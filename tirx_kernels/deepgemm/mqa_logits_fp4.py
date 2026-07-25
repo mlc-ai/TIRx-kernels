@@ -779,6 +779,15 @@ def get_kernel(**kwargs: Any):
                 q_pipe.full.wait(q_stage_idx, q_phase)
                 Tx.warp.permute_layout(smem_sf_q_post[q_stage_idx, :], smem_sf_q[q_stage_idx, :])
                 T.ptx.fence.proxy_async("shared::cta")
+                # Each tmem_pipe.full arrive commits all prior asynchronous
+                # TCGEN work from this issuer. Wait for the final commit from
+                # the preceding q block before overwriting its SFQ TMEM input.
+                if tmem_iter_idx > T.uint32(0):
+                    previous_tmem_iter: T.uint32 = tmem_iter_idx - T.uint32(1)
+                    tmem_pipe.full.wait(
+                        previous_tmem_iter % T.uint32(num_tmem_stages),
+                        (previous_tmem_iter // T.uint32(num_tmem_stages)) & T.uint32(1),
+                    )
                 if T.ptx.elect_sync():
                     Tx.copy_async(sfq_tmem, smem_sf_q_cp[T.cast(q_stage_idx, "int32")], cta_group=1)
                 T.cuda.warp_sync()

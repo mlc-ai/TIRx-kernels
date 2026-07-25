@@ -379,11 +379,12 @@ def _kernel(
     SFB_tmem = tmem_pool.alloc_sf(
         (128 * SFB_n_chunks, sf_mma_k * MMA_K_BLOCKS), "float8_e4m3fn", sf_per_mma=sf_mma_k
     )
+    # Publish the weak shared-memory store performed by tcgen05.alloc through
+    # the existing cluster release/acquire before any other warp consumes the
+    # TMEM base address.
+    tmem_pool.commit()
     T.ptx.barrier.cluster.arrive(sem="release", aligned=True)
     T.ptx.barrier.cluster.wait(acquire=True, aligned=False)
-    # Alloc TMEM after the cluster sync, warp-0-only, before the role split, so
-    # the TMA warp overlaps its first loads with the alloc.
-    tmem_pool.commit()
     if tid_in_cta < 32:
         T.ptx.tcgen05.relinquish_alloc_permit(cta_group=CTA_GROUP)
     pair_mask: T.int32
