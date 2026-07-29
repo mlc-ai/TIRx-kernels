@@ -365,6 +365,8 @@ def _kernel(
     tmem_finished = MBarrier(pool, 1, leader=mbar_leader)
     tmem_finished.init(1)
     pool.commit()
+    if mbar_leader:
+        T.ptx.fence.mbarrier_init()
     tmem_pool = T.TMEMPool(pool, total_cols=512, cta_group=CTA_GROUP, tmem_addr=tmem_addr)
     tmem = tmem_pool.alloc((CTA_M, 512), "float32")
     A_smem = A_smem_packed.view("float4_e2m1fn")
