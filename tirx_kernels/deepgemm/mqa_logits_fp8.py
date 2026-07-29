@@ -716,6 +716,9 @@ def get_kernel(**kwargs: Any):
                             "f32",
                             space="shared",
                         )
+                # Publish the generic-proxy weight reads before this consumer
+                # eventually releases the Q stage for a subsequent TMA overwrite.
+                T.ptx.fence.proxy_async("shared::cta")
                 kv_idx: T.uint32 = T.uint32(0)
                 while kv_idx < num_kv_blocks:
                     kv_stage_idx: T.uint32 = (num_total_kv_blocks + kv_idx) % T.uint32(
@@ -734,6 +737,9 @@ def get_kernel(**kwargs: Any):
                     umma_pipe.full.wait(
                         warpgroup_idx_local, (num_total_kv_blocks + kv_idx) & T.uint32(1)
                     )
+                    # Order the generic-proxy scale read before the producer
+                    # reuses this KV stage through the async proxy.
+                    T.ptx.fence.proxy_async("shared::cta")
                     kv_pipe.empty.arrive(kv_stage_idx)
                     kv_offset: T.uint32 = kv_start + kv_idx * T.uint32(block_kv) + math_thread_idx
                     for q_inner_i in T.unroll(0, block_q):

@@ -906,6 +906,9 @@ def get_kernel(**kwargs: Any):
                 q_pipe.full.wait(q_stage_idx, q_phase)
                 if num_kv_blocks > T.uint32(0):
                     Tx.warpgroup.copy(cached_weights, smem_weights[q_stage_idx])
+                    # Publish the generic-proxy weight reads before this
+                    # consumer releases the Q stage for a later TMA overwrite.
+                    T.ptx.fence.proxy_async("shared::cta")
                     for q_off_i in T.unroll(0, block_q):
                         q_row_offsets[q_off_i] = T.cast(
                             q_idx * T.uint32(block_q) + T.uint32(q_off_i), "uint64"
