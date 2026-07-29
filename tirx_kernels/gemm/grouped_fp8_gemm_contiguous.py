@@ -407,8 +407,8 @@ def _kernel(
             accum: T.int32
             mma_issue: T.uint32
 
-            # Keep waits and pipeline state warp-uniform so ptxas can use URs;
-            # elect a single lane only for tcgen05 issue and commit instructions.
+            # Keep waits and pipeline state warp-uniform; elect a single lane
+            # only for tcgen05 issue and commit instructions.
             @T.inline
             def mma(ks, sf_off: T.constexpr, copy_sf: T.constexpr):
                 ks_desc: T.int32
@@ -428,7 +428,6 @@ def _kernel(
                             accum=accum,
                             dispatch="tcgen05",
                             cta_group=CTA_GROUP,
-                            pred=mma_issue,
                         )
                     else:
                         Tx.gemm_async(
@@ -440,7 +439,6 @@ def _kernel(
                             accum=accum,
                             dispatch="tcgen05",
                             cta_group=CTA_GROUP,
-                            pred=mma_issue,
                         )
 
                 mma_issue = T.ptx.elect_sync()
@@ -448,10 +446,12 @@ def _kernel(
                     if mma_issue:
                         Tx.copy_async(SFA_tmem[tmem_idx], SFA_smem_fp8[ks], cta_group=CTA_GROUP)
                         Tx.copy_async(SFB_tmem[tmem_idx], SFB_smem_fp8[ks], cta_group=CTA_GROUP)
-                gemm_with_sf(sf_off)
+                if mma_issue:
+                    gemm_with_sf(sf_off)
                 accum = 1
                 T.cuda.warp_sync()
-                smem_pipe.empty.arrive(ks, cta_group=CTA_GROUP, cta_mask=CTA_MASK, pred=mma_issue)
+                if mma_issue:
+                    smem_pipe.empty.arrive(ks, cta_group=CTA_GROUP, cta_mask=CTA_MASK)
                 T.cuda.warp_sync()
 
             @T.inline
@@ -470,9 +470,8 @@ def _kernel(
                     mma_state.advance()
                     mma(mma_state.stage, 3 * K_ITERS, False)
                     mma_state.advance()
-                tmem_pipe.full.arrive(
-                    tmem_idx, cta_group=CTA_GROUP, cta_mask=CTA_MASK, pred=mma_issue
-                )
+                if mma_issue:
+                    tmem_pipe.full.arrive(tmem_idx, cta_group=CTA_GROUP, cta_mask=CTA_MASK)
                 T.cuda.warp_sync()
 
             while tile_scheduler.valid():
