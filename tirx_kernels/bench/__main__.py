@@ -17,35 +17,18 @@
 """CLI entry point: python -m tirx_kernels.bench [--kernel <name>] [--config <label>]"""
 
 import argparse
-import contextlib
 import json
 import os
 import sys
-import tempfile
 import traceback
 from unittest import SkipTest
 
-from tirx_kernels.registry import discover_kernels
-from tirx_kernels.runner import run_kernel_bench
+from tirx_kernels.registry import discover_kernels, load_kernel
+from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S, DEFAULT_BENCH_ROUNDS, run_kernel_bench
 
 
-def _gpu_lock():
-    """Per-physical-GPU advisory lock around the GPU-measurement phase.
-
-    Enabled by BENCH_SUITE_GPU_LOCK=1 (set by bench_suite run.py when it overcommits
-    CPU workers): many bench subprocesses import + compile in parallel, but only
-    one measures per physical GPU at a time. Keyed by CUDA_VISIBLE_DEVICES; a
-    no-op for standalone runs or a multi-GPU mask.
-    """
-    if os.environ.get("BENCH_SUITE_GPU_LOCK") != "1":
-        return contextlib.nullcontext()
-    gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if not gpu or "," in gpu:
-        return contextlib.nullcontext()
-    from tvm_ffi.utils import FileLock
-
-    lock_dir = os.environ.get("BENCH_SUITE_LOCK_DIR") or tempfile.gettempdir()
-    return FileLock(os.path.join(lock_dir, f"bench_suite-gpu-{gpu}.lock"))
+def _get_bench_configs(mod):
+    return getattr(mod, "BENCH_CONFIGS", getattr(mod, "CONFIGS", []))
 
 
 def main():
@@ -64,80 +47,92 @@ def main():
         "--warmup",
         type=int,
         default=None,
-        help="Override the kernel module's benchmark warmup default",
+        help="Override the event/proton warmup budget in ms (else bench() default)",
     )
     parser.add_argument(
         "--repeat",
         type=int,
         default=None,
-        help="Override the kernel module's benchmark repeat default",
+        help="Override the event/proton rep budget in ms (else bench() default)",
     )
     parser.add_argument(
         "--timer",
         type=str,
-        choices=("proton", "event"),
+        choices=("event", "proton", "cudagraph_proton", "kineto", "megamoe"),
         default=None,
-        help="Override the kernel module's benchmark timer",
+        help="Override the kernel module's benchmark timer: 'event' = do_bench, "
+        "'proton' = do_bench_proton, 'cudagraph_proton' = "
+        "do_bench_cudagraph_proton [NVIDIA], 'kineto' = distributed full GPU "
+        "activity span, 'megamoe' = DeepGEMM bench_kineto protocol for MegaMoE",
     )
     parser.add_argument(
-        "--rounds", type=int, default=None, help="Override the kernel module's benchmark rounds"
+        "--rounds",
+        type=int,
+        default=DEFAULT_BENCH_ROUNDS,
+        help=(
+            f"Independent standard-timer calls inside one process (default {DEFAULT_BENCH_ROUNDS})"
+        ),
     )
     parser.add_argument(
-        "--round-cooldown",
+        "--cooldown",
         type=float,
-        default=None,
-        help="Override seconds between benchmark rounds",
-    )
-    parser.add_argument(
-        "--impls",
-        type=str,
-        choices=("all", "ours", "baseline"),
-        default=None,
-        help="Which impls to bench: 'all' (default), 'ours' (only our kernel — "
-        "skips reference setup/execution; reference times come from the pinned "
-        "baseline), or 'baseline' (only reference impls). Sets TIRX_BENCH_IMPLS.",
+        default=DEFAULT_BENCH_COOLDOWN_S,
+        help=(
+            "Seconds before every implementation in every round "
+            f"(default {DEFAULT_BENCH_COOLDOWN_S:g})"
+        ),
     )
     args = parser.parse_args()
 
-    if args.impls is not None:
-        os.environ["TIRX_BENCH_IMPLS"] = args.impls
+    if args.rounds < 1:
+        print("ERROR: --rounds must be >= 1", file=sys.stderr)
+        sys.exit(2)
+    if args.cooldown < 0:
+        print("ERROR: --cooldown must be >= 0", file=sys.stderr)
+        sys.exit(2)
 
     if args.json or args.json_file:
         os.environ["TIRX_BENCH_JSON"] = "1"
 
-    all_kernels = discover_kernels(min_compute_capability=args.cc)
-
     if args.kernel:
-        if args.kernel not in all_kernels:
+        try:
+            mod = load_kernel(args.kernel)
+        except KeyError:
+            print(f"ERROR: kernel '{args.kernel}' not found.", file=sys.stderr)
+            sys.exit(1)
+        if args.cc is not None and mod.KERNEL_META.get("compute_capability") != args.cc:
             print(
-                f"ERROR: kernel '{args.kernel}' not found. Available: {sorted(all_kernels.keys())}",
+                f"ERROR: kernel '{args.kernel}' compute_capability="
+                f"{mod.KERNEL_META.get('compute_capability')} != filter {args.cc}",
                 file=sys.stderr,
             )
             sys.exit(1)
-        all_kernels = {args.kernel: all_kernels[args.kernel]}
+        all_kernels = {args.kernel: mod}
+    else:
+        all_kernels = discover_kernels(min_compute_capability=args.cc)
 
-    # Each kernel's run_bench() manages its own ProtonContext session.
+    # Each kernel's run_bench() manages its own Proton session via bench(timer=...).
     # No global proton session needed.
     results = []
 
     for name, mod in sorted(all_kernels.items()):
-        configs = getattr(mod, "BENCH_CONFIGS", getattr(mod, "CONFIGS", []))
+        configs = _get_bench_configs(mod)
         for cfg in configs:
             label = cfg.get("label", "default")
             if args.config and label != args.config:
                 continue
             try:
-                with _gpu_lock():
-                    result = run_kernel_bench(
-                        name,
-                        cfg,
-                        registry=all_kernels,
-                        warmup=args.warmup,
-                        repeat=args.repeat,
-                        timer=args.timer,
-                        rounds=args.rounds,
-                        round_cooldown_s=args.round_cooldown,
-                    )
+                # GPU flock is inside tvm.tirx.bench (prepare + rounds).
+                result = run_kernel_bench(
+                    name,
+                    cfg,
+                    registry=all_kernels,
+                    warmup=args.warmup,
+                    repeat=args.repeat,
+                    timer=args.timer,
+                    rounds=args.rounds,
+                    cooldown=args.cooldown,
+                )
                 results.append(result)
             except SkipTest as exc:
                 results.append(
@@ -168,7 +163,7 @@ def main():
                 print(f"SKIP  {kernel} [{label}]: {r.get('reason', '?')}")
             else:
                 impls = r.get("impls", {})
-                impl_str = ", ".join(f"{k}={v:.3f}ms" for k, v in impls.items())
+                impl_str = ", ".join(f"{k}={v:.3f}µs" for k, v in impls.items())
                 print(f"OK    {kernel} [{label}]: {impl_str}")
 
 

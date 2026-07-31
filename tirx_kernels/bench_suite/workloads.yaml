@@ -1,138 +1,234 @@
-# bench_suite workloads - curated sweep for `python -m tirx_kernels.bench_suite`.
-# Edit freely. Run `python -m tirx_kernels.registry --format=benchrun --cc 10` to see the full set.
-
-defaults:
-  warmup: 100
-  repeat: 30
-  timer: proton
-
+# bench-suite workloads — curated 113-workload single-GPU regression sweep.
+# GemmComm keeps only the representative TP1 profiles; every row uses one GPU.
+defaults: {}
 workloads:
-  # -- deepgemm_sm100_fp4_mqa_logits
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv4096_h64_d128_f32_dense_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv4096_h64_d128_f32_dense_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv8192_h64_d128_f32_dense_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv8192_h64_d128_f32_dense_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv4096_h64_d128_f32_dense_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv4096_h64_d128_f32_dense_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv8192_h64_d128_f32_dense_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv8192_h64_d128_f32_dense_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv4096_h64_d128_f32_compressed_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv4096_h64_d128_f32_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv8192_h64_d128_f32_compressed_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv8192_h64_d128_f32_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv4096_h64_d128_f32_compressed_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv4096_h64_d128_f32_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv8192_h64_d128_f32_compressed_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv8192_h64_d128_f32_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv4096_h64_d128_bf16_dense_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv4096_h64_d128_bf16_dense_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv8192_h64_d128_bf16_dense_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv8192_h64_d128_bf16_dense_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv4096_h64_d128_bf16_dense_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv4096_h64_d128_bf16_dense_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv8192_h64_d128_bf16_dense_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv8192_h64_d128_bf16_dense_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv4096_h64_d128_bf16_compressed_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv4096_h64_d128_bf16_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv8192_h64_d128_bf16_compressed_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s2048_skv8192_h64_d128_bf16_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv4096_h64_d128_bf16_compressed_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv4096_h64_d128_bf16_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv8192_h64_d128_bf16_compressed_cp}
-  - {kernel: deepgemm_sm100_fp4_mqa_logits, config: s4096_skv8192_h64_d128_bf16_compressed_nocp}
-  # -- deepgemm_sm100_fp8_mqa_logits
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv4096_h64_d128_f32_dense_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv4096_h64_d128_f32_dense_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv8192_h64_d128_f32_dense_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv8192_h64_d128_f32_dense_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv4096_h64_d128_f32_dense_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv4096_h64_d128_f32_dense_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv8192_h64_d128_f32_dense_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv8192_h64_d128_f32_dense_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv4096_h64_d128_f32_compressed_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv4096_h64_d128_f32_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv8192_h64_d128_f32_compressed_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv8192_h64_d128_f32_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv4096_h64_d128_f32_compressed_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv4096_h64_d128_f32_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv8192_h64_d128_f32_compressed_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv8192_h64_d128_f32_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv4096_h64_d128_bf16_dense_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv4096_h64_d128_bf16_dense_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv8192_h64_d128_bf16_dense_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv8192_h64_d128_bf16_dense_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv4096_h64_d128_bf16_dense_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv4096_h64_d128_bf16_dense_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv8192_h64_d128_bf16_dense_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv8192_h64_d128_bf16_dense_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv4096_h64_d128_bf16_compressed_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv4096_h64_d128_bf16_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv8192_h64_d128_bf16_compressed_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s2048_skv8192_h64_d128_bf16_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv4096_h64_d128_bf16_compressed_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv4096_h64_d128_bf16_compressed_nocp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv8192_h64_d128_bf16_compressed_cp}
-  - {kernel: deepgemm_sm100_fp8_mqa_logits, config: s4096_skv8192_h64_d128_bf16_compressed_nocp}
-  # -- flash_attention4
-  - {kernel: flash_attention4, config: s1024_h32kv4}
-  - {kernel: flash_attention4, config: s1024_h32kv4_causal}
-  - {kernel: flash_attention4, config: s1024_h32kv8}
-  - {kernel: flash_attention4, config: s1024_h32kv8_causal}
-  - {kernel: flash_attention4, config: s1024_h32kv16}
-  - {kernel: flash_attention4, config: s1024_h32kv16_causal}
-  - {kernel: flash_attention4, config: s1024_h32kv32}
-  - {kernel: flash_attention4, config: s1024_h32kv32_causal}
-  - {kernel: flash_attention4, config: s2048_h32kv4}
-  - {kernel: flash_attention4, config: s2048_h32kv4_causal}
-  - {kernel: flash_attention4, config: s2048_h32kv8}
-  - {kernel: flash_attention4, config: s2048_h32kv8_causal}
-  - {kernel: flash_attention4, config: s2048_h32kv16}
-  - {kernel: flash_attention4, config: s2048_h32kv16_causal}
-  - {kernel: flash_attention4, config: s2048_h32kv32}
-  - {kernel: flash_attention4, config: s2048_h32kv32_causal}
-  - {kernel: flash_attention4, config: s4096_h32kv4}
-  - {kernel: flash_attention4, config: s4096_h32kv4_causal}
-  - {kernel: flash_attention4, config: s4096_h32kv8}
-  - {kernel: flash_attention4, config: s4096_h32kv8_causal}
-  - {kernel: flash_attention4, config: s4096_h32kv16}
-  - {kernel: flash_attention4, config: s4096_h32kv16_causal}
-  - {kernel: flash_attention4, config: s4096_h32kv32}
-  - {kernel: flash_attention4, config: s4096_h32kv32_causal}
-  - {kernel: flash_attention4, config: s8192_h32kv4}
-  - {kernel: flash_attention4, config: s8192_h32kv4_causal}
-  - {kernel: flash_attention4, config: s8192_h32kv8}
-  - {kernel: flash_attention4, config: s8192_h32kv8_causal}
-  - {kernel: flash_attention4, config: s8192_h32kv16}
-  - {kernel: flash_attention4, config: s8192_h32kv16_causal}
-  - {kernel: flash_attention4, config: s8192_h32kv32}
-  - {kernel: flash_attention4, config: s8192_h32kv32_causal}
-  # -- fp16_bf16_gemm
-  - {kernel: fp16_bf16_gemm, config: fp16_1024x1024x1024}
-  - {kernel: fp16_bf16_gemm, config: fp16_2048x2048x2048}
-  - {kernel: fp16_bf16_gemm, config: fp16_4096x4096x4096}
-  - {kernel: fp16_bf16_gemm, config: fp16_8192x8192x8192}
-  - {kernel: fp16_bf16_gemm, config: fp16_16384x16384x16384}
-  - {kernel: fp16_bf16_gemm, config: bf16_1024x1024x1024}
-  - {kernel: fp16_bf16_gemm, config: bf16_2048x2048x2048}
-  - {kernel: fp16_bf16_gemm, config: bf16_4096x4096x4096}
-  - {kernel: fp16_bf16_gemm, config: bf16_8192x8192x8192}
-  - {kernel: fp16_bf16_gemm, config: bf16_16384x16384x16384}
-  # -- fp8_blockwise_gemm
-  - {kernel: fp8_blockwise_gemm, config: deepgemm_m4096_n2112_k7168}
-  - {kernel: fp8_blockwise_gemm, config: deepgemm_m4096_n576_k7168}
-  - {kernel: fp8_blockwise_gemm, config: deepgemm_m4096_n24576_k1536}
-  - {kernel: fp8_blockwise_gemm, config: deepgemm_m4096_n32768_k512}
-  - {kernel: fp8_blockwise_gemm, config: deepgemm_m4096_n7168_k16384}
-  - {kernel: fp8_blockwise_gemm, config: deepgemm_m4096_n4096_k7168}
-  - {kernel: fp8_blockwise_gemm, config: deepgemm_m4096_n7168_k2048}
-  # -- nvfp4_gemm
-  - {kernel: nvfp4_gemm, config: 1024x1024x1024}
-  - {kernel: nvfp4_gemm, config: 2048x2048x2048}
-  - {kernel: nvfp4_gemm, config: 4096x4096x4096}
-  - {kernel: nvfp4_gemm, config: 8192x8192x8192}
-  - {kernel: nvfp4_gemm, config: 16384x16384x16384}
-  # -- deepgemm_sm100_tf32_hc_prenorm_gemm
-  - {kernel: deepgemm_sm100_tf32_hc_prenorm_gemm, config: m13_n24_k7168_s1}
-  - {kernel: deepgemm_sm100_tf32_hc_prenorm_gemm, config: m137_n24_k7680_s16}
-  - {kernel: deepgemm_sm100_tf32_hc_prenorm_gemm, config: m4096_n24_k7168_s1}
-  - {kernel: deepgemm_sm100_tf32_hc_prenorm_gemm, config: m4096_n24_k28672_s16}
+- kernel: allgather_gemm
+  config: tp1_m8192_n24576_k4096_fp16_dynamic
+  timer: kineto
+  num_gpus: 1
+- kernel: allgather_gemm
+  config: tp1_m8192_n51200_k5120_fp16_dynamic
+  timer: kineto
+  num_gpus: 1
+- kernel: allgather_gemm
+  config: tp1_m8192_n57344_k8192_fp16_dynamic
+  timer: kineto
+  num_gpus: 1
+- kernel: allgather_gemm
+  config: tp1_m8192_n106496_k16384_fp16_dynamic
+  timer: kineto
+  num_gpus: 1
+- kernel: gemm_reduce_scatter
+  config: tp1_m8192_n4096_k12288_fp16_dynamic
+  timer: kineto
+  num_gpus: 1
+- kernel: gemm_reduce_scatter
+  config: tp1_m8192_n5120_k25600_fp16_dynamic
+  timer: kineto
+  num_gpus: 1
+- kernel: gemm_reduce_scatter
+  config: tp1_m8192_n8192_k28672_fp16_dynamic
+  timer: kineto
+  num_gpus: 1
+- kernel: gemm_reduce_scatter
+  config: tp1_m8192_n16384_k53248_fp16_dynamic
+  timer: kineto
+  num_gpus: 1
+- kernel: deepgemm_fp8_fp4_mega_moe
+  config: t64_m64_h7168_i3072_e384_k6_g1
+  timer: megamoe
+  num_gpus: 1
+- kernel: deepgemm_fp8_fp4_mega_moe
+  config: t8192_m8192_h7168_i3072_e384_k6_g1
+  timer: megamoe
+  num_gpus: 1
+- kernel: deepgemm_sm100_fp4_mqa_logits
+  config: s2048_skv4096_h64_d128_f32_dense_cp
+- kernel: deepgemm_sm100_fp4_mqa_logits
+  config: s4096_skv8192_h64_d128_bf16_compressed_nocp
+- kernel: deepgemm_sm100_fp4_paged_mqa_logits
+  config: b1_n1_mp1_ps32_h64_d128_f32_fixed
+- kernel: deepgemm_sm100_fp4_paged_mqa_logits
+  config: b16_n1_mp128_ps64_h64_d128_bf16_fixed
+- kernel: deepgemm_sm100_fp8_mqa_logits
+  config: s2048_skv4096_h64_d128_f32_dense_cp
+- kernel: deepgemm_sm100_fp8_mqa_logits
+  config: s4096_skv8192_h64_d128_bf16_compressed_nocp
+- kernel: deepgemm_sm100_fp8_paged_mqa_logits
+  config: b1_n1_mp1_ps64_h64_d128_f32_fixed
+- kernel: deepgemm_sm100_fp8_paged_mqa_logits
+  config: b16_n1_mp128_ps64_h64_d128_bf16_fixed
+- kernel: flash_attention4
+  config: s1024_h32kv4
+- kernel: flash_attention4
+  config: s1024_h32kv4_causal
+- kernel: flash_attention4
+  config: s1024_h32kv8
+- kernel: flash_attention4
+  config: s1024_h32kv8_causal
+- kernel: flash_attention4
+  config: s1024_h32kv16
+- kernel: flash_attention4
+  config: s1024_h32kv16_causal
+- kernel: flash_attention4
+  config: s1024_h32kv32
+- kernel: flash_attention4
+  config: s1024_h32kv32_causal
+- kernel: flash_attention4
+  config: s2048_h32kv4
+- kernel: flash_attention4
+  config: s2048_h32kv4_causal
+- kernel: flash_attention4
+  config: s2048_h32kv8
+- kernel: flash_attention4
+  config: s2048_h32kv8_causal
+- kernel: flash_attention4
+  config: s2048_h32kv16
+- kernel: flash_attention4
+  config: s2048_h32kv16_causal
+- kernel: flash_attention4
+  config: s2048_h32kv32
+- kernel: flash_attention4
+  config: s2048_h32kv32_causal
+- kernel: flash_attention4
+  config: s4096_h32kv4
+- kernel: flash_attention4
+  config: s4096_h32kv4_causal
+- kernel: flash_attention4
+  config: s4096_h32kv8
+- kernel: flash_attention4
+  config: s4096_h32kv8_causal
+- kernel: flash_attention4
+  config: s4096_h32kv16
+- kernel: flash_attention4
+  config: s4096_h32kv16_causal
+- kernel: flash_attention4
+  config: s4096_h32kv32
+- kernel: flash_attention4
+  config: s4096_h32kv32_causal
+- kernel: flash_attention4
+  config: s8192_h32kv4
+- kernel: flash_attention4
+  config: s8192_h32kv4_causal
+- kernel: flash_attention4
+  config: s8192_h32kv8
+- kernel: flash_attention4
+  config: s8192_h32kv8_causal
+- kernel: flash_attention4
+  config: s8192_h32kv16
+- kernel: flash_attention4
+  config: s8192_h32kv16_causal
+- kernel: flash_attention4
+  config: s8192_h32kv32
+- kernel: flash_attention4
+  config: s8192_h32kv32_causal
+- kernel: sparse_flashmla_prefill_head64_phase1
+  config: bench_dqk512_hq64_s4096_kv8192_topk512
+- kernel: sparse_flashmla_prefill_head64_phase1
+  config: bench_dqk512_hq64_s4096_kv32768_topk512
+- kernel: sparse_flashmla_prefill_head64_phase1
+  config: bench_dqk512_hq64_s4096_kv49152_topk512
+- kernel: sparse_flashmla_prefill_head64_phase1
+  config: bench_dqk512_hq64_s4096_kv65536_topk512
+- kernel: sparse_flashmla_prefill_head64_phase1
+  config: bench_dqk576_hq64_s4096_kv8192_topk512
+- kernel: sparse_flashmla_prefill_head64_phase1
+  config: bench_dqk576_hq64_s4096_kv32768_topk512
+- kernel: sparse_flashmla_prefill_head64_phase1
+  config: bench_dqk576_hq64_s4096_kv49152_topk512
+- kernel: sparse_flashmla_prefill_head64_phase1
+  config: bench_dqk576_hq64_s4096_kv65536_topk512
+- kernel: sparse_flashmla_prefill_head128_phase1
+  config: bench_regular_dqk512_hq128_s4096_kv8192_topk2048
+- kernel: sparse_flashmla_prefill_head128_phase1
+  config: bench_regular_dqk512_hq128_s4096_kv32768_topk2048
+- kernel: sparse_flashmla_prefill_head128_phase1
+  config: bench_regular_dqk512_hq128_s4096_kv65536_topk2048
+- kernel: sparse_flashmla_prefill_head128_phase1
+  config: bench_regular_dqk576_hq128_s4096_kv8192_topk2048
+- kernel: sparse_flashmla_prefill_head128_phase1
+  config: bench_regular_dqk576_hq128_s4096_kv32768_topk2048
+- kernel: sparse_flashmla_prefill_head128_phase1
+  config: bench_regular_dqk576_hq128_s4096_kv65536_topk2048
+- kernel: sparse_flashmla_prefill_head128_small_topk_phase1
+  config: bench_smalltopk_dqk512_hq128_s4096_kv8192_topk1280
+- kernel: sparse_flashmla_prefill_head128_small_topk_phase1
+  config: bench_smalltopk_dqk512_hq128_s4096_kv32768_topk1280
+- kernel: sparse_flashmla_prefill_head128_small_topk_phase1
+  config: bench_smalltopk_dqk512_hq128_s4096_kv65536_topk1280
+- kernel: fp16_bf16_gemm
+  config: fp16_1024x1024x1024
+- kernel: fp16_bf16_gemm
+  config: fp16_2048x2048x2048
+- kernel: fp16_bf16_gemm
+  config: fp16_4096x4096x4096
+- kernel: fp16_bf16_gemm
+  config: fp16_8192x8192x8192
+- kernel: fp16_bf16_gemm
+  config: fp16_16384x16384x16384
+- kernel: fp16_bf16_gemm
+  config: bf16_1024x1024x1024
+- kernel: fp16_bf16_gemm
+  config: bf16_2048x2048x2048
+- kernel: fp16_bf16_gemm
+  config: bf16_4096x4096x4096
+- kernel: fp16_bf16_gemm
+  config: bf16_8192x8192x8192
+- kernel: fp16_bf16_gemm
+  config: bf16_16384x16384x16384
+- kernel: fp8_blockwise_gemm
+  config: deepgemm_m4096_n2112_k7168
+- kernel: fp8_blockwise_gemm
+  config: deepgemm_m4096_n576_k7168
+- kernel: fp8_blockwise_gemm
+  config: deepgemm_m4096_n24576_k1536
+- kernel: fp8_blockwise_gemm
+  config: deepgemm_m4096_n32768_k512
+- kernel: fp8_blockwise_gemm
+  config: deepgemm_m4096_n7168_k16384
+- kernel: fp8_blockwise_gemm
+  config: deepgemm_m4096_n4096_k7168
+- kernel: fp8_blockwise_gemm
+  config: deepgemm_m4096_n7168_k2048
+- kernel: grouped_fp8_gemm_contiguous
+  config: large_g4_m8192_n6144_k7168
+- kernel: grouped_fp8_gemm_contiguous
+  config: large_g4_m8192_n7168_k3072
+- kernel: grouped_fp8_gemm_contiguous
+  config: large_g4_m8192_n4096_k4096
+- kernel: grouped_fp8_gemm_contiguous
+  config: large_g4_m8192_n4096_k2048
+- kernel: grouped_fp8_gemm_contiguous
+  config: large_g8_m4096_n6144_k7168
+- kernel: grouped_fp8_gemm_contiguous
+  config: large_g8_m4096_n7168_k3072
+- kernel: grouped_fp8_gemm_contiguous
+  config: large_g8_m4096_n4096_k4096
+- kernel: grouped_fp8_gemm_contiguous
+  config: large_g8_m4096_n4096_k2048
+- kernel: nvfp4_gemm
+  config: 1024x1024x1024
+- kernel: nvfp4_gemm
+  config: 2048x2048x2048
+- kernel: nvfp4_gemm
+  config: 4096x4096x4096
+- kernel: nvfp4_gemm
+  config: 8192x8192x8192
+- kernel: nvfp4_gemm
+  config: 16384x16384x16384
+- kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+  config: m64_n24_k28672_s112
+- kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+  config: m128_n24_k16384_s64
+- kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+  config: m8192_n24_k16384_s1
+- kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+  config: m8192_n24_k28672_s1
+- kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+  config: m13_n24_k7168_s1
+- kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+  config: m137_n24_k7680_s16
+- kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+  config: m4096_n24_k7168_s1
+- kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+  config: m4096_n24_k28672_s16

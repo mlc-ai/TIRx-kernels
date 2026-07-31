@@ -1,159 +1,193 @@
-# bench_suite baseline view: `tir.json + ref.json`
+# bench-suite baseline view: `baseline.json`
 
-- Timestamp: `12`
-- Label:     `3a146e3c-dirty`
-- Git:       `{'tir': '66ac7a57', 'tirx-kernels': '78d81763-dirty', 'tirx-bench-ci': None}`
-- Workloads: 122 ok, 0 failed
+- Timestamp: `14`
+- Label:     `post-refactor`
+- Git:       `{'tir': 'fabb698a', 'tirx-kernels': '6c2af771', 'tirx-bench-ci': None}`
+- Workloads: 105 ok, 0 failed
 
-Each row shows our impl's time (tir/tirx) and every reference impl, with ref/ours where ref = fastest non-ours impl. Higher ratio = ours is faster.
+Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
+
+## allgather_gemm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `tp1_m8192_n106496_k16384_fp16_dynamic` | tirx | 20324.1247 | cublas_nccl_cudagraph | 18118.8980 | 0.891 | cublasmp_split_p2p=18339.1959 |
+| `tp1_m8192_n24576_k4096_fp16_dynamic` | tirx | 1053.2129 | cublas_nccl_cudagraph | 1032.3811 | 0.980 | cublasmp_split_p2p=1078.3585 |
+| `tp1_m8192_n51200_k5120_fp16_dynamic` | tirx | 2806.9690 | cublas_nccl_cudagraph | 2699.1326 | 0.962 | cublasmp_split_p2p=2756.7483 |
+| `tp1_m8192_n57344_k8192_fp16_dynamic` | tirx | 5361.5593 | cublas_nccl_cudagraph | 4892.5433 | 0.913 | cublasmp_split_p2p=4985.0454 |
+
+## deepgemm_fp8_fp4_mega_moe
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `t64_m64_h7168_i3072_e384_k6_g1` | tirx | 1297.0000 | deepgemm | 1289.0000 | 0.994 | — |
+| `t8192_m8192_h7168_i3072_e384_k6_g1` | tirx | 3439.2000 | deepgemm | 3440.0000 | 1.000 | — |
 
 ## deepgemm_sm100_fp4_mqa_logits
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `s2048_skv4096_h64_d128_bf16_compressed_cp` | tirx | 39.0528 | deepgemm | 41.4492 | 1.061 | — |
-| `s2048_skv4096_h64_d128_bf16_compressed_nocp` | tirx | 50.4636 | deepgemm | 53.7064 | 1.064 | — |
-| `s2048_skv4096_h64_d128_bf16_dense_cp` | tirx | 39.1974 | deepgemm | 40.2046 | 1.026 | — |
-| `s2048_skv4096_h64_d128_bf16_dense_nocp` | tirx | 50.7348 | deepgemm | 51.9132 | 1.023 | — |
-| `s2048_skv4096_h64_d128_f32_compressed_cp` | tirx | 39.3690 | deepgemm | 42.2660 | 1.074 | — |
-| `s2048_skv4096_h64_d128_f32_compressed_nocp` | tirx | 51.3034 | deepgemm | 55.6612 | 1.085 | — |
-| `s2048_skv4096_h64_d128_f32_dense_cp` | tirx | 38.6596 | deepgemm | 38.2982 | 0.991 | — |
-| `s2048_skv4096_h64_d128_f32_dense_nocp` | tirx | 49.6118 | deepgemm | 49.2016 | 0.992 | — |
-| `s2048_skv8192_h64_d128_bf16_compressed_cp` | tirx | 67.8256 | deepgemm | 71.5942 | 1.056 | — |
-| `s2048_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 104.1978 | deepgemm | 110.3214 | 1.059 | — |
-| `s2048_skv8192_h64_d128_bf16_dense_cp` | tirx | 68.4344 | deepgemm | 69.7630 | 1.019 | — |
-| `s2048_skv8192_h64_d128_bf16_dense_nocp` | tirx | 105.2054 | deepgemm | 106.6070 | 1.013 | — |
-| `s2048_skv8192_h64_d128_f32_compressed_cp` | tirx | 68.6354 | deepgemm | 74.5248 | 1.086 | — |
-| `s2048_skv8192_h64_d128_f32_compressed_nocp` | tirx | 105.7710 | deepgemm | 116.1390 | 1.098 | — |
-| `s2048_skv8192_h64_d128_f32_dense_cp` | tirx | 66.7216 | deepgemm | 65.8792 | 0.987 | — |
-| `s2048_skv8192_h64_d128_f32_dense_nocp` | tirx | 102.9428 | deepgemm | 102.2286 | 0.993 | — |
-| `s4096_skv4096_h64_d128_bf16_compressed_cp` | tirx | 68.5622 | deepgemm | 73.8250 | 1.077 | — |
-| `s4096_skv4096_h64_d128_bf16_compressed_nocp` | tirx | 68.4964 | deepgemm | 73.8336 | 1.078 | — |
-| `s4096_skv4096_h64_d128_bf16_dense_cp` | tirx | 68.6648 | deepgemm | 71.6704 | 1.044 | — |
-| `s4096_skv4096_h64_d128_bf16_dense_nocp` | tirx | 68.6962 | deepgemm | 71.6460 | 1.043 | — |
-| `s4096_skv4096_h64_d128_f32_compressed_cp` | tirx | 69.1526 | deepgemm | 75.4456 | 1.091 | — |
-| `s4096_skv4096_h64_d128_f32_compressed_nocp` | tirx | 69.0176 | deepgemm | 75.3618 | 1.092 | — |
-| `s4096_skv4096_h64_d128_f32_dense_cp` | tirx | 66.9856 | deepgemm | 67.4862 | 1.007 | — |
-| `s4096_skv4096_h64_d128_f32_dense_nocp` | tirx | 66.8244 | deepgemm | 67.2304 | 1.006 | — |
-| `s4096_skv8192_h64_d128_bf16_compressed_cp` | tirx | 121.8894 | deepgemm | 129.7596 | 1.065 | — |
-| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 174.6916 | deepgemm | 185.7610 | 1.063 | — |
-| `s4096_skv8192_h64_d128_bf16_dense_cp` | tirx | 123.7708 | deepgemm | 126.5750 | 1.023 | — |
-| `s4096_skv8192_h64_d128_bf16_dense_nocp` | tirx | 177.2958 | deepgemm | 180.8310 | 1.020 | — |
-| `s4096_skv8192_h64_d128_f32_compressed_cp` | tirx | 123.9858 | deepgemm | 136.5624 | 1.101 | — |
-| `s4096_skv8192_h64_d128_f32_compressed_nocp` | tirx | 178.4298 | deepgemm | 197.0844 | 1.105 | — |
-| `s4096_skv8192_h64_d128_f32_dense_cp` | tirx | 119.9626 | deepgemm | 120.5018 | 1.004 | — |
-| `s4096_skv8192_h64_d128_f32_dense_nocp` | tirx | 171.7834 | deepgemm | 172.6364 | 1.005 | — |
+| `s2048_skv4096_h64_d128_f32_dense_cp` | tirx | 37.5969 | deepgemm | 39.6371 | 1.054 | — |
+| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 181.1046 | deepgemm | 181.3527 | 1.001 | — |
+
+## deepgemm_sm100_fp4_paged_mqa_logits
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `b16_n1_mp128_ps64_h64_d128_bf16_fixed` | tirx | 6.4656 | deepgemm | 6.4663 | 1.000 | — |
+| `b1_n1_mp1_ps32_h64_d128_f32_fixed` | tirx | 4.0549 | deepgemm | 4.9944 | 1.232 | — |
+
 ## deepgemm_sm100_fp8_mqa_logits
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `s2048_skv4096_h64_d128_bf16_compressed_cp` | tirx | 41.5712 | deepgemm | 43.7146 | 1.052 | — |
-| `s2048_skv4096_h64_d128_bf16_compressed_nocp` | tirx | 54.5962 | deepgemm | 57.7064 | 1.057 | — |
-| `s2048_skv4096_h64_d128_bf16_dense_cp` | tirx | 41.1702 | deepgemm | 40.9190 | 0.994 | — |
-| `s2048_skv4096_h64_d128_bf16_dense_nocp` | tirx | 53.7680 | deepgemm | 53.8580 | 1.002 | — |
-| `s2048_skv4096_h64_d128_f32_compressed_cp` | tirx | 40.7020 | deepgemm | 43.3454 | 1.065 | — |
-| `s2048_skv4096_h64_d128_f32_compressed_nocp` | tirx | 53.8916 | deepgemm | 57.2530 | 1.062 | — |
-| `s2048_skv4096_h64_d128_f32_dense_cp` | tirx | 41.0534 | deepgemm | 40.7790 | 0.993 | — |
-| `s2048_skv4096_h64_d128_f32_dense_nocp` | tirx | 52.5876 | deepgemm | 51.7582 | 0.984 | — |
-| `s2048_skv8192_h64_d128_bf16_compressed_cp` | tirx | 70.5332 | deepgemm | 75.7720 | 1.074 | — |
-| `s2048_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 108.2100 | deepgemm | 116.7262 | 1.079 | — |
-| `s2048_skv8192_h64_d128_bf16_dense_cp` | tirx | 69.9804 | deepgemm | 70.0708 | 1.001 | — |
-| `s2048_skv8192_h64_d128_bf16_dense_nocp` | tirx | 109.8610 | deepgemm | 110.6138 | 1.007 | — |
-| `s2048_skv8192_h64_d128_f32_compressed_cp` | tirx | 69.0042 | deepgemm | 75.4814 | 1.094 | — |
-| `s2048_skv8192_h64_d128_f32_compressed_nocp` | tirx | 114.7394 | deepgemm | 116.2582 | 1.013 | — |
-| `s2048_skv8192_h64_d128_f32_dense_cp` | tirx | 69.5186 | deepgemm | 68.6358 | 0.987 | — |
-| `s2048_skv8192_h64_d128_f32_dense_nocp` | tirx | 116.6902 | deepgemm | 106.7686 | 0.915 | — |
-| `s4096_skv4096_h64_d128_bf16_compressed_cp` | tirx | 70.6786 | deepgemm | 76.8538 | 1.087 | — |
-| `s4096_skv4096_h64_d128_bf16_compressed_nocp` | tirx | 70.0840 | deepgemm | 76.9674 | 1.098 | — |
-| `s4096_skv4096_h64_d128_bf16_dense_cp` | tirx | 70.2026 | deepgemm | 70.5664 | 1.005 | — |
-| `s4096_skv4096_h64_d128_bf16_dense_nocp` | tirx | 70.3950 | deepgemm | 70.8030 | 1.006 | — |
-| `s4096_skv4096_h64_d128_f32_compressed_cp` | tirx | 70.3020 | deepgemm | 76.9666 | 1.095 | — |
-| `s4096_skv4096_h64_d128_f32_compressed_nocp` | tirx | 71.1504 | deepgemm | 77.7792 | 1.093 | — |
-| `s4096_skv4096_h64_d128_f32_dense_cp` | tirx | 69.9604 | deepgemm | 69.9062 | 0.999 | — |
-| `s4096_skv4096_h64_d128_f32_dense_nocp` | tirx | 69.8496 | deepgemm | 69.3916 | 0.993 | — |
-| `s4096_skv8192_h64_d128_bf16_compressed_cp` | tirx | 126.1686 | deepgemm | 137.2644 | 1.088 | — |
-| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 186.8726 | deepgemm | 199.0896 | 1.065 | — |
-| `s4096_skv8192_h64_d128_bf16_dense_cp` | tirx | 125.8938 | deepgemm | 126.1572 | 1.002 | — |
-| `s4096_skv8192_h64_d128_bf16_dense_nocp` | tirx | 188.0258 | deepgemm | 188.8176 | 1.004 | — |
-| `s4096_skv8192_h64_d128_f32_compressed_cp` | tirx | 130.1268 | deepgemm | 138.5152 | 1.064 | — |
-| `s4096_skv8192_h64_d128_f32_compressed_nocp` | tirx | 183.1572 | deepgemm | 197.4068 | 1.078 | — |
-| `s4096_skv8192_h64_d128_f32_dense_cp` | tirx | 128.6312 | deepgemm | 129.1630 | 1.004 | — |
-| `s4096_skv8192_h64_d128_f32_dense_nocp` | tirx | 185.8836 | deepgemm | 188.1062 | 1.012 | — |
+| `s2048_skv4096_h64_d128_f32_dense_cp` | tirx | 40.0279 | deepgemm | 41.2420 | 1.030 | — |
+| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 180.1963 | deepgemm | 189.3540 | 1.051 | — |
+
+## deepgemm_sm100_fp8_paged_mqa_logits
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `b16_n1_mp128_ps64_h64_d128_bf16_fixed` | tirx | 6.6756 | deepgemm | 6.8586 | 1.027 | sglang_cutedsl=6.9025 |
+| `b1_n1_mp1_ps64_h64_d128_f32_fixed` | tirx | 4.6250 | sglang_cutedsl | 4.8811 | 1.055 | deepgemm=5.4470 |
+
 ## deepgemm_sm100_tf32_hc_prenorm_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `m137_n24_k7680_s16` | tirx | 5.0322 | deepgemm | 5.0102 | 0.996 | — |
-| `m13_n24_k7168_s1` | tirx | 20.4722 | deepgemm | 20.6454 | 1.008 | — |
-| `m4096_n24_k28672_s16` | tirx | 56.4038 | deepgemm | 56.8650 | 1.008 | — |
-| `m4096_n24_k7168_s1` | tirx | 21.7128 | deepgemm | 21.9608 | 1.011 | — |
+| `m128_n24_k16384_s64` | tirx | 5.2311 | deepgemm | 5.1865 | 0.991 | — |
+| `m137_n24_k7680_s16` | tirx | 5.3731 | deepgemm | 5.3226 | 0.991 | — |
+| `m13_n24_k7168_s1` | tirx | 21.4164 | deepgemm | 20.8460 | 0.973 | — |
+| `m4096_n24_k28672_s16` | tirx | 58.1708 | deepgemm | 62.9098 | 1.081 | — |
+| `m4096_n24_k7168_s1` | tirx | 23.2634 | deepgemm | 23.6653 | 1.017 | — |
+| `m64_n24_k28672_s112` | tirx | 5.1863 | deepgemm | 5.1776 | 0.998 | — |
+| `m8192_n24_k16384_s1` | tirx | 51.6240 | deepgemm | 61.6711 | 1.195 | — |
+| `m8192_n24_k28672_s1` | tirx | 83.7983 | deepgemm | 91.7821 | 1.095 | — |
+
 ## flash_attention4
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `s1024_h32kv16` | tir | 19.6242 | flashattn_sm100 | 19.8208 | 1.010 | — |
-| `s1024_h32kv16_causal` | tir | 19.2028 | flashattn_sm100 | 19.3800 | 1.009 | — |
-| `s1024_h32kv32` | tir | 20.1002 | flashattn_sm100 | 20.1028 | 1.000 | — |
-| `s1024_h32kv32_causal` | tir | 20.5508 | flashattn_sm100 | 20.0346 | 0.975 | — |
-| `s1024_h32kv4` | tir | 19.2656 | flashattn_sm100 | 19.5874 | 1.017 | — |
-| `s1024_h32kv4_causal` | tir | 18.8606 | flashattn_sm100 | 19.0948 | 1.012 | — |
-| `s1024_h32kv8` | tir | 19.6302 | flashattn_sm100 | 19.9304 | 1.015 | — |
-| `s1024_h32kv8_causal` | tir | 18.2838 | flashattn_sm100 | 18.9610 | 1.037 | — |
-| `s2048_h32kv16` | tir | 56.2074 | flashattn_sm100 | 56.6262 | 1.007 | — |
-| `s2048_h32kv16_causal` | tir | 36.1102 | flashattn_sm100 | 37.9766 | 1.052 | — |
-| `s2048_h32kv32` | tir | 57.8408 | flashattn_sm100 | 57.9906 | 1.003 | — |
-| `s2048_h32kv32_causal` | tir | 38.1550 | flashattn_sm100 | 38.1450 | 1.000 | — |
-| `s2048_h32kv4` | tir | 54.4104 | flashattn_sm100 | 54.9310 | 1.010 | — |
-| `s2048_h32kv4_causal` | tir | 34.5532 | flashattn_sm100 | 36.6602 | 1.061 | — |
-| `s2048_h32kv8` | tir | 55.9074 | flashattn_sm100 | 56.4110 | 1.009 | — |
-| `s2048_h32kv8_causal` | tir | 34.6696 | flashattn_sm100 | 36.4542 | 1.051 | — |
-| `s4096_h32kv16` | tir | 205.4442 | flashattn_sm100 | 206.4930 | 1.005 | — |
-| `s4096_h32kv16_causal` | tir | 111.9902 | flashattn_sm100 | 115.4514 | 1.031 | — |
-| `s4096_h32kv32` | tir | 211.0658 | flashattn_sm100 | 212.4378 | 1.007 | — |
-| `s4096_h32kv32_causal` | tir | 117.1522 | flashattn_sm100 | 116.4474 | 0.994 | — |
-| `s4096_h32kv4` | tir | 204.1070 | flashattn_sm100 | 203.5118 | 0.997 | — |
-| `s4096_h32kv4_causal` | tir | 109.3778 | flashattn_sm100 | 111.7976 | 1.022 | — |
-| `s4096_h32kv8` | tir | 202.9702 | flashattn_sm100 | 202.7426 | 0.999 | — |
-| `s4096_h32kv8_causal` | tir | 110.4246 | flashattn_sm100 | 113.9544 | 1.032 | — |
-| `s8192_h32kv16` | tir | 841.0486 | flashattn_sm100 | 830.1202 | 0.987 | — |
-| `s8192_h32kv16_causal` | tir | 417.5102 | flashattn_sm100 | 418.7370 | 1.003 | — |
-| `s8192_h32kv32` | tir | 841.2190 | flashattn_sm100 | 834.8080 | 0.992 | — |
-| `s8192_h32kv32_causal` | tir | 440.2474 | flashattn_sm100 | 438.5840 | 0.996 | — |
-| `s8192_h32kv4` | tir | 853.7838 | flashattn_sm100 | 837.4688 | 0.981 | — |
-| `s8192_h32kv4_causal` | tir | 424.2588 | flashattn_sm100 | 428.2980 | 1.010 | — |
-| `s8192_h32kv8` | tir | 839.2554 | flashattn_sm100 | 813.0972 | 0.969 | — |
-| `s8192_h32kv8_causal` | tir | 425.0300 | flashattn_sm100 | 426.0576 | 1.002 | — |
+| `s1024_h32kv16` | tir | 19.7438 | flashattn_sm100 | 20.1868 | 1.022 | — |
+| `s1024_h32kv16_causal` | tir | 20.1373 | flashattn_sm100 | 20.2434 | 1.005 | — |
+| `s1024_h32kv32` | tir | 20.1770 | flashattn_sm100 | 20.5041 | 1.016 | — |
+| `s1024_h32kv32_causal` | tir | 20.6680 | flashattn_sm100 | 21.4776 | 1.039 | — |
+| `s1024_h32kv4` | tir | 19.2911 | flashattn_sm100 | 19.9360 | 1.033 | — |
+| `s1024_h32kv4_causal` | tir | 18.9146 | flashattn_sm100 | 19.6163 | 1.037 | — |
+| `s1024_h32kv8` | tir | 19.5000 | flashattn_sm100 | 19.9824 | 1.025 | — |
+| `s1024_h32kv8_causal` | tir | 19.0961 | flashattn_sm100 | 19.7242 | 1.033 | — |
+| `s2048_h32kv16` | tir | 57.8216 | flashattn_sm100 | 58.2600 | 1.008 | — |
+| `s2048_h32kv16_causal` | tir | 36.2784 | flashattn_sm100 | 38.6564 | 1.066 | — |
+| `s2048_h32kv32` | tir | 59.3314 | flashattn_sm100 | 59.6296 | 1.005 | — |
+| `s2048_h32kv32_causal` | tir | 39.8301 | flashattn_sm100 | 40.4032 | 1.014 | — |
+| `s2048_h32kv4` | tir | 56.3555 | flashattn_sm100 | 56.6166 | 1.005 | — |
+| `s2048_h32kv4_causal` | tir | 35.5954 | flashattn_sm100 | 37.9587 | 1.066 | — |
+| `s2048_h32kv8` | tir | 56.2651 | flashattn_sm100 | 56.5705 | 1.005 | — |
+| `s2048_h32kv8_causal` | tir | 36.1257 | flashattn_sm100 | 37.8445 | 1.048 | — |
+| `s4096_h32kv16` | tir | 213.4173 | flashattn_sm100 | 214.3931 | 1.005 | — |
+| `s4096_h32kv16_causal` | tir | 112.9986 | flashattn_sm100 | 118.0209 | 1.044 | — |
+| `s4096_h32kv32` | tir | 216.7032 | flashattn_sm100 | 220.5039 | 1.018 | — |
+| `s4096_h32kv32_causal` | tir | 119.3166 | flashattn_sm100 | 120.5545 | 1.010 | — |
+| `s4096_h32kv4` | tir | 209.4276 | flashattn_sm100 | 209.6753 | 1.001 | — |
+| `s4096_h32kv4_causal` | tir | 109.7150 | flashattn_sm100 | 114.5406 | 1.044 | — |
+| `s4096_h32kv8` | tir | 209.7788 | flashattn_sm100 | 211.4472 | 1.008 | — |
+| `s4096_h32kv8_causal` | tir | 111.8660 | flashattn_sm100 | 117.7443 | 1.053 | — |
+| `s8192_h32kv16` | tir | 772.2544 | flashattn_sm100 | 773.7900 | 1.002 | — |
+| `s8192_h32kv16_causal` | tir | 414.9246 | flashattn_sm100 | 424.7156 | 1.024 | — |
+| `s8192_h32kv32` | tir | 795.9493 | flashattn_sm100 | 798.4008 | 1.003 | — |
+| `s8192_h32kv32_causal` | tir | 433.7231 | flashattn_sm100 | 433.6129 | 1.000 | — |
+| `s8192_h32kv4` | tir | 780.6390 | flashattn_sm100 | 770.4900 | 0.987 | — |
+| `s8192_h32kv4_causal` | tir | 412.2221 | flashattn_sm100 | 421.1178 | 1.022 | — |
+| `s8192_h32kv8` | tir | 771.2404 | flashattn_sm100 | 775.7926 | 1.006 | — |
+| `s8192_h32kv8_causal` | tir | 415.8717 | flashattn_sm100 | 428.5254 | 1.030 | — |
+
 ## fp16_bf16_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_1024x1024x1024` | tir | 6.4456 | torch-cublas | 5.3760 | 0.834 | deepgemm-bf16=7.4892, deepgemm-cublaslt=5.4266 |
-| `bf16_16384x16384x16384` | tir | 6283.4044 | torch-cublas | 6081.9526 | 0.968 | deepgemm-bf16=6655.4354, deepgemm-cublaslt=6113.4668 |
-| `bf16_2048x2048x2048` | tir | 15.8594 | torch-cublas | 17.2414 | 1.087 | deepgemm-bf16=17.9342, deepgemm-cublaslt=17.5336 |
-| `bf16_4096x4096x4096` | tir | 92.2864 | deepgemm-bf16 | 91.9502 | 0.996 | deepgemm-cublaslt=93.8422, torch-cublas=93.9048 |
-| `bf16_8192x8192x8192` | tir | 770.5386 | deepgemm-cublaslt | 799.6210 | 1.038 | deepgemm-bf16=827.0226, torch-cublas=836.7196 |
-| `fp16_1024x1024x1024` | tir | 6.4952 | torch-cublas | 5.3986 | 0.831 | deepgemm-cublaslt=5.4360 |
-| `fp16_16384x16384x16384` | tir | 6523.3726 | deepgemm-cublaslt | 6440.7908 | 0.987 | torch-cublas=6444.0982 |
-| `fp16_2048x2048x2048` | tir | 16.0552 | torch-cublas | 17.5884 | 1.095 | deepgemm-cublaslt=17.7006 |
-| `fp16_4096x4096x4096` | tir | 96.6986 | deepgemm-cublaslt | 99.1310 | 1.025 | torch-cublas=99.2578 |
-| `fp16_8192x8192x8192` | tir | 793.7720 | torch-cublas | 863.3326 | 1.088 | deepgemm-cublaslt=865.7602 |
+| `bf16_1024x1024x1024` | tir | 6.9013 | torch-cublas | 6.0055 | 0.870 | deepgemm-bf16=6.8659, deepgemm-cublaslt=6.0092 |
+| `bf16_16384x16384x16384` | tir | 5628.1333 | torch-cublas | 5610.1962 | 0.997 | deepgemm-bf16=5976.2569, deepgemm-cublaslt=5613.8253 |
+| `bf16_2048x2048x2048` | tir | 16.4056 | torch-cublas | 15.5389 | 0.947 | deepgemm-bf16=17.2813, deepgemm-cublaslt=15.5431 |
+| `bf16_4096x4096x4096` | tir | 93.7913 | deepgemm-bf16 | 88.7105 | 0.946 | deepgemm-cublaslt=89.6318, torch-cublas=89.8241 |
+| `bf16_8192x8192x8192` | tir | 695.5359 | deepgemm-cublaslt | 708.2811 | 1.018 | deepgemm-bf16=733.1626, torch-cublas=713.1888 |
+| `fp16_1024x1024x1024` | tir | 6.8571 | torch-cublas | 5.9095 | 0.862 | — |
+| `fp16_16384x16384x16384` | tir | 5753.1710 | torch-cublas | 5759.5303 | 1.001 | — |
+| `fp16_2048x2048x2048` | tir | 16.4258 | torch-cublas | 15.8087 | 0.962 | — |
+| `fp16_4096x4096x4096` | tir | 96.1417 | torch-cublas | 93.1778 | 0.969 | — |
+| `fp16_8192x8192x8192` | tir | 727.8093 | torch-cublas | 759.2175 | 1.043 | — |
+
 ## fp8_blockwise_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `deepgemm_m4096_n2112_k7168` | tir | 49.0142 | deepgemm | 49.9134 | 1.018 | — |
-| `deepgemm_m4096_n24576_k1536` | tir | 117.6808 | deepgemm | 118.1730 | 1.004 | — |
-| `deepgemm_m4096_n32768_k512` | tir | 72.7242 | deepgemm | 76.4026 | 1.051 | — |
-| `deepgemm_m4096_n4096_k7168` | tir | 82.6742 | deepgemm | 82.9742 | 1.004 | — |
-| `deepgemm_m4096_n576_k7168` | tir | 18.1556 | deepgemm | 18.6968 | 1.030 | — |
-| `deepgemm_m4096_n7168_k16384` | tir | 327.3532 | deepgemm | 327.6390 | 1.001 | — |
-| `deepgemm_m4096_n7168_k2048` | tir | 44.1186 | deepgemm | 44.5254 | 1.009 | — |
+| `deepgemm_m4096_n2112_k7168` | tir | 50.7469 | deepgemm | 49.6232 | 0.978 | — |
+| `deepgemm_m4096_n24576_k1536` | tir | 113.8359 | deepgemm | 113.0782 | 0.993 | — |
+| `deepgemm_m4096_n32768_k512` | tir | 67.9943 | deepgemm | 71.2934 | 1.049 | — |
+| `deepgemm_m4096_n4096_k7168` | tir | 82.0894 | deepgemm | 82.2106 | 1.001 | — |
+| `deepgemm_m4096_n576_k7168` | tir | 20.1172 | deepgemm | 19.0448 | 0.947 | — |
+| `deepgemm_m4096_n7168_k16384` | tir | 333.0388 | deepgemm | 330.8140 | 0.993 | — |
+| `deepgemm_m4096_n7168_k2048` | tir | 42.9358 | deepgemm | 42.3531 | 0.986 | — |
+
+## gemm_reduce_scatter
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `tp1_m8192_n16384_k53248_fp16_dynamic` | tirx | 9622.9860 | cublas_nccl_cudagraph | 9198.5443 | 0.956 | cublasmp_split_p2p=10003.0208 |
+| `tp1_m8192_n4096_k12288_fp16_dynamic` | tirx | 599.1303 | cublas_nccl_cudagraph | 561.3896 | 0.937 | cublasmp_split_p2p=748.3171 |
+| `tp1_m8192_n5120_k25600_fp16_dynamic` | tirx | 1500.3251 | cublas_nccl_cudagraph | 1431.1354 | 0.954 | cublasmp_split_p2p=1833.8248 |
+| `tp1_m8192_n8192_k28672_fp16_dynamic` | tirx | 2434.1435 | cublas_nccl_cudagraph | 2403.8429 | 0.988 | cublasmp_split_p2p=2844.8883 |
+
+## grouped_fp8_gemm_contiguous
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `large_g4_m8192_n4096_k2048` | tir | 161.1956 | deepgemm | 168.0708 | 1.043 | — |
+| `large_g4_m8192_n4096_k4096` | tir | 351.4085 | deepgemm | 361.4099 | 1.028 | — |
+| `large_g4_m8192_n6144_k7168` | tir | 997.3748 | deepgemm | 1043.1590 | 1.046 | — |
+| `large_g4_m8192_n7168_k3072` | tir | 507.5144 | deepgemm | 526.4080 | 1.037 | — |
+| `large_g8_m4096_n4096_k2048` | tir | 189.1060 | deepgemm | 195.4129 | 1.033 | — |
+| `large_g8_m4096_n4096_k4096` | tir | 354.3510 | deepgemm | 359.8891 | 1.016 | — |
+| `large_g8_m4096_n6144_k7168` | tir | 1071.8308 | deepgemm | 1095.4849 | 1.022 | — |
+| `large_g8_m4096_n7168_k3072` | tir | 506.7036 | deepgemm | 535.0379 | 1.056 | — |
+
 ## nvfp4_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `1024x1024x1024` | tir | 5.1832 | cublaslt_nvfp4 | 4.2432 | 0.819 | flashinfer=4.3290 |
-| `16384x16384x16384` | tir | 1667.7848 | cublaslt_nvfp4 | 1569.8754 | 0.941 | flashinfer=1589.4680 |
-| `2048x2048x2048` | tir | 8.3540 | cublaslt_nvfp4 | 7.4380 | 0.890 | flashinfer=7.5904 |
-| `4096x4096x4096` | tir | 29.1422 | flashinfer | 28.7304 | 0.986 | cublaslt_nvfp4=29.9500 |
-| `8192x8192x8192` | tir | 185.4468 | flashinfer | 181.8584 | 0.981 | cublaslt_nvfp4=182.9938 |
+| `1024x1024x1024` | tir | 5.3781 | cublaslt_nvfp4 | 4.4346 | 0.825 | flashinfer=4.5210 |
+| `16384x16384x16384` | tir | 1489.9813 | flashinfer | 1444.8755 | 0.970 | cublaslt_nvfp4=1466.0304 |
+| `2048x2048x2048` | tir | 8.7511 | flashinfer | 7.4529 | 0.852 | cublaslt_nvfp4=7.5843 |
+| `4096x4096x4096` | tir | 29.4367 | cublaslt_nvfp4 | 27.6113 | 0.938 | flashinfer=28.7620 |
+| `8192x8192x8192` | tir | 185.4257 | flashinfer | 176.1684 | 0.950 | cublaslt_nvfp4=179.2211 |
+
+## sparse_flashmla_prefill_head128_phase1
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bench_regular_dqk512_hq128_s4096_kv32768_topk2048` | tirx | 1725.6573 | flashmla | 1757.7074 | 1.019 | — |
+| `bench_regular_dqk512_hq128_s4096_kv65536_topk2048` | tirx | 1888.3586 | flashmla | 1895.1349 | 1.004 | — |
+| `bench_regular_dqk512_hq128_s4096_kv8192_topk2048` | tirx | 1698.9118 | flashmla | 1712.2236 | 1.008 | — |
+| `bench_regular_dqk576_hq128_s4096_kv32768_topk2048` | tirx | 1794.0651 | flashmla | 1817.7636 | 1.013 | trtllm_gen=2054.2305 |
+| `bench_regular_dqk576_hq128_s4096_kv65536_topk2048` | tirx | 2021.1135 | flashmla | 2009.2543 | 0.994 | trtllm_gen=2203.1653 |
+| `bench_regular_dqk576_hq128_s4096_kv8192_topk2048` | tirx | 1793.0457 | flashmla | 1816.3394 | 1.013 | trtllm_gen=2050.9292 |
+
+## sparse_flashmla_prefill_head128_small_topk_phase1
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bench_smalltopk_dqk512_hq128_s4096_kv32768_topk1280` | tirx | 1148.6985 | flashmla | 1157.5796 | 1.008 | — |
+| `bench_smalltopk_dqk512_hq128_s4096_kv65536_topk1280` | tirx | 1197.4755 | flashmla | 1218.7120 | 1.018 | — |
+| `bench_smalltopk_dqk512_hq128_s4096_kv8192_topk1280` | tirx | 1158.1683 | flashmla | 1159.3792 | 1.001 | — |
+
+## sparse_flashmla_prefill_head64_phase1
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bench_dqk512_hq64_s4096_kv32768_topk512` | tirx | 373.9933 | flashmla | 379.0438 | 1.014 | — |
+| `bench_dqk512_hq64_s4096_kv49152_topk512` | tirx | 373.3247 | flashmla | 383.1354 | 1.026 | — |
+| `bench_dqk512_hq64_s4096_kv65536_topk512` | tirx | 382.1048 | flashmla | 389.4611 | 1.019 | — |
+| `bench_dqk512_hq64_s4096_kv8192_topk512` | tirx | 363.6449 | flashmla | 373.5008 | 1.027 | — |
+| `bench_dqk576_hq64_s4096_kv32768_topk512` | tirx | 383.8314 | flashmla | 395.1274 | 1.029 | trtllm_gen=461.2470 |
+| `bench_dqk576_hq64_s4096_kv49152_topk512` | tirx | 392.5180 | flashmla | 403.6945 | 1.028 | trtllm_gen=474.9567 |
+| `bench_dqk576_hq64_s4096_kv65536_topk512` | tirx | 402.3719 | flashmla | 416.8263 | 1.036 | trtllm_gen=483.9187 |
+| `bench_dqk576_hq64_s4096_kv8192_topk512` | tirx | 375.3681 | flashmla | 383.5837 | 1.022 | trtllm_gen=452.4132 |

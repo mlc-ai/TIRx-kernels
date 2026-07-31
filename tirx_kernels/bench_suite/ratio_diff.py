@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ratio-based regression diff for bench_suite.
+"""Ratio-based regression diff for bench-suite.
 
 For each (kernel, config) we measure with multiple impls, compute the
 ratio ref/ours where ref = fastest non-ours impl picked in baseline and
@@ -15,17 +15,16 @@ moving ratio is a real perf signal. Rows where the reference impl
 itself drifted > 20% are flagged ⚠ — workload's environment was
 unstable, so the ratio Δ is less trustworthy.
 
-The report lists every comparable workload in a single table, sorted by
-ratio Δ from most-improved to most-regressed (positive → negative).
+The report lists comparable workloads in one table sorted by ratio Δ from
+most-improved to most-regressed (positive → negative).
 Baseline workloads that were attempted this run but produced no comparable
 measurement (failed, interfered, or missing an impl) are listed in a separate
 "Not comparable in current run" section so lost coverage is never silent.
 
 Usage:
-    python ratio_diff.py [baseline.json] [current.json] [-o PATH]
+    python ratio_diff.py [current.json] [--baseline PATH] [-o PATH]
 
-Importable as `build_report(baseline_path, current)` for use from
-`run.py`.
+Importable as `build_report(baseline, current)` for use from `run.py`.
 """
 
 from __future__ import annotations
@@ -36,46 +35,20 @@ import json
 import sys
 from pathlib import Path
 
-OUR_IMPLS = {"tir", "tirx"}
+try:
+    from tirx_kernels.bench_suite.impls import is_our_impl, our_impls
+except ModuleNotFoundError:  # Support `python tirx_kernels/bench_suite/ratio_diff.py`.
+    from impls import is_our_impl, our_impls
+
 DEFAULT_RATIO_THRESHOLD = 1.0
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent
-DEFAULT_LATEST_RUN = REPO_ROOT / ".bench_suite" / "latest.json"
-DEFAULT_TIR_BASELINE = HERE / "tir.json"
-DEFAULT_REF_BASELINE = HERE / "ref.json"
-DEFAULT_RATIO_BASELINE = HERE / "ratio.json"
-
-
-def _result_key(row: dict) -> tuple[str, str]:
-    return row["kernel"], row.get("label") or row.get("config")
+DEFAULT_LATEST_RUN = REPO_ROOT / ".bench-suite" / "latest.json"
+DEFAULT_BASELINE = HERE / "baseline.json"
 
 
 def _refs_only(impls: dict[str, float]) -> dict[str, float]:
-    return {k: v for k, v in impls.items() if k not in OUR_IMPLS and v > 0}
-
-
-def join_default_baseline() -> dict:
-    """Join the checked-in tir.json + ref.json into one diffable payload.
-
-    The two pinned baselines have independent update cadences and are never
-    stored combined; the ref impls are folded into each tir result's `impls`.
-    """
-    here = Path(__file__).resolve().parent
-    tir = json.loads((here / "tir.json").read_text()) if (here / "tir.json").exists() else {}
-    ref = json.loads((here / "ref.json").read_text()) if (here / "ref.json").exists() else {}
-    ref_idx = {_result_key(r): _refs_only(r.get("impls") or {}) for r in ref.get("results", [])}
-    payload = {k: v for k, v in tir.items() if k != "results"}
-    payload["results"] = [
-        {
-            **r,
-            "impls": {
-                **(r.get("impls") or {}),
-                **ref_idx.get((r["kernel"], r.get("label") or r.get("config")), {}),
-            },
-        }
-        for r in tir.get("results", [])
-    ]
-    return payload
+    return {k: v for k, v in impls.items() if not is_our_impl(k) and v > 0}
 
 
 def index(payload: dict) -> dict[tuple[str, str], dict[str, float]]:
@@ -98,104 +71,21 @@ def pick_ref(base_impls: dict[str, float]) -> str | None:
     return min(refs, key=lambda k: refs[k])
 
 
-def pick_ours(impls: dict[str, float]) -> str | None:
-    for name in ("tir", "tirx"):
-        if name in impls and impls[name] > 0:
-            return name
-    return None
-
-
-def build_ratio_payload(tir_payload: dict, ref_payload: dict) -> dict:
-    """Build ratio.json contents from pinned tir + ref (no run JSON needed)."""
-    ref_idx = {
-        _result_key(r): _refs_only(r.get("impls") or {}) for r in ref_payload.get("results", [])
-    }
-    out = {
-        "timestamp": tir_payload.get("timestamp"),
-        "label": tir_payload.get("label"),
-        "git": tir_payload.get("git"),
-        "kernel_tree": tir_payload.get("kernel_tree"),
-        "results": [],
-    }
-    for r in tir_payload.get("results") or []:
-        if r.get("status") != "ok":
-            continue
-        key = _result_key(r)
-        impls = {**(r.get("impls") or {}), **ref_idx.get(key, {})}
-        ref = pick_ref(impls)
-        ours = pick_ours(impls)
-        if ref is None or ours is None:
-            continue
-        ours_us = impls[ours]
-        ref_us = impls[ref]
-        if ours_us <= 0 or ref_us <= 0:
-            continue
-        out["results"].append(
-            {
-                "kernel": r["kernel"],
-                "config": r.get("config"),
-                "label": r.get("label") or r.get("config"),
-                "status": "ok",
-                "ref_impl": ref,
-                "ours_impl": ours,
-                "ours_us": ours_us,
-                "ref_us": ref_us,
-                "ratio": ref_us / ours_us,
-            }
-        )
-    out["results"].sort(key=_result_key)
-    return out
-
-
-def ratio_index(payload: dict) -> dict[tuple[str, str], dict]:
-    """{(kernel, config) -> ratio row} from ratio.json."""
-    out: dict[tuple[str, str], dict] = {}
-    for r in payload.get("results") or []:
-        if r.get("status") != "ok":
-            continue
-        key = _result_key(r)
-        out[key] = r
-    return out
-
-
-def load_ratio_baseline(path: Path | str | None = None) -> dict | None:
-    path = Path(path) if path is not None else DEFAULT_RATIO_BASELINE
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
-
-
-def write_ratio_json(
-    path: Path | None = None, *, tir_path: Path | None = None, ref_path: Path | None = None
-) -> Path:
-    """Regenerate ratio.json from pinned tir.json + ref.json."""
-    tir_path = tir_path or DEFAULT_TIR_BASELINE
-    ref_path = ref_path or DEFAULT_REF_BASELINE
-    tir = json.loads(tir_path.read_text()) if tir_path.exists() else {}
-    ref = json.loads(ref_path.read_text()) if ref_path.exists() else {}
-    payload = build_ratio_payload(tir, ref)
-    out = path or DEFAULT_RATIO_BASELINE
-    out.write_text(json.dumps(payload, indent=2))
-    return out
-
-
 def build_report(
-    baseline_path: Path | str,
+    baseline_path: Path | str | dict,
     current: dict | Path | str,
     *,
     threshold_pct: float = DEFAULT_RATIO_THRESHOLD,
-    ratio_baseline: dict | Path | str | None = None,
 ) -> tuple[str, int]:
-    """Build the unified bench markdown (ours + ref + ratio vs saved ratio).
+    """Build the unified bench markdown (ours + ref + ratio vs baseline ratio).
 
-    Returns (markdown, n_regressions_below_threshold) for run.py's exit code.
+    The saved ratio is computed directly from the baseline payload (ref/ours
+    per workload), so no separate ratio cache is needed. Returns (markdown,
+    n_regressions_below_threshold) for run.py's exit code.
     """
     if isinstance(baseline_path, dict):
         base_payload = baseline_path
-        baseline_label = (
-            f"{base_payload.get('timestamp')} ({base_payload.get('label') or '-'}) "
-            "from tir.json + ref.json"
-        )
+        baseline_label = f"{base_payload.get('timestamp')} ({base_payload.get('label') or '-'})"
     else:
         base_payload = json.loads(Path(baseline_path).read_text())
         baseline_label = str(baseline_path)
@@ -209,12 +99,6 @@ def build_report(
     base = index(base_payload)
     cur = index(cur_payload)
 
-    if ratio_baseline is None:
-        ratio_baseline = load_ratio_baseline()
-    elif isinstance(ratio_baseline, str | Path):
-        ratio_baseline = json.loads(Path(ratio_baseline).read_text())
-    saved = ratio_index(ratio_baseline or {})
-
     # Status of every current-run result, including non-ok rows. index() keeps
     # only status=="ok", so a workload that failed/interfered this run is absent
     # from `cur` and would otherwise vanish from the report with no trace — the
@@ -225,7 +109,7 @@ def build_report(
     for r in cur_payload.get("results") or []:
         cur_status[(r["kernel"], r.get("label") or r.get("config"))] = r
 
-    rows: list[tuple[str, str, str, float, float, float, float, float, float, float]] = []
+    rows: list[tuple[str, str, str, str, float, float, float, float, float, float, float]] = []
     skipped_no_ref: list[tuple[str, str]] = []
     # Baseline workloads attempted this run but yielding no comparable ratio
     # (failed, interfered, or ok-but-missing an impl). Workloads simply not in
@@ -234,8 +118,8 @@ def build_report(
     not_comparable: list[tuple[str, str, str]] = []
     for key, base_impls in base.items():
         ref = pick_ref(base_impls)
-        ours_b = next((i for i in OUR_IMPLS if i in base_impls), None)
-        if ref is None or ours_b is None:
+        baseline_ours = our_impls(base_impls)
+        if ref is None or not baseline_ours:
             skipped_no_ref.append(key)
             continue
         if key not in cur:
@@ -243,93 +127,93 @@ def build_report(
             if rec is not None:  # attempted this run but not ok → surface it
                 st = rec.get("status") or "?"
                 err = (rec.get("error") or "").strip().splitlines()
-                not_comparable.append((key[0], key[1], f"{st}: {err[0]}" if err else st))
+                reason = f"{st}: {err[0]}" if err else st
+                for ours_b in baseline_ours:
+                    not_comparable.append((key[0], key[1], f"{ours_b}: {reason}"))
             continue
         cur_impls = cur[key]
-        if ours_b not in cur_impls or ref not in cur_impls:
-            missing = ", ".join(i for i in (ours_b, ref) if i not in cur_impls)
-            not_comparable.append((key[0], key[1], f"ok but missing impl(s): {missing}"))
-            continue
-        our_b_us, ref_b_us = base_impls[ours_b], base_impls[ref]
-        our_c_us, ref_c_us = cur_impls[ours_b], cur_impls[ref]
-        if min(our_b_us, ref_b_us, our_c_us, ref_c_us) <= 0:
-            continue
-        # ref/ours: higher = ours is faster than ref = better.
-        base_ratio = ref_b_us / our_b_us
-        cur_ratio = ref_c_us / our_c_us
-        saved_row = saved.get(key)
-        saved_ratio = saved_row.get("ratio") if saved_row else base_ratio
-        if saved_ratio <= 0:
+        for ours_b in baseline_ours:
+            if ours_b not in cur_impls or ref not in cur_impls:
+                missing = ", ".join(i for i in (ours_b, ref) if i not in cur_impls)
+                not_comparable.append(
+                    (key[0], key[1], f"{ours_b}: ok but missing impl(s): {missing}")
+                )
+                continue
+            our_b_us, ref_b_us = base_impls[ours_b], base_impls[ref]
+            our_c_us, ref_c_us = cur_impls[ours_b], cur_impls[ref]
+            if min(our_b_us, ref_b_us, our_c_us, ref_c_us) <= 0:
+                continue
+            # ref/ours: higher = ours is faster than ref = better.
+            base_ratio = ref_b_us / our_b_us
+            cur_ratio = ref_c_us / our_c_us
             saved_ratio = base_ratio
-        delta_pct = (cur_ratio - saved_ratio) / saved_ratio * 100.0
-        ref_drift_pct = (ref_c_us - ref_b_us) / ref_b_us * 100.0
-        our_drift_pct = (our_c_us - our_b_us) / our_b_us * 100.0
-        rows.append(
-            (
-                key[0],
-                key[1],
-                ref,
-                our_c_us,
-                ref_c_us,
-                cur_ratio,
-                saved_ratio,
-                delta_pct,
-                our_drift_pct,
-                ref_drift_pct,
+            delta_pct = (cur_ratio - saved_ratio) / saved_ratio * 100.0
+            ref_drift_pct = (ref_c_us - ref_b_us) / ref_b_us * 100.0
+            our_drift_pct = (our_c_us - our_b_us) / our_b_us * 100.0
+            rows.append(
+                (
+                    key[0],
+                    key[1],
+                    ours_b,
+                    ref,
+                    our_c_us,
+                    ref_c_us,
+                    cur_ratio,
+                    saved_ratio,
+                    delta_pct,
+                    our_drift_pct,
+                    ref_drift_pct,
+                )
             )
-        )
 
     # Positive ratio Δ first (improvements), negative last (regressions).
-    rows.sort(key=lambda r: -r[7])
+    rows.sort(key=lambda r: -r[8])
 
     out = io.StringIO()
 
     def w(line: str = "") -> None:
         out.write(line + "\n")
 
-    n_regressions = sum(1 for r in rows if r[7] <= -threshold_pct)
-    n_improvements = sum(1 for r in rows if r[7] >= threshold_pct)
+    def write_ratio_table(table_rows: list[tuple]) -> None:
+        if not table_rows:
+            return
+        w(
+            "| kernel | config | ours impl | ref | ours (µs) | ref (µs) | ratio | saved | "
+            "ratio Δ | ours Δ | ref Δ |"
+        )
+        w("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|")
+        for k, c, ours, ref, our_us, ref_us, cr, sr, d, our_d, ref_d in table_rows:
+            flag = " ⚠" if abs(ref_d) > 20 else ""
+            w(
+                f"| {k} | {c} | {ours} | {ref} | {our_us:.2f} | {ref_us:.2f} | {cr:.3f} | "
+                f"{sr:.3f} | {d:+.1f}% | {our_d:+.1f}% | {ref_d:+.1f}%{flag} |"
+            )
+        w()
 
-    ratio_label = (
-        f"{ratio_baseline.get('timestamp')} ({ratio_baseline.get('label') or '-'})"
-        if ratio_baseline
-        else "computed from tir.json + ref.json"
-    )
+    n_regressions = sum(1 for r in rows if r[8] <= -threshold_pct)
+    n_improvements = sum(1 for r in rows if r[8] >= threshold_pct)
 
-    w("# bench_suite bench report")
+    w("# bench-suite bench report")
     w()
     w(f"- Baseline (abs µs): `{baseline_label}`")
-    w(f"- Saved ratios: `{ratio_label}` from ratio.json")
     w(f"- Current run: `{current_label}`")
     w(
-        "- Columns: ref/ours ratio (higher = ours faster), ratio Δ vs saved ratio.json, "
-        "ours/ref Δ vs pinned tir.json + ref.json abs µs. Sorted by ratio Δ."
+        "- Columns: ref/ours ratio (higher = ours faster), ratio Δ vs baseline ratio, "
+        "ours/ref Δ vs pinned baseline abs µs. Sorted by ratio Δ."
     )
     w(
-        f"- Summary: {len(rows)} comparable workloads; "
+        f"- Summary: {len(rows)} comparable implementation/reference measurements; "
         f"{n_improvements} > +{threshold_pct:g}%, {n_regressions} < -{threshold_pct:g}%"
         + (
             f"; {len(not_comparable)} not comparable in current run (see below)"
             if not_comparable
             else ""
         )
-        + ". ⚠ = reference abs µs drifted >20% vs pinned ref (less trustworthy)."
+        + ". ⚠ = reference abs µs drifted >20% vs baseline (less trustworthy)."
     )
     w()
 
-    if rows:
-        w(
-            "| kernel | config | ref | ours (µs) | ref (µs) | ratio | saved | "
-            "ratio Δ | ours Δ | ref Δ |"
-        )
-        w("|---|---|---|---:|---:|---:|---:|---:|---:|---:|")
-        for k, c, ref, our_us, ref_us, cr, sr, d, our_d, ref_d in rows:
-            flag = " ⚠" if abs(ref_d) > 20 else ""
-            w(
-                f"| {k} | {c} | {ref} | {our_us:.2f} | {ref_us:.2f} | {cr:.3f} | "
-                f"{sr:.3f} | {d:+.1f}% | {our_d:+.1f}% | {ref_d:+.1f}%{flag} |"
-            )
-        w()
+    write_ratio_table(rows)
 
     if not_comparable:
         w(f"## Not comparable in current run ({len(not_comparable)})")
@@ -366,7 +250,9 @@ def main() -> None:
         help=f"Current run JSON (default: {DEFAULT_LATEST_RUN})",
     )
     ap.add_argument(
-        "--baseline", default=None, help="Combined baseline JSON; default joins tir.json + ref.json"
+        "--baseline",
+        default=str(DEFAULT_BASELINE),
+        help=f"Baseline JSON to diff against (default: {DEFAULT_BASELINE})",
     )
     ap.add_argument(
         "--threshold",
@@ -379,23 +265,11 @@ def main() -> None:
         "-o",
         type=Path,
         default=None,
-        help="Write report path (default: .bench_suite/reports/<run>/bench.md)",
-    )
-    ap.add_argument(
-        "--refresh-ratio-json",
-        action="store_true",
-        help="Regenerate ratio.json from tir.json + ref.json and exit",
+        help="Write report path (default: .bench-suite/reports/<run>/bench.md)",
     )
     args = ap.parse_args()
 
-    if args.refresh_ratio_json:
-        out = write_ratio_json()
-        print(f"[ratio_diff] refreshed {out} ({len(json.loads(out.read_text())['results'])} rows)")
-        return
-
-    baseline = join_default_baseline() if args.baseline is None else args.baseline
-    if isinstance(baseline, str | Path):
-        baseline = json.loads(Path(baseline).read_text())
+    baseline = json.loads(Path(args.baseline).read_text())
     report, _ = build_report(baseline, args.current, threshold_pct=args.threshold)
     print(report)
 

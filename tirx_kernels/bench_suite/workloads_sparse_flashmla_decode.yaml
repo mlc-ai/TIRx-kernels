@@ -1,0 +1,24 @@
+# Complete in-scope performance matrix transcribed from
+# FlashMLA/tests/test_flash_mla_sparse_decoding.py::gen_testcase, plus the
+# task-required h_q=64 DeepSeek-V4 primary. Every row has public h_q=64 and
+# executes the single MODEL_TYPE-parameterized SM100 head64 sparse-FP8 kernel.
+
+defaults:
+  # Timer, warmup, repeat, rounds, and cooldown use bench-suite defaults.
+
+workloads:
+  - {kernel: sparse_flashmla_decode_head64, config: deepseek_v4_v32_b128_sq2_sk32768_topk2048_p64}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b2_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b64_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b74_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b128_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b148_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b256_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b2_sq2_sk16384_topk128_p256_xsk16384_xtopk1024_xp2_xtopklen}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b64_sq2_sk16384_topk128_p256_xsk16384_xtopk1024_xp2_xtopklen}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b74_sq2_sk16384_topk128_p256_xsk16384_xtopk1024_xp2_xtopklen}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b128_sq2_sk16384_topk128_p256_xsk16384_xtopk1024_xp2_xtopklen}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b148_sq2_sk16384_topk128_p256_xsk16384_xtopk1024_xp2_xtopklen}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b256_sq2_sk16384_topk128_p256_xsk16384_xtopk1024_xp2_xtopklen}
+  - {kernel: sparse_flashmla_decode_head64, config: model1_b148_sq2_sk32768_topk16384_p64}
+  - {kernel: sparse_flashmla_decode_head64, config: v32_b148_sq2_sk32768_topk16384_p64}

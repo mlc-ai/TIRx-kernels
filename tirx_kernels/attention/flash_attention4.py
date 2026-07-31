@@ -1,8 +1,16 @@
+"""FlashAttention-4 TIRx kernel and direct NVIDIA IKET profiling entry point.
+
+Run ``python -m tirx_kernels.attention.flash_attention4`` to profile the
+annotated kernel.  Correctness and ordinary benchmarks remain exposed through
+``run_test`` and ``run_bench``.
+"""
+
 from __future__ import annotations
 
+import argparse
 import math
 import os
-from enum import Enum
+from functools import partial
 
 import numpy as np
 import torch
@@ -11,24 +19,35 @@ import tvm
 import tvm.testing
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
-from tvm.tirx.bench import CudaProfiler, bench, tensor_bytes
+from tvm.tirx.bench import bench
+from tvm.tirx.cuda import iket
+from tvm.tirx.cuda.iket import IketProfiler
 from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState, TCGen05Bar
 from tvm.tirx.lang.tile_scheduler import FlashAttentionLinearScheduler, FlashAttentionLPTScheduler
 from tvm.tirx.layout import wg_local_layout
 
 M_CLUSTER = 1
 N_CLUSTER = 1
-SM_NUMBER = 148
-NUM_GROUPS = 6
-PROFILER_BUFFER_SIZE = int(2000000.0)
-PROFILER_WRITE_STRIDE = SM_NUMBER * NUM_GROUPS
-PROFILER_ON = False
-# Lightweight softmax-step timestamps (mirrors instr/flash_fwd_sm100_instr.py
-# t0..t3): leader-lane STG of %globaltimer_lo straight to profiler_buffer,
-# no fences, no local arrays — CudaProfiler's per-event __threadfence_block
-# inflates a single-CTA task ~10x; this stays ~1%. Parse with
-# instr/tirx_phase.py --light.
-LIGHT_TS = False
+IKET_EVENT_NAMES = (
+    "correction",
+    "epi-ld-tmem",
+    "issue-tma-k",
+    "issue-tma-q",
+    "issue-tma-v",
+    "softmax-exp2",
+    "softmax-fma",
+    "softmax-max",
+    "softmax-sum",
+    "softmax-tmem-st",
+    "tma-store",
+    "softmax-baseline",
+    "softmax-phase-0",
+    "softmax-phase-1",
+    "softmax-phase-2",
+    "softmax-phase-3",
+    "softmax-phase-4",
+    "softmax-phase-5",
+)
 # ex2-emulation ratio per regime (grid-searched under the bench protocol;
 # heavier and lighter both measured worse on their respective regimes):
 # emulate elements with (i*2 % 16) >= 16 - 2*PAIRS in fragments
@@ -107,37 +126,6 @@ def ex2_emulation_2(out, idx, x, y):
     out[idx + 1] = combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1])
 
 
-class ProfileEventType(Enum):
-    IssueTMA_Q = 0
-    IssueTMA_K = 1
-    IssueTMA_V = 2
-    IssueMMA_QK = 3
-    IssueMMA_PV = 4
-    Softmax_MAX = 5
-    Softmax_FMA = 6
-    Softmax_EXP2 = 7
-    Softmax_TMEM_ST = 8
-    Softmax_SUM = 9
-    Correction = 10
-    EpiLDTMEM = 11
-    TMAStore = 12
-
-
-event_type_names = [
-    "issue-tma-q",
-    "issue-tma-k",
-    "issue-tma-v",
-    "issue-mma-qk",
-    "issue-mma-pv",
-    "softmax-max",
-    "softmax-fma",
-    "softmax-exp2",
-    "softmax-tmem-st",
-    "softmax-sum",
-    "correction",
-    "epi-ld-tmem",
-    "tma-store",
-]
 WG_NUMBER = 4
 WARP_NUMBER = 4
 NUM_THREADS = 32 * WARP_NUMBER * WG_NUMBER
@@ -173,7 +161,6 @@ def _kernel(
     K: T.Buffer((BATCH_SIZE, SEQ_LEN_KV, NUM_KV_HEADS, HEAD_DIM), "float16"),
     V: T.Buffer((BATCH_SIZE, SEQ_LEN_KV, NUM_KV_HEADS, HEAD_DIM), "float16"),
     O: T.Buffer((BATCH_SIZE, SEQ_LEN_Q, NUM_QO_HEADS, HEAD_DIM), "float16"),
-    profiler_buffer: T.Buffer((PROFILER_BUFFER_SIZE,), "uint64"),
     *,
     BATCH_SIZE: T.constexpr,
     SEQ_LEN_Q: T.constexpr,
@@ -247,13 +234,12 @@ def _kernel(
     bx = T.cta_id([cta_count])
     wg_id = T.warpgroup_id([4])
     warp_id = T.warp_id_in_wg([4])
-    lane_id = T.lane_id([32])
     tid_in_wg = T.thread_id_in_wg([128])
     pool = T.SMEMPool()
-    Q_smem = pool.alloc_mma((SMEM_PIPE_DEPTH_Q, BLK_M, HEAD_DIM), "float16")
-    K_smem = pool.alloc_mma((SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM), "float16")
+    Q_smem = pool.alloc_tcgen05_mma_AB((SMEM_PIPE_DEPTH_Q, BLK_M, HEAD_DIM), "float16")
+    K_smem = pool.alloc_tcgen05_mma_AB((SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM), "float16")
     V_smem = K_smem.view(SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM)
-    O_smem = pool.alloc_mma((TMEM_PIPE_DEPTH, BLK_M, HEAD_DIM), "float16")
+    O_smem = pool.alloc_tcgen05_mma_AB((TMEM_PIPE_DEPTH, BLK_M, HEAD_DIM), "float16")
     sScale = pool.alloc((SSCALE_TOTAL_SIZE,), "float32", align=1024)
     tmem_addr = pool.alloc([1], "uint32")
     ACC_SCALE_BASE: T.let = 0
@@ -293,12 +279,7 @@ def _kernel(
     # excess vs cutedsl, which uses one prologue init barrier).
     bar_s0_s1_sequence.init(32)
     pool.commit()
-    profiler = CudaProfiler(
-        profiler_buffer,
-        write_stride=PROFILER_WRITE_STRIDE,
-        num_groups=NUM_GROUPS,
-        profiler_enabled=PROFILER_ON,
-    )
+    iket = IketProfiler()
     # TMEM is allocated by the MMA warp (cta-scope warp 12 = wg3/warp0) and
     # the alloc deliberately sits AFTER the prologue cta_syncs (commit is
     # emitted further down): every other warp's first TMEM access is
@@ -322,23 +303,15 @@ def _kernel(
     T.ptx.fence.proxy_async("shared::cta")
     T.ptx.fence.mbarrier_init()
     T.cuda.cta_sync()
-    S_region = T.meta_var(
-        T.TMEMStages(tmem, col_start=0, width=MMA_N, stages=SMEM_PIPE_DEPTH_Q, stride=MMA_N)
-    )
-    O_region = T.meta_var(
-        T.TMEMStages(
-            tmem,
-            col_start=MMA_N * SMEM_PIPE_DEPTH_Q,
-            width=MMA_N,
-            stages=SMEM_PIPE_DEPTH_Q,
-            stride=MMA_N,
-        )
-    )
-    P_region = T.meta_var(
-        T.TMEMStages(
-            tmem_as_f16, col_start=MMA_N, width=BLK_N, stages=SMEM_PIPE_DEPTH_Q, stride=MMA_N * 2
-        )
-    )
+    # S and O share the (128, N_COLS_TMEM) f32 tmem as 2*SMEM_PIPE_DEPTH_Q
+    # MMA_N-wide stages: S in the low SMEM_PIPE_DEPTH_Q, O in the high ones
+    # (indexed SMEM_PIPE_DEPTH_Q + stage). Indexing a constant stage at the use
+    # site keeps the column offset in the region so allocated_addr stays 0.
+    S_region = T.meta_var(tmem.rearrange("m (s n) -> s m n", n=MMA_N))
+    O_region = S_region
+    # P overlays the f16 view of the S stages: the high MMA_N-wide half (two=1)
+    # of each stage's 2*MMA_N f16 columns, indexed [stage, 1, :, cols].
+    P_region = T.meta_var(tmem_as_f16.rearrange("m (s two n) -> s two m n", two=2, n=MMA_N))
     scheduler = (
         FlashAttentionLPTScheduler(
             "fa_scheduler",
@@ -357,16 +330,6 @@ def _kernel(
         )
     )
     scheduler.init(bx)
-    if (wg_id == 3) & (warp_id == 1):
-        profiler.init(0)
-    elif (wg_id == 3) & (warp_id == 2):
-        profiler.init(1)
-    elif (wg_id == 3) & (warp_id == 0):
-        profiler.init(2)
-    elif wg_id <= 1:
-        profiler.init(3 + wg_id)
-    elif wg_id == 2:
-        profiler.init(5)
     kv_pipe.init(0)
     phase_q = 0
     phase_oepi = 0
@@ -396,16 +359,16 @@ def _kernel(
                     q_load.empty.wait(i_q, phase_q_load)
                     tma_copy_q = T.meta_var(
                         {
-                            "dispatch": "tma",
+                            "dispatch": "tma_auto",
                             "mbar": q_load.full.buf.ptr_to([i_q]),
                             "cta_group": CTA_GROUP,
                         }
                     )
-                    profiler.start(ProfileEventType.IssueTMA_Q, lane_id == 0)
-                    Q_smem_3d = Q_smem.view(SMEM_PIPE_DEPTH_Q, SEQ_Q_PER_TILE, GQA_RATIO, HEAD_DIM)
+                    tma_q_token = iket.range_start("issue-tma-q")
+                    Q_smem_4d = Q_smem.view(SMEM_PIPE_DEPTH_Q, SEQ_Q_PER_TILE, GQA_RATIO, HEAD_DIM)
                     if T.ptx.elect_sync():
                         Tx.copy_async(
-                            Q_smem_3d[i_q, :, :, :],
+                            Q_smem_4d[i_q, :, :, :],
                             Q[
                                 batch_idx,
                                 m_start + i_q * SEQ_Q_PER_TILE : m_start
@@ -416,19 +379,19 @@ def _kernel(
                             **tma_copy_q,
                         )
                         q_load.full.arrive(i_q, CTA_GROUP * BLK_M * HEAD_DIM * F16_BYTES)
-                    profiler.end(ProfileEventType.IssueTMA_Q, lane_id == 0)
+                    iket.range_end(tma_q_token)
 
                 @T.inline
                 def load_k(i_kv):
                     kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase)
                     tma_copy_k = T.meta_var(
                         {
-                            "dispatch": "tma",
+                            "dispatch": "tma_auto",
                             "mbar": kv_load.full.buf.ptr_to([kv_pipe.stage]),
                             "cta_group": CTA_GROUP,
                         }
                     )
-                    profiler.start(ProfileEventType.IssueTMA_K, lane_id == 0)
+                    tma_k_token = iket.range_start("issue-tma-k")
                     if T.ptx.elect_sync():
                         Tx.copy_async(
                             K_smem[kv_pipe.stage, :, :],
@@ -436,7 +399,7 @@ def _kernel(
                             **tma_copy_k,
                         )
                         kv_load.full.arrive(kv_pipe.stage, CTA_GROUP * BLK_N * HEAD_DIM * F16_BYTES)
-                    profiler.end(ProfileEventType.IssueTMA_K, lane_id == 0)
+                    iket.range_end(tma_k_token)
                     kv_pipe.advance()
 
                 @T.inline
@@ -444,12 +407,12 @@ def _kernel(
                     kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase)
                     tma_copy_v = T.meta_var(
                         {
-                            "dispatch": "tma",
+                            "dispatch": "tma_auto",
                             "mbar": kv_load.full.buf.ptr_to([kv_pipe.stage]),
                             "cta_group": CTA_GROUP,
                         }
                     )
-                    profiler.start(ProfileEventType.IssueTMA_V, lane_id == 0)
+                    tma_v_token = iket.range_start("issue-tma-v")
                     if T.ptx.elect_sync():
                         Tx.copy_async(
                             V_smem[kv_pipe.stage, :, :],
@@ -457,7 +420,7 @@ def _kernel(
                             **tma_copy_v,
                         )
                         kv_load.full.arrive(kv_pipe.stage, CTA_GROUP * BLK_N * HEAD_DIM * F16_BYTES)
-                    profiler.end(ProfileEventType.IssueTMA_V, lane_id == 0)
+                    iket.range_end(tma_v_token)
                     kv_pipe.advance()
 
                 load_trip_count: T.int32
@@ -476,12 +439,13 @@ def _kernel(
                     load_k(i_kv)
                     load_v(i_kv)
             if warp_id == 2:
+                corr_epi.full.wait(0, phase_tmem)
+                tma_store_token = iket.range_start("tma-store")
                 for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                    corr_epi.full.wait(i_q, phase_tmem)
-                    if i_q == 0:
-                        profiler.start(ProfileEventType.TMAStore, lane_id == 0)
+                    if i_q != 0:
+                        corr_epi.full.wait(i_q, phase_tmem)
                     m_start_global = T.meta_var(m_start + i_q * SEQ_Q_PER_TILE)
-                    O_smem_3d = O_smem.view(TMEM_PIPE_DEPTH, SEQ_Q_PER_TILE, GQA_RATIO, HEAD_DIM)
+                    O_smem_4d = O_smem.view(TMEM_PIPE_DEPTH, SEQ_Q_PER_TILE, GQA_RATIO, HEAD_DIM)
                     if T.ptx.elect_sync():
                         Tx.copy_async(
                             O[
@@ -490,14 +454,14 @@ def _kernel(
                                 kv_head_idx * GQA_RATIO : (kv_head_idx + 1) * GQA_RATIO,
                                 :,
                             ],
-                            O_smem_3d[i_q, :, :, :],
-                            dispatch="tma",
+                            O_smem_4d[i_q, :, :, :],
+                            dispatch="tma_auto",
                         )
                     T.ptx.cp_async.bulk.commit_group()
                 for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
                     T.ptx.cp_async.bulk.wait_group(1 - i_q)
                     corr_epi.empty.arrive(i_q)
-                profiler.end(ProfileEventType.TMAStore, lane_id == 0)
+                iket.range_end(tma_store_token)
                 phase_tmem ^= 1
             if warp_id == 0:
                 acc: T.int32
@@ -506,7 +470,7 @@ def _kernel(
                 @T.inline
                 def gemm_qk(q_stage, kv_stage):
                     Tx.warp.gemm_async(
-                        S_region[q_stage],
+                        S_region[q_stage, :, :],
                         Q_smem[q_stage, 0:BLK_M, 0:HEAD_DIM],
                         K_smem[kv_stage, 0:BLK_N, 0:HEAD_DIM],
                         dispatch="tcgen05",
@@ -528,8 +492,8 @@ def _kernel(
                 @T.inline
                 def gemm_pv_part1(i_q, kv_stage, should_accumulate):
                     Tx.warp.gemm_async(
-                        O_region[i_q],
-                        P_region[i_q, 0:K_SPLIT],
+                        O_region[SMEM_PIPE_DEPTH_Q + i_q, :, :],
+                        P_region[i_q, 1, :, 0:K_SPLIT],
                         V_smem[kv_stage, 0:K_SPLIT, 0:HEAD_DIM],
                         transB=True,
                         accum=should_accumulate,
@@ -541,8 +505,8 @@ def _kernel(
                 def gemm_pv_part2(i_q, kv_stage):
                     p_ready_2.wait(i_q, phase_tmem)
                     Tx.warp.gemm_async(
-                        O_region[i_q],
-                        P_region[i_q, K_SPLIT:BLK_N],
+                        O_region[SMEM_PIPE_DEPTH_Q + i_q, :, :],
+                        P_region[i_q, 1, :, K_SPLIT:BLK_N],
                         V_smem[kv_stage, K_SPLIT:BLK_N, 0:HEAD_DIM],
                         transB=True,
                         accum=True,
@@ -629,22 +593,8 @@ def _kernel(
             rescale_threshold = T.meta_var(8.0)
             row_max: T.f32[1]
             row_sum: T.f32[1]
-            ts_step: T.int32
-            ts_step = 0
-
-            @T.inline
-            def light_ts(j):
-                if LIGHT_TS:
-                    if tid_in_wg == 0:
-                        profiler_buffer[1 + wg_id * 4096 + ts_step * 8 + j] = T.cast(
-                            T.ptx.fetch_register(64, "clock64"), "uint64"
-                        )
-
-            if LIGHT_TS:
-                if tid_in_wg == 0:
-                    profiler_buffer[1 + wg_id * 4096 + 4000] = T.cast(
-                        T.ptx.fetch_register(64, "clock64"), "uint64"
-                    )
+            if warp_id == 0:
+                iket.mark("softmax-baseline")
 
             @T.inline
             def mask_r2p(s_chunk_buf, col_limit, ncol: T.int32):
@@ -716,8 +666,11 @@ def _kernel(
                 p_chunk_buf = T.decl_buffer((BLK_N,), dtype="float16", data=p_chunk_buf_f32.data)
                 p_chunk = p_chunk_buf.view(128, BLK_N, layout=wg_local_layout(BLK_N))
                 s_ready.wait(wg_id, phase_s_full)
-                light_ts(0)
-                profiler.start(ProfileEventType.Softmax_MAX, tid_in_wg == 0)
+                if warp_id == 0:
+                    iket.mark("softmax-phase-0")
+                softmax_max_token = iket.sentinel_token("softmax-max")
+                if warp_id == 0:
+                    softmax_max_token = iket.range_start("softmax-max")
                 tile_max: T.f32[1]
                 for chunk_idx in T.unroll(BLK_N // SOFTMAX_LD_CHUNK):
                     Tx.wg.copy_async(
@@ -725,7 +678,9 @@ def _kernel(
                             :, chunk_idx * SOFTMAX_LD_CHUNK : (chunk_idx + 1) * SOFTMAX_LD_CHUNK
                         ],
                         S_region[
-                            wg_id, chunk_idx * SOFTMAX_LD_CHUNK : (chunk_idx + 1) * SOFTMAX_LD_CHUNK
+                            wg_id,
+                            :,
+                            chunk_idx * SOFTMAX_LD_CHUNK : (chunk_idx + 1) * SOFTMAX_LD_CHUNK,
                         ],
                     )
                 if apply_mask:
@@ -759,8 +714,9 @@ def _kernel(
                         acc_scale = T.ptx.exp2(acc_scale_)
                 row_max[0] = row_max_new
                 row_max_scaled: T.let = row_max_safe * scale_log2
-                light_ts(1)
-                profiler.end(ProfileEventType.Softmax_MAX, tid_in_wg == 0)
+                if warp_id == 0:
+                    iket.mark("softmax-phase-1")
+                iket.range_end(softmax_max_token)
                 if tid_in_wg < BLK_M and (not is_first):
                     sScale_idx: T.let = ACC_SCALE_BASE + tid_in_wg + wg_id * BLK_M
                     sScale[sScale_idx] = acc_scale
@@ -773,15 +729,19 @@ def _kernel(
                 # and therefore the PV MMA. The reverse (sScale slot reuse)
                 # direction stays on softmax_corr.empty.
                 if STATS_BAR_PAIRWISE:
-                    tvm.tirx.cuda.op.ptx_bar_arrive(1 + wg_id * 4 + warp_id, 64)
+                    tvm.backend.cuda.op.ptx_bar_arrive(1 + wg_id * 4 + warp_id, 64)
                 else:
-                    tvm.tirx.cuda.op.ptx_bar_arrive(1 + wg_id, 256)
-                profiler.start(ProfileEventType.Softmax_FMA, tid_in_wg == 0)
+                    tvm.backend.cuda.op.ptx_bar_arrive(1 + wg_id, 256)
+                softmax_fma_token = iket.sentinel_token("softmax-fma")
+                if warp_id == 0:
+                    softmax_fma_token = iket.range_start("softmax-fma")
                 Tx.wg.fma(s_chunk, s_chunk, scale_log2, -row_max_scaled)
-                profiler.end(ProfileEventType.Softmax_FMA, tid_in_wg == 0)
+                iket.range_end(softmax_fma_token)
                 if USE_S0_S1_BARRIER:
                     bar_s0_s1_sequence.wait(wg_id * 4 + warp_id, phase_s0_s1)
-                profiler.start(ProfileEventType.Softmax_EXP2, tid_in_wg == 0)
+                softmax_exp2_token = iket.sentinel_token("softmax-exp2")
+                if warp_id == 0:
+                    softmax_exp2_token = iket.range_start("softmax-exp2")
                 for frag_idx in T.unroll(4):
                     s_chunk_local = s_chunk_buf.local(BLK_N)
                     for i in T.unroll(BLK_N // 4 // 2):
@@ -809,12 +769,14 @@ def _kernel(
                     )
                 if USE_S0_S1_BARRIER:
                     bar_s0_s1_sequence.arrive((1 - wg_id) * 4 + warp_id)
-                profiler.end(ProfileEventType.Softmax_EXP2, tid_in_wg == 0)
-                profiler.start(ProfileEventType.Softmax_TMEM_ST, tid_in_wg == 0)
+                iket.range_end(softmax_exp2_token)
+                softmax_tmem_st_token = iket.sentinel_token("softmax-tmem-st")
+                if warp_id == 0:
+                    softmax_tmem_st_token = iket.range_start("softmax-tmem-st")
                 P_SPLIT_Q = T.meta_var(2 if is_causal else 3)
                 for i in T.unroll(P_SPLIT_Q):
                     Tx.wg.copy_async(
-                        P_region[wg_id, i * BLK_N // 4 : (i + 1) * BLK_N // 4],
+                        P_region[wg_id, 1, :, i * BLK_N // 4 : (i + 1) * BLK_N // 4],
                         p_chunk[:, i * BLK_N // 4 : (i + 1) * BLK_N // 4],
                     )
                 T.ptx.tcgen05.wait.st()
@@ -822,18 +784,26 @@ def _kernel(
                 for i in T.unroll(4 - P_SPLIT_Q):
                     Tx.wg.copy_async(
                         P_region[
-                            wg_id, (P_SPLIT_Q + i) * BLK_N // 4 : (P_SPLIT_Q + 1 + i) * BLK_N // 4
+                            wg_id,
+                            1,
+                            :,
+                            (P_SPLIT_Q + i) * BLK_N // 4 : (P_SPLIT_Q + 1 + i) * BLK_N // 4,
                         ],
                         p_chunk[:, (P_SPLIT_Q + i) * BLK_N // 4 : (P_SPLIT_Q + 1 + i) * BLK_N // 4],
                     )
-                light_ts(2)
+                if warp_id == 0:
+                    iket.mark("softmax-phase-2")
                 T.ptx.tcgen05.wait.st()
                 p_ready_2.arrive(wg_id)
-                light_ts(3)
-                profiler.end(ProfileEventType.Softmax_TMEM_ST, tid_in_wg == 0)
+                if warp_id == 0:
+                    iket.mark("softmax-phase-3")
+                iket.range_end(softmax_tmem_st_token)
                 softmax_corr.empty.wait(wg_id, phase_q)
-                light_ts(4)
-                profiler.start(ProfileEventType.Softmax_SUM, tid_in_wg == 0)
+                if warp_id == 0:
+                    iket.mark("softmax-phase-4")
+                softmax_sum_token = iket.sentinel_token("softmax-sum")
+                if warp_id == 0:
+                    softmax_sum_token = iket.range_start("softmax-sum")
                 phase_s_full ^= 1
                 phase_q ^= 1
                 if is_first:
@@ -841,9 +811,9 @@ def _kernel(
                 else:
                     row_sum[0] = row_sum[0] * acc_scale
                     Tx.sum(row_sum, s_chunk_buf, accum=True)
-                light_ts(5)
-                ts_step = ts_step + 1
-                profiler.end(ProfileEventType.Softmax_SUM, tid_in_wg == 0)
+                if warp_id == 0:
+                    iket.mark("softmax-phase-5")
+                iket.range_end(softmax_sum_token)
                 if USE_S0_S1_BARRIER:
                     phase_s0_s1 ^= 1
 
@@ -890,7 +860,9 @@ def _kernel(
                 EPI_LD_SM = T.meta_var(32)
                 o_ready.wait(wg_id, phase_oepi)
                 corr_epi.empty.wait(wg_id, phase_oepi)
-                profiler.start(ProfileEventType.EpiLDTMEM, tid_in_wg == 0)
+                epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
+                if warp_id == 0:
+                    epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
                 acc_O_row_is_zero_or_nan: T.let = tvm.tirx.any(
                     row_sum[0] == T.float32(0.0), row_sum[0] != row_sum[0]
                 )
@@ -904,7 +876,11 @@ def _kernel(
                         for d_tile in T.unroll(ceildiv(HEAD_DIM, EPI_LD_SM)):
                             Tx.wg.copy_async(
                                 o_row_f32_sm,
-                                O_region[epi_q, d_tile * EPI_LD_SM : (d_tile + 1) * EPI_LD_SM],
+                                O_region[
+                                    SMEM_PIPE_DEPTH_Q + epi_q,
+                                    :,
+                                    d_tile * EPI_LD_SM : (d_tile + 1) * EPI_LD_SM,
+                                ],
                             )
                             Tx.wg.mul(o_row_f32_sm, o_row_f32_sm, norm_scale_sm)
                             Tx.wg.cast(o_row_f16_sm, o_row_f32_sm)
@@ -915,7 +891,7 @@ def _kernel(
                                 o_row_f16_sm,
                                 vec_len=8,
                             )
-                profiler.end(ProfileEventType.EpiLDTMEM, tid_in_wg == 0)
+                iket.range_end(epi_ld_tmem_token)
                 T.ptx.fence.proxy_async("shared::cta")
                 corr_epi.full.arrive(wg_id)
                 p_o_rescale.arrive(wg_id)
@@ -924,20 +900,20 @@ def _kernel(
                 if tid_in_wg < BLK_M:
                     sScale[ROW_SUM_BASE + tid_in_wg + wg_id * BLK_M] = row_sum[0]
                 if STATS_BAR_PAIRWISE:
-                    tvm.tirx.cuda.op.ptx_bar_arrive(1 + wg_id * 4 + warp_id, 64)
+                    tvm.backend.cuda.op.ptx_bar_arrive(1 + wg_id * 4 + warp_id, 64)
                 else:
-                    tvm.tirx.cuda.op.ptx_bar_arrive(1 + wg_id, 256)
+                    tvm.backend.cuda.op.ptx_bar_arrive(1 + wg_id, 256)
         if wg_id == 2:
             T.ptx.setmaxnreg(False, 64)
             if STATS_BAR_PAIRWISE:
-                tvm.tirx.cuda.op.ptx_bar_sync(1 + 0 * 4 + warp_id, 64)
+                tvm.backend.cuda.op.ptx_bar_sync(1 + 0 * 4 + warp_id, 64)
             else:
-                tvm.tirx.cuda.op.ptx_bar_sync(1 + 0, 256)
+                tvm.backend.cuda.op.ptx_bar_sync(1 + 0, 256)
             softmax_corr.empty.arrive(0)
             if STATS_BAR_PAIRWISE:
-                tvm.tirx.cuda.op.ptx_bar_sync(1 + 1 * 4 + warp_id, 64)
+                tvm.backend.cuda.op.ptx_bar_sync(1 + 1 * 4 + warp_id, 64)
             else:
-                tvm.tirx.cuda.op.ptx_bar_sync(1 + 1, 256)
+                tvm.backend.cuda.op.ptx_bar_sync(1 + 1, 256)
             phase_q ^= 1
             corr_trip_count: T.let = (
                 get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
@@ -947,10 +923,12 @@ def _kernel(
             for i_kv in T.serial(corr_trip_count - 1, unroll=False):
                 for i_q in T.unroll(2):
                     if STATS_BAR_PAIRWISE:
-                        tvm.tirx.cuda.op.ptx_bar_sync(1 + i_q * 4 + warp_id, 64)
+                        tvm.backend.cuda.op.ptx_bar_sync(1 + i_q * 4 + warp_id, 64)
                     else:
-                        tvm.tirx.cuda.op.ptx_bar_sync(1 + i_q, 256)
-                    profiler.start(ProfileEventType.Correction, tid_in_wg == 0)
+                        tvm.backend.cuda.op.ptx_bar_sync(1 + i_q, 256)
+                    correction_token = iket.sentinel_token("correction")
+                    if warp_id == 0:
+                        correction_token = iket.range_start("correction")
                     acc_scale: T.f32
                     should_rescale: T.i32
                     if tid_in_wg < BLK_M:
@@ -967,29 +945,41 @@ def _kernel(
                                 d_start: T.let = d_tile * RESCALE_TILE
                                 if d_start < HEAD_DIM:
                                     Tx.wg.copy_async(
-                                        o_row, O_region[i_q, d_start : d_start + RESCALE_TILE]
+                                        o_row,
+                                        O_region[
+                                            SMEM_PIPE_DEPTH_Q + i_q,
+                                            :,
+                                            d_start : d_start + RESCALE_TILE,
+                                        ],
                                     )
                                     Tx.wg.mul(o_row, o_row, acc_scale)
                                     Tx.wg.copy_async(
-                                        O_region[i_q, d_start : d_start + RESCALE_TILE], o_row
+                                        O_region[
+                                            SMEM_PIPE_DEPTH_Q + i_q,
+                                            :,
+                                            d_start : d_start + RESCALE_TILE,
+                                        ],
+                                        o_row,
                                     )
                             T.ptx.tcgen05.wait.st()
                     p_o_rescale.arrive(i_q)
                     softmax_corr.empty.arrive(1 - i_q)
-                    profiler.end(ProfileEventType.Correction, tid_in_wg == 0)
+                    iket.range_end(correction_token)
                 phase_q ^= 1
             softmax_corr.empty.arrive(1)
             if not EPI_ON_SOFTMAX:
                 for i_q in T.unroll(2):
                     if STATS_BAR_PAIRWISE:
-                        tvm.tirx.cuda.op.ptx_bar_sync(1 + i_q * 4 + warp_id, 64)
+                        tvm.backend.cuda.op.ptx_bar_sync(1 + i_q * 4 + warp_id, 64)
                     else:
-                        tvm.tirx.cuda.op.ptx_bar_sync(1 + i_q, 256)
+                        tvm.backend.cuda.op.ptx_bar_sync(1 + i_q, 256)
                     row_sum: T.let = sScale[ROW_SUM_BASE + tid_in_wg + i_q * BLK_M]
                     softmax_corr.empty.arrive(i_q)
                     o_ready.wait(i_q, phase_tmem)
                     corr_epi.empty.wait(i_q, phase_tmem)
-                    profiler.start(ProfileEventType.EpiLDTMEM, tid_in_wg == 0)
+                    epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
+                    if warp_id == 0:
+                        epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
                     acc_O_mn_row_is_zero_or_nan: T.let = tvm.tirx.any(
                         row_sum == T.float32(0.0), row_sum != row_sum
                     )
@@ -1002,7 +992,10 @@ def _kernel(
                         d_start: T.let = d_tile * TMEM_EPI_LD_SIZE
                         if d_start < HEAD_DIM:
                             Tx.wg.copy_async(
-                                o_row_f32, O_region[i_q, d_start : d_start + TMEM_EPI_LD_SIZE]
+                                o_row_f32,
+                                O_region[
+                                    SMEM_PIPE_DEPTH_Q + i_q, :, d_start : d_start + TMEM_EPI_LD_SIZE
+                                ],
                             )
                             Tx.wg.mul(o_row_f32, o_row_f32, norm_scale)
                             Tx.wg.cast(o_row_f16, o_row_f32)
@@ -1016,7 +1009,7 @@ def _kernel(
                                 o_row_f16,
                                 vec_len=8,
                             )
-                        profiler.end(ProfileEventType.EpiLDTMEM, tid_in_wg == 0)
+                    iket.range_end(epi_ld_tmem_token)
                     T.ptx.fence.proxy_async("shared::cta")
                     corr_epi.full.arrive(i_q)
                     p_o_rescale.arrive(i_q)
@@ -1127,8 +1120,7 @@ def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causa
     O_tir = torch.empty(
         (batch_size, seq_len, num_qo_heads, head_dim), dtype=torch.float16, device="cuda"
     )
-    profiler_buf = torch.zeros(PROFILER_BUFFER_SIZE, dtype=torch.uint64, device="cuda")
-    ex(Q_tir, K_tir, V_tir, O_tir, profiler_buf)
+    ex(Q_tir, K_tir, V_tir, O_tir)
     torch.cuda.synchronize()
     Q_t = Q.float().transpose(1, 2)
     K_t = K.float().transpose(1, 2)
@@ -1154,9 +1146,11 @@ def run_bench(
     num_kv_heads,
     head_dim,
     is_causal=False,
-    warmup=10,
-    repeat=30,
-    timer="proton",
+    warmup=None,
+    repeat=None,
+    timer=None,  # None inherits the global default (proton); the CuTeDSL flashattn
+    # reference cannot be CUDA-graph-captured, so proton (not cudagraph_proton) is what
+    # gives an honest ratio here (verified 0.994 vs event's unstable 0.97-1.38).
     **kwargs,
 ):
     """Benchmark flash attention 4."""
@@ -1167,54 +1161,15 @@ def run_bench(
     )
     ex = compile_kernel(prim_func)
 
-    def make_input():
-        Q, K, V, _ = prepare_data(
-            batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim
-        )
-        Q_cuda = Q.cuda()
-        K_cuda = K.cuda()
-        V_cuda = V.cuda()
-        O_tir = torch.empty(
-            (batch_size, seq_len, num_qo_heads, head_dim), dtype=torch.float16, device="cuda"
-        )
-        profiler_buf = torch.zeros(PROFILER_BUFFER_SIZE, dtype=torch.uint64, device="cuda")
-        case = {
-            "tir": (Q_cuda, K_cuda, V_cuda, O_tir, profiler_buf),
-            # Cheap reshapes; only consumed when flashinfer is actually benched.
-            "flashinfer": (
-                Q_cuda.reshape(-1, num_qo_heads, head_dim),
-                K_cuda.reshape(-1, num_kv_heads, head_dim),
-                V_cuda.reshape(-1, num_kv_heads, head_dim),
-            ),
-        }
-        return case, tensor_bytes(Q_cuda, K_cuda, V_cuda, O_tir)
-
-    def _flashinfer():
-        import flashinfer
-
-        workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0")
-        wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
-            workspace_buffer, "NHD", backend="cutlass"
-        )
-        qo_indptr = torch.tensor([0, seq_len], device="cuda:0", dtype=torch.int32)
-        kv_indptr = torch.tensor([0, seq_len], device="cuda:0", dtype=torch.int32)
-        wrapper.plan(
-            qo_indptr,
-            kv_indptr,
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim_qk=head_dim,
-        )
-        Q0, K0, V0, _ = prepare_data(
-            batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim
-        )
-        wrapper.run(
-            Q0.reshape(-1, num_qo_heads, head_dim).cuda(),
-            K0.reshape(-1, num_kv_heads, head_dim).cuda(),
-            V0.reshape(-1, num_kv_heads, head_dim).cuda(),
-        )
-        torch.cuda.synchronize()
-        return lambda case: wrapper.run(*case["flashinfer"])
+    # Allocate inputs once, outside the timed region (Triton-standard pure launch).
+    Q, K, V, _ = prepare_data(batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim)
+    Q_cuda = Q.cuda()
+    K_cuda = K.cuda()
+    V_cuda = V.cuda()
+    O_tir = torch.empty(
+        (batch_size, seq_len, num_qo_heads, head_dim), dtype=torch.float16, device="cuda"
+    )
+    funcs = {"tir": lambda: ex(Q_cuda, K_cuda, V_cuda, O_tir)}
 
     def _flashattn_sm100():
         # Flash-Attention SM100 (CuTeDSL FA4) baseline.
@@ -1223,49 +1178,33 @@ def run_bench(
         # call must happen BEFORE `cute.compile`. Wrapping new tensors after
         # compile poisons the host-side `cuTensorMapEncodeTiled` path (it starts
         # failing ~hundreds of launches later anywhere in the process, including
-        # in unrelated TIR kernels). So we pre-allocate one full FA tensor set
-        # per bench input group, wrap them all up-front, then compile exactly
-        # once using group 0 as the prototype. Each group's storage is
-        # independent, so the bench's L2 eviction protocol applies to FA the
-        # same way it does to TIR/FlashInfer.
+        # in unrelated TIR kernels). So we wrap one FA tensor set up-front, then
+        # compile exactly once using it.
         import cutlass
         import cutlass.cute as cute
         import cutlass.torch as cutlass_torch
         from flash_attn.cute.flash_fwd_sm100 import FlashAttentionForwardSm100
+        from flash_attn.cute.utils import AuxData
 
-        from tvm.tirx.bench import _compute_group_count, _get_l2_cache_bytes
-
-        # Estimate per-group input footprint to match the bench's group count.
-        elem_bytes = 2  # fp16
-        q_bytes = batch_size * seq_len * num_qo_heads * head_dim * elem_bytes
-        kv_bytes = batch_size * seq_len * num_kv_heads * head_dim * elem_bytes
-        per_group_bytes = q_bytes + 2 * kv_bytes + q_bytes  # Q + K + V + O
-        num_fa_groups = _compute_group_count(per_group_bytes, _get_l2_cache_bytes())
-
-        fa_groups = []
-        fa_keep_alive = []
-        for _ in range(num_fa_groups):
-            Qi, Ki, Vi, _ = prepare_data(
-                batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim
-            )
-            Qf_g = Qi.cuda().contiguous()
-            Kf_g = Ki.cuda().contiguous()
-            Vf_g = Vi.cuda().contiguous()
-            Of_g = torch.zeros_like(Qf_g)
-            q_t_g, q_th_g = cutlass_torch.cute_tensor_like(
-                Qf_g, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-            )
-            k_t_g, k_th_g = cutlass_torch.cute_tensor_like(
-                Kf_g, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-            )
-            v_t_g, v_th_g = cutlass_torch.cute_tensor_like(
-                Vf_g, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-            )
-            o_t_g, o_th_g = cutlass_torch.cute_tensor_like(
-                Of_g, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-            )
-            fa_groups.append((q_t_g, k_t_g, v_t_g, o_t_g))
-            fa_keep_alive.append((q_th_g, k_th_g, v_th_g, o_th_g, Qf_g, Kf_g, Vf_g, Of_g))
+        Qi, Ki, Vi, _ = prepare_data(
+            batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim
+        )
+        Qf = Qi.cuda().contiguous()
+        Kf = Ki.cuda().contiguous()
+        Vf = Vi.cuda().contiguous()
+        Of = torch.zeros_like(Qf)
+        q_t, q_th = cutlass_torch.cute_tensor_like(
+            Qf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+        )
+        k_t, k_th = cutlass_torch.cute_tensor_like(
+            Kf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+        )
+        v_t, v_th = cutlass_torch.cute_tensor_like(
+            Vf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+        )
+        o_t, o_th = cutlass_torch.cute_tensor_like(
+            Of, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+        )
 
         fa_fwd = FlashAttentionForwardSm100(
             head_dim=head_dim,
@@ -1280,13 +1219,12 @@ def run_bench(
         )
         _stream_fa = cutlass_torch.default_stream()
         _scale_fa = 1.0 / math.sqrt(head_dim)
-        proto_q, proto_k, proto_v, proto_o = fa_groups[0]
         compiled_fa = cute.compile(
             fa_fwd,
-            proto_q,
-            proto_k,
-            proto_v,
-            proto_o,
+            q_t,
+            k_t,
+            v_t,
+            o_t,
             None,  # mLSE
             _scale_fa,  # softmax_scale
             None,  # mCuSeqlensQ
@@ -1299,16 +1237,11 @@ def run_bench(
             None,  # learnable_sink
             None,  # descale_tensors
             None,  # blocksparse_tensors
-            None,  # aux_tensors
+            AuxData(),  # aux_data (FA4 takes an AuxData, not None)
             _stream_fa,  # stream (FA4 sm100 keeps stream as the LAST positional)
         )
 
-        counter = [0]
-
-        def run(case):
-            idx = counter[0] % len(fa_groups)
-            counter[0] += 1
-            q_t, k_t, v_t, o_t = fa_groups[idx]
+        def run():
             compiled_fa(
                 q_t,
                 k_t,
@@ -1326,22 +1259,111 @@ def run_bench(
                 None,  # learnable_sink
                 None,  # descale_tensors
                 None,  # blocksparse_tensors
-                None,  # aux_tensors
+                AuxData(),  # aux_data (FA4 takes an AuxData, not None)
                 _stream_fa,  # stream (FA4 sm100 keeps stream as the LAST positional)
             )
 
-        # Keep the per-group backing torch storage alive for the run's lifetime
-        # (the cute tensors in fa_groups alias it).
-        run._fa_keep_alive = fa_keep_alive
+        # Keep the backing torch storage alive for the run's lifetime
+        # (the cute tensors alias it).
+        run._fa_keep_alive = (q_th, k_th, v_th, o_th, Qf, Kf, Vf, Of)
         return run
 
-    funcs = {"tir": lambda case: ex(*case["tir"])}
     return bench(
         funcs,
-        make_input,
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        proton_name="flash_attention4",
-        references={"flashinfer": _flashinfer, "flashattn_sm100": _flashattn_sm100},
+        references={"flashattn_sm100": _flashattn_sm100},
+        **kwargs,
     )
+
+
+def _parse_iket_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Profile the annotated FA4 kernel with NVIDIA IKET"
+    )
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--seq-len", type=int, default=1024)
+    parser.add_argument("--num-qo-heads", type=int, default=32)
+    parser.add_argument("--num-kv-heads", type=int, default=32)
+    parser.add_argument("--head-dim", type=int, default=128)
+    parser.add_argument("--causal", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Number of traced FA4 launches; setup and compilation remain outside the loop",
+    )
+    parser.add_argument("--output-dir", default="/tmp/fa4-iket")
+    parser.add_argument(
+        "--postprocess", choices=("perfetto", "json", "html", "none", "all"), default="all"
+    )
+    parser.add_argument("--clobber", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument("--keep", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--max-ts-cnt-per-warp", type=int, default=None)
+    return parser.parse_args()
+
+
+def _profile_iket_workload(args: argparse.Namespace) -> None:
+    if args.repeat <= 0:
+        raise ValueError("--repeat must be positive")
+
+    func = get_flash_attention4_kernel(
+        args.batch_size,
+        args.seq_len,
+        args.seq_len,
+        args.num_qo_heads,
+        args.num_kv_heads,
+        args.head_dim,
+        is_causal=args.causal,
+    )
+    executable = IketProfiler().compile(
+        tvm.IRModule({"main": func}),
+        target=tvm.target.Target({"kind": "cuda", "arch": "sm_100a"}),
+        tir_pipeline="tirx",
+    )
+
+    q, k, v, _ = prepare_data(
+        args.batch_size,
+        args.seq_len,
+        args.seq_len,
+        args.num_qo_heads,
+        args.num_kv_heads,
+        args.head_dim,
+    )
+    q, k, v = q.cuda(), k.cuda(), v.cuda()
+    out = torch.empty(
+        (args.batch_size, args.seq_len, args.num_qo_heads, args.head_dim),
+        dtype=torch.float16,
+        device="cuda",
+    )
+
+    for _ in range(args.repeat):
+        executable(q, k, v, out)
+    torch.cuda.synchronize()
+
+
+def _print_iket_result(result: iket.IketProfileResult) -> None:
+    print(f"IKET output directory: {result.output_dir}")
+    for path in (*result.json_traces, *result.perfetto_traces, *result.html_reports):
+        print(f"IKET artifact: {path}")
+
+
+def main() -> None:
+    """Profile FA4 when this kernel module is executed directly."""
+    args = _parse_iket_args()
+    result = iket.run(
+        partial(_profile_iket_workload, args),
+        output_dir=args.output_dir,
+        postprocess=args.postprocess,
+        clobber=args.clobber,
+        timeout=args.timeout,
+        keep=args.keep,
+        max_ts_cnt_per_warp=args.max_ts_cnt_per_warp,
+    )
+    _print_iket_result(result)
+
+
+if __name__ == "__main__":
+    main()

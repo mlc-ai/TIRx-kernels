@@ -5,7 +5,7 @@ import torch
 import tvm
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
-from tvm.tirx.bench import bench, tensor_bytes
+from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import Pipeline, PipelineState
 from tvm.tirx.lang.tile_scheduler import ClusterLaunchControlScheduler
 
@@ -30,7 +30,7 @@ _DTYPE_MAP = {"fp16": tvm.DataType("float16"), "bf16": tvm.DataType("bfloat16")}
 def _swizzle_for_row_bytes(row_bytes):
     """Pick the MMA-shared swizzle atom matching the tile row width (the 128/64/32B
     swizzle is selected from the row byte width)."""
-    from tvm.tirx.cuda.operator.tile_primitive.tma_utils import SwizzleMode
+    from tvm.backend.cuda.operator.tile_primitive.tma_utils import SwizzleMode
 
     if row_bytes % 128 == 0:
         return SwizzleMode.SWIZZLE_128B_ATOM
@@ -151,9 +151,9 @@ def _kernel(
     # Teardown handshake: 1-arrival cross-CTA mbarrier (OVERLAP) vs the full cluster_sync.
     tmem_fin = Pipeline(pool, 1, full="mbar", empty="mbar", init_full=1)
     pool.move_base_to(1024)
-    Asmem = pool.alloc_mma((PIPE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), ab_type)
-    Bsmem = pool.alloc_mma((PIPE_DEPTH, BLK_N, BLK_K), ab_type)
-    Dsmem = pool.alloc_mma(
+    Asmem = pool.alloc_tcgen05_mma_AB((PIPE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), ab_type)
+    Bsmem = pool.alloc_tcgen05_mma_AB((PIPE_DEPTH, BLK_N, BLK_K), ab_type)
+    Dsmem = pool.alloc_tcgen05_mma_AB(
         (NUM_CONSUMER, NUM_D_TILES, BLK_M, EPI_N),
         ab_type,
         swizzle_mode=_swizzle_for_row_bytes(EPI_N * (ab_type.bits // 8)),
@@ -192,7 +192,7 @@ def _kernel(
                 stage = tma_cur.stage
                 tma_config = T.meta_var(
                     {
-                        "dispatch": "tma",
+                        "dispatch": "tma_auto",
                         "cta_group": 2,
                         "mbar": smem_full_cta0.ptr_to([stage]),
                         # Prefetch the A/B tensormaps at entry.
@@ -315,7 +315,7 @@ def _kernel(
                     T.ptx.tcgen05.wait.ld()
                     Tx.wg.cast(Dreg_16b, Dreg)
                     if i == WB_PIPE_DEPTH - 1:
-                        tmem_pipe.empty.arrive(slot, cta_id=0, pred=True)
+                        tmem_pipe.empty.arrive(slot, remote=0, pred=True)
                     db = T.meta_var(i % NUM_D_TILES)
                     T.ptx.cp_async.bulk.wait_group(NUM_D_TILES - 1, read=True)
                     T.cuda.warpgroup_sync(wg_id + 10)
@@ -334,7 +334,7 @@ def _kernel(
                         Tx.copy_async(
                             D[d_m : d_m + BLK_M, d_n : d_n + EPI_N],
                             Dsmem[0, db],
-                            dispatch="tma",
+                            dispatch="tma_auto",
                             cache_hint="evict_first",  # evict-first L2 policy for the store
                             prefetch_tensormap=True,  # prefetch the D tensormap
                         )
@@ -352,7 +352,7 @@ def _kernel(
                     Tx.wg.copy_async(Dreg, tmem[:, tn : tn + NOL])
                     T.ptx.tcgen05.wait.ld()
                     Tx.wg.cast(Dreg_16b[:, i * NOL : (i + 1) * NOL], Dreg)
-                tmem_pipe.empty.arrive(wg_id, cta_id=0, pred=True)
+                tmem_pipe.empty.arrive(wg_id, remote=0, pred=True)
                 for i in T.unroll(WB_PIPE_DEPTH):
                     db = T.meta_var(i % NUM_D_TILES)
                     T.ptx.cp_async.bulk.wait_group(NUM_D_TILES - 1, read=True)
@@ -373,7 +373,7 @@ def _kernel(
                         Tx.copy_async(
                             D[d_m : d_m + BLK_M, d_n : d_n + EPI_N],
                             Dsmem[wg_id, db],
-                            dispatch="tma",
+                            dispatch="tma_auto",
                             cache_hint="evict_first",  # evict-first L2 policy
                             prefetch_tensormap=True,  # prefetch the D tensormap
                         )
@@ -401,7 +401,7 @@ def _kernel(
             # cross-CTA mbarrier handshake before dealloc -- lighter than a full cluster_sync.
             T.cuda.warpgroup_sync(wg_id + 10)
             if (warp_id == 0) & (lane_id == 0):
-                tmem_fin.full.arrive(0, cta_id=1 - cbx, pred=True)
+                tmem_fin.full.arrive(0, remote=1 - cbx, pred=True)
             if warp_id == 0:
                 tmem_fin.full.wait(0, 0)
     if not OVERLAP_EPILOGUE:
@@ -436,14 +436,6 @@ CONFIGS = [
     for d in ["fp16", "bf16"]
     for s in [1024, 2048, 4096, 8192, 16384]
 ]
-# Benchmark on the square fp16/bf16 B200 shapes. Both dtypes must be here so the
-# bench_suite workloads for fp16_* and bf16_* resolve to a config (fp16 compares
-# against the cublasLt/torch baselines; the native deepgemm baseline is bf16-only).
-BENCH_CONFIGS = [
-    {"dtype": d, "M": s, "N": s, "K": s, "label": f"{d}_{s}x{s}x{s}"}
-    for d in ["fp16", "bf16"]
-    for s in [1024, 2048, 4096, 8192, 16384]
-]
 
 
 def get_kernel(dtype, M, N, K, **kwargs):
@@ -465,7 +457,7 @@ def run_test(dtype, M, N, K, **kwargs):
     torch.testing.assert_close(C_tvm.cpu(), C_ref.cpu(), rtol=0.001, atol=0.01)
 
 
-def run_bench(dtype, M, N, K, warmup=10, repeat=30, timer="proton", **kwargs):
+def run_bench(dtype, M, N, K, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark fp16/bf16 GEMM."""
     kernel = tir_kernel(dtype, M, N, K)
     target = tvm.target.Target("cuda")
@@ -473,44 +465,33 @@ def run_bench(dtype, M, N, K, warmup=10, repeat=30, timer="proton", **kwargs):
         mod = tvm.IRModule({"main": kernel})
         ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
 
-    def make_input():
-        A, B, C = prepare_data(dtype, M, N, K)
-        case = {
-            "tir": (A, B, torch.zeros_like(C, device="cuda")),
-            "torch-cublas": (A, B, torch.zeros_like(C, device="cuda")),
-            "deepgemm-cublaslt": (A, B, torch.zeros(M, N, dtype=A.dtype, device="cuda")),
-            "deepgemm-bf16": (A, B, torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")),
-        }
-        return case, tensor_bytes(*case["tir"])
+    # Allocate inputs once, outside the timed region (Triton-standard pure launch).
+    A, B, C = prepare_data(dtype, M, N, K)
+    C_tir = torch.zeros_like(C, device="cuda")
 
-    funcs = {"tir": lambda case: ex(*case["tir"])}
+    funcs = {"tir": lambda: ex(A, B, C_tir)}
 
     def _torch_cublas():
-        return lambda case: torch.matmul(
-            case["torch-cublas"][0], case["torch-cublas"][1].T, out=case["torch-cublas"][2]
-        )
+        C_out = torch.zeros_like(C, device="cuda")
+        return lambda: torch.matmul(A, B.T, out=C_out)
 
-    def _deepgemm_cublaslt():
-        import deep_gemm
-
-        return lambda case: deep_gemm.cublaslt_gemm_nt(*case["deepgemm-cublaslt"], None)
-
-    references = {"torch-cublas": _torch_cublas, "deepgemm-cublaslt": _deepgemm_cublaslt}
+    references = {"torch-cublas": _torch_cublas}
     if dtype == "bf16":
+
+        def _deepgemm_cublaslt():
+            import deep_gemm
+
+            C_out = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+            return lambda: deep_gemm.cublaslt_gemm_nt(A, B, C_out, None)
 
         def _deepgemm_bf16():
             import deep_gemm
 
-            return lambda case: deep_gemm.bf16_gemm_nt(*case["deepgemm-bf16"])
+            C_out = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+            return lambda: deep_gemm.bf16_gemm_nt(A, B, C_out)
 
-        references["deepgemm-bf16"] = _deepgemm_bf16
+        references.update(
+            {"deepgemm-cublaslt": _deepgemm_cublaslt, "deepgemm-bf16": _deepgemm_bf16}
+        )
 
-    return bench(
-        funcs,
-        make_input,
-        warmup=warmup,
-        repeat=repeat,
-        timer=timer,
-        proton_name="gemm",
-        references=references,
-    )
+    return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)

@@ -30,6 +30,9 @@ from typing import Any
 
 import tvm
 
+DEFAULT_BENCH_ROUNDS = 5
+DEFAULT_BENCH_COOLDOWN_S = 1.0
+
 
 def compile_kernel(func):
     """Compile a single TIR PrimFunc via the tirx pipeline."""
@@ -62,17 +65,19 @@ def run_kernel_bench(
     repeat: int | None = None,
     timer: str | None = None,
     rounds: int | None = None,
-    round_cooldown_s: float | None = None,
+    cooldown: float | None = None,
 ):
     """Run a kernel's benchmark.
 
-    Delegates to ``mod.run_bench(**params, warmup=warmup, repeat=repeat)``
-    if available, otherwise runs ``run_test`` without timing.
+    Delegates to ``mod.run_bench(**params, ...)`` if available, otherwise runs
+    ``run_test`` without timing. warmup/repeat are only forwarded when explicitly
+    provided (CLI ``--warmup/--repeat`` or a per-workload override); otherwise each
+    timer uses its own Triton-aligned default inside ``tvm.tirx.bench.bench``.
     """
     if registry is None:
-        from tirx_kernels.registry import discover_kernels
+        from tirx_kernels.registry import load_kernel
 
-        registry = discover_kernels()
+        registry = {kernel_name: load_kernel(kernel_name)}
 
     mod = registry[kernel_name]
     params = {k: v for k, v in config.items() if k != "label"}
@@ -89,8 +94,8 @@ def run_kernel_bench(
             bench_kwargs["timer"] = timer
         if rounds is not None:
             bench_kwargs["rounds"] = rounds
-        if round_cooldown_s is not None:
-            bench_kwargs["round_cooldown_s"] = round_cooldown_s
+        if cooldown is not None:
+            bench_kwargs["cooldown_s"] = cooldown
         result = run_bench_fn(**bench_kwargs)
         if not isinstance(result, dict):
             result = {}

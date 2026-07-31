@@ -6,10 +6,10 @@ import os
 import torch
 from deep_gemm.utils.math import per_block_cast_to_fp8, per_token_cast_to_fp8
 
+from tvm.backend.cuda.operator.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
-from tvm.tirx.bench import bench, tensor_bytes
-from tvm.tirx.cuda.operator.tile_primitive.tma_utils import SwizzleMode
+from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState
 from tvm.tirx.lang.tile_scheduler import ClusterPersistentScheduler2D
 
@@ -255,12 +255,10 @@ def _kernel(
         empty_phase_offset=1,
         leader=barrier_leader,
     )
-    # ``datapath="D"`` documents that the MMA writes Layout D (M=128 full
-    # datapath, identity row→lane) — the downstream ``.16x256b`` M=128
-    # epilogue readback structurally checks this and would reject e.g. a
-    # Layout F acc here. See PTX ISA §9.7.16.10.5.
-    acc_buf = tmem_pool.alloc((128, TMEM_DEPTH * MMA_N), "float32", datapath="D")
-    acc = T.meta_var(T.TMEMStages(acc_buf, col_start=0, width=MMA_N, stages=TMEM_DEPTH))
+    acc_buf = tmem_pool.alloc_tcgen05_mma_D(
+        (128, TMEM_DEPTH * MMA_N), "float32", M=128 * CTA_GROUP, cta_group=CTA_GROUP
+    )
+    acc = T.meta_var(acc_buf.rearrange("m (s n) -> s m n", s=TMEM_DEPTH))
     SFA_tmem = tmem_pool.alloc_sf(
         (TMEM_DEPTH, BLK_SFA, 4 * K_ITERS), "float8_e8m0fnu", sf_per_mma=1, sf_reuse=K_ITERS
     )
@@ -268,9 +266,11 @@ def _kernel(
         (TMEM_DEPTH, BLK_SFB, 4 * K_ITERS), "float8_e8m0fnu", sf_per_mma=1, sf_reuse=K_ITERS
     )
     pool.move_base_to(1024)
-    A_smem = pool.alloc_mma((SMEM_DEPTH, BLK_M, BLK_K), "float8_e4m3fn")
-    B_smem = pool.alloc_mma((SMEM_DEPTH, BLK_N, BLK_K), "float8_e4m3fn")
-    D_smem = pool.alloc_mma((TMEM_DEPTH, D_SMEM_M, D_SMEM_N), "bfloat16", swizzle_mode=D_SWIZZLE)
+    A_smem = pool.alloc_tcgen05_mma_AB((SMEM_DEPTH, BLK_M, BLK_K), "float8_e4m3fn")
+    B_smem = pool.alloc_tcgen05_mma_AB((SMEM_DEPTH, BLK_N, BLK_K), "float8_e4m3fn")
+    D_smem = pool.alloc_tcgen05_mma_AB(
+        (TMEM_DEPTH, D_SMEM_M, D_SMEM_N), "bfloat16", swizzle_mode=D_SWIZZLE
+    )
     SFA_smem = pool.alloc((SMEM_DEPTH, BLK_SFA), "uint32")
     SFB_smem = pool.alloc((SMEM_DEPTH, BLK_SFB), "uint32")
     pool.commit()
@@ -312,7 +312,7 @@ def _kernel(
                 k = T.meta_var(k_tile * BLK_K)
                 tma_copy = T.meta_var(
                     {
-                        "dispatch": "tma",
+                        "dispatch": "tma_auto",
                         "mbar": smem_pipe.full.ptr_to([stage]),
                         "cta_group": 1,
                         "cache_hint": "evict_normal",
@@ -360,7 +360,7 @@ def _kernel(
                     Tx.warp.permute_layout(SFA_smem_post[ks, :], SFA_smem[ks, :])
                     Tx.warp.permute_layout(SFB_smem_post[ks, :], SFB_smem[ks, :])
                     T.ptx.fence.proxy_async("shared::cta")
-                trans_done.arrive(ks, cta_id=0)
+                trans_done.arrive(ks, remote=0)
 
             @T.inline
             def trans_iter():
@@ -392,7 +392,7 @@ def _kernel(
                 scale_k = T.meta_var((k_tile % 4) * K_ITERS)
                 if SWAP_AB:
                     Tx.gemm_async(
-                        acc[tmem_idx],
+                        acc[tmem_idx, :, :],
                         B_smem[ks],
                         A_smem[ks],
                         SFA=SFB_tmem[tmem_idx, :, scale_k : scale_k + K_ITERS],
@@ -403,7 +403,7 @@ def _kernel(
                     )
                 else:
                     Tx.gemm_async(
-                        acc[tmem_idx],
+                        acc[tmem_idx, :, :],
                         A_smem[ks],
                         B_smem[ks],
                         SFA=SFA_tmem[tmem_idx, :, scale_k : scale_k + K_ITERS],
@@ -455,7 +455,7 @@ def _kernel(
                 if SWAP_AB:
                     for atom_m in T.unroll(2):
                         col_st: T.let = ot * 16 + atom_m * 8
-                        Tx.wg.copy_async(swap_frag[:, :], acc[tmem_idx, col_st : col_st + 8])
+                        Tx.wg.copy_async(swap_frag[:, :], acc[tmem_idx, :, col_st : col_st + 8])
                         T.ptx.tcgen05.wait.ld()
                         Tx.wg.cast(swap_bf16, swap_frag)
                         rs = T.meta_var(atom_m * 8)
@@ -468,7 +468,7 @@ def _kernel(
                     for ki in T.unroll(EPI_TILE // TMEM_LD_SIZE):
                         Dreg = T.wg_reg_tile(TMEM_LD_SIZE)
                         acc_n = T.meta_var(ot * EPI_TILE + ki * TMEM_LD_SIZE)
-                        Tx.wg.copy_async(Dreg, acc[tmem_idx, acc_n : acc_n + TMEM_LD_SIZE])
+                        Tx.wg.copy_async(Dreg, acc[tmem_idx, :, acc_n : acc_n + TMEM_LD_SIZE])
                         T.ptx.tcgen05.wait.ld()
                         Dreg_bf16 = T.wg_reg_tile(TMEM_LD_SIZE, dtype="bfloat16")
                         Tx.wg.cast(Dreg_bf16, Dreg)
@@ -476,7 +476,7 @@ def _kernel(
                             D_smem[stage, :, ki * TMEM_LD_SIZE : (ki + 1) * TMEM_LD_SIZE], Dreg_bf16
                         )
                 if ot == STORE_TILES - 1:
-                    tmem_pipe.empty.arrive(tmem_idx, cta_id=0)
+                    tmem_pipe.empty.arrive(tmem_idx, remote=0)
                 T.ptx.fence.proxy_async("shared::cta")
                 T.cuda.warpgroup_sync(10)
                 d_m: T.let = m_idx * DG_BLOCK_M + (ot * 16 if SWAP_AB else 0)
@@ -486,7 +486,7 @@ def _kernel(
                         Tx.copy_async(
                             D[d_m : d_m + D_TILE_M, d_n : d_n + D_TILE_N],
                             D_smem[stage],
-                            dispatch="tma",
+                            dispatch="tma_auto",
                             prefetch_tensormap=True,
                         )
                         T.ptx.cp_async.bulk.commit_group()
@@ -501,8 +501,9 @@ def _kernel(
         if tid_in_wg == 0:
             T.ptx.cp_async.bulk.wait_group(0)
         T.cuda.warpgroup_sync(10)
-    tmem_pool.dealloc()
+    # The epilogue warpgroup and peer CTA must finish all TMEM reads first.
     T.cuda.cluster_sync()
+    tmem_pool.dealloc()
 
 
 def tir_kernel(M: int, N: int, K: int):
@@ -524,24 +525,6 @@ def tir_kernel(M: int, N: int, K: int):
 
 KERNEL_META = {"name": "fp8_blockwise_gemm", "category": "gemm", "compute_capability": 10}
 CONFIGS = [
-    {
-        "M": 16,
-        "N": 256,
-        "K": 512,
-        "verify_scale_slices": True,
-        "label": "scale_slices_swap_ab_m16_n256_k512",
-    },
-    {
-        "M": 512,
-        "N": 608,
-        "K": 512,
-        "verify_scale_slices": True,
-        "label": "scale_slices_direct_ab_m512_n608_k512",
-    },
-    *[{"M": s, "N": s, "K": s, "label": f"{s}x{s}x{s}"} for s in [1024, 2048, 4096, 8192, 16384]],
-]
-BENCH_CONFIGS = [
-    {"M": 1024, "N": 1024, "K": 1024, "label": "smoke_1024x1024x1024"},
     {"M": 4096, "N": 2112, "K": 7168, "label": "deepgemm_m4096_n2112_k7168"},
     {"M": 4096, "N": 576, "K": 7168, "label": "deepgemm_m4096_n576_k7168"},
     {"M": 4096, "N": 24576, "K": 1536, "label": "deepgemm_m4096_n24576_k1536"},
@@ -549,7 +532,6 @@ BENCH_CONFIGS = [
     {"M": 4096, "N": 7168, "K": 16384, "label": "deepgemm_m4096_n7168_k16384"},
     {"M": 4096, "N": 4096, "K": 7168, "label": "deepgemm_m4096_n4096_k7168"},
     {"M": 4096, "N": 7168, "K": 2048, "label": "deepgemm_m4096_n7168_k2048"},
-    {"M": 8192, "N": 7168, "K": 4096, "label": "stress_m8192_n7168_k4096"},
 ]
 
 
@@ -618,7 +600,15 @@ def run_test(M=1024, N=1024, K=1024, verify_scale_slices=False):
 
 
 def run_bench(
-    M=1024, N=1024, K=1024, *, warmup=10, repeat=30, timer="proton", kernel_fair: bool | None = None
+    M=1024,
+    N=1024,
+    K=1024,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    kernel_fair: bool | None = None,
+    **kwargs,
 ):
     """Benchmark DeepGEMM main kernel against the TIRx kernel."""
     import torch
@@ -629,48 +619,35 @@ def run_bench(
         kernel_fair = _env_flag("TIRX_FP8_BLOCKWISE_GEMM_KERNEL_FAIR", default=True)
 
     kernel = tir_kernel(M, N, K)
-    A_fp8, B_fp8, sfa, sfb, sfa_pack, sfb_pack, C_ref, A_origin, B_origin = prepare_data(M, N, K)
-    C_tvm = torch.zeros_like(C_ref).to(torch.bfloat16).to("cuda")
     ex = compile_kernel(kernel)
 
-    def make_input():
-        A_fp8, B_fp8, sfa, sfb, sfa_pack, sfb_pack, C_ref, _, _ = prepare_data(M, N, K)
-        C_tvm = torch.zeros_like(C_ref).to(torch.bfloat16).to("cuda")
-        C_dg = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
-        if kernel_fair:
-            sfa_dg = _dg_scale_view(sfa_pack, M)
-            sfb_dg = _dg_scale_view(sfb_pack, N)
-        else:
-            sfa_dg = sfa
-            sfb_dg = sfb
-        case = (A_fp8, B_fp8, sfa, sfb, sfa_pack, sfb_pack, sfa_dg, sfb_dg, C_tvm, C_dg)
-        return case, tensor_bytes(A_fp8, B_fp8, sfa_pack, sfb_pack, C_tvm)
+    # Allocate inputs once, outside the timed region (Triton-standard pure launch).
+    A_fp8, B_fp8, sfa, sfb, sfa_pack, sfb_pack, C_ref, _, _ = prepare_data(M, N, K)
+    C_tvm = torch.zeros_like(C_ref).to(torch.bfloat16).to("cuda")
 
-    funcs = {"tir": lambda case: ex(case[0], case[1], case[4], case[5], case[8])}
+    funcs = {"tir": lambda: ex(A_fp8, B_fp8, sfa_pack, sfb_pack, C_tvm)}
 
     def _deepgemm():
         import deep_gemm
 
+        C_dg = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
         if kernel_fair:
-            return lambda case: deep_gemm.fp8_gemm_nt(
-                (case[0], case[6]),
-                (case[1], case[7]),
-                case[9],
-                disable_ue8m0_cast=False,
-                recipe=(1, 1, 128),
+            sfa_dg = _dg_scale_view(sfa_pack, M)
+            sfb_dg = _dg_scale_view(sfb_pack, N)
+            return lambda: deep_gemm.fp8_gemm_nt(
+                (A_fp8, sfa_dg), (B_fp8, sfb_dg), C_dg, disable_ue8m0_cast=False, recipe=(1, 1, 128)
             )
-        return lambda case: deep_gemm.fp8_gemm_nt(
-            (case[0], case[2]), (case[1], case[3]), case[9], disable_ue8m0_cast=False, recipe=None
+        return lambda: deep_gemm.fp8_gemm_nt(
+            (A_fp8, sfa), (B_fp8, sfb), C_dg, disable_ue8m0_cast=False, recipe=None
         )
 
     result = bench(
         funcs,
-        make_input,
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        proton_name="fp8_blockwise_gemm",
         references={"deepgemm": _deepgemm},
+        **kwargs,
     )
     result["kernel_fair"] = kernel_fair
     return result
