@@ -4,16 +4,48 @@ High-performance GPU kernels written in [TIRx](https://github.com/apache/tvm).
 
 ## Kernels
 
-| Name                 | dtype             | Arch    |
-| -------------------- | ----------------- | ------- |
-| `fp16_bf16_gemm`     | fp16 / bf16       | sm_100a |
-| `fp8_blockwise_gemm` | fp8 (blockwise)   | sm_100a |
-| `grouped_fp8_gemm_contiguous` | fp8 (m-grouped) | sm_100a |
-| `nvfp4_gemm`         | nvfp4             | sm_100a |
-| `flash_attention4`   | bf16              | sm_100a |
-| `deepgemm_sm100_fp4_mqa_logits` | fp4 / bf16 | sm_100a |
-| `deepgemm_sm100_fp8_mqa_logits` | fp8 / bf16 | sm_100a |
-| `deepgemm_sm100_tf32_hc_prenorm_gemm` | tf32 / bf16 | sm_100a |
+All kernels target `sm_100a`. Names are the registry names accepted by the
+`--kernel` CLI filters.
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `fp16_bf16_gemm` | fp16 / bf16 | Dense GEMM |
+| `fp8_blockwise_gemm` | fp8 | Blockwise-scaled dense GEMM |
+| `grouped_fp8_gemm_contiguous` | fp8 | M-grouped contiguous GEMM |
+| `nvfp4_gemm` | nvfp4 | Dense GEMM |
+| `flash_attention4` | bf16 | FlashAttention-4 |
+| `rmsnorm` | fp16 / bf16 | RMSNorm |
+| `allgather_gemm` | fp16 | AllGather + GEMM (multi-GPU, NVSHMEM) |
+| `gemm_reduce_scatter` | fp16 | GEMM + ReduceScatter (multi-GPU, NVSHMEM) |
+
+FlashMLA sparse attention:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `sparse_flashmla_prefill_head64_phase1` | bf16 | Sparse prefill, 64 q-heads (phase 1) |
+| `sparse_flashmla_prefill_head128_phase1` | bf16 | Sparse prefill, 128 q-heads (phase 1) |
+| `sparse_flashmla_prefill_head128_small_topk_phase1` | bf16 | Sparse prefill, 128 q-heads, small top-k (phase 1) |
+| `flash_mla_sparse_fwd` | bf16 | Sparse forward |
+
+DeepGEMM ports:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `deepgemm_sm100_fp4_mqa_logits` | fp4 / bf16 | MQA attention logits |
+| `deepgemm_sm100_fp8_mqa_logits` | fp8 / bf16 | MQA attention logits |
+| `deepgemm_sm100_fp4_paged_mqa_logits` | fp4 / bf16 | Paged-KV MQA attention logits |
+| `deepgemm_sm100_fp8_paged_mqa_logits` | fp8 / bf16 | Paged-KV MQA attention logits |
+| `deepgemm_sm100_tf32_hc_prenorm_gemm` | tf32 / bf16 | Prenorm GEMM |
+| `deepgemm_fp8_fp4_mega_moe` | fp8 + fp4 | Fused MoE (MegaMoE) |
+
+## Performance
+
+Per-workload numbers — our kernel time, every reference impl, and the
+ref/ours ratio (>1 means ours is faster) — are pinned in
+[`tirx_kernels/bench_suite/baseline.md`](tirx_kernels/bench_suite/baseline.md),
+regenerated on every baseline promotion. See the
+[bench-suite README](tirx_kernels/bench_suite/README.md) for how the sweep runs
+and how to refresh the baseline.
 
 ## Installation
 
@@ -34,7 +66,15 @@ them — they are only needed to actually compile/run a kernel:
 | `tvm.tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tir/python`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels. |
-| `flashinfer`     | `nvfp4_gemm` data/baseline         | Used for nvfp4 quantization and the baseline.          |
+| `flashinfer`     | `nvfp4_gemm` data/baseline | Used for nvfp4 quantization and reference impls. |
+| `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` reference; checkout on `PYTHONPATH`. |
+| `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
+| NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
+
+The bench_suite **default sweep** hard-requires several of these (a missing
+reference fails the whole sweep) — see
+[`tirx_kernels/bench_suite/README.md`](tirx_kernels/bench_suite/README.md)
+for the prerequisites and workarounds.
 
 ## Usage
 
@@ -52,8 +92,8 @@ python -m tirx_kernels.test --kernel fp16_bf16_gemm --config bf16_1024x1024x1024
 # Benchmark
 python -m tirx_kernels.bench --kernel nvfp4_gemm
 
-# Pre-commit regression benchmark sweep
-python -m tirx_kernels.bench_suite --impls all
+# Pre-commit regression benchmark sweep (see tirx_kernels/bench_suite/README.md)
+python -m tirx_kernels.bench_suite
 ```
 
 ### Programmatic API

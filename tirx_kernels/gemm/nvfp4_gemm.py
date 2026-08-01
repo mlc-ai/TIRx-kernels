@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from enum import IntEnum
+from pathlib import Path
 
 import flashinfer
 import torch
 from flashinfer import SfLayout, nvfp4_quantize
 
 import tvm
+from tvm.backend.cuda.operator.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
+from tvm.backend.cuda.operator.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 from tvm.tirx.bench import bench
-from tvm.tirx.cuda.operator.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
-from tvm.tirx.cuda.operator.tile_primitive.tma_utils import SwizzleMode
 from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState, TMABar
 from tvm.tirx.lang.tile_scheduler import ClusterPersistentScheduler2D
 
@@ -39,10 +43,6 @@ def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
     if return_origin:
         return (A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref, A_origin, B_origin)
     return (A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref)
-
-
-def _gemm_io_bytes(M: int, N: int, K: int) -> int:
-    return M * K // 2 + N * K // 2 + M * N * 2
 
 
 _CUBLASLT_EXT = None
@@ -235,11 +235,11 @@ void nvfp4_cublaslt(torch::Tensor A, torch::Tensor B, torch::Tensor A_scale,
     return _CUBLASLT_EXT
 
 
-def _tma_g2c_args(bar, stage, cta_mask, cta_group):
-    """Shared kwargs for the A/B and SF TMA g2c loads; only the mbarrier and
+def _tma_g2s_args(bar, stage, cta_mask, cta_group):
+    """Shared kwargs for the A/B and SF TMA g2s loads; only the mbarrier and
     cta_mask vary."""
     return {
-        "dispatch": "tma",
+        "dispatch": "tma_auto",
         "cta_group": cta_group,
         "mbar": T.reinterpret("handle", T.ptx.map_shared_rank(bar.ptr_to([stage]), 0)),
         "cta_mask": cta_mask,
@@ -330,8 +330,8 @@ def _kernel(
     b_n = T.meta_var(cta_n * MMA_N + id_in_pair * CTA_N)
     d_n = T.meta_var(cta_n * MMA_N)
     pool = T.SMEMPool()
-    A_smem_packed = pool.alloc_mma((PIPE_DEPTH, CTA_M, CTA_K // 2), "uint8")
-    B_smem_packed = pool.alloc_mma((PIPE_DEPTH, CTA_N, CTA_K // 2), "uint8")
+    A_smem_packed = pool.alloc_tcgen05_mma_AB((PIPE_DEPTH, CTA_M, CTA_K // 2), "uint8")
+    B_smem_packed = pool.alloc_tcgen05_mma_AB((PIPE_DEPTH, CTA_N, CTA_K // 2), "uint8")
     SFA_smem = pool.alloc(
         (PIPE_DEPTH, CTA_M, SF_CTA_K),
         "uint8",
@@ -344,7 +344,7 @@ def _kernel(
         layout=sf_smem_layout(SFB_N, 16, sf_per_mma=4, pipe_depth=PIPE_DEPTH),
         align=1024,
     )
-    output_smem = pool.alloc_mma(
+    output_smem = pool.alloc_tcgen05_mma_AB(
         (WB_PIPE_DEPTH, CTA_M, EPI_TILE), "bfloat16", swizzle_mode=D_SWIZZLE_MODE
     )
     tmem_addr = pool.alloc([1], "uint32", align=4)
@@ -412,12 +412,12 @@ def _kernel(
             if id_in_pair == 0:
                 tile_bytes = T.meta_var(A_BYTES + B_BYTES)
                 T.ptx.mbarrier.arrive.expect_tx(
-                    tile_full_bar.ptr_to([stage]), tile_bytes, cta_id=pair_leader_rank
+                    tile_full_bar.ptr_to([stage]), tile_bytes, remote=pair_leader_rank, pred=True
                 )
             single_cta_mask: T.int32 = 1 << id_in_pair
-            # Barrier pre-mapped to the cluster leader (the g2c primitive maps
+            # Barrier pre-mapped to the cluster leader (the g2s primitive maps
             # neither the barrier nor expect_tx — both handled above).
-            tile_copy = T.meta_var(_tma_g2c_args(tile_full_bar, stage, single_cta_mask, CTA_GROUP))
+            tile_copy = T.meta_var(_tma_g2s_args(tile_full_bar, stage, single_cta_mask, CTA_GROUP))
             Tx.copy_async(
                 A_smem_packed[stage, 0:CTA_M, 0 : CTA_K // 2],
                 A_packed[a_m : a_m + CTA_M, k : k + CTA_K // 2],
@@ -447,18 +447,18 @@ def _kernel(
             if id_in_pair == 0:
                 scale_bytes = T.meta_var(SFA_BYTES + SFB_BYTES)
                 T.ptx.mbarrier.arrive.expect_tx(
-                    scale_full_bar.ptr_to([stage]), scale_bytes, cta_id=pair_leader_rank
+                    scale_full_bar.ptr_to([stage]), scale_bytes, remote=pair_leader_rank, pred=True
                 )
             single_cta_mask: T.int32 = 1 << id_in_pair
             # SFA: each CTA loads its half (single_cta_mask). SFB: multicast to
             # both CTAs (pair_mask).
-            sfa_copy = T.meta_var(_tma_g2c_args(scale_full_bar, stage, single_cta_mask, CTA_GROUP))
+            sfa_copy = T.meta_var(_tma_g2s_args(scale_full_bar, stage, single_cta_mask, CTA_GROUP))
             Tx.copy_async(
                 SFA_smem[stage, 0:CTA_M, 0:SF_CTA_K],
                 SFA_in[sf_m : sf_m + CTA_M, sf_k : sf_k + SF_CTA_K],
                 **sfa_copy,
             )
-            sfb_copy = T.meta_var(_tma_g2c_args(scale_full_bar, stage, pair_mask, CTA_GROUP))
+            sfb_copy = T.meta_var(_tma_g2s_args(scale_full_bar, stage, pair_mask, CTA_GROUP))
             if SFB_N == 128:
                 if id_in_pair == 0:
                     Tx.copy_async(
@@ -543,7 +543,7 @@ def _kernel(
                     Tx.copy_async(
                         D[d_m : d_m + CTA_M, d_n_out : d_n_out + EPI_TILE],
                         output_smem[epi_wb_state.stage, 0:CTA_M, 0:EPI_TILE],
-                        dispatch="tma",
+                        dispatch="tma_auto",
                         cache_hint="evict_first",
                         prefetch_tensormap=True,
                     )
@@ -563,7 +563,7 @@ def _kernel(
                         T.ptx.tcgen05.wait.ld()
                         if tid_in_wg == 0:
                             tmem_pipe.empty.arrive(
-                                epi_cur.stage, cta_id=pair_leader_rank, pred=True, count=1
+                                epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
                             )
                     Tx.wg.mul(reg_ldst, reg_ldst, alpha_local)
                     Tx.wg.cast(reg_ldst_16b, reg_ldst)
@@ -581,7 +581,7 @@ def _kernel(
                 Tx.wg.cast(reg_all_16b, reg_all)
                 if tid_in_wg == 0:
                     tmem_pipe.empty.arrive(
-                        epi_cur.stage, cta_id=pair_leader_rank, pred=True, count=1
+                        epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
                     )
                 T.cuda.warpgroup_sync(1)
                 for no in T.unroll(MMA_N // EPI_TILE):
@@ -597,8 +597,11 @@ def _kernel(
         T.cuda.warpgroup_sync(1)
     if warp_id == int(WarpRole.EPILOGUE):
         if T.ptx.elect_sync():
-            T.ptx.mbarrier.arrive.cluster_count(
-                tmem_finished.ptr_to([0]), pair_leader_rank + 1 - id_in_pair, 1
+            T.ptx.mbarrier.arrive(
+                tmem_finished.ptr_to([0]),
+                remote=pair_leader_rank + 1 - id_in_pair,
+                pred=True,
+                count=1,
             )
         T.ptx.mbarrier.try_wait_acquire_cluster(tmem_finished.ptr_to([0]), 0)
         T.ptx.tcgen05.dealloc(tmem_pool.addr, n_cols=512, cta_group=CTA_GROUP)
@@ -688,7 +691,85 @@ def run_test(M=1024, N=1024, K=1024):
     assert cosine_sim > 0.97, f"nvfp4_gemm cosine_sim {cosine_sim:.6f} <= 0.97"
 
 
-def run_bench(M=1024, N=1024, K=1024, *, warmup=10, repeat=30, timer="proton"):
+def _flashinfer_autotune_cache_path(
+    M: int, N: int, K: int, *, backend: str = "auto"
+) -> Path | None:
+    """Return an environment-specific, per-shape FlashInfer cache path."""
+    cache_root = os.environ.get("TIRX_BENCH_CACHE_DIR")
+    if not cache_root:
+        return None
+
+    # FlashInfer rejects cache metadata from a different software/GPU stack.
+    # Put each stack in its own directory as well, so an obsolete file cannot
+    # prevent the current process from saving its newly tuned result.
+    from flashinfer.autotuner import _collect_metadata
+
+    environment = _collect_metadata()
+    digest = hashlib.sha256(
+        json.dumps(environment, sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+    version = str(getattr(flashinfer, "__version__", "unknown")).replace("/", "_")
+    backend_suffix = "" if backend == "auto" else f"_{backend}"
+    return (
+        Path(cache_root)
+        / "flashinfer"
+        / f"{version}-{digest}"
+        / f"nvfp4_gemm{backend_suffix}_{M}x{N}x{K}.json"
+    )
+
+
+def _flashinfer_tuned_choice(
+    M: int, N: int, K: int, cache_path: Path | None, *, expected_runner: str | None = None
+) -> tuple[str, object]:
+    """Read the exact-shape runner/tactic selected by FlashInfer's autotuner."""
+    choices: list[tuple[str, object]] = []
+    if cache_path is not None and cache_path.exists():
+        payload = json.loads(cache_path.read_text())
+        packed_shape_prefix = f"(({M}, {K // 2}), ({K // 2}, {N})"
+        choices.extend(
+            (value[0], value[1])
+            for key, value in payload.items()
+            if key.startswith("('fp4_gemm', ") and packed_shape_prefix in key
+        )
+    else:
+        from flashinfer.autotuner import AutoTuner
+
+        for key, (_, tactic, _) in AutoTuner.get().profiling_cache.items():
+            if (
+                key.custom_op == "fp4_gemm"
+                and len(key.nearest_profile) >= 2
+                and key.nearest_profile[0] == (M, K // 2)
+                and key.nearest_profile[1] == (K // 2, N)
+            ):
+                choices.append((key.runner_class_name, tactic))
+
+    if expected_runner is not None:
+        choices = [choice for choice in choices if choice[0] == expected_runner]
+
+    unique = list(
+        dict.fromkeys((runner, json.dumps(tactic, sort_keys=True)) for runner, tactic in choices)
+    )
+    if len(unique) != 1:
+        raise RuntimeError(
+            "FlashInfer autotune did not produce exactly one fp4_gemm choice "
+            f"for M={M}, N={N}, K={K}, expected_runner={expected_runner}: {choices}"
+        )
+    runner, tactic_json = unique[0]
+    tactic = json.loads(tactic_json)
+    if tactic == -1:
+        raise RuntimeError(
+            f"FlashInfer autotune fell back to {runner} tactic=-1 for M={M}; "
+            "refusing to benchmark an untuned fallback"
+        )
+    return runner, tactic
+
+
+# timer=None inherits the global default (proton). Proton matters here: the
+# flashinfer/cublaslt references carry heavy per-call host dispatch (Python + internal
+# cudaDeviceSynchronize), and since the nvfp4 kernel (~28µs) is faster than that dispatch,
+# event wall-clock is host-starved and over-credits us ~4x. Proton measures pure GPU
+# kernel time -> honest ~parity (verified 0.996 vs event 4.11).
+def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark."""
     import torch
 
@@ -699,76 +780,118 @@ def run_bench(M=1024, N=1024, K=1024, *, warmup=10, repeat=30, timer="proton"):
         mod = tvm.IRModule({"main": kernel})
         ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
 
-    def make_input():
-        A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
-        alpha_value = float(alpha.item())
-        alpha_tensor = torch.tensor([alpha_value], device="cuda", dtype=torch.float)
-        out_tir = torch.empty_like(C_ref).to("cuda").to(torch.bfloat16)
-        out_fi = torch.empty_like(out_tir)
-        out_cublaslt = torch.empty_like(out_tir)
-        case = {
-            "tir": (A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out_tir),
-            "flashinfer": (A_fp4, B_fp4, A_sf, B_sf, alpha, out_fi),
-            "cublaslt_nvfp4": (A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt),
-        }
-        return case, _gemm_io_bytes(M, N, K)
+    # Allocate inputs once, outside the timed region (Triton-standard pure launch).
+    A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
+    alpha_value = float(alpha.item())
+    alpha_tensor = torch.tensor([alpha_value], device="cuda", dtype=torch.float)
+    out_tir = torch.empty_like(C_ref).to("cuda").to(torch.bfloat16)
 
-    funcs = {"tir": lambda case: ex.mod(*case["tir"])}
+    funcs = {"tir": lambda: ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out_tir)}
+    flashinfer_backend = os.environ.get("TIRX_NVFP4_FLASHINFER_BACKEND", "auto")
+    if flashinfer_backend not in {"auto", "cutlass"}:
+        raise ValueError(
+            f"TIRX_NVFP4_FLASHINFER_BACKEND must be 'auto' or 'cutlass', got {flashinfer_backend!r}"
+        )
+    expected_flashinfer_runner = "CutlassFp4GemmRunner" if flashinfer_backend == "cutlass" else None
+    flashinfer_cache_path = _flashinfer_autotune_cache_path(M, N, K, backend=flashinfer_backend)
+    flashinfer_context_kwargs = {"tuning_buckets": (M,), "round_up": False}
+    if flashinfer_cache_path is not None:
+        flashinfer_context_kwargs["cache"] = str(flashinfer_cache_path)
 
     def _flashinfer():
-        def run(case):
-            with flashinfer.autotune(False):  # time with the tuned config, no re-tune
-                return flashinfer.mm_fp4(
-                    case["flashinfer"][0],
-                    case["flashinfer"][1].T,
-                    case["flashinfer"][2],
-                    case["flashinfer"][3].T,
-                    case["flashinfer"][4],
-                    out=case["flashinfer"][5],
-                    block_size=16,
-                    backend="auto",
-                    use_nvfp4=True,
+        out_fi = torch.empty_like(out_tir)
+        cache_hit_before_tune = False
+        if flashinfer_cache_path is not None and flashinfer_cache_path.exists():
+            try:
+                _flashinfer_tuned_choice(
+                    M, N, K, flashinfer_cache_path, expected_runner=expected_flashinfer_runner
                 )
+                cache_hit_before_tune = True
+            except (json.JSONDecodeError, RuntimeError):
+                pass
 
-        # Autotune once on a throwaway input so the timed runs use the tuned config.
-        A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
-        autotune_case = {
-            "flashinfer": (
+        def run():
+            return flashinfer.mm_fp4(
                 A_fp4,
-                B_fp4,
+                B_fp4.T,
                 A_sf,
-                B_sf,
+                B_sf.T,
                 alpha,
-                torch.empty_like(C_ref).to("cuda").to(torch.bfloat16),
+                out=out_fi,
+                block_size=16,
+                backend=flashinfer_backend,
+                use_nvfp4=True,
             )
-        }
-        with flashinfer.autotune(True):
-            run(autotune_case)
+
+        # Tune/load exactly this benchmark shape and persist the selection in
+        # the suite cache. Both profiling and all cache I/O happen before the
+        # launch closure is handed to bench().
+        with flashinfer.autotune(True, **flashinfer_context_kwargs):
+            run()
         torch.cuda.synchronize()
+
+        # Exercise the normal non-tuning lookup once before timing and reject
+        # a silent heuristic fallback. Keep the exact same bucket override that
+        # was used while tuning: cuDNN runner cache keys include its mapper.
+        with flashinfer.autotune(False, **flashinfer_context_kwargs):
+            run()
+        torch.cuda.synchronize()
+        runner, tactic = _flashinfer_tuned_choice(
+            M, N, K, flashinfer_cache_path, expected_runner=expected_flashinfer_runner
+        )
+        sample_rows = min(M, 256)
+        sample_cols = min(N, 256)
+        cosine_similarity = torch.nn.functional.cosine_similarity(
+            out_fi[:sample_rows, :sample_cols].reshape(-1).float(),
+            C_ref[:sample_rows, :sample_cols].reshape(-1).float(),
+            dim=0,
+        ).item()
+        if cosine_similarity <= 0.97:
+            raise RuntimeError(
+                "FlashInfer tuned NVFP4 output failed validation: "
+                f"cosine_similarity={cosine_similarity:.6f}"
+            )
+        metadata.update(
+            {
+                "flashinfer_autotune_cache": (
+                    "hit"
+                    if cache_hit_before_tune
+                    else "miss"
+                    if flashinfer_cache_path is not None
+                    else "memory"
+                ),
+                "flashinfer_tuning_bucket": M,
+                "flashinfer_requested_backend": flashinfer_backend,
+                "flashinfer_runner": runner,
+                "flashinfer_tactic": tactic,
+                "flashinfer_cosine_similarity": cosine_similarity,
+            }
+        )
         return run
 
     def _cublaslt():
         ext = _load_cublaslt_nvfp4_ext()
-        return lambda case: ext.nvfp4_cublaslt(
-            case["cublaslt_nvfp4"][0],
-            case["cublaslt_nvfp4"][1],
-            case["cublaslt_nvfp4"][2],
-            case["cublaslt_nvfp4"][3],
-            case["cublaslt_nvfp4"][4],
-            case["cublaslt_nvfp4"][5],
-            M,
-            N,
-            K,
+        out_cublaslt = torch.empty_like(out_tir)
+        return lambda: ext.nvfp4_cublaslt(
+            A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K
         )
 
-    result = bench(
-        funcs,
-        make_input,
-        warmup=warmup,
-        repeat=repeat,
-        timer=timer,
-        proton_name="nvfp4_gemm",
-        references={"flashinfer": _flashinfer, "cublaslt_nvfp4": _cublaslt},
-    )
+    # FlashInfer is a required reference for this benchmark. Prepare and
+    # validate its tuned launch before entering bench() so a bad/missing cache
+    # fails the workload instead of being downgraded to an optional baseline
+    # construction error.
+    flashinfer_run = _flashinfer()
+    # Load the file and install the exact-M mapper once, outside all timer
+    # calls. Timed FlashInfer launches then perform only an in-memory cache
+    # lookup and the selected kernel launch.
+    with flashinfer.autotune(False, **flashinfer_context_kwargs):
+        result = bench(
+            funcs,
+            warmup=warmup,
+            repeat=repeat,
+            timer=timer,
+            references={"flashinfer": lambda: flashinfer_run, "cublaslt_nvfp4": _cublaslt},
+            **kwargs,
+        )
     result["metadata"] = {**result.get("metadata", {}), **metadata}
     return result
