@@ -305,7 +305,7 @@ def _mqa_fp8_wrelu_reduce_src(num_heads: int) -> str:
 
 
 def get_kernel(**kwargs: Any):
-    from tvm.backend.cuda.operator.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
+    from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
     from tvm.script import tirx as T
     from tvm.script.tirx import tile as Tx
     from tvm.tirx.lang.pipeline import Pipeline

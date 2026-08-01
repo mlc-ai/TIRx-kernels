@@ -6,7 +6,7 @@ import os
 import torch
 from deep_gemm.utils.math import per_block_cast_to_fp8, per_token_cast_to_fp8
 
-from tvm.backend.cuda.operator.tile_primitive.tma_utils import SwizzleMode
+from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 from tvm.tirx.bench import bench

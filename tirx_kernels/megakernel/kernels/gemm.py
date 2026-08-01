@@ -25,7 +25,7 @@ from tirx_kernels.megakernel.utils.config import (
     ProfileEventType,
 )
 from tirx_kernels.megakernel.utils.utils import ceildiv, mbarrier_try_wait
-from tvm.backend.cuda.operator.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
+from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 from tvm.tirx.bench import CudaProfiler
