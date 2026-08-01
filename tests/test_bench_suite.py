@@ -12,6 +12,8 @@ from tirx_kernels.bench_suite.baseline_view import render_markdown
 from tirx_kernels.bench_suite.ratio_diff import build_report
 from tirx_kernels.gemm_comm.allgather_gemm import CONFIGS as ALLGATHER_GEMM_CONFIGS
 from tirx_kernels.gemm_comm.gemm_reduce_scatter import CONFIGS as GEMM_RS_CONFIGS
+from tirx_kernels.megakernel.moe import BENCH_CONFIGS as MEGAKERNEL_MOE_BENCH_CONFIGS
+from tirx_kernels.megakernel.moe import _estimate_bench_launch_slots
 
 
 class _ScheduledJobsPool:
@@ -50,6 +52,17 @@ def test_finalize_bench_record_rejects_baseline_errors() -> None:
     assert row["error"] == "baseline error(s): deepgemm: setup failed"
 
 
+def test_default_workloads_include_full_megakernel_moe_sweep() -> None:
+    workloads = run.load_workloads(run.DEFAULT_WORKLOADS)
+    megakernel_moe_workloads = [w for w in workloads if w["kernel"] == "megakernel_moe"]
+
+    assert {w["config"] for w in megakernel_moe_workloads} == {
+        config["label"] for config in MEGAKERNEL_MOE_BENCH_CONFIGS
+    }
+    assert all(w["num_gpus"] == 1 for w in megakernel_moe_workloads)
+    assert all("timer" not in w for w in megakernel_moe_workloads)
+
+
 def test_default_workloads_include_manual_tp1_gemm_comm_kineto_profiles() -> None:
     workloads = run.load_workloads(run.DEFAULT_WORKLOADS)
     selected = [
@@ -83,6 +96,17 @@ def test_bench_suite_defaults_to_five_round_arithmetic_mean() -> None:
     assert row["status"] == "ok"
 
 
+def test_megakernel_moe_launch_slots_include_runtime_estimate_headroom() -> None:
+    slots = _estimate_bench_launch_slots(
+        runtime_us=1000.0, warmup=None, repeat=None, rounds=5, preflight_launches=1
+    )
+
+    # Defaults produce 25 warmup and 100 repeat launches.  Capacity includes
+    # 25% headroom on those runtime-derived loops, while keeping the one-call
+    # setup, five-call estimate, and final guard unchanged.
+    assert slots == 1 + 5 * (1 + 5 + 157) + 16
+
+
 def test_default_workloads_do_not_override_standard_timer_budgets() -> None:
     workloads = run.load_workloads(run.DEFAULT_WORKLOADS)
 
@@ -100,7 +124,7 @@ def test_ratio_report_keeps_grouped_tir_schedulers_out_of_references() -> None:
     baseline = {
         "results": [
             {
-                "kernel": "grouped_moe",
+                "kernel": "megakernel_moe",
                 "label": "moe_a3b_bs1_all",
                 "status": "ok",
                 "impls": {
@@ -116,7 +140,7 @@ def test_ratio_report_keeps_grouped_tir_schedulers_out_of_references() -> None:
     current = {
         "results": [
             {
-                "kernel": "grouped_moe",
+                "kernel": "megakernel_moe",
                 "label": "moe_a3b_bs1_all",
                 "status": "ok",
                 "impls": {
@@ -133,9 +157,9 @@ def test_ratio_report_keeps_grouped_tir_schedulers_out_of_references() -> None:
     report, regressions = build_report(baseline, current)
 
     assert regressions == 0
-    assert "| grouped_moe | moe_a3b_bs1_all | tir_static | sglang_full |" in report
-    assert "| grouped_moe | moe_a3b_bs1_all | tir_dynamic | sglang_full |" in report
-    assert "| grouped_moe | moe_a3b_bs1_all | tir_unfused | sglang_full |" in report
+    assert "| megakernel_moe | moe_a3b_bs1_all | tir_static | sglang_full |" in report
+    assert "| megakernel_moe | moe_a3b_bs1_all | tir_dynamic | sglang_full |" in report
+    assert "| megakernel_moe | moe_a3b_bs1_all | tir_unfused | sglang_full |" in report
 
 
 def test_baseline_view_renders_grouped_implementations_in_one_row() -> None:
@@ -145,7 +169,7 @@ def test_baseline_view_renders_grouped_implementations_in_one_row() -> None:
         "git": {},
         "results": [
             {
-                "kernel": "grouped_moe",
+                "kernel": "megakernel_moe",
                 "label": "moe_a3b_bs128_all",
                 "status": "ok",
                 "impls": {
@@ -157,7 +181,7 @@ def test_baseline_view_renders_grouped_implementations_in_one_row() -> None:
                 },
             },
             {
-                "kernel": "grouped_moe",
+                "kernel": "megakernel_moe",
                 "label": "moe_a3b_bs1_all",
                 "status": "ok",
                 "impls": {

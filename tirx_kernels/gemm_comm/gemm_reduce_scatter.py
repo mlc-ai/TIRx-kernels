@@ -1060,7 +1060,7 @@ def get_kernel(
     scheduler: str = "dynamic",
     **_kwargs: Any,
 ) -> tvm.IRModule:
-    """Build the hand-transcribed fused kernel directly."""
+    """Build the hand-transcribed fused kernel directly, without the megakernel DSL."""
 
     config = _config(M, N, K, world_size, dtype, scheduler)
     return build_kernel(config)

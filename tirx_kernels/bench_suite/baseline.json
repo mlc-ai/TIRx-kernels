@@ -1255,6 +1255,142 @@
       }
     },
     {
+      "kernel": "megakernel_moe",
+      "config": "moe_a3b_bs1024_all",
+      "label": "moe_a3b_bs1024_all",
+      "status": "ok",
+      "impls": {
+        "tir_static": 260.3319666727019,
+        "tir_dynamic": 256.43904246586357,
+        "tir_unfused": 274.0186843046738,
+        "sglang_full": 335.96671631802514,
+        "flashinfer_full": 311.66465435466444
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "megakernel_moe",
+      "config": "moe_a3b_bs128_all",
+      "label": "moe_a3b_bs128_all",
+      "status": "ok",
+      "impls": {
+        "tir_static": 223.41903075120936,
+        "tir_dynamic": 219.2493048823826,
+        "tir_unfused": 227.14321488461698,
+        "sglang_full": 245.05980521395728,
+        "flashinfer_full": 248.44393300216663
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "megakernel_moe",
+      "config": "moe_a3b_bs1_all",
+      "label": "moe_a3b_bs1_all",
+      "status": "ok",
+      "impls": {
+        "tir_static": 33.65353503563663,
+        "tir_dynamic": 36.96890793226583,
+        "tir_unfused": 34.79088707144742,
+        "sglang_full": 56.010359334512906,
+        "flashinfer_full": 65.07261364403668
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "megakernel_moe",
+      "config": "moe_a3b_bs2048_all",
+      "label": "moe_a3b_bs2048_all",
+      "status": "ok",
+      "impls": {
+        "tir_static": 338.4891929120119,
+        "tir_dynamic": 339.494418456061,
+        "tir_unfused": 357.90457684533663,
+        "sglang_full": 431.9870584377305,
+        "flashinfer_full": 391.46567872632227
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "megakernel_moe",
+      "config": "moe_a3b_bs32_all",
+      "label": "moe_a3b_bs32_all",
+      "status": "ok",
+      "impls": {
+        "tir_static": 190.32097997810504,
+        "tir_dynamic": 192.191575597882,
+        "tir_unfused": 199.6875291155722,
+        "sglang_full": 223.84275606220038,
+        "flashinfer_full": 222.42723208004705
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "megakernel_moe",
+      "config": "moe_a3b_bs4096_all",
+      "label": "moe_a3b_bs4096_all",
+      "status": "ok",
+      "impls": {
+        "tir_static": 563.0525144385831,
+        "tir_dynamic": 558.4132929411765,
+        "tir_unfused": 573.442198088161,
+        "sglang_full": 665.7489859807733,
+        "flashinfer_full": 606.7888952492668
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "megakernel_moe",
+      "config": "moe_a3b_bs512_all",
+      "label": "moe_a3b_bs512_all",
+      "status": "ok",
+      "impls": {
+        "tir_static": 237.77595029894752,
+        "tir_dynamic": 230.41276427433954,
+        "tir_unfused": 243.28616138718203,
+        "sglang_full": 288.8538545087485,
+        "flashinfer_full": 276.8774290678039
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "megakernel_moe",
+      "config": "moe_a3b_bs8_all",
+      "label": "moe_a3b_bs8_all",
+      "status": "ok",
+      "impls": {
+        "tir_static": 95.6029155826643,
+        "tir_dynamic": 99.94910741421258,
+        "tir_unfused": 104.51417933669386,
+        "sglang_full": 129.94199100683306,
+        "flashinfer_full": 134.83030262942145
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
       "kernel": "nvfp4_gemm",
       "config": "1024x1024x1024",
       "label": "1024x1024x1024",

@@ -15,6 +15,7 @@ All kernels target `sm_100a`. Names are the registry names accepted by the
 | `nvfp4_gemm` | nvfp4 | Dense GEMM |
 | `flash_attention4` | bf16 | FlashAttention-4 |
 | `rmsnorm` | fp16 / bf16 | RMSNorm |
+| `megakernel_moe` | bf16 | Fused MoE megakernel |
 | `allgather_gemm` | fp16 | AllGather + GEMM (multi-GPU, NVSHMEM) |
 | `gemm_reduce_scatter` | fp16 | GEMM + ReduceScatter (multi-GPU, NVSHMEM) |
 
@@ -36,7 +37,7 @@ DeepGEMM ports:
 | `deepgemm_sm100_fp4_paged_mqa_logits` | fp4 / bf16 | Paged-KV MQA attention logits |
 | `deepgemm_sm100_fp8_paged_mqa_logits` | fp8 / bf16 | Paged-KV MQA attention logits |
 | `deepgemm_sm100_tf32_hc_prenorm_gemm` | tf32 / bf16 | Prenorm GEMM |
-| `deepgemm_fp8_fp4_mega_moe` | fp8 + fp4 | Fused MoE (MegaMoE) |
+| `deepgemm_fp8_fp4_mega_moe` | fp8 + fp4 | Fused MoE megakernel (MegaMoE) |
 
 ## Performance
 
@@ -66,7 +67,7 @@ them — they are only needed to actually compile/run a kernel:
 | `tvm.tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tir/python`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels. |
-| `flashinfer`     | `nvfp4_gemm` data/baseline | Used for nvfp4 quantization and reference impls. |
+| `flashinfer`     | `nvfp4_gemm` data/baseline, `megakernel_moe` baseline | Used for nvfp4 quantization and reference impls. |
 | `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` reference; checkout on `PYTHONPATH`. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
