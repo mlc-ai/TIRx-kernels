@@ -488,6 +488,7 @@ def get_kernel(**kwargs: Any):
     num_sfq_atom = _align_up(next_n_atom * num_heads, num_utccp_aligned_elems)
     # Per-group SFKV tile: one 128-token compute tile per math warpgroup.
     num_sfkv = _align_up(umma_m, num_utccp_aligned_elems)
+    real_num_sfq_atom = next_n_atom * num_heads
     smem_alignment = 8 * (head_dim // 2)
     desc_sdo = 8 * (head_dim // 2) // 16
     sf_desc_sdo = 8 * 4 * 4 // 16
@@ -563,7 +564,7 @@ def get_kernel(**kwargs: Any):
     cache_policy_evict_normal = T.uint64(1152921504606846976)
     has_cache_policy_evict_normal = 1
     tma_unicast_cta_mask = 0
-    tma_no_cta_group_modifier = -1
+    tma_no_cta_group_modifier = 1
     q_tma_block_inner = head_dim // 2
     q_tma_swizzle_mode = head_dim // 2
     q_tma_dtype_size = 1
@@ -876,25 +877,25 @@ def get_kernel(**kwargs: Any):
         smem = T.alloc_buffer([smem_total_bytes], "uint8", scope="shared.dyn", align=smem_alignment)
         T.attr({"tirx.dyn_smem_bytes": smem_total_bytes})
         smem_q_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint8"), "shared.dyn"), smem.ptr_to([smem_q_offset])
+            PointerType(PrimType("uint8")), smem.ptr_to([smem_q_offset])
         )
         smem_kv_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint8"), "shared.dyn"), smem.ptr_to([smem_kv_offset])
+            PointerType(PrimType("uint8")), smem.ptr_to([smem_kv_offset])
         )
         smem_sf_q_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32"), "shared.dyn"), smem.ptr_to([smem_sf_q_offset])
+            PointerType(PrimType("uint32")), smem.ptr_to([smem_sf_q_offset])
         )
         smem_sf_kv_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32"), "shared.dyn"), smem.ptr_to([smem_sf_kv_offset])
+            PointerType(PrimType("uint32")), smem.ptr_to([smem_sf_kv_offset])
         )
         smem_weights_data: T.let = T.reinterpret(
-            PointerType(PrimType("float32"), "shared.dyn"), smem.ptr_to([smem_weights_offset])
+            PointerType(PrimType("float32")), smem.ptr_to([smem_weights_offset])
         )
         smem_barrier_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint64"), "shared.dyn"), smem.ptr_to([smem_barrier_offset])
+            PointerType(PrimType("uint64")), smem.ptr_to([smem_barrier_offset])
         )
         smem_tmem_ptr_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32"), "shared.dyn"), smem.ptr_to([smem_tmem_ptr_offset])
+            PointerType(PrimType("uint32")), smem.ptr_to([smem_tmem_ptr_offset])
         )
         smem_q = T.decl_buffer(
             (num_q_stages, next_n_atom * num_heads, head_dim // 2),
@@ -1219,9 +1220,7 @@ def get_kernel(**kwargs: Any):
                 )
                 mbarrier_arrive_and_expect_tx(
                     smem_barriers.ptr_to([full_q_barrier_base + stage_idx]),
-                    smem_q_size_per_stage
-                    + smem_sf_q_size_per_stage * 2
-                    + smem_weight_size_per_stage,
+                    smem_q_size_per_stage + real_num_sfq_atom * 4 * 2 + smem_weight_size_per_stage,
                 )
 
         # Early schedule-metadata load: issue the global loads before the
@@ -2312,10 +2311,7 @@ def _build_tirx_tensor_maps(data: dict[str, Any]) -> dict[str, Any]:
             tensor=sf_q,
             gmem_inner_dim=config.num_heads,
             gmem_outer_dim=config.batch_size * config.next_n,
-            # UTCCP's 32x128b warp transpose reads the complete aligned
-            # 128-word stage.  Make the descriptor box cover that stage so
-            # the hardware's OOB-zero behavior initializes the padded heads.
-            smem_inner_dim=_align_up(next_n_atom * config.num_heads, 128),
+            smem_inner_dim=config.num_heads,
             smem_outer_dim=next_n_atom,
             gmem_outer_stride=int(sf_q.stride(1)),
             swizzle_mode=0,
