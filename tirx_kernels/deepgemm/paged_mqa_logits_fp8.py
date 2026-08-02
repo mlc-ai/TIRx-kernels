@@ -860,22 +860,22 @@ def get_kernel(**kwargs: Any):
         smem = T.alloc_buffer([smem_total_bytes], "uint8", scope="shared.dyn", align=smem_alignment)
         T.attr({"tirx.dyn_smem_bytes": smem_total_bytes})
         smem_q_data: T.let = T.reinterpret(
-            PointerType(PrimType("float8_e4m3fn")), smem.ptr_to([smem_q_offset])
+            PointerType(PrimType("float8_e4m3fn"), "shared.dyn"), smem.ptr_to([smem_q_offset])
         )
         smem_kv_data: T.let = T.reinterpret(
-            PointerType(PrimType("float8_e4m3fn")), smem.ptr_to([smem_kv_offset])
+            PointerType(PrimType("float8_e4m3fn"), "shared.dyn"), smem.ptr_to([smem_kv_offset])
         )
         smem_kv_scales_data: T.let = T.reinterpret(
-            PointerType(PrimType("float32")), smem.ptr_to([smem_kv_scales_offset])
+            PointerType(PrimType("float32"), "shared.dyn"), smem.ptr_to([smem_kv_scales_offset])
         )
         smem_weights_data: T.let = T.reinterpret(
-            PointerType(PrimType("float32")), smem.ptr_to([smem_weights_offset])
+            PointerType(PrimType("float32"), "shared.dyn"), smem.ptr_to([smem_weights_offset])
         )
         smem_barrier_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint64")), smem.ptr_to([smem_barrier_offset])
+            PointerType(PrimType("uint64"), "shared.dyn"), smem.ptr_to([smem_barrier_offset])
         )
         smem_tmem_ptr_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32")), smem.ptr_to([smem_tmem_ptr_offset])
+            PointerType(PrimType("uint32"), "shared.dyn"), smem.ptr_to([smem_tmem_ptr_offset])
         )
         smem_q = T.decl_buffer(
             (num_q_stages, next_n_atom * num_heads, head_dim),

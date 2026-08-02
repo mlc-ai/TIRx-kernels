@@ -683,6 +683,7 @@ def _kernel(
                             chunk_idx * SOFTMAX_LD_CHUNK : (chunk_idx + 1) * SOFTMAX_LD_CHUNK,
                         ],
                     )
+                T.ptx.tcgen05.wait.ld()
                 if apply_mask:
                     apply_causal_mask(s_chunk_buf, m_block_idx, i_kv)
                 row_max_old: T.f32
@@ -882,6 +883,7 @@ def _kernel(
                                     d_tile * EPI_LD_SM : (d_tile + 1) * EPI_LD_SM,
                                 ],
                             )
+                            T.ptx.tcgen05.wait.ld()
                             Tx.wg.mul(o_row_f32_sm, o_row_f32_sm, norm_scale_sm)
                             Tx.wg.cast(o_row_f16_sm, o_row_f32_sm)
                             Tx.wg.copy(
@@ -952,6 +954,7 @@ def _kernel(
                                             d_start : d_start + RESCALE_TILE,
                                         ],
                                     )
+                                    T.ptx.tcgen05.wait.ld()
                                     Tx.wg.mul(o_row, o_row, acc_scale)
                                     Tx.wg.copy_async(
                                         O_region[
@@ -997,6 +1000,7 @@ def _kernel(
                                     SMEM_PIPE_DEPTH_Q + i_q, :, d_start : d_start + TMEM_EPI_LD_SIZE
                                 ],
                             )
+                            T.ptx.tcgen05.wait.ld()
                             Tx.wg.mul(o_row_f32, o_row_f32, norm_scale)
                             Tx.wg.cast(o_row_f16, o_row_f32)
                             Tx.wg.copy(

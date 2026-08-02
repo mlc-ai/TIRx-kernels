@@ -415,6 +415,7 @@ def _kernel(
             T.ptx.fence.mbarrier_init()
 
         T.ptx.tcgen05.alloc(T.address_of(tmem_start_addr[0]), n_cols=512, cta_group=1)
+        T.cuda.warp_sync()
         T.cuda.trap_when_assert_failed(tmem_start_addr[0] == T.uint32(0))
         T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
         iket.range_end(prologue_token)
@@ -555,6 +556,10 @@ def _kernel(
                 pv_wait_token = iket.range_start("h64-pv-wait")
                 bar_sv_done.wait(prev_buf, prev_phase)
                 iket.range_end(pv_wait_token)
+                # The completed TCGEN05 MMA read this shared-memory stage
+                # through the async proxy.  Order that read before reusing the
+                # stage for the generic S write below.
+                T.ptx.fence.proxy_async("shared::cta")
 
             # CUDA phase1.cuh:229-232 S store (vectorized by the reg copy path).
             Tx.wg.copy(s_smem_gemm[:, :], s_frag[:, :])
@@ -605,6 +610,9 @@ def _kernel(
         last_phase: T.int32 = _ring_phase_parity(last_k, max_k_blocks)
         bar_sv_done.wait(last_buf, last_phase)
         T.ptx.tcgen05.fence.after_thread_sync()
+        # bar_sv_done makes the final TCGEN05 read complete; cross back from
+        # the async proxy before o_smem aliases and overwrites its K stage.
+        T.ptx.fence.proxy_async("shared::cta")
 
         attn_sink_log2: T.let = (
             T.cuda.ldg(attn_sink.ptr_to([idx_in_warpgroup % B_H]), "float32") * LOG_2_E
@@ -661,6 +669,18 @@ def _kernel(
                             o_smem.chunk((None, D_V // 64))[:, epi_chunk_idx],
                             **tma_config(),
                         )
+
+        # Global<-shared TMA stores are tracked per issuing warp.  Each elected
+        # lane must commit and drain its own group before the shared staging
+        # buffer can be released at kernel exit.
+        if warp_idx == 0:
+            if T.ptx.elect_sync():
+                T.ptx.cp_async.bulk.commit_group()
+                T.ptx.cp_async.bulk.wait_group(0, read=False)
+        if warp_idx == 1:
+            if T.ptx.elect_sync():
+                T.ptx.cp_async.bulk.commit_group()
+                T.ptx.cp_async.bulk.wait_group(0, read=False)
 
         if warp_idx == 0:
             T.ptx.tcgen05.dealloc(T.uint32(0), n_cols=512, cta_group=1)

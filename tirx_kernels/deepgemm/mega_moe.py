@@ -1022,12 +1022,11 @@ def get_tirx_dynamic_shared_memory_bytes(config: MegaMoeConfig) -> int:
     smem_barrier_offset = smem_task_info_offset + smem_task_info_size
     smem_tmem_ptr_offset = smem_barrier_offset + num_total_barriers * 8
     smem_symm_rank_bases_offset = _align_up(smem_tmem_ptr_offset + smem_tmem_ptr_size, 8)
-    smem_symm_rank_bases_size = config.num_processes * 8 if config.num_processes > 1 else 0
-    return (
-        smem_symm_rank_bases_offset + smem_symm_rank_bases_size
-        if config.num_processes > 1
-        else smem_tmem_ptr_offset + smem_tmem_ptr_size
-    )
+    # The PrimFunc declares ``uint64[num_processes]`` at this aligned address
+    # for every specialization.  Keep the declared view inside its backing
+    # allocation even when TP1 statically eliminates all rank-base accesses.
+    smem_symm_rank_bases_size = config.num_processes * 8
+    return smem_symm_rank_bases_offset + smem_symm_rank_bases_size
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -2252,12 +2251,11 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
     smem_barrier_offset = smem_task_info_offset + smem_task_info_size
     smem_tmem_ptr_offset = smem_barrier_offset + num_total_barriers * 8
     smem_symm_rank_bases_offset = _align_up(smem_tmem_ptr_offset + smem_tmem_ptr_size, 8)
-    smem_symm_rank_bases_size = num_processes * 8 if num_processes > 1 else 0
-    smem_total_bytes = (
-        smem_symm_rank_bases_offset + smem_symm_rank_bases_size
-        if num_processes > 1
-        else smem_tmem_ptr_offset + smem_tmem_ptr_size
-    )
+    # The view below is declared for TP1 as well, even though rank-base loads
+    # and stores are specialized away. Its full declared extent must still fit
+    # in the shared allocation.
+    smem_symm_rank_bases_size = num_processes * 8
+    smem_total_bytes = smem_symm_rank_bases_offset + smem_symm_rank_bases_size
     num_chunks = (
         1
         if num_chunk_slots * kernel_config.num_epilogue_warps * num_hidden_bytes
@@ -2696,40 +2694,40 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
         smem = T.alloc_buffer([smem_total_bytes], "uint8", scope="shared.dyn")
         T.attr({"tirx.dyn_smem_bytes": smem_total_bytes})
         smem_expert_count_data: T.let = T.reinterpret(
-            PointerType(PrimType("int32")), smem.ptr_to([smem_expert_count_offset])
+            PointerType(PrimType("int32"), "shared.dyn"), smem.ptr_to([smem_expert_count_offset])
         )
         smem_send_buffer_data: T.let = T.reinterpret(
-            PointerType(PrimType("int8")), smem.ptr_to([smem_send_buffer_offset])
+            PointerType(PrimType("int8"), "shared.dyn"), smem.ptr_to([smem_send_buffer_offset])
         )
         smem_a_data: T.let = T.reinterpret(
-            PointerType(PrimType("int8")), smem.ptr_to([smem_a_offset])
+            PointerType(PrimType("int8"), "shared.dyn"), smem.ptr_to([smem_a_offset])
         )
         smem_b_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint8")), smem.ptr_to([smem_b_offset])
+            PointerType(PrimType("uint8"), "shared.dyn"), smem.ptr_to([smem_b_offset])
         )
         smem_sfa_data: T.let = T.reinterpret(
-            PointerType(PrimType("int32")), smem.ptr_to([smem_sfa_offset])
+            PointerType(PrimType("int32"), "shared.dyn"), smem.ptr_to([smem_sfa_offset])
         )
         smem_sfb_data: T.let = T.reinterpret(
-            PointerType(PrimType("int32")), smem.ptr_to([smem_sfb_offset])
+            PointerType(PrimType("int32"), "shared.dyn"), smem.ptr_to([smem_sfb_offset])
         )
         smem_amax_reduction_data: T.let = T.reinterpret(
-            PointerType(PrimType("float32")), smem.ptr_to([smem_amax_reduction_offset])
+            PointerType(PrimType("float32"), "shared.dyn"), smem.ptr_to([smem_amax_reduction_offset])
         )
         smem_task_info_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32")), smem.ptr_to([smem_task_info_offset])
+            PointerType(PrimType("uint32"), "shared.dyn"), smem.ptr_to([smem_task_info_offset])
         )
         smem_cd_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint8")), smem.ptr_to([smem_cd_offset])
+            PointerType(PrimType("uint8"), "shared.dyn"), smem.ptr_to([smem_cd_offset])
         )
         smem_barrier_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint64")), smem.ptr_to([smem_barrier_offset])
+            PointerType(PrimType("uint64"), "shared.dyn"), smem.ptr_to([smem_barrier_offset])
         )
         smem_tmem_ptr_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32")), smem.ptr_to([smem_tmem_ptr_offset])
+            PointerType(PrimType("uint32"), "shared.dyn"), smem.ptr_to([smem_tmem_ptr_offset])
         )
         smem_symm_rank_bases_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint64")), smem.ptr_to([smem_symm_rank_bases_offset])
+            PointerType(PrimType("uint64"), "shared.dyn"), smem.ptr_to([smem_symm_rank_bases_offset])
         )
         smem_expert_count = T.decl_buffer(
             (num_experts,),
@@ -3598,10 +3596,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 n_cols=num_tmem_cols,
                 cta_group=kernel_config.num_ctas_per_cluster,
             )
-        # `fence_barrier_init` above is `.release.cluster`, so the cluster
-        # arrive here doesn't need release semantics. `.wait.acquire` pairs
-        # with that release to make mbarrier init visible to other CTAs.
-        T.ptx.barrier.cluster.arrive(sem="relaxed", aligned=True)
+        # `fence_barrier_init` publishes the earlier mbarrier initialization,
+        # but the tcgen05.alloc above performs a later weak shared-memory store
+        # of the TMEM base.  Publish that store before epilogue warps read it.
+        T.ptx.barrier.cluster.arrive(sem="release", aligned=True)
         T.ptx.barrier.cluster.wait(acquire=True, aligned=True)
         if flat_warp_idx < kernel_config.num_dispatch_warps:
             warpgroup_reg_dealloc(num_dispatch_registers)
@@ -4017,7 +4015,17 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                 )
             )
-            T.ptx.bar.sync(dispatch_sync_barrier_idx, kernel_config.num_dispatch_threads)
+            # The epilogue grid barrier happens before the CTA-local
+            # dispatch/epilogue rendezvous above.  It therefore cannot publish
+            # dispatch's expert-count reads to a different CTA that starts
+            # clearing the reusable workspace.  Rendezvous all dispatch CTAs
+            # before any of them performs that cleanup.
+            workspace_grid_sync(
+                dispatch_grid_sync_index,
+                kernel_config.num_dispatch_threads,
+                dispatch_sync_barrier_idx,
+                flat_warp_idx * 32 + lane_idx,
+            )
             if sm_idx == 0:
                 # SM 0: clear expert send count and schedule task counters
                 dispatch_expert_idx = thread_idx
@@ -4166,6 +4174,11 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         current_ring_count = load_acq_u32(
                             workspace_l2_full_count.ptr_to([ring_block_idx])
                         )
+                # The release/acquire counters publish generic global stores
+                # from dispatch (L1) or the preceding epilogue's scale-factor
+                # writes (L2).  TMA reads through the async proxy, so bridge
+                # the acquired frontier before loading either ring.
+                T.ptx.fence.proxy_async("global")
                 for k_block_idx in T.serial(0, num_k_blocks):
                     barrier_wait(
                         smem_barriers.ptr_to([empty_barrier_base + pipeline_stage_idx]),
@@ -4937,6 +4950,16 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                 )
             )
+            # Dynamic shared memory now changes ownership from dispatch's
+            # generic-proxy expert counters to combine's async-proxy TMA
+            # destination.  The named barrier transfers the dispatch threads'
+            # happens-before frontier; this proxy fence makes that frontier
+            # visible to the TMA writes before the storage is reused.
+            T.ptx.fence.proxy_async("shared::cta")
+            # The preceding grid barrier publishes every epilogue's generic
+            # stores into the symmetric combine-token buffer.  Combine reads
+            # those stores through TMA's async global proxy.
+            T.ptx.fence.proxy_async("global")
             token_idx = sm_idx * kernel_config.num_epilogue_warps + epilogue_warp_idx
             combine_phase = T.int32(0)
             load_stage_idx = T.int32(0)

@@ -361,6 +361,7 @@ def _kernel(
             T.ptx.fence.mbarrier_init()
     elif warp_idx == 2:
         T.ptx.tcgen05.alloc(T.address_of(tmem_start_addr[0]), n_cols=512, cta_group=2)
+        T.cuda.warp_sync()
         T.cuda.trap_when_assert_failed(tmem_start_addr[0] == T.uint32(0))
         T.ptx.tcgen05.relinquish_alloc_permit(cta_group=2)
     elif warp_idx == 3:
@@ -905,6 +906,7 @@ def _kernel(
                 li = li_tmp
 
                 bar_SV_done.wait(0, (wg3_rs & 1) ^ 1)
+                T.ptx.fence.proxy_async("shared::cta")
                 Tx.wg.copy(s_smem_gemm[:, :], s_frag[:, :])
 
                 if (k > 0) & should_scale_o:

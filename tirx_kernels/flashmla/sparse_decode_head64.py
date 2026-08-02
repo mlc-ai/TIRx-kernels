@@ -662,10 +662,15 @@ def _kernel(
         packed = T.alloc_local((4,), "uint32")
         for pair_i in T.unroll(4):
             raw_pair: T.let = T.cast(T.shift_right(raw, T.cast(pair_i * 16, "uint64")), "uint16")
-            rounded_bits: T.let = T.ptx.cvt(raw_pair, dtype="bf16x2", atype="e4m3x2", rounding="rn")
-            rounded: T.let = T.reinterpret("bfloat16x2", rounded_bits)
-            scaled_lo: T.let = T.Shuffle([rounded], [0]) * scale
-            scaled_hi: T.let = T.Shuffle([rounded], [1]) * scale
+            # PTX 9.1 has the exact E4M3-to-F16 conversion on SM100f; the
+            # direct E4M3-to-BF16 form is not available until PTX 9.2.  E4M3
+            # values are exactly representable in both intermediate formats.
+            rounded_bits: T.let = T.ptx.cvt(
+                raw_pair, dtype="f16x2", atype="e4m3x2", rounding="rn"
+            )
+            rounded: T.let = T.reinterpret("float16x2", rounded_bits)
+            scaled_lo: T.let = T.cast(T.Shuffle([rounded], [0]), "bfloat16") * scale
+            scaled_hi: T.let = T.cast(T.Shuffle([rounded], [1]), "bfloat16") * scale
             packed[pair_i] = T.reinterpret("uint32", T.Shuffle([scaled_lo, scaled_hi], [0, 1]))
         T.ptx.st(smem_addr, src=packed.ptr_to([0]), weak=True, space="shared::cta", ptx_type="b128")
 
@@ -691,6 +696,7 @@ def _kernel(
                 T.ptx.mbarrier.init(bar_valid_free.ptr_to([index_stage]), 258)
             T.ptx.fence.mbarrier_init()
         T.ptx.tcgen05.alloc(T.address_of(tmem_start_addr[0]), n_cols=512, cta_group=1)
+        T.cuda.warp_sync()
         T.cuda.trap_when_assert_failed(tmem_start_addr[0] == T.uint32(0))
         T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
     T.cuda.cta_sync()
@@ -922,6 +928,10 @@ def _kernel(
                 if real_mi == T.float32(-float("inf")):
                     li = 0.0
                     mi = T.float32(-float("inf"))
+                # Every WG0 warp read its peer's per-block maximum from this
+                # allocation above.  Do not let a faster warp reuse the same
+                # locations for ``li`` until all of those reads have retired.
+                T.ptx.bar.sync(BAR_WG0_SYNC, 128)
                 rowwise_buf[idx_in_warpgroup] = li
                 T.ptx.bar.sync(BAR_WG0_SYNC, 128)
                 li = li + rowwise_buf[idx_in_warpgroup ^ 64]
@@ -1732,6 +1742,7 @@ def _kernel(
                 # SxV use, then convert each fp8x8 with the exact ue8m0
                 # scale and weak shared b128 store from the source.
                 bar_q_utccp.wait(0, batch_bar_phase)
+                T.ptx.fence.proxy_async("shared::cta")
                 for block_idx in T.serial(start_block, end_block, unroll=False):
                     bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                     bar_raw_ready.wait(rs_buf.stage, rs_buf.phase)
@@ -2039,14 +2050,18 @@ def _kernel_shape_params(
     *,
     prepared_num_blocks: int | None = None,
     prepared_extra_num_blocks: int | None = None,
+    num_sm_parts_override: int | None = None,
 ) -> dict[str, int]:
-    device_obj = torch.device(device)
-    device_index = device_obj.index
-    if device_index is None:
-        device_index = torch.cuda.current_device()
-    num_sm_parts = (
-        int(torch.cuda.get_device_properties(device_index).multi_processor_count) // cfg.s_q
-    )
+    if num_sm_parts_override is None:
+        device_obj = torch.device(device)
+        device_index = device_obj.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        num_sm_parts = (
+            int(torch.cuda.get_device_properties(device_index).multi_processor_count) // cfg.s_q
+        )
+    else:
+        num_sm_parts = int(num_sm_parts_override)
     num_sm_parts = max(num_sm_parts, 1)
     num_blocks = (
         prepared_num_blocks
@@ -2159,10 +2174,11 @@ def _specialized_decode_kernels(
 
 def get_kernel(**kwargs: Any):
     cfg = _cfg(**kwargs)
-    if not torch.cuda.is_available():
+    num_sm_parts = kwargs.get("num_sm_parts")
+    if num_sm_parts is None and not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA decode")
     device = kwargs.get("device", "cuda")
-    shape = _kernel_shape_params(cfg, device)
+    shape = _kernel_shape_params(cfg, device, num_sm_parts_override=num_sm_parts)
     return list(
         _specialized_decode_kernels(
             cfg.normalized_model_type, shape["max_splits"], _main_presence_mask(cfg), cfg.b == 2

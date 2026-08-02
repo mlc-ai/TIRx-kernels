@@ -380,6 +380,7 @@ def _kernel(
             )
 
         T.ptx.tcgen05.alloc(T.address_of(tmem_start_addr[0]), n_cols=512, cta_group=2)
+        T.cuda.warp_sync()
         T.cuda.trap_when_assert_failed(tmem_start_addr[0] == T.uint32(0))
         T.ptx.tcgen05.relinquish_alloc_permit(cta_group=2)
         iket.range_end(prologue_token)
@@ -500,6 +501,7 @@ def _kernel(
                 prev_phase: T.let = ((k - 1) // NUM_BUFS) & 1
                 pv_wait_token = iket.range_start("h128-pv-wait")
                 bar_sv_done.wait(prev_buf, prev_phase)
+                T.ptx.fence.proxy_async("shared::cta")
                 iket.range_end(pv_wait_token)
 
             Tx.wg.copy(s_smem_gemm[:, :], s_frag[:, :])
@@ -547,6 +549,7 @@ def _kernel(
         last_buf: T.let = last_k % NUM_BUFS
         last_phase: T.let = (last_k // NUM_BUFS) & 1
         bar_sv_done.wait(last_buf, last_phase)
+        T.ptx.fence.proxy_async("shared::cta")
         T.ptx.tcgen05.fence.after_thread_sync()
 
         attn_sink_log2: T.let = (
@@ -598,6 +601,18 @@ def _kernel(
                         o_smem.chunk((None, D_V // B_EPI))[:, epi_k2],
                         **tma_config(),
                     )
+
+        # The global<-shared TMA stores are issued by two different warps and
+        # therefore own independent bulk-async groups.  Drain both groups
+        # before the CTA exits and releases the shared output staging buffer.
+        if warp_idx == 0:
+            if T.ptx.elect_sync():
+                T.ptx.cp_async.bulk.commit_group()
+                T.ptx.cp_async.bulk.wait_group(0, read=False)
+        if warp_idx == 1:
+            if T.ptx.elect_sync():
+                T.ptx.cp_async.bulk.commit_group()
+                T.ptx.cp_async.bulk.wait_group(0, read=False)
 
         if warp_idx == 0:
             T.ptx.tcgen05.dealloc(T.uint32(0), n_cols=512, cta_group=2)
@@ -688,6 +703,7 @@ def _kernel(
                     prev_buf: T.let = (k - 1) % NUM_BUFS
                     prev_phase: T.let = ((k - 1) // NUM_BUFS) & 1
                     bar_sv_part_done.wait(prev_buf, prev_phase)
+                    T.ptx.fence.proxy_async("shared::cta")
 
                 @T.inline
                 def gather_v_part(row_offset, part, token_buf, bar):
@@ -723,6 +739,7 @@ def _kernel(
                     prev_buf: T.let = (k - 1) % NUM_BUFS
                     prev_phase: T.let = ((k - 1) // NUM_BUFS) & 1
                     bar_sv_done.wait(prev_buf, prev_phase)
+                    T.ptx.fence.proxy_async("shared::cta")
                 token_idxs_part1 = T.alloc_local((WG2_ROWS_PER_PART, 4), "int32")
                 gather_v_part(WG2_ROWS_PER_PART, 1, token_idxs_part1, bar_v_part1_ready)
         iket.range_end(v_gather_token)
