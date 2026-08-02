@@ -787,19 +787,14 @@ def _kernel(
                 p_peer = p_peer_frag.local().view("uint32")
                 bar_QK_done.wait(0, wg3_rs & 1)
                 T.ptx.tcgen05.fence.after_thread_sync()
-
-                @T.inline
-                def load_p(lo_dst, hi_dst):
-                    # datapath-B P read back as (128, B_TOPK) identity: merge the
-                    # two lane-halves into 128 rows.
-                    p_win = tmem_p.rearrange("h (b t) -> (b h) t", b=2)
-                    Tx.wg.copy_async(lo_dst[:, :], p_win.chunk((None, 2))[:, 0])
-                    Tx.wg.copy_async(hi_dst[:, :], p_win.chunk((None, 2))[:, 1])
-
-                if local_warp_idx < 2:
-                    load_p(p_frag, p_peer_frag)
-                else:
-                    load_p(p_peer_frag, p_frag)
+                # Datapath-B P read back as (128, B_TOPK) identity.  Both
+                # warpgroup collectives stay converged while each warp selects
+                # which lane-half is its local fragment and which is its peer.
+                p_half: T.int32 = T.if_then_else(local_warp_idx < 2, 0, 1)
+                p_peer_half: T.int32 = 1 - p_half
+                p_win = tmem_p.rearrange("h (b t) -> (b h) t", b=2)
+                Tx.wg.copy_async(p_frag[:, :], p_win.chunk((None, 2))[:, p_half])
+                Tx.wg.copy_async(p_peer_frag[:, :], p_win.chunk((None, 2))[:, p_peer_half])
                 T.ptx.tcgen05.wait.ld()
                 T.ptx.tcgen05.fence.before_thread_sync()
                 bar_P_empty.arrive(0, remote=T.uint32(0))

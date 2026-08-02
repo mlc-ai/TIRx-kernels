@@ -446,17 +446,13 @@ def _kernel(
             p_peer_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, (B_TOPK // 2)), "float32")
             p = p_frag.local()
             p_peer = p_peer_frag.local()
-
-            @T.inline
-            def load_p(lo_dst, hi_dst):
-                p_win = tmem_p_bmm.rearrange("b h t -> (b h) t")
-                Tx.wg.copy_async(lo_dst[:, :], p_win.chunk((None, 2))[:, 0])
-                Tx.wg.copy_async(hi_dst[:, :], p_win.chunk((None, 2))[:, 1])
-
-            if warp_idx < 2:
-                load_p(p_frag, p_peer_frag)
-            else:
-                load_p(p_peer_frag, p_frag)
+            # Keep every warp at the same two warpgroup-scoped call sites;
+            # only the source half differs between the local and peer fragments.
+            p_half: T.int32 = T.if_then_else(warp_idx < 2, 0, 1)
+            p_peer_half: T.int32 = 1 - p_half
+            p_win = tmem_p_bmm.rearrange("b h t -> (b h) t")
+            Tx.wg.copy_async(p_frag[:, :], p_win.chunk((None, 2))[:, p_half])
+            Tx.wg.copy_async(p_peer_frag[:, :], p_win.chunk((None, 2))[:, p_peer_half])
             T.ptx.tcgen05.wait.ld()
             T.ptx.tcgen05.fence.before_thread_sync()
             bar_p_free.arrive(0)

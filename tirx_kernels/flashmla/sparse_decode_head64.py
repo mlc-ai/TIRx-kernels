@@ -793,12 +793,17 @@ def _kernel(
                     p_peer_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, B_TOPK // 2), "float32")
                     p = p_frag.local()
                     p_peer = p_peer_frag.local()
-                    if warp_idx < 2:
-                        Tx.wg.copy_async(p_frag[:, :], p_tmem_win.chunk((None, 2))[:, 0])
-                        Tx.wg.copy_async(p_peer_frag[:, :], p_tmem_win.chunk((None, 2))[:, 1])
-                    else:
-                        Tx.wg.copy_async(p_peer_frag[:, :], p_tmem_win.chunk((None, 2))[:, 0])
-                        Tx.wg.copy_async(p_frag[:, :], p_tmem_win.chunk((None, 2))[:, 1])
+                    # Each Tx.wg call is one warpgroup collective.  Keep the two
+                    # static call sites converged and select the local/peer TMEM
+                    # half through their per-warp source coordinates.
+                    p_half: T.int32 = T.if_then_else(warp_idx < 2, 0, 1)
+                    p_peer_half: T.int32 = 1 - p_half
+                    Tx.wg.copy_async(
+                        p_frag[:, :], p_tmem_win.chunk((None, 2))[:, p_half]
+                    )
+                    Tx.wg.copy_async(
+                        p_peer_frag[:, :], p_tmem_win.chunk((None, 2))[:, p_peer_half]
+                    )
                     T.ptx.tcgen05.wait.ld()
                     T.ptx.tcgen05.fence.before_thread_sync()
 
