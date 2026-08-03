@@ -4149,31 +4149,35 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     "int32",
                 )
                 ring_block_idx = pool_block_idx % num_ring_blocks
-                if block_phase == T.int32(1):
-                    expected_ring_count = kernel_config.block_m * (
-                        pool_block_idx // num_ring_blocks + 1
-                    )
-                    current_ring_count = load_acq_u32(
-                        workspace_l1_full_count.ptr_to([ring_block_idx])
-                    )
-                    while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                # Only the lane that issues the TMA needs to poll.  Rendezvous
+                # before issue so final workspace cleanup follows that acquire.
+                if T.ptx.elect_sync():
+                    if block_phase == T.int32(1):
+                        expected_ring_count = kernel_config.block_m * (
+                            pool_block_idx // num_ring_blocks + 1
+                        )
                         current_ring_count = load_acq_u32(
                             workspace_l1_full_count.ptr_to([ring_block_idx])
                         )
-                else:
-                    expected_ring_count = (
-                        intermediate_hidden
-                        // kernel_config.block_n
-                        * 2
-                        * (pool_block_idx // num_ring_blocks + 1)
-                    )
-                    current_ring_count = load_acq_u32(
-                        workspace_l2_full_count.ptr_to([ring_block_idx])
-                    )
-                    while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                        while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                            current_ring_count = load_acq_u32(
+                                workspace_l1_full_count.ptr_to([ring_block_idx])
+                            )
+                    else:
+                        expected_ring_count = (
+                            intermediate_hidden
+                            // kernel_config.block_n
+                            * 2
+                            * (pool_block_idx // num_ring_blocks + 1)
+                        )
                         current_ring_count = load_acq_u32(
                             workspace_l2_full_count.ptr_to([ring_block_idx])
                         )
+                        while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                            current_ring_count = load_acq_u32(
+                                workspace_l2_full_count.ptr_to([ring_block_idx])
+                            )
+                T.cuda.warp_sync()
                 # The release/acquire counters publish generic global stores
                 # from dispatch (L1) or the preceding epilogue's scale-factor
                 # writes (L2).  TMA reads through the async proxy, so bridge
