@@ -45,6 +45,10 @@ FlashKDA ports (FlashInfer frozen kernels):
 | ------ | ----- | ---------- |
 | `flashkda_bf16_fused_m128` | bf16 | Recurrent KDA prefill, M128 schedule |
 
+Testing/benching against the `flashinfer_frozen_m128` reference requires
+`FLASHKDA_PR_WORKTREE` pointing at the flashinfer-ai/flashinfer#4262 head
+worktree (which contains the frozen m128 kernel).
+
 ## Performance
 
 Per-workload numbers — our kernel time, every reference impl, and the

@@ -112,9 +112,6 @@ TMA_SLOT_OUT = 640
 
 LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
-# PR head worktree that contains the frozen m128 kernel (flashinfer-ai/flashinfer#4262).
-_FLASHKDA_PR_WORKTREE_DEFAULT = "/home/bohanhou/worktree/recurrent-kda/flashinfer-pr4262"
-
 # ---------------------------------------------------------------------------
 # CUDA device helpers, transcribed in source order from
 # csrc/kda/flashkda_bf16_fused_m128.cu:110-496.
@@ -130,13 +127,6 @@ _FLASHKDA_SRCS = {
     asm volatile(
         "fence.proxy.tensormap::generic.acquire.gpu [%0], 128;\n"
         :: "l"(tmap_ptr) : "memory");
-}
-""",
-    "flashkda_cp_async_cg_16_zfill": r"""// .cu:1280-1281 (cp.async.cg 16B with src-size zero-fill predicate)
-__device__ __forceinline__ void flashkda_cp_async_cg_16_zfill(
-    int dst, const void *src, int src_bytes) {
-    asm volatile("cp.async.cg.shared::cta.global [%0], [%1], 16, %2;"
-        :: "r"(dst), "l"(src), "r"(src_bytes));
 }
 """,
     "flashkda_tanh_approx": r"""// tanh.approx.f32 (sigmoid via tanh; used throughout the prep role)
@@ -235,18 +225,6 @@ def _mma_final_2step(taddr_d, b_lo, taddr_a, enable_d):
                 pred=leader,
             )
         )
-
-
-def _cp_async_cg_16_zfill(dst, src, src_bytes):
-    # .cu:1280-1281 (cp.async.cg 16B with src-size zero-fill predicate)
-    return T.cuda.func_call(
-        "flashkda_cp_async_cg_16_zfill",
-        dst,
-        src,
-        src_bytes,
-        source_code=_FLASHKDA_SRCS["flashkda_cp_async_cg_16_zfill"],
-        return_type="void",
-    )
 
 
 def _ld_global_v4_u32(dst, ptr):
@@ -895,10 +873,23 @@ def _reference_torch(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
 def _load_frozen_recurrent_kda():
     """Import flashinfer.recurrent_kda from the PR head worktree (frozen m128).
 
+    The worktree (flashinfer-ai/flashinfer#4262 head, which contains the frozen
+    m128 kernel) is located via the FLASHKDA_PR_WORKTREE environment variable.
     Handles the case where an installed flashinfer (main, without kda.py) was
     already imported by purging it and re-importing from the worktree.
     """
-    worktree = os.environ.get("FLASHKDA_PR_WORKTREE", _FLASHKDA_PR_WORKTREE_DEFAULT)
+    worktree = os.environ.get("FLASHKDA_PR_WORKTREE")
+    if worktree is None:
+        try:
+            from flashinfer.kda import recurrent_kda
+
+            return recurrent_kda
+        except ImportError as e:
+            raise RuntimeError(
+                "flashinfer.kda is unavailable; set FLASHKDA_PR_WORKTREE to the "
+                "flashinfer-ai/flashinfer#4262 head worktree containing the "
+                "frozen m128 kernel"
+            ) from e
     if worktree not in sys.path:
         sys.path.insert(0, worktree)
     import flashinfer
@@ -1650,19 +1641,13 @@ def _kernel(
                             True,
                             4,
                             ".b16",
-                            smem_raw.ptr_to(
-                                [
-                                    T.cast(out_stage_addr, "uint32")
-                                    - smem
-                                    + T.cast(stsm_offset, "uint32")
-                                ]
-                            ),
+                            smem_raw.ptr_to([T.cast(out_stage_addr, "uint32") - smem + T.cast(stsm_offset, "uint32")]),
                             T.address_of(out_packed[pack_base]),
                             T.address_of(out_packed[pack_base + 1]),
                             T.address_of(out_packed[pack_base + 2]),
                             T.address_of(out_packed[pack_base + 3]),
                             shape="m8n8",
-                        )
+                        )  # fmt: skip
                 _fence_async_shared()  # .cu:1050
                 T.ptx.bar.sync(9, 128)  # .cu:1051
                 if epilogue_local_warp == 0:  # .cu:1052-1057
@@ -1898,13 +1883,13 @@ def _kernel(
                     v_src: T.int64 = (
                         token * T.cast(h, "int64") + T.cast(head_idx_2, "int64")
                     ) * 128 + T.cast(segment * 8, "int64")  # .cu:1279
-                    _cp_async_cg_16_zfill(
-                        smem_v_addr
-                        + T.cast(load_stage, "int32") * 41984
-                        + (row * 128 + segment * 8) * 2,
+                    T.ptx.cp_async(
+                        smem_raw.ptr_to([SMEM_SMEM_V_OFF + T.cast(load_stage, "int32") * 41984 + (row * 128 + segment * 8) * 2]),
                         v.ptr_to([v_src]),
-                        T.if_then_else(token_valid != 0, 16, 0),
-                    )  # .cu:1280-1281
+                        16,
+                        predicate=token_valid,
+                        fill_mode="zero",
+                    )  # .cu:1280-1281  # fmt: skip
                 T.ptx.cp_async.commit_group()  # .cu:1283
                 T.ptx.cp_async.wait_group(0)  # .cu:1284
             T.ptx.bar.sync(8, 32)  # .cu:1286 barrier.sync 8, 32
@@ -1978,14 +1963,9 @@ def _kernel(
                 if prep_local_warp == 0:  # .cu:1349-1357
                     if T.ptx.elect_sync():
                         _mbarrier_arrive_expect_tx(
-                            smem_raw.ptr_to(
-                                [
-                                    (mbar_base + MBAR_GATE_RAW_FULL_OFF + prep_stage * 8)
-                                    - T.cast(smem, "int32")
-                                ]
-                            ),
+                            smem_raw.ptr_to([(mbar_base + MBAR_GATE_RAW_FULL_OFF + prep_stage * 8) - T.cast(smem, "int32")]),
                             8704,
-                        )  # .cu:1351
+                        )  # .cu:1351  # fmt: skip
                         _tma_3d_gmem2smem(
                             smem_raw,
                             T.cast(smem, "int32"),
@@ -2006,14 +1986,9 @@ def _kernel(
                             mbar_base + MBAR_GATE_RAW_FULL_OFF + prep_stage * 8,
                         )  # .cu:1353
                         _mbarrier_arrive_expect_tx(
-                            smem_raw.ptr_to(
-                                [
-                                    (mbar_base + MBAR_QK_RAW_FULL_OFF + prep_stage * 8)
-                                    - T.cast(smem, "int32")
-                                ]
-                            ),
+                            smem_raw.ptr_to([(mbar_base + MBAR_QK_RAW_FULL_OFF + prep_stage * 8) - T.cast(smem, "int32")]),
                             16384,
-                        )  # .cu:1354
+                        )  # .cu:1354  # fmt: skip
                         _tma_4d_gmem2smem(
                             smem_raw,
                             T.cast(smem, "int32"),
@@ -2036,11 +2011,8 @@ def _kernel(
                     beta_raw_pair[0] = _ld_shared_b32(
                         smem_raw,
                         T.cast(smem, "int32"),
-                        smem_beta_raw_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + lane * 16
-                        + head_idx_3 % 8 // 2 * 4,
-                    )  # .cu:1361
+                        smem_beta_raw_addr + T.cast(prep_stage, "int32") * 41984 + lane * 16 + head_idx_3 % 8 // 2 * 4,
+                    )  # .cu:1361  # fmt: skip
                     beta_raw_pair_fp32: T.f32[2]  # .cu:1362
                     for _pair in T.unroll(1):  # .cu:1363-1372
                         beta_raw_pair_fp32[_pair * 2] = T.cuda.uint_as_float(
@@ -2101,11 +2073,13 @@ def _kernel(
                     gate_load_base: T.int64 = (
                         gate_load_token * T.cast(h, "int64") + T.cast(head_idx_3, "int64")
                     ) * 128 + T.cast(gate_load_segment * 8, "int64")  # .cu:1408
-                    _cp_async_cg_16_zfill(
-                        smem_g_raw_addr + T.cast(prep_stage, "int32") * 41984 + gate_load_item * 16,
+                    T.ptx.cp_async(
+                        smem_raw.ptr_to([SMEM_SMEM_G_RAW_OFF + T.cast(prep_stage, "int32") * 41984 + gate_load_item * 16]),
                         g.ptr_to([gate_load_base]),
-                        T.if_then_else(gate_load_token < eos_4, 16, 0),
-                    )  # .cu:1409-1410
+                        16,
+                        predicate=T.if_then_else(gate_load_token < eos_4, 1, 0),
+                        fill_mode="zero",
+                    )  # .cu:1409-1410  # fmt: skip
             if chunk_is_full_2 == 0:  # .cu:1413-1429
                 T.ptx.cp_async.commit_group()  # .cu:1414
                 T.ptx.cp_async.wait_group(0)  # .cu:1415
@@ -2216,22 +2190,8 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed,
-                        smem_q_raw_prefetch_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
-                            ^ (
-                                (
-                                    segment_1 * 8 // 64 * 4096
-                                    + row_1 * 128
-                                    + segment_1 * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        ),
-                    )  # .cu:1526-1528
+                        smem_q_raw_prefetch_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
+                    )  # .cu:1526-1528  # fmt: skip
                     packed_fp32: T.f32[8]  # .cu:1529
                     for _pair in T.unroll(4):  # .cu:1530-1539
                         packed_fp32[_pair * 2] = T.cuda.uint_as_float(
@@ -2247,22 +2207,8 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_0,
-                        smem_kd_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
-                            ^ (
-                                (
-                                    segment_1 * 8 // 64 * 4096
-                                    + row_1 * 128
-                                    + segment_1 * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        ),
-                    )  # .cu:1545-1547
+                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
+                    )  # .cu:1545-1547  # fmt: skip
                     packed_0_fp32: T.f32[8]  # .cu:1548
                     for _pair in T.unroll(4):  # .cu:1549-1558
                         packed_0_fp32[_pair * 2] = T.cuda.uint_as_float(
@@ -2372,24 +2318,9 @@ def _kernel(
                     _st_shared_b32(
                         smem_raw,
                         T.cast(smem, "int32"),
-                        smem_qd_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
-                            ^ (
-                                (
-                                    segment_1 * 8 // 64 * 4096
-                                    + row_1 * 128
-                                    + segment_1 * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        )
-                        + word * 4,
+                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word * 4,
                         packed_1[word],
-                    )
+                    )  # fmt: skip
                 packed_0_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:1674
                 for _lp in T.unroll(4):  # .cu:1675-1679
                     packed_0_1[_lp] = T.cuda.float22bfloat162_rn(
@@ -2399,24 +2330,9 @@ def _kernel(
                     _st_shared_b32(
                         smem_raw,
                         T.cast(smem, "int32"),
-                        smem_kd_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
-                            ^ (
-                                (
-                                    segment_1 * 8 // 64 * 4096
-                                    + row_1 * 128
-                                    + segment_1 * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        )
-                        + word_1 * 4,
+                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_1 * 4,
                         packed_0_1[word_1],
-                    )
+                    )  # fmt: skip
                 packed_1_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:1684
                 for _lp in T.unroll(4):  # .cu:1685-1689
                     packed_1_1[_lp] = T.cuda.float22bfloat162_rn(
@@ -2426,24 +2342,9 @@ def _kernel(
                     _st_shared_b32(
                         smem_raw,
                         T.cast(smem, "int32"),
-                        smem_ki_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
-                            ^ (
-                                (
-                                    segment_1 * 8 // 64 * 4096
-                                    + row_1 * 128
-                                    + segment_1 * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        )
-                        + word_2 * 4,
+                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_2 * 4,
                         packed_1_1[word_2],
-                    )
+                    )  # fmt: skip
             if prep_instance == 0:  # .cu:1695-1707
                 T.ptx.bar.sync(11, 128)
             elif prep_instance == 1:
@@ -2466,55 +2367,22 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_kd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    lane // 16 // 8 * 256
-                                    + (pair_row_base + lane % 16) * 8
-                                    + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4))
-                                    // 16
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    lane % 16 // 8 // 8 * 256
-                                    + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
-                                    + (
-                                        lane % 16 // 8 % 8 * 16
-                                        ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)
-                                    )
-                                    // 16
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_zero(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_zero_off4(acc, a_frag, b_frag)
                 # .cu:1728-1741 chain step 1
@@ -2522,74 +2390,22 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_kd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        lane // 16 // 8 * 256
-                                        + (pair_row_base + lane % 16) * 8
-                                        + (
-                                            lane // 16 % 8 * 16
-                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                        )
-                                        // 16
-                                    )
-                                    ^ 2
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            lane % 16 // 8 // 8 * 256
-                                            + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
-                                            + (
-                                                lane % 16 // 8 % 8 * 16
-                                                ^ (
-                                                    (
-                                                        pair_col_base + 8 * (lane // 16) + lane % 8
-                                                        & 7
-                                                    )
-                                                    << 4
-                                                )
-                                            )
-                                            // 16
-                                        )
-                                        + 256
-                                        ^ 2
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 # .cu:1742-1755 chain step 2
@@ -2597,82 +2413,22 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_kd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        lane // 16 // 8 * 256
-                                        + (pair_row_base + lane % 16) * 8
-                                        + (
-                                            lane // 16 % 8 * 16
-                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                        )
-                                        // 16
-                                    )
-                                    ^ 2
-                                    ^ 6
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                lane % 16 // 8 // 8 * 256
-                                                + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
-                                                + (
-                                                    lane % 16 // 8 % 8 * 16
-                                                    ^ (
-                                                        (
-                                                            pair_col_base
-                                                            + 8 * (lane // 16)
-                                                            + lane % 8
-                                                            & 7
-                                                        )
-                                                        << 4
-                                                    )
-                                                )
-                                                // 16
-                                            )
-                                            + 256
-                                            ^ 2
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 6
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 # .cu:1756-1769 chain step 3
@@ -2680,89 +2436,22 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_kd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        lane // 16 // 8 * 256
-                                        + (pair_row_base + lane % 16) * 8
-                                        + (
-                                            lane // 16 % 8 * 16
-                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                        )
-                                        // 16
-                                    )
-                                    ^ 2
-                                    ^ 6
-                                    ^ 2
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    lane % 16 // 8 // 8 * 256
-                                                    + (pair_col_base + 8 * (lane // 16) + lane % 8)
-                                                    * 8
-                                                    + (
-                                                        lane % 16 // 8 % 8 * 16
-                                                        ^ (
-                                                            (
-                                                                pair_col_base
-                                                                + 8 * (lane // 16)
-                                                                + lane % 8
-                                                                & 7
-                                                            )
-                                                            << 4
-                                                        )
-                                                    )
-                                                    // 16
-                                                )
-                                                + 256
-                                                ^ 2
-                                            )
-                                            - 256
-                                            + 256
-                                            ^ 6
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 2
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 # .cu:1770-1783 chain step 4
@@ -2770,103 +2459,22 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_kd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            lane // 16 // 8 * 256
-                                            + (pair_row_base + lane % 16) * 8
-                                            + (
-                                                lane // 16 % 8 * 16
-                                                ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                            )
-                                            // 16
-                                        )
-                                        ^ 2
-                                        ^ 6
-                                        ^ 2
-                                        ^ 6
-                                    )
-                                    + 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        lane % 16 // 8 // 8 * 256
-                                                        + (
-                                                            pair_col_base
-                                                            + 8 * (lane // 16)
-                                                            + lane % 8
-                                                        )
-                                                        * 8
-                                                        + (
-                                                            lane % 16 // 8 % 8 * 16
-                                                            ^ (
-                                                                (
-                                                                    pair_col_base
-                                                                    + 8 * (lane // 16)
-                                                                    + lane % 8
-                                                                    & 7
-                                                                )
-                                                                << 4
-                                                            )
-                                                        )
-                                                        // 16
-                                                    )
-                                                    + 256
-                                                    ^ 2
-                                                )
-                                                - 256
-                                                + 256
-                                                ^ 6
-                                            )
-                                            - 256
-                                            + 256
-                                            ^ 2
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 6
-                                    )
-                                    + 256
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 # .cu:1784-1797 chain step 5
@@ -2874,111 +2482,22 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_kd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                lane // 16 // 8 * 256
-                                                + (pair_row_base + lane % 16) * 8
-                                                + (
-                                                    lane // 16 % 8 * 16
-                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                                )
-                                                // 16
-                                            )
-                                            ^ 2
-                                            ^ 6
-                                            ^ 2
-                                            ^ 6
-                                        )
-                                        + 256
-                                    )
-                                    ^ 2
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        (
-                                                            lane % 16 // 8 // 8 * 256
-                                                            + (
-                                                                pair_col_base
-                                                                + 8 * (lane // 16)
-                                                                + lane % 8
-                                                            )
-                                                            * 8
-                                                            + (
-                                                                lane % 16 // 8 % 8 * 16
-                                                                ^ (
-                                                                    (
-                                                                        pair_col_base
-                                                                        + 8 * (lane // 16)
-                                                                        + lane % 8
-                                                                        & 7
-                                                                    )
-                                                                    << 4
-                                                                )
-                                                            )
-                                                            // 16
-                                                        )
-                                                        + 256
-                                                        ^ 2
-                                                    )
-                                                    - 256
-                                                    + 256
-                                                    ^ 6
-                                                )
-                                                - 256
-                                                + 256
-                                                ^ 2
-                                            )
-                                            - 256
-                                            + 256
-                                            ^ 6
-                                        )
-                                        + 256
-                                        - 256
-                                        + 256
-                                        ^ 2
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 # .cu:1798-1811 chain step 6
@@ -2986,117 +2505,22 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_kd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                lane // 16 // 8 * 256
-                                                + (pair_row_base + lane % 16) * 8
-                                                + (
-                                                    lane // 16 % 8 * 16
-                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                                )
-                                                // 16
-                                            )
-                                            ^ 2
-                                            ^ 6
-                                            ^ 2
-                                            ^ 6
-                                        )
-                                        + 256
-                                    )
-                                    ^ 2
-                                    ^ 6
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        (
-                                                            (
-                                                                lane % 16 // 8 // 8 * 256
-                                                                + (
-                                                                    pair_col_base
-                                                                    + 8 * (lane // 16)
-                                                                    + lane % 8
-                                                                )
-                                                                * 8
-                                                                + (
-                                                                    lane % 16 // 8 % 8 * 16
-                                                                    ^ (
-                                                                        (
-                                                                            pair_col_base
-                                                                            + 8 * (lane // 16)
-                                                                            + lane % 8
-                                                                            & 7
-                                                                        )
-                                                                        << 4
-                                                                    )
-                                                                )
-                                                                // 16
-                                                            )
-                                                            + 256
-                                                            ^ 2
-                                                        )
-                                                        - 256
-                                                        + 256
-                                                        ^ 6
-                                                    )
-                                                    - 256
-                                                    + 256
-                                                    ^ 2
-                                                )
-                                                - 256
-                                                + 256
-                                                ^ 6
-                                            )
-                                            + 256
-                                            - 256
-                                            + 256
-                                            ^ 2
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 6
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256 + 256 ^ 6) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 # .cu:1812-1825 chain step 7
@@ -3104,123 +2528,22 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_kd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                lane // 16 // 8 * 256
-                                                + (pair_row_base + lane % 16) * 8
-                                                + (
-                                                    lane // 16 % 8 * 16
-                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                                )
-                                                // 16
-                                            )
-                                            ^ 2
-                                            ^ 6
-                                            ^ 2
-                                            ^ 6
-                                        )
-                                        + 256
-                                    )
-                                    ^ 2
-                                    ^ 6
-                                    ^ 2
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6 ^ 2) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        (
-                                                            (
-                                                                (
-                                                                    lane % 16 // 8 // 8 * 256
-                                                                    + (
-                                                                        pair_col_base
-                                                                        + 8 * (lane // 16)
-                                                                        + lane % 8
-                                                                    )
-                                                                    * 8
-                                                                    + (
-                                                                        lane % 16 // 8 % 8 * 16
-                                                                        ^ (
-                                                                            (
-                                                                                pair_col_base
-                                                                                + 8 * (lane // 16)
-                                                                                + lane % 8
-                                                                                & 7
-                                                                            )
-                                                                            << 4
-                                                                        )
-                                                                    )
-                                                                    // 16
-                                                                )
-                                                                + 256
-                                                                ^ 2
-                                                            )
-                                                            - 256
-                                                            + 256
-                                                            ^ 6
-                                                        )
-                                                        - 256
-                                                        + 256
-                                                        ^ 2
-                                                    )
-                                                    - 256
-                                                    + 256
-                                                    ^ 6
-                                                )
-                                                + 256
-                                                - 256
-                                                + 256
-                                                ^ 2
-                                            )
-                                            - 256
-                                            + 256
-                                            ^ 6
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 2
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 row0: T.int32 = pair_row_base + lane // 4  # .cu:1826
@@ -3278,754 +2601,176 @@ def _kernel(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    lane // 16 // 8 * 256
-                                    + (pair_row_base + lane % 16) * 8
-                                    + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4))
-                                    // 16
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    lane % 16 // 8 // 8 * 256
-                                    + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
-                                    + (
-                                        lane % 16 // 8 % 8 * 16
-                                        ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)
-                                    )
-                                    // 16
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_zero(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_zero_off4(acc, a_frag, b_frag)
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        lane // 16 // 8 * 256
-                                        + (pair_row_base + lane % 16) * 8
-                                        + (
-                                            lane // 16 % 8 * 16
-                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                        )
-                                        // 16
-                                    )
-                                    ^ 2
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            lane % 16 // 8 // 8 * 256
-                                            + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
-                                            + (
-                                                lane % 16 // 8 % 8 * 16
-                                                ^ (
-                                                    (
-                                                        pair_col_base + 8 * (lane // 16) + lane % 8
-                                                        & 7
-                                                    )
-                                                    << 4
-                                                )
-                                            )
-                                            // 16
-                                        )
-                                        + 256
-                                        ^ 2
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        lane // 16 // 8 * 256
-                                        + (pair_row_base + lane % 16) * 8
-                                        + (
-                                            lane // 16 % 8 * 16
-                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                        )
-                                        // 16
-                                    )
-                                    ^ 2
-                                    ^ 6
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                lane % 16 // 8 // 8 * 256
-                                                + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
-                                                + (
-                                                    lane % 16 // 8 % 8 * 16
-                                                    ^ (
-                                                        (
-                                                            pair_col_base
-                                                            + 8 * (lane // 16)
-                                                            + lane % 8
-                                                            & 7
-                                                        )
-                                                        << 4
-                                                    )
-                                                )
-                                                // 16
-                                            )
-                                            + 256
-                                            ^ 2
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 6
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        lane // 16 // 8 * 256
-                                        + (pair_row_base + lane % 16) * 8
-                                        + (
-                                            lane // 16 % 8 * 16
-                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                        )
-                                        // 16
-                                    )
-                                    ^ 2
-                                    ^ 6
-                                    ^ 2
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    lane % 16 // 8 // 8 * 256
-                                                    + (pair_col_base + 8 * (lane // 16) + lane % 8)
-                                                    * 8
-                                                    + (
-                                                        lane % 16 // 8 % 8 * 16
-                                                        ^ (
-                                                            (
-                                                                pair_col_base
-                                                                + 8 * (lane // 16)
-                                                                + lane % 8
-                                                                & 7
-                                                            )
-                                                            << 4
-                                                        )
-                                                    )
-                                                    // 16
-                                                )
-                                                + 256
-                                                ^ 2
-                                            )
-                                            - 256
-                                            + 256
-                                            ^ 6
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 2
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            lane // 16 // 8 * 256
-                                            + (pair_row_base + lane % 16) * 8
-                                            + (
-                                                lane // 16 % 8 * 16
-                                                ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                            )
-                                            // 16
-                                        )
-                                        ^ 2
-                                        ^ 6
-                                        ^ 2
-                                        ^ 6
-                                    )
-                                    + 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        lane % 16 // 8 // 8 * 256
-                                                        + (
-                                                            pair_col_base
-                                                            + 8 * (lane // 16)
-                                                            + lane % 8
-                                                        )
-                                                        * 8
-                                                        + (
-                                                            lane % 16 // 8 % 8 * 16
-                                                            ^ (
-                                                                (
-                                                                    pair_col_base
-                                                                    + 8 * (lane // 16)
-                                                                    + lane % 8
-                                                                    & 7
-                                                                )
-                                                                << 4
-                                                            )
-                                                        )
-                                                        // 16
-                                                    )
-                                                    + 256
-                                                    ^ 2
-                                                )
-                                                - 256
-                                                + 256
-                                                ^ 6
-                                            )
-                                            - 256
-                                            + 256
-                                            ^ 2
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 6
-                                    )
-                                    + 256
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                lane // 16 // 8 * 256
-                                                + (pair_row_base + lane % 16) * 8
-                                                + (
-                                                    lane // 16 % 8 * 16
-                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                                )
-                                                // 16
-                                            )
-                                            ^ 2
-                                            ^ 6
-                                            ^ 2
-                                            ^ 6
-                                        )
-                                        + 256
-                                    )
-                                    ^ 2
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        (
-                                                            lane % 16 // 8 // 8 * 256
-                                                            + (
-                                                                pair_col_base
-                                                                + 8 * (lane // 16)
-                                                                + lane % 8
-                                                            )
-                                                            * 8
-                                                            + (
-                                                                lane % 16 // 8 % 8 * 16
-                                                                ^ (
-                                                                    (
-                                                                        pair_col_base
-                                                                        + 8 * (lane // 16)
-                                                                        + lane % 8
-                                                                        & 7
-                                                                    )
-                                                                    << 4
-                                                                )
-                                                            )
-                                                            // 16
-                                                        )
-                                                        + 256
-                                                        ^ 2
-                                                    )
-                                                    - 256
-                                                    + 256
-                                                    ^ 6
-                                                )
-                                                - 256
-                                                + 256
-                                                ^ 2
-                                            )
-                                            - 256
-                                            + 256
-                                            ^ 6
-                                        )
-                                        + 256
-                                        - 256
-                                        + 256
-                                        ^ 2
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                lane // 16 // 8 * 256
-                                                + (pair_row_base + lane % 16) * 8
-                                                + (
-                                                    lane // 16 % 8 * 16
-                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                                )
-                                                // 16
-                                            )
-                                            ^ 2
-                                            ^ 6
-                                            ^ 2
-                                            ^ 6
-                                        )
-                                        + 256
-                                    )
-                                    ^ 2
-                                    ^ 6
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        (
-                                                            (
-                                                                lane % 16 // 8 // 8 * 256
-                                                                + (
-                                                                    pair_col_base
-                                                                    + 8 * (lane // 16)
-                                                                    + lane % 8
-                                                                )
-                                                                * 8
-                                                                + (
-                                                                    lane % 16 // 8 % 8 * 16
-                                                                    ^ (
-                                                                        (
-                                                                            pair_col_base
-                                                                            + 8 * (lane // 16)
-                                                                            + lane % 8
-                                                                            & 7
-                                                                        )
-                                                                        << 4
-                                                                    )
-                                                                )
-                                                                // 16
-                                                            )
-                                                            + 256
-                                                            ^ 2
-                                                        )
-                                                        - 256
-                                                        + 256
-                                                        ^ 6
-                                                    )
-                                                    - 256
-                                                    + 256
-                                                    ^ 2
-                                                )
-                                                - 256
-                                                + 256
-                                                ^ 6
-                                            )
-                                            + 256
-                                            - 256
-                                            + 256
-                                            ^ 2
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 6
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256 + 256 ^ 6) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                lane // 16 // 8 * 256
-                                                + (pair_row_base + lane % 16) * 8
-                                                + (
-                                                    lane // 16 % 8 * 16
-                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
-                                                )
-                                                // 16
-                                            )
-                                            ^ 2
-                                            ^ 6
-                                            ^ 2
-                                            ^ 6
-                                        )
-                                        + 256
-                                    )
-                                    ^ 2
-                                    ^ 6
-                                    ^ 2
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6 ^ 2) * 16) - T.cast(smem, "int32")]),
                     T.address_of(a_frag[0]),
                     T.address_of(a_frag[1]),
                     T.address_of(a_frag[2]),
                     T.address_of(a_frag[3]),
-                )
+                )  # fmt: skip
                 T.ptx.ldmatrix(
                     False,
                     4,
                     ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_ki_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        (
-                                                            (
-                                                                (
-                                                                    lane % 16 // 8 // 8 * 256
-                                                                    + (
-                                                                        pair_col_base
-                                                                        + 8 * (lane // 16)
-                                                                        + lane % 8
-                                                                    )
-                                                                    * 8
-                                                                    + (
-                                                                        lane % 16 // 8 % 8 * 16
-                                                                        ^ (
-                                                                            (
-                                                                                pair_col_base
-                                                                                + 8 * (lane // 16)
-                                                                                + lane % 8
-                                                                                & 7
-                                                                            )
-                                                                            << 4
-                                                                        )
-                                                                    )
-                                                                    // 16
-                                                                )
-                                                                + 256
-                                                                ^ 2
-                                                            )
-                                                            - 256
-                                                            + 256
-                                                            ^ 6
-                                                        )
-                                                        - 256
-                                                        + 256
-                                                        ^ 2
-                                                    )
-                                                    - 256
-                                                    + 256
-                                                    ^ 6
-                                                )
-                                                + 256
-                                                - 256
-                                                + 256
-                                                ^ 2
-                                            )
-                                            - 256
-                                            + 256
-                                            ^ 6
-                                        )
-                                        - 256
-                                        + 256
-                                        ^ 2
-                                    )
-                                    - 256
-                                )
-                                * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
+                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
                     T.address_of(b_frag[0]),
                     T.address_of(b_frag[1]),
                     T.address_of(b_frag[2]),
                     T.address_of(b_frag[3]),
-                )
+                )  # fmt: skip
                 _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
                 _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
             else:  # .cu:1991-2000
@@ -4115,24 +2860,8 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_2,
-                        smem_qd_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            restore_segment * 8 // 64 * 4096
-                            + restore_row * 128
-                            + restore_segment * 8 % 64 * 2
-                            ^ (
-                                (
-                                    restore_segment * 8 // 64 * 4096
-                                    + restore_row * 128
-                                    + restore_segment * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        ),
-                    )  # .cu:2087-2089
+                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)),
+                    )  # .cu:2087-2089  # fmt: skip
                     packed_fp32_1: T.f32[8]  # .cu:2090
                     for _pair in T.unroll(4):  # .cu:2091-2100
                         packed_fp32_1[_pair * 2] = T.cuda.uint_as_float(
@@ -4148,24 +2877,8 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_0_2,
-                        smem_kd_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            restore_segment * 8 // 64 * 4096
-                            + restore_row * 128
-                            + restore_segment * 8 % 64 * 2
-                            ^ (
-                                (
-                                    restore_segment * 8 // 64 * 4096
-                                    + restore_row * 128
-                                    + restore_segment * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        ),
-                    )  # .cu:2106-2108
+                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)),
+                    )  # .cu:2106-2108  # fmt: skip
                     packed_0_fp32_1: T.f32[8]  # .cu:2109
                     for _pair in T.unroll(4):  # .cu:2110-2119
                         packed_0_fp32_1[_pair * 2] = T.cuda.uint_as_float(
@@ -4181,24 +2894,8 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_1_2,
-                        smem_ki_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            restore_segment * 8 // 64 * 4096
-                            + restore_row * 128
-                            + restore_segment * 8 % 64 * 2
-                            ^ (
-                                (
-                                    restore_segment * 8 // 64 * 4096
-                                    + restore_row * 128
-                                    + restore_segment * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        ),
-                    )  # .cu:2125-2127
+                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)),
+                    )  # .cu:2125-2127  # fmt: skip
                     packed_1_fp32: T.f32[8]  # .cu:2128
                     for _pair in T.unroll(4):  # .cu:2129-2138
                         packed_1_fp32[_pair * 2] = T.cuda.uint_as_float(
@@ -4241,26 +2938,9 @@ def _kernel(
                         _st_shared_b32(
                             smem_raw,
                             T.cast(smem, "int32"),
-                            smem_qd_addr
-                            + T.cast(prep_stage, "int32") * 41984
-                            + (
-                                restore_segment * 8 // 64 * 4096
-                                + restore_row * 128
-                                + restore_segment * 8 % 64 * 2
-                                ^ (
-                                    (
-                                        restore_segment * 8 // 64 * 4096
-                                        + restore_row * 128
-                                        + restore_segment * 8 % 64 * 2
-                                        >> 7
-                                        & 7
-                                    )
-                                    << 4
-                                )
-                            )
-                            + word_3 * 4,
+                            smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)) + word_3 * 4,
                             packed_2_1[word_3],
-                        )
+                        )  # fmt: skip
                     packed_3 = T.alloc_local((4,), "uint32", align=4)  # .cu:2166
                     for _lp in T.unroll(4):  # .cu:2167-2171
                         packed_3[_lp] = T.cuda.float22bfloat162_rn(
@@ -4270,26 +2950,9 @@ def _kernel(
                         _st_shared_b32(
                             smem_raw,
                             T.cast(smem, "int32"),
-                            smem_kd_addr
-                            + T.cast(prep_stage, "int32") * 41984
-                            + (
-                                restore_segment * 8 // 64 * 4096
-                                + restore_row * 128
-                                + restore_segment * 8 % 64 * 2
-                                ^ (
-                                    (
-                                        restore_segment * 8 // 64 * 4096
-                                        + restore_row * 128
-                                        + restore_segment * 8 % 64 * 2
-                                        >> 7
-                                        & 7
-                                    )
-                                    << 4
-                                )
-                            )
-                            + word_4 * 4,
+                            smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)) + word_4 * 4,
                             packed_3[word_4],
-                        )
+                        )  # fmt: skip
                     packed_4 = T.alloc_local((4,), "uint32", align=4)  # .cu:2176
                     for _lp in T.unroll(4):  # .cu:2177-2181
                         packed_4[_lp] = T.cuda.float22bfloat162_rn(
@@ -4299,26 +2962,9 @@ def _kernel(
                         _st_shared_b32(
                             smem_raw,
                             T.cast(smem, "int32"),
-                            smem_kr_trans_addr
-                            + T.cast(prep_stage, "int32") * 41984
-                            + (
-                                restore_segment * 8 // 64 * 4096
-                                + restore_row * 128
-                                + restore_segment * 8 % 64 * 2
-                                ^ (
-                                    (
-                                        restore_segment * 8 // 64 * 4096
-                                        + restore_row * 128
-                                        + restore_segment * 8 % 64 * 2
-                                        >> 7
-                                        & 7
-                                    )
-                                    << 4
-                                )
-                            )
-                            + word_5 * 4,
+                            smem_kr_trans_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)) + word_5 * 4,
                             packed_4[word_5],
-                        )
+                        )  # fmt: skip
             if prep_local_warp == 0:  # .cu:2188-2250
                 inverse_row: T.int32 = lane  # .cu:2189
                 diag_block: T.int32 = inverse_row // 8  # .cu:2190
@@ -4505,12 +3151,9 @@ def _kernel(
                     _st_shared_b32(
                         smem_raw,
                         T.cast(smem, "int32"),
-                        smem_inv_work_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + swizzled_off_2
-                        + word_6 * 4,
+                        smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_2 + word_6 * 4,
                         packed_0_3[word_6],
-                    )
+                    )  # fmt: skip
             if prep_local_warp < 2:  # .cu:2251-2256
                 if T.ptx.elect_sync():
                     _mbarrier_arrive(
@@ -4813,24 +3456,8 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_6,
-                        smem_qd_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            restore_segment_1 * 8 // 64 * 4096
-                            + restore_row_1 * 128
-                            + restore_segment_1 * 8 % 64 * 2
-                            ^ (
-                                (
-                                    restore_segment_1 * 8 // 64 * 4096
-                                    + restore_row_1 * 128
-                                    + restore_segment_1 * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        ),
-                    )  # .cu:2422-2424
+                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
+                    )  # .cu:2422-2424  # fmt: skip
                     packed_fp32_3: T.f32[8]  # .cu:2425
                     for _pair in T.unroll(4):  # .cu:2426-2435
                         packed_fp32_3[_pair * 2] = T.cuda.uint_as_float(
@@ -4846,24 +3473,8 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_0_4,
-                        smem_kd_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            restore_segment_1 * 8 // 64 * 4096
-                            + restore_row_1 * 128
-                            + restore_segment_1 * 8 % 64 * 2
-                            ^ (
-                                (
-                                    restore_segment_1 * 8 // 64 * 4096
-                                    + restore_row_1 * 128
-                                    + restore_segment_1 * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        ),
-                    )  # .cu:2441-2443
+                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
+                    )  # .cu:2441-2443  # fmt: skip
                     packed_0_fp32_2: T.f32[8]  # .cu:2444
                     for _pair in T.unroll(4):  # .cu:2445-2454
                         packed_0_fp32_2[_pair * 2] = T.cuda.uint_as_float(
@@ -4879,24 +3490,8 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_1_3,
-                        smem_ki_addr
-                        + T.cast(prep_stage, "int32") * 41984
-                        + (
-                            restore_segment_1 * 8 // 64 * 4096
-                            + restore_row_1 * 128
-                            + restore_segment_1 * 8 % 64 * 2
-                            ^ (
-                                (
-                                    restore_segment_1 * 8 // 64 * 4096
-                                    + restore_row_1 * 128
-                                    + restore_segment_1 * 8 % 64 * 2
-                                    >> 7
-                                    & 7
-                                )
-                                << 4
-                            )
-                        ),
-                    )  # .cu:2460-2462
+                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
+                    )  # .cu:2460-2462  # fmt: skip
                     packed_1_fp32_1: T.f32[8]  # .cu:2463
                     for _pair in T.unroll(4):  # .cu:2464-2473
                         packed_1_fp32_1[_pair * 2] = T.cuda.uint_as_float(
@@ -4939,26 +3534,9 @@ def _kernel(
                         _st_shared_b32(
                             smem_raw,
                             T.cast(smem, "int32"),
-                            smem_qd_addr
-                            + T.cast(prep_stage, "int32") * 41984
-                            + (
-                                restore_segment_1 * 8 // 64 * 4096
-                                + restore_row_1 * 128
-                                + restore_segment_1 * 8 % 64 * 2
-                                ^ (
-                                    (
-                                        restore_segment_1 * 8 // 64 * 4096
-                                        + restore_row_1 * 128
-                                        + restore_segment_1 * 8 % 64 * 2
-                                        >> 7
-                                        & 7
-                                    )
-                                    << 4
-                                )
-                            )
-                            + word_7 * 4,
+                            smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_7 * 4,
                             packed_2_2[word_7],
-                        )
+                        )  # fmt: skip
                     packed_3_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:2501
                     for _lp in T.unroll(4):  # .cu:2502-2506
                         packed_3_1[_lp] = T.cuda.float22bfloat162_rn(
@@ -4968,26 +3546,9 @@ def _kernel(
                         _st_shared_b32(
                             smem_raw,
                             T.cast(smem, "int32"),
-                            smem_kd_addr
-                            + T.cast(prep_stage, "int32") * 41984
-                            + (
-                                restore_segment_1 * 8 // 64 * 4096
-                                + restore_row_1 * 128
-                                + restore_segment_1 * 8 % 64 * 2
-                                ^ (
-                                    (
-                                        restore_segment_1 * 8 // 64 * 4096
-                                        + restore_row_1 * 128
-                                        + restore_segment_1 * 8 % 64 * 2
-                                        >> 7
-                                        & 7
-                                    )
-                                    << 4
-                                )
-                            )
-                            + word_8 * 4,
+                            smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_8 * 4,
                             packed_3_1[word_8],
-                        )
+                        )  # fmt: skip
                     packed_4_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:2511
                     for _lp in T.unroll(4):  # .cu:2512-2516
                         packed_4_1[_lp] = T.cuda.float22bfloat162_rn(
@@ -4997,26 +3558,9 @@ def _kernel(
                         _st_shared_b32(
                             smem_raw,
                             T.cast(smem, "int32"),
-                            smem_kr_trans_addr
-                            + T.cast(prep_stage, "int32") * 41984
-                            + (
-                                restore_segment_1 * 8 // 64 * 4096
-                                + restore_row_1 * 128
-                                + restore_segment_1 * 8 % 64 * 2
-                                ^ (
-                                    (
-                                        restore_segment_1 * 8 // 64 * 4096
-                                        + restore_row_1 * 128
-                                        + restore_segment_1 * 8 % 64 * 2
-                                        >> 7
-                                        & 7
-                                    )
-                                    << 4
-                                )
-                            )
-                            + word_9 * 4,
+                            smem_kr_trans_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_9 * 4,
                             packed_4_1[word_9],
-                        )
+                        )  # fmt: skip
             _fence_async_shared()  # .cu:2523
             if prep_instance == 0:  # .cu:2524-2536
                 T.ptx.bar.sync(11, 128)
