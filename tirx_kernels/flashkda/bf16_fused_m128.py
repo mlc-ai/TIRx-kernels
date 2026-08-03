@@ -2205,8 +2205,6 @@ def _kernel(
                 ) * 128 + T.cast(segment_1 * 8, "int64")  # .cu:1505
                 # q/k smem swizzle byte offset (spelled inline at each .cu use site:
                 # 1528, 1547, 1672, 1682, 1692)
-                _qk_swz: T.int32 = segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
-                _qk_swz = _qk_swz ^ ((_qk_swz >> 7 & 7) << 4)
                 q_raw_vec: T.f32[8]  # .cu:1506
                 k_raw_vec: T.f32[8]  # .cu:1507
                 for _zi in T.unroll(8):  # .cu:1508-1523
@@ -2218,7 +2216,21 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed,
-                        smem_q_raw_prefetch_addr + T.cast(prep_stage, "int32") * 41984 + _qk_swz,
+                        smem_q_raw_prefetch_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
+                            ^ (
+                                (
+                                    segment_1 * 8 // 64 * 4096
+                                    + row_1 * 128
+                                    + segment_1 * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        ),
                     )  # .cu:1526-1528
                     packed_fp32: T.f32[8]  # .cu:1529
                     for _pair in T.unroll(4):  # .cu:1530-1539
@@ -2235,7 +2247,21 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_0,
-                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + _qk_swz,
+                        smem_kd_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
+                            ^ (
+                                (
+                                    segment_1 * 8 // 64 * 4096
+                                    + row_1 * 128
+                                    + segment_1 * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        ),
                     )  # .cu:1545-1547
                     packed_0_fp32: T.f32[8]  # .cu:1548
                     for _pair in T.unroll(4):  # .cu:1549-1558
@@ -2346,7 +2372,22 @@ def _kernel(
                     _st_shared_b32(
                         smem_raw,
                         T.cast(smem, "int32"),
-                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + _qk_swz + word * 4,
+                        smem_qd_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
+                            ^ (
+                                (
+                                    segment_1 * 8 // 64 * 4096
+                                    + row_1 * 128
+                                    + segment_1 * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        )
+                        + word * 4,
                         packed_1[word],
                     )
                 packed_0_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:1674
@@ -2358,7 +2399,22 @@ def _kernel(
                     _st_shared_b32(
                         smem_raw,
                         T.cast(smem, "int32"),
-                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + _qk_swz + word_1 * 4,
+                        smem_kd_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
+                            ^ (
+                                (
+                                    segment_1 * 8 // 64 * 4096
+                                    + row_1 * 128
+                                    + segment_1 * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        )
+                        + word_1 * 4,
                         packed_0_1[word_1],
                     )
                 packed_1_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:1684
@@ -2370,7 +2426,22 @@ def _kernel(
                     _st_shared_b32(
                         smem_raw,
                         T.cast(smem, "int32"),
-                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + _qk_swz + word_2 * 4,
+                        smem_ki_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
+                            ^ (
+                                (
+                                    segment_1 * 8 // 64 * 4096
+                                    + row_1 * 128
+                                    + segment_1 * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        )
+                        + word_2 * 4,
                         packed_1_1[word_2],
                     )
             if prep_instance == 0:  # .cu:1695-1707
@@ -2390,29 +2461,6 @@ def _kernel(
             b_frag = T.alloc_local((4,), "uint32", align=4)  # .cu:1711
             acc = T.alloc_local((8,), "float32", align=4)  # .cu:1712
             if pair_row_base >= pair_col_base:  # .cu:1713-1990
-                _kd_a0: T.int32 = (
-                    lane // 16 // 8 * 256
-                    + (pair_row_base + lane % 16) * 8
-                    + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16
-                )
-                _ki_b0: T.int32 = (
-                    lane % 16 // 8 // 8 * 256
-                    + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
-                    + (
-                        lane % 16 // 8 % 8 * 16
-                        ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)
-                    )
-                    // 16
-                )
-                # ki b-side chain steps (.cu:1720-1818); C precedence is
-                # additive > xor, so each step is parenthesized explicitly.
-                _kb1 = (_ki_b0 + 256) ^ 2
-                _kb2 = (_kb1 - 256 + 256) ^ 6
-                _kb3 = (_kb2 - 256 + 256) ^ 2
-                _kb4 = (_kb3 - 256 + 256) ^ 6
-                _kb5 = (_kb4 + 256 - 256 + 256) ^ 2
-                _kb6 = (_kb5 - 256 + 256) ^ 6
-                _kb7 = (_kb6 - 256 + 256) ^ 2
                 # .cu:1714-1727 chain step 0 (kd a, ki b, 2x zero-C mma)
                 T.ptx.ldmatrix(
                     False,
@@ -2420,7 +2468,17 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + _kd_a0 * 16)
+                            (
+                                smem_kd_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    lane // 16 // 8 * 256
+                                    + (pair_row_base + lane % 16) * 8
+                                    + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4))
+                                    // 16
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2435,7 +2493,20 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + _ki_b0 * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    lane % 16 // 8 // 8 * 256
+                                    + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
+                                    + (
+                                        lane % 16 // 8 % 8 * 16
+                                        ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)
+                                    )
+                                    // 16
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2453,7 +2524,23 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (_kd_a0 ^ 2) * 16)
+                            (
+                                smem_kd_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        lane // 16 // 8 * 256
+                                        + (pair_row_base + lane % 16) * 8
+                                        + (
+                                            lane // 16 % 8 * 16
+                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                        )
+                                        // 16
+                                    )
+                                    ^ 2
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2468,7 +2555,33 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb1 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            lane % 16 // 8 // 8 * 256
+                                            + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
+                                            + (
+                                                lane % 16 // 8 % 8 * 16
+                                                ^ (
+                                                    (
+                                                        pair_col_base + 8 * (lane // 16) + lane % 8
+                                                        & 7
+                                                    )
+                                                    << 4
+                                                )
+                                            )
+                                            // 16
+                                        )
+                                        + 256
+                                        ^ 2
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2489,7 +2602,20 @@ def _kernel(
                             (
                                 smem_kd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (_kd_a0 ^ 2 ^ 6) * 16
+                                + (
+                                    (
+                                        lane // 16 // 8 * 256
+                                        + (pair_row_base + lane % 16) * 8
+                                        + (
+                                            lane // 16 % 8 * 16
+                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                        )
+                                        // 16
+                                    )
+                                    ^ 2
+                                    ^ 6
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2505,7 +2631,40 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb2 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                lane % 16 // 8 // 8 * 256
+                                                + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
+                                                + (
+                                                    lane % 16 // 8 % 8 * 16
+                                                    ^ (
+                                                        (
+                                                            pair_col_base
+                                                            + 8 * (lane // 16)
+                                                            + lane % 8
+                                                            & 7
+                                                        )
+                                                        << 4
+                                                    )
+                                                )
+                                                // 16
+                                            )
+                                            + 256
+                                            ^ 2
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 6
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2526,7 +2685,21 @@ def _kernel(
                             (
                                 smem_kd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (_kd_a0 ^ 2 ^ 6 ^ 2) * 16
+                                + (
+                                    (
+                                        lane // 16 // 8 * 256
+                                        + (pair_row_base + lane % 16) * 8
+                                        + (
+                                            lane // 16 % 8 * 16
+                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                        )
+                                        // 16
+                                    )
+                                    ^ 2
+                                    ^ 6
+                                    ^ 2
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2542,7 +2715,46 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb3 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    lane % 16 // 8 // 8 * 256
+                                                    + (pair_col_base + 8 * (lane // 16) + lane % 8)
+                                                    * 8
+                                                    + (
+                                                        lane % 16 // 8 % 8 * 16
+                                                        ^ (
+                                                            (
+                                                                pair_col_base
+                                                                + 8 * (lane // 16)
+                                                                + lane % 8
+                                                                & 7
+                                                            )
+                                                            << 4
+                                                        )
+                                                    )
+                                                    // 16
+                                                )
+                                                + 256
+                                                ^ 2
+                                            )
+                                            - 256
+                                            + 256
+                                            ^ 6
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 2
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2563,7 +2775,25 @@ def _kernel(
                             (
                                 smem_kd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + ((_kd_a0 ^ 2 ^ 6 ^ 2 ^ 6) + 256) * 16
+                                + (
+                                    (
+                                        (
+                                            lane // 16 // 8 * 256
+                                            + (pair_row_base + lane % 16) * 8
+                                            + (
+                                                lane // 16 % 8 * 16
+                                                ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                            )
+                                            // 16
+                                        )
+                                        ^ 2
+                                        ^ 6
+                                        ^ 2
+                                        ^ 6
+                                    )
+                                    + 256
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2582,7 +2812,52 @@ def _kernel(
                             (
                                 smem_ki_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (_kb4 + 256 - 256) * 16
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    (
+                                                        lane % 16 // 8 // 8 * 256
+                                                        + (
+                                                            pair_col_base
+                                                            + 8 * (lane // 16)
+                                                            + lane % 8
+                                                        )
+                                                        * 8
+                                                        + (
+                                                            lane % 16 // 8 % 8 * 16
+                                                            ^ (
+                                                                (
+                                                                    pair_col_base
+                                                                    + 8 * (lane // 16)
+                                                                    + lane % 8
+                                                                    & 7
+                                                                )
+                                                                << 4
+                                                            )
+                                                        )
+                                                        // 16
+                                                    )
+                                                    + 256
+                                                    ^ 2
+                                                )
+                                                - 256
+                                                + 256
+                                                ^ 6
+                                            )
+                                            - 256
+                                            + 256
+                                            ^ 2
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 6
+                                    )
+                                    + 256
+                                    - 256
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2604,7 +2879,28 @@ def _kernel(
                             (
                                 smem_kd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (((_kd_a0 ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2) * 16
+                                + (
+                                    (
+                                        (
+                                            (
+                                                lane // 16 // 8 * 256
+                                                + (pair_row_base + lane % 16) * 8
+                                                + (
+                                                    lane // 16 % 8 * 16
+                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                                )
+                                                // 16
+                                            )
+                                            ^ 2
+                                            ^ 6
+                                            ^ 2
+                                            ^ 6
+                                        )
+                                        + 256
+                                    )
+                                    ^ 2
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2620,7 +2916,61 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb5 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    (
+                                                        (
+                                                            lane % 16 // 8 // 8 * 256
+                                                            + (
+                                                                pair_col_base
+                                                                + 8 * (lane // 16)
+                                                                + lane % 8
+                                                            )
+                                                            * 8
+                                                            + (
+                                                                lane % 16 // 8 % 8 * 16
+                                                                ^ (
+                                                                    (
+                                                                        pair_col_base
+                                                                        + 8 * (lane // 16)
+                                                                        + lane % 8
+                                                                        & 7
+                                                                    )
+                                                                    << 4
+                                                                )
+                                                            )
+                                                            // 16
+                                                        )
+                                                        + 256
+                                                        ^ 2
+                                                    )
+                                                    - 256
+                                                    + 256
+                                                    ^ 6
+                                                )
+                                                - 256
+                                                + 256
+                                                ^ 2
+                                            )
+                                            - 256
+                                            + 256
+                                            ^ 6
+                                        )
+                                        + 256
+                                        - 256
+                                        + 256
+                                        ^ 2
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2641,7 +2991,29 @@ def _kernel(
                             (
                                 smem_kd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (((_kd_a0 ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6) * 16
+                                + (
+                                    (
+                                        (
+                                            (
+                                                lane // 16 // 8 * 256
+                                                + (pair_row_base + lane % 16) * 8
+                                                + (
+                                                    lane // 16 % 8 * 16
+                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                                )
+                                                // 16
+                                            )
+                                            ^ 2
+                                            ^ 6
+                                            ^ 2
+                                            ^ 6
+                                        )
+                                        + 256
+                                    )
+                                    ^ 2
+                                    ^ 6
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2657,7 +3029,66 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb6 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    (
+                                                        (
+                                                            (
+                                                                lane % 16 // 8 // 8 * 256
+                                                                + (
+                                                                    pair_col_base
+                                                                    + 8 * (lane // 16)
+                                                                    + lane % 8
+                                                                )
+                                                                * 8
+                                                                + (
+                                                                    lane % 16 // 8 % 8 * 16
+                                                                    ^ (
+                                                                        (
+                                                                            pair_col_base
+                                                                            + 8 * (lane // 16)
+                                                                            + lane % 8
+                                                                            & 7
+                                                                        )
+                                                                        << 4
+                                                                    )
+                                                                )
+                                                                // 16
+                                                            )
+                                                            + 256
+                                                            ^ 2
+                                                        )
+                                                        - 256
+                                                        + 256
+                                                        ^ 6
+                                                    )
+                                                    - 256
+                                                    + 256
+                                                    ^ 2
+                                                )
+                                                - 256
+                                                + 256
+                                                ^ 6
+                                            )
+                                            + 256
+                                            - 256
+                                            + 256
+                                            ^ 2
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 6
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2678,7 +3109,30 @@ def _kernel(
                             (
                                 smem_kd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (((_kd_a0 ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6 ^ 2) * 16
+                                + (
+                                    (
+                                        (
+                                            (
+                                                lane // 16 // 8 * 256
+                                                + (pair_row_base + lane % 16) * 8
+                                                + (
+                                                    lane // 16 % 8 * 16
+                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                                )
+                                                // 16
+                                            )
+                                            ^ 2
+                                            ^ 6
+                                            ^ 2
+                                            ^ 6
+                                        )
+                                        + 256
+                                    )
+                                    ^ 2
+                                    ^ 6
+                                    ^ 2
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2694,7 +3148,71 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb7 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    (
+                                                        (
+                                                            (
+                                                                (
+                                                                    lane % 16 // 8 // 8 * 256
+                                                                    + (
+                                                                        pair_col_base
+                                                                        + 8 * (lane // 16)
+                                                                        + lane % 8
+                                                                    )
+                                                                    * 8
+                                                                    + (
+                                                                        lane % 16 // 8 % 8 * 16
+                                                                        ^ (
+                                                                            (
+                                                                                pair_col_base
+                                                                                + 8 * (lane // 16)
+                                                                                + lane % 8
+                                                                                & 7
+                                                                            )
+                                                                            << 4
+                                                                        )
+                                                                    )
+                                                                    // 16
+                                                                )
+                                                                + 256
+                                                                ^ 2
+                                                            )
+                                                            - 256
+                                                            + 256
+                                                            ^ 6
+                                                        )
+                                                        - 256
+                                                        + 256
+                                                        ^ 2
+                                                    )
+                                                    - 256
+                                                    + 256
+                                                    ^ 6
+                                                )
+                                                + 256
+                                                - 256
+                                                + 256
+                                                ^ 2
+                                            )
+                                            - 256
+                                            + 256
+                                            ^ 6
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 2
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2762,146 +3280,16 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + _kd_a0 * 16)
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
-                    T.address_of(a_frag[0]),
-                    T.address_of(a_frag[1]),
-                    T.address_of(a_frag[2]),
-                    T.address_of(a_frag[3]),
-                )
-                T.ptx.ldmatrix(
-                    False,
-                    4,
-                    ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + _ki_b0 * 16)
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
-                    T.address_of(b_frag[0]),
-                    T.address_of(b_frag[1]),
-                    T.address_of(b_frag[2]),
-                    T.address_of(b_frag[3]),
-                )
-                _mma_m16n8k16_bf16_zero(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_zero_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix(
-                    False,
-                    4,
-                    ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (_kd_a0 ^ 2) * 16)
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
-                    T.address_of(a_frag[0]),
-                    T.address_of(a_frag[1]),
-                    T.address_of(a_frag[2]),
-                    T.address_of(a_frag[3]),
-                )
-                T.ptx.ldmatrix(
-                    False,
-                    4,
-                    ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb1 - 256) * 16)
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
-                    T.address_of(b_frag[0]),
-                    T.address_of(b_frag[1]),
-                    T.address_of(b_frag[2]),
-                    T.address_of(b_frag[3]),
-                )
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix(
-                    False,
-                    4,
-                    ".b16",
-                    smem_raw.ptr_to(
-                        [
                             (
                                 smem_qd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (_kd_a0 ^ 2 ^ 6) * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
-                    T.address_of(a_frag[0]),
-                    T.address_of(a_frag[1]),
-                    T.address_of(a_frag[2]),
-                    T.address_of(a_frag[3]),
-                )
-                T.ptx.ldmatrix(
-                    False,
-                    4,
-                    ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb2 - 256) * 16)
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
-                    T.address_of(b_frag[0]),
-                    T.address_of(b_frag[1]),
-                    T.address_of(b_frag[2]),
-                    T.address_of(b_frag[3]),
-                )
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix(
-                    False,
-                    4,
-                    ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + (_kd_a0 ^ 2 ^ 6 ^ 2) * 16
-                            )
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
-                    T.address_of(a_frag[0]),
-                    T.address_of(a_frag[1]),
-                    T.address_of(a_frag[2]),
-                    T.address_of(a_frag[3]),
-                )
-                T.ptx.ldmatrix(
-                    False,
-                    4,
-                    ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb3 - 256) * 16)
-                            - T.cast(smem, "int32")
-                        ]
-                    ),
-                    T.address_of(b_frag[0]),
-                    T.address_of(b_frag[1]),
-                    T.address_of(b_frag[2]),
-                    T.address_of(b_frag[3]),
-                )
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix(
-                    False,
-                    4,
-                    ".b16",
-                    smem_raw.ptr_to(
-                        [
-                            (
-                                smem_qd_addr
-                                + T.cast(prep_stage, "int32") * 41984
-                                + ((_kd_a0 ^ 2 ^ 6 ^ 2 ^ 6) + 256) * 16
+                                + (
+                                    lane // 16 // 8 * 256
+                                    + (pair_row_base + lane % 16) * 8
+                                    + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4))
+                                    // 16
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2920,7 +3308,90 @@ def _kernel(
                             (
                                 smem_ki_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (_kb4 + 256 - 256) * 16
+                                + (
+                                    lane % 16 // 8 // 8 * 256
+                                    + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
+                                    + (
+                                        lane % 16 // 8 % 8 * 16
+                                        ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)
+                                    )
+                                    // 16
+                                )
+                                * 16
+                            )
+                            - T.cast(smem, "int32")
+                        ]
+                    ),
+                    T.address_of(b_frag[0]),
+                    T.address_of(b_frag[1]),
+                    T.address_of(b_frag[2]),
+                    T.address_of(b_frag[3]),
+                )
+                _mma_m16n8k16_bf16_zero(acc, a_frag, b_frag)
+                _mma_m16n8k16_bf16_zero_off4(acc, a_frag, b_frag)
+                T.ptx.ldmatrix(
+                    False,
+                    4,
+                    ".b16",
+                    smem_raw.ptr_to(
+                        [
+                            (
+                                smem_qd_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        lane // 16 // 8 * 256
+                                        + (pair_row_base + lane % 16) * 8
+                                        + (
+                                            lane // 16 % 8 * 16
+                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                        )
+                                        // 16
+                                    )
+                                    ^ 2
+                                )
+                                * 16
+                            )
+                            - T.cast(smem, "int32")
+                        ]
+                    ),
+                    T.address_of(a_frag[0]),
+                    T.address_of(a_frag[1]),
+                    T.address_of(a_frag[2]),
+                    T.address_of(a_frag[3]),
+                )
+                T.ptx.ldmatrix(
+                    False,
+                    4,
+                    ".b16",
+                    smem_raw.ptr_to(
+                        [
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            lane % 16 // 8 // 8 * 256
+                                            + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
+                                            + (
+                                                lane % 16 // 8 % 8 * 16
+                                                ^ (
+                                                    (
+                                                        pair_col_base + 8 * (lane // 16) + lane % 8
+                                                        & 7
+                                                    )
+                                                    << 4
+                                                )
+                                            )
+                                            // 16
+                                        )
+                                        + 256
+                                        ^ 2
+                                    )
+                                    - 256
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2941,7 +3412,20 @@ def _kernel(
                             (
                                 smem_qd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (((_kd_a0 ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2) * 16
+                                + (
+                                    (
+                                        lane // 16 // 8 * 256
+                                        + (pair_row_base + lane % 16) * 8
+                                        + (
+                                            lane // 16 % 8 * 16
+                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                        )
+                                        // 16
+                                    )
+                                    ^ 2
+                                    ^ 6
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2957,7 +3441,40 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb5 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                lane % 16 // 8 // 8 * 256
+                                                + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
+                                                + (
+                                                    lane % 16 // 8 % 8 * 16
+                                                    ^ (
+                                                        (
+                                                            pair_col_base
+                                                            + 8 * (lane // 16)
+                                                            + lane % 8
+                                                            & 7
+                                                        )
+                                                        << 4
+                                                    )
+                                                )
+                                                // 16
+                                            )
+                                            + 256
+                                            ^ 2
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 6
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -2977,7 +3494,21 @@ def _kernel(
                             (
                                 smem_qd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (((_kd_a0 ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6) * 16
+                                + (
+                                    (
+                                        lane // 16 // 8 * 256
+                                        + (pair_row_base + lane % 16) * 8
+                                        + (
+                                            lane // 16 % 8 * 16
+                                            ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                        )
+                                        // 16
+                                    )
+                                    ^ 2
+                                    ^ 6
+                                    ^ 2
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -2993,7 +3524,46 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb6 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    lane % 16 // 8 // 8 * 256
+                                                    + (pair_col_base + 8 * (lane // 16) + lane % 8)
+                                                    * 8
+                                                    + (
+                                                        lane % 16 // 8 % 8 * 16
+                                                        ^ (
+                                                            (
+                                                                pair_col_base
+                                                                + 8 * (lane // 16)
+                                                                + lane % 8
+                                                                & 7
+                                                            )
+                                                            << 4
+                                                        )
+                                                    )
+                                                    // 16
+                                                )
+                                                + 256
+                                                ^ 2
+                                            )
+                                            - 256
+                                            + 256
+                                            ^ 6
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 2
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -3013,7 +3583,25 @@ def _kernel(
                             (
                                 smem_qd_addr
                                 + T.cast(prep_stage, "int32") * 41984
-                                + (((_kd_a0 ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6 ^ 2) * 16
+                                + (
+                                    (
+                                        (
+                                            lane // 16 // 8 * 256
+                                            + (pair_row_base + lane % 16) * 8
+                                            + (
+                                                lane // 16 % 8 * 16
+                                                ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                            )
+                                            // 16
+                                        )
+                                        ^ 2
+                                        ^ 6
+                                        ^ 2
+                                        ^ 6
+                                    )
+                                    + 256
+                                )
+                                * 16
                             )
                             - T.cast(smem, "int32")
                         ]
@@ -3029,7 +3617,407 @@ def _kernel(
                     ".b16",
                     smem_raw.ptr_to(
                         [
-                            (smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (_kb7 - 256) * 16)
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    (
+                                                        lane % 16 // 8 // 8 * 256
+                                                        + (
+                                                            pair_col_base
+                                                            + 8 * (lane // 16)
+                                                            + lane % 8
+                                                        )
+                                                        * 8
+                                                        + (
+                                                            lane % 16 // 8 % 8 * 16
+                                                            ^ (
+                                                                (
+                                                                    pair_col_base
+                                                                    + 8 * (lane // 16)
+                                                                    + lane % 8
+                                                                    & 7
+                                                                )
+                                                                << 4
+                                                            )
+                                                        )
+                                                        // 16
+                                                    )
+                                                    + 256
+                                                    ^ 2
+                                                )
+                                                - 256
+                                                + 256
+                                                ^ 6
+                                            )
+                                            - 256
+                                            + 256
+                                            ^ 2
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 6
+                                    )
+                                    + 256
+                                    - 256
+                                )
+                                * 16
+                            )
+                            - T.cast(smem, "int32")
+                        ]
+                    ),
+                    T.address_of(b_frag[0]),
+                    T.address_of(b_frag[1]),
+                    T.address_of(b_frag[2]),
+                    T.address_of(b_frag[3]),
+                )
+                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
+                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
+                T.ptx.ldmatrix(
+                    False,
+                    4,
+                    ".b16",
+                    smem_raw.ptr_to(
+                        [
+                            (
+                                smem_qd_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                lane // 16 // 8 * 256
+                                                + (pair_row_base + lane % 16) * 8
+                                                + (
+                                                    lane // 16 % 8 * 16
+                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                                )
+                                                // 16
+                                            )
+                                            ^ 2
+                                            ^ 6
+                                            ^ 2
+                                            ^ 6
+                                        )
+                                        + 256
+                                    )
+                                    ^ 2
+                                )
+                                * 16
+                            )
+                            - T.cast(smem, "int32")
+                        ]
+                    ),
+                    T.address_of(a_frag[0]),
+                    T.address_of(a_frag[1]),
+                    T.address_of(a_frag[2]),
+                    T.address_of(a_frag[3]),
+                )
+                T.ptx.ldmatrix(
+                    False,
+                    4,
+                    ".b16",
+                    smem_raw.ptr_to(
+                        [
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    (
+                                                        (
+                                                            lane % 16 // 8 // 8 * 256
+                                                            + (
+                                                                pair_col_base
+                                                                + 8 * (lane // 16)
+                                                                + lane % 8
+                                                            )
+                                                            * 8
+                                                            + (
+                                                                lane % 16 // 8 % 8 * 16
+                                                                ^ (
+                                                                    (
+                                                                        pair_col_base
+                                                                        + 8 * (lane // 16)
+                                                                        + lane % 8
+                                                                        & 7
+                                                                    )
+                                                                    << 4
+                                                                )
+                                                            )
+                                                            // 16
+                                                        )
+                                                        + 256
+                                                        ^ 2
+                                                    )
+                                                    - 256
+                                                    + 256
+                                                    ^ 6
+                                                )
+                                                - 256
+                                                + 256
+                                                ^ 2
+                                            )
+                                            - 256
+                                            + 256
+                                            ^ 6
+                                        )
+                                        + 256
+                                        - 256
+                                        + 256
+                                        ^ 2
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
+                            - T.cast(smem, "int32")
+                        ]
+                    ),
+                    T.address_of(b_frag[0]),
+                    T.address_of(b_frag[1]),
+                    T.address_of(b_frag[2]),
+                    T.address_of(b_frag[3]),
+                )
+                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
+                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
+                T.ptx.ldmatrix(
+                    False,
+                    4,
+                    ".b16",
+                    smem_raw.ptr_to(
+                        [
+                            (
+                                smem_qd_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                lane // 16 // 8 * 256
+                                                + (pair_row_base + lane % 16) * 8
+                                                + (
+                                                    lane // 16 % 8 * 16
+                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                                )
+                                                // 16
+                                            )
+                                            ^ 2
+                                            ^ 6
+                                            ^ 2
+                                            ^ 6
+                                        )
+                                        + 256
+                                    )
+                                    ^ 2
+                                    ^ 6
+                                )
+                                * 16
+                            )
+                            - T.cast(smem, "int32")
+                        ]
+                    ),
+                    T.address_of(a_frag[0]),
+                    T.address_of(a_frag[1]),
+                    T.address_of(a_frag[2]),
+                    T.address_of(a_frag[3]),
+                )
+                T.ptx.ldmatrix(
+                    False,
+                    4,
+                    ".b16",
+                    smem_raw.ptr_to(
+                        [
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    (
+                                                        (
+                                                            (
+                                                                lane % 16 // 8 // 8 * 256
+                                                                + (
+                                                                    pair_col_base
+                                                                    + 8 * (lane // 16)
+                                                                    + lane % 8
+                                                                )
+                                                                * 8
+                                                                + (
+                                                                    lane % 16 // 8 % 8 * 16
+                                                                    ^ (
+                                                                        (
+                                                                            pair_col_base
+                                                                            + 8 * (lane // 16)
+                                                                            + lane % 8
+                                                                            & 7
+                                                                        )
+                                                                        << 4
+                                                                    )
+                                                                )
+                                                                // 16
+                                                            )
+                                                            + 256
+                                                            ^ 2
+                                                        )
+                                                        - 256
+                                                        + 256
+                                                        ^ 6
+                                                    )
+                                                    - 256
+                                                    + 256
+                                                    ^ 2
+                                                )
+                                                - 256
+                                                + 256
+                                                ^ 6
+                                            )
+                                            + 256
+                                            - 256
+                                            + 256
+                                            ^ 2
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 6
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
+                            - T.cast(smem, "int32")
+                        ]
+                    ),
+                    T.address_of(b_frag[0]),
+                    T.address_of(b_frag[1]),
+                    T.address_of(b_frag[2]),
+                    T.address_of(b_frag[3]),
+                )
+                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
+                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
+                T.ptx.ldmatrix(
+                    False,
+                    4,
+                    ".b16",
+                    smem_raw.ptr_to(
+                        [
+                            (
+                                smem_qd_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                lane // 16 // 8 * 256
+                                                + (pair_row_base + lane % 16) * 8
+                                                + (
+                                                    lane // 16 % 8 * 16
+                                                    ^ ((pair_row_base + lane % 16 & 7) << 4)
+                                                )
+                                                // 16
+                                            )
+                                            ^ 2
+                                            ^ 6
+                                            ^ 2
+                                            ^ 6
+                                        )
+                                        + 256
+                                    )
+                                    ^ 2
+                                    ^ 6
+                                    ^ 2
+                                )
+                                * 16
+                            )
+                            - T.cast(smem, "int32")
+                        ]
+                    ),
+                    T.address_of(a_frag[0]),
+                    T.address_of(a_frag[1]),
+                    T.address_of(a_frag[2]),
+                    T.address_of(a_frag[3]),
+                )
+                T.ptx.ldmatrix(
+                    False,
+                    4,
+                    ".b16",
+                    smem_raw.ptr_to(
+                        [
+                            (
+                                smem_ki_addr
+                                + T.cast(prep_stage, "int32") * 41984
+                                + (
+                                    (
+                                        (
+                                            (
+                                                (
+                                                    (
+                                                        (
+                                                            (
+                                                                (
+                                                                    lane % 16 // 8 // 8 * 256
+                                                                    + (
+                                                                        pair_col_base
+                                                                        + 8 * (lane // 16)
+                                                                        + lane % 8
+                                                                    )
+                                                                    * 8
+                                                                    + (
+                                                                        lane % 16 // 8 % 8 * 16
+                                                                        ^ (
+                                                                            (
+                                                                                pair_col_base
+                                                                                + 8 * (lane // 16)
+                                                                                + lane % 8
+                                                                                & 7
+                                                                            )
+                                                                            << 4
+                                                                        )
+                                                                    )
+                                                                    // 16
+                                                                )
+                                                                + 256
+                                                                ^ 2
+                                                            )
+                                                            - 256
+                                                            + 256
+                                                            ^ 6
+                                                        )
+                                                        - 256
+                                                        + 256
+                                                        ^ 2
+                                                    )
+                                                    - 256
+                                                    + 256
+                                                    ^ 6
+                                                )
+                                                + 256
+                                                - 256
+                                                + 256
+                                                ^ 2
+                                            )
+                                            - 256
+                                            + 256
+                                            ^ 6
+                                        )
+                                        - 256
+                                        + 256
+                                        ^ 2
+                                    )
+                                    - 256
+                                )
+                                * 16
+                            )
                             - T.cast(smem, "int32")
                         ]
                     ),
@@ -3122,18 +4110,28 @@ def _kernel(
                     restore_qd_values: T.f32[8]  # .cu:2083
                     restore_kd_values: T.f32[8]  # .cu:2084
                     restore_ki_values: T.f32[8]  # .cu:2085
-                    _rs_swz: T.int32 = (
-                        restore_segment * 8 // 64 * 4096
-                        + restore_row * 128
-                        + restore_segment * 8 % 64 * 2
-                    )
-                    _rs_swz = _rs_swz ^ ((_rs_swz >> 7 & 7) << 4)
                     packed_2 = T.alloc_local((4,), "uint32", align=16)  # .cu:2086
                     _ld_shared_v4(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_2,
-                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + _rs_swz,
+                        smem_qd_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            restore_segment * 8 // 64 * 4096
+                            + restore_row * 128
+                            + restore_segment * 8 % 64 * 2
+                            ^ (
+                                (
+                                    restore_segment * 8 // 64 * 4096
+                                    + restore_row * 128
+                                    + restore_segment * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        ),
                     )  # .cu:2087-2089
                     packed_fp32_1: T.f32[8]  # .cu:2090
                     for _pair in T.unroll(4):  # .cu:2091-2100
@@ -3150,7 +4148,23 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_0_2,
-                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + _rs_swz,
+                        smem_kd_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            restore_segment * 8 // 64 * 4096
+                            + restore_row * 128
+                            + restore_segment * 8 % 64 * 2
+                            ^ (
+                                (
+                                    restore_segment * 8 // 64 * 4096
+                                    + restore_row * 128
+                                    + restore_segment * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        ),
                     )  # .cu:2106-2108
                     packed_0_fp32_1: T.f32[8]  # .cu:2109
                     for _pair in T.unroll(4):  # .cu:2110-2119
@@ -3167,7 +4181,23 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_1_2,
-                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + _rs_swz,
+                        smem_ki_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            restore_segment * 8 // 64 * 4096
+                            + restore_row * 128
+                            + restore_segment * 8 % 64 * 2
+                            ^ (
+                                (
+                                    restore_segment * 8 // 64 * 4096
+                                    + restore_row * 128
+                                    + restore_segment * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        ),
                     )  # .cu:2125-2127
                     packed_1_fp32: T.f32[8]  # .cu:2128
                     for _pair in T.unroll(4):  # .cu:2129-2138
@@ -3213,7 +4243,21 @@ def _kernel(
                             T.cast(smem, "int32"),
                             smem_qd_addr
                             + T.cast(prep_stage, "int32") * 41984
-                            + _rs_swz
+                            + (
+                                restore_segment * 8 // 64 * 4096
+                                + restore_row * 128
+                                + restore_segment * 8 % 64 * 2
+                                ^ (
+                                    (
+                                        restore_segment * 8 // 64 * 4096
+                                        + restore_row * 128
+                                        + restore_segment * 8 % 64 * 2
+                                        >> 7
+                                        & 7
+                                    )
+                                    << 4
+                                )
+                            )
                             + word_3 * 4,
                             packed_2_1[word_3],
                         )
@@ -3228,7 +4272,21 @@ def _kernel(
                             T.cast(smem, "int32"),
                             smem_kd_addr
                             + T.cast(prep_stage, "int32") * 41984
-                            + _rs_swz
+                            + (
+                                restore_segment * 8 // 64 * 4096
+                                + restore_row * 128
+                                + restore_segment * 8 % 64 * 2
+                                ^ (
+                                    (
+                                        restore_segment * 8 // 64 * 4096
+                                        + restore_row * 128
+                                        + restore_segment * 8 % 64 * 2
+                                        >> 7
+                                        & 7
+                                    )
+                                    << 4
+                                )
+                            )
                             + word_4 * 4,
                             packed_3[word_4],
                         )
@@ -3243,7 +4301,21 @@ def _kernel(
                             T.cast(smem, "int32"),
                             smem_kr_trans_addr
                             + T.cast(prep_stage, "int32") * 41984
-                            + _rs_swz
+                            + (
+                                restore_segment * 8 // 64 * 4096
+                                + restore_row * 128
+                                + restore_segment * 8 % 64 * 2
+                                ^ (
+                                    (
+                                        restore_segment * 8 // 64 * 4096
+                                        + restore_row * 128
+                                        + restore_segment * 8 % 64 * 2
+                                        >> 7
+                                        & 7
+                                    )
+                                    << 4
+                                )
+                            )
                             + word_5 * 4,
                             packed_4[word_5],
                         )
@@ -3736,18 +4808,28 @@ def _kernel(
                     restore_qd_values_1: T.f32[8]  # .cu:2418
                     restore_kd_values_1: T.f32[8]  # .cu:2419
                     restore_ki_values_1: T.f32[8]  # .cu:2420
-                    _rs_swz_1: T.int32 = (
-                        restore_segment_1 * 8 // 64 * 4096
-                        + restore_row_1 * 128
-                        + restore_segment_1 * 8 % 64 * 2
-                    )
-                    _rs_swz_1 = _rs_swz_1 ^ ((_rs_swz_1 >> 7 & 7) << 4)
                     packed_6 = T.alloc_local((4,), "uint32", align=16)  # .cu:2421
                     _ld_shared_v4(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_6,
-                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + _rs_swz_1,
+                        smem_qd_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            restore_segment_1 * 8 // 64 * 4096
+                            + restore_row_1 * 128
+                            + restore_segment_1 * 8 % 64 * 2
+                            ^ (
+                                (
+                                    restore_segment_1 * 8 // 64 * 4096
+                                    + restore_row_1 * 128
+                                    + restore_segment_1 * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        ),
                     )  # .cu:2422-2424
                     packed_fp32_3: T.f32[8]  # .cu:2425
                     for _pair in T.unroll(4):  # .cu:2426-2435
@@ -3764,7 +4846,23 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_0_4,
-                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + _rs_swz_1,
+                        smem_kd_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            restore_segment_1 * 8 // 64 * 4096
+                            + restore_row_1 * 128
+                            + restore_segment_1 * 8 % 64 * 2
+                            ^ (
+                                (
+                                    restore_segment_1 * 8 // 64 * 4096
+                                    + restore_row_1 * 128
+                                    + restore_segment_1 * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        ),
                     )  # .cu:2441-2443
                     packed_0_fp32_2: T.f32[8]  # .cu:2444
                     for _pair in T.unroll(4):  # .cu:2445-2454
@@ -3781,7 +4879,23 @@ def _kernel(
                         smem_raw,
                         T.cast(smem, "int32"),
                         packed_1_3,
-                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + _rs_swz_1,
+                        smem_ki_addr
+                        + T.cast(prep_stage, "int32") * 41984
+                        + (
+                            restore_segment_1 * 8 // 64 * 4096
+                            + restore_row_1 * 128
+                            + restore_segment_1 * 8 % 64 * 2
+                            ^ (
+                                (
+                                    restore_segment_1 * 8 // 64 * 4096
+                                    + restore_row_1 * 128
+                                    + restore_segment_1 * 8 % 64 * 2
+                                    >> 7
+                                    & 7
+                                )
+                                << 4
+                            )
+                        ),
                     )  # .cu:2460-2462
                     packed_1_fp32_1: T.f32[8]  # .cu:2463
                     for _pair in T.unroll(4):  # .cu:2464-2473
@@ -3827,7 +4941,21 @@ def _kernel(
                             T.cast(smem, "int32"),
                             smem_qd_addr
                             + T.cast(prep_stage, "int32") * 41984
-                            + _rs_swz_1
+                            + (
+                                restore_segment_1 * 8 // 64 * 4096
+                                + restore_row_1 * 128
+                                + restore_segment_1 * 8 % 64 * 2
+                                ^ (
+                                    (
+                                        restore_segment_1 * 8 // 64 * 4096
+                                        + restore_row_1 * 128
+                                        + restore_segment_1 * 8 % 64 * 2
+                                        >> 7
+                                        & 7
+                                    )
+                                    << 4
+                                )
+                            )
                             + word_7 * 4,
                             packed_2_2[word_7],
                         )
@@ -3842,7 +4970,21 @@ def _kernel(
                             T.cast(smem, "int32"),
                             smem_kd_addr
                             + T.cast(prep_stage, "int32") * 41984
-                            + _rs_swz_1
+                            + (
+                                restore_segment_1 * 8 // 64 * 4096
+                                + restore_row_1 * 128
+                                + restore_segment_1 * 8 % 64 * 2
+                                ^ (
+                                    (
+                                        restore_segment_1 * 8 // 64 * 4096
+                                        + restore_row_1 * 128
+                                        + restore_segment_1 * 8 % 64 * 2
+                                        >> 7
+                                        & 7
+                                    )
+                                    << 4
+                                )
+                            )
                             + word_8 * 4,
                             packed_3_1[word_8],
                         )
@@ -3857,7 +4999,21 @@ def _kernel(
                             T.cast(smem, "int32"),
                             smem_kr_trans_addr
                             + T.cast(prep_stage, "int32") * 41984
-                            + _rs_swz_1
+                            + (
+                                restore_segment_1 * 8 // 64 * 4096
+                                + restore_row_1 * 128
+                                + restore_segment_1 * 8 % 64 * 2
+                                ^ (
+                                    (
+                                        restore_segment_1 * 8 // 64 * 4096
+                                        + restore_row_1 * 128
+                                        + restore_segment_1 * 8 % 64 * 2
+                                        >> 7
+                                        & 7
+                                    )
+                                    << 4
+                                )
+                            )
                             + word_9 * 4,
                             packed_4_1[word_9],
                         )
