@@ -564,7 +564,7 @@ def get_kernel(**kwargs: Any):
     cache_policy_evict_normal = T.uint64(1152921504606846976)
     has_cache_policy_evict_normal = 1
     tma_unicast_cta_mask = 0
-    tma_no_cta_group_modifier = 1
+    tma_cta_group = 1
     q_tma_block_inner = head_dim // 2
     q_tma_swizzle_mode = head_dim // 2
     q_tma_dtype_size = 1
@@ -1022,7 +1022,7 @@ def get_kernel(**kwargs: Any):
                     barrier_ptr,
                     T.address_of(tensor_map),
                     tma_unicast_cta_mask,
-                    tma_no_cta_group_modifier,
+                    tma_cta_group,
                     cache_policy_evict_normal,
                     has_cache_policy_evict_normal,
                     "tile",
@@ -1048,7 +1048,7 @@ def get_kernel(**kwargs: Any):
                     barrier_ptr,
                     T.address_of(tensor_map),
                     tma_unicast_cta_mask,
-                    tma_no_cta_group_modifier,
+                    tma_cta_group,
                     cache_policy_evict_normal,
                     has_cache_policy_evict_normal,
                     "tile",
@@ -1074,7 +1074,7 @@ def get_kernel(**kwargs: Any):
                     barrier_ptr,
                     T.address_of(tensor_map),
                     tma_unicast_cta_mask,
-                    tma_no_cta_group_modifier,
+                    tma_cta_group,
                     cache_policy_evict_normal,
                     has_cache_policy_evict_normal,
                     "tile",
@@ -1101,7 +1101,7 @@ def get_kernel(**kwargs: Any):
                     barrier_ptr,
                     T.address_of(tensor_map),
                     tma_unicast_cta_mask,
-                    tma_no_cta_group_modifier,
+                    tma_cta_group,
                     cache_policy_evict_normal,
                     has_cache_policy_evict_normal,
                     "tile",
@@ -1127,7 +1127,7 @@ def get_kernel(**kwargs: Any):
                     barrier_ptr,
                     T.address_of(tensor_map),
                     tma_unicast_cta_mask,
-                    tma_no_cta_group_modifier,
+                    tma_cta_group,
                     cache_policy_evict_normal,
                     has_cache_policy_evict_normal,
                     "tile",

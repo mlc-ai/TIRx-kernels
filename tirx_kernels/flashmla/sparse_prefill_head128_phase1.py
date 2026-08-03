@@ -380,7 +380,6 @@ def _kernel(
             )
 
         T.ptx.tcgen05.alloc(T.address_of(tmem_start_addr[0]), n_cols=512, cta_group=2)
-        T.cuda.warp_sync()
         T.cuda.trap_when_assert_failed(tmem_start_addr[0] == T.uint32(0))
         T.ptx.tcgen05.relinquish_alloc_permit(cta_group=2)
         iket.range_end(prologue_token)

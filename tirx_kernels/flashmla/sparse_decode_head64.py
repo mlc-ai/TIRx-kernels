@@ -662,12 +662,9 @@ def _kernel(
         packed = T.alloc_local((4,), "uint32")
         for pair_i in T.unroll(4):
             raw_pair: T.let = T.cast(T.shift_right(raw, T.cast(pair_i * 16, "uint64")), "uint16")
-            # PTX 9.1 has the exact E4M3-to-F16 conversion on SM100f; the
-            # direct E4M3-to-BF16 form is not available until PTX 9.2.  E4M3
-            # values are exactly representable in both intermediate formats.
-            rounded_bits: T.let = T.ptx.cvt(
-                raw_pair, dtype="f16x2", atype="e4m3x2", rounding="rn"
-            )
+            # PTX 9.1 defines E4M3x2 up-conversion to F16x2.  E4M3 values are
+            # exactly representable through that intermediate before BF16.
+            rounded_bits: T.let = T.ptx.cvt(raw_pair, dtype="f16x2", atype="e4m3x2", rounding="rn")
             rounded: T.let = T.reinterpret("float16x2", rounded_bits)
             scaled_lo: T.let = T.cast(T.Shuffle([rounded], [0]), "bfloat16") * scale
             scaled_hi: T.let = T.cast(T.Shuffle([rounded], [1]), "bfloat16") * scale
@@ -696,7 +693,6 @@ def _kernel(
                 T.ptx.mbarrier.init(bar_valid_free.ptr_to([index_stage]), 258)
             T.ptx.fence.mbarrier_init()
         T.ptx.tcgen05.alloc(T.address_of(tmem_start_addr[0]), n_cols=512, cta_group=1)
-        T.cuda.warp_sync()
         T.cuda.trap_when_assert_failed(tmem_start_addr[0] == T.uint32(0))
         T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
     T.cuda.cta_sync()
@@ -793,17 +789,12 @@ def _kernel(
                     p_peer_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, B_TOPK // 2), "float32")
                     p = p_frag.local()
                     p_peer = p_peer_frag.local()
-                    # Each Tx.wg call is one warpgroup collective.  Keep the two
-                    # static call sites converged and select the local/peer TMEM
-                    # half through their per-warp source coordinates.
-                    p_half: T.int32 = T.if_then_else(warp_idx < 2, 0, 1)
-                    p_peer_half: T.int32 = 1 - p_half
-                    Tx.wg.copy_async(
-                        p_frag[:, :], p_tmem_win.chunk((None, 2))[:, p_half]
-                    )
-                    Tx.wg.copy_async(
-                        p_peer_frag[:, :], p_tmem_win.chunk((None, 2))[:, p_peer_half]
-                    )
+                    if warp_idx < 2:
+                        Tx.wg.copy_async(p_frag[:, :], p_tmem_win.chunk((None, 2))[:, 0])
+                        Tx.wg.copy_async(p_peer_frag[:, :], p_tmem_win.chunk((None, 2))[:, 1])
+                    else:
+                        Tx.wg.copy_async(p_peer_frag[:, :], p_tmem_win.chunk((None, 2))[:, 0])
+                        Tx.wg.copy_async(p_frag[:, :], p_tmem_win.chunk((None, 2))[:, 1])
                     T.ptx.tcgen05.wait.ld()
                     T.ptx.tcgen05.fence.before_thread_sync()
 
@@ -1747,7 +1738,6 @@ def _kernel(
                 # SxV use, then convert each fp8x8 with the exact ue8m0
                 # scale and weak shared b128 store from the source.
                 bar_q_utccp.wait(0, batch_bar_phase)
-                T.ptx.fence.proxy_async("shared::cta")
                 for block_idx in T.serial(start_block, end_block, unroll=False):
                     bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                     bar_raw_ready.wait(rs_buf.stage, rs_buf.phase)
@@ -2055,18 +2045,14 @@ def _kernel_shape_params(
     *,
     prepared_num_blocks: int | None = None,
     prepared_extra_num_blocks: int | None = None,
-    num_sm_parts_override: int | None = None,
 ) -> dict[str, int]:
-    if num_sm_parts_override is None:
-        device_obj = torch.device(device)
-        device_index = device_obj.index
-        if device_index is None:
-            device_index = torch.cuda.current_device()
-        num_sm_parts = (
-            int(torch.cuda.get_device_properties(device_index).multi_processor_count) // cfg.s_q
-        )
-    else:
-        num_sm_parts = int(num_sm_parts_override)
+    device_obj = torch.device(device)
+    device_index = device_obj.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    num_sm_parts = (
+        int(torch.cuda.get_device_properties(device_index).multi_processor_count) // cfg.s_q
+    )
     num_sm_parts = max(num_sm_parts, 1)
     num_blocks = (
         prepared_num_blocks
@@ -2179,11 +2165,10 @@ def _specialized_decode_kernels(
 
 def get_kernel(**kwargs: Any):
     cfg = _cfg(**kwargs)
-    num_sm_parts = kwargs.get("num_sm_parts")
-    if num_sm_parts is None and not torch.cuda.is_available():
+    if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA decode")
     device = kwargs.get("device", "cuda")
-    shape = _kernel_shape_params(cfg, device, num_sm_parts_override=num_sm_parts)
+    shape = _kernel_shape_params(cfg, device)
     return list(
         _specialized_decode_kernels(
             cfg.normalized_model_type, shape["max_splits"], _main_presence_mask(cfg), cfg.b == 2

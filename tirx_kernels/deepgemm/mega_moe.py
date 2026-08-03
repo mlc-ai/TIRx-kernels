@@ -2227,6 +2227,9 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
     dispatch_with_epilogue_sync_barrier_idx = 1
     epilogue_full_sync_barrier_idx = 2
     epilogue_wg_sync_barrier_start_idx = 3
+    dispatch_with_load_a_sync_barrier_idx = (
+        epilogue_wg_sync_barrier_start_idx + num_epilogue_wgs
+    )
     before_dispatch_pull_barrier_tag = 1
     before_combine_reduce_barrier_tag = 2
     after_workspace_clean_barrier_tag = 3
@@ -2694,40 +2697,40 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
         smem = T.alloc_buffer([smem_total_bytes], "uint8", scope="shared.dyn")
         T.attr({"tirx.dyn_smem_bytes": smem_total_bytes})
         smem_expert_count_data: T.let = T.reinterpret(
-            PointerType(PrimType("int32"), "shared.dyn"), smem.ptr_to([smem_expert_count_offset])
+            PointerType(PrimType("int32")), smem.ptr_to([smem_expert_count_offset])
         )
         smem_send_buffer_data: T.let = T.reinterpret(
-            PointerType(PrimType("int8"), "shared.dyn"), smem.ptr_to([smem_send_buffer_offset])
+            PointerType(PrimType("int8")), smem.ptr_to([smem_send_buffer_offset])
         )
         smem_a_data: T.let = T.reinterpret(
-            PointerType(PrimType("int8"), "shared.dyn"), smem.ptr_to([smem_a_offset])
+            PointerType(PrimType("int8")), smem.ptr_to([smem_a_offset])
         )
         smem_b_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint8"), "shared.dyn"), smem.ptr_to([smem_b_offset])
+            PointerType(PrimType("uint8")), smem.ptr_to([smem_b_offset])
         )
         smem_sfa_data: T.let = T.reinterpret(
-            PointerType(PrimType("int32"), "shared.dyn"), smem.ptr_to([smem_sfa_offset])
+            PointerType(PrimType("int32")), smem.ptr_to([smem_sfa_offset])
         )
         smem_sfb_data: T.let = T.reinterpret(
-            PointerType(PrimType("int32"), "shared.dyn"), smem.ptr_to([smem_sfb_offset])
+            PointerType(PrimType("int32")), smem.ptr_to([smem_sfb_offset])
         )
         smem_amax_reduction_data: T.let = T.reinterpret(
-            PointerType(PrimType("float32"), "shared.dyn"), smem.ptr_to([smem_amax_reduction_offset])
+            PointerType(PrimType("float32")), smem.ptr_to([smem_amax_reduction_offset])
         )
         smem_task_info_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32"), "shared.dyn"), smem.ptr_to([smem_task_info_offset])
+            PointerType(PrimType("uint32")), smem.ptr_to([smem_task_info_offset])
         )
         smem_cd_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint8"), "shared.dyn"), smem.ptr_to([smem_cd_offset])
+            PointerType(PrimType("uint8")), smem.ptr_to([smem_cd_offset])
         )
         smem_barrier_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint64"), "shared.dyn"), smem.ptr_to([smem_barrier_offset])
+            PointerType(PrimType("uint64")), smem.ptr_to([smem_barrier_offset])
         )
         smem_tmem_ptr_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32"), "shared.dyn"), smem.ptr_to([smem_tmem_ptr_offset])
+            PointerType(PrimType("uint32")), smem.ptr_to([smem_tmem_ptr_offset])
         )
         smem_symm_rank_bases_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint64"), "shared.dyn"), smem.ptr_to([smem_symm_rank_bases_offset])
+            PointerType(PrimType("uint64")), smem.ptr_to([smem_symm_rank_bases_offset])
         )
         smem_expert_count = T.decl_buffer(
             (num_experts,),
@@ -4015,15 +4018,13 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                 )
             )
-            # The epilogue grid barrier happens before the CTA-local
-            # dispatch/epilogue rendezvous above.  It therefore cannot publish
-            # dispatch's expert-count reads to a different CTA that starts
-            # clearing the reusable workspace.  Rendezvous all dispatch CTAs
-            # before any of them performs that cleanup.
+            # The epilogue sentinel can overtake a slower load-A consumer in
+            # the multi-stage task ring.  Include load-A in this CTA+grid
+            # rendezvous before clearing the ring counters it still polls.
             workspace_grid_sync(
                 dispatch_grid_sync_index,
-                kernel_config.num_dispatch_threads,
-                dispatch_sync_barrier_idx,
+                kernel_config.num_dispatch_threads + 32,
+                dispatch_with_load_a_sync_barrier_idx,
                 flat_warp_idx * 32 + lane_idx,
             )
             if sm_idx == 0:
@@ -4149,39 +4150,35 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     "int32",
                 )
                 ring_block_idx = pool_block_idx % num_ring_blocks
-                # Only the lane that issues the TMA needs to poll.  Rendezvous
-                # before issue so final workspace cleanup follows that acquire.
-                if T.ptx.elect_sync():
-                    if block_phase == T.int32(1):
-                        expected_ring_count = kernel_config.block_m * (
-                            pool_block_idx // num_ring_blocks + 1
-                        )
+                if block_phase == T.int32(1):
+                    expected_ring_count = kernel_config.block_m * (
+                        pool_block_idx // num_ring_blocks + 1
+                    )
+                    current_ring_count = load_acq_u32(
+                        workspace_l1_full_count.ptr_to([ring_block_idx])
+                    )
+                    while current_ring_count != T.cast(expected_ring_count, "uint32"):
                         current_ring_count = load_acq_u32(
                             workspace_l1_full_count.ptr_to([ring_block_idx])
                         )
-                        while current_ring_count != T.cast(expected_ring_count, "uint32"):
-                            current_ring_count = load_acq_u32(
-                                workspace_l1_full_count.ptr_to([ring_block_idx])
-                            )
-                    else:
-                        expected_ring_count = (
-                            intermediate_hidden
-                            // kernel_config.block_n
-                            * 2
-                            * (pool_block_idx // num_ring_blocks + 1)
-                        )
+                else:
+                    expected_ring_count = (
+                        intermediate_hidden
+                        // kernel_config.block_n
+                        * 2
+                        * (pool_block_idx // num_ring_blocks + 1)
+                    )
+                    current_ring_count = load_acq_u32(
+                        workspace_l2_full_count.ptr_to([ring_block_idx])
+                    )
+                    while current_ring_count != T.cast(expected_ring_count, "uint32"):
                         current_ring_count = load_acq_u32(
                             workspace_l2_full_count.ptr_to([ring_block_idx])
                         )
-                        while current_ring_count != T.cast(expected_ring_count, "uint32"):
-                            current_ring_count = load_acq_u32(
-                                workspace_l2_full_count.ptr_to([ring_block_idx])
-                            )
-                T.cuda.warp_sync()
                 # The release/acquire counters publish generic global stores
                 # from dispatch (L1) or the preceding epilogue's scale-factor
-                # writes (L2).  TMA reads through the async proxy, so bridge
-                # the acquired frontier before loading either ring.
+                # writes (L2).  TMA reads through the async proxy, so bridge the
+                # acquired frontier before loading either ring.
                 T.ptx.fence.proxy_async("global")
                 for k_block_idx in T.serial(0, num_k_blocks):
                     barrier_wait(
@@ -4228,6 +4225,12 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                             full_barrier_arrive_cta0(full_barrier_ptr)
                     T.cuda.warp_sync()
                     advance_pipeline()
+            workspace_grid_sync(
+                dispatch_grid_sync_index,
+                kernel_config.num_dispatch_threads + 32,
+                dispatch_with_load_a_sync_barrier_idx,
+                kernel_config.num_dispatch_threads + lane_idx,
+            )
         elif flat_warp_idx == kernel_config.load_b_warp_idx:
             warpgroup_reg_dealloc(num_non_epilogue_registers)
             sched_stage_idx = T.int32(0)
@@ -4954,12 +4957,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                 )
             )
-            # Dynamic shared memory now changes ownership from dispatch's
-            # generic-proxy expert counters to combine's async-proxy TMA
-            # destination.  The named barrier transfers the dispatch threads'
-            # happens-before frontier; this proxy fence makes that frontier
-            # visible to the TMA writes before the storage is reused.
-            T.ptx.fence.proxy_async("shared::cta")
             # The preceding grid barrier publishes every epilogue's generic
             # stores into the symmetric combine-token buffer.  Combine reads
             # those stores through TMA's async global proxy.

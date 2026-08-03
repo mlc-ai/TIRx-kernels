@@ -361,7 +361,6 @@ def _kernel(
             T.ptx.fence.mbarrier_init()
     elif warp_idx == 2:
         T.ptx.tcgen05.alloc(T.address_of(tmem_start_addr[0]), n_cols=512, cta_group=2)
-        T.cuda.warp_sync()
         T.cuda.trap_when_assert_failed(tmem_start_addr[0] == T.uint32(0))
         T.ptx.tcgen05.relinquish_alloc_permit(cta_group=2)
     elif warp_idx == 3:
@@ -478,6 +477,10 @@ def _kernel(
                 perform_o_copy_out(last_s_q_idx, last_outer_loop_phase, False)
             else:
                 bar_tQ_full.wait(0, wg0_outer_loop_phase)
+                # The first iteration has no preceding output-copy path (which
+                # contains this WG-wide rendezvous).  Make every WG0 warp retire
+                # generation 0 before warp 0 can publish generation 1.
+                T.ptx.bar.sync(BAR_WG0_SYNC, 128)
             last_valid = 1
             last_s_q_idx = wg0_s_q_idx
             last_outer_loop_phase = wg0_outer_loop_phase
@@ -787,14 +790,19 @@ def _kernel(
                 p_peer = p_peer_frag.local().view("uint32")
                 bar_QK_done.wait(0, wg3_rs & 1)
                 T.ptx.tcgen05.fence.after_thread_sync()
-                # Datapath-B P read back as (128, B_TOPK) identity.  Both
-                # warpgroup collectives stay converged while each warp selects
-                # which lane-half is its local fragment and which is its peer.
-                p_half: T.int32 = T.if_then_else(local_warp_idx < 2, 0, 1)
-                p_peer_half: T.int32 = 1 - p_half
-                p_win = tmem_p.rearrange("h (b t) -> (b h) t", b=2)
-                Tx.wg.copy_async(p_frag[:, :], p_win.chunk((None, 2))[:, p_half])
-                Tx.wg.copy_async(p_peer_frag[:, :], p_win.chunk((None, 2))[:, p_peer_half])
+
+                @T.inline
+                def load_p(lo_dst, hi_dst):
+                    # datapath-B P read back as (128, B_TOPK) identity: merge the
+                    # two lane-halves into 128 rows.
+                    p_win = tmem_p.rearrange("h (b t) -> (b h) t", b=2)
+                    Tx.wg.copy_async(lo_dst[:, :], p_win.chunk((None, 2))[:, 0])
+                    Tx.wg.copy_async(hi_dst[:, :], p_win.chunk((None, 2))[:, 1])
+
+                if local_warp_idx < 2:
+                    load_p(p_frag, p_peer_frag)
+                else:
+                    load_p(p_peer_frag, p_frag)
                 T.ptx.tcgen05.wait.ld()
                 T.ptx.tcgen05.fence.before_thread_sync()
                 bar_P_empty.arrive(0, remote=T.uint32(0))
