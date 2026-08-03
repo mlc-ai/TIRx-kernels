@@ -1,0 +1,13 @@
+# Complete in-scope performance matrix for the FlashKDA bf16 fused m128
+# (SM100) port: exactly the module's five BENCH_CONFIGS cases, covering the
+# head-count / packed / state variants that dispatch to this kernel.
+
+defaults:
+  # Timer, warmup, repeat, rounds, and cooldown use bench-suite defaults.
+
+workloads:
+  - {kernel: flashkda_bf16_fused_m128, config: h96_fixed8192}
+  - {kernel: flashkda_bf16_fused_m128, config: h96_mixed}
+  - {kernel: flashkda_bf16_fused_m128, config: h96_uniform}
+  - {kernel: flashkda_bf16_fused_m128, config: h64_mixed}
+  - {kernel: flashkda_bf16_fused_m128, config: h64_uniform}
