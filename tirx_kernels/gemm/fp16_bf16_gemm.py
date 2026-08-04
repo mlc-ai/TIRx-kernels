@@ -251,6 +251,7 @@ def _kernel(
             @T.inline
             def mma_stage(buf):
                 smem_pipe.full.wait(mma_smem.stage, mma_smem.phase)
+                T.ptx.tcgen05.fence.after_thread_sync()
                 stage = mma_smem.stage
                 tmem_n = T.meta_var(buf * MMA_N)
                 # 2-SM tcgen05 A@B^T (B stored (N,K), transB=False); accum=0 on the
@@ -302,6 +303,7 @@ def _kernel(
         def writeback(m_idx, n_idx):
             slot = T.meta_var(wb_buf.stage if OVERLAP_EPILOGUE else wg_id)
             tmem_pipe.full.wait(slot, wb_buf.phase)
+            T.ptx.tcgen05.fence.after_thread_sync()
             tmem_base = T.meta_var(slot * MMA_N)
             if OVERLAP_EPILOGUE:
                 # Fused per-chunk load+store, overlapping the next MMA. Keep Dreg_16b
@@ -315,6 +317,7 @@ def _kernel(
                     T.ptx.tcgen05.wait.ld()
                     Tx.wg.cast(Dreg_16b, Dreg)
                     if i == WB_PIPE_DEPTH - 1:
+                        T.ptx.tcgen05.fence.before_thread_sync()
                         tmem_pipe.empty.arrive(slot, remote=0, pred=True)
                     db = T.meta_var(i % NUM_D_TILES)
                     T.ptx.cp_async.bulk.wait_group(NUM_D_TILES - 1, read=True)
@@ -352,6 +355,7 @@ def _kernel(
                     Tx.wg.copy_async(Dreg, tmem[:, tn : tn + NOL])
                     T.ptx.tcgen05.wait.ld()
                     Tx.wg.cast(Dreg_16b[:, i * NOL : (i + 1) * NOL], Dreg)
+                T.ptx.tcgen05.fence.before_thread_sync()
                 tmem_pipe.empty.arrive(wg_id, remote=0, pred=True)
                 for i in T.unroll(WB_PIPE_DEPTH):
                     db = T.meta_var(i % NUM_D_TILES)

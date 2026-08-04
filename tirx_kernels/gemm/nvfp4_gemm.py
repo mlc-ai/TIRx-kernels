@@ -486,6 +486,7 @@ def _kernel(
             stage = mma_smem.stage
             scale_full_bar.wait(mma_smem.stage, mma_smem.phase)
             tile_full_bar.wait(mma_smem.stage, mma_smem.phase)
+            T.ptx.tcgen05.fence.after_thread_sync()
             Tx.copy_async(SFA_tmem, SFA_smem[stage], cta_group=CTA_GROUP)
             Tx.copy_async(SFB_tmem, SFB_smem[stage], cta_group=CTA_GROUP)
             Tx.gemm_async(
@@ -528,6 +529,7 @@ def _kernel(
         @T.inline
         def epilogue():
             tmem_pipe.full.wait(epi_cur.stage, epi_cur.phase)
+            T.ptx.tcgen05.fence.after_thread_sync()
 
             # Per-chunk store: R->S (stmatrix) then S->G (TMA). Shared by both schedules.
             @T.inline
@@ -562,6 +564,7 @@ def _kernel(
                     if no == MMA_N // EPI_TILE - 1:
                         T.ptx.tcgen05.wait.ld()
                         if tid_in_wg == 0:
+                            T.ptx.tcgen05.fence.before_thread_sync()
                             tmem_pipe.empty.arrive(
                                 epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
                             )
@@ -580,6 +583,7 @@ def _kernel(
                 Tx.wg.mul(reg_all, reg_all, alpha_local)
                 Tx.wg.cast(reg_all_16b, reg_all)
                 if tid_in_wg == 0:
+                    T.ptx.tcgen05.fence.before_thread_sync()
                     tmem_pipe.empty.arrive(
                         epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
                     )

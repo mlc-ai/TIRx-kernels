@@ -624,6 +624,7 @@ def get_kernel(**kwargs: Any):
                             # extent and fail the gemm dispatch's StructuralEqual check.
                             tmem_col_start: T.int32 = T.cast(tmem_addr, "int32")
                             tmem_pipe.empty.wait(tmem_stage_idx, tmem_phase ^ T.uint32(1))
+                            T.ptx.tcgen05.fence.after_thread_sync()
                             # D = KV @ Q^T over full head_dim in one issue; the tcgen05
                             # dispatch unrolls the umma_k tiling and accumulates internally.
                             Tx.gemm_async(
@@ -701,6 +702,7 @@ def get_kernel(**kwargs: Any):
                             space="shared",
                         )
                         tmem_pipe.full.wait(tmem_stage_idx, tmem_phase)
+                        T.ptx.tcgen05.fence.after_thread_sync()
                         # Release the kv stage only after the tmem accumulator is
                         # ready, and fence the generic-proxy scale_kv read first.
                         T.ptx.fence.proxy_async("shared::cta")
@@ -744,6 +746,7 @@ def get_kernel(**kwargs: Any):
                                 store_logits(q_offset + T.cast(kv_offset, "uint64"), result)
                         # Release this tmem stage once per kv block AFTER the token loop;
                         # inside the last token ptxas fuses it with the compressed guard branch.
+                        T.ptx.tcgen05.fence.before_thread_sync()
                         tmem_pipe.empty.arrive(tmem_stage_idx)
                         kv_idx = kv_idx + T.uint32(1)
                         kv_offset = kv_offset + T.uint32(block_kv)

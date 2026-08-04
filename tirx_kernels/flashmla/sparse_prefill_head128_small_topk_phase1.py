@@ -425,6 +425,7 @@ def _kernel(
             bar_li_empty.arrive(0)
 
             bar_tOut_full.wait(0, o_outer_loop_phase)
+            T.ptx.tcgen05.fence.after_thread_sync()
             if is_last_o:
                 if T.ptx.elect_sync():
                     T.ptx.griddepcontrol.launch_dependents()
@@ -443,7 +444,9 @@ def _kernel(
                         bar_tQ_full.wait(0, o_outer_loop_phase)
                     else:
                         bar_tQ_full.wait(0, o_outer_loop_phase ^ 1)
+                    T.ptx.fence.proxy_async("shared::cta")
                 if epi_k == ((D_V // 2) // B_EPI) - 1:
+                    T.ptx.tcgen05.fence.before_thread_sync()
                     bar_tOut_empty.arrive(0, remote=T.uint32(0))
                 Tx.wg.mul(o_epi_frag[:, :], o_epi_frag[:, :], output_scale)
                 Tx.wg.cast(o_epi_bf16_frag[:, :], o_epi_frag[:, :])
@@ -489,6 +492,7 @@ def _kernel(
             wg0_next_job: T.let = T.ptx.clc_query_cancel(
                 T.address_of(clc_response[0]), use_ld_acquire=True
             )
+            T.ptx.fence.proxy_async("shared::cta")
             T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
             if wg0_next_job == T.uint32(0xFFFFFFFF):
                 wg0_job_valid = 0
@@ -578,6 +582,7 @@ def _kernel(
                 wg1_next_job: T.let = T.ptx.clc_query_cancel(
                     T.address_of(clc_response[0]), use_ld_acquire=True
                 )
+                T.ptx.fence.proxy_async("shared::cta")
                 T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
                 if wg1_next_job == T.uint32(0xFFFFFFFF):
                     wg1_job_valid = 0
@@ -669,6 +674,7 @@ def _kernel(
                     umma_next_job: T.let = T.ptx.clc_query_cancel(
                         T.address_of(clc_response[0]), use_ld_acquire=True
                     )
+                    T.ptx.fence.proxy_async("shared::cta")
                     T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
                     if umma_next_job == T.uint32(0xFFFFFFFF):
                         umma_job_valid = 0
@@ -720,6 +726,7 @@ def _kernel(
                     valid_next_job: T.let = T.ptx.clc_query_cancel(
                         T.address_of(clc_response[0]), use_ld_acquire=True
                     )
+                    T.ptx.fence.proxy_async("shared::cta")
                     T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
                     if valid_next_job == T.uint32(0xFFFFFFFF):
                         valid_job_valid = 0
@@ -739,6 +746,7 @@ def _kernel(
                     while clc_job_valid != 0:
                         if cta_idx == 0:
                             bar_clc_empty.wait(0, clc_outer_loop_phase ^ 1)
+                            T.ptx.fence.proxy_async("shared::cta")
                             T.ptx.clc_try_cancel(
                                 T.address_of(clc_response[0]), bar_clc_full.ptr_to([0])
                             )
@@ -748,6 +756,7 @@ def _kernel(
                         clc_next_job: T.let = T.ptx.clc_query_cancel(
                             T.address_of(clc_response[0]), use_ld_acquire=True
                         )
+                        T.ptx.fence.proxy_async("shared::cta")
                         T.ptx.mbarrier.arrive(
                             bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True
                         )
@@ -967,6 +976,7 @@ def _kernel(
             wg3_next_job: T.let = T.ptx.clc_query_cancel(
                 T.address_of(clc_response[0]), use_ld_acquire=True
             )
+            T.ptx.fence.proxy_async("shared::cta")
             T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
             if wg3_next_job == T.uint32(0xFFFFFFFF):
                 wg3_job_valid = 0

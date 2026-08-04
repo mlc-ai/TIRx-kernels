@@ -777,6 +777,7 @@ def get_kernel(**kwargs: Any):
                             # extent and fail the gemm dispatch's StructuralEqual check.
                             tmem_col_start: T.int32 = T.cast(tmem_addr, "int32")
                             tmem_pipe.empty.wait(tmem_stage_idx, tmem_phase ^ T.uint32(1))
+                            T.ptx.tcgen05.fence.after_thread_sync()
                             # REGION D: block-scaled fp4 UMMA (KV @ Qᵀ) via gemm_async;
                             # operand order (D, A=KV, B=Q) with SFA=KV / SFB=Q scales in TMEM.
                             sfkv_tmem_mma = T.decl_buffer(
@@ -884,6 +885,7 @@ def get_kernel(**kwargs: Any):
                             kv_start + kv_idx * T.uint32(block_kv) + T.cast(thread_idx, "uint32")
                         )
                         tmem_pipe.full.wait(tmem_stage_idx, tmem_phase)
+                        T.ptx.tcgen05.fence.after_thread_sync()
                         for q_inner_i in T.unroll(0, block_q):
                             tmem_addr: T.uint32 = tmem_stage_idx * T.uint32(umma_n) + T.uint32(
                                 q_inner_i * num_heads
@@ -903,6 +905,7 @@ def get_kernel(**kwargs: Any):
                             )
                             T.ptx.tcgen05.wait.ld()
                             if q_inner_i == block_q - 1:
+                                T.ptx.tcgen05.fence.before_thread_sync()
                                 tmem_pipe.empty.arrive(tmem_stage_idx)
                             # Weighted-ReLU reduce via inline CUDA (see _mqa_fp4_wrelu_reduce_src).
                             result_f32: T.float32 = cuda_func_call(

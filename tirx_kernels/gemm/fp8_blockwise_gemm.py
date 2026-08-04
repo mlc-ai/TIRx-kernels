@@ -386,6 +386,7 @@ def _kernel(
             @T.inline
             def mma(ks, k_tile):
                 trans_done.wait(ks, mma_state.phase)
+                T.ptx.tcgen05.fence.after_thread_sync()
                 if k_tile % 4 == 0:
                     Tx.copy_async(SFA_tmem[tmem_idx], SFA_smem_fp8[ks], cta_group=CTA_GROUP)
                     Tx.copy_async(SFB_tmem[tmem_idx], SFB_smem_fp8[ks], cta_group=CTA_GROUP)
@@ -476,6 +477,7 @@ def _kernel(
                             D_smem[stage, :, ki * TMEM_LD_SIZE : (ki + 1) * TMEM_LD_SIZE], Dreg_bf16
                         )
                 if ot == STORE_TILES - 1:
+                    T.ptx.tcgen05.fence.before_thread_sync()
                     tmem_pipe.empty.arrive(tmem_idx, remote=0)
                 T.ptx.fence.proxy_async("shared::cta")
                 T.cuda.warpgroup_sync(10)
@@ -496,6 +498,7 @@ def _kernel(
             tmem_idx = tile_scheduler.tile_idx % TMEM_DEPTH
             tmem_phase = tile_scheduler.tile_idx // TMEM_DEPTH & 1
             tmem_pipe.full.wait(tmem_idx, tmem_phase)
+            T.ptx.tcgen05.fence.after_thread_sync()
             epilogue()
             tile_scheduler.next_tile()
         if tid_in_wg == 0:
