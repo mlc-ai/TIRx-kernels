@@ -382,11 +382,12 @@ def get_kernel(**kwargs: Any):
     num_b_tma_atoms = block_k // block_swizzled_bk
     umma_k = 32 // 4
     d_tmem_start_col = block_k * num_cast_stages
-    # Cast-warp per-thread register counts: cast_per_thread fp32 regs per thread
-    # spanning 2 Layout-F rows, cast_pairs packed pairs each.
+    # Cast-warp per-thread register counts (compile-time Python ints): each of
+    # the 128 cast/reduce threads owns ``cast_per_thread`` fp32 A registers in
+    # the .16x256b atom; they span 2 Layout-F rows, with ``cast_pairs`` packed
+    # f32x2 groups in each row.
     cast_per_thread = block_m * block_k // num_cast_and_reduce_threads
-    cast_row_w = cast_per_thread // 2  # per-thread elems per Layout-F row
-    cast_pairs = cast_row_w // 2  # packed (f32x2) pairs per row
+    cast_pairs = cast_per_thread // 4  # 2 rows x 2 fp32 values per packed pair
     tmem_layout = TileLayout(S[(128, num_tmem_cols) : (1 @ TLane, 1 @ TCol)])
     num_k_blocks = config.num_k_blocks
     num_k_blocks_per_split = num_k_blocks // num_splits
@@ -395,11 +396,21 @@ def get_kernel(**kwargs: Any):
     def cuda_grid_dependency_synchronize():
         T.evaluate(T.ptx.griddepcontrol.wait())
 
-    def fma_sum_of_squares(acc0, acc1, a_flat, row_w, npairs, sc):
-        # Parse-time unrolled packed fma.f32x2 sum-of-squares into the two per-row
-        # accumulators, mirroring the hand ffma2 sum0/sum1 pair (rz.ftz, sub-ULP).
+    def fma_sum_of_squares(acc0, acc1, a_flat, npairs, sc):
+        # Plain (non-@T.inline) Python helper: the parser executes this call's
+        # Python ``for`` at parse time, unrolling it so each 2-wide pair slice
+        # stays a compile-time-static rank-1 region (a TIR loop var or a
+        # middle-dim scalar index would make the fma reg path reject the op —
+        # non-static extent / "op rank 3 > anchor rank 2"). Fused packed
+        # fma.f32x2 accumulate (acc += pair*pair) into the two per-row dual
+        # accumulators, structurally mirroring the hand ffma2 sum0/sum1 float2
+        # pair (the T.fma f32x2 path emits fma.rz.ftz vs the hand's rn/non-ftz
+        # — a sub-ULP sqr difference, well within the kernel's 1e-8 gate). The
+        # flat A view exposes the .16x256b physical register order
+        # ``reg = v0p + 2*va + 4*vb``: each group of four registers contains a
+        # packed row-0 pair followed by the matching packed row-1 pair.
         for p in range(npairs):
-            lo0, lo1 = 2 * p, row_w + 2 * p
+            lo0, lo1 = 4 * p, 4 * p + 2
             sc.fma(acc0, a_flat[lo0 : lo0 + 2], a_flat[lo0 : lo0 + 2], acc0)
             sc.fma(acc1, a_flat[lo1 : lo1 + 2], a_flat[lo1 : lo1 + 2], acc1)
 
@@ -631,8 +642,26 @@ def get_kernel(**kwargs: Any):
             sub_warp_idx: T.uint32 = T.cast(
                 T.cast(warp_idx, "int32") - T.int32(num_mma_warps), "uint32"
             )
-            # A cast/deposit register tiles in the warpgroup .16x256b atom (fp32-slot
-            # layout, so the cast is a slot-for-slot widen matching the deposit order).
+            # A cast/deposit register tiles. The bf16 A tile is ldmatrix-loaded
+            # (below) into the per-warpgroup ``.16x256b`` tcgen05 register atom —
+            # the same Layout-F M=64 distribution the gemm_async A-in-TMEM operand
+            # reads — then cast to tf32 (T.cast) and DEPOSITED into TMEM cols
+            # [cast_stage*block_k, +block_k) via T.copy_async (reg->tmem
+            # tcgen05.st, the A operand gemm_async consumes). ``a_bf16`` is
+            # declared with the *fp32* atom layout (one element per 32-bit slot,
+            # NOT the dense 2-bf16-per-slot bf16 atom) so a_bf16 and a_fp32 share
+            # an identical per-(lane, register) (row, col) mapping — the cast is
+            # then a slot-for-slot widen and a_fp32's register order matches both
+            # the ldmatrix output AND what the tcgen05.st deposit consumes (rel
+            # D == 0). NB the LOAD stays hand ldmatrix: T.copy on this warpgroup
+            # atom can't emit ldmatrix (its m8n8 per-warp lane distribution is
+            # structurally incompatible with the wid_in_wg+split-laneid atom) and
+            # falls to a 16x-scalar-LDS reg path that costs +25% on the latency-
+            # bound tail. The square/accumulate runs on the flat ``.local()`` view
+            # (per-thread private regs via ``Tx.fill`` / ``Tx.fma``). Its physical
+            # register order interleaves the two Layout-F rows in packed pairs:
+            # regs [4*p:4*p+2] feed row m_idx0 and regs [4*p+2:4*p+4] feed row
+            # m_idx1 (+8).
             a_bf16 = T.alloc_buffer(
                 (block_m, block_k),
                 "bfloat16",
@@ -644,8 +673,9 @@ def get_kernel(**kwargs: Any):
             # the fused form is the only no-regression reduce shape.
             sqr0 = T.alloc_local((2,), "float32")
             sqr1 = T.alloc_local((2,), "float32")
-            a_flat = a_fp32.local()  # 1D (cast_per_thread,): [0:16]=row0, [16:32]=row1
-            # Per-thread private regs: use thread-scope fill/fma.
+            a_flat = a_fp32.local()  # 1D physical-register view, 32 fp32 values per thread
+            # Per-thread private regs: use thread-scope fill/fma (not Tx.warp — warp
+            # scope requires a laneid-distributed layout; see elementwise reg dispatch).
             Tx.fill(sqr0, T.float32(0))
             Tx.fill(sqr1, T.float32(0))
             cast_st: T.uint32 = T.uint32(0)
@@ -668,12 +698,9 @@ def get_kernel(**kwargs: Any):
                             a_fp32[:, p * 8 : (p + 1) * 8], a_bf16[:, p * 8 : (p + 1) * 8]
                         )
                         # sqr{0,1} += a*a for this atom's packed pair per row.
-                        Tx.fma(sqr0, a_flat[2 * p : 2 * p + 2], a_flat[2 * p : 2 * p + 2], sqr0)
+                        Tx.fma(sqr0, a_flat[4 * p : 4 * p + 2], a_flat[4 * p : 4 * p + 2], sqr0)
                         Tx.fma(
-                            sqr1,
-                            a_flat[16 + 2 * p : 16 + 2 * p + 2],
-                            a_flat[16 + 2 * p : 16 + 2 * p + 2],
-                            sqr1,
+                            sqr1, a_flat[4 * p + 2 : 4 * p + 4], a_flat[4 * p + 2 : 4 * p + 4], sqr1
                         )
                         Tx.warpgroup.copy_async(
                             _tmem[0:block_m, a_col + p * 8 : a_col + (p + 1) * 8],
@@ -681,7 +708,7 @@ def get_kernel(**kwargs: Any):
                         )
                 else:
                     Tx.warpgroup.cast(a_fp32, a_bf16)
-                    fma_sum_of_squares(sqr0, sqr1, a_flat, cast_row_w, cast_pairs, Tx)
+                    fma_sum_of_squares(sqr0, sqr1, a_flat, cast_pairs, Tx)
                     Tx.warpgroup.copy_async(_tmem[0:block_m, a_col : a_col + block_k], a_fp32)
                 T.ptx.tcgen05.wait.st()
                 cast_pipe.full.arrive(cast_stage_idx)
