@@ -251,12 +251,15 @@ def _kernel(
     phase_s0_s1: T.int32
     phase_q_load: T.int32
     phase_oepi: T.int32
+    phase_pv_done: T.int32
     q_load = Pipeline(pool, SMEM_PIPE_DEPTH_Q, full="tma", empty="tcgen05", empty_phase_offset=1)
     kv_load = Pipeline(pool, SMEM_PIPE_DEPTH_KV, full="tma", empty="tcgen05", empty_phase_offset=1)
     p_o_rescale = MBarrier(pool, 2)
     p_o_rescale.init(256)
     s_ready = TCGen05Bar(pool, 2)
     s_ready.init(1)
+    pv_done = TCGen05Bar(pool, 2)
+    pv_done.init(1)
     o_ready = TCGen05Bar(pool, 2)
     o_ready.init(1)
     softmax_corr = Pipeline(
@@ -338,6 +341,7 @@ def _kernel(
     if USE_S0_S1_BARRIER:
         phase_s0_s1 = T.if_then_else(wg_id == 1, 0, 1)
     phase_q_load = 0
+    phase_pv_done = 0
     tmem_pool.commit()
     if (wg_id == 3) & (warp_id == 0):
         T.cuda.trap_when_assert_failed(tmem_addr[0] == T.uint32(0))
@@ -548,6 +552,14 @@ def _kernel(
                         p_o_rescale.wait(i_q, phase_tmem)
                         T.ptx.tcgen05.fence.after_thread_sync()
                         gemm_pv(i_q, stage_v, acc)
+                        # P overlays the score accumulator for this stage. PV
+                        # reads P, while the following QK writes the aliased S
+                        # region. Their destination accumulators differ, so
+                        # PTX does not provide an implicit MMA->MMA pipeline.
+                        if T.ptx.elect_sync():
+                            pv_done.arrive(i_q)
+                        pv_done.wait(i_q, phase_pv_done)
+                        T.ptx.tcgen05.fence.after_thread_sync()
                         if i_q == 1:
                             if T.ptx.elect_sync():
                                 kv_load.empty.arrive(stage_v)
@@ -574,6 +586,7 @@ def _kernel(
                     acc = 1
                     kv_pipe.advance()
                     phase_tmem ^= 1
+                    phase_pv_done ^= 1
                 for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
                     if i_q == 0:
                         kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
@@ -734,6 +747,8 @@ def _kernel(
                 # try_wait + nanosleep latency — this wait gates p_o_rescale
                 # and therefore the PV MMA. The reverse (sScale slot reuse)
                 # direction stays on softmax_corr.empty.
+                if not is_first:
+                    T.ptx.tcgen05.fence.before_thread_sync()
                 if STATS_BAR_PAIRWISE:
                     tvm.backend.cuda.op.ptx_bar_arrive(1 + wg_id * 4 + warp_id, 64)
                 else:
@@ -935,6 +950,7 @@ def _kernel(
                         tvm.backend.cuda.op.ptx_bar_sync(1 + i_q * 4 + warp_id, 64)
                     else:
                         tvm.backend.cuda.op.ptx_bar_sync(1 + i_q, 256)
+                    T.ptx.tcgen05.fence.after_thread_sync()
                     correction_token = iket.sentinel_token("correction")
                     if warp_id == 0:
                         correction_token = iket.range_start("correction")
