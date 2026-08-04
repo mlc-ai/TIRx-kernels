@@ -504,6 +504,7 @@ def _kernel(
                 @T.inline
                 def gemm_pv_part2(i_q, kv_stage):
                     p_ready_2.wait(i_q, phase_tmem)
+                    T.ptx.tcgen05.fence.after_thread_sync()
                     Tx.warp.gemm_async(
                         O_region[SMEM_PIPE_DEPTH_Q + i_q, :, :],
                         P_region[i_q, 1, :, K_SPLIT:BLK_N],
@@ -523,6 +524,7 @@ def _kernel(
                     q_load.full.wait(i_q, phase_q_load)
                     if i_q == 0:
                         kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
+                    T.ptx.tcgen05.fence.after_thread_sync()
                     gemm_qk(i_q, kv_pipe.stage)
                     if i_q == 1:
                         if T.ptx.elect_sync():
@@ -544,12 +546,14 @@ def _kernel(
                         if i_q == 0:
                             kv_load.full.wait(stage_v, phase_v)
                         p_o_rescale.wait(i_q, phase_tmem)
+                        T.ptx.tcgen05.fence.after_thread_sync()
                         gemm_pv(i_q, stage_v, acc)
                         if i_q == 1:
                             if T.ptx.elect_sync():
                                 kv_load.empty.arrive(stage_v)
                         if i_q == 0:
                             kv_load.full.wait(stage_k, phase_k)
+                        T.ptx.tcgen05.fence.after_thread_sync()
                         gemm_qk(i_q, stage_k)
                         # Early Q release (non-causal / multi-task CTAs):
                         # Q[i_q]'s LAST reader is this final QK — committing
@@ -574,6 +578,7 @@ def _kernel(
                     if i_q == 0:
                         kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
                     p_o_rescale.wait(i_q, phase_tmem)
+                    T.ptx.tcgen05.fence.after_thread_sync()
                     gemm_pv(i_q, kv_pipe.stage, acc)
                     if i_q == 1:
                         if T.ptx.elect_sync():
@@ -666,6 +671,7 @@ def _kernel(
                 p_chunk_buf = T.decl_buffer((BLK_N,), dtype="float16", data=p_chunk_buf_f32.data)
                 p_chunk = p_chunk_buf.view(128, BLK_N, layout=wg_local_layout(BLK_N))
                 s_ready.wait(wg_id, phase_s_full)
+                T.ptx.tcgen05.fence.after_thread_sync()
                 if warp_id == 0:
                     iket.mark("softmax-phase-0")
                 softmax_max_token = iket.sentinel_token("softmax-max")
@@ -780,6 +786,7 @@ def _kernel(
                         p_chunk[:, i * BLK_N // 4 : (i + 1) * BLK_N // 4],
                     )
                 T.ptx.tcgen05.wait.st()
+                T.ptx.tcgen05.fence.before_thread_sync()
                 p_o_rescale.arrive(wg_id)
                 for i in T.unroll(4 - P_SPLIT_Q):
                     Tx.wg.copy_async(
@@ -794,6 +801,7 @@ def _kernel(
                 if warp_id == 0:
                     iket.mark("softmax-phase-2")
                 T.ptx.tcgen05.wait.st()
+                T.ptx.tcgen05.fence.before_thread_sync()
                 p_ready_2.arrive(wg_id)
                 if warp_id == 0:
                     iket.mark("softmax-phase-3")
@@ -860,6 +868,7 @@ def _kernel(
                 EPI_LD_SM = T.meta_var(32)
                 o_ready.wait(wg_id, phase_oepi)
                 corr_epi.empty.wait(wg_id, phase_oepi)
+                T.ptx.tcgen05.fence.after_thread_sync()
                 epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
                 if warp_id == 0:
                     epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
@@ -962,6 +971,7 @@ def _kernel(
                                         o_row,
                                     )
                             T.ptx.tcgen05.wait.st()
+                            T.ptx.tcgen05.fence.before_thread_sync()
                     p_o_rescale.arrive(i_q)
                     softmax_corr.empty.arrive(1 - i_q)
                     iket.range_end(correction_token)
@@ -977,6 +987,7 @@ def _kernel(
                     softmax_corr.empty.arrive(i_q)
                     o_ready.wait(i_q, phase_tmem)
                     corr_epi.empty.wait(i_q, phase_tmem)
+                    T.ptx.tcgen05.fence.after_thread_sync()
                     epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
                     if warp_id == 0:
                         epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
