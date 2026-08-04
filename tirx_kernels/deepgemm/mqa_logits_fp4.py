@@ -756,6 +756,7 @@ def get_kernel(**kwargs: Any):
                         previous_tmem_iter % T.uint32(num_tmem_stages),
                         (previous_tmem_iter // T.uint32(num_tmem_stages)) & T.uint32(1),
                     )
+                    T.ptx.tcgen05.fence.after_thread_sync()
                 if T.ptx.elect_sync():
                     Tx.copy_async(sfq_tmem, smem_sf_q_cp[T.cast(q_stage_idx, "int32")], cta_group=1)
                 T.cuda.warp_sync()
@@ -765,6 +766,17 @@ def get_kernel(**kwargs: Any):
                     # transpose worker (sf_ready).
                     kv_pipe.full.wait(kv_stage_idx, kv_phase)
                     sf_ready.wait(kv_stage_idx, kv_phase)
+                    # SFKV occupies one fixed TMEM tile.  Its preceding MMA
+                    # read and this iteration's CP overwrite are not an
+                    # architected TCGEN pipeline, so observe the final commit
+                    # from the preceding KV block before reusing the tile.
+                    if (kv_idx > T.uint32(0)) and (tmem_issued > T.uint32(0)):
+                        previous_tmem_iter: T.uint32 = tmem_issued - T.uint32(1)
+                        tmem_pipe.full.wait(
+                            previous_tmem_iter % T.uint32(num_tmem_stages),
+                            (previous_tmem_iter // T.uint32(num_tmem_stages)) & T.uint32(1),
+                        )
+                        T.ptx.tcgen05.fence.after_thread_sync()
                     # cp + MMA share ONE elect scope: drops a redundant elect.sync per
                     # kv-iter and lets the cp overlap the MMA setup.
                     if T.ptx.elect_sync():
@@ -837,6 +849,12 @@ def get_kernel(**kwargs: Any):
                 t_kv_i: T.uint32 = T.uint32(0)
                 while t_kv_i < t_num_kv:
                     kv_pipe.full.wait(t_kv_stage, t_kv_phase)
+                    # The preceding tcgen05.cp read of this transposed stage
+                    # completes through kv_pipe.empty before the TMA producer
+                    # can refill the stage.  Reconnect that async-proxy read
+                    # to the generic-proxy stores which now reuse the same
+                    # physical shared-memory backing.
+                    T.ptx.fence.proxy_async("shared::cta")
                     emit_sf_transpose(smem_sf_kv, smem_sf_kv_t, lane_idx, t_kv_stage, 0)
                     emit_sf_transpose(
                         smem_sf_kv, smem_sf_kv_t, lane_idx, t_kv_stage, num_utccp_aligned_elems

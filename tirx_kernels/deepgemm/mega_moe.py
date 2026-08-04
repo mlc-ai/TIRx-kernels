@@ -4330,6 +4330,9 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 current_iter_idx = 0
                 pipeline_stage_idx = T.int32(0)
                 pipeline_phase = T.int32(0)
+                scale_tmem_pending = T.int32(0)
+                scale_tmem_stage_idx = T.int32(0)
+                scale_tmem_phase = T.int32(0)
                 while True:
                     consumer_get_next_task()
                     consumer_bind_task_args()
@@ -4366,6 +4369,17 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                             full_wait_phase,
                         )
                         T.ptx.tcgen05.fence.after_thread_sync()
+                        # SFA/SFB use fixed TMEM columns.  MMA -> CP is not an
+                        # implicit TCGEN pipeline, so the next overwrite must
+                        # observe completion of the preceding k-block's MMAs.
+                        if scale_tmem_pending != T.int32(0):
+                            barrier_wait(
+                                smem_barriers.ptr_to(
+                                    [empty_barrier_base + scale_tmem_stage_idx]
+                                ),
+                                scale_tmem_phase,
+                            )
+                            T.ptx.tcgen05.fence.after_thread_sync()
                         a_desc_base_lo = T.tvm_warp_shuffle(
                             T.uint32(0xFFFFFFFF), a_desc_lo, pipeline_stage_idx, 32, 32
                         )
@@ -4452,6 +4466,9 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                     )
                         T.cuda.warp_sync()
                         empty_barrier_arrive_current(k_block_idx == num_k_blocks - T.int32(1))
+                        scale_tmem_pending = T.int32(1)
+                        scale_tmem_stage_idx = pipeline_stage_idx
+                        scale_tmem_phase = pipeline_phase
                         advance_pipeline()
                 if current_iter_idx > 0:
                     previous_iter_idx_u32 = T.cast(current_iter_idx - T.int32(1), "uint32")
