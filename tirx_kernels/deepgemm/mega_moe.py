@@ -3388,6 +3388,7 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
 
         @T.inline
         def tmem_empty_barrier_arrive_cta0(tmem_empty_barrier_ptr):
+            T.ptx.tcgen05.fence.before_thread_sync()
             T.ptx.mbarrier.arrive(tmem_empty_barrier_ptr, remote=0, pred=True)
 
         @T.inline
@@ -4664,7 +4665,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                             )
                             fence_view_async_tmem_load()
                             if j == wg_block_m // atom_m - 1:
-                                T.ptx.tcgen05.fence.before_thread_sync()
                                 tmem_empty_barrier_arrive_cta0(
                                     smem_barriers.ptr_to(
                                         [tmem_empty_barrier_base + accum_stage_idx]
@@ -4866,7 +4866,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                 s == wg_block_m // kernel_config.store_block_m - 1
                                 and i == kernel_config.store_block_m // atom_m - 1
                             ):
-                                T.ptx.tcgen05.fence.before_thread_sync()
                                 tmem_empty_barrier_arrive_cta0(
                                     smem_barriers.ptr_to(
                                         [tmem_empty_barrier_base + accum_stage_idx]
