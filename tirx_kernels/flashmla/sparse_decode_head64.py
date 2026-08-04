@@ -1738,6 +1738,11 @@ def _kernel(
                 # SxV use, then convert each fp8x8 with the exact ue8m0
                 # scale and weak shared b128 store from the source.
                 bar_q_utccp.wait(0, batch_bar_phase)
+                # The completed UTCCP read q_sw128 through the async proxy,
+                # while this warpgroup now reuses the aliased k_full storage
+                # through generic shared stores.  The mbarrier wait observes
+                # TCGEN completion but does not itself bridge memory proxies.
+                T.ptx.fence.proxy_async("shared::cta")
                 for block_idx in T.serial(start_block, end_block, unroll=False):
                     bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                     bar_raw_ready.wait(rs_buf.stage, rs_buf.phase)

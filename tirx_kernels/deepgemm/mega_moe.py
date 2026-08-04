@@ -1580,6 +1580,7 @@ def get_kernel(
     umma_n = kernel_config.block_m
     umma_block_k = 128
     umma_k = 32
+    num_umma_k_blocks_per_stage = kernel_config.block_k // umma_block_k
     num_sfa_utccp_chunks = sf_block_m // 128
     num_sfb_utccp_chunks = kernel_config.block_n // 128
     num_epilogue_stages = 2
@@ -1591,14 +1592,16 @@ def get_kernel(
     num_accum_tmem_cols = kernel_config.block_m * num_epilogue_stages
     num_sfa_tmem_cols = sf_block_m // 32
     num_sfb_tmem_cols = kernel_config.block_n // 32
+    num_sfa_tmem_cols_total = num_sfa_tmem_cols * num_umma_k_blocks_per_stage
+    num_sfb_tmem_cols_total = num_sfb_tmem_cols * num_umma_k_blocks_per_stage
     num_tmem_cols = 32
-    if num_accum_tmem_cols + num_sfa_tmem_cols + num_sfb_tmem_cols > 32:
+    if num_accum_tmem_cols + num_sfa_tmem_cols_total + num_sfb_tmem_cols_total > 32:
         num_tmem_cols = 64
-    if num_accum_tmem_cols + num_sfa_tmem_cols + num_sfb_tmem_cols > 64:
+    if num_accum_tmem_cols + num_sfa_tmem_cols_total + num_sfb_tmem_cols_total > 64:
         num_tmem_cols = 128
-    if num_accum_tmem_cols + num_sfa_tmem_cols + num_sfb_tmem_cols > 128:
+    if num_accum_tmem_cols + num_sfa_tmem_cols_total + num_sfb_tmem_cols_total > 128:
         num_tmem_cols = 256
-    if num_accum_tmem_cols + num_sfa_tmem_cols + num_sfb_tmem_cols > 256:
+    if num_accum_tmem_cols + num_sfa_tmem_cols_total + num_sfb_tmem_cols_total > 256:
         num_tmem_cols = 512
 
     if not 32 <= num_tmem_cols <= 512:
@@ -2874,19 +2877,27 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
             layout=TileLayout(S[(128, num_tmem_cols) : (1 @ TLane, 1 @ TCol)]),
         )
         sfa_tmem = T.decl_buffer(
-            (128, sf_block_m // 32),
+            (num_umma_k_blocks_per_stage, 128, sf_block_m // 32),
             "float8_e8m0fnu",
             scope="tmem",
             allocated_addr=num_accum_tmem_cols,
-            layout=sf_tmem_layout(128, SF_K=sf_block_m // 32, sf_per_mma=sf_block_m // 32),
+            layout=sf_tmem_layout(
+                128,
+                SF_K=sf_block_m // 32,
+                sf_per_mma=sf_block_m // 32,
+                pipe_depth=num_umma_k_blocks_per_stage,
+            ),
         )
         sfb_tmem = T.decl_buffer(
-            (128, kernel_config.block_n // 32),
+            (num_umma_k_blocks_per_stage, 128, kernel_config.block_n // 32),
             "float8_e8m0fnu",
             scope="tmem",
-            allocated_addr=num_accum_tmem_cols + num_sfa_tmem_cols,
+            allocated_addr=num_accum_tmem_cols + num_sfa_tmem_cols_total,
             layout=sf_tmem_layout(
-                128, SF_K=kernel_config.block_n // 32, sf_per_mma=kernel_config.block_n // 32
+                128,
+                SF_K=kernel_config.block_n // 32,
+                sf_per_mma=kernel_config.block_n // 32,
+                pipe_depth=num_umma_k_blocks_per_stage,
             ),
         )
         desc_a: T.uint64
@@ -4373,7 +4384,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                         ),
                                     )
                                     utccp_copy(
-                                        sfa_tmem.allocated_addr[0] + sfa_chunk_idx * 4, desc_sf
+                                        sfa_tmem.allocated_addr[0]
+                                        + umma_k_block_idx * num_sfa_tmem_cols
+                                        + sfa_chunk_idx * 4,
+                                        desc_sf,
                                     )
                                 for sfb_chunk_idx in T.unroll(0, num_sfb_utccp_chunks):
                                     desc_sf = replace_smem_desc_addr(
@@ -4387,7 +4401,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                         ),
                                     )
                                     utccp_copy(
-                                        sfb_tmem.allocated_addr[0] + sfb_chunk_idx * 4, desc_sf
+                                        sfb_tmem.allocated_addr[0]
+                                        + umma_k_block_idx * num_sfb_tmem_cols
+                                        + sfb_chunk_idx * 4,
+                                        desc_sf,
                                     )
                                 for k_idx in T.unroll(0, umma_block_k // umma_k):
                                     runtime_desc_i = make_runtime_instr_desc_with_sf_id(
@@ -4413,8 +4430,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                         accum_stage_idx * umma_n,
                                         desc_b,
                                         desc_a,
-                                        sfb_tmem.allocated_addr[0],
-                                        sfa_tmem.allocated_addr[0],
+                                        sfb_tmem.allocated_addr[0]
+                                        + umma_k_block_idx * num_sfb_tmem_cols,
+                                        sfa_tmem.allocated_addr[0]
+                                        + umma_k_block_idx * num_sfa_tmem_cols,
                                         runtime_desc_i,
                                         d_dtype="float32",
                                         a_dtype="float4_e2m1fn",
