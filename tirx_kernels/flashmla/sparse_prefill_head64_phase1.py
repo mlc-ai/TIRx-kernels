@@ -555,10 +555,12 @@ def _kernel(
                 pv_wait_token = iket.range_start("h64-pv-wait")
                 bar_sv_done.wait(prev_buf, prev_phase)
                 iket.range_end(pv_wait_token)
-                # The completed TCGEN05 MMA read this shared-memory stage
-                # through the async proxy.  Order that read before reusing the
-                # stage for the generic S write below.
-                T.ptx.fence.proxy_async("shared::cta")
+
+            # On the first iteration s_smem_gemm aliases q_rope, which was
+            # read by an async TCGEN05 copy.  On later iterations it is the
+            # completed SxV MMA stage.  Order either async read before the
+            # generic S write below.
+            T.ptx.fence.proxy_async("shared::cta")
 
             # CUDA phase1.cuh:229-232 S store (vectorized by the reg copy path).
             Tx.wg.copy(s_smem_gemm[:, :], s_frag[:, :])
@@ -668,18 +670,6 @@ def _kernel(
                             o_smem.chunk((None, D_V // 64))[:, epi_chunk_idx],
                             **tma_config(),
                         )
-
-        # Global<-shared TMA stores are tracked per issuing warp.  Each elected
-        # lane must commit and drain its own group before the shared staging
-        # buffer can be released at kernel exit.
-        if warp_idx == 0:
-            if T.ptx.elect_sync():
-                T.ptx.cp_async.bulk.commit_group()
-                T.ptx.cp_async.bulk.wait_group(0, read=False)
-        if warp_idx == 1:
-            if T.ptx.elect_sync():
-                T.ptx.cp_async.bulk.commit_group()
-                T.ptx.cp_async.bulk.wait_group(0, read=False)
 
         if warp_idx == 0:
             T.ptx.tcgen05.dealloc(T.uint32(0), n_cols=512, cta_group=1)

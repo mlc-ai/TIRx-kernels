@@ -601,18 +601,6 @@ def _kernel(
                         **tma_config(),
                     )
 
-        # The global<-shared TMA stores are issued by two different warps and
-        # therefore own independent bulk-async groups.  Drain both groups
-        # before the CTA exits and releases the shared output staging buffer.
-        if warp_idx == 0:
-            if T.ptx.elect_sync():
-                T.ptx.cp_async.bulk.commit_group()
-                T.ptx.cp_async.bulk.wait_group(0, read=False)
-        if warp_idx == 1:
-            if T.ptx.elect_sync():
-                T.ptx.cp_async.bulk.commit_group()
-                T.ptx.cp_async.bulk.wait_group(0, read=False)
-
         if warp_idx == 0:
             T.ptx.tcgen05.dealloc(T.uint32(0), n_cols=512, cta_group=2)
         iket.range_end(epilogue_token)
@@ -702,7 +690,6 @@ def _kernel(
                     prev_buf: T.let = (k - 1) % NUM_BUFS
                     prev_phase: T.let = ((k - 1) // NUM_BUFS) & 1
                     bar_sv_part_done.wait(prev_buf, prev_phase)
-                    T.ptx.fence.proxy_async("shared::cta")
 
                 @T.inline
                 def gather_v_part(row_offset, part, token_buf, bar):
@@ -738,7 +725,6 @@ def _kernel(
                     prev_buf: T.let = (k - 1) % NUM_BUFS
                     prev_phase: T.let = ((k - 1) // NUM_BUFS) & 1
                     bar_sv_done.wait(prev_buf, prev_phase)
-                    T.ptx.fence.proxy_async("shared::cta")
                 token_idxs_part1 = T.alloc_local((WG2_ROWS_PER_PART, 4), "int32")
                 gather_v_part(WG2_ROWS_PER_PART, 1, token_idxs_part1, bar_v_part1_ready)
         iket.range_end(v_gather_token)
