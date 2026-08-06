@@ -744,7 +744,6 @@ def _kernel(
                     while clc_job_valid != 0:
                         if cta_idx == 0:
                             bar_clc_empty.wait(0, clc_outer_loop_phase ^ 1)
-                            T.ptx.fence.proxy_async("shared::cta")
                             T.ptx.clc_try_cancel(
                                 T.address_of(clc_response[0]), bar_clc_full.ptr_to([0])
                             )
