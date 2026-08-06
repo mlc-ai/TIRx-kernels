@@ -569,7 +569,6 @@ def get_kernel(**kwargs: Any):
                     stage_idx: T.uint32 = mma_st
                     cast_stage_idx: T.uint32 = mma_cs
                     cast_pipe.full.wait(cast_stage_idx, mma_ph)
-                    T.ptx.tcgen05.fence.after_thread_sync()
                     # int32 col base (a uint32 extent fails gemm_async's layout check).
                     a_col: T.int32 = T.cast(cast_stage_idx * T.uint32(block_k), "int32")
                     # D += A(tmem tf32) @ B^T(smem); accum=(s != 0) mirrors the hand scale_c.
@@ -585,7 +584,6 @@ def get_kernel(**kwargs: Any):
                         # mirroring the hand's shuffle + IADD descriptor pattern.
                         smem_desc="local_hoist",
                     )
-                    T.ptx.tcgen05.fence.before_thread_sync()
                     if T.ptx.elect_sync():
                         cast_pipe.empty.arrive(cast_stage_idx)
                         smem_pipe.empty.arrive(stage_idx)
@@ -599,7 +597,6 @@ def get_kernel(**kwargs: Any):
                     tmem_pipe.arrive(0)
 
             tmem_pipe.wait(0, 0)
-            T.ptx.tcgen05.fence.after_thread_sync()
             # D epilogue, hand-aligned: 8 x [tcgen05.ld.32x32b.x4 + wait.ld +
             # st.shared.v4 (lane<16) + syncwarp] into the 128B-swizzled smem_cd.
             d_frag = T.alloc_local((4,), "float32")
@@ -693,7 +690,6 @@ def get_kernel(**kwargs: Any):
                 # SMEM->reg A load via ldmatrix.x4 (T.copy dispatch).
                 Tx.warpgroup.copy(a_bf16, smem_a_mma[stage_idx])
                 cast_pipe.empty.wait(cast_stage_idx, cast_cph)
-                T.ptx.tcgen05.fence.after_thread_sync()
                 # bf16->tf32 + sqr-fma + TMEM deposit: interleaved per 8-col atom on
                 # short mainloops (hand structure); single wide STTM.x8 on deep pipelines.
                 if num_k_blocks_per_split <= 16:
@@ -715,7 +711,6 @@ def get_kernel(**kwargs: Any):
                     fma_sum_of_squares(sqr0, sqr1, a_flat, cast_pairs, Tx)
                     Tx.warpgroup.copy_async(_tmem[0:block_m, a_col : a_col + block_k], a_fp32)
                 T.ptx.tcgen05.wait.st()
-                T.ptx.tcgen05.fence.before_thread_sync()
                 cast_pipe.full.arrive(cast_stage_idx)
                 cast_st = stage_idx + T.uint32(1)
                 if cast_st == T.uint32(num_stages):

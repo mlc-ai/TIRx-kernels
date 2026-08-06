@@ -425,7 +425,6 @@ def _kernel(
             bar_li_empty.arrive(0)
 
             bar_tOut_full.wait(0, o_outer_loop_phase)
-            T.ptx.tcgen05.fence.after_thread_sync()
             if is_last_o:
                 if T.ptx.elect_sync():
                     T.ptx.griddepcontrol.launch_dependents()
@@ -446,7 +445,6 @@ def _kernel(
                         bar_tQ_full.wait(0, o_outer_loop_phase ^ 1)
                     T.ptx.fence.proxy_async("shared::cta")
                 if epi_k == ((D_V // 2) // B_EPI) - 1:
-                    T.ptx.tcgen05.fence.before_thread_sync()
                     bar_tOut_empty.arrive(0, remote=T.uint32(0))
                 Tx.wg.mul(o_epi_frag[:, :], o_epi_frag[:, :], output_scale)
                 Tx.wg.cast(o_epi_bf16_frag[:, :], o_epi_frag[:, :])

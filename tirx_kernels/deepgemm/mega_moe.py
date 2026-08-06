@@ -3388,7 +3388,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
 
         @T.inline
         def tmem_empty_barrier_arrive_cta0(tmem_empty_barrier_ptr):
-            T.ptx.tcgen05.fence.before_thread_sync()
             T.ptx.mbarrier.arrive(tmem_empty_barrier_ptr, remote=0, pred=True)
 
         @T.inline
@@ -4361,14 +4360,12 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         smem_barriers.ptr_to([tmem_empty_barrier_base + accum_stage_idx]),
                         accum_phase ^ T.int32(1),
                     )
-                    T.ptx.tcgen05.fence.after_thread_sync()
                     for k_block_idx in T.serial(0, num_k_blocks):
                         full_wait_phase: T.int32 = pipeline_phase
                         mbarrier_wait_phase(
                             smem_barriers.ptr_to([full_barrier_base + pipeline_stage_idx]),
                             full_wait_phase,
                         )
-                        T.ptx.tcgen05.fence.after_thread_sync()
                         # SFA/SFB use fixed TMEM columns.  MMA -> CP is not an
                         # implicit TCGEN pipeline, so the next overwrite must
                         # observe completion of the preceding k-block's MMAs.
@@ -4379,7 +4376,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                 ),
                                 scale_tmem_phase,
                             )
-                            T.ptx.tcgen05.fence.after_thread_sync()
                         a_desc_base_lo = T.tvm_warp_shuffle(
                             T.uint32(0xFFFFFFFF), a_desc_lo, pipeline_stage_idx, 32, 32
                         )
@@ -4571,7 +4567,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 barrier_wait(
                     smem_barriers.ptr_to([tmem_full_barrier_base + accum_stage_idx]), accum_phase
                 )
-                T.ptx.tcgen05.fence.after_thread_sync()
                 # Now we can release the task
                 scheduler_release_task_info()
                 # Match DeepGEMM's `ptx::exchange(..., 0)`: all lanes have the same
