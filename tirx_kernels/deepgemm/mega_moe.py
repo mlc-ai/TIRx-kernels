@@ -2228,6 +2228,9 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
     dispatch_with_epilogue_sync_barrier_idx = 1
     epilogue_full_sync_barrier_idx = 2
     epilogue_wg_sync_barrier_start_idx = 3
+    dispatch_with_load_a_sync_barrier_idx = (
+        epilogue_wg_sync_barrier_start_idx + num_epilogue_wgs
+    )
     before_dispatch_pull_barrier_tag = 1
     before_combine_reduce_barrier_tag = 2
     after_workspace_clean_barrier_tag = 3
@@ -4017,7 +4020,15 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                 )
             )
-            T.ptx.bar.sync(dispatch_sync_barrier_idx, kernel_config.num_dispatch_threads)
+            # Dispatch and load-A read reusable global workspace after the
+            # preceding grid rendezvous. The epilogue grid rendezvous cannot
+            # publish those reads because it precedes this CTA-local join.
+            workspace_grid_sync(
+                dispatch_grid_sync_index,
+                kernel_config.num_dispatch_threads + 32,
+                dispatch_with_load_a_sync_barrier_idx,
+                flat_warp_idx * 32 + lane_idx,
+            )
             if sm_idx == 0:
                 # SM 0: clear expert send count and schedule task counters
                 dispatch_expert_idx = thread_idx
@@ -4216,6 +4227,12 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                             full_barrier_arrive_cta0(full_barrier_ptr)
                     T.cuda.warp_sync()
                     advance_pipeline()
+            workspace_grid_sync(
+                dispatch_grid_sync_index,
+                kernel_config.num_dispatch_threads + 32,
+                dispatch_with_load_a_sync_barrier_idx,
+                kernel_config.num_dispatch_threads + lane_idx,
+            )
         elif flat_warp_idx == kernel_config.load_b_warp_idx:
             warpgroup_reg_dealloc(num_non_epilogue_registers)
             sched_stage_idx = T.int32(0)
