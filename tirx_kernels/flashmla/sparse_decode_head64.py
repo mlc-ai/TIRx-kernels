@@ -782,6 +782,11 @@ def _kernel(
                     bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                     bar_qk_done.wait(rs_buf.stage, rs_buf.phase)
                     T.ptx.tcgen05.fence.after_thread_sync()
+                    # A later QK commit is ordered after the preceding SxV
+                    # operation from this TCGEN issuer.  Its completion thus
+                    # retires the prior async read of s_smem_gemm; bridge that
+                    # read before p_exchange overwrites the aliased union.
+                    T.ptx.fence.proxy_async("shared::cta")
 
                     p_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, B_TOPK // 2), "float32")
                     p_peer_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, B_TOPK // 2), "float32")
@@ -1736,15 +1741,15 @@ def _kernel(
                 # SxV use, then convert each fp8x8 with the exact ue8m0
                 # scale and weak shared b128 store from the source.
                 bar_q_utccp.wait(0, batch_bar_phase)
-                # The completed UTCCP read q_sw128 through the async proxy,
-                # while this warpgroup now reuses the aliased k_full storage
-                # through generic shared stores.  The mbarrier wait observes
-                # TCGEN completion but does not itself bridge memory proxies.
-                T.ptx.fence.proxy_async("shared::cta")
                 for block_idx in T.serial(start_block, end_block, unroll=False):
                     bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                     bar_raw_ready.wait(rs_buf.stage, rs_buf.phase)
                     bar_sv_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
+                    # On the first block, bridge the completed UTCCP read of
+                    # q_sw128 before generic stores reuse its k_full alias.  On
+                    # later ring turns, bridge the completed SxV read of this
+                    # stage before the same generic stores overwrite it.
+                    T.ptx.fence.proxy_async("shared::cta")
                     cur_nope_base_u64: T.let = T.if_then_else(
                         rs_buf.stage == 0, nope0_base_u64, nope1_base_u64
                     )
