@@ -251,15 +251,12 @@ def _kernel(
     phase_s0_s1: T.int32
     phase_q_load: T.int32
     phase_oepi: T.int32
-    phase_pv_done: T.int32
     q_load = Pipeline(pool, SMEM_PIPE_DEPTH_Q, full="tma", empty="tcgen05", empty_phase_offset=1)
     kv_load = Pipeline(pool, SMEM_PIPE_DEPTH_KV, full="tma", empty="tcgen05", empty_phase_offset=1)
     p_o_rescale = MBarrier(pool, 2)
     p_o_rescale.init(256)
     s_ready = TCGen05Bar(pool, 2)
     s_ready.init(1)
-    pv_done = TCGen05Bar(pool, 2)
-    pv_done.init(1)
     o_ready = TCGen05Bar(pool, 2)
     o_ready.init(1)
     softmax_corr = Pipeline(
@@ -341,7 +338,6 @@ def _kernel(
     if USE_S0_S1_BARRIER:
         phase_s0_s1 = T.if_then_else(wg_id == 1, 0, 1)
     phase_q_load = 0
-    phase_pv_done = 0
     tmem_pool.commit()
     if (wg_id == 3) & (warp_id == 0):
         T.cuda.trap_when_assert_failed(tmem_addr[0] == T.uint32(0))
@@ -508,7 +504,6 @@ def _kernel(
                 @T.inline
                 def gemm_pv_part2(i_q, kv_stage):
                     p_ready_2.wait(i_q, phase_tmem)
-                    T.ptx.tcgen05.fence.after_thread_sync()
                     Tx.warp.gemm_async(
                         O_region[SMEM_PIPE_DEPTH_Q + i_q, :, :],
                         P_region[i_q, 1, :, K_SPLIT:BLK_N],
@@ -528,7 +523,6 @@ def _kernel(
                     q_load.full.wait(i_q, phase_q_load)
                     if i_q == 0:
                         kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
-                    T.ptx.tcgen05.fence.after_thread_sync()
                     gemm_qk(i_q, kv_pipe.stage)
                     if i_q == 1:
                         if T.ptx.elect_sync():
@@ -550,22 +544,12 @@ def _kernel(
                         if i_q == 0:
                             kv_load.full.wait(stage_v, phase_v)
                         p_o_rescale.wait(i_q, phase_tmem)
-                        T.ptx.tcgen05.fence.after_thread_sync()
                         gemm_pv(i_q, stage_v, acc)
-                        # P overlays the score accumulator for this stage. PV
-                        # reads P, while the following QK writes the aliased S
-                        # region. Their destination accumulators differ, so
-                        # PTX does not provide an implicit MMA->MMA pipeline.
-                        if T.ptx.elect_sync():
-                            pv_done.arrive(i_q)
-                        pv_done.wait(i_q, phase_pv_done)
-                        T.ptx.tcgen05.fence.after_thread_sync()
                         if i_q == 1:
                             if T.ptx.elect_sync():
                                 kv_load.empty.arrive(stage_v)
                         if i_q == 0:
                             kv_load.full.wait(stage_k, phase_k)
-                        T.ptx.tcgen05.fence.after_thread_sync()
                         gemm_qk(i_q, stage_k)
                         # Early Q release (non-causal / multi-task CTAs):
                         # Q[i_q]'s LAST reader is this final QK — committing
@@ -586,12 +570,10 @@ def _kernel(
                     acc = 1
                     kv_pipe.advance()
                     phase_tmem ^= 1
-                    phase_pv_done ^= 1
                 for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
                     if i_q == 0:
                         kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
                     p_o_rescale.wait(i_q, phase_tmem)
-                    T.ptx.tcgen05.fence.after_thread_sync()
                     gemm_pv(i_q, kv_pipe.stage, acc)
                     if i_q == 1:
                         if T.ptx.elect_sync():
@@ -684,7 +666,6 @@ def _kernel(
                 p_chunk_buf = T.decl_buffer((BLK_N,), dtype="float16", data=p_chunk_buf_f32.data)
                 p_chunk = p_chunk_buf.view(128, BLK_N, layout=wg_local_layout(BLK_N))
                 s_ready.wait(wg_id, phase_s_full)
-                T.ptx.tcgen05.fence.after_thread_sync()
                 if warp_id == 0:
                     iket.mark("softmax-phase-0")
                 softmax_max_token = iket.sentinel_token("softmax-max")
@@ -747,8 +728,6 @@ def _kernel(
                 # try_wait + nanosleep latency — this wait gates p_o_rescale
                 # and therefore the PV MMA. The reverse (sScale slot reuse)
                 # direction stays on softmax_corr.empty.
-                if not is_first:
-                    T.ptx.tcgen05.fence.before_thread_sync()
                 if STATS_BAR_PAIRWISE:
                     tvm.backend.cuda.op.ptx_bar_arrive(1 + wg_id * 4 + warp_id, 64)
                 else:
@@ -801,7 +780,6 @@ def _kernel(
                         p_chunk[:, i * BLK_N // 4 : (i + 1) * BLK_N // 4],
                     )
                 T.ptx.tcgen05.wait.st()
-                T.ptx.tcgen05.fence.before_thread_sync()
                 p_o_rescale.arrive(wg_id)
                 for i in T.unroll(4 - P_SPLIT_Q):
                     Tx.wg.copy_async(
@@ -816,7 +794,6 @@ def _kernel(
                 if warp_id == 0:
                     iket.mark("softmax-phase-2")
                 T.ptx.tcgen05.wait.st()
-                T.ptx.tcgen05.fence.before_thread_sync()
                 p_ready_2.arrive(wg_id)
                 if warp_id == 0:
                     iket.mark("softmax-phase-3")
@@ -883,7 +860,6 @@ def _kernel(
                 EPI_LD_SM = T.meta_var(32)
                 o_ready.wait(wg_id, phase_oepi)
                 corr_epi.empty.wait(wg_id, phase_oepi)
-                T.ptx.tcgen05.fence.after_thread_sync()
                 epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
                 if warp_id == 0:
                     epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
@@ -950,7 +926,6 @@ def _kernel(
                         tvm.backend.cuda.op.ptx_bar_sync(1 + i_q * 4 + warp_id, 64)
                     else:
                         tvm.backend.cuda.op.ptx_bar_sync(1 + i_q, 256)
-                    T.ptx.tcgen05.fence.after_thread_sync()
                     correction_token = iket.sentinel_token("correction")
                     if warp_id == 0:
                         correction_token = iket.range_start("correction")
@@ -987,7 +962,6 @@ def _kernel(
                                         o_row,
                                     )
                             T.ptx.tcgen05.wait.st()
-                            T.ptx.tcgen05.fence.before_thread_sync()
                     p_o_rescale.arrive(i_q)
                     softmax_corr.empty.arrive(1 - i_q)
                     iket.range_end(correction_token)
@@ -1003,7 +977,6 @@ def _kernel(
                     softmax_corr.empty.arrive(i_q)
                     o_ready.wait(i_q, phase_tmem)
                     corr_epi.empty.wait(i_q, phase_tmem)
-                    T.ptx.tcgen05.fence.after_thread_sync()
                     epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
                     if warp_id == 0:
                         epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
