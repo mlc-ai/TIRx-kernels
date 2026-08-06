@@ -765,16 +765,6 @@ def get_kernel(**kwargs: Any):
                     # transpose worker (sf_ready).
                     kv_pipe.full.wait(kv_stage_idx, kv_phase)
                     sf_ready.wait(kv_stage_idx, kv_phase)
-                    # SFKV occupies one fixed TMEM tile.  Its preceding MMA
-                    # read and this iteration's CP overwrite are not an
-                    # architected TCGEN pipeline, so observe the final commit
-                    # from the preceding KV block before reusing the tile.
-                    if (kv_idx > T.uint32(0)) and (tmem_issued > T.uint32(0)):
-                        previous_tmem_iter: T.uint32 = tmem_issued - T.uint32(1)
-                        tmem_pipe.full.wait(
-                            previous_tmem_iter % T.uint32(num_tmem_stages),
-                            (previous_tmem_iter // T.uint32(num_tmem_stages)) & T.uint32(1),
-                        )
                     # cp + MMA share ONE elect scope: drops a redundant elect.sync per
                     # kv-iter and lets the cp overlap the MMA setup.
                     if T.ptx.elect_sync():
