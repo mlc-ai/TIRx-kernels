@@ -2228,6 +2228,9 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
     dispatch_with_epilogue_sync_barrier_idx = 1
     epilogue_full_sync_barrier_idx = 2
     epilogue_wg_sync_barrier_start_idx = 3
+    dispatch_with_load_a_sync_barrier_idx = (
+        epilogue_wg_sync_barrier_start_idx + num_epilogue_wgs
+    )
     before_dispatch_pull_barrier_tag = 1
     before_combine_reduce_barrier_tag = 2
     after_workspace_clean_barrier_tag = 3
@@ -3598,10 +3601,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 n_cols=num_tmem_cols,
                 cta_group=kernel_config.num_ctas_per_cluster,
             )
-        # `fence_barrier_init` above is `.release.cluster`, so the cluster
-        # arrive here doesn't need release semantics. `.wait.acquire` pairs
-        # with that release to make mbarrier init visible to other CTAs.
-        T.ptx.barrier.cluster.arrive(sem="relaxed", aligned=True)
+        # `fence_barrier_init` publishes the earlier mbarrier initialization,
+        # but the tcgen05.alloc above performs a later weak shared-memory store
+        # of the TMEM base.  Publish that store before epilogue warps read it.
+        T.ptx.barrier.cluster.arrive(sem="release", aligned=True)
         T.ptx.barrier.cluster.wait(acquire=True, aligned=True)
         if flat_warp_idx < kernel_config.num_dispatch_warps:
             warpgroup_reg_dealloc(num_dispatch_registers)
@@ -4017,7 +4020,15 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                 )
             )
-            T.ptx.bar.sync(dispatch_sync_barrier_idx, kernel_config.num_dispatch_threads)
+            # Dispatch and load-A read reusable global workspace after the
+            # preceding grid rendezvous. The epilogue grid rendezvous cannot
+            # publish those reads because it precedes this CTA-local join.
+            workspace_grid_sync(
+                dispatch_grid_sync_index,
+                kernel_config.num_dispatch_threads + 32,
+                dispatch_with_load_a_sync_barrier_idx,
+                flat_warp_idx * 32 + lane_idx,
+            )
             if sm_idx == 0:
                 # SM 0: clear expert send count and schedule task counters
                 dispatch_expert_idx = thread_idx
@@ -4166,6 +4177,11 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         current_ring_count = load_acq_u32(
                             workspace_l2_full_count.ptr_to([ring_block_idx])
                         )
+                # The release/acquire counters publish generic global stores
+                # from dispatch (L1) or the preceding epilogue's scale-factor
+                # writes (L2).  TMA reads through the async proxy, so bridge the
+                # acquired frontier before loading either ring.
+                T.ptx.fence.proxy_async("global")
                 for k_block_idx in T.serial(0, num_k_blocks):
                     barrier_wait(
                         smem_barriers.ptr_to([empty_barrier_base + pipeline_stage_idx]),
@@ -4211,6 +4227,12 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                             full_barrier_arrive_cta0(full_barrier_ptr)
                     T.cuda.warp_sync()
                     advance_pipeline()
+            workspace_grid_sync(
+                dispatch_grid_sync_index,
+                kernel_config.num_dispatch_threads + 32,
+                dispatch_with_load_a_sync_barrier_idx,
+                kernel_config.num_dispatch_threads + lane_idx,
+            )
         elif flat_warp_idx == kernel_config.load_b_warp_idx:
             warpgroup_reg_dealloc(num_non_epilogue_registers)
             sched_stage_idx = T.int32(0)
@@ -4326,12 +4348,14 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         smem_barriers.ptr_to([tmem_empty_barrier_base + accum_stage_idx]),
                         accum_phase ^ T.int32(1),
                     )
+                    T.ptx.tcgen05.fence.after_thread_sync()
                     for k_block_idx in T.serial(0, num_k_blocks):
                         full_wait_phase: T.int32 = pipeline_phase
                         mbarrier_wait_phase(
                             smem_barriers.ptr_to([full_barrier_base + pipeline_stage_idx]),
                             full_wait_phase,
                         )
+                        T.ptx.tcgen05.fence.after_thread_sync()
                         a_desc_base_lo = T.tvm_warp_shuffle(
                             T.uint32(0xFFFFFFFF), a_desc_lo, pipeline_stage_idx, 32, 32
                         )
@@ -4408,6 +4432,14 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                             T.Or(umma_k_block_idx > 0, k_idx > 0),
                                         ),
                                     )
+                                # The next UMMA sub-block overwrites these fixed
+                                # scale-factor columns. MMA -> CP is not an
+                                # implicit TCGEN pipeline, so order that reuse
+                                # without draining the outer K-block pipeline.
+                                if umma_k_block_idx + 1 < (
+                                    kernel_config.block_k // umma_block_k
+                                ):
+                                    T.ptx.tcgen05.fence.before_thread_sync()
                         T.cuda.warp_sync()
                         empty_barrier_arrive_current(k_block_idx == num_k_blocks - T.int32(1))
                         advance_pipeline()
@@ -4512,6 +4544,7 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 barrier_wait(
                     smem_barriers.ptr_to([tmem_full_barrier_base + accum_stage_idx]), accum_phase
                 )
+                T.ptx.tcgen05.fence.after_thread_sync()
                 # Now we can release the task
                 scheduler_release_task_info()
                 # Match DeepGEMM's `ptx::exchange(..., 0)`: all lanes have the same
@@ -4937,6 +4970,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                 )
             )
+            # The preceding grid barrier publishes every epilogue's generic
+            # stores into the symmetric combine-token buffer.  Combine reads
+            # those stores through TMA's async global proxy.
+            T.ptx.fence.proxy_async("global")
             token_idx = sm_idx * kernel_config.num_epilogue_warps + epilogue_warp_idx
             combine_phase = T.int32(0)
             load_stage_idx = T.int32(0)

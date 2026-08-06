@@ -782,6 +782,11 @@ def _kernel(
                     bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                     bar_qk_done.wait(rs_buf.stage, rs_buf.phase)
                     T.ptx.tcgen05.fence.after_thread_sync()
+                    # A later QK commit is ordered after the preceding SxV
+                    # operation from this TCGEN issuer.  Its completion thus
+                    # retires the prior async read of s_smem_gemm; bridge that
+                    # read before p_exchange overwrites the aliased union.
+                    T.ptx.fence.proxy_async("shared::cta")
 
                     p_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, B_TOPK // 2), "float32")
                     p_peer_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, B_TOPK // 2), "float32")
@@ -922,6 +927,10 @@ def _kernel(
                 if real_mi == T.float32(-float("inf")):
                     li = 0.0
                     mi = T.float32(-float("inf"))
+                # Every WG0 warp read its peer's per-block maximum from this
+                # allocation above.  Do not let a faster warp reuse the same
+                # locations for ``li`` until all of those reads have retired.
+                T.ptx.bar.sync(BAR_WG0_SYNC, 128)
                 rowwise_buf[idx_in_warpgroup] = li
                 T.ptx.bar.sync(BAR_WG0_SYNC, 128)
                 li = li + rowwise_buf[idx_in_warpgroup ^ 64]
@@ -1736,6 +1745,11 @@ def _kernel(
                     bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                     bar_raw_ready.wait(rs_buf.stage, rs_buf.phase)
                     bar_sv_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
+                    # On the first block, bridge the completed UTCCP read of
+                    # q_sw128 before generic stores reuse its k_full alias.  On
+                    # later ring turns, bridge the completed SxV read of this
+                    # stage before the same generic stores overwrite it.
+                    T.ptx.fence.proxy_async("shared::cta")
                     cur_nope_base_u64: T.let = T.if_then_else(
                         rs_buf.stage == 0, nope0_base_u64, nope1_base_u64
                     )

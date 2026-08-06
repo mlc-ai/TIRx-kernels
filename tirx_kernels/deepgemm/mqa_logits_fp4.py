@@ -836,6 +836,12 @@ def get_kernel(**kwargs: Any):
                 t_kv_i: T.uint32 = T.uint32(0)
                 while t_kv_i < t_num_kv:
                     kv_pipe.full.wait(t_kv_stage, t_kv_phase)
+                    # The preceding tcgen05.cp read of this transposed stage
+                    # completes through kv_pipe.empty before the TMA producer
+                    # can refill the stage.  Reconnect that async-proxy read
+                    # to the generic-proxy stores which now reuse the same
+                    # physical shared-memory backing.
+                    T.ptx.fence.proxy_async("shared::cta")
                     emit_sf_transpose(smem_sf_kv, smem_sf_kv_t, lane_idx, t_kv_stage, 0)
                     emit_sf_transpose(
                         smem_sf_kv, smem_sf_kv_t, lane_idx, t_kv_stage, num_utccp_aligned_elems

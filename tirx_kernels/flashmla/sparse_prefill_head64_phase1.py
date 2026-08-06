@@ -556,6 +556,12 @@ def _kernel(
                 bar_sv_done.wait(prev_buf, prev_phase)
                 iket.range_end(pv_wait_token)
 
+            # On the first iteration s_smem_gemm aliases q_rope, which was
+            # read by an async TCGEN05 copy.  On later iterations it is the
+            # completed SxV MMA stage.  Order either async read before the
+            # generic S write below.
+            T.ptx.fence.proxy_async("shared::cta")
+
             # CUDA phase1.cuh:229-232 S store (vectorized by the reg copy path).
             Tx.wg.copy(s_smem_gemm[:, :], s_frag[:, :])
             if (k > 0) & should_scale_o:
@@ -605,6 +611,9 @@ def _kernel(
         last_phase: T.int32 = _ring_phase_parity(last_k, max_k_blocks)
         bar_sv_done.wait(last_buf, last_phase)
         T.ptx.tcgen05.fence.after_thread_sync()
+        # bar_sv_done makes the final TCGEN05 read complete; cross back from
+        # the async proxy before o_smem aliases and overwrites its K stage.
+        T.ptx.fence.proxy_async("shared::cta")
 
         attn_sink_log2: T.let = (
             T.cuda.ldg(attn_sink.ptr_to([idx_in_warpgroup % B_H]), "float32") * LOG_2_E

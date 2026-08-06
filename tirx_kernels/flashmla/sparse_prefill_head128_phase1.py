@@ -500,6 +500,7 @@ def _kernel(
                 prev_phase: T.let = ((k - 1) // NUM_BUFS) & 1
                 pv_wait_token = iket.range_start("h128-pv-wait")
                 bar_sv_done.wait(prev_buf, prev_phase)
+                T.ptx.fence.proxy_async("shared::cta")
                 iket.range_end(pv_wait_token)
 
             Tx.wg.copy(s_smem_gemm[:, :], s_frag[:, :])
@@ -547,6 +548,7 @@ def _kernel(
         last_buf: T.let = last_k % NUM_BUFS
         last_phase: T.let = (last_k // NUM_BUFS) & 1
         bar_sv_done.wait(last_buf, last_phase)
+        T.ptx.fence.proxy_async("shared::cta")
         T.ptx.tcgen05.fence.after_thread_sync()
 
         attn_sink_log2: T.let = (

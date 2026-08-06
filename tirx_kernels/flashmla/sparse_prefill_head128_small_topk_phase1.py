@@ -443,6 +443,7 @@ def _kernel(
                         bar_tQ_full.wait(0, o_outer_loop_phase)
                     else:
                         bar_tQ_full.wait(0, o_outer_loop_phase ^ 1)
+                    T.ptx.fence.proxy_async("shared::cta")
                 if epi_k == ((D_V // 2) // B_EPI) - 1:
                     bar_tOut_empty.arrive(0, remote=T.uint32(0))
                 Tx.wg.mul(o_epi_frag[:, :], o_epi_frag[:, :], output_scale)
@@ -477,6 +478,10 @@ def _kernel(
                 perform_o_copy_out(last_s_q_idx, last_outer_loop_phase, False)
             else:
                 bar_tQ_full.wait(0, wg0_outer_loop_phase)
+                # The first iteration has no preceding output-copy path (which
+                # contains this WG-wide rendezvous).  Make every WG0 warp retire
+                # generation 0 before warp 0 can publish generation 1.
+                T.ptx.bar.sync(BAR_WG0_SYNC, 128)
             last_valid = 1
             last_s_q_idx = wg0_s_q_idx
             last_outer_loop_phase = wg0_outer_loop_phase
@@ -485,6 +490,7 @@ def _kernel(
             wg0_next_job: T.let = T.ptx.clc_query_cancel(
                 T.address_of(clc_response[0]), use_ld_acquire=True
             )
+            T.ptx.fence.proxy_async("shared::cta")
             T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
             if wg0_next_job == T.uint32(0xFFFFFFFF):
                 wg0_job_valid = 0
@@ -574,6 +580,7 @@ def _kernel(
                 wg1_next_job: T.let = T.ptx.clc_query_cancel(
                     T.address_of(clc_response[0]), use_ld_acquire=True
                 )
+                T.ptx.fence.proxy_async("shared::cta")
                 T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
                 if wg1_next_job == T.uint32(0xFFFFFFFF):
                     wg1_job_valid = 0
@@ -665,6 +672,7 @@ def _kernel(
                     umma_next_job: T.let = T.ptx.clc_query_cancel(
                         T.address_of(clc_response[0]), use_ld_acquire=True
                     )
+                    T.ptx.fence.proxy_async("shared::cta")
                     T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
                     if umma_next_job == T.uint32(0xFFFFFFFF):
                         umma_job_valid = 0
@@ -716,6 +724,7 @@ def _kernel(
                     valid_next_job: T.let = T.ptx.clc_query_cancel(
                         T.address_of(clc_response[0]), use_ld_acquire=True
                     )
+                    T.ptx.fence.proxy_async("shared::cta")
                     T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
                     if valid_next_job == T.uint32(0xFFFFFFFF):
                         valid_job_valid = 0
@@ -744,6 +753,7 @@ def _kernel(
                         clc_next_job: T.let = T.ptx.clc_query_cancel(
                             T.address_of(clc_response[0]), use_ld_acquire=True
                         )
+                        T.ptx.fence.proxy_async("shared::cta")
                         T.ptx.mbarrier.arrive(
                             bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True
                         )
@@ -905,6 +915,7 @@ def _kernel(
                 li = li_tmp
 
                 bar_SV_done.wait(0, (wg3_rs & 1) ^ 1)
+                T.ptx.fence.proxy_async("shared::cta")
                 Tx.wg.copy(s_smem_gemm[:, :], s_frag[:, :])
 
                 if (k > 0) & should_scale_o:
@@ -962,6 +973,7 @@ def _kernel(
             wg3_next_job: T.let = T.ptx.clc_query_cancel(
                 T.address_of(clc_response[0]), use_ld_acquire=True
             )
+            T.ptx.fence.proxy_async("shared::cta")
             T.ptx.mbarrier.arrive(bar_clc_empty.ptr_to([0]), remote=T.uint32(0), pred=True)
             if wg3_next_job == T.uint32(0xFFFFFFFF):
                 wg3_job_valid = 0
