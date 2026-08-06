@@ -12,7 +12,7 @@ import torch
 
 from tirx_kernels.flashmla._gemm import tcgen05_config
 from tirx_kernels.flashmla._tma import tma_config
-from tvm.backend.cuda.operator.tile_primitive.tma_utils import SwizzleMode
+from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.ir import PointerType, PrimType
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
@@ -662,12 +662,10 @@ def _kernel(
         packed = T.alloc_local((4,), "uint32")
         for pair_i in T.unroll(4):
             raw_pair: T.let = T.cast(T.shift_right(raw, T.cast(pair_i * 16, "uint64")), "uint16")
-            # PTX 9.1 defines E4M3x2 up-conversion to F16x2.  E4M3 values are
-            # exactly representable through that intermediate before BF16.
-            rounded_bits: T.let = T.ptx.cvt(raw_pair, dtype="f16x2", atype="e4m3x2", rounding="rn")
-            rounded: T.let = T.reinterpret("float16x2", rounded_bits)
-            scaled_lo: T.let = T.cast(T.Shuffle([rounded], [0]), "bfloat16") * scale
-            scaled_hi: T.let = T.cast(T.Shuffle([rounded], [1]), "bfloat16") * scale
+            rounded_bits: T.let = T.ptx.cvt(raw_pair, dtype="bf16x2", atype="e4m3x2", rounding="rn")
+            rounded: T.let = T.reinterpret("bfloat16x2", rounded_bits)
+            scaled_lo: T.let = T.Shuffle([rounded], [0]) * scale
+            scaled_hi: T.let = T.Shuffle([rounded], [1]) * scale
             packed[pair_i] = T.reinterpret("uint32", T.Shuffle([scaled_lo, scaled_hi], [0, 1]))
         T.ptx.st(smem_addr, src=packed.ptr_to([0]), weak=True, space="shared::cta", ptx_type="b128")
 

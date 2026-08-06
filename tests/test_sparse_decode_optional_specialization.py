@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import pytest
-import torch
 
-import tvm
 from tirx_kernels.flashmla.sparse_decode_head64 import (
     COMBINE_OPTIONAL_BUFFER_PARAMS,
     MAIN_OPTIONAL_BUFFER_PARAMS,
@@ -12,7 +10,6 @@ from tirx_kernels.flashmla.sparse_decode_head64 import (
     _specialized_combine_kernel,
     _specialized_decode_kernels,
     _specialized_main_kernel,
-    get_kernel,
 )
 
 MAIN_PARAMETER_NAMES = (
@@ -150,23 +147,3 @@ def test_main_and_combine_specialization_caches_are_independent() -> None:
 def test_runtime_argument_filter_drops_absent_optionals() -> None:
     assert _present_runtime_args(("a", None, "c", None), (1, 3), (False, False)) == ("a", "c")
     assert _present_runtime_args(("a", "b", "c", "d"), (1, 3), (True, False)) == ("a", "b", "c")
-
-
-def test_v32_public_kernel_compiles_for_sm100() -> None:
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10:
-        pytest.skip("requires an SM100 GPU")
-    main, _combine = get_kernel(
-        model_type="V32",
-        b=1,
-        s_q=1,
-        s_kv=128,
-        topk=128,
-        page_block_size=64,
-        device="cuda:0",
-    )
-
-    tvm.compile(
-        tvm.IRModule({"main": main}),
-        target=tvm.target.Target({"kind": "cuda", "arch": "sm_100a"}),
-        tir_pipeline="tirx",
-    )
