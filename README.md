@@ -14,7 +14,7 @@ All kernels target `sm_100a`. Names are the registry names accepted by the
 | `grouped_fp8_gemm_contiguous` | fp8 | M-grouped contiguous GEMM |
 | `nvfp4_gemm` | nvfp4 | Dense GEMM |
 | `flash_attention4` | bf16 | FlashAttention-4 |
-| `flash_attention_backward_sm100` | fp16 | Two-CTA FlashAttention backward (D=128) |
+| `flash_attention_backward_sm100` | fp16 | Two-CTA FlashAttention backward (D=128); [schedule sketch](tirx_kernels/attention/flash_attention_backward_sm100_sketch.md) |
 | `rmsnorm` | fp16 / bf16 | RMSNorm |
 | `allgather_gemm` | fp16 | AllGather + GEMM (multi-GPU, NVSHMEM) |
 | `gemm_reduce_scatter` | fp16 | GEMM + ReduceScatter (multi-GPU, NVSHMEM) |
