@@ -16,6 +16,8 @@
 # under the License.
 from __future__ import annotations
 
+from tvm import tirx
+
 from tirx_kernels.registry import discover_categories, discover_kernels, load_kernel
 
 
@@ -42,3 +44,16 @@ def test_load_kernel_finds_single_module() -> None:
 def test_load_kernel_finds_flashmla_unified_entry() -> None:
     mod = load_kernel("flash_mla_sparse_fwd")
     assert mod.KERNEL_META["category"] == "flashmla"
+
+
+def test_load_kernel_finds_flash_attention_backward() -> None:
+    mod = load_kernel("flash_attention_backward_sm100", strict=True)
+
+    assert mod.KERNEL_META == {
+        "name": "flash_attention_backward_sm100",
+        "category": "attention",
+        "compute_capability": 10,
+    }
+    assert {config["is_causal"] for config in mod.CONFIGS} == {False, True}
+    kernel = mod.get_kernel(batch_size=1, seq_len=256, num_heads=1, head_dim=128, is_causal=False)
+    assert sum(tirx.is_buffer_var(param) for param in kernel.params) == 9

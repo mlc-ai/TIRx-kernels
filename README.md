@@ -14,6 +14,7 @@ All kernels target `sm_100a`. Names are the registry names accepted by the
 | `grouped_fp8_gemm_contiguous` | fp8 | M-grouped contiguous GEMM |
 | `nvfp4_gemm` | nvfp4 | Dense GEMM |
 | `flash_attention4` | bf16 | FlashAttention-4 |
+| `flash_attention_backward_sm100` | fp16 | Two-CTA FlashAttention backward (D=128) |
 | `rmsnorm` | fp16 / bf16 | RMSNorm |
 | `allgather_gemm` | fp16 | AllGather + GEMM (multi-GPU, NVSHMEM) |
 | `gemm_reduce_scatter` | fp16 | GEMM + ReduceScatter (multi-GPU, NVSHMEM) |
@@ -67,6 +68,7 @@ them — they are only needed to actually compile/run a kernel:
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels. |
 | `flashinfer`     | `nvfp4_gemm` data/baseline | Used for nvfp4 quantization and reference impls. |
+| `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` data/baseline | Current SM100 forward/backward reference. |
 | `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` reference; checkout on `PYTHONPATH`. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
