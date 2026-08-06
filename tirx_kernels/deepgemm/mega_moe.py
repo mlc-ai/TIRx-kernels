@@ -1022,11 +1022,12 @@ def get_tirx_dynamic_shared_memory_bytes(config: MegaMoeConfig) -> int:
     smem_barrier_offset = smem_task_info_offset + smem_task_info_size
     smem_tmem_ptr_offset = smem_barrier_offset + num_total_barriers * 8
     smem_symm_rank_bases_offset = _align_up(smem_tmem_ptr_offset + smem_tmem_ptr_size, 8)
-    # The PrimFunc declares ``uint64[num_processes]`` at this aligned address
-    # for every specialization.  Keep the declared view inside its backing
-    # allocation even when TP1 statically eliminates all rank-base accesses.
-    smem_symm_rank_bases_size = config.num_processes * 8
-    return smem_symm_rank_bases_offset + smem_symm_rank_bases_size
+    smem_symm_rank_bases_size = config.num_processes * 8 if config.num_processes > 1 else 0
+    return (
+        smem_symm_rank_bases_offset + smem_symm_rank_bases_size
+        if config.num_processes > 1
+        else smem_tmem_ptr_offset + smem_tmem_ptr_size
+    )
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -1580,7 +1581,6 @@ def get_kernel(
     umma_n = kernel_config.block_m
     umma_block_k = 128
     umma_k = 32
-    num_umma_k_blocks_per_stage = kernel_config.block_k // umma_block_k
     num_sfa_utccp_chunks = sf_block_m // 128
     num_sfb_utccp_chunks = kernel_config.block_n // 128
     num_epilogue_stages = 2
@@ -1592,16 +1592,14 @@ def get_kernel(
     num_accum_tmem_cols = kernel_config.block_m * num_epilogue_stages
     num_sfa_tmem_cols = sf_block_m // 32
     num_sfb_tmem_cols = kernel_config.block_n // 32
-    num_sfa_tmem_cols_total = num_sfa_tmem_cols * num_umma_k_blocks_per_stage
-    num_sfb_tmem_cols_total = num_sfb_tmem_cols * num_umma_k_blocks_per_stage
     num_tmem_cols = 32
-    if num_accum_tmem_cols + num_sfa_tmem_cols_total + num_sfb_tmem_cols_total > 32:
+    if num_accum_tmem_cols + num_sfa_tmem_cols + num_sfb_tmem_cols > 32:
         num_tmem_cols = 64
-    if num_accum_tmem_cols + num_sfa_tmem_cols_total + num_sfb_tmem_cols_total > 64:
+    if num_accum_tmem_cols + num_sfa_tmem_cols + num_sfb_tmem_cols > 64:
         num_tmem_cols = 128
-    if num_accum_tmem_cols + num_sfa_tmem_cols_total + num_sfb_tmem_cols_total > 128:
+    if num_accum_tmem_cols + num_sfa_tmem_cols + num_sfb_tmem_cols > 128:
         num_tmem_cols = 256
-    if num_accum_tmem_cols + num_sfa_tmem_cols_total + num_sfb_tmem_cols_total > 256:
+    if num_accum_tmem_cols + num_sfa_tmem_cols + num_sfb_tmem_cols > 256:
         num_tmem_cols = 512
 
     if not 32 <= num_tmem_cols <= 512:
@@ -2230,9 +2228,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
     dispatch_with_epilogue_sync_barrier_idx = 1
     epilogue_full_sync_barrier_idx = 2
     epilogue_wg_sync_barrier_start_idx = 3
-    dispatch_with_load_a_sync_barrier_idx = (
-        epilogue_wg_sync_barrier_start_idx + num_epilogue_wgs
-    )
     before_dispatch_pull_barrier_tag = 1
     before_combine_reduce_barrier_tag = 2
     after_workspace_clean_barrier_tag = 3
@@ -2257,11 +2252,12 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
     smem_barrier_offset = smem_task_info_offset + smem_task_info_size
     smem_tmem_ptr_offset = smem_barrier_offset + num_total_barriers * 8
     smem_symm_rank_bases_offset = _align_up(smem_tmem_ptr_offset + smem_tmem_ptr_size, 8)
-    # The view below is declared for TP1 as well, even though rank-base loads
-    # and stores are specialized away. Its full declared extent must still fit
-    # in the shared allocation.
-    smem_symm_rank_bases_size = num_processes * 8
-    smem_total_bytes = smem_symm_rank_bases_offset + smem_symm_rank_bases_size
+    smem_symm_rank_bases_size = num_processes * 8 if num_processes > 1 else 0
+    smem_total_bytes = (
+        smem_symm_rank_bases_offset + smem_symm_rank_bases_size
+        if num_processes > 1
+        else smem_tmem_ptr_offset + smem_tmem_ptr_size
+    )
     num_chunks = (
         1
         if num_chunk_slots * kernel_config.num_epilogue_warps * num_hidden_bytes
@@ -2877,27 +2873,19 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
             layout=TileLayout(S[(128, num_tmem_cols) : (1 @ TLane, 1 @ TCol)]),
         )
         sfa_tmem = T.decl_buffer(
-            (num_umma_k_blocks_per_stage, 128, sf_block_m // 32),
+            (128, sf_block_m // 32),
             "float8_e8m0fnu",
             scope="tmem",
             allocated_addr=num_accum_tmem_cols,
-            layout=sf_tmem_layout(
-                128,
-                SF_K=sf_block_m // 32,
-                sf_per_mma=sf_block_m // 32,
-                pipe_depth=num_umma_k_blocks_per_stage,
-            ),
+            layout=sf_tmem_layout(128, SF_K=sf_block_m // 32, sf_per_mma=sf_block_m // 32),
         )
         sfb_tmem = T.decl_buffer(
-            (num_umma_k_blocks_per_stage, 128, kernel_config.block_n // 32),
+            (128, kernel_config.block_n // 32),
             "float8_e8m0fnu",
             scope="tmem",
-            allocated_addr=num_accum_tmem_cols + num_sfa_tmem_cols_total,
+            allocated_addr=num_accum_tmem_cols + num_sfa_tmem_cols,
             layout=sf_tmem_layout(
-                128,
-                SF_K=kernel_config.block_n // 32,
-                sf_per_mma=kernel_config.block_n // 32,
-                pipe_depth=num_umma_k_blocks_per_stage,
+                128, SF_K=kernel_config.block_n // 32, sf_per_mma=kernel_config.block_n // 32
             ),
         )
         desc_a: T.uint64
@@ -4029,15 +4017,7 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                 )
             )
-            # The epilogue sentinel can overtake a slower load-A consumer in
-            # the multi-stage task ring.  Include load-A in this CTA+grid
-            # rendezvous before clearing the ring counters it still polls.
-            workspace_grid_sync(
-                dispatch_grid_sync_index,
-                kernel_config.num_dispatch_threads + 32,
-                dispatch_with_load_a_sync_barrier_idx,
-                flat_warp_idx * 32 + lane_idx,
-            )
+            T.ptx.bar.sync(dispatch_sync_barrier_idx, kernel_config.num_dispatch_threads)
             if sm_idx == 0:
                 # SM 0: clear expert send count and schedule task counters
                 dispatch_expert_idx = thread_idx
@@ -4236,12 +4216,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                             full_barrier_arrive_cta0(full_barrier_ptr)
                     T.cuda.warp_sync()
                     advance_pipeline()
-            workspace_grid_sync(
-                dispatch_grid_sync_index,
-                kernel_config.num_dispatch_threads + 32,
-                dispatch_with_load_a_sync_barrier_idx,
-                kernel_config.num_dispatch_threads + lane_idx,
-            )
         elif flat_warp_idx == kernel_config.load_b_warp_idx:
             warpgroup_reg_dealloc(num_non_epilogue_registers)
             sched_stage_idx = T.int32(0)
@@ -4329,9 +4303,6 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 current_iter_idx = 0
                 pipeline_stage_idx = T.int32(0)
                 pipeline_phase = T.int32(0)
-                scale_tmem_pending = T.int32(0)
-                scale_tmem_stage_idx = T.int32(0)
-                scale_tmem_phase = T.int32(0)
                 while True:
                     consumer_get_next_task()
                     consumer_bind_task_args()
@@ -4360,22 +4331,14 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         smem_barriers.ptr_to([tmem_empty_barrier_base + accum_stage_idx]),
                         accum_phase ^ T.int32(1),
                     )
+                    T.ptx.tcgen05.fence.after_thread_sync()
                     for k_block_idx in T.serial(0, num_k_blocks):
                         full_wait_phase: T.int32 = pipeline_phase
                         mbarrier_wait_phase(
                             smem_barriers.ptr_to([full_barrier_base + pipeline_stage_idx]),
                             full_wait_phase,
                         )
-                        # SFA/SFB use fixed TMEM columns.  MMA -> CP is not an
-                        # implicit TCGEN pipeline, so the next overwrite must
-                        # observe completion of the preceding k-block's MMAs.
-                        if scale_tmem_pending != T.int32(0):
-                            barrier_wait(
-                                smem_barriers.ptr_to(
-                                    [empty_barrier_base + scale_tmem_stage_idx]
-                                ),
-                                scale_tmem_phase,
-                            )
+                        T.ptx.tcgen05.fence.after_thread_sync()
                         a_desc_base_lo = T.tvm_warp_shuffle(
                             T.uint32(0xFFFFFFFF), a_desc_lo, pipeline_stage_idx, 32, 32
                         )
@@ -4397,10 +4360,7 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                         ),
                                     )
                                     utccp_copy(
-                                        sfa_tmem.allocated_addr[0]
-                                        + umma_k_block_idx * num_sfa_tmem_cols
-                                        + sfa_chunk_idx * 4,
-                                        desc_sf,
+                                        sfa_tmem.allocated_addr[0] + sfa_chunk_idx * 4, desc_sf
                                     )
                                 for sfb_chunk_idx in T.unroll(0, num_sfb_utccp_chunks):
                                     desc_sf = replace_smem_desc_addr(
@@ -4414,10 +4374,7 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                         ),
                                     )
                                     utccp_copy(
-                                        sfb_tmem.allocated_addr[0]
-                                        + umma_k_block_idx * num_sfb_tmem_cols
-                                        + sfb_chunk_idx * 4,
-                                        desc_sf,
+                                        sfb_tmem.allocated_addr[0] + sfb_chunk_idx * 4, desc_sf
                                     )
                                 for k_idx in T.unroll(0, umma_block_k // umma_k):
                                     runtime_desc_i = make_runtime_instr_desc_with_sf_id(
@@ -4443,10 +4400,8 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                         accum_stage_idx * umma_n,
                                         desc_b,
                                         desc_a,
-                                        sfb_tmem.allocated_addr[0]
-                                        + umma_k_block_idx * num_sfb_tmem_cols,
-                                        sfa_tmem.allocated_addr[0]
-                                        + umma_k_block_idx * num_sfa_tmem_cols,
+                                        sfb_tmem.allocated_addr[0],
+                                        sfa_tmem.allocated_addr[0],
                                         runtime_desc_i,
                                         d_dtype="float32",
                                         a_dtype="float4_e2m1fn",
@@ -4460,11 +4415,16 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                             T.Or(umma_k_block_idx > 0, k_idx > 0),
                                         ),
                                     )
+                                # The next UMMA sub-block overwrites these fixed
+                                # scale-factor columns. MMA -> CP is not an
+                                # implicit TCGEN pipeline, so order that reuse
+                                # without draining the outer K-block pipeline.
+                                if umma_k_block_idx + 1 < (
+                                    kernel_config.block_k // umma_block_k
+                                ):
+                                    T.ptx.tcgen05.fence.before_thread_sync()
                         T.cuda.warp_sync()
                         empty_barrier_arrive_current(k_block_idx == num_k_blocks - T.int32(1))
-                        scale_tmem_pending = T.int32(1)
-                        scale_tmem_stage_idx = pipeline_stage_idx
-                        scale_tmem_phase = pipeline_phase
                         advance_pipeline()
                 if current_iter_idx > 0:
                     previous_iter_idx_u32 = T.cast(current_iter_idx - T.int32(1), "uint32")
@@ -4567,6 +4527,7 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 barrier_wait(
                     smem_barriers.ptr_to([tmem_full_barrier_base + accum_stage_idx]), accum_phase
                 )
+                T.ptx.tcgen05.fence.after_thread_sync()
                 # Now we can release the task
                 scheduler_release_task_info()
                 # Match DeepGEMM's `ptx::exchange(..., 0)`: all lanes have the same
