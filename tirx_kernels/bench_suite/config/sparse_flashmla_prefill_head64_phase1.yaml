@@ -1,0 +1,10 @@
+kernel: sparse_flashmla_prefill_head64_phase1
+configs:
+  - {config: bench_dqk512_hq64_s4096_kv8192_topk512, default: true}
+  - {config: bench_dqk512_hq64_s4096_kv32768_topk512, default: true}
+  - {config: bench_dqk512_hq64_s4096_kv49152_topk512, default: true}
+  - {config: bench_dqk512_hq64_s4096_kv65536_topk512, default: true}
+  - {config: bench_dqk576_hq64_s4096_kv8192_topk512, default: true}
+  - {config: bench_dqk576_hq64_s4096_kv32768_topk512, default: true}
+  - {config: bench_dqk576_hq64_s4096_kv49152_topk512, default: true}
+  - {config: bench_dqk576_hq64_s4096_kv65536_topk512, default: true}

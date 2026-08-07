@@ -1,0 +1,10 @@
+kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+configs:
+  - {config: m64_n24_k28672_s112, default: true}
+  - {config: m128_n24_k16384_s64, default: true}
+  - {config: m8192_n24_k16384_s1, default: true}
+  - {config: m8192_n24_k28672_s1, default: true}
+  - {config: m13_n24_k7168_s1, default: true}
+  - {config: m137_n24_k7680_s16, default: true}
+  - {config: m4096_n24_k7168_s1, default: true}
+  - {config: m4096_n24_k28672_s16, default: true}

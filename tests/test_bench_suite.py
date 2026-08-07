@@ -51,7 +51,7 @@ def test_finalize_bench_record_rejects_baseline_errors() -> None:
 
 
 def test_default_workloads_include_manual_tp1_gemm_comm_kineto_profiles() -> None:
-    workloads = run.load_workloads(run.DEFAULT_WORKLOADS)
+    workloads = run.load_config_dir()
     selected = [
         workload
         for workload in workloads
@@ -84,7 +84,7 @@ def test_bench_suite_defaults_to_five_round_arithmetic_mean() -> None:
 
 
 def test_default_workloads_do_not_override_standard_timer_budgets() -> None:
-    workloads = run.load_workloads(run.DEFAULT_WORKLOADS)
+    workloads = run.load_config_dir()
 
     for workload in workloads:
         if workload.get("timer") in {"kineto", "megamoe"}:

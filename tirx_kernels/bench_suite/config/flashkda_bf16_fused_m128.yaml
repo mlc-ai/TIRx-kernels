@@ -1,0 +1,9 @@
+# Exactly the module's five BENCH_CONFIGS cases, covering the head-count /
+# packed / state variants that dispatch to this kernel.
+kernel: flashkda_bf16_fused_m128
+configs:
+  - {config: h96_fixed8192, default: true}
+  - {config: h96_mixed, default: true}
+  - {config: h96_uniform, default: true}
+  - {config: h64_mixed, default: true}
+  - {config: h64_uniform, default: true}

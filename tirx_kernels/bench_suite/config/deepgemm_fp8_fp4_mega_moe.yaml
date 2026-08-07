@@ -1,0 +1,5 @@
+kernel: deepgemm_fp8_fp4_mega_moe
+defaults: {num_gpus: 1, timer: megamoe}
+configs:
+  - {config: t64_m64_h7168_i3072_e384_k6_g1, default: true}
+  - {config: t8192_m8192_h7168_i3072_e384_k6_g1, default: true}

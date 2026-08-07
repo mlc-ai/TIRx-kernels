@@ -1,0 +1,7 @@
+kernel: nvfp4_gemm
+configs:
+  - {config: 1024x1024x1024, default: true}
+  - {config: 2048x2048x2048, default: true}
+  - {config: 4096x4096x4096, default: true}
+  - {config: 8192x8192x8192, default: true}
+  - {config: 16384x16384x16384, default: true}

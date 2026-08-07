@@ -307,14 +307,14 @@ def build_kernel(
     def matrix_desc_from_anchor(layout_bits, anchor_start, byte_delta):
         # layout_bits deliberately has a zero start-address field.  Authority
         # comes from anchor_start, which is derived from a real shared view.
-        start = T.bitwise_and(
-            anchor_start + T.cast(byte_delta // 16, "uint64"), T.uint64(0x3FFF)
-        )
+        start = T.bitwise_and(anchor_start + T.cast(byte_delta // 16, "uint64"), T.uint64(0x3FFF))
         return T.bitwise_or(T.uint64(layout_bits), start)
 
     @T.inline
-    def copy_128b(dst, src):
-        T.ptx.st(dst, src=src, weak=True, space="shared::cta", ptx_type="b128")
+    def copy_128b(dst, value):
+        # The dialect takes the payload as one 128-bit register; callers pass a
+        # uint128 view element rather than a pointer into their local buffer.
+        T.ptx.st.weak.shared__cta.b128(dst, value)
 
     def pointer_offset(ptr, offset):
         return T.ptr_byte_offset(ptr, offset * 2, "float16")
@@ -322,19 +322,23 @@ def build_kernel(
     def pointer_offset_f32(ptr, offset):
         return T.ptr_byte_offset(ptr, offset * 4, "float32")
 
+    # kind::f16 = fp16 A/B into an fp32 accumulator. The .ss and .ts table
+    # entries share this chain and are told apart by the A operand's dtype:
+    # u64 is a shared-memory descriptor, u32 a TMEM address.
+    _MMA_F16 = "tcgen05.mma.cta_group::2.kind::f16"
+    # cta_group::2 takes an 8-lane disable-output-lane vector; nothing is
+    # disabled here, but the operands are not optional.
+    _MMA_KEEP_ALL_LANES = (0, 0, 0, 0, 0, 0, 0, 0)
+
     @T.inline
     def mma_ss_one(d, accumulate, a_desc, b_desc, instruction):
-        T.ptx.tcgen05.mma(
-            d,
+        T.ptx[_MMA_F16](
+            T.uint32(d),
             T.uint64(a_desc),
             T.uint64(b_desc),
             T.uint32(instruction),
-            d_dtype="float32",
-            a_dtype="float16",
-            b_dtype="float16",
-            use_a_tmem=False,
-            cta_group=2,
-            enable_input_d=accumulate,
+            *_MMA_KEEP_ALL_LANES,
+            T.ptx.pred(accumulate),
         )
 
     @T.inline
@@ -350,17 +354,13 @@ def build_kernel(
 
     @T.inline
     def mma_ts_one(d, a, accumulate, b_desc):
-        T.ptx.tcgen05.mma(
-            d,
+        T.ptx[_MMA_F16](
+            T.uint32(d),
             T.uint32(a),
             T.uint64(b_desc),
             T.uint32(270598160),
-            d_dtype="float32",
-            a_dtype="float16",
-            b_dtype="float16",
-            use_a_tmem=True,
-            cta_group=2,
-            enable_input_d=accumulate,
+            *_MMA_KEEP_ALL_LANES,
+            T.ptx.pred(accumulate),
         )
 
     @T.inline
@@ -376,21 +376,11 @@ def build_kernel(
 
     @T.inline
     def mma_s(d, accumulate, desc_k_row, desc_q_row):
-        mma_ss8(
-            d,
-            accumulate,
-            desc_k_row,
-            desc_q_row,
-        )
+        mma_ss8(d, accumulate, desc_k_row, desc_q_row)
 
     @T.inline
     def mma_dp(d, accumulate, desc_v_row, desc_do_row):
-        mma_ss8(
-            d,
-            accumulate,
-            desc_v_row,
-            desc_do_row,
-        )
+        mma_ss8(d, accumulate, desc_v_row, desc_do_row)
 
     @T.inline
     def mma_dv(d, a, accumulate, desc_do_col):
@@ -448,45 +438,66 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
             return_type="uint64",
         )
 
+    # The dialect takes one composed TMEM address instead of a base plus
+    # row/col; get_tmem_addr packs them the same way the old operands did.
+    def _tmem_addr(base, row, col):
+        return T.cuda.get_tmem_addr(T.uint32(base), row, col)
 
     def tmem_load_64(dst, dst_offset, base, row, col):
-        return T.ptx.tcgen05.ld(
-            base,
-            *[dst[dst_offset + i] for i in range(64)],
-            shape="32x32b",
-            num=64,
-            row=row,
-            col=col,
+        return T.ptx["tcgen05.ld.sync.aligned.32x32b.x64.b32"](
+            *[dst[dst_offset + i] for i in range(64)], _tmem_addr(base, row, col)
         )
 
     def tmem_load_32(dst, dst_offset, base, row, col):
-        return T.ptx.tcgen05.ld(
-            base,
-            *[dst[dst_offset + i] for i in range(32)],
-            shape="32x32b",
-            num=32,
-            row=row,
-            col=col,
+        return T.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+            *[dst[dst_offset + i] for i in range(32)], _tmem_addr(base, row, col)
         )
 
     def tmem_store_32(src, src_offset, base, row, col):
-        return T.ptx.tcgen05.st(
-            base,
-            *[src[src_offset + i] for i in range(32)],
-            shape="32x32b",
-            num=32,
-            row=row,
-            col=col,
+        return T.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
+            _tmem_addr(base, row, col), *[src[src_offset + i] for i in range(32)]
         )
 
+    # 2-SM cluster TMA load: unicast (no .multicast::cluster) and no cache
+    # policy, so only the completion and cta_group tokens ride the chain. Note
+    # the mbarrier operand now follows the coordinates.
+    _TMA_G2S_2SM = (
+        "cp.async.bulk.tensor.{dim}d.shared::cluster.global"
+        ".mbarrier::complete_tx::bytes.cta_group::2"
+    )
+    # Stores put the tensor map and coordinates first and the shared source last.
+    _TMA_S2G = "cp.async.bulk.tensor.{dim}d.global.shared::cta.tile.bulk_group"
+    _TMA_S2G_REDUCE = (
+        "cp.reduce.async.bulk.tensor.{dim}d.global.shared::cta.{redop}.tile.bulk_group"
+    )
+    # The destination is this CTA's own shared memory.
+    _BULK_G2S_CTA = "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"
+    # shared::cta -> peer CTA's shared::cluster window (DSMEM push).
+    _BULK_S2C = "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"
+    # pair_mask names both CTAs of the pair, so the commit is the multicast form.
+    _TCGEN05_COMMIT = (
+        "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
+    )
+
+    def tma_g2s(dim, dst_ptr, mbar, tensormap_addr, *coords):
+        return T.ptx[_TMA_G2S_2SM.format(dim=dim)](dst_ptr, tensormap_addr, *coords, mbar)
+
+    def tma_s2g(dim, src_ptr, tensormap_addr, *coords):
+        return T.ptx[_TMA_S2G.format(dim=dim)](tensormap_addr, *coords, src_ptr)
+
+    def tma_s2g_reduce(dim, src_ptr, tensormap_addr, redop, *coords):
+        chain = _TMA_S2G_REDUCE.format(dim=dim, redop=redop)
+        return T.ptx[chain](tensormap_addr, *coords, src_ptr)
+
+    def bulk_g2s_cta(dst_ptr, src_ptr, num_bytes, mbar):
+        return T.ptx[_BULK_G2S_CTA](dst_ptr, src_ptr, T.uint32(num_bytes), mbar)
+
+    def tcgen05_commit(mbar_ptr, cta_mask):
+        return T.ptx[_TCGEN05_COMMIT](mbar_ptr, T.Cast("uint16", cta_mask))
+
     def tmem_store_16(src, src_offset, base, row, col):
-        return T.ptx.tcgen05.st(
-            base,
-            *[src[src_offset + i] for i in range(16)],
-            shape="32x32b",
-            num=16,
-            row=row,
-            col=col,
+        return T.ptx["tcgen05.st.sync.aligned.32x32b.x16.b32"](
+            _tmem_addr(base, row, col), *[src[src_offset + i] for i in range(16)]
         )
 
     @T.meta_class
@@ -816,10 +827,10 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
         pair_mask: T.int32
         pair_mask = (1 << pair_leader_rank) | (1 << (pair_leader_rank + 1))
 
-        T.ptx.fence.proxy_async("shared::cta")
-        T.ptx.fence.mbarrier_init()
-        T.ptx.barrier.cluster.arrive(sem="relaxed", aligned=False)
-        T.ptx.barrier.cluster.wait(aligned=False)
+        T.ptx.fence.proxy.async_.shared__cta()
+        T.ptx.fence.mbarrier_init.release.cluster()
+        T.ptx.barrier.cluster.arrive.relaxed()
+        T.ptx.barrier.cluster.wait()
 
         # TMA barrier remote view for leader's mbar
         tma_kv_cta0 = tma_kv.remote_view(pair_leader_rank)
@@ -852,28 +863,28 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
             # warp must request the same target as the MMA/load/relay warps;
             # CUDA already DCE'd its isolated 24-register request in the
             # profiled build, leaving this exact WG-wide dec-104 instruction.
-            T.ptx.setmaxnreg(False, 104)
+            T.ptx.setmaxnreg.dec.sync.aligned.u32(104)
             if warp_id == 0:
                 # The physical MMA warp owns TMEM allocation in both CTAs.
                 # MMA, compute, and dQ-reduce warps rendezvous on the same
                 # 13-warp named barrier used by the upstream allocator.
-                T.ptx.tcgen05.alloc(
-                    T.address_of(tmem_addr), n_cols=512, cta_group=CTA_GROUP
+                T.ptx.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(
+                    T.address_of(tmem_addr), T.uint32(512)
                 )
-                T.ptx.bar.sync(5, 416)
+                T.ptx.bar.sync(T.uint32(5), 416)
             if warp_id == 1:
                 # ---- TMA warp: 2 loads per M-tile (Q, dO) ----
-                if T.ptx.elect_sync():
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(q_row_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(q_col_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(k_row_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(k_col_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(v_row_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(do_row_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(do_col_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(dk_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(dv_tensormap)))
-                    T.evaluate(T.ptx.prefetch_tensormap(T.address_of(dq_tensormap)))
+                if T.cuda.elect_sync():
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_row_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_col_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(k_row_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(k_col_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(v_row_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(do_row_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(do_col_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dk_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dv_tensormap)))
+                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dq_tensormap)))
                 q_cons_ph = PipelineState(1)
                 q_cons_ph.init(1)
                 lse_cons_ph = PipelineState(1)
@@ -895,22 +906,22 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                 @T.inline
                 def tma_n_tile():
                     # K/V: each CTA loads its CTA_N=128 rows
-                    if T.ptx.elect_sync():
-                        T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                    if T.cuda.elect_sync():
+                        tma_g2s(
                             5, K_smem.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]),
-                            T.address_of(k_row_tensormap), 0, CTA_GROUP, "",
+                            T.address_of(k_row_tensormap),
                             0, n_st_cta, 0, h_idx, b_idx,
                         )
-                        T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                        tma_g2s(
                             5, V_smem.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]),
-                            T.address_of(v_row_tensormap), 0, CTA_GROUP, "",
+                            T.address_of(v_row_tensormap),
                             0, n_st_cta, 0, h_idx, b_idx,
                         )
                         # K_col for Phase E: all BLK_N=256 rows, per-CTA 64 cols
                         k_col_col_st = T.meta_var(id_in_pair * B_N_COL)
-                        T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                        tma_g2s(
                             4, K_col.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]),
-                            T.address_of(k_col_tensormap), 0, CTA_GROUP, "",
+                            T.address_of(k_col_tensormap),
                             k_col_col_st, n_st, h_idx, b_idx,
                         )
                         if id_in_pair == 0:
@@ -924,10 +935,10 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     q_consumed.wait(0, q_cons_ph.phase)
                     iket.range_end(tma_wait_q_token)
                     q_row_st = T.meta_var(m_st_first + id_in_pair * B_N)
-                    if T.ptx.elect_sync():
-                        T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                    if T.cuda.elect_sync():
+                        tma_g2s(
                             5, Q_row.ptr_to([0, 0, 0]), tma_q_cta0.ptr_to([0]),
-                            T.address_of(q_row_tensormap), 0, CTA_GROUP, "",
+                            T.address_of(q_row_tensormap),
                             0, q_row_st, 0, h_idx, b_idx,
                         )
                         if id_in_pair == 0:
@@ -936,9 +947,9 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     tma_wait_lse_token = iket.range_start("tma-wait-lse")
                     lse_consumed.wait(0, lse_cons_ph.phase)
                     iket.range_end(tma_wait_lse_token)
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         tma_lse.arrive(0, LSE_BYTES)
-                        T.ptx.cp_async_bulk_g2s_cta(
+                        bulk_g2s_cta(
                             sLSE.ptr_to([0, 0]),
                             LSE_g.ptr_to([b_idx, h_idx, m_st_first]),
                             LSE_BYTES, tma_lse.ptr_to([0]),
@@ -948,15 +959,15 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     buf_a_consumed.wait(0, a_cons_ph.phase)
                     iket.range_end(tma_wait_a_token)
                     do_col_st = T.meta_var(id_in_pair * B_N_COL)
-                    if T.ptx.elect_sync():
-                        T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                    if T.cuda.elect_sync():
+                        tma_g2s(
                             5, dO_row.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]),
-                            T.address_of(do_row_tensormap), 0, CTA_GROUP, "",
+                            T.address_of(do_row_tensormap),
                             0, q_row_st, 0, h_idx, b_idx,
                         )
-                        T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                        tma_g2s(
                             4, dO_col.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]),
-                            T.address_of(do_col_tensormap), 0, CTA_GROUP, "",
+                            T.address_of(do_col_tensormap),
                             do_col_st, m_st_first, h_idx, b_idx,
                         )
                         if id_in_pair == 0:
@@ -965,9 +976,9 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     tma_wait_dpsum_token = iket.range_start("tma-wait-dpsum")
                     dpsum_consumed.wait(0, dpsum_cons_ph.phase)
                     iket.range_end(tma_wait_dpsum_token)
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         tma_dpsum.arrive(0, DPSUM_BYTES)
-                        T.ptx.cp_async_bulk_g2s_cta(
+                        bulk_g2s_cta(
                             sDPsum.ptr_to([0]),
                             dpsum_g.ptr_to([b_idx, h_idx, m_st_first]),
                             DPSUM_BYTES, tma_dpsum.ptr_to([0]),
@@ -991,10 +1002,10 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         tma_wait_qcol_token = iket.range_start("tma-wait-qcol")
                         qcol_consumed.wait(0, qcol_cons_ph.phase)
                         iket.range_end(tma_wait_qcol_token)
-                        if T.ptx.elect_sync():
-                            T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                        if T.cuda.elect_sync():
+                            tma_g2s(
                                 4, Q_col.ptr_to([0, 0]), tma_qcol_cta0.ptr_to([0]),
-                                T.address_of(q_col_tensormap), 0, CTA_GROUP, "",
+                                T.address_of(q_col_tensormap),
                                 q_col_st_next, m_st_qcol, h_idx, b_idx,
                             )
                             if id_in_pair == 0:
@@ -1004,10 +1015,10 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         tma_wait_q_token = iket.range_start("tma-wait-q")
                         q_consumed.wait(0, q_cons_ph.phase)
                         iket.range_end(tma_wait_q_token)
-                        if T.ptx.elect_sync():
-                            T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                        if T.cuda.elect_sync():
+                            tma_g2s(
                                 5, Q_row.ptr_to([0, 0, 0]), tma_q_cta0.ptr_to([0]),
-                                T.address_of(q_row_tensormap), 0, CTA_GROUP, "",
+                                T.address_of(q_row_tensormap),
                                 0, q_row_st_next, 0, h_idx, b_idx,
                             )
                             if id_in_pair == 0:
@@ -1016,9 +1027,9 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         tma_wait_lse_token = iket.range_start("tma-wait-lse")
                         lse_consumed.wait(0, lse_cons_ph.phase)
                         iket.range_end(tma_wait_lse_token)
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             tma_lse.arrive(0, LSE_BYTES)
-                            T.ptx.cp_async_bulk_g2s_cta(
+                            bulk_g2s_cta(
                                 sLSE.ptr_to([0, 0]),
                                 LSE_g.ptr_to([b_idx, h_idx, m_st_next]),
                                 LSE_BYTES, tma_lse.ptr_to([0]),
@@ -1028,15 +1039,15 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         buf_a_consumed.wait(0, a_cons_ph.phase)
                         iket.range_end(tma_wait_a_token)
                         do_col_st_next = T.meta_var(id_in_pair * B_N_COL)
-                        if T.ptx.elect_sync():
-                            T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                        if T.cuda.elect_sync():
+                            tma_g2s(
                                 5, dO_row.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]),
-                                T.address_of(do_row_tensormap), 0, CTA_GROUP, "",
+                                T.address_of(do_row_tensormap),
                                 0, q_row_st_next, 0, h_idx, b_idx,
                             )
-                            T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                            tma_g2s(
                                 4, dO_col.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]),
-                                T.address_of(do_col_tensormap), 0, CTA_GROUP, "",
+                                T.address_of(do_col_tensormap),
                                 do_col_st_next, m_st_next, h_idx, b_idx,
                             )
                             if id_in_pair == 0:
@@ -1045,9 +1056,9 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         tma_wait_dpsum_token = iket.range_start("tma-wait-dpsum")
                         dpsum_consumed.wait(0, dpsum_cons_ph.phase)
                         iket.range_end(tma_wait_dpsum_token)
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             tma_dpsum.arrive(0, DPSUM_BYTES)
-                            T.ptx.cp_async_bulk_g2s_cta(
+                            bulk_g2s_cta(
                                 sDPsum.ptr_to([0]),
                                 dpsum_g.ptr_to([b_idx, h_idx, m_st_next]),
                                 DPSUM_BYTES, tma_dpsum.ptr_to([0]),
@@ -1067,10 +1078,10 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         (m_tile_start + num_m_tiles_this_n - 1) * BLK_M
                     )
                     q_col_st_tail = T.meta_var(id_in_pair * B_N_COL)
-                    if T.ptx.elect_sync():
-                        T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                    if T.cuda.elect_sync():
+                        tma_g2s(
                             4, Q_col.ptr_to([0, 0]), tma_qcol_cta0.ptr_to([0]),
-                            T.address_of(q_col_tensormap), 0, CTA_GROUP, "",
+                            T.address_of(q_col_tensormap),
                             q_col_st_tail, m_st_qcol_tail, h_idx, b_idx,
                         )
                         if id_in_pair == 0:
@@ -1165,14 +1176,13 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     tma_q.wait(0, q_ph.phase)
                     q_ph.advance()
                     accum_var = 0
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                        T.ptx.tcgen05.commit(
+                        tcgen05_commit(
                             q_consumed.ptr_to([0]),
-                            cta_group=CTA_GROUP,
-                            cta_mask=pair_mask,
+                            pair_mask,
                         )
                     iket.range_end(mma_s_token)
 
@@ -1181,9 +1191,9 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     tma_a.wait(0, a_ph.phase)
                     a_ph.advance()
                     accum_var = 0
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         mma_dp(TMEM_OFF_DP, accum_var, desc_v_row, desc_do_row)
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                     iket.range_end(mma_dp_token)
 
@@ -1191,11 +1201,11 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     mma_dv_token = iket.range_start("mma-dv")
                     strip_ready.wait(0, strip_ready_ph.phase)
                     strip_ready_ph.advance()
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv, desc_do_col)
                     accum_dv = 1
-                    if T.ptx.elect_sync():
-                        T.ptx.tcgen05.commit(buf_a_consumed.ptr_to([0]), cta_group=CTA_GROUP, cta_mask=pair_mask)
+                    if T.cuda.elect_sync():
+                        tcgen05_commit(buf_a_consumed.ptr_to([0]), pair_mask)
                     iket.range_end(mma_dv_token)
 
                     # ---- Main loop: M-tiles 1..N-1 ----
@@ -1211,14 +1221,13 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         dq_tmem_free.wait(0, dq_tmem_free_ph.phase)
                         dq_tmem_free_ph.advance()
                         accum_var = 0
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                            T.ptx.tcgen05.commit(
+                            tcgen05_commit(
                                 q_consumed.ptr_to([0]),
-                                cta_group=CTA_GROUP,
-                                cta_mask=pair_mask,
+                            pair_mask,
                             )
                         iket.range_end(mma_s_token)
 
@@ -1230,10 +1239,10 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         wg0_ph.advance()
                         tma_qcol.wait(0, qcol_ph.phase)
                         qcol_ph.advance()
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk, desc_q_col)
-                        if T.ptx.elect_sync():
-                            T.ptx.tcgen05.commit(qcol_consumed.ptr_to([0]), cta_group=CTA_GROUP, cta_mask=pair_mask)
+                        if T.cuda.elect_sync():
+                            tcgen05_commit(qcol_consumed.ptr_to([0]), pair_mask)
                         accum_dk = 1
                         iket.range_end(mma_dk_token)
 
@@ -1242,9 +1251,9 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         tma_a.wait(0, a_ph.phase)
                         a_ph.advance()
                         accum_var = 0
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             mma_dp(TMEM_OFF_DP, accum_var, desc_v_row, desc_do_row)
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                         iket.range_end(mma_dp_token)
 
@@ -1262,14 +1271,13 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         iket.range_end(mma_dq_alias_token)
                         mma_dq_issue_token = iket.range_start("mma-dq-issue")
                         accum_var = 0
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             mma_dq(TMEM_OFF_DQ, accum_var, desc_ds_exch, desc_k_col)
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                            T.ptx.tcgen05.commit(
+                            tcgen05_commit(
                                 ds_exch_consumed.ptr_to([0]),
-                                cta_group=CTA_GROUP,
-                                cta_mask=pair_mask,
+                            pair_mask,
                             )
                         iket.range_end(mma_dq_issue_token)
 
@@ -1277,20 +1285,19 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         mma_dv_token = iket.range_start("mma-dv")
                         strip_ready.wait(0, strip_ready_ph.phase)
                         strip_ready_ph.advance()
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv, desc_do_col)
-                        if T.ptx.elect_sync():
-                            T.ptx.tcgen05.commit(buf_a_consumed.ptr_to([0]), cta_group=CTA_GROUP, cta_mask=pair_mask)
+                        if T.cuda.elect_sync():
+                            tcgen05_commit(buf_a_consumed.ptr_to([0]), pair_mask)
                         iket.range_end(mma_dv_token)
 
                     # dV is complete before the remaining dK/dQ tail.  Match
                     # sdKVaccum stage 0 by releasing all compute warps now so
                     # its epilogue overlaps the tail below.
-                    if T.ptx.elect_sync():
-                        T.ptx.tcgen05.commit(
+                    if T.cuda.elect_sync():
+                        tcgen05_commit(
                             dv_done.ptr_to([0]),
-                            cta_group=CTA_GROUP,
-                            cta_mask=pair_mask,
+                            pair_mask,
                         )
 
                     # ---- After loop: Phase D[N-1], Phase E[N-1] ----
@@ -1299,16 +1306,15 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     wg0_ph.advance()
                     tma_qcol.wait(0, qcol_ph.phase)
                     qcol_ph.advance()
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk, desc_q_col)
-                    if T.ptx.elect_sync():
-                        T.ptx.tcgen05.commit(qcol_consumed.ptr_to([0]), cta_group=CTA_GROUP, cta_mask=pair_mask)
+                    if T.cuda.elect_sync():
+                        tcgen05_commit(qcol_consumed.ptr_to([0]), pair_mask)
                         # sdKVaccum stage 1: release dK independently after its
                         # final update, while the final dQ path remains live.
-                        T.ptx.tcgen05.commit(
+                        tcgen05_commit(
                             dk_done.ptr_to([0]),
-                            cta_group=CTA_GROUP,
-                            cta_mask=pair_mask,
+                            pair_mask,
                         )
                     iket.range_end(mma_dk_token)
 
@@ -1324,14 +1330,13 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     iket.range_end(mma_dq_ready_token)
                     mma_dq_issue_token = iket.range_start("mma-dq-issue")
                     accum_var = 0
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         mma_dq(TMEM_OFF_DQ, accum_var, desc_ds_exch, desc_k_col)
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                        T.ptx.tcgen05.commit(
+                        tcgen05_commit(
                             ds_exch_consumed.ptr_to([0]),
-                            cta_group=CTA_GROUP,
-                            cta_mask=pair_mask,
+                            pair_mask,
                         )
                     iket.range_end(mma_dq_issue_token)
 
@@ -1351,28 +1356,28 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     for _ in T.serial(num_m_tiles_this_n, annotations={"disable_unroll": True}):
                         ds_exch_mbar.wait(0, relay_ph.phase)
                         relay_ph.advance()
-                        if T.ptx.elect_sync():
+                        if T.cuda.elect_sync():
                             wg02mma.arrive(0, remote=0, pred=True)
 
                 relay_n_tile()
 
             if warp_id == 0:
-                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=CTA_GROUP)
-                T.ptx.bar.sync(5, 416)
+                T.ptx.tcgen05.relinquish_alloc_permit.cta_group__2.sync.aligned()
+                T.ptx.bar.sync(T.uint32(5), 416)
                 tmem_dealloc_mbar.arrive(
                     0, remote=1 - id_in_pair, pred=True
                 )
                 tmem_dealloc_mbar.wait(0, 0)
-                T.ptx.tcgen05.dealloc(
-                    tmem_addr[0], n_cols=512, cta_group=CTA_GROUP
+                T.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](
+                    tmem_addr[0], T.uint32(512)
                 )
 
         # ==============================================================
         # WG1+WG2: softmax grad + dS + split epilogue
         # ==============================================================
         elif (wg_id >= 1) & (wg_id <= 2):
-            T.ptx.setmaxnreg(True, 136)
-            T.ptx.bar.sync(5, 416)
+            T.ptx.setmaxnreg.inc.sync.aligned.u32(136)
+            T.ptx.bar.sync(T.uint32(5), 416)
             compute_wg = T.meta_var(wg_id - 1)
             gemm_s_ph = PipelineState(1)
             gemm_s_ph.init(0)
@@ -1430,7 +1435,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     # delayed dS commit: publish the previous tile's dQ-safe
                     # token immediately after this warp has drained the next
                     # tile's S load, before doing any P arithmetic.
-                    T.ptx.tcgen05.wait.ld()
+                    T.ptx.tcgen05.wait__ld.sync.aligned()
                     if (i_m_inner > 0) & (lane_id == 0):
                         s_tmem_consumed.arrive(0, remote=0, pred=True)
 
@@ -1452,8 +1457,8 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                             )
                             S_strip[2 * j] = T.cuda.float2_x(scaled_pair)
                             S_strip[2 * j + 1] = T.cuda.float2_y(scaled_pair)
-                            S_strip[2 * j] = T.ptx.exp2(S_strip[2 * j])
-                            S_strip[2 * j + 1] = T.ptx.exp2(S_strip[2 * j + 1])
+                            T.ptx.ex2.approx.ftz.f32(S_strip[2 * j], S_strip[2 * j])
+                            T.ptx.ex2.approx.ftz.f32(S_strip[2 * j + 1], S_strip[2 * j + 1])
                         # Only the first two Q tiles that overlap this
                         # 256-row K/V cluster can intersect the causal
                         # diagonal.  Hoist the uniform branch outside the
@@ -1489,16 +1494,16 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         # register stage is ready, drain both S loads and
                         # synchronize the compute warps before the first store.
                         if stage == 0:
-                            T.ptx.bar.sync(8, 256)
+                            T.ptx.bar.sync(T.uint32(8), 256)
 
                         tmem_store_16(
                             P_f16_u32, stage * 16, TMEM_OFF_A, 0,
                             (tmem_p_col + stage * 32) // 2,
                         )
                     lse_ph.advance()
-                    T.ptx.tcgen05.wait.st()
-                    T.ptx.fence.proxy_async("shared::cta")
-                    T.ptx.bar.sync(8, 256)
+                    T.ptx.tcgen05.wait__st.sync.aligned()
+                    T.ptx.fence.proxy.async_.shared__cta()
+                    T.ptx.bar.sync(T.uint32(8), 256)
                     # Bridge the generic LSE reads into the async proxy, then
                     # publish the eight compute warps' release only after the
                     # existing rendezvous has ordered every reader.
@@ -1507,7 +1512,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
 
                     # One elected thread per warp contributes to the shared
                     # P-ready barrier in the leader CTA.
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         strip_ready.arrive(0, remote=0, pred=True)
                     iket.range_end(softmax_p_token)
 
@@ -1518,6 +1523,9 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     gemm_dp_ph.advance()
 
                     dP_strip = T.alloc_local((STRIP_SIZE,), f32)
+                    # .f32x2 writes its destination as one packed 64-bit
+                    # register, so address the same storage in pairs.
+                    dP_pairs = dP_strip.view("uint64")
                     tmem_dp_col = T.meta_var(TMEM_OFF_DP + strip_off)
                     for stage in T.unroll(STRIP_SIZE // 32):
                         tmem_load_32(
@@ -1527,29 +1535,23 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
 
                     # dS^T[n,m] = P^T[n,j] * (dP^T[n,j] - dpsum[m]).
                     for j in T.unroll(STRIP_SIZE // 2):
-                        T.ptx.sub_f32x2(
-                            T.address_of(dP_strip[2 * j]),
+                        T.ptx.sub.rn.ftz.f32x2(
+                            dP_pairs[j],
                             T.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1]),
                             T.cuda.make_float2(
                                 sDPsum[strip_off + 2 * j],
                                 sDPsum[strip_off + 2 * j + 1],
                             ),
-                            rounding="rn",
-                            ftz=True,
                         )
-                        T.ptx.mul_f32x2(
-                            T.address_of(dP_strip[2 * j]),
+                        T.ptx.mul.rn.ftz.f32x2(
+                            dP_pairs[j],
                             T.cuda.make_float2(S_strip[2 * j], S_strip[2 * j + 1]),
-                            T.cuda.make_float2(
-                                dP_strip[2 * j], dP_strip[2 * j + 1]
-                            ),
-                            rounding="rn",
-                            ftz=True,
+                            T.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1]),
                         )
 
                     dpsum_ph.advance()
 
-                    T.ptx.tcgen05.wait.ld()
+                    T.ptx.tcgen05.wait__ld.sync.aligned()
 
                     dS_full_f16 = T.alloc_local((STRIP_SIZE,), f16)
                     for j in T.unroll(STRIP_SIZE // 2):
@@ -1558,7 +1560,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                             T.address_of(dP_strip[2 * j]),
                         )
 
-                    T.ptx.bar.sync(8, 256)
+                    T.ptx.bar.sync(T.uint32(8), 256)
 
                     tmem_ds_col = T.meta_var(TMEM_OFF_DP * 2 + strip_off)
                     dS_f16_u32 = dS_full_f16.view("uint32")
@@ -1567,12 +1569,12 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         tmem_ds_col // 2,
                     )
 
-                    T.ptx.tcgen05.wait.st()
+                    T.ptx.tcgen05.wait__st.sync.aligned()
 
                     # The dK MMA only consumes dS from TMEM.  Release that
                     # dependency before the independent SMEM visibility,
                     # cross-WG rendezvous, and DSMEM exchange path.
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         wg02mma_tmem.arrive(0, remote=0, pred=True)
                     iket.range_end(softmax_ds_token)
 
@@ -1586,7 +1588,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     # The empty barrier orders TCGEN completion, while this
                     # proxy fence bridges the completed async-proxy read to
                     # the generic stores that reuse dS_exch.
-                    T.ptx.fence.proxy_async("shared::cta")
+                    T.ptx.fence.proxy.async_.shared__cta()
                     ds_exch_consumed_ph.advance()
                     if compute_wg == id_in_pair:
                         ds_row_base = T.meta_var(id_in_pair * CTA_N)
@@ -1601,7 +1603,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                                     dS_exch.ptr_to([0, 0]),
                                     ds_row_st + dS_sw.apply(ni * 8),
                                 ),
-                                dS_full_f16.ptr_to([ni * 8]),
+                                dS_full_f16.view("uint128")[ni],
                             )
                     else:
                         stage_row_st: T.int32
@@ -1612,11 +1614,11 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                                     dS_send.ptr_to([0, 0]),
                                     stage_row_st + dS_sw.apply(ni * 8),
                                 ),
-                                dS_full_f16.ptr_to([ni * 8]),
+                                dS_full_f16.view("uint128")[ni],
                             )
 
-                    T.ptx.fence.proxy_async("shared::cta")
-                    T.ptx.bar.sync(8, 256)
+                    T.ptx.fence.proxy.async_.shared__cta()
+                    T.ptx.bar.sync(T.uint32(8), 256)
 
                     # This fence/rendezvous bridges both the dS stores used by
                     # the DSMEM async copy and the completed generic dPsum
@@ -1632,25 +1634,31 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         peer_cta: T.int32
                         peer_cta = 1 - id_in_pair
                         ds_copy_bytes = T.meta_var(CTA_N * B_N * DTYPE_SIZE)
-                        T.ptx.mbarrier.arrive.expect_tx(
-                            ds_exch_mbar.ptr_to([0]), ds_copy_bytes,
-                            remote=peer_cta, pred=True,
+                        # mapa writes its result, so the peer-window addresses
+                        # are computed into registers first; both the arrival
+                        # and the copy then name the peer's shared window.
+                        remote_mbar = T.alloc_local([1], "uint32")
+                        T.ptx.mapa.shared__cluster.u32(
+                            remote_mbar[0],
+                            T.cuda.cvta_generic_to_shared(ds_exch_mbar.ptr_to([0])),
+                            T.uint32(peer_cta),
                         )
-                        remote_mbar: T.uint64
-                        remote_mbar = T.ptx.mapa(
-                            ds_exch_mbar.ptr_to([0]), peer_cta,
-                            space="", ptx_type="u64", return_type="uint64",
+                        remote_dst = T.alloc_local([1], "uint32")
+                        T.ptx.mapa.shared__cluster.u32(
+                            remote_dst[0],
+                            T.cuda.cvta_generic_to_shared(
+                                dS_exch.ptr_to([id_in_pair * CTA_N, 0])
+                            ),
+                            T.uint32(peer_cta),
                         )
-                        remote_dst: T.uint64
-                        remote_dst = T.ptx.mapa(
-                            dS_exch.ptr_to([id_in_pair * CTA_N, 0]), peer_cta,
-                            space="", ptx_type="u64", return_type="uint64",
+                        T.ptx.mbarrier.arrive.expect_tx.shared__cluster.b64(
+                            remote_mbar[0], T.uint32(ds_copy_bytes), pred=True
                         )
-                        T.ptx.cp_async.bulk.s2c(
-                            remote_dst,
+                        T.ptx[_BULK_S2C](
+                            remote_dst[0],
                             dS_send.ptr_to([0, 0]),
-                            ds_copy_bytes,
-                            remote_mbar,
+                            T.uint32(ds_copy_bytes),
+                            remote_mbar[0],
                         )
                     iket.range_end(ds_exchange_token)
 
@@ -1666,7 +1674,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     dv_epi_strip, 0, TMEM_OFF_A, 0,
                     TMEM_OFF_B + compute_wg * EPI_N,
                 )
-                T.ptx.tcgen05.wait.ld()
+                T.ptx.tcgen05.wait__ld.sync.aligned()
                 for j in T.unroll(EPI_N // 2):
                     cast_f32x2_to_f16x2(
                         T.address_of(dv_epi_f16[2 * j]),
@@ -1682,46 +1690,42 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                             dV_epi.ptr_to([compute_wg, 0, 0]),
                             epi_row_st + epi_sw.apply(ni * 8),
                         ),
-                        dv_epi_f16.ptr_to([ni * 8]),
+                        dv_epi_f16.view("uint128")[ni],
                     )
-                T.ptx.fence.proxy_async("shared::cta")
-                T.ptx.bar.sync(wg_id + 10, 128)
+                T.ptx.fence.proxy.async_.shared__cta()
+                T.ptx.bar.sync(T.uint32(wg_id + 10), 128)
                 if (warp_id == 0) & (lane_id == 0):
-                    T.ptx.cp_async.bulk.tensor.s2g(
+                    tma_s2g(
                         4,
                         dV_epi.ptr_to([compute_wg, 0, 0]),
                         T.address_of(dv_tensormap),
-                        "",
                         compute_wg * EPI_N,
                         n_st_cta,
                         h_idx,
                         b_idx,
                     )
                 if warp_id == 0:
-                    T.ptx.bar.arrive(wg_id + 10, 160)
-                T.ptx.fence.proxy_async("shared::cta")
-                T.ptx.bar.sync(wg_id + 10, 160)
+                    T.ptx.bar.arrive(T.uint32(wg_id + 10), 160)
+                T.ptx.fence.proxy.async_.shared__cta()
+                T.ptx.bar.sync(T.uint32(wg_id + 10), 160)
 
                 dk_done.wait(0, dk_done_ph.phase)
                 dk_done_ph.advance()
                 dk_epi_strip = T.alloc_local((EPI_N,), f32)
+                dk_epi_pairs = dk_epi_strip.view("uint64")
                 dk_epi_f16 = T.alloc_local((EPI_N,), f16)
                 tmem_load_64(
                     dk_epi_strip, 0, TMEM_OFF_A, 0,
                     TMEM_OFF_C + compute_wg * EPI_N,
                 )
-                T.ptx.tcgen05.wait.ld()
+                T.ptx.tcgen05.wait__ld.sync.aligned()
                 for j in T.unroll(EPI_N // 2):
-                    T.ptx.mul_f32x2(
-                        T.address_of(dk_epi_strip[2 * j]),
-                        T.cuda.make_float2(
-                            dk_epi_strip[2 * j], dk_epi_strip[2 * j + 1]
-                        ),
+                    T.ptx.mul.rn.ftz.f32x2(
+                        dk_epi_pairs[j],
+                        T.cuda.make_float2(dk_epi_strip[2 * j], dk_epi_strip[2 * j + 1]),
                         T.cuda.make_float2(
                             T.float32(softmax_scale), T.float32(softmax_scale)
                         ),
-                        rounding="rn",
-                        ftz=True,
                     )
                     cast_f32x2_to_f16x2(
                         T.address_of(dk_epi_f16[2 * j]),
@@ -1733,42 +1737,41 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                             dK_epi.ptr_to([compute_wg, 0, 0]),
                             epi_row_st + epi_sw.apply(ni * 8),
                         ),
-                        dk_epi_f16.ptr_to([ni * 8]),
+                        dk_epi_f16.view("uint128")[ni],
                     )
-                T.ptx.fence.proxy_async("shared::cta")
-                T.ptx.bar.sync(wg_id + 10, 128)
+                T.ptx.fence.proxy.async_.shared__cta()
+                T.ptx.bar.sync(T.uint32(wg_id + 10), 128)
                 if (warp_id == 0) & (lane_id == 0):
-                    T.ptx.cp_async.bulk.tensor.s2g(
+                    tma_s2g(
                         4,
                         dK_epi.ptr_to([compute_wg, 0, 0]),
                         T.address_of(dk_tensormap),
-                        "",
                         compute_wg * EPI_N,
                         n_st_cta,
                         h_idx,
                         b_idx,
                     )
                 if warp_id == 0:
-                    T.ptx.bar.arrive(wg_id + 10, 160)
-                T.ptx.fence.proxy_async("shared::cta")
-                T.ptx.bar.sync(wg_id + 10, 160)
+                    T.ptx.bar.arrive(T.uint32(wg_id + 10), 160)
+                T.ptx.fence.proxy.async_.shared__cta()
+                T.ptx.bar.sync(T.uint32(wg_id + 10), 160)
                 # Keep the terminal dV/dK stores asynchronous, but place both
                 # issues in one explicit bulk group so their lifetime remains
                 # visible to NumSim/checkers.  Neither source tile is reused.
                 if (warp_id == 0) & (lane_id == 0):
-                    T.ptx.cp_async.bulk.commit_group()
+                    T.ptx.cp.async_.bulk.commit_group()
                 iket.range_end(dkv_epilogue_token)
 
             softmax_n_tile()
-            T.ptx.bar.arrive(5, 416)
+            T.ptx.bar.arrive(T.uint32(5), 416)
 
 
         # ==============================================================
         # WG0: dQ reduce (TMEM → SMEM → TMA reduce)
         # ==============================================================
         else:
-            T.ptx.setmaxnreg(True, 136)
-            T.ptx.bar.sync(5, 416)
+            T.ptx.setmaxnreg.inc.sync.aligned.u32(136)
+            T.ptx.bar.sync(T.uint32(5), 416)
             gemm_dq_ph_wg3 = PipelineState(1)
             gemm_dq_ph_wg3.init(0)
 
@@ -1794,13 +1797,13 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     )
 
                     # Drain dQ before releasing the shared dP/dQ region.
-                    T.ptx.tcgen05.wait.ld()
+                    T.ptx.tcgen05.wait__ld.sync.aligned()
                     T.cuda.warp_sync()
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         dq_tmem_free.arrive(0, remote=0, pred=True)
 
                     m_st_cta = T.meta_var(m_st_val + id_in_pair * DQ_M_PER_CTA)
-                    dq_reduce_elected: T.let = T.ptx.elect_sync()
+                    dq_reduce_elected: T.let = T.cuda.elect_sync()
 
                     for stage in T.unroll(DQ_REDUCE_ITERS):
                         dq_reduce_stage_token = iket.range_start("dq-reduce-stage")
@@ -1821,37 +1824,36 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                                     + chunk * BLK_M * 4
                                     + row_local * 4,
                                 ),
-                                dQ_full.ptr_to([dq_reg_st + chunk * 4]),
+                                dQ_full.view("uint128")[(dq_reg_st + chunk * 4) // 4],
                             )
-                        T.ptx.fence.proxy_async("shared::cta")
+                        T.ptx.fence.proxy.async_.shared__cta()
                         T.cuda.warpgroup_sync(4)
 
                         if warp_id == 0:
                             if dq_reduce_elected:
-                                T.ptx.cp_async.bulk.tensor.s2g_reduce(
+                                tma_s2g_reduce(
                                     4,
                                     dQ_smem.ptr_to([smem_slot, 0, 0]),
                                     T.address_of(dq_tensormap),
-                                    "",
                                     "add",
                                     0,
                                     m_st_cta + stage * DQ_ROWS_PER_STAGE,
                                     h_idx,
                                     b_idx,
                                 )
-                            T.ptx.cp_async.bulk.commit_group()
-                            T.ptx.cp_async.bulk.wait_group(DQ_STAGES - 1)
+                            T.ptx.cp.async_.bulk.commit_group()
+                            T.ptx.cp.async_.bulk.wait_group(DQ_STAGES - 1)
                         T.cuda.warpgroup_sync(4)
                         iket.range_end(dq_reduce_stage_token)
                     iket.range_end(dq_reduce_token)
 
                 # Wait for all pending TMA reduces
                 if warp_id == 0:
-                    T.ptx.cp_async.bulk.wait_group(0)
+                    T.ptx.cp.async_.bulk.wait_group(0)
                 T.cuda.warpgroup_sync(4)
 
             wg3_n_tile()
-            T.ptx.bar.arrive(5, 416)
+            T.ptx.bar.arrive(T.uint32(5), 416)
     # fmt: on
     return kernel
 
@@ -1926,6 +1928,14 @@ CONFIGS = [
         (2, 4096, True),
         (1, 8192, True),
         (1, 8192, False),
+        # flash-attn's own sweep has no fixed config list -- benchmark_attn.py
+        # takes every shape from the command line -- so "the official shape" is
+        # its default: --headdim (128,128), --seqlen 8192, --nheads unset (16
+        # for head_dim <= 192), --total-seqlen 32k giving batch 32k // 8192,
+        # and --causal both. These two rows are that default. We still generate
+        # fp16 where it generates bf16.
+        (4, 8192, True),
+        (4, 8192, False),
     )
 ]
 

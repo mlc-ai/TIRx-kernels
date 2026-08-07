@@ -499,7 +499,7 @@ def get_kernel(**kwargs: Any):
         _tmem = tmem_pool.alloc((128, num_tmem_cols), "float32", layout=tmem_layout)
 
         # Make the inited barriers visible before the cta_sync.
-        T.ptx.fence.mbarrier_init()
+        T.ptx.fence.mbarrier_init.release.cluster()
         tmem_pool.commit()  # warp-2-guarded tcgen05.alloc (self-guards via thread_rank)
         T.cuda.cta_sync()
 
@@ -519,7 +519,7 @@ def get_kernel(**kwargs: Any):
 
         if warp_idx < num_mma_warps:
             if warp_idx == 0:
-                if T.ptx.elect_sync():
+                if T.cuda.elect_sync():
                     # Loop-carried stage/phase counters (no per-iter div/mod on the uniform path).
                     tma_st: T.uint32 = T.uint32(0)
                     tma_ph: T.uint32 = T.uint32(1)
@@ -584,7 +584,7 @@ def get_kernel(**kwargs: Any):
                         # mirroring the hand's shuffle + IADD descriptor pattern.
                         smem_desc="local_hoist",
                     )
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         cast_pipe.empty.arrive(cast_stage_idx)
                         smem_pipe.empty.arrive(stage_idx)
                     mma_st = stage_idx + T.uint32(1)
@@ -593,7 +593,7 @@ def get_kernel(**kwargs: Any):
                     mma_cs = cast_stage_idx ^ T.uint32(1)
                     if mma_cs == T.uint32(0):
                         mma_ph = mma_ph ^ T.uint32(1)
-                if T.ptx.elect_sync():
+                if T.cuda.elect_sync():
                     tmem_pipe.arrive(0)
 
             tmem_pipe.wait(0, 0)
@@ -602,10 +602,10 @@ def get_kernel(**kwargs: Any):
             d_frag = T.alloc_local((4,), "float32")
             for i in T.unroll(block_n // 4):
                 taddr_d: T.uint32 = T.uint32(d_tmem_start_col + i * 4)
-                T.ptx.tcgen05.ld(
-                    taddr_d, d_frag[0], d_frag[1], d_frag[2], d_frag[3], shape="32x32b", num=4
+                T.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
+                    d_frag[0], d_frag[1], d_frag[2], d_frag[3], T.uint32(taddr_d)
                 )
-                T.ptx.tcgen05.wait.ld()
+                T.ptx.tcgen05.wait__ld.sync.aligned()
                 if lane_u32 < T.uint32(16):
                     # Per-thread 4-col slice store; the swizzled layout of
                     # smem_cd_mma computes the address, the 16B chunk emits v4.
@@ -613,10 +613,10 @@ def get_kernel(**kwargs: Any):
                     Tx.copy(smem_cd_mma[m_row, i * 4 : (i + 1) * 4], d_frag[:])
                 T.cuda.warp_sync()
 
-            T.ptx.fence.proxy_async("shared::cta")
-            T.ptx.bar.sync(0, num_mma_threads)
+            T.ptx.fence.proxy.async_.shared__cta()
+            T.ptx.bar.sync(0, T.uint32(num_mma_threads))
             if warp_idx == 0:
-                if T.ptx.elect_sync():
+                if T.cuda.elect_sync():
                     # D store via TMA (writes only the valid region of boundary tiles).
                     m0: T.uint32 = m_block_idx * T.uint32(block_m)
                     if num_splits == 1:
@@ -636,7 +636,7 @@ def get_kernel(**kwargs: Any):
                             prefetch_tensormap=True,
                             cache_hint="evict_first",
                         )
-                    T.ptx.cp_async.bulk.commit_group()
+                    T.ptx.cp.async_.bulk.commit_group()
             tmem_pool.dealloc()  # warp-1-guarded relinquish + tcgen05.dealloc
         else:
             sub_warp_idx: T.uint32 = T.cast(
@@ -710,7 +710,7 @@ def get_kernel(**kwargs: Any):
                     Tx.warpgroup.cast(a_fp32, a_bf16)
                     fma_sum_of_squares(sqr0, sqr1, a_flat, cast_pairs, Tx)
                     Tx.warpgroup.copy_async(_tmem[0:block_m, a_col : a_col + block_k], a_fp32)
-                T.ptx.tcgen05.wait.st()
+                T.ptx.tcgen05.wait__st.sync.aligned()
                 cast_pipe.full.arrive(cast_stage_idx)
                 cast_st = stage_idx + T.uint32(1)
                 if cast_st == T.uint32(num_stages):
