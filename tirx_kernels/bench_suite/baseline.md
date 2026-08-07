@@ -170,6 +170,19 @@ Grouped workloads show one row per config and one timing column per implementati
 | `large_g8_m4096_n6144_k7168` | tir | 1094.3548 | deepgemm | 1126.7154 | 1.030 | — |
 | `large_g8_m4096_n7168_k3072` | tir | 501.1544 | deepgemm | 530.3688 | 1.058 | — |
 
+## megakernel_moe
+
+| config | tir_static (µs) | tir_dynamic (µs) | tir_unfused (µs) | sglang_full (µs) | flashinfer_full (µs) |
+|---|---:|---:|---:|---:|---:|
+| `moe_a3b_bs1_all` | 33.8177 | 37.1881 | 33.2740 | 53.2202 | 60.1598 |
+| `moe_a3b_bs8_all` | 96.4288 | 100.0675 | 103.5619 | 126.5397 | 131.4599 |
+| `moe_a3b_bs32_all` | 192.3405 | 192.4070 | 198.5807 | 224.5717 | 218.3641 |
+| `moe_a3b_bs128_all` | 222.1318 | 220.2841 | 228.6052 | 245.3700 | 247.8075 |
+| `moe_a3b_bs512_all` | 239.2628 | 231.7671 | 244.3510 | 287.6833 | 274.4938 |
+| `moe_a3b_bs1024_all` | 259.9133 | 257.9804 | 275.5271 | 338.3083 | 312.4617 |
+| `moe_a3b_bs2048_all` | 339.3372 | 343.8899 | 355.3639 | 430.7005 | 392.3249 |
+| `moe_a3b_bs4096_all` | 562.7819 | 559.7292 | 574.0259 | 667.4069 | 604.9371 |
+
 ## nvfp4_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
