@@ -296,46 +296,21 @@ def build_kernel(
     f16 = tvm.DataType("float16")
     f32 = tvm.DataType("float32")
 
-    # Byte offsets in the upstream SharedStorage order.  Raw tcgen05 matrix
-    # Matrix descriptors carry the absolute shared address in 16-byte units.
-    # TIRx places shared.dyn at CUDA shared address 0x400; keep that base
-    # separate from SMEMPool-relative offsets so changing a descriptor cannot
-    # move the allocation it describes.
-    CUDA_SHARED_DYN_BASE = 1024
+    # Leave the first KiB to the barriers allocated before the matrix payloads.
+    # TCGEN descriptors derive their address field from an allocated shared view
+    # below; this is a pool-relative choice, not an architectural shared address.
     POOL_Q_ROW = 1024
-    POOL_K_ROW = 17408
-    POOL_V_ROW = 50176
-    POOL_DO_ROW = 82944
-    POOL_Q_COL = 99328
-    POOL_DO_COL = 115712
-    POOL_DS_SEND = 132096
-    POOL_K_COL = 148480
-    POOL_DS_EXCH = 181248
-    SMEM_Q_ROW = CUDA_SHARED_DYN_BASE + POOL_Q_ROW
-    SMEM_K_ROW = CUDA_SHARED_DYN_BASE + POOL_K_ROW
-    SMEM_V_ROW = CUDA_SHARED_DYN_BASE + POOL_V_ROW
-    SMEM_DO_ROW = CUDA_SHARED_DYN_BASE + POOL_DO_ROW
-    SMEM_Q_COL = CUDA_SHARED_DYN_BASE + POOL_Q_COL
-    SMEM_DO_COL = CUDA_SHARED_DYN_BASE + POOL_DO_COL
-    SMEM_DS_SEND = CUDA_SHARED_DYN_BASE + POOL_DS_SEND
-    SMEM_K_COL = CUDA_SHARED_DYN_BASE + POOL_K_COL
-    SMEM_DS_EXCH = CUDA_SHARED_DYN_BASE + POOL_DS_EXCH
-    DESC_SS_A = 0x4000404004000000
-    DESC_SS_B = 0x4000404002000000
-    DESC_TS_B = 0x4000404000000000
+    MATRIX_DESC_F16_SS_LDO_1024 = 0x4000404004000000
+    MATRIX_DESC_F16_SS_LDO_512 = 0x4000404002000000
+    MATRIX_DESC_F16_TS = 0x4000404000000000
 
-    def smem_desc(prefix, byte_offset):
-        assert byte_offset % 16 == 0
-        return prefix | (byte_offset // 16)
-
-    DESC_K_ROW = smem_desc(DESC_SS_A, SMEM_K_ROW)
-    DESC_Q_ROW = smem_desc(DESC_SS_B, SMEM_Q_ROW)
-    DESC_V_ROW = smem_desc(DESC_SS_A, SMEM_V_ROW)
-    DESC_DO_ROW = smem_desc(DESC_SS_B, SMEM_DO_ROW)
-    DESC_Q_COL = smem_desc(DESC_TS_B, SMEM_Q_COL)
-    DESC_DO_COL = smem_desc(DESC_TS_B, SMEM_DO_COL)
-    DESC_K_COL = smem_desc(DESC_TS_B, SMEM_K_COL)
-    DESC_DS_EXCH = smem_desc(DESC_TS_B, SMEM_DS_EXCH)
+    def matrix_desc_from_anchor(layout_bits, anchor_start, byte_delta):
+        # layout_bits deliberately has a zero start-address field.  Authority
+        # comes from anchor_start, which is derived from a real shared view.
+        start = T.bitwise_and(
+            anchor_start + T.cast(byte_delta // 16, "uint64"), T.uint64(0x3FFF)
+        )
+        return T.bitwise_or(T.uint64(layout_bits), start)
 
     @T.inline
     def copy_128b(dst, src):
@@ -400,49 +375,49 @@ def build_kernel(
         mma_ts_one(d, a + 56, 1, b_base + 896)
 
     @T.inline
-    def mma_s(d, accumulate):
+    def mma_s(d, accumulate, desc_k_row, desc_q_row):
         mma_ss8(
             d,
             accumulate,
-            DESC_K_ROW,
-            DESC_Q_ROW,
+            desc_k_row,
+            desc_q_row,
         )
 
     @T.inline
-    def mma_dp(d, accumulate):
+    def mma_dp(d, accumulate, desc_v_row, desc_do_row):
         mma_ss8(
             d,
             accumulate,
-            DESC_V_ROW,
-            DESC_DO_ROW,
+            desc_v_row,
+            desc_do_row,
         )
 
     @T.inline
-    def mma_dv(d, a, accumulate):
-        mma_ts8(d, a, accumulate, DESC_DO_COL)
+    def mma_dv(d, a, accumulate, desc_do_col):
+        mma_ts8(d, a, accumulate, desc_do_col)
 
     @T.inline
-    def mma_dk(d, a, accumulate):
-        mma_ts8(d, a, accumulate, DESC_Q_COL)
+    def mma_dk(d, a, accumulate, desc_q_col):
+        mma_ts8(d, a, accumulate, desc_q_col)
 
     @T.inline
-    def mma_dq(d, accumulate):
-        mma_ss_one(d, accumulate, DESC_DS_EXCH, DESC_K_COL, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 128, DESC_K_COL + 128, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 256, DESC_K_COL + 256, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 384, DESC_K_COL + 384, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 512, DESC_K_COL + 512, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 640, DESC_K_COL + 640, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 768, DESC_K_COL + 768, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 896, DESC_K_COL + 896, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 1024, DESC_K_COL + 1024, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 1152, DESC_K_COL + 1152, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 1280, DESC_K_COL + 1280, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 1408, DESC_K_COL + 1408, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 1536, DESC_K_COL + 1536, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 1664, DESC_K_COL + 1664, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 1792, DESC_K_COL + 1792, 136413200)
-        mma_ss_one(d, 1, DESC_DS_EXCH + 1920, DESC_K_COL + 1920, 136413200)
+    def mma_dq(d, accumulate, desc_ds_exch, desc_k_col):
+        mma_ss_one(d, accumulate, desc_ds_exch, desc_k_col, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 128, desc_k_col + 128, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 256, desc_k_col + 256, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 384, desc_k_col + 384, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 512, desc_k_col + 512, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 640, desc_k_col + 640, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 768, desc_k_col + 768, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 896, desc_k_col + 896, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 1024, desc_k_col + 1024, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 1152, desc_k_col + 1152, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 1280, desc_k_col + 1280, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 1408, desc_k_col + 1408, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 1536, desc_k_col + 1536, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 1664, desc_k_col + 1664, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 1792, desc_k_col + 1792, 136413200)
+        mma_ss_one(d, 1, desc_ds_exch + 1920, desc_k_col + 1920, 136413200)
 
     @T.inline
     def cast_f32x2_to_f16x2(dst, src):
@@ -795,6 +770,15 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
         dV_epi = pool.alloc((2, CTA_N, EPI_N), f16, layout=epi_layout_2)
         pool.commit()
 
+        desc_k_row: T.uint64
+        desc_q_row: T.uint64
+        desc_v_row: T.uint64
+        desc_do_row: T.uint64
+        desc_q_col: T.uint64
+        desc_do_col: T.uint64
+        desc_k_col: T.uint64
+        desc_ds_exch: T.uint64
+
         # Total: 32+32+32+32+16+16+16+32+1+0.5+8 = 217.5KB
 
         tma_kv.init(1)
@@ -1098,6 +1082,53 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
 
             elif warp_id == 0 and id_in_pair == 0:
                 # ---- MMA warp (leader CTA only, TMEM accumulation for dV/dK) ----
+                # One real shared pointer anchors the whole SMEMPool backing;
+                # every other start field is the corresponding view offset
+                # relative to that anchor.  No shared.dyn base is assumed.
+                q_row_addr: T.uint32 = T.cuda.cvta_generic_to_shared(
+                    Q_row.ptr_to([0, 0, 0])
+                )
+                q_row_start: T.uint64 = T.cast(
+                    T.shift_right(q_row_addr, T.uint32(4)), "uint64"
+                )
+                desc_k_row = matrix_desc_from_anchor(
+                    MATRIX_DESC_F16_SS_LDO_1024,
+                    q_row_start,
+                    (K_smem.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
+                )
+                desc_q_row = matrix_desc_from_anchor(
+                    MATRIX_DESC_F16_SS_LDO_512, q_row_start, 0
+                )
+                desc_v_row = matrix_desc_from_anchor(
+                    MATRIX_DESC_F16_SS_LDO_1024,
+                    q_row_start,
+                    (V_smem.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
+                )
+                desc_do_row = matrix_desc_from_anchor(
+                    MATRIX_DESC_F16_SS_LDO_512,
+                    q_row_start,
+                    (dO_row.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
+                )
+                desc_q_col = matrix_desc_from_anchor(
+                    MATRIX_DESC_F16_TS,
+                    q_row_start,
+                    (Q_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
+                )
+                desc_do_col = matrix_desc_from_anchor(
+                    MATRIX_DESC_F16_TS,
+                    q_row_start,
+                    (dO_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
+                )
+                desc_k_col = matrix_desc_from_anchor(
+                    MATRIX_DESC_F16_TS,
+                    q_row_start,
+                    (K_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
+                )
+                desc_ds_exch = matrix_desc_from_anchor(
+                    MATRIX_DESC_F16_TS,
+                    q_row_start,
+                    (dS_exch.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
+                )
                 kv_ph = PipelineState(1)
                 kv_ph.init(0)
                 q_ph = PipelineState(1)
@@ -1135,7 +1166,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     q_ph.advance()
                     accum_var = 0
                     if T.ptx.elect_sync():
-                        mma_s(TMEM_OFF_A, accum_var)
+                        mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
                     if T.ptx.elect_sync():
                         mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                         T.ptx.tcgen05.commit(
@@ -1151,7 +1182,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     a_ph.advance()
                     accum_var = 0
                     if T.ptx.elect_sync():
-                        mma_dp(TMEM_OFF_DP, accum_var)
+                        mma_dp(TMEM_OFF_DP, accum_var, desc_v_row, desc_do_row)
                     if T.ptx.elect_sync():
                         mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                     iket.range_end(mma_dp_token)
@@ -1161,7 +1192,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     strip_ready.wait(0, strip_ready_ph.phase)
                     strip_ready_ph.advance()
                     if T.ptx.elect_sync():
-                        mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv)
+                        mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv, desc_do_col)
                     accum_dv = 1
                     if T.ptx.elect_sync():
                         T.ptx.tcgen05.commit(buf_a_consumed.ptr_to([0]), cta_group=CTA_GROUP, cta_mask=pair_mask)
@@ -1181,7 +1212,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         dq_tmem_free_ph.advance()
                         accum_var = 0
                         if T.ptx.elect_sync():
-                            mma_s(TMEM_OFF_A, accum_var)
+                            mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
                         if T.ptx.elect_sync():
                             mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                             T.ptx.tcgen05.commit(
@@ -1200,7 +1231,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         tma_qcol.wait(0, qcol_ph.phase)
                         qcol_ph.advance()
                         if T.ptx.elect_sync():
-                            mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk)
+                            mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk, desc_q_col)
                         if T.ptx.elect_sync():
                             T.ptx.tcgen05.commit(qcol_consumed.ptr_to([0]), cta_group=CTA_GROUP, cta_mask=pair_mask)
                         accum_dk = 1
@@ -1212,7 +1243,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         a_ph.advance()
                         accum_var = 0
                         if T.ptx.elect_sync():
-                            mma_dp(TMEM_OFF_DP, accum_var)
+                            mma_dp(TMEM_OFF_DP, accum_var, desc_v_row, desc_do_row)
                         if T.ptx.elect_sync():
                             mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                         iket.range_end(mma_dp_token)
@@ -1232,7 +1263,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         mma_dq_issue_token = iket.range_start("mma-dq-issue")
                         accum_var = 0
                         if T.ptx.elect_sync():
-                            mma_dq(TMEM_OFF_DQ, accum_var)
+                            mma_dq(TMEM_OFF_DQ, accum_var, desc_ds_exch, desc_k_col)
                         if T.ptx.elect_sync():
                             mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                             T.ptx.tcgen05.commit(
@@ -1247,7 +1278,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         strip_ready.wait(0, strip_ready_ph.phase)
                         strip_ready_ph.advance()
                         if T.ptx.elect_sync():
-                            mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv)
+                            mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv, desc_do_col)
                         if T.ptx.elect_sync():
                             T.ptx.tcgen05.commit(buf_a_consumed.ptr_to([0]), cta_group=CTA_GROUP, cta_mask=pair_mask)
                         iket.range_end(mma_dv_token)
@@ -1269,7 +1300,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     tma_qcol.wait(0, qcol_ph.phase)
                     qcol_ph.advance()
                     if T.ptx.elect_sync():
-                        mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk)
+                        mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk, desc_q_col)
                     if T.ptx.elect_sync():
                         T.ptx.tcgen05.commit(qcol_consumed.ptr_to([0]), cta_group=CTA_GROUP, cta_mask=pair_mask)
                         # sdKVaccum stage 1: release dK independently after its
@@ -1294,7 +1325,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     mma_dq_issue_token = iket.range_start("mma-dq-issue")
                     accum_var = 0
                     if T.ptx.elect_sync():
-                        mma_dq(TMEM_OFF_DQ, accum_var)
+                        mma_dq(TMEM_OFF_DQ, accum_var, desc_ds_exch, desc_k_col)
                     if T.ptx.elect_sync():
                         mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                         T.ptx.tcgen05.commit(
