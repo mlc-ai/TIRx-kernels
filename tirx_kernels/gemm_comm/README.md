@@ -19,8 +19,9 @@ under the License.
 
 # Distributed GEMM kernels
 
-This category contains SM100, tensor-parallel kernels. Both workloads
-register TP1 and TP4 specializations for eight model shapes:
+This category contains the SM100, tensor-parallel kernels recovered from the
+megakernel performance branch. Both workloads register TP1 and TP4
+specializations for eight model shapes:
 
 | Registry name | Global operation | Rank-local result |
 | --- | --- | --- |
@@ -41,8 +42,8 @@ the local module, and owns its Device API streams. No Disco session or remote
 runtime object is created. Mutable queues, semaphores, workspaces, and outputs
 are reset independently on every rank before each measured launch.
 
-Both registry entries are direct kernel ports with no scheduling policy,
-execution region, or MoE change. AllGather+GEMM keeps
+Both registry entries are direct kernel ports. This PR contains no megakernel
+DSL, scheduling policy, execution region, or MoE change. AllGather+GEMM keeps
 the already validated dynamic queue implementation. GEMM+ReduceScatter uses
 the hand-transcribed fused persistent kernel in `gemm_reduce_scatter.py`: a
 two-CTA GEMM queue feeds an initially

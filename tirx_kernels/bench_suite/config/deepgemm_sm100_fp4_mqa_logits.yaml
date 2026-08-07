@@ -1,0 +1,4 @@
+kernel: deepgemm_sm100_fp4_mqa_logits
+configs:
+  - {config: s2048_skv4096_h64_d128_f32_dense_cp, default: true}
+  - {config: s4096_skv8192_h64_d128_bf16_compressed_nocp, default: true}

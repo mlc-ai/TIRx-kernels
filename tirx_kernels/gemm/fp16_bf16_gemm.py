@@ -11,7 +11,9 @@ from tvm.tirx.lang.tile_scheduler import ClusterLaunchControlScheduler
 
 
 def prepare_data(dtype, M, N, K):
-    torch_dev = torch.device("cuda")
+    # Pin the ordinal: a bare "cuda" is resolved at each allocation against the
+    # then-current device, so every tensor here must name the same one.
+    torch_dev = torch.device("cuda", torch.cuda.current_device())
     if dtype == "fp16":
         dtype = torch.float16
     elif dtype == "bf16":
@@ -163,28 +165,26 @@ def _kernel(
     tmem = tmem_pool.alloc((128, 512), "float32")
     # TMEMPool.commit/dealloc wraps the tcgen05 alloc/dealloc handshake.
     tmem_pool.commit()
-    T.ptx.fence.proxy_async("shared::cta")
-    T.ptx.fence.mbarrier_init()
+    T.ptx.fence.proxy.async_.shared__cta()
+    T.ptx.fence.mbarrier_init.release.cluster()
     # OVERLAP shapes split the prologue cluster barrier: arrive (relaxed) here, then each
     # active role waits(acquire) after its own setup so the latency overlaps it (idle warps
     # skip the wait). No-overlap shapes keep the cheaper fused cluster_sync.
     if OVERLAP_EPILOGUE:
-        T.ptx.barrier.cluster.arrive(sem="relaxed", aligned=True)
+        T.ptx.barrier.cluster.arrive.relaxed.aligned()
     else:
         T.cuda.cluster_sync()
 
     if wg_id == NUM_CONSUMER:
         # ==================== PRODUCER warpgroup ====================
-        T.ptx.setmaxnreg(False, 56)  # reduce the producer's per-warp register budget
+        T.ptx.setmaxnreg.dec.sync.aligned.u32(56)  # reduce the producer's per-warp register budget
         if warp_id == 3:
             # -------- LOADER (TMA) --------
             ld = clc_sched.worker("ld_sched")
             ld.init(bx // 2)
             tma_cur = PipelineState(PIPE_DEPTH, 1)
             if OVERLAP_EPILOGUE:
-                T.ptx.barrier.cluster.wait(
-                    acquire=True, aligned=False
-                )  # split cluster barrier (loader)
+                T.ptx.barrier.cluster.wait.acquire()  # split cluster barrier (loader)
 
             @T.inline
             def tma_load_stage(k_tile, m_idx, n_idx):
@@ -223,7 +223,7 @@ def _kernel(
                     tma_cur.advance()
 
             # CLC loader: load the current tile, then consume the schedule for the next.
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 while ld.valid():
                     m_idx = T.meta_var(ld.m_idx)
                     n_idx = T.meta_var(ld.n_idx)
@@ -234,7 +234,7 @@ def _kernel(
         elif warp_id == 2:
             # -------- CLC SCHEDULER --------
             if OVERLAP_EPILOGUE:
-                T.ptx.barrier.cluster.wait(acquire=True, aligned=False)  # split barrier (scheduler)
+                T.ptx.barrier.cluster.wait.acquire()  # split barrier (scheduler)
             clc_sched.run_scheduler(cbx)
         elif (warp_id < NUM_CONSUMER) & (cbx == 0):
             # -------- MMA (tcgen05) --------
@@ -244,9 +244,7 @@ def _kernel(
             tmem_buf = PipelineState(TMEM_PHASE_DEPTH, 1)
             accum: T.int32
             if OVERLAP_EPILOGUE:
-                T.ptx.barrier.cluster.wait(
-                    acquire=True, aligned=False
-                )  # split cluster barrier (MMA)
+                T.ptx.barrier.cluster.wait.acquire()  # split cluster barrier (MMA)
 
             @T.inline
             def mma_stage(buf):
@@ -281,7 +279,7 @@ def _kernel(
             # coords (it MMAs whatever the loader staged), so reset() not init().
             mm = clc_sched.worker("mma_sched")
             mm.reset()
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 while mm.valid():
                     mm.consume()
                     mma()
@@ -289,14 +287,14 @@ def _kernel(
     elif wg_id < NUM_CONSUMER:
         # ==================== CONSUMER / EPILOGUE warpgroup(s) ====================
         if not OVERLAP_EPILOGUE:
-            T.ptx.setmaxnreg(True, 224)  # raise the consumer's per-warp register budget
+            T.ptx.setmaxnreg.inc.sync.aligned.u32(
+                224
+            )  # raise the consumer's per-warp register budget
         wb = clc_sched.worker("wb_sched")
         wb.init(bx // 2)
         wb_buf = PipelineState(TMEM_PHASE_DEPTH, 0)
         if OVERLAP_EPILOGUE:
-            T.ptx.barrier.cluster.wait(
-                acquire=True, aligned=False
-            )  # split cluster barrier (consumer)
+            T.ptx.barrier.cluster.wait.acquire()  # split cluster barrier (consumer)
 
         @T.inline
         def writeback(m_idx, n_idx):
@@ -312,12 +310,12 @@ def _kernel(
                     Dreg = T.wg_reg_tile(EPI_N)
                     tn = T.meta_var(tmem_base + i * EPI_N)
                     Tx.wg.copy_async(Dreg, tmem[:, tn : tn + EPI_N])
-                    T.ptx.tcgen05.wait.ld()
+                    T.ptx.tcgen05.wait__ld.sync.aligned()
                     Tx.wg.cast(Dreg_16b, Dreg)
                     if i == WB_PIPE_DEPTH - 1:
                         tmem_pipe.empty.arrive(slot, remote=0, pred=True)
                     db = T.meta_var(i % NUM_D_TILES)
-                    T.ptx.cp_async.bulk.wait_group(NUM_D_TILES - 1, read=True)
+                    T.ptx.cp.async_.bulk.wait_group.read(NUM_D_TILES - 1)
                     T.cuda.warpgroup_sync(wg_id + 10)
                     # consumer is wg_id==0 here; literal Dsmem[0,...] keeps STSM dispatch.
                     for jv in T.unroll(EPI_N // 8):
@@ -328,7 +326,7 @@ def _kernel(
                     if (warp_id == 0) & (lane_id == 0):
                         # Proxy fence by the single TMA-issuing thread (warpgroup_sync above
                         # made writes CTA-visible; an all-128-thread fence was the dominant stall).
-                        T.ptx.fence.proxy_async("shared::cta")
+                        T.ptx.fence.proxy.async_.shared__cta()
                         d_m = T.meta_var(((m_idx * 2 + cbx) * NUM_CONSUMER + wg_id) * BLK_M)
                         d_n = T.meta_var(n_idx * MMA_N + i * EPI_N)
                         Tx.copy_async(
@@ -339,7 +337,7 @@ def _kernel(
                             prefetch_tensormap=True,  # prefetch the D tensormap
                         )
                     # commit_group collectively reconverges the warpgroup (no post-sync).
-                    T.ptx.cp_async.bulk.commit_group()
+                    T.ptx.cp.async_.bulk.commit_group()
             else:
                 # No-overlap: load+cast all chunks, free the accumulator, then store. Stage
                 # the tmem->reg f32 load in 16-col sub-chunks so the f32 footprint stays 16
@@ -350,12 +348,12 @@ def _kernel(
                     Dreg = T.wg_reg_tile(NOL)
                     tn = T.meta_var(tmem_base + i * NOL)
                     Tx.wg.copy_async(Dreg, tmem[:, tn : tn + NOL])
-                    T.ptx.tcgen05.wait.ld()
+                    T.ptx.tcgen05.wait__ld.sync.aligned()
                     Tx.wg.cast(Dreg_16b[:, i * NOL : (i + 1) * NOL], Dreg)
                 tmem_pipe.empty.arrive(wg_id, remote=0, pred=True)
                 for i in T.unroll(WB_PIPE_DEPTH):
                     db = T.meta_var(i % NUM_D_TILES)
-                    T.ptx.cp_async.bulk.wait_group(NUM_D_TILES - 1, read=True)
+                    T.ptx.cp.async_.bulk.wait_group.read(NUM_D_TILES - 1)
                     T.cuda.warpgroup_sync(wg_id + 10)
                     # Store reg->smem in 8-bf16 (128b) sub-slices -> st.128 (one swizzle
                     # chunk each), avoiding the scalar 16b loop / bank conflicts.
@@ -367,7 +365,7 @@ def _kernel(
                     T.cuda.warpgroup_sync(wg_id + 10)
                     if (warp_id == 0) & (lane_id == 0):
                         # Single-thread proxy fence after the CTA sync (see overlap path).
-                        T.ptx.fence.proxy_async("shared::cta")
+                        T.ptx.fence.proxy.async_.shared__cta()
                         d_m = T.meta_var(((m_idx * 2 + cbx) * NUM_CONSUMER + wg_id) * BLK_M)
                         d_n = T.meta_var(n_idx * MMA_N + i * EPI_N)
                         Tx.copy_async(
@@ -378,7 +376,7 @@ def _kernel(
                             prefetch_tensormap=True,  # prefetch the D tensormap
                         )
                     # commit_group collectively reconverges the warpgroup (no post-sync).
-                    T.ptx.cp_async.bulk.commit_group()
+                    T.ptx.cp.async_.bulk.commit_group()
 
         # CLC consumer: capture the current tile, consume the schedule for the next
         # (overlapping it with the MMA-output wait), then store the captured tile.
@@ -395,7 +393,7 @@ def _kernel(
             wb_buf.advance()
             wb.mark_done_if_drained()
         # Drain any in-flight TMA stores before tmem teardown.
-        T.ptx.cp_async.bulk.wait_group(0)
+        T.ptx.cp.async_.bulk.wait_group(0)
         if OVERLAP_EPILOGUE:
             # Teardown: warpgroup_sync (all tmem reads done), then warp0 does a 1-arrival
             # cross-CTA mbarrier handshake before dealloc -- lighter than a full cluster_sync.
@@ -448,7 +446,7 @@ def run_test(dtype, M, N, K, **kwargs):
 
     A, B, C = prepare_data(dtype, M, N, K)
     kernel = tir_kernel(dtype, M, N, K)
-    C_tvm = torch.zeros_like(C, device="cuda")
+    C_tvm = torch.zeros_like(C)
     target = tvm.target.Target("cuda")
     with target:
         ex = compile_kernel(kernel)

@@ -1,0 +1,4 @@
+kernel: deepgemm_sm100_fp4_paged_mqa_logits
+configs:
+  - {config: b1_n1_mp1_ps32_h64_d128_f32_fixed, default: true}
+  - {config: b16_n1_mp128_ps64_h64_d128_bf16_fixed, default: true}

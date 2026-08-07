@@ -1,10 +1,15 @@
 # bench-suite
 
-Pre-commit regression benchmark for TIRx kernels. Runs the curated workload
-sweep in `workloads.yaml` against the **working tree**, assigns GPUs
-automatically, and writes run JSON + reports under `.bench-suite/`.
-The default sweep contains 113 representative single-GPU workloads, including
-the TP1 AllGather+GEMM and GEMM+ReduceScatter profiles.
+Pre-commit regression benchmark for TIRx kernels. Runs a curated workload
+sweep against the **working tree**, assigns GPUs automatically, and writes run
+JSON + reports under `.bench-suite/`.
+
+`config/` holds one file per kernel listing every config that kernel can bench,
+each flagged `default: true|false`. With no `--workloads`, the flagged configs
+across all files are assembled into `.bench-suite/workloads.generated.yaml` and
+that is what runs -- 128 representative single-GPU workloads, including the TP1
+AllGather+GEMM and GEMM+ReduceScatter profiles. Widening or narrowing the sweep
+is a flag flip, not a new file.
 
 ```bash
 cd /path/to/tirx-kernels
@@ -41,11 +46,11 @@ run a trimmed workload list:
 
 ```bash
 grep -vE "allgather_gemm|gemm_reduce_scatter" \
-  tirx_kernels/bench_suite/workloads.yaml > /tmp/workloads_no_comm.yaml
+  .bench-suite/workloads.generated.yaml > /tmp/workloads_no_comm.yaml
 python -m tirx_kernels.bench_suite --workloads /tmp/workloads_no_comm.yaml
 ```
 
-Import gate (kernels referenced in `workloads.yaml` only):
+Import gate (kernels in the assembled default sweep only):
 
 ```bash
 python -m tirx_kernels.bench_suite --check-imports
@@ -63,8 +68,9 @@ and install the CUTLASS DSL version required by that checkout:
 export SGLANG_PATH=/path/to/sglang
 export PYTHONPATH="${SGLANG_PATH}/python:${PYTHONPATH}"
 
-python -m tirx_kernels.bench_suite \
-  --workloads tirx_kernels/bench_suite/workloads_sglang_fp8_paged_mqa.yaml
+python -m tirx_kernels.bench_suite --filter deepgemm_sm100_fp8_paged_mqa_logits \
+  --workloads <(python -c "import yaml,sys; from tirx_kernels.bench_suite import run; \
+yaml.safe_dump({'workloads': run.load_kernel_configs('deepgemm_sm100_fp8_paged_mqa_logits')}, sys.stdout)")
 ```
 
 This is a kernel-only Proton comparison: Q/context reshaping, schedule metadata,
@@ -81,7 +87,8 @@ performance cases, plus the h_q=64 DeepSeek-V4 primary:
 ```bash
 export FLASH_MLA_PATH=/path/to/FlashMLA
 python -m tirx_kernels.bench_suite \
-  --workloads tirx_kernels/bench_suite/workloads_sparse_flashmla_decode.yaml
+  --workloads <(python -c "import yaml,sys; from tirx_kernels.bench_suite import run; \
+yaml.safe_dump({'workloads': run.load_kernel_configs('sparse_flashmla_decode_head64')}, sys.stdout)")
 ```
 
 The workload has exactly 15 rows: all 14 upstream public-h_q=64 cases whose
@@ -99,7 +106,7 @@ are outside both timed closures. For this port, only the results emitted by
 
 | Kind | Files |
 |------|--------|
-| **Run** | `run.py`, `workloads.yaml`, dedicated `workloads_*.yaml` matrices |
+| **Run** | `run.py`, `config/<kernel>.yaml` (one per kernel, per-config `default:` flag) |
 | **Pinned baseline (git)** | `baseline.json`, `baseline.md` |
 | **Promote / report** | `promote_baseline.py`, `ratio_diff.py`, `baseline_view.py` |
 
@@ -168,8 +175,11 @@ Spot-check one workload: `python -m tirx_kernels.bench --kernel ... --config ...
 
 ## Workload fields
 
-Each `workloads.yaml` entry requires `kernel` and `config`. Optional fields are
-`timer`, `warmup`, `repeat`, and `num_gpus` (default `1`). Multi-GPU jobs receive
+Each `config/<kernel>.yaml` entry requires `config` and `default`; the file
+supplies `kernel` and an optional file-level `defaults:` mapping merged into
+every entry. Optional per-entry fields are `timer`, `warmup`, `repeat`, and
+`num_gpus` (default `1`). A file passed via `--workloads` uses the flat
+`workloads:` list form instead, where each entry carries its own `kernel`. Multi-GPU jobs receive
 the acquired physical indices as an ordered, comma-separated
 `CUDA_VISIBLE_DEVICES` value and all assigned cards are monitored for interference.
 

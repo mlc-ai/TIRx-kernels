@@ -1,0 +1,7 @@
+kernel: gemm_reduce_scatter
+defaults: {num_gpus: 1, timer: kineto}
+configs:
+  - {config: tp1_m8192_n4096_k12288_fp16_dynamic, default: true}
+  - {config: tp1_m8192_n5120_k25600_fp16_dynamic, default: true}
+  - {config: tp1_m8192_n8192_k28672_fp16_dynamic, default: true}
+  - {config: tp1_m8192_n16384_k53248_fp16_dynamic, default: true}

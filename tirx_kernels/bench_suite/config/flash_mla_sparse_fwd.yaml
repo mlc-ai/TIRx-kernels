@@ -1,0 +1,19 @@
+kernel: flash_mla_sparse_fwd
+configs:
+  - {config: bench_dqk512_hq64_s4096_kv8192_topk512, default: false}
+  - {config: bench_dqk512_hq64_s4096_kv32768_topk512, default: false}
+  - {config: bench_dqk512_hq64_s4096_kv49152_topk512, default: false}
+  - {config: bench_dqk512_hq64_s4096_kv65536_topk512, default: false}
+  - {config: bench_dqk576_hq64_s4096_kv8192_topk512, default: false}
+  - {config: bench_dqk576_hq64_s4096_kv32768_topk512, default: false}
+  - {config: bench_dqk576_hq64_s4096_kv49152_topk512, default: false}
+  - {config: bench_dqk576_hq64_s4096_kv65536_topk512, default: false}
+  - {config: bench_regular_dqk512_hq128_s4096_kv8192_topk2048, default: false}
+  - {config: bench_regular_dqk512_hq128_s4096_kv32768_topk2048, default: false}
+  - {config: bench_regular_dqk512_hq128_s4096_kv65536_topk2048, default: false}
+  - {config: bench_regular_dqk576_hq128_s4096_kv8192_topk2048, default: false}
+  - {config: bench_regular_dqk576_hq128_s4096_kv32768_topk2048, default: false}
+  - {config: bench_regular_dqk576_hq128_s4096_kv65536_topk2048, default: false}
+  - {config: bench_smalltopk_dqk512_hq128_s4096_kv8192_topk1280, default: false}
+  - {config: bench_smalltopk_dqk512_hq128_s4096_kv32768_topk1280, default: false}
+  - {config: bench_smalltopk_dqk512_hq128_s4096_kv65536_topk1280, default: false}

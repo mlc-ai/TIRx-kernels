@@ -216,14 +216,14 @@ def _kernel(
     cluster_rank = 0
     if CTA_GROUP > 1:
         cbx, cby = T.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
-        cluster_rank = T.ptx.fetch_register(32, "cluster_ctarank")
+        cluster_rank = T.cuda.mov_sreg(32, "cluster_ctarank")
     bx = T.cta_id([SM_NUMBER])
     wg_id = T.warpgroup_id([WG_NUMBER])
     warp_id = T.warp_id_in_wg([4])
     tid_in_wg = T.thread_id_in_wg([128])
     lane_id = T.lane_id([32])
     pool = T.SMEMPool()
-    barrier_leader = (wg_id == 0) & (warp_id == 1) & (T.ptx.elect_sync() != T.uint32(0))
+    barrier_leader = (wg_id == 0) & (warp_id == 1) & (T.cuda.elect_sync() != T.uint32(0))
     tmem_pool = T.TMEMPool(
         pool,
         total_cols=512,
@@ -264,7 +264,7 @@ def _kernel(
     SFB_smem = pool.alloc((SMEM_DEPTH, BLK_SFB), "uint32")
     pool.commit()
     if barrier_leader:
-        T.ptx.fence.mbarrier_init()
+        T.ptx.fence.mbarrier_init.release.cluster()
     stage: T.int32
     tile_scheduler = ClusterPersistentScheduler2D(
         "tile_scheduler",
@@ -367,7 +367,7 @@ def _kernel(
                     tma_load(k_tile)
                     tma_cur.advance()
 
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 while tile_scheduler.valid():
                     tma_iter()
                     tile_scheduler.next_tile()
@@ -382,7 +382,7 @@ def _kernel(
                 if k_tile % 4 == 0:
                     Tx.warp.permute_layout(SFA_smem_post[ks, :], SFA_smem[ks, :])
                     Tx.warp.permute_layout(SFB_smem_post[ks, :], SFB_smem[ks, :])
-                    T.ptx.fence.proxy_async("shared::cta")
+                    T.ptx.fence.proxy.async_.shared__cta()
                 trans_done.arrive(ks, remote=0)
 
             @T.inline
@@ -413,7 +413,7 @@ def _kernel(
             def mma(ks, sf_off: T.constexpr, copy_sf: T.constexpr):
                 ks_desc: T.int32
                 trans_done.wait(ks, mma_state.phase)
-                T.ptx.tcgen05.fence.after_thread_sync()
+                T.ptx.tcgen05.fence__after_thread_sync()
                 ks_desc = T.cuda.__shfl_sync(T.uint32(0xFFFFFFFF), ks, 0, 32)
 
                 @T.inline
@@ -441,7 +441,7 @@ def _kernel(
                             cta_group=CTA_GROUP,
                         )
 
-                mma_issue = T.ptx.elect_sync()
+                mma_issue = T.cuda.elect_sync()
                 if mma_issue:
                     if copy_sf:
                         Tx.copy_async(SFA_tmem[tmem_idx], SFA_smem_fp8[ks], cta_group=CTA_GROUP)
@@ -458,7 +458,7 @@ def _kernel(
                 tmem_idx = tile_scheduler.tile_idx % TMEM_DEPTH
                 tmem_phase = tile_scheduler.tile_idx // TMEM_DEPTH & 1
                 tmem_pipe.empty.wait(tmem_idx, tmem_phase)
-                T.ptx.tcgen05.fence.after_thread_sync()
+                T.ptx.tcgen05.fence__after_thread_sync()
                 accum = 0
                 for _ in T.serial(K_TILES // 4):
                     mma(mma_state.stage, 0, True)
@@ -501,13 +501,13 @@ def _kernel(
                 stage = store_iter % TMEM_DEPTH
                 if store_iter >= TMEM_DEPTH:
                     if warp_id == 0:
-                        T.ptx.cp_async.bulk.wait_group(TMEM_DEPTH - 1)
+                        T.ptx.cp.async_.bulk.wait_group(TMEM_DEPTH - 1)
                     T.cuda.warpgroup_sync(10)
                 if SWAP_AB:
                     for atom_m in T.unroll(2):
                         col_st: T.let = ot * 16 + atom_m * 8
                         Tx.wg.copy_async(swap_frag[:, :], acc[tmem_idx, :, col_st : col_st + 8])
-                        T.ptx.tcgen05.wait.ld()
+                        T.ptx.tcgen05.wait__ld.sync.aligned()
                         Tx.wg.cast(swap_bf16, swap_frag)
                         rs = T.meta_var(atom_m * 8)
                         Tx.wg.copy(
@@ -520,7 +520,7 @@ def _kernel(
                         Dreg = T.wg_reg_tile(TMEM_LD_SIZE)
                         acc_n = T.meta_var(ot * EPI_TILE + ki * TMEM_LD_SIZE)
                         Tx.wg.copy_async(Dreg, acc[tmem_idx, :, acc_n : acc_n + TMEM_LD_SIZE])
-                        T.ptx.tcgen05.wait.ld()
+                        T.ptx.tcgen05.wait__ld.sync.aligned()
                         Dreg_bf16 = T.wg_reg_tile(TMEM_LD_SIZE, dtype="bfloat16")
                         Tx.wg.cast(Dreg_bf16, Dreg)
                         Tx.wg.copy(
@@ -528,12 +528,12 @@ def _kernel(
                         )
                 if ot == STORE_TILES - 1:
                     tmem_pipe.empty.arrive(tmem_idx, remote=0)
-                T.ptx.fence.proxy_async("shared::cta")
+                T.ptx.fence.proxy.async_.shared__cta()
                 T.cuda.warpgroup_sync(10)
                 d_m: T.let = m_idx * DG_BLOCK_M + (ot * 16 if SWAP_AB else 0)
                 d_n: T.let = n_idx * DG_BLOCK_N + (0 if SWAP_AB else ot * EPI_TILE)
                 if warp_id == 0:
-                    if T.ptx.elect_sync():
+                    if T.cuda.elect_sync():
                         for d_atom in T.unroll(D_TMA_ISSUES):
                             d_atom_n = T.meta_var(d_atom * D_TMA_TILE_N)
                             Tx.copy_async(
@@ -546,7 +546,7 @@ def _kernel(
                                 tensormap_l2_promotion=TMA_L2_PROMOTION,
                                 prefetch_tensormap=True,
                             )
-                        T.ptx.cp_async.bulk.commit_group()
+                        T.ptx.cp.async_.bulk.commit_group()
 
         T.cuda.trap_when_assert_failed(tmem_pool.addr == 0)
         while tile_scheduler.valid():
@@ -556,7 +556,7 @@ def _kernel(
             epilogue()
             tile_scheduler.next_tile()
         if tid_in_wg == 0:
-            T.ptx.cp_async.bulk.wait_group(0)
+            T.ptx.cp.async_.bulk.wait_group(0)
         T.cuda.warpgroup_sync(10)
     # The epilogue warpgroup and every CTA sharing the allocation must finish first.
     if CTA_GROUP > 1:

@@ -9,6 +9,18 @@ from tvm.script.tirx import tile as Tx
 from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import MBarrier, TMABar
 
+
+def _mapa_u64(ptr, rank):
+    """`mapa.u64` into a declared register, returned as an ordinary value.
+
+    PTX has no defining form, so mapa writes a register the caller declares;
+    a one-element local buffer gives both a writable lvalue and an Expr.
+    """
+    mapped = T.alloc_local([1], "uint64")
+    T.evaluate(T.ptx.mapa.u64(mapped[0], ptr, T.uint32(rank)))
+    return mapped[0]
+
+
 eps = 1e-06
 F16_BYTES = 2
 F32_BYTES = 4
@@ -173,7 +185,7 @@ def tirx_dispatch_rmsnorm(dim: int, batch_size: int, SMEM_PER_CTA=220, MAX_THREA
         if CLUSTER_N > 1:
             T.cuda.cluster_sync()
         else:
-            T.ptx.bar.sync(1, b_dx * b_dy)
+            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
         input_vec: T.f16[VECTOR_SIZE]
         weight_vec: T.f16[VECTOR_SIZE]
         x_vec: T.f32[VECTOR_SIZE]
@@ -212,7 +224,7 @@ def tirx_dispatch_rmsnorm(dim: int, batch_size: int, SMEM_PER_CTA=220, MAX_THREA
                 if t_idx < CLUSTER_N:
                     remote_ptr: T.let = T.reinterpret(
                         PointerType(PrimType("float32")),
-                        T.ptx.map_shared_rank(cluster_reduce_smem.ptr_to([0]), t_idx),
+                        _mapa_u64(cluster_reduce_smem.ptr_to([0]), t_idx),
                     )
                     remote_buf = T.decl_buffer([1], "float32", scope="shared", data=remote_ptr)
                     sum_sq = remote_buf[0]
@@ -221,8 +233,8 @@ def tirx_dispatch_rmsnorm(dim: int, batch_size: int, SMEM_PER_CTA=220, MAX_THREA
                 sum_sq = T.cuda.warp_sum(sum_sq, width=CLUSTER_N)
                 if t_idx == 0:
                     sum_sq_smem[0] = sum_sq
-            T.ptx.bar.sync(1, b_dx * b_dy)
-            T.ptx.fence.proxy("shared")
+            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
+            T.ptx.fence.proxy.async_.shared__cta()
             norm_factor = T.rsqrt(sum_sq_smem[0] / dim + eps)
         else:
             norm_factor = T.rsqrt(sum_sq / dim + eps)
@@ -306,7 +318,7 @@ def tirx_dispatch_rmsnorm(dim: int, batch_size: int, SMEM_PER_CTA=220, MAX_THREA
                 if t_idx < CLUSTER_N:
                     remote_ptr: T.let = T.reinterpret(
                         PointerType(PrimType("float32")),
-                        T.ptx.map_shared_rank(cluster_reduce_smem.ptr_to([0]), t_idx),
+                        _mapa_u64(cluster_reduce_smem.ptr_to([0]), t_idx),
                     )
                     remote_buf = T.decl_buffer([1], "float32", scope="shared", data=remote_ptr)
                     sum_sq = remote_buf[0]
@@ -315,8 +327,8 @@ def tirx_dispatch_rmsnorm(dim: int, batch_size: int, SMEM_PER_CTA=220, MAX_THREA
                 sum_sq = T.cuda.warp_sum(sum_sq, width=CLUSTER_N)
                 if t_idx == 0:
                     sum_sq_smem[0] = sum_sq
-            T.ptx.bar.sync(1, b_dx * b_dy)
-            T.ptx.fence.proxy("shared")
+            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
+            T.ptx.fence.proxy.async_.shared__cta()
             norm_factor = T.rsqrt(sum_sq_smem[0] / dim + eps)
         else:
             norm_factor = T.rsqrt(sum_sq / dim + eps)
@@ -396,8 +408,8 @@ def tirx_original_impl(hidden_size, batch_size, SMEM_PER_CTA=220, MAX_THREADS=25
                     Tx.copy(x_smem[st : st + vec_size], x_vec[:])
             sum_sq = T.cuda.warp_sum(sum_sq)
             sum_sq_smem[ty] = sum_sq
-            T.ptx.bar.sync(1, bdx * bdy)
-            T.ptx.fence.proxy("shared")
+            T.ptx.bar.sync(1, T.uint32(bdx * bdy))
+            T.ptx.fence.proxy.async_.shared__cta()
             if ty == 0:
                 if tx < bdy:
                     sum_sq = sum_sq_smem[tx]
@@ -405,8 +417,8 @@ def tirx_original_impl(hidden_size, batch_size, SMEM_PER_CTA=220, MAX_THREADS=25
                     sum_sq = T.float32(0.0)
                 sum_sq = T.cuda.warp_sum(sum_sq)
                 sum_sq_smem[0] = sum_sq
-            T.ptx.bar.sync(1, bdx * bdy)
-            T.ptx.fence.proxy("shared")
+            T.ptx.bar.sync(1, T.uint32(bdx * bdy))
+            T.ptx.fence.proxy.async_.shared__cta()
             rms_norm = T.rsqrt(sum_sq_smem[0] / hidden_size + eps)
             for ki in T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)):
                 for kv in T.unroll(vec_size):
@@ -423,7 +435,7 @@ def tirx_original_impl(hidden_size, batch_size, SMEM_PER_CTA=220, MAX_THREADS=25
                 if st < hidden_size:
                     Tx.cast(input_vec[:], input_vec_f32[:])
                     Tx.copy(out_global[idx, st : st + vec_size], input_vec[:])
-            T.ptx.bar.sync(1, bdx * bdy)
+            T.ptx.bar.sync(1, T.uint32(bdx * bdy))
             idx = idx + SM_COUNT
 
     return rmsnorm
@@ -489,11 +501,11 @@ def tirx_input_DSMEM_write_TMA_wts_GMEM(
         input_bar.init(1)
         if CLUSTER_N > 1:
             cluster_bar.init(CLUSTER_N)
-            T.ptx.fence.mbarrier_init()
+            T.ptx.fence.mbarrier_init.release.cluster()
         if CLUSTER_N > 1:
             T.cuda.cluster_sync()
         else:
-            T.ptx.bar.sync(1, b_dx * b_dy)
+            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
         input_vec: T.f16[VECTOR_SIZE]
         weight_vec: T.f16[VECTOR_SIZE]
         x_vec: T.f32[VECTOR_SIZE]
@@ -523,8 +535,8 @@ def tirx_input_DSMEM_write_TMA_wts_GMEM(
                     sum_sq = sum_sq + x_vec[v_id] * x_vec[v_id]
         sum_sq = T.cuda.warp_sum(sum_sq)
         sum_sq_smem[t_idy] = sum_sq
-        T.ptx.bar.sync(1, b_dx * b_dy)
-        T.ptx.fence.proxy("shared")
+        T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
+        T.ptx.fence.proxy.async_.shared__cta()
         if t_idy == 0:
             if t_idx < b_dy:
                 sum_sq = sum_sq_smem[t_idx]
@@ -532,18 +544,22 @@ def tirx_input_DSMEM_write_TMA_wts_GMEM(
                 sum_sq = T.float32(0.0)
             sum_sq = T.cuda.warp_sum(sum_sq)
             sum_sq_smem[0] = sum_sq
-        T.ptx.bar.sync(1, b_dx * b_dy)
-        T.ptx.fence.proxy("shared")
+        T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
+        T.ptx.fence.proxy.async_.shared__cta()
         if CLUSTER_N > 1:
             if t_idy == 0:
                 if t_idx < CLUSTER_N:
                     remote_ptr: T.let = T.reinterpret(
                         PointerType(PrimType("float32")),
-                        T.ptx.map_shared_rank(cluster_reduce_smem.ptr_to([cta_rank]), t_idx),
+                        _mapa_u64(cluster_reduce_smem.ptr_to([cta_rank]), t_idx),
                     )
                     remote_buf = T.decl_buffer([1], "float32", scope="shared", data=remote_ptr)
                     remote_buf[0] = sum_sq_smem[0]
-                    T.ptx.mbarrier.arrive(cluster_bar.ptr_to([0]), remote=t_idx, pred=True)
+                    _rem1 = T.alloc_local([1], "uint64")
+                    T.ptx.mapa.shared__cluster.u64(
+                        _rem1[0], cluster_bar.ptr_to([0]), T.uint32(t_idx)
+                    )
+                    T.ptx.mbarrier.arrive.b64(_rem1[0], T.uint32(1), pred=T.bool(True))
             cluster_bar.wait(0, 0)
             if t_idy == 0:
                 if t_idx < CLUSTER_N:
@@ -553,8 +569,8 @@ def tirx_input_DSMEM_write_TMA_wts_GMEM(
                 sum_sq = T.cuda.warp_sum(sum_sq, width=CLUSTER_N)
                 if t_idx == 0:
                     sum_sq_smem[0] = sum_sq
-            T.ptx.bar.sync(1, b_dx * b_dy)
-            T.ptx.fence.proxy("shared")
+            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
+            T.ptx.fence.proxy.async_.shared__cta()
             norm_factor = T.rsqrt(sum_sq_smem[0] / dim + eps)
         else:
             norm_factor = T.rsqrt(sum_sq_smem[0] / dim + eps)
@@ -694,7 +710,7 @@ def _get_rmsnorm_kernel(hidden_size):
                 if st < hidden_size:
                     Tx.cast(input_vec[:], input_vec_f32[:])
                     Tx.copy(out_global[idx, st : st + vec_size], input_vec[:])
-            T.ptx.bar.sync(1, bdx * bdy)
+            T.ptx.bar.sync(1, T.uint32(bdx * bdy))
             idx = idx + SM_COUNT
 
     return rmsnorm

@@ -1,0 +1,34 @@
+kernel: flash_attention4
+configs:
+  - {config: s1024_h32kv4, default: true}
+  - {config: s1024_h32kv4_causal, default: true}
+  - {config: s1024_h32kv8, default: true}
+  - {config: s1024_h32kv8_causal, default: true}
+  - {config: s1024_h32kv16, default: true}
+  - {config: s1024_h32kv16_causal, default: true}
+  - {config: s1024_h32kv32, default: true}
+  - {config: s1024_h32kv32_causal, default: true}
+  - {config: s2048_h32kv4, default: true}
+  - {config: s2048_h32kv4_causal, default: true}
+  - {config: s2048_h32kv8, default: true}
+  - {config: s2048_h32kv8_causal, default: true}
+  - {config: s2048_h32kv16, default: true}
+  - {config: s2048_h32kv16_causal, default: true}
+  - {config: s2048_h32kv32, default: true}
+  - {config: s2048_h32kv32_causal, default: true}
+  - {config: s4096_h32kv4, default: true}
+  - {config: s4096_h32kv4_causal, default: true}
+  - {config: s4096_h32kv8, default: true}
+  - {config: s4096_h32kv8_causal, default: true}
+  - {config: s4096_h32kv16, default: true}
+  - {config: s4096_h32kv16_causal, default: true}
+  - {config: s4096_h32kv32, default: true}
+  - {config: s4096_h32kv32_causal, default: true}
+  - {config: s8192_h32kv4, default: true}
+  - {config: s8192_h32kv4_causal, default: true}
+  - {config: s8192_h32kv8, default: true}
+  - {config: s8192_h32kv8_causal, default: true}
+  - {config: s8192_h32kv16, default: true}
+  - {config: s8192_h32kv16_causal, default: true}
+  - {config: s8192_h32kv32, default: true}
+  - {config: s8192_h32kv32_causal, default: true}

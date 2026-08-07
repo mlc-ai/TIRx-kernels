@@ -1,0 +1,8 @@
+kernel: sparse_flashmla_prefill_head128_phase1
+configs:
+  - {config: bench_regular_dqk512_hq128_s4096_kv8192_topk2048, default: true}
+  - {config: bench_regular_dqk512_hq128_s4096_kv32768_topk2048, default: true}
+  - {config: bench_regular_dqk512_hq128_s4096_kv65536_topk2048, default: true}
+  - {config: bench_regular_dqk576_hq128_s4096_kv8192_topk2048, default: true}
+  - {config: bench_regular_dqk576_hq128_s4096_kv32768_topk2048, default: true}
+  - {config: bench_regular_dqk576_hq128_s4096_kv65536_topk2048, default: true}

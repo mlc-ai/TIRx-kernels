@@ -359,13 +359,13 @@ def get_kernel(**kwargs: Any):
     logits_tir_dtype = "float32" if config.logits_dtype == "float32" else "bfloat16"
 
     def lane_id_u32():
-        return T.cast(T.ptx.fetch_register(32, "laneid"), "uint32")
+        return T.cast(T.cuda.mov_sreg(32, "laneid"), "uint32")
 
     def cuda_grid_dependency_synchronize():
         T.evaluate(T.ptx.griddepcontrol.wait())
 
     def named_barrier_sync_8(count):
-        T.evaluate(T.ptx.bar.sync(8, count))
+        T.evaluate(T.ptx.bar.sync(8, T.uint32(count)))
 
     @T.prim_func
     def sm100_fp8_mqa_logits(
@@ -474,7 +474,7 @@ def get_kernel(**kwargs: Any):
             # Scalar predicated store: per-thread non-contiguous output, so TMA/bulk
             # does not apply; bf16 stays a plain buffer store (predicated @P STG.E.U16).
             if config.logits_dtype == "float32":
-                T.ptx.st(logits_flat.ptr_to([flat_offset]), value, space="global", ptx_type="f32")
+                T.ptx.st.global_.f32(logits_flat.ptr_to([flat_offset]), value)
             else:
                 logits_flat[flat_offset] = value
 
@@ -502,18 +502,18 @@ def get_kernel(**kwargs: Any):
             schedule_result[1] = num_kv_blocks
 
         # Pipeline constructors already ran mbarrier.init; fence + cta_sync publish them.
-        T.ptx.fence.mbarrier_init()
+        T.ptx.fence.mbarrier_init.release.cluster()
         if warp_idx == spec_warp_start + 2:
-            T.ptx.tcgen05.alloc(
-                T.address_of(tmem_ptr_in_smem[0]), n_cols=num_tmem_cols, cta_group=1
+            T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                T.address_of(tmem_ptr_in_smem[0]), T.uint32(num_tmem_cols)
             )
         T.cuda.cta_sync()
 
         cuda_grid_dependency_synchronize()
 
         if warp_idx == spec_warp_start:
-            T.ptx.setmaxnreg(False, 56)
-            if T.ptx.elect_sync():
+            T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
+            if T.cuda.elect_sync():
                 # Ring cursors with subtract-wrap (DeepGEMM RingPipeline): avoids ptxas
                 # magic-number division for `% kNumStages` on these hot paths.
                 q_stage_idx: T.uint32 = T.uint32(0)
@@ -553,8 +553,8 @@ def get_kernel(**kwargs: Any):
                         q_phase = q_phase ^ T.uint32(1)
             T.cuda.warp_sync()
         elif warp_idx == spec_warp_start + 1:
-            T.ptx.setmaxnreg(False, 56)
-            if T.ptx.elect_sync():
+            T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
+            if T.cuda.elect_sync():
                 kv_stage_idx: T.uint32 = T.uint32(0)
                 kv_phase: T.uint32 = T.uint32(0)
                 q_idx: T.uint32 = sm_idx_u32
@@ -595,7 +595,7 @@ def get_kernel(**kwargs: Any):
                             kv_phase = kv_phase ^ T.uint32(1)
                     q_idx = q_idx + T.uint32(config.num_sms)
         elif warp_idx == spec_warp_start + 2:
-            T.ptx.setmaxnreg(False, 56)
+            T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
             T.cuda.trap_when_assert_failed(tmem_ptr_in_smem[0] == T.uint32(0))
             # fp8 (e4m3) views over the 128B-swizzled uint8 SMEM; with descI omitted the
             # tcgen05 dispatch constant-folds the dense instruction descriptor.
@@ -603,7 +603,7 @@ def get_kernel(**kwargs: Any):
             smem_kv_fp8 = smem_kv.view("float8_e4m3fn")
             # Whole MMA-warp loop in one elect scope: ring cursors stay elect-lane
             # locals on the uniform datapath (no R2UR per use).
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 q_stage_idx: T.uint32 = T.uint32(0)
                 q_phase: T.uint32 = T.uint32(0)
                 kv_stage_idx: T.uint32 = T.uint32(0)
@@ -659,9 +659,9 @@ def get_kernel(**kwargs: Any):
                         q_phase = q_phase ^ T.uint32(1)
             T.cuda.warp_sync()
         elif warp_idx == spec_warp_start + 3:
-            T.ptx.setmaxnreg(False, 56)
+            T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
         elif warp_idx < spec_warp_start:
-            T.ptx.setmaxnreg(True, 224)
+            T.ptx.setmaxnreg.inc.sync.aligned.u32(224)
             math_thread_idx: T.uint32 = warp_idx_u32 * T.uint32(32) + lane_idx_u32
             accum = T.alloc_local((num_heads,), "float32")
             cached_weights = T.alloc_local((block_q, num_heads), "float32")
@@ -689,21 +689,19 @@ def get_kernel(**kwargs: Any):
                     )
                     # Publish the generic-proxy weight reads before this consumer
                     # eventually releases the Q stage for a subsequent TMA overwrite.
-                    T.ptx.fence.proxy_async("shared::cta")
+                    T.ptx.fence.proxy.async_.shared__cta()
                     kv_offset: T.uint32 = kv_start + math_thread_idx
                     kv_idx: T.uint32 = T.uint32(0)
                     while kv_idx < num_kv_blocks:
                         kv_pipe.full.wait(kv_stage_idx, kv_phase)
-                        scale_kv: T.float32 = T.ptx.ld(
-                            smem_kv_scales.ptr_to([kv_stage_idx, math_thread_idx]),
-                            "float32",
-                            "f32",
-                            space="shared",
+                        scale_kv: T.float32
+                        T.ptx.ld.shared.f32(
+                            scale_kv, smem_kv_scales.ptr_to([kv_stage_idx, math_thread_idx])
                         )
                         tmem_pipe.full.wait(tmem_stage_idx, tmem_phase)
                         # Release the kv stage only after the tmem accumulator is
                         # ready, and fence the generic-proxy scale_kv read first.
-                        T.ptx.fence.proxy_async("shared::cta")
+                        T.ptx.fence.proxy.async_.shared__cta()
                         kv_pipe.empty.arrive(kv_stage_idx)
                         tmem_stage_base: T.uint32 = tmem_stage_idx * T.uint32(umma_n)
                         for q_inner_i in T.unroll(0, block_q):
@@ -716,12 +714,12 @@ def get_kernel(**kwargs: Any):
                                 accum_2d[:, 0 : num_heads // 2],
                                 tmem[:, tmem_addr : tmem_addr + num_heads // 2],
                             )
-                            T.ptx.tcgen05.wait.ld()
+                            T.ptx.tcgen05.wait__ld.sync.aligned()
                             Tx.warpgroup.copy_async(
                                 accum_2d[:, num_heads // 2 : num_heads],
                                 tmem[:, tmem_addr_hi : tmem_addr_hi + num_heads // 2],
                             )
-                            T.ptx.tcgen05.wait.ld()
+                            T.ptx.tcgen05.wait__ld.sync.aligned()
                             # Weighted-ReLU reduce via inline CUDA (see _mqa_fp8_wrelu_reduce_src).
                             reduced: T.float32 = cuda_func_call(
                                 f"tvm_builtin_mqa_fp8_wrelu_reduce_{num_heads}",
@@ -763,7 +761,9 @@ def get_kernel(**kwargs: Any):
                     q_phase = q_phase ^ T.uint32(1)
             named_barrier_sync_8(T.uint32(num_math_threads))
             if warp_idx == 0:
-                T.ptx.tcgen05.dealloc(T.uint32(0), n_cols=num_tmem_cols, cta_group=1)
+                T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                    T.uint32(0), T.uint32(num_tmem_cols)
+                )
 
     sm100_fp8_mqa_logits = sm100_fp8_mqa_logits.with_attr("tirx.persistent_kernel", True)
 

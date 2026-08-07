@@ -1,0 +1,9 @@
+kernel: fp8_blockwise_gemm
+configs:
+  - {config: deepgemm_m4096_n2112_k7168, default: true}
+  - {config: deepgemm_m4096_n576_k7168, default: true}
+  - {config: deepgemm_m4096_n24576_k1536, default: true}
+  - {config: deepgemm_m4096_n32768_k512, default: true}
+  - {config: deepgemm_m4096_n7168_k16384, default: true}
+  - {config: deepgemm_m4096_n4096_k7168, default: true}
+  - {config: deepgemm_m4096_n7168_k2048, default: true}

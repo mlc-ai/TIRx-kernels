@@ -625,9 +625,15 @@ def get_kernel(**kwargs: Any):
     cache_hint_sm90_evict_normal = "evict_normal"
     cache_hint_sm100_evict_normal = "evict_normal"
     cache_policy_evict_normal = T.uint64(1152921504606846976)
-    has_cache_policy_evict_normal = 1
-    tma_unicast_cta_mask = 0
-    tma_cta_group = 1
+    # One ptx spelling per rank: unicast (no .multicast::cluster), no
+    # .cta_group modifier (the legacy raw form passed -1 to suppress it), with
+    # the evict-normal L2 cache policy as a real operand.
+    tma_g2s_2d = (
+        "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
+    )
+    tma_g2s_3d = (
+        "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
+    )
     q_tma_block_inner = head_dim
     q_tma_swizzle_mode = head_dim
     q_tma_dtype_size = 1
@@ -718,7 +724,7 @@ def get_kernel(**kwargs: Any):
         )
 
     def lane_id_u32():
-        return T.cast(T.ptx.fetch_register(32, "laneid"), "uint32")
+        return T.cast(T.cuda.mov_sreg(32, "laneid"), "uint32")
 
     # relu-weighted-accumulate of a packed f32x2 pair:
     #   d = fma(a + |a|, w, c)
@@ -759,17 +765,17 @@ def get_kernel(**kwargs: Any):
 
     def fadd2_rn_noftz(a, b):
         out = T.alloc_local((1,), "uint64")
-        T.evaluate(T.ptx.add_f32x2(out.ptr_to([0]), a, b, rounding="rn", ftz=False))
+        T.evaluate(T.ptx.add.rn.f32x2(out[0], a, b))
         return out[0]
 
     def fadd_rn_noftz(a, b):
         out = T.alloc_local((1,), "float32")
-        T.evaluate(T.ptx.add_f32(out.ptr_to([0]), a, b, rounding="rn", ftz=False))
+        T.evaluate(T.ptx.add.rn.f32(out[0], a, b))
         return out[0]
 
     def fmul_rn_noftz(a, b):
         out = T.alloc_local((1,), "float32")
-        T.evaluate(T.ptx.mul_f32(out.ptr_to([0]), a, b, rounding="rn", ftz=False))
+        T.evaluate(T.ptx.mul.rn.f32(out[0], a, b))
         return out[0]
 
     def cuda_grid_dependency_synchronize():
@@ -791,16 +797,18 @@ def get_kernel(**kwargs: Any):
         num_prefetch_lines = 512
 
     def mbarrier_init_cta(barrier_ptr, arrive_count):
-        T.evaluate(T.ptx.mbarrier.init(barrier_ptr, arrive_count))
+        T.evaluate(T.ptx.mbarrier.init.shared.b64(barrier_ptr, T.uint32(arrive_count)))
 
     def mbarrier_wait_cta(barrier_ptr, phase):
-        T.evaluate(T.ptx.mbarrier.try_wait(barrier_ptr, phase))
+        T.evaluate(T.cuda.mbarrier_wait(barrier_ptr, phase))
 
     def mbarrier_arrive_cta(barrier_ptr):
-        T.evaluate(T.ptx.mbarrier.arrive(barrier_ptr))
+        T.evaluate(T.ptx.mbarrier.arrive.shared.b64(barrier_ptr, T.uint32(1)))
 
     def mbarrier_arrive_expect_tx_cta(barrier_ptr, transaction_bytes):
-        T.evaluate(T.ptx.mbarrier.arrive.expect_tx(barrier_ptr, transaction_bytes))
+        T.evaluate(
+            T.ptx.mbarrier.arrive.expect_tx.shared.b64(barrier_ptr, T.uint32(transaction_bytes))
+        )
 
     @T.prim_func
     def sm100_fp8_paged_mqa_logits(
@@ -849,10 +857,10 @@ def get_kernel(**kwargs: Any):
         lane_idx_u32: T.let = lane_id_u32()
 
         if warp_idx == spec_warp_start:
-            T.evaluate(T.ptx.prefetch_tensormap(T.address_of(tensor_map_q)))
-            T.evaluate(T.ptx.prefetch_tensormap(T.address_of(tensor_map_kv)))
-            T.evaluate(T.ptx.prefetch_tensormap(T.address_of(tensor_map_kv_scales)))
-            T.evaluate(T.ptx.prefetch_tensormap(T.address_of(tensor_map_weights)))
+            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_q)))
+            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_kv)))
+            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_kv_scales)))
+            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_weights)))
 
         T.static_assert(smem_q_size_per_stage % smem_alignment == 0, "Unaligned TMA swizzling")
         T.static_assert(smem_kv_size_per_stage % smem_alignment == 0, "Unaligned TMA swizzling")
@@ -959,22 +967,13 @@ def get_kernel(**kwargs: Any):
             )
             T.static_assert(q_tma_num_inner_atoms == 1, "Unsupported split TMA atom")
             T.evaluate(
-                T.call_intrin(
-                    "",
-                    "tirx.ptx_cp_async_bulk_tensor_g2s_cluster",
-                    2,
+                T.ptx[tma_g2s_2d](
                     dst,
-                    barrier_ptr,
                     T.address_of(tensor_map),
-                    tma_unicast_cta_mask,
-                    tma_cta_group,
+                    T.cast(coord0, "int32"),
+                    T.cast(coord1, "int32"),
+                    barrier_ptr,
                     cache_policy_evict_normal,
-                    has_cache_policy_evict_normal,
-                    "tile",
-                    0,
-                    0,
-                    coord0,
-                    coord1,
                 )
             )
 
@@ -985,22 +984,13 @@ def get_kernel(**kwargs: Any):
             )
             T.static_assert(weights_tma_num_inner_atoms == 1, "Unsupported split TMA atom")
             T.evaluate(
-                T.call_intrin(
-                    "",
-                    "tirx.ptx_cp_async_bulk_tensor_g2s_cluster",
-                    2,
+                T.ptx[tma_g2s_2d](
                     dst,
-                    barrier_ptr,
                     T.address_of(tensor_map),
-                    tma_unicast_cta_mask,
-                    tma_cta_group,
+                    T.cast(coord0, "int32"),
+                    T.cast(coord1, "int32"),
+                    barrier_ptr,
                     cache_policy_evict_normal,
-                    has_cache_policy_evict_normal,
-                    "tile",
-                    0,
-                    0,
-                    coord0,
-                    coord1,
                 )
             )
 
@@ -1011,23 +1001,14 @@ def get_kernel(**kwargs: Any):
             )
             T.static_assert(kv_tma_num_inner_atoms == 1, "Unsupported split TMA atom")
             T.evaluate(
-                T.call_intrin(
-                    "",
-                    "tirx.ptx_cp_async_bulk_tensor_g2s_cluster",
-                    3,
+                T.ptx[tma_g2s_3d](
                     dst,
-                    barrier_ptr,
                     T.address_of(tensor_map),
-                    tma_unicast_cta_mask,
-                    tma_cta_group,
+                    T.cast(coord0, "int32"),
+                    T.cast(coord1, "int32"),
+                    T.cast(coord2, "int32"),
+                    barrier_ptr,
                     cache_policy_evict_normal,
-                    has_cache_policy_evict_normal,
-                    "tile",
-                    0,
-                    0,
-                    coord0,
-                    coord1,
-                    coord2,
                 )
             )
 
@@ -1038,34 +1019,25 @@ def get_kernel(**kwargs: Any):
             )
             T.static_assert(kv_scales_tma_num_inner_atoms == 1, "Unsupported split TMA atom")
             T.evaluate(
-                T.call_intrin(
-                    "",
-                    "tirx.ptx_cp_async_bulk_tensor_g2s_cluster",
-                    2,
+                T.ptx[tma_g2s_2d](
                     dst,
-                    barrier_ptr,
                     T.address_of(tensor_map),
-                    tma_unicast_cta_mask,
-                    tma_cta_group,
+                    T.cast(coord0, "int32"),
+                    T.cast(coord1, "int32"),
+                    barrier_ptr,
                     cache_policy_evict_normal,
-                    has_cache_policy_evict_normal,
-                    "tile",
-                    0,
-                    0,
-                    coord0,
-                    coord1,
                 )
             )
 
         @T.inline
         def make_smem_desc(desc, smem_ptr):
-            T.ptx.tcgen05.encode_matrix_descriptor(
+            T.cuda.tcgen05.encode_matrix_descriptor(
                 T.address_of(desc), smem_ptr, ldo=0, sdo=desc_sdo, swizzle=desc_swizzle
             )
 
         @T.inline
         def issue_tma_q(stage_idx, tma_q_atom_idx):
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 q_token_idx: T.uint32 = atom_to_token_idx_expr(tma_q_atom_idx)
                 tma_load_2d_q(
                     smem_q.ptr_to([stage_idx, 0, 0]),
@@ -1172,7 +1144,7 @@ def get_kernel(**kwargs: Any):
                     )
 
         if warp_idx == tma_warp_0:
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 for init_i in T.unroll(0, num_q_stages):
                     mbarrier_init_cta(
                         smem_barriers.ptr_to([full_q_barrier_base + init_i]), T.uint32(1)
@@ -1180,9 +1152,9 @@ def get_kernel(**kwargs: Any):
                     mbarrier_init_cta(
                         smem_barriers.ptr_to([empty_q_barrier_base + init_i]), T.uint32(8)
                     )
-                T.ptx.fence.mbarrier_init()
+                T.ptx.fence.mbarrier_init.release.cluster()
         if warp_idx == tma_warp_1:
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 for init_i in T.unroll(0, num_kv_stages):
                     mbarrier_init_cta(
                         smem_barriers.ptr_to([full_kv_barrier_base + init_i]), T.uint32(1)
@@ -1190,9 +1162,9 @@ def get_kernel(**kwargs: Any):
                     mbarrier_init_cta(
                         smem_barriers.ptr_to([empty_kv_barrier_base + init_i]), T.uint32(4)
                     )
-                T.ptx.fence.mbarrier_init()
+                T.ptx.fence.mbarrier_init.release.cluster()
         if warp_idx == umma_warp_0:
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 for init_i in T.unroll(0, num_kv_stages):
                     mbarrier_init_cta(
                         smem_barriers.ptr_to(
@@ -1206,9 +1178,9 @@ def get_kernel(**kwargs: Any):
                         ),
                         T.uint32(4),
                     )
-                T.ptx.fence.mbarrier_init()
+                T.ptx.fence.mbarrier_init.release.cluster()
         if warp_idx == umma_warp_0 + 1:
-            if T.ptx.elect_sync():
+            if T.cuda.elect_sync():
                 for init_i in T.unroll(0, num_umma_barriers):
                     mbarrier_init_cta(
                         smem_barriers.ptr_to([full_umma_barrier_base + init_i]), T.uint32(1)
@@ -1216,14 +1188,14 @@ def get_kernel(**kwargs: Any):
                     mbarrier_init_cta(
                         smem_barriers.ptr_to([empty_umma_barrier_base + init_i]), T.uint32(4)
                     )
-                T.ptx.fence.mbarrier_init()
+                T.ptx.fence.mbarrier_init.release.cluster()
         T.cuda.cta_sync()
 
         cuda_grid_dependency_synchronize()
 
         if warp_idx == tma_warp_0:
             # TMA warp 0: loads Q + weights (shared) and KV/scales for group 0.
-            T.ptx.setmaxnreg(False, num_specialized_registers)
+            T.ptx.setmaxnreg.dec.sync.aligned.u32(num_specialized_registers)
             current_q_atom_idx: T.uint32 = start_q_atom_idx
             current_kv_idx: T.uint32 = start_kv_idx
             current_num_kv: T.uint32 = start_num_kv
@@ -1329,7 +1301,7 @@ def get_kernel(**kwargs: Any):
                     kv_phase ^ T.uint32(1),
                 )
 
-                if T.ptx.elect_sync():
+                if T.cuda.elect_sync():
                     for block_i in T.unroll(0, num_pages_per_tile):
                         tma_load_3d_kv(
                             smem_kv.ptr_to([0, kv_stage_idx, block_i * page_size, 0]),
@@ -1366,7 +1338,7 @@ def get_kernel(**kwargs: Any):
                 current_num_kv = scheduler_result[6]
         elif warp_idx == tma_warp_1:
             # TMA warp 1: loads KV/scales for group 1 only.
-            T.ptx.setmaxnreg(False, num_specialized_registers)
+            T.ptx.setmaxnreg.dec.sync.aligned.u32(num_specialized_registers)
             current_q_atom_idx: T.uint32 = start_q_atom_idx
             current_kv_idx: T.uint32 = start_kv_idx
             current_num_kv: T.uint32 = start_num_kv
@@ -1448,7 +1420,7 @@ def get_kernel(**kwargs: Any):
                     kv_phase ^ T.uint32(1),
                 )
 
-                if T.ptx.elect_sync():
+                if T.cuda.elect_sync():
                     for block_i in T.unroll(0, num_pages_per_tile):
                         tma_load_3d_kv(
                             smem_kv.ptr_to([1, kv_stage_idx, block_i * page_size, 0]),
@@ -1492,7 +1464,7 @@ def get_kernel(**kwargs: Any):
         elif T.Or(warp_idx == umma_warp_0, warp_idx == umma_warp_0 + 1):
             # One UMMA warp per math warpgroup: waits for its group's KV stage,
             # then issues the 4 tcgen05 MMAs (K=32 each) for its group.
-            T.ptx.setmaxnreg(False, num_specialized_registers)
+            T.ptx.setmaxnreg.dec.sync.aligned.u32(num_specialized_registers)
             umma_group_idx: T.let = warp_idx_u32 - T.uint32(umma_warp_0)
             # TMEM allocation happens off the full-CTA sync path (the ~300-cycle
             # tcgen05.alloc would otherwise hold back the TMA warps' first issue).
@@ -1500,10 +1472,10 @@ def get_kernel(**kwargs: Any):
             # TMA warps do not touch TMEM). Matches the CuTeDSL TmemAllocator
             # split: math warp allocs, consumers sync on a sub-CTA barrier.
             if warp_idx == umma_warp_0 + 1:
-                T.ptx.tcgen05.alloc(
-                    T.address_of(tmem_ptr_in_smem[0]), n_cols=num_tmem_cols, cta_group=1
+                T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                    T.address_of(tmem_ptr_in_smem[0]), T.uint32(num_tmem_cols)
                 )
-            T.ptx.bar.sync(9, num_math_threads + 2 * 32)
+            T.ptx.bar.sync(9, T.uint32(num_math_threads + 2 * 32))
             current_q_atom_idx: T.uint32 = start_q_atom_idx
             current_kv_idx: T.uint32 = start_kv_idx
             current_num_kv: T.uint32 = start_num_kv
@@ -1511,14 +1483,13 @@ def get_kernel(**kwargs: Any):
             kv_iter_idx: T.uint32 = T.uint32(0)
             q_stage_idx: T.uint32 = T.uint32(0)
             q_phase: T.uint32 = T.uint32(0)
-            tmem_allocated: T.uint32 = T.ptx.ld(
-                tmem_ptr_in_smem.ptr_to([0]), "uint32", "u32", space="shared"
-            )
+            tmem_allocated: T.uint32
+            T.ptx.ld.shared.u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
             T.cuda.trap_when_assert_failed(tmem_allocated == T.uint32(0))
             desc_i: T.uint32
             desc_a: T.uint64
             desc_b: T.uint64
-            T.ptx.tcgen05.encode_instr_descriptor(
+            T.cuda.tcgen05.encode_instr_descriptor(
                 T.address_of(desc_i),
                 d_dtype="float32",
                 a_dtype="float8_e4m3fn",
@@ -1590,15 +1561,15 @@ def get_kernel(**kwargs: Any):
                     ),
                     umma_phase ^ T.uint32(1),
                 )
-                T.ptx.tcgen05.fence.after_thread_sync()
+                T.ptx.tcgen05.fence__after_thread_sync()
                 T.static_assert(head_dim % umma_k == 0, "Invalid head dim")
                 for k in T.unroll(0, head_dim // umma_k):
                     make_smem_desc(
                         desc_a, smem_kv.ptr_to([umma_group_idx, kv_stage_idx, 0, k * umma_k])
                     )
                     make_smem_desc(desc_b, smem_q.ptr_to([q_stage_idx, 0, k * umma_k]))
-                    if T.ptx.elect_sync():
-                        T.ptx.tcgen05.mma(
+                    if T.cuda.elect_sync():
+                        T.ptx["tcgen05.mma.cta_group::1.kind::f8f6f4"](
                             umma_group_idx * T.uint32(umma_n * num_umma_stages)
                             + umma_stage_idx * T.uint32(umma_n),
                             desc_a,
@@ -1608,15 +1579,10 @@ def get_kernel(**kwargs: Any):
                             T.uint32(0),
                             T.uint32(0),
                             T.uint32(0),
-                            d_dtype="float32",
-                            a_dtype="float8_e4m3fn",
-                            b_dtype="float8_e4m3fn",
-                            use_a_tmem=False,
-                            cta_group=1,
-                            enable_input_d=T.uint32(k),
+                            T.ptx.pred(T.uint32(k)),
                         )
-                if T.ptx.elect_sync():
-                    T.ptx.tcgen05.commit(
+                if T.cuda.elect_sync():
+                    T.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
                         smem_barriers.ptr_to(
                             [
                                 full_umma_barrier_base
@@ -1639,10 +1605,10 @@ def get_kernel(**kwargs: Any):
                 current_kv_idx = scheduler_result[5]
                 current_num_kv = scheduler_result[6]
         elif warp_idx < spec_warp_start:
-            T.ptx.setmaxnreg(True, num_math_registers)
+            T.ptx.setmaxnreg.inc.sync.aligned.u32(num_math_registers)
             # Math warps consume TMEM: wait on named barrier 9 for the UMMA
             # warp's tcgen05.alloc (see the UMMA branch).
-            T.ptx.bar.sync(9, num_math_threads + 2 * 32)
+            T.ptx.bar.sync(9, T.uint32(num_math_threads + 2 * 32))
             current_q_atom_idx: T.uint32 = start_q_atom_idx
             current_kv_idx: T.uint32 = start_kv_idx
             current_num_kv: T.uint32 = start_num_kv
@@ -1690,8 +1656,7 @@ def get_kernel(**kwargs: Any):
                         + T.uint32(q_inner_i * num_heads)
                     )
                     if num_heads == 32:
-                        T.ptx.tcgen05.ld(
-                            tmem_addr,
+                        T.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
                             accum[0],
                             accum[1],
                             accum[2],
@@ -1724,12 +1689,10 @@ def get_kernel(**kwargs: Any):
                             accum[29],
                             accum[30],
                             accum[31],
-                            shape="32x32b",
-                            num=32,
+                            T.uint32(tmem_addr),
                         )
                     if num_heads == 64:
-                        T.ptx.tcgen05.ld(
-                            tmem_addr,
+                        T.ptx["tcgen05.ld.sync.aligned.32x32b.x64.b32"](
                             accum[0],
                             accum[1],
                             accum[2],
@@ -1794,15 +1757,14 @@ def get_kernel(**kwargs: Any):
                             accum[61],
                             accum[62],
                             accum[63],
-                            shape="32x32b",
-                            num=64,
+                            T.uint32(tmem_addr),
                         )
-                    T.ptx.tcgen05.wait.ld()
+                    T.ptx.tcgen05.wait__ld.sync.aligned()
                     if q_inner_i == num_iters_c - 1:
                         # Release the UMMA stage right after the last TMEM load
                         # so the next MMA can start while the FMA chain and the
                         # store are still running (CuTeDSL order).
-                        T.ptx.tcgen05.fence.before_thread_sync()
+                        T.ptx.tcgen05.fence__before_thread_sync()
                         # One arrive per math warp in the group (lane 0): the
                         # tcgen05.ld above is warp-collective, so all lanes' TMEM
                         # reads are complete once lane 0's wait.ld returns.
@@ -1901,11 +1863,10 @@ def get_kernel(**kwargs: Any):
                     ),
                     kv_phase,
                 )
-                scale_kv: T.float32 = T.ptx.ld(
+                scale_kv: T.float32
+                T.ptx.ld.shared.f32(
+                    scale_kv,
                     smem_kv_scales.ptr_to([math_warpgroup_idx, kv_stage_idx, math_thread_idx]),
-                    "float32",
-                    "f32",
-                    space="shared",
                 )
                 umma_stage_idx: T.uint32 = umma_iter_idx % T.uint32(num_umma_stages)
                 umma_phase: T.uint32 = (umma_iter_idx // T.uint32(num_umma_stages)) & T.uint32(1)
@@ -1920,7 +1881,7 @@ def get_kernel(**kwargs: Any):
                     ),
                     umma_phase,
                 )
-                T.ptx.tcgen05.fence.after_thread_sync()
+                T.ptx.tcgen05.fence__after_thread_sync()
                 # One arrive per math warp in the group (lane 0); all lanes read
                 # their scales before the UMMA wait above, so the SMEM reads are
                 # complete by the time lane 0 arrives.
@@ -1960,9 +1921,11 @@ def get_kernel(**kwargs: Any):
                 current_kv_idx = scheduler_result[5]
                 current_num_kv = scheduler_result[6]
             T.ptx.griddepcontrol.launch_dependents()
-            T.ptx.bar.sync(8, num_math_threads)
+            T.ptx.bar.sync(8, T.uint32(num_math_threads))
             if warp_idx == 0:
-                T.ptx.tcgen05.dealloc(T.uint32(0), n_cols=num_tmem_cols, cta_group=1)
+                T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                    T.uint32(0), T.uint32(num_tmem_cols)
+                )
 
     return sm100_fp8_paged_mqa_logits.with_attr(
         "tirx.kernel_launch_params",
