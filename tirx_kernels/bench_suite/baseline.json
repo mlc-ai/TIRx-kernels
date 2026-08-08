@@ -2,13 +2,13 @@
   "timestamp": "14",
   "label": "post-refactor",
   "git": {
-    "tir": "9cb54a9c",
-    "tirx-kernels": "f9ca43d5",
+    "tir": "425f6f4c",
+    "tirx-kernels": "a1349527-dirty",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
-    "tir:python/tvm/tirx": "673dc9d382a17bec756defe64b5992d9988f5a70",
-    "tirx-kernels:tirx_kernels": "1b3ff8a4dd99cc65411c28a74bbe1b5e77245702"
+    "tir:python/tvm/tirx": "6c973d6a8a4ce746e562739b613bd36972731ef7",
+    "tirx-kernels:tirx_kernels": "750d4f2dd7bb97f5983524d6af57a37611873dab"
   },
   "baselines": {
     "torch": {
@@ -31,8 +31,8 @@
       "importable": true,
       "source_dir": "/home/bohanhou/flashinfer",
       "git_dir": "/home/bohanhou/flashinfer",
-      "git_sha": "28ca04eb-dirty",
-      "version": "0.6.17",
+      "git_sha": "f2e04400-dirty",
+      "version": "0.6.18",
       "dist": "flashinfer-python",
       "editable": true
     },
@@ -61,8 +61,8 @@
     },
     "cutlass": {
       "importable": true,
-      "source_dir": "/home/bohanhou/my/lib/python3.11/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass",
-      "version": "4.6.1"
+      "source_dir": "/home/bohanhou/my/lib/python3.11/site-packages/nvidia_cutlass_dsl/python_packages/cutlass",
+      "version": "4.6.0.dev0"
     }
   },
   "probe": {
@@ -1932,6 +1932,118 @@
         "tirx": 371.51397503943457,
         "flashmla": 383.37544175597174,
         "trtllm_gen": 449.4778610539998
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "tinygemm2_sm100",
+      "config": "b13_o1024_k2048",
+      "label": "b13_o1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 4.337182626136939,
+        "flashinfer_sm100": 4.321447015344641
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "tinygemm2_sm100",
+      "config": "b16_o2880_k2880",
+      "label": "b16_o2880_k2880",
+      "status": "ok",
+      "impls": {
+        "tirx": 7.957574587590906,
+        "flashinfer_sm100": 8.043049032830764
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "tinygemm2_sm100",
+      "config": "b1_o128_k720",
+      "label": "b1_o128_k720",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.3079548789487916,
+        "flashinfer_sm100": 3.3083637842926117
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "tinygemm2_sm100",
+      "config": "b2_o16_k256",
+      "label": "b2_o16_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.407440867980366,
+        "flashinfer_sm100": 3.4164765376383293
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "tinygemm2_sm100",
+      "config": "b4_o2880_k2880",
+      "label": "b4_o2880_k2880",
+      "status": "ok",
+      "impls": {
+        "tirx": 7.069593435309656,
+        "flashinfer_sm100": 7.059199489266571
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "tinygemm2_sm100",
+      "config": "b64_o4096_k3072",
+      "label": "b64_o4096_k3072",
+      "status": "ok",
+      "impls": {
+        "tirx": 22.123812521938312,
+        "flashinfer_sm100": 22.26655248141803
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "tinygemm2_sm100",
+      "config": "b7_o128_k4096",
+      "label": "b7_o128_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 4.948998253773425,
+        "flashinfer_sm100": 4.917144937910768
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "tinygemm2_sm100",
+      "config": "b8_o1024_k1024",
+      "label": "b8_o1024_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.5397556169458553,
+        "flashinfer_sm100": 3.5289754859042994
       },
       "aggregated": {
         "rounds": 5,

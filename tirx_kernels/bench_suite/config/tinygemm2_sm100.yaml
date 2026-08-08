@@ -1,0 +1,10 @@
+kernel: tinygemm2_sm100
+configs:
+  - {config: b1_o128_k720, default: true}
+  - {config: b2_o16_k256, default: true}
+  - {config: b4_o2880_k2880, default: true}
+  - {config: b7_o128_k4096, default: true}
+  - {config: b8_o1024_k1024, default: true}
+  - {config: b13_o1024_k2048, default: true}
+  - {config: b16_o2880_k2880, default: true}
+  - {config: b64_o4096_k3072, default: true}

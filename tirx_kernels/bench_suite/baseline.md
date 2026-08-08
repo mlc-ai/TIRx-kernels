@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '9cb54a9c', 'tirx-kernels': 'f9ca43d5', 'tirx-bench-ci': None}`
-- Workloads: 128 ok, 0 failed
+- Git:       `{'tir': '425f6f4c', 'tirx-kernels': 'a1349527-dirty', 'tirx-bench-ci': None}`
+- Workloads: 136 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -234,3 +234,16 @@ Grouped workloads show one row per config and one timing column per implementati
 | `bench_dqk576_hq64_s4096_kv49152_topk512` | tirx | 390.2824 | flashmla | 404.9671 | 1.038 | trtllm_gen=474.2063 |
 | `bench_dqk576_hq64_s4096_kv65536_topk512` | tirx | 402.6227 | flashmla | 418.9807 | 1.041 | trtllm_gen=488.9936 |
 | `bench_dqk576_hq64_s4096_kv8192_topk512` | tirx | 371.5140 | flashmla | 383.3754 | 1.032 | trtllm_gen=449.4779 |
+
+## tinygemm2_sm100
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `b13_o1024_k2048` | tirx | 4.3372 | flashinfer_sm100 | 4.3214 | 0.996 | — |
+| `b16_o2880_k2880` | tirx | 7.9576 | flashinfer_sm100 | 8.0430 | 1.011 | — |
+| `b1_o128_k720` | tirx | 3.3080 | flashinfer_sm100 | 3.3084 | 1.000 | — |
+| `b2_o16_k256` | tirx | 3.4074 | flashinfer_sm100 | 3.4165 | 1.003 | — |
+| `b4_o2880_k2880` | tirx | 7.0696 | flashinfer_sm100 | 7.0592 | 0.999 | — |
+| `b64_o4096_k3072` | tirx | 22.1238 | flashinfer_sm100 | 22.2666 | 1.006 | — |
+| `b7_o128_k4096` | tirx | 4.9490 | flashinfer_sm100 | 4.9171 | 0.994 | — |
+| `b8_o1024_k1024` | tirx | 3.5398 | flashinfer_sm100 | 3.5290 | 0.997 | — |
