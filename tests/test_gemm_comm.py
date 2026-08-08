@@ -1,10 +1,8 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright (c) 2026 The TIRX Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
 #   http://www.apache.org/licenses/LICENSE-2.0
 #
@@ -19,8 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from tirx_kernels.gemm_comm import allgather_gemm, gemm_reduce_scatter
-from tirx_kernels.gemm_comm._model_shapes import (
+from tirx_kernels.basic import allgather_gemm, gemm_reduce_scatter
+from tirx_kernels.basic.utils._model_shapes import (
     ALLGATHER_GEMM_MODEL_SHAPES,
     GEMM_RS_MODEL_SHAPES,
     SUPPORTED_WORLD_SIZES,
@@ -30,8 +28,8 @@ from tirx_kernels.registry import discover_kernels
 
 
 def test_gemm_comm_registry_entries() -> None:
-    kernels = discover_kernels(category="gemm_comm")
-    assert set(kernels) == {"allgather_gemm", "gemm_reduce_scatter"}
+    kernels = discover_kernels(category="basic")
+    assert {"allgather_gemm", "gemm_reduce_scatter"} <= set(kernels)
 
 
 @pytest.mark.parametrize(

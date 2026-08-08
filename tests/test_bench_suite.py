@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from tirx_kernels.basic.allgather_gemm import CONFIGS as ALLGATHER_GEMM_CONFIGS
+from tirx_kernels.basic.gemm_reduce_scatter import CONFIGS as GEMM_RS_CONFIGS
 from tirx_kernels.bench_suite import run
 from tirx_kernels.bench_suite.baseline_view import render_markdown
 from tirx_kernels.bench_suite.ratio_diff import build_report
-from tirx_kernels.gemm_comm.allgather_gemm import CONFIGS as ALLGATHER_GEMM_CONFIGS
-from tirx_kernels.gemm_comm.gemm_reduce_scatter import CONFIGS as GEMM_RS_CONFIGS
 from tirx_kernels.megakernel.moe import BENCH_CONFIGS as MEGAKERNEL_MOE_BENCH_CONFIGS
 from tirx_kernels.megakernel.moe import _estimate_bench_launch_slots
 

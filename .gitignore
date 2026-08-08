@@ -4,6 +4,8 @@
 __pycache__/
 *.pyc
 tirx_kernels.egg-info/
+/build/
+/dist/
 tools/cpusim/examples/bench_gen/
 .porting/
 

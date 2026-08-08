@@ -5,22 +5,40 @@ High-performance GPU kernels written in [TIRx](https://github.com/apache/tvm).
 ## Kernels
 
 All kernels target `sm_100a`. Names are the registry names accepted by the
-`--kernel` CLI filters.
+`--kernel` CLI filters. Each category directory holds the kernels ported from
+one upstream project; `basic/` holds the native TIRx kernels with no single
+upstream project.
+
+`basic/` — native TIRx kernels:
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
 | `fp16_bf16_gemm` | fp16 / bf16 | Dense GEMM |
-| `fp8_blockwise_gemm` | fp8 | Blockwise-scaled dense GEMM |
-| `grouped_fp8_gemm_contiguous` | fp8 | M-grouped contiguous GEMM |
 | `nvfp4_gemm` | nvfp4 | Dense GEMM |
-| `flash_attention4` | bf16 | FlashAttention-4 |
-| `flash_attention_backward_sm100` | fp16 | Two-CTA FlashAttention backward (D=128); [schedule sketch](tirx_kernels/attention/flash_attention_backward_sm100_sketch.md) |
 | `rmsnorm` | fp16 / bf16 | RMSNorm |
-| `megakernel_moe` | bf16 | Fused MoE megakernel |
 | `allgather_gemm` | fp16 | AllGather + GEMM (multi-GPU, NVSHMEM) |
 | `gemm_reduce_scatter` | fp16 | GEMM + ReduceScatter (multi-GPU, NVSHMEM) |
 
-FlashMLA sparse attention:
+`flashattention/` — Dao-AILab flash-attention ports:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `flash_attention4` | bf16 | FlashAttention-4 |
+| `flash_attention_backward_sm100` | fp16 | Two-CTA FlashAttention backward (D=128); [schedule sketch](tirx_kernels/flashattention/flash_attention_backward_sm100_sketch.md) |
+
+`flashinfer/` — FlashInfer ports:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `tinygemm2_sm100` | bf16 | TinyGEMM2 |
+| `gdn_prefill_sm100` | fp16 | Gated Delta Net prefill |
+| `flashkda_bf16_fused_m128` | bf16 | Recurrent KDA prefill, M128 schedule |
+
+Testing/benching against the `flashinfer_m128` reference requires
+`FLASHKDA_PR_WORKTREE` pointing at the flashinfer-ai/flashinfer#4262 head
+worktree containing the m128 kernel.
+
+`flashmla/` — FlashMLA sparse attention ports:
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
@@ -29,10 +47,12 @@ FlashMLA sparse attention:
 | `sparse_flashmla_prefill_head128_small_topk_phase1` | bf16 | Sparse prefill, 128 q-heads, small top-k (phase 1) |
 | `flash_mla_sparse_fwd` | bf16 | Sparse forward |
 
-DeepGEMM ports:
+`deepgemm/` — DeepGEMM ports:
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
+| `fp8_blockwise_gemm` | fp8 | Blockwise-scaled dense GEMM |
+| `grouped_fp8_gemm_contiguous` | fp8 | M-grouped contiguous GEMM |
 | `deepgemm_sm100_fp4_mqa_logits` | fp4 / bf16 | MQA attention logits |
 | `deepgemm_sm100_fp8_mqa_logits` | fp8 / bf16 | MQA attention logits |
 | `deepgemm_sm100_fp4_paged_mqa_logits` | fp4 / bf16 | Paged-KV MQA attention logits |
@@ -40,15 +60,11 @@ DeepGEMM ports:
 | `deepgemm_sm100_tf32_hc_prenorm_gemm` | tf32 / bf16 | Prenorm GEMM |
 | `deepgemm_fp8_fp4_mega_moe` | fp8 + fp4 | Fused MoE megakernel (MegaMoE) |
 
-FlashKDA ports (FlashInfer reference kernels):
+`megakernel/`:
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
-| `flashkda_bf16_fused_m128` | bf16 | Recurrent KDA prefill, M128 schedule |
-
-Testing/benching against the `flashinfer_m128` reference requires
-`FLASHKDA_PR_WORKTREE` pointing at the flashinfer-ai/flashinfer#4262 head
-worktree containing the m128 kernel.
+| `megakernel_moe` | bf16 | Fused MoE megakernel |
 
 ## Performance
 
@@ -132,4 +148,11 @@ and `CONFIGS` (the test/bench parameter sweeps) that the registry and CLI use.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Except where otherwise noted, this project is licensed under the Apache
+License 2.0; see [LICENSE](LICENSE). Required Apache attribution notices are
+collected in [NOTICE](NOTICE).
+
+Kernel ports derived from third-party projects (DeepGEMM, FlashMLA,
+flash-attention, FlashInfer) retain their upstream terms and per-file
+attribution headers; see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+for the corresponding copyright notices and license texts.

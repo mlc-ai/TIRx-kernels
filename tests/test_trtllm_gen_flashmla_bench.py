@@ -6,7 +6,7 @@ from unittest import SkipTest, mock
 import pytest
 import torch
 
-from tirx_kernels.flashmla._trtllm_gen_bench import (
+from tirx_kernels.flashmla.utils._trtllm_gen_bench import (
     PAGE_SIZE,
     is_sm100_device,
     make_identity_paged_kv_buffer,
@@ -101,8 +101,8 @@ def test_validate_trtllm_sparse_indices_rejects_invalid_entries() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_trtllm_gen_backend_does_not_fall_back_to_other_backends() -> None:
-    from tirx_kernels.flashmla._trtllm_gen_bench import prepare_trtllm_gen_launch
     from tirx_kernels.flashmla.sparse_prefill_head64_phase1 import prepare_data
+    from tirx_kernels.flashmla.utils._trtllm_gen_bench import prepare_trtllm_gen_launch
 
     if not is_sm100_device():
         pytest.skip("SM100 required")
@@ -164,13 +164,13 @@ def _assert_sparse_prefill_refs_match_tirx(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.skipif(not is_sm100_device(), reason="SM100 required")
 def test_trtllm_gen_matches_tirx_and_flashmla_head64() -> None:
-    from tirx_kernels.flashmla._flashmla_bench import run_flashmla_sparse_prefill
-    from tirx_kernels.flashmla._trtllm_gen_bench import run_trtllm_gen_sparse_prefill
     from tirx_kernels.flashmla.sparse_prefill_head64_phase1 import (
         _tirx_args,
         get_kernel,
         prepare_data,
     )
+    from tirx_kernels.flashmla.utils._flashmla_bench import run_flashmla_sparse_prefill
+    from tirx_kernels.flashmla.utils._trtllm_gen_bench import run_trtllm_gen_sparse_prefill
     from tirx_kernels.runner import compile_kernel
 
     kwargs = dict(
@@ -199,13 +199,13 @@ def test_trtllm_gen_matches_tirx_and_flashmla_head64() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.skipif(not is_sm100_device(), reason="SM100 required")
 def test_trtllm_gen_matches_tirx_and_flashmla_head128() -> None:
-    from tirx_kernels.flashmla._flashmla_bench import run_flashmla_sparse_prefill
-    from tirx_kernels.flashmla._trtllm_gen_bench import run_trtllm_gen_sparse_prefill
     from tirx_kernels.flashmla.sparse_prefill_head128_phase1 import (
         _tirx_args,
         get_kernel,
         prepare_data,
     )
+    from tirx_kernels.flashmla.utils._flashmla_bench import run_flashmla_sparse_prefill
+    from tirx_kernels.flashmla.utils._trtllm_gen_bench import run_trtllm_gen_sparse_prefill
     from tirx_kernels.runner import compile_kernel
 
     kwargs = dict(

@@ -1,3 +1,7 @@
+# This file contains code ported from FlashMLA (https://github.com/deepseek-ai/FlashMLA),
+# copyright (c) 2025 DeepSeek, licensed under the MIT License.
+# See THIRD_PARTY_LICENSES.md for the full license text.
+
 from __future__ import annotations
 
 import math
@@ -1034,8 +1038,8 @@ def run_bench(
 
     funcs = {"tirx": lambda: ex(*args)}
 
-    from tirx_kernels.flashmla._flashmla_bench import flashmla_reference_builder
-    from tirx_kernels.flashmla._trtllm_gen_bench import (
+    from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_reference_builder
+    from tirx_kernels.flashmla.utils._trtllm_gen_bench import (
         trtllm_gen_config_compatible,
         trtllm_gen_reference_builder,
     )

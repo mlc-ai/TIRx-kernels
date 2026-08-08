@@ -1,3 +1,13 @@
+<!--
+Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Modifications Copyright (c) 2026 The TIRX Authors.
+SPDX-License-Identifier: BSD-3-Clause AND Apache-2.0
+
+This design sketch documents a modified TIRx port of FlashInfer's
+gated_delta_net_chunked.py. See LICENSE, NOTICE, and
+THIRD_PARTY_LICENSES.md for the applicable terms.
+-->
+
 # TIRx FP16 GDN prefill SM100: coarse WASP pipeline sketch
 
 This file is a non-executable design sketch.  It is not a Python module, a new
@@ -14,7 +24,7 @@ to show the TIRx kernel as:
   and schedule have been stated.
 
 The implementation represented by this sketch is maintained in
-[`tirx_kernels/attention/gdn_prefill_sm100.py`](../../tirx_kernels/attention/gdn_prefill_sm100.py).
+[`tirx_kernels/flashinfer/gdn_prefill_sm100.py`](../../tirx_kernels/flashinfer/gdn_prefill_sm100.py).
 That module is the source of truth.
 
 The specialization is fixed to FP16 Q/K/V/O and inverse storage, FP32

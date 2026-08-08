@@ -1,3 +1,25 @@
+<!--
+Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+Copyright (c) 2026 The TIRX Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied. See the License for the
+specific language governing permissions and limitations
+under the License.
+
+This design sketch documents a modified TIRx port of FlashInfer's
+csrc/kda/flashkda_bf16_fused_m128.cu. See NOTICE and
+THIRD_PARTY_LICENSES.md for upstream attribution.
+-->
+
 # FlashKDA BF16 M128: coarse WASP pipeline sketch
 
 This file is a non-executable design sketch.  It is not a new IR, builder API,
@@ -11,7 +33,7 @@ the CUDA kernel as:
   rather than descriptors or instruction hints.
 
 The implementation represented by this sketch is maintained in
-[`tirx_kernels/flashkda/bf16_fused_m128.py`](../../tirx_kernels/flashkda/bf16_fused_m128.py).
+[`tirx_kernels/flashinfer/bf16_fused_m128.py`](../../tirx_kernels/flashinfer/bf16_fused_m128.py).
 That module is the source of truth.
 
 ## Pipeline at a glance

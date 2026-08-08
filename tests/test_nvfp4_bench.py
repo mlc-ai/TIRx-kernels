@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from tirx_kernels.gemm.nvfp4_gemm import _flashinfer_tuned_choice
+from tirx_kernels.basic.nvfp4_gemm import _flashinfer_tuned_choice
 
 
 def test_flashinfer_tuned_choice_reads_cutlass_tactic(tmp_path) -> None:

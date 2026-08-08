@@ -1,8 +1,31 @@
+<!--
+Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+Copyright (c) 2026 The TIRX Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied. See the License for the
+specific language governing permissions and limitations
+under the License.
+
+This design sketch documents a modified TIRx port of FlashInfer's
+csrc/tinygemm2_sm100.cu, whose generated Loom schedules are exact ports of
+NVIDIA TensorRT-LLM's TinyGEMM2 kernel. See NOTICE and
+THIRD_PARTY_LICENSES.md for upstream attribution.
+-->
+
 # TinyGEMM2 BF16 SM100: coarse WASP pipeline sketch
 
 This non-executable design sketch describes the storage layout, warp roles,
 pipeline, synchronization, and PTX-level operations of
-[`tirx_kernels/gemm/tinygemm2_sm100.py`](../../tirx_kernels/gemm/tinygemm2_sm100.py).
+[`tirx_kernels/flashinfer/tinygemm2_sm100.py`](../../tirx_kernels/flashinfer/tinygemm2_sm100.py).
 That TIRx module is the authoritative implementation.
 
 The four static specializations are `STAGES in {4,8}` crossed with
@@ -591,7 +614,7 @@ use automatic stage and `USE_PDL=False`.
 
 ## TIRx module and validation contract
 
-- `KERNEL_META = {"name": "tinygemm2_sm100", "category": "gemm",
+- `KERNEL_META = {"name": "tinygemm2_sm100", "category": "flashinfer",
   "compute_capability": 10}`.
 - The executable kernel is expressed entirely in TIRx: warp uniformization uses
   a u32 `T.thread_id` plus one shared i32 view, followed by
