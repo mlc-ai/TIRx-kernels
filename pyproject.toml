@@ -16,12 +16,6 @@ dependencies = ["pyyaml>=6.0"]
 [tool.setuptools.packages.find]
 include = ["tirx_kernels*"]
 
-[tool.pytest.ini_options]
-# Repo root on sys.path so pytest imports the tirx_kernels package
-# without requiring PYTHONPATH each time. TIR (`tvm.tirx`) and external
-# deps like deep_gemm are user-installed and must stay on the env.
-pythonpath = ["."]
-
 [tool.ruff]
 line-length = 100
 indent-width = 4
@@ -41,7 +35,6 @@ ignore = [
   "UP030", # format-literals
   "UP031", # printf-string-formatting
   # ruff (preview rules, not yet stable)
-  "RUF043", # pytest-raises-ambiguous-pattern
   "RUF059", # unused-unpacked-variable
 ]
 fixable = ["ALL"]
