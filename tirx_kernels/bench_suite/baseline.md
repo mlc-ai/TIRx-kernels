@@ -2,7 +2,7 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '2417cfb0', 'tirx-kernels': '66c99ecb-dirty', 'tirx-bench-ci': None}`
+- Git:       `{'tir': 'f5d998f1', 'tirx-kernels': 'a27292c8-dirty', 'tirx-bench-ci': None}`
 - Workloads: 150 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
@@ -11,14 +11,14 @@ Grouped workloads show one row per config and one timing column per implementati
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `gelu_fp16_d11008_t8192` | tirx | 153.8830 | flashinfer | 253.1983 | 1.645 | — |
-| `gelu_tanh_fp16_d11008_t8192` | tirx | 97.5279 | flashinfer | 109.4587 | 1.122 | — |
-| `silu_bf16_d16384_t32768` | tirx | 454.4052 | flashinfer | 474.3242 | 1.044 | — |
-| `silu_bf16_d4096_t8192` | tirx | 33.2570 | flashinfer | 36.3874 | 1.094 | — |
-| `silu_fp16_d11008_t8192` | tirx | 97.7234 | flashinfer | 107.8325 | 1.103 | — |
-| `silu_fp16_d16384_t32768` | tirx | 453.1574 | flashinfer | 469.0037 | 1.035 | — |
-| `silu_fp16_d4096_t1` | tirx | 2.5835 | flashinfer | 2.7657 | 1.071 | — |
-| `silu_fp16_d4096_t8192` | tirx | 33.1831 | flashinfer | 35.7912 | 1.079 | — |
+| `gelu_fp16_d11008_t8192` | tirx | 153.7020 | flashinfer | 253.0105 | 1.646 | — |
+| `gelu_tanh_fp16_d11008_t8192` | tirx | 97.3507 | flashinfer | 109.2135 | 1.122 | — |
+| `silu_bf16_d16384_t32768` | tirx | 454.3596 | flashinfer | 474.5232 | 1.044 | — |
+| `silu_bf16_d4096_t8192` | tirx | 33.3754 | flashinfer | 36.2414 | 1.086 | — |
+| `silu_fp16_d11008_t8192` | tirx | 97.6393 | flashinfer | 108.0944 | 1.107 | — |
+| `silu_fp16_d16384_t32768` | tirx | 453.1996 | flashinfer | 468.4406 | 1.034 | — |
+| `silu_fp16_d4096_t1` | tirx | 2.5989 | flashinfer | 2.8029 | 1.078 | — |
+| `silu_fp16_d4096_t8192` | tirx | 33.0855 | flashinfer | 35.9270 | 1.086 | — |
 
 ## allgather_gemm
 
@@ -210,12 +210,12 @@ Grouped workloads show one row per config and one timing column per implementati
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_b128_m2048_k2048` | tirx | 283.0116 | flashinfer | 317.3262 | 1.121 | — |
-| `bf16_b8_m512_k2048` | tirx | 8.8922 | flashinfer | 10.6704 | 1.200 | — |
-| `fp16_b128_m2048_k2048` | tirx | 274.6744 | flashinfer | 303.0726 | 1.103 | — |
-| `fp16_b4_m128_k4096` | tirx | 5.5265 | flashinfer | 5.7668 | 1.043 | — |
-| `fp16_b8_m16_k2048` | tirx | 3.4283 | flashinfer | 4.2711 | 1.246 | — |
-| `fp16_b8_m512_k2048` | tirx | 8.7729 | flashinfer | 10.2351 | 1.167 | — |
+| `bf16_b128_m2048_k2048` | tirx | 285.8931 | flashinfer | 321.6687 | 1.125 | — |
+| `bf16_b8_m512_k2048` | tirx | 8.8665 | flashinfer | 10.7135 | 1.208 | — |
+| `fp16_b128_m2048_k2048` | tirx | 276.2779 | flashinfer | 304.7120 | 1.103 | — |
+| `fp16_b4_m128_k4096` | tirx | 5.5820 | flashinfer | 5.8108 | 1.041 | — |
+| `fp16_b8_m16_k2048` | tirx | 3.4218 | flashinfer | 4.2766 | 1.250 | — |
+| `fp16_b8_m512_k2048` | tirx | 8.7735 | flashinfer | 10.5524 | 1.203 | — |
 
 ## sparse_flashmla_decode_head64
 

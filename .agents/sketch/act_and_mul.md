@@ -327,8 +327,11 @@ module bakes the same values per config.
   "compute_capability": 10}`.
 - The executable kernel is expressed entirely in plain TIRx: explicit
   `while` grid-stride loops, scalar/vector register buffers, explicit
-  global loads/stores, and `T.ptx` inline PTX for `griddepcontrol`.
-  No `Tx` tile primitives anywhere in the pre-dispatch IR.
+  global loads/stores, and native `T.ptx.*` forms for every non-trivial
+  instruction (`griddepcontrol`, `ld.global.nc.v4.b32`, `ex2.approx.ftz.f32`,
+  `tanh.approx.f32`, `fma.rn.ftz.f32`, the cvt packs). There is no
+  `T.cuda.func_call` and no `Tx` tile primitives anywhere in the
+  pre-dispatch IR.
 - `get_kernel(act, dtype, num_tokens, d)` returns the specialized primfunc;
   `prepare_data`, `run_test`, `run_bench` follow the repository contract.
 - The timed implementation is named `tirx`; flashinfer is a lazy reference

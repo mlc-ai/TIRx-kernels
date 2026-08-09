@@ -98,111 +98,65 @@ def _validate(dtype: str, n_experts: int, m: int, k: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Inline-PTX / CUDA-math helpers (verbatim source asm blocks and wrappers)
+# Native PTX helpers (all ops expressed with T.ptx.* forms)
 # ---------------------------------------------------------------------------
-
-_FP32_VEC_TO_E2M1_16_SRC = r"""// fp32_vec_to_e2m1 (16 elts -> uint64), verbatim asm from
-// quantization_utils.cuh:166-198
-__device__ __forceinline__ uint64_t act_fp32_vec_to_e2m1_16(
-    float a0, float a1, float a2, float a3, float a4, float a5, float a6, float a7,
-    float a8, float a9, float a10, float a11, float a12, float a13, float a14, float a15) {
-  uint64_t val;
-  asm volatile(
-      "{\n"
-      ".reg .b8 byte0;\n"
-      ".reg .b8 byte1;\n"
-      ".reg .b8 byte2;\n"
-      ".reg .b8 byte3;\n"
-      ".reg .b8 byte4;\n"
-      ".reg .b8 byte5;\n"
-      ".reg .b8 byte6;\n"
-      ".reg .b8 byte7;\n"
-      ".reg .b32 val0;\n"
-      ".reg .b32 val1;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte0,  %2,  %1;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte1,  %4,  %3;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte2,  %6,  %5;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte3,  %8,  %7;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte4, %10,  %9;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte5, %12, %11;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte6, %14, %13;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte7, %16, %15;\n"
-      "mov.b32 val0, {byte0, byte1, byte2, byte3};\n"
-      "mov.b32 val1, {byte4, byte5, byte6, byte7};\n"
-      "mov.b64 %0, {val0, val1};\n"
-      "}"
-      : "=l"(val)
-      : "f"(a0), "f"(a1), "f"(a2), "f"(a3), "f"(a4), "f"(a5), "f"(a6), "f"(a7),
-        "f"(a8), "f"(a9), "f"(a10), "f"(a11), "f"(a12), "f"(a13), "f"(a14), "f"(a15));
-  return val;
-}
-"""
 
 
 def _fp32_vec_to_e2m1_16(vals):
-    return T.cuda.func_call(
-        "act_fp32_vec_to_e2m1_16", *vals, source_code=_FP32_VEC_TO_E2M1_16_SRC, return_type="uint64"
-    )
+    """fp32_vec_to_e2m1 (16 elts -> uint64), native form of the source asm block.
 
-
-def _h2_src(name, pair_t, scalar_t, op, arity):
-    if arity == 1:
-        body = f"{pair_t} r = {op}(*reinterpret_cast<{pair_t} const*>(&a));"
-    else:
-        body = (
-            f"{pair_t} r = {op}(*reinterpret_cast<{pair_t} const*>(&a), "
-            f"*reinterpret_cast<{pair_t} const*>(&b));"
-        )
-    return f"""// {op} verbatim wrapper (quantization_utils.cuh cuda_abs/cuda_max chain)
-__device__ __forceinline__ uint32_t {name}(uint32_t a, uint32_t b) {{
-  (void)b;
-  {body}
-  return *reinterpret_cast<uint32_t*>(&r);
-}}
-"""
-
-
-def _hmax_scalar_src(name, scalar_t):
-    return f"""// scalar __hmax verbatim wrapper (cudaTypeUtils.cuh cuda_max)
-__device__ __forceinline__ uint16_t {name}(uint16_t a, uint16_t b) {{
-  {scalar_t} r = __hmax(*reinterpret_cast<{scalar_t} const*>(&a),
-                        *reinterpret_cast<{scalar_t} const*>(&b));
-  return *reinterpret_cast<uint16_t*>(&r);
-}}
-"""
+    The dialect deliberately does not register the 4 x b8 `mov.b32` pack, so
+    the byte gather is expressed as b16-pair shifts plus registered mov packs:
+    `mov.b32 {w0, w1}` (2 x b16) and `mov.b64 {v0, v1}` (2 x b32).
+    """
+    bytes_ = T.alloc_local([8], "uint8")
+    for i in range(8):
+        # cvt.rn.satfinite.e2m1x2.f32 d, hi, lo (second source operand is the low lane)
+        T.evaluate(T.ptx.cvt.rn.satfinite.e2m1x2.f32(bytes_[i], vals[2 * i + 1], vals[2 * i]))
+    w = [
+        T.cast(bytes_[i], "uint16") | (T.cast(bytes_[i + 1], "uint16") << T.uint16(8))
+        for i in (0, 2, 4, 6)
+    ]
+    v = T.alloc_local([2], "uint32")
+    T.evaluate(T.ptx.mov.b32(v[0], w[0], w[1]))
+    T.evaluate(T.ptx.mov.b32(v[1], w[2], w[3]))
+    out = T.alloc_local([1], "uint64")
+    T.evaluate(T.ptx.mov.b64(out[0], v[0], v[1]))
+    return out[0]
 
 
 def _habs2(dtype):
-    pair_t = "half2" if dtype == "float16" else "__nv_bfloat162"
-    scalar_t = "half" if dtype == "float16" else "__nv_bfloat16"
-    name = f"act_habs2_{'f16' if dtype == 'float16' else 'bf16'}"
-    src = _h2_src(name, pair_t, scalar_t, "__habs2", 1)
+    chain = T.ptx.abs.f16x2 if dtype == "float16" else T.ptx.abs.bf16x2
 
     def impl(a):
-        return T.cuda.func_call(name, a, T.uint32(0), source_code=src, return_type="uint32")
+        out = T.alloc_local([1], "uint32")
+        T.evaluate(chain(out[0], a))
+        return out[0]
 
     return impl
 
 
 def _hmax2(dtype):
-    pair_t = "half2" if dtype == "float16" else "__nv_bfloat162"
-    scalar_t = "half" if dtype == "float16" else "__nv_bfloat16"
-    name = f"act_hmax2_{'f16' if dtype == 'float16' else 'bf16'}"
-    src = _h2_src(name, pair_t, scalar_t, "__hmax2", 2)
+    chain = T.ptx.max.f16x2 if dtype == "float16" else T.ptx.max.bf16x2
 
     def impl(a, b):
-        return T.cuda.func_call(name, a, b, source_code=src, return_type="uint32")
+        out = T.alloc_local([1], "uint32")
+        T.evaluate(chain(out[0], a, b))
+        return out[0]
 
     return impl
 
 
 def _hmax(dtype):
-    scalar_t = "half" if dtype == "float16" else "__nv_bfloat16"
-    name = f"act_hmax_{'f16' if dtype == 'float16' else 'bf16'}"
-    src = _hmax_scalar_src(name, scalar_t)
+    # Scalar __hmax lowers to setp.gt.f16/bf16 + selp.b16 in the source.
+    cmp_chain = T.ptx.setp.gt.f16 if dtype == "float16" else T.ptx.setp.gt.bf16
 
     def impl(a, b):
-        return T.cuda.func_call(name, a, b, source_code=src, return_type="uint16")
+        pred = T.local_scalar("uint32")
+        out = T.alloc_local([1], "uint16")
+        T.evaluate(cmp_chain(pred, a, b))
+        T.evaluate(T.ptx.selp.b16(out[0], a, b, T.ptx.pred(pred)))
+        return out[0]
 
     return impl
 

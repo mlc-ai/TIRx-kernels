@@ -92,7 +92,10 @@ exp2_fast(dst, src)                # ex2 approximation of __expf; production bui
                                    # FSETP.GEU subnormal guard around each MUFU.EX2
 cast_e4m3x2(dst_u16, hi, lo)       # cvt.rn.satfinite.e4m3x2.f32 pair conversion
 cast_f16x2_e4m3x2(dst_u32, src)    # cvt.rn.f16x2.e4m3x2 pair decode
-fp32_vec_to_e2m1(dst_u64, f32x8)   # 8x cvt.rn.satfinite.e2m1x2.f32 + byte pack (source asm block)
+fp32_vec_to_e2m1(dst_u64, f32x8)   # 8x cvt.rn.satfinite.e2m1x2.f32 + byte pack
+                                   # (source: one asm block with 4 x b8 mov.b32 packs;
+                                   #  TIRx: b16-pair shl/or + mov.b32/mov.b64 packs, since
+                                   #  the dialect does not register the 4 x b8 form)
 select(dst, pred, a, b)            # selp family (b16/u16/u32 forms; nvcc lowers
                                    # f32 ternaries to branches with preloaded
                                    # defaults instead — branch-lowered sites are
@@ -314,7 +317,7 @@ def silu_and_mul_nvfp4_experts_quantize(
             copy_r2g_b8(fp8_sf_val, sf_addr)
             # instruction_selection: st.global.b8; extent: one byte store per iteration
 
-        # --- scale to e2m1 and pack (fp32_vec_to_e2m1 source asm block) ---
+        # --- scale to e2m1 and pack (fp32_vec_to_e2m1; source asm block, native TIRx pack) ---
         for i in static_range(8):
             f_lo = cast("f32", x_bits.pair[i].lo)
             # instruction_selection: cvt.f32.f16 (bf16: cvt.f32.bf16); extent: one scalar
@@ -415,10 +418,15 @@ def prepare_data(dtype, n_experts, m, k, mask_mode):
 - `KERNEL_META = {"name": "silu_and_mul_nvfp4_experts_quantize", "category":
   "flashinfer", "compute_capability": 10}`.
 - The executable kernel is expressed entirely in plain TIRx: explicit `while`
-  grid-stride loop, runtime-shape scalar ABI, register tiles, explicit
-  `T.ptx` loads/stores/cvt/rcp, and `T.cuda.func_call` asm helpers only for
-  the source's own asm blocks (`fp32_vec_to_e2m1`) and CUDA-math wrappers
-  (`__habs2`/`__hmax2`/`__hmax`, `tanh`-free). No `Tx` tile primitives.
+  grid-stride loop, runtime-shape scalar ABI, register tiles, and native
+  `T.ptx.*` forms for every non-trivial instruction (`ld.global.v4.b64`,
+  `ex2.approx.ftz.f32`, `abs.f16x2`/`max.f16x2`, `setp.gt.f16` + `selp.b16`
+  for scalar `__hmax`, the `cvt.rn.satfinite.*` conversions, `rcp.approx.ftz.f32`).
+  The `fp32_vec_to_e2m1` pack is native too: eight
+  `cvt.rn.satfinite.e2m1x2.f32` into b8 locals, then b16-pair shifts plus the
+  registered `mov.b32` (2 x b16) and `mov.b64` (2 x b32) packs — the dialect
+  deliberately does not register the source asm's 4 x b8 `mov.b32` form.
+  There is no `T.cuda.func_call` and no `Tx` tile primitives.
 - `get_kernel(dtype, n_experts, m, k, mask_mode)` returns the specialized
   primfunc with static grid/block; `prepare_data`, `run_test`, `run_bench`
   follow the repository contract.

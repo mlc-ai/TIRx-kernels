@@ -64,30 +64,19 @@ _SQRT1_2 = 0.7071067811865476  # M_SQRT1_2
 _GELU_TANH_C0 = 0.044715
 _GELU_TANH_C1 = 0.7978845608028654
 
-_TANH_APPROX_SRC = r"""// tanh.approx.f32 (matches flashinfer math.cuh math::tanh(float))
-__device__ __forceinline__ float act_tanh_approx_f32(float x) {
-    float y;
-    asm volatile("tanh.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
-    return y;
-}
-"""
-
 
 def _tanh_approx(x):
-    return T.cuda.func_call(
-        "act_tanh_approx_f32", x, source_code=_TANH_APPROX_SRC, return_type="float32"
-    )
-
-
-_FMAF_RN_SRC = r"""// __fmaf_rn (value form of fma.rn.f32)
-__device__ __forceinline__ float act_fmaf_rn(float a, float b, float c) {
-    return __fmaf_rn(a, b, c);
-}
-"""
+    # tanh.approx.f32 (matches flashinfer math.cuh math::tanh(float))
+    out = T.alloc_local([1], "float32")
+    T.evaluate(T.ptx.tanh.approx.f32(out[0], x))
+    return out[0]
 
 
 def _fmaf_rn(a, b, c):
-    return T.cuda.func_call("act_fmaf_rn", a, b, c, source_code=_FMAF_RN_SRC, return_type="float32")
+    # __fmaf_rn under the production -use_fast_math build (fma.rn.ftz.f32)
+    out = T.alloc_local([1], "float32")
+    T.evaluate(T.ptx.fma.rn.ftz.f32(out[0], a, b, c))
+    return out[0]
 
 
 def _unpack_lo(word, dtype):
