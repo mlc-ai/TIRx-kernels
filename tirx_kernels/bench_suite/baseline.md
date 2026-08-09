@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': 'f5d998f1', 'tirx-kernels': 'a27292c8-dirty', 'tirx-bench-ci': None}`
-- Workloads: 150 ok, 0 failed
+- Git:       `{'tir': '788bda49', 'tirx-kernels': 'ab141a77', 'tirx-bench-ci': None}`
+- Workloads: 172 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -50,6 +50,30 @@ Grouped workloads show one row per config and one timing column per implementati
 | `b16_n1_mp128_ps64_h64_d128_bf16_fixed` | tirx | 6.3675 | deepgemm | 6.5311 | 1.026 | — |
 | `b1_n1_mp1_ps32_h64_d128_f32_fixed` | tirx | 4.4052 | deepgemm | 5.1028 | 1.158 | — |
 
+## deepgemm_sm100_fp8_bmm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bhd_bhr_hdr_b4096_h8_r4096_d1024` | tirx | 131.9678 | deepgemm | 162.6479 | 1.232 | — |
+| `bhd_hdr_bhr_b8192_h8_r4096_d1024` | tirx | 225.1458 | deepgemm | 264.8337 | 1.176 | — |
+| `bhr_hdr_bhd_b4096_h8_r4096_d1024` | tirx | 97.5299 | deepgemm | 122.6598 | 1.258 | — |
+| `bhr_hdr_bhd_b8192_h8_r4096_d1024` | tirx | 191.7272 | deepgemm | 218.4521 | 1.139 | — |
+
+## deepgemm_sm100_fp8_gemm_1d1d
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `m4096_n2112_k7168` | tirx | 48.9878 | deepgemm | 49.1870 | 1.004 | — |
+| `m4096_n24576_k1536` | tirx | 113.5593 | deepgemm | 113.0182 | 0.995 | — |
+| `m4096_n24576_k1536_bfp4` | tirx | 109.0930 | deepgemm | 108.3724 | 0.993 | — |
+| `m4096_n32768_k512` | tirx | 69.5186 | deepgemm | 70.5655 | 1.015 | — |
+| `m4096_n4096_k7168` | tirx | 79.4826 | deepgemm | 80.1051 | 1.008 | — |
+| `m4096_n4096_k7168_bfp4` | tirx | 78.5007 | deepgemm | 78.5248 | 1.000 | — |
+| `m4096_n576_k7168` | tirx | 18.7567 | deepgemm | 19.0959 | 1.018 | — |
+| `m4096_n7168_k16384` | tirx | 330.8989 | deepgemm | 334.0285 | 1.009 | — |
+| `m4096_n7168_k16384_bfp4` | tirx | 296.1075 | deepgemm | 297.0176 | 1.003 | — |
+| `m4096_n7168_k2048` | tirx | 41.3486 | deepgemm | 41.4492 | 1.002 | — |
+
 ## deepgemm_sm100_fp8_mqa_logits
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
@@ -63,6 +87,44 @@ Grouped workloads show one row per config and one timing column per implementati
 |---|---|---:|---|---:|---:|---|
 | `b16_n1_mp128_ps64_h64_d128_bf16_fixed` | tirx | 6.5965 | deepgemm | 6.8616 | 1.040 | sglang_cutedsl=6.9308 |
 | `b1_n1_mp1_ps64_h64_d128_f32_fixed` | tirx | 4.5151 | deepgemm | 4.9688 | 1.100 | sglang_cutedsl=4.9862 |
+
+## deepgemm_sm100_k_grouped_fp8_gemm_contiguous
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `g16_m7168_n2048_k2048_gran128_al128` | tirx | 575.5251 | deepgemm | 574.9544 | 0.999 | — |
+| `g4_m4096_n7168_k8192_gran128_al128` | tirx | 833.7875 | deepgemm | 817.3513 | 0.980 | — |
+| `g4_m4096_n7168_k8192_gran128_al128_psum` | tirx | 845.1483 | deepgemm | 851.5625 | 1.008 | — |
+| `g4_m4096_n7168_k8192_gran32_al32` | tirx | 823.3530 | deepgemm | 874.6029 | 1.062 | — |
+| `g8_m4096_n7168_k4096_gran128_al128` | tirx | 871.8640 | deepgemm | 874.8866 | 1.003 | — |
+| `g8_m4096_n7168_k4096_gran32_al160` | tirx | 908.6568 | deepgemm | 933.3643 | 1.027 | — |
+
+## deepgemm_sm100_m_grouped_fp8_gemm_contiguous
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `g4_m8192_n4096_k2048` | tirx | 164.8735 | deepgemm | 166.7974 | 1.012 | — |
+| `g4_m8192_n4096_k4096` | tirx | 374.0236 | deepgemm | 372.3451 | 0.996 | — |
+| `g4_m8192_n4096_k4096_psum` | tirx | 455.3101 | deepgemm | 451.1907 | 0.991 | — |
+| `g4_m8192_n6144_k7168` | tirx | 979.2425 | deepgemm | 1020.5768 | 1.042 | — |
+| `g4_m8192_n6144_k7168_bfp4` | tirx | 960.2907 | deepgemm | 962.3588 | 1.002 | — |
+| `g4_m8192_n7168_k3072` | tirx | 526.9307 | deepgemm | 520.1199 | 0.987 | — |
+| `g8_m4096_n4096_k2048` | tirx | 195.8065 | deepgemm | 196.1758 | 1.002 | — |
+| `g8_m4096_n4096_k2048_bfp4` | tirx | 183.9154 | deepgemm | 183.7797 | 0.999 | — |
+| `g8_m4096_n4096_k4096` | tirx | 352.3328 | deepgemm | 359.1956 | 1.019 | — |
+| `g8_m4096_n6144_k7168` | tirx | 1118.6606 | deepgemm | 1121.3582 | 1.002 | — |
+| `g8_m4096_n7168_k3072` | tirx | 540.3432 | deepgemm | 535.2302 | 0.991 | — |
+| `g8_m4096_n7168_k3072_psum_zp` | tirx | 529.1949 | deepgemm | 523.8315 | 0.990 | — |
+
+## deepgemm_sm100_m_grouped_fp8_gemm_masked
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `g32_m192_n4096_k2048` | tirx | 73.0334 | deepgemm | 73.0063 | 1.000 | — |
+| `g32_m192_n4096_k4096_bfp4` | tirx | 113.0535 | deepgemm | 112.0275 | 0.991 | — |
+| `g32_m192_n6144_k7168` | tirx | 327.9311 | deepgemm | 327.3398 | 0.998 | — |
+| `g6_m1024_n4096_k2048` | tirx | 39.2550 | deepgemm | 39.4350 | 1.005 | — |
+| `g6_m1024_n6144_k7168` | tirx | 200.3398 | deepgemm | 200.7125 | 1.002 | — |
 
 ## deepgemm_sm100_tf32_hc_prenorm_gemm
 
@@ -139,18 +201,6 @@ Grouped workloads show one row per config and one timing column per implementati
 | `fp16_4096x4096x4096` | tir | 97.4104 | torch-cublas | 93.6657 | 0.962 | — |
 | `fp16_8192x8192x8192` | tir | 737.0429 | torch-cublas | 744.8045 | 1.011 | — |
 
-## fp8_blockwise_gemm
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `deepgemm_m4096_n2112_k7168` | tir | 50.7796 | deepgemm | 49.4835 | 0.974 | — |
-| `deepgemm_m4096_n24576_k1536` | tir | 113.9491 | deepgemm | 113.6677 | 0.998 | — |
-| `deepgemm_m4096_n32768_k512` | tir | 67.8366 | deepgemm | 71.9740 | 1.061 | — |
-| `deepgemm_m4096_n4096_k7168` | tir | 80.7791 | deepgemm | 80.7767 | 1.000 | — |
-| `deepgemm_m4096_n576_k7168` | tir | 20.0995 | deepgemm | 19.0024 | 0.945 | — |
-| `deepgemm_m4096_n7168_k16384` | tir | 340.2924 | deepgemm | 332.4038 | 0.977 | — |
-| `deepgemm_m4096_n7168_k2048` | tir | 43.3182 | deepgemm | 42.1357 | 0.973 | — |
-
 ## gdn_prefill_sm100
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
@@ -169,19 +219,6 @@ Grouped workloads show one row per config and one timing column per implementati
 | `tp1_m8192_n4096_k12288_fp16_dynamic` | tirx | 602.2152 | cublas_nccl_cudagraph | 564.3116 | 0.937 | cublasmp_split_p2p=754.4997 |
 | `tp1_m8192_n5120_k25600_fp16_dynamic` | tirx | 1501.6823 | cublas_nccl_cudagraph | 1411.5482 | 0.940 | cublasmp_split_p2p=1811.8186 |
 | `tp1_m8192_n8192_k28672_fp16_dynamic` | tirx | 2499.8367 | cublas_nccl_cudagraph | 2450.8611 | 0.980 | cublasmp_split_p2p=2886.1382 |
-
-## grouped_fp8_gemm_contiguous
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `large_g4_m8192_n4096_k2048` | tir | 162.4744 | deepgemm | 165.6884 | 1.020 | — |
-| `large_g4_m8192_n4096_k4096` | tir | 349.7351 | deepgemm | 367.1022 | 1.050 | — |
-| `large_g4_m8192_n6144_k7168` | tir | 979.6092 | deepgemm | 989.7458 | 1.010 | — |
-| `large_g4_m8192_n7168_k3072` | tir | 496.1302 | deepgemm | 529.0817 | 1.066 | — |
-| `large_g8_m4096_n4096_k2048` | tir | 192.7758 | deepgemm | 199.0057 | 1.032 | — |
-| `large_g8_m4096_n4096_k4096` | tir | 349.4112 | deepgemm | 347.7435 | 0.995 | — |
-| `large_g8_m4096_n6144_k7168` | tir | 1094.3548 | deepgemm | 1126.7154 | 1.030 | — |
-| `large_g8_m4096_n7168_k3072` | tir | 501.1544 | deepgemm | 530.3688 | 1.058 | — |
 
 ## megakernel_moe
 

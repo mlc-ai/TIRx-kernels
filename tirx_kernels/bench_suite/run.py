@@ -1139,26 +1139,33 @@ def write_run(
     return path
 
 
+#: Which reference a kernel's ratio is quoted against, for the kernels that
+#: benchmark against more than one.  A kernel with a single non-ours impl needs
+#: no entry -- `_baseline_impl` derives it from the row.
 BASELINE_IMPL_BY_KERNEL = {
     "fp16_bf16_gemm": "torch-cublas",
-    "fp8_blockwise_gemm": "deepgemm",
-    "grouped_fp8_gemm_contiguous": "deepgemm",
     "nvfp4_gemm": "flashinfer",
-    "flash_attention4": "flashattn_sm100",
     "flashkda_bf16_fused_m128": "flashinfer_m128",
-    "gdn_prefill_sm100": "flashinfer_cutedsl",
-    "tinygemm2_sm100": "flashinfer_sm100",
-    "deepgemm_sm100_fp8_mqa_logits": "deepgemm",
-    "deepgemm_sm100_fp4_mqa_logits": "deepgemm",
-    "deepgemm_sm100_fp4_paged_mqa_logits": "deepgemm",
     "deepgemm_sm100_fp8_paged_mqa_logits": "deepgemm",
-    "deepgemm_sm100_tf32_hc_prenorm_gemm": "deepgemm",
-    "flash_mla_sparse_fwd": "flashmla",
     "sparse_flashmla_prefill_head64_phase1": "flashmla",
     "sparse_flashmla_prefill_head128_phase1": "flashmla",
-    "sparse_flashmla_prefill_head128_small_topk_phase1": "flashmla",
-    "sparse_flashmla_decode_head64": "flashmla",
 }
+
+
+def _baseline_impl(kernel: str, impl_names: list[str]) -> str | None:
+    """The reference a kernel's ratio is quoted against.
+
+    Most kernels have exactly one non-ours implementation, so naming it in a
+    hand-maintained table only creates a row that can be forgotten -- and four
+    kernels already had been, printing a bare `ratio` header.  The table now
+    only breaks genuine ties.
+    """
+    pinned = BASELINE_IMPL_BY_KERNEL.get(kernel)
+    if pinned:
+        return pinned
+    ours = set(our_impls(dict.fromkeys(impl_names)))
+    others = [name for name in impl_names if name not in ours]
+    return others[0] if len(others) == 1 else None
 
 
 def _our_impl(row_impls: dict) -> str | None:
@@ -1234,7 +1241,7 @@ def write_summary(out_dir: Path, current: dict) -> Path:
                     seen.add(impl)
                     impl_names.append(impl)
         impl_names.sort()
-        baseline_impl = BASELINE_IMPL_BY_KERNEL.get(kernel)
+        baseline_impl = _baseline_impl(kernel, impl_names)
         # Determine "ours" impl name once for the whole kernel (constant per kernel)
         ours_impl = None
         for r in rows:

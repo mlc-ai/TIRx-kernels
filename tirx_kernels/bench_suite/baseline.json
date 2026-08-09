@@ -2,13 +2,13 @@
   "timestamp": "14",
   "label": "post-refactor",
   "git": {
-    "tir": "f5d998f1",
-    "tirx-kernels": "a27292c8-dirty",
+    "tir": "788bda49",
+    "tirx-kernels": "ab141a77",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
-    "tir:python/tvm/tirx": "6c973d6a8a4ce746e562739b613bd36972731ef7",
-    "tirx-kernels:tirx_kernels": "8eb3c65f6acdd7824271b9ace58b1790bf9d8097"
+    "tir:python/tvm/tirx": "526829344fb7f9e544ad3e9e5fe04b3952ab9cac",
+    "tirx-kernels:tirx_kernels": "698689cd82cc7398ea65897cc9906051e7e28d12"
   },
   "baselines": {
     "torch": {
@@ -337,6 +337,202 @@
       }
     },
     {
+      "kernel": "deepgemm_sm100_fp8_bmm",
+      "config": "bhd_bhr_hdr_b4096_h8_r4096_d1024",
+      "label": "bhd_bhr_hdr_b4096_h8_r4096_d1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 131.96778410454942,
+        "deepgemm": 162.6478875548461
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_bmm",
+      "config": "bhd_hdr_bhr_b8192_h8_r4096_d1024",
+      "label": "bhd_hdr_bhr_b8192_h8_r4096_d1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 225.14580810341707,
+        "deepgemm": 264.8336557183443
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_bmm",
+      "config": "bhr_hdr_bhd_b4096_h8_r4096_d1024",
+      "label": "bhr_hdr_bhd_b4096_h8_r4096_d1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 97.52990205930986,
+        "deepgemm": 122.65976551975476
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_bmm",
+      "config": "bhr_hdr_bhd_b8192_h8_r4096_d1024",
+      "label": "bhr_hdr_bhd_b8192_h8_r4096_d1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 191.72717876484265,
+        "deepgemm": 218.45214454576916
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n2112_k7168",
+      "label": "m4096_n2112_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 48.98775749209752,
+        "deepgemm": 49.1870375052735
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n24576_k1536",
+      "label": "m4096_n24576_k1536",
+      "status": "ok",
+      "impls": {
+        "tirx": 113.55927599347022,
+        "deepgemm": 113.01822657814613
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n24576_k1536_bfp4",
+      "label": "m4096_n24576_k1536_bfp4",
+      "status": "ok",
+      "impls": {
+        "tirx": 109.09296178072697,
+        "deepgemm": 108.37239551801656
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n32768_k512",
+      "label": "m4096_n32768_k512",
+      "status": "ok",
+      "impls": {
+        "tirx": 69.51863847469987,
+        "deepgemm": 70.56545958032403
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n4096_k7168",
+      "label": "m4096_n4096_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 79.48255267014245,
+        "deepgemm": 80.10506796179868
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n4096_k7168_bfp4",
+      "label": "m4096_n4096_k7168_bfp4",
+      "status": "ok",
+      "impls": {
+        "tirx": 78.50070171090391,
+        "deepgemm": 78.52479523475546
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n576_k7168",
+      "label": "m4096_n576_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 18.756705256580396,
+        "deepgemm": 19.095908539118156
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n7168_k16384",
+      "label": "m4096_n7168_k16384",
+      "status": "ok",
+      "impls": {
+        "tirx": 330.89888495617106,
+        "deepgemm": 334.02848428186604
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n7168_k16384_bfp4",
+      "label": "m4096_n7168_k16384_bfp4",
+      "status": "ok",
+      "impls": {
+        "tirx": 296.1075104326702,
+        "deepgemm": 297.0176377804597
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_gemm_1d1d",
+      "config": "m4096_n7168_k2048",
+      "label": "m4096_n7168_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 41.3486051396207,
+        "deepgemm": 41.44922882043442
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
       "kernel": "deepgemm_sm100_fp8_mqa_logits",
       "config": "s2048_skv4096_h64_d128_f32_dense_cp",
       "label": "s2048_skv4096_h64_d128_f32_dense_cp",
@@ -391,6 +587,328 @@
       },
       "aggregated": {
         "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
+      "config": "g16_m7168_n2048_k2048_gran128_al128",
+      "label": "g16_m7168_n2048_k2048_gran128_al128",
+      "status": "ok",
+      "impls": {
+        "tirx": 575.5251370516855,
+        "deepgemm": 574.9543943624674
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
+      "config": "g4_m4096_n7168_k8192_gran128_al128",
+      "label": "g4_m4096_n7168_k8192_gran128_al128",
+      "status": "ok",
+      "impls": {
+        "tirx": 833.7874648921405,
+        "deepgemm": 817.3512933319444
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
+      "config": "g4_m4096_n7168_k8192_gran128_al128_psum",
+      "label": "g4_m4096_n7168_k8192_gran128_al128_psum",
+      "status": "ok",
+      "impls": {
+        "tirx": 845.1483470920523,
+        "deepgemm": 851.5624557422144
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
+      "config": "g4_m4096_n7168_k8192_gran32_al32",
+      "label": "g4_m4096_n7168_k8192_gran32_al32",
+      "status": "ok",
+      "impls": {
+        "tirx": 823.3529879178338,
+        "deepgemm": 874.6029256533665
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
+      "config": "g8_m4096_n7168_k4096_gran128_al128",
+      "label": "g8_m4096_n7168_k4096_gran128_al128",
+      "status": "ok",
+      "impls": {
+        "tirx": 871.8639502265065,
+        "deepgemm": 874.886571681416
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
+      "config": "g8_m4096_n7168_k4096_gran32_al160",
+      "label": "g8_m4096_n7168_k4096_gran32_al160",
+      "status": "ok",
+      "impls": {
+        "tirx": 908.6567936178296,
+        "deepgemm": 933.3643380959098
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g4_m8192_n4096_k2048",
+      "label": "g4_m8192_n4096_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 164.87345370542212,
+        "deepgemm": 166.79736814960182
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g4_m8192_n4096_k4096",
+      "label": "g4_m8192_n4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 374.0235623375541,
+        "deepgemm": 372.345114074542
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g4_m8192_n4096_k4096_psum",
+      "label": "g4_m8192_n4096_k4096_psum",
+      "status": "ok",
+      "impls": {
+        "tirx": 455.31005410275606,
+        "deepgemm": 451.19072026886045
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g4_m8192_n6144_k7168",
+      "label": "g4_m8192_n6144_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 979.2424787878788,
+        "deepgemm": 1020.5767818181818
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g4_m8192_n6144_k7168_bfp4",
+      "label": "g4_m8192_n6144_k7168_bfp4",
+      "status": "ok",
+      "impls": {
+        "tirx": 960.2907295421245,
+        "deepgemm": 962.3587878330192
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g4_m8192_n7168_k3072",
+      "label": "g4_m8192_n7168_k3072",
+      "status": "ok",
+      "impls": {
+        "tirx": 526.9306850946199,
+        "deepgemm": 520.1199083983918
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g8_m4096_n4096_k2048",
+      "label": "g8_m4096_n4096_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 195.80650997049003,
+        "deepgemm": 196.17577945139183
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g8_m4096_n4096_k2048_bfp4",
+      "label": "g8_m4096_n4096_k2048_bfp4",
+      "status": "ok",
+      "impls": {
+        "tirx": 183.91540917901256,
+        "deepgemm": 183.77966202037143
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g8_m4096_n4096_k4096",
+      "label": "g8_m4096_n4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 352.33276012807164,
+        "deepgemm": 359.1956211752296
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g8_m4096_n6144_k7168",
+      "label": "g8_m4096_n6144_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 1118.6606081481482,
+        "deepgemm": 1121.3582296296297
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g8_m4096_n7168_k3072",
+      "label": "g8_m4096_n7168_k3072",
+      "status": "ok",
+      "impls": {
+        "tirx": 540.3431695054832,
+        "deepgemm": 535.2302142109595
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
+      "config": "g8_m4096_n7168_k3072_psum_zp",
+      "label": "g8_m4096_n7168_k3072_psum_zp",
+      "status": "ok",
+      "impls": {
+        "tirx": 529.1949161255918,
+        "deepgemm": 523.8314910712887
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_masked",
+      "config": "g32_m192_n4096_k2048",
+      "label": "g32_m192_n4096_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 73.03344410053873,
+        "deepgemm": 73.00634211827844
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_masked",
+      "config": "g32_m192_n4096_k4096_bfp4",
+      "label": "g32_m192_n4096_k4096_bfp4",
+      "status": "ok",
+      "impls": {
+        "tirx": 113.05346224487147,
+        "deepgemm": 112.02754244040777
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_masked",
+      "config": "g32_m192_n6144_k7168",
+      "label": "g32_m192_n6144_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 327.9310617041181,
+        "deepgemm": 327.3397893178851
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_masked",
+      "config": "g6_m1024_n4096_k2048",
+      "label": "g6_m1024_n4096_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 39.25498160271597,
+        "deepgemm": 39.4349775747687
+      },
+      "aggregated": {
+        "rounds": 15,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_m_grouped_fp8_gemm_masked",
+      "config": "g6_m1024_n6144_k7168",
+      "label": "g6_m1024_n6144_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 200.33982131550852,
+        "deepgemm": 200.71254083210994
+      },
+      "aggregated": {
+        "rounds": 15,
         "method": "mean"
       }
     },
@@ -1185,104 +1703,6 @@
       }
     },
     {
-      "kernel": "fp8_blockwise_gemm",
-      "config": "deepgemm_m4096_n2112_k7168",
-      "label": "deepgemm_m4096_n2112_k7168",
-      "status": "ok",
-      "impls": {
-        "tir": 50.77959628035314,
-        "deepgemm": 49.483477472033506
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "fp8_blockwise_gemm",
-      "config": "deepgemm_m4096_n24576_k1536",
-      "label": "deepgemm_m4096_n24576_k1536",
-      "status": "ok",
-      "impls": {
-        "tir": 113.94910710321132,
-        "deepgemm": 113.66769038610944
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "fp8_blockwise_gemm",
-      "config": "deepgemm_m4096_n32768_k512",
-      "label": "deepgemm_m4096_n32768_k512",
-      "status": "ok",
-      "impls": {
-        "tir": 67.83660924292163,
-        "deepgemm": 71.97400993750038
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "fp8_blockwise_gemm",
-      "config": "deepgemm_m4096_n4096_k7168",
-      "label": "deepgemm_m4096_n4096_k7168",
-      "status": "ok",
-      "impls": {
-        "tir": 80.77913530813022,
-        "deepgemm": 80.77668942627778
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "fp8_blockwise_gemm",
-      "config": "deepgemm_m4096_n576_k7168",
-      "label": "deepgemm_m4096_n576_k7168",
-      "status": "ok",
-      "impls": {
-        "tir": 20.09954315344132,
-        "deepgemm": 19.002390311031675
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "fp8_blockwise_gemm",
-      "config": "deepgemm_m4096_n7168_k16384",
-      "label": "deepgemm_m4096_n7168_k16384",
-      "status": "ok",
-      "impls": {
-        "tir": 340.2924330087495,
-        "deepgemm": 332.403795190485
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "fp8_blockwise_gemm",
-      "config": "deepgemm_m4096_n7168_k2048",
-      "label": "deepgemm_m4096_n7168_k2048",
-      "status": "ok",
-      "impls": {
-        "tir": 43.31823168851617,
-        "deepgemm": 42.13573046904129
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
       "kernel": "gdn_prefill_sm100",
       "config": "hq16_hv16_s4096+4096",
       "label": "hq16_hv16_s4096+4096",
@@ -1406,118 +1826,6 @@
         "tirx": 2499.836699999997,
         "cublas_nccl_cudagraph": 2450.8610999999974,
         "cublasmp_split_p2p": 2886.1381999999962
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "grouped_fp8_gemm_contiguous",
-      "config": "large_g4_m8192_n4096_k2048",
-      "label": "large_g4_m8192_n4096_k2048",
-      "status": "ok",
-      "impls": {
-        "tir": 162.47438272044897,
-        "deepgemm": 165.68836545160391
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "grouped_fp8_gemm_contiguous",
-      "config": "large_g4_m8192_n4096_k4096",
-      "label": "large_g4_m8192_n4096_k4096",
-      "status": "ok",
-      "impls": {
-        "tir": 349.7350630380768,
-        "deepgemm": 367.1021960538968
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "grouped_fp8_gemm_contiguous",
-      "config": "large_g4_m8192_n6144_k7168",
-      "label": "large_g4_m8192_n6144_k7168",
-      "status": "ok",
-      "impls": {
-        "tir": 979.6091642574257,
-        "deepgemm": 989.7457854462997
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "grouped_fp8_gemm_contiguous",
-      "config": "large_g4_m8192_n7168_k3072",
-      "label": "large_g4_m8192_n7168_k3072",
-      "status": "ok",
-      "impls": {
-        "tir": 496.1302438375799,
-        "deepgemm": 529.081667666376
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "grouped_fp8_gemm_contiguous",
-      "config": "large_g8_m4096_n4096_k2048",
-      "label": "large_g8_m4096_n4096_k2048",
-      "status": "ok",
-      "impls": {
-        "tir": 192.77582796766788,
-        "deepgemm": 199.0057070543285
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "grouped_fp8_gemm_contiguous",
-      "config": "large_g8_m4096_n4096_k4096",
-      "label": "large_g8_m4096_n4096_k4096",
-      "status": "ok",
-      "impls": {
-        "tir": 349.4111512590365,
-        "deepgemm": 347.7435339810625
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "grouped_fp8_gemm_contiguous",
-      "config": "large_g8_m4096_n6144_k7168",
-      "label": "large_g8_m4096_n6144_k7168",
-      "status": "ok",
-      "impls": {
-        "tir": 1094.3547688888889,
-        "deepgemm": 1126.715443678161
-      },
-      "aggregated": {
-        "rounds": 5,
-        "method": "mean"
-      }
-    },
-    {
-      "kernel": "grouped_fp8_gemm_contiguous",
-      "config": "large_g8_m4096_n7168_k3072",
-      "label": "large_g8_m4096_n7168_k3072",
-      "status": "ok",
-      "impls": {
-        "tir": 501.1544148434479,
-        "deepgemm": 530.3687628570526
       },
       "aggregated": {
         "rounds": 5,

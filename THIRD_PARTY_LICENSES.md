@@ -16,11 +16,14 @@ collected here.
   - `tirx_kernels/deepgemm/paged_mqa_logits_fp8.py`
   - `tirx_kernels/deepgemm/tf32_hc_prenorm_gemm.py`
   - `tirx_kernels/deepgemm/mega_moe.py`
-
-  `tirx_kernels/deepgemm/fp8_blockwise_gemm.py` and
-  `tirx_kernels/deepgemm/grouped_fp8_gemm_contiguous.py` are native TIRx
-  implementations that only use DeepGEMM as a benchmark reference; they
-  contain no DeepGEMM code.
+  - `tirx_kernels/deepgemm/_sm100_fp8_fp4_gemm_1d1d.py`, its data and reference
+    helper `_sm100_fp8_fp4_gemm_1d1d_data.py`, and its five entry modules
+    `fp8_gemm_1d1d.py`, `m_grouped_fp8_gemm_contiguous.py`,
+    `m_grouped_fp8_gemm_masked.py`, `k_grouped_fp8_gemm_contiguous.py` and
+    `fp8_bmm.py`, ported from
+    `deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh` together
+    with its scheduler, epilogue and layout-heuristic helpers
+  - `.agents/sketch/sm100_fp8_fp4_gemm_1d1d.md`, which documents that port
 
 ```text
 MIT License

@@ -51,8 +51,11 @@ worktree containing the m128 kernel.
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
-| `fp8_blockwise_gemm` | fp8 | Blockwise-scaled dense GEMM |
-| `grouped_fp8_gemm_contiguous` | fp8 | M-grouped contiguous GEMM |
+| `deepgemm_sm100_fp8_gemm_1d1d` | fp8 + fp4 / bf16 | Dense blockwise-scaled GEMM |
+| `deepgemm_sm100_m_grouped_fp8_gemm_contiguous` | fp8 + fp4 / bf16 | M-grouped contiguous GEMM (incl. psum layout) |
+| `deepgemm_sm100_m_grouped_fp8_gemm_masked` | fp8 + fp4 / bf16 | M-grouped masked GEMM |
+| `deepgemm_sm100_k_grouped_fp8_gemm_contiguous` | fp8 / fp32 | K-grouped contiguous GEMM (wgrad, incl. psum layout) |
+| `deepgemm_sm100_fp8_bmm` | fp8 / bf16 + fp32 | Batched GEMM behind `fp8_einsum` |
 | `deepgemm_sm100_fp4_mqa_logits` | fp4 / bf16 | MQA attention logits |
 | `deepgemm_sm100_fp8_mqa_logits` | fp8 / bf16 | MQA attention logits |
 | `deepgemm_sm100_fp4_paged_mqa_logits` | fp4 / bf16 | Paged-KV MQA attention logits |

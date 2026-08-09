@@ -1,0 +1,7 @@
+kernel: deepgemm_sm100_m_grouped_fp8_gemm_masked
+configs:
+  - {config: g32_m192_n6144_k7168, default: true}
+  - {config: g32_m192_n4096_k2048, default: true}
+  - {config: g6_m1024_n6144_k7168, default: true}
+  - {config: g6_m1024_n4096_k2048, default: true}
+  - {config: g32_m192_n4096_k4096_bfp4, default: true}

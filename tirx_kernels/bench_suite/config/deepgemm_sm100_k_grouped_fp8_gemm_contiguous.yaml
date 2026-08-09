@@ -1,0 +1,8 @@
+kernel: deepgemm_sm100_k_grouped_fp8_gemm_contiguous
+configs:
+  - {config: g4_m4096_n7168_k8192_gran32_al32, default: true}
+  - {config: g4_m4096_n7168_k8192_gran128_al128, default: true}
+  - {config: g8_m4096_n7168_k4096_gran32_al160, default: true}
+  - {config: g8_m4096_n7168_k4096_gran128_al128, default: true}
+  - {config: g16_m7168_n2048_k2048_gran128_al128, default: true}
+  - {config: g4_m4096_n7168_k8192_gran128_al128_psum, default: true}
