@@ -1,0 +1,30 @@
+# Complete source-comparable STP horizontal sweep.  Horizontal dispatch supports
+# BF16/FP16/FP32 state but does not cover the int16 state-scale specialization.
+kernel: selective_state_update_stp_horizontal
+configs:
+  - {config: b64_h64_d64_s128_r8_base, default: true}
+  - {config: b64_h8_d64_s128_r1, default: true}
+  - {config: b64_h64_d128_s128_r8, default: true}
+  - {config: b64_h64_d64_s64_r8, default: true}
+  - {config: b64_h64_d64_s96_r8, default: true}
+  - {config: b64_h64_d64_s256_r8, default: true}
+  - {config: b64_h64_d64_s128_r8_statef16, default: true}
+  - {config: b64_h64_d64_s128_r8_statef32, default: true}
+  - {config: b64_h64_d64_s128_r8_weightbf16, default: true}
+  - {config: b64_h64_d64_s128_r1, default: true}
+  - {config: b64_h64_d64_s128_r2, default: true}
+  - {config: b64_h64_d64_s128_r4, default: true}
+  - {config: b64_h64_d64_s128_r16, default: true}
+  - {config: b64_h64_d64_s128_r32, default: true}
+  - {config: b64_h64_d64_s128_r64, default: true}
+  - {config: b64_h64_d64_s128_r8_z, default: true}
+  - {config: b64_h64_d64_s128_r8_no_dt_bias, default: true}
+  - {config: b64_h64_d64_s128_r8_no_softplus, default: true}
+  - {config: b64_h64_d64_s128_r8_no_update, default: true}
+  - {config: b64_h64_d64_s128_r8_no_indices, default: true}
+  - {config: b64_h64_d64_s128_r8_indices_i32, default: true}
+  - {config: b64_h64_d64_s128_r8_stride2, default: true}
+  - {config: b64_h64_d64_s128_r8_dst2d, default: true}
+  - {config: b64_h64_d64_s128_r8_pad4, default: true}
+  - {config: b64_h64_d64_s128_r8_philox10, default: true}
+  - {config: b64_h64_d64_s64_r8_philox10, default: true}
