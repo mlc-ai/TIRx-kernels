@@ -151,6 +151,7 @@ TMEM_SHARED_INPUT_COL = 448
 
 TMEM_ALLOC_BARRIER = 1
 INVERSE_BARRIER = 2
+CG1_TMEM_DEALLOC_BARRIER = 3
 INITIAL_STATE_BARRIER = 4
 
 LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
@@ -1828,6 +1829,7 @@ def _kernel(
                     _consumer_wait(smem_addr_cg1, 320, kv_previous_count_cg1, 1)
                     kv_consumer_count_cg1 = kv_consumer_count_cg1 + 1
                     state_input_count_cg1: T.int32 = state_input_producer_count_cg1
+                    _producer_acquire(smem_addr_cg1, 472, state_input_count_cg1, 1)
                     state_input_producer_count_cg1 = state_input_producer_count_cg1 + 1
                     state_values_cg1: T.float32[128]
                     state_input_words_cg1: T.uint32[64]
@@ -2086,6 +2088,7 @@ def _kernel(
                 # Retained runtime empty-sequence branch from CK:L1422-L1432.
                 _copy_empty_state(initial_state, final_state, batch_cg1, head_cg1, thread, HV=HV)
             work_linear_cg1 = work_linear_cg1 + grid_x
+        T.cuda.warpgroup_sync(CG1_TMEM_DEALLOC_BARRIER)
         if warp == 4:
             T.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
             T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
