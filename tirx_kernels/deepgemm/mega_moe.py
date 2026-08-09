@@ -1637,6 +1637,27 @@ def get_kernel(
     def load_volatile_u64(dst, address):
         return T.ptx.ld.volatile.global_.u64(dst, address)
 
+    def load_global_s64(dst, address):
+        return T.ptx.ld.global_.s64(dst, address)
+
+    def load_global_u64(dst, address):
+        return T.ptx.ld.global_.u64(dst, address)
+
+    def load_global_u32(dst, address):
+        return T.ptx.ld.global_.u32(dst, address)
+
+    def store_global_u64(address, value):
+        return T.ptx.st.global_.u64(address, value)
+
+    def store_global_u32(address, value):
+        return T.ptx.st.global_.u32(address, value)
+
+    def store_global_u8(address, value):
+        return T.ptx.st.global_.u8(address, value)
+
+    def store_global_f32(address, value):
+        return T.ptx.st.global_.f32(address, value)
+
     # Destination-first, mirroring the PTX these wrap: the caller declares the
     # register and passes it in.
     def load_acq_sys_s32(dst, address):
@@ -1658,6 +1679,12 @@ def get_kernel(
         # ptx destinations are declared registers, so the helper writes into
         # one the caller owns rather than returning a value.
         return T.ptx.ld.global_.f32(dst, address)
+
+    def load_shared_u64(dst, address):
+        return T.ptx.ld.shared.u64(dst, address)
+
+    def load_shared_u32(dst, address):
+        return T.ptx.ld.shared.u32(dst, address)
 
     def uint32_bits_to_float(bits):
         return T.cuda.uint_as_float(bits)
@@ -1854,6 +1881,9 @@ def get_kernel(
 
     def st_shared_u32(ptr, value):
         return T.ptx.st.shared.u32(ptr, value)
+
+    def st_shared_u64(ptr, value):
+        return T.ptx.st.shared.u64(ptr, value)
 
     def st_shared_bulk(ptr, num_bytes):
         return T.ptx.st_bulk.weak.shared__cta(ptr, T.cast(num_bytes, "uint64"))
@@ -2066,12 +2096,11 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
             )
         return rank_offset
 
-    def symm_rank_base_expr(
-        sym_buffer_base, symm_rank_offsets, smem_symm_rank_bases, mapped_rank_idx
-    ):
+    def load_symm_rank_base(dst, smem_symm_rank_bases, mapped_rank_idx):
         if num_processes > 1:
-            return smem_symm_rank_bases[T.cast(mapped_rank_idx, "int32")]
-        return sym_buffer_base + T.cast(symm_rank_offsets[0], "uint64")
+            return load_shared_u64(
+                dst, smem_symm_rank_bases.ptr_to([T.cast(mapped_rank_idx, "int32")])
+            )
 
     sm100_smem_capacity = 232448
     shared_alignment = 1024
@@ -2891,6 +2920,16 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
         expected_ring_count: T.int32
         scheduler_num_m_blocks: T.int32
         scheduler_cached_status: T.uint64
+        ordinary_global_u64: T.uint64
+        ordinary_global_u32: T.uint32
+        ordinary_global_s64: T.int64
+        symm_rank_base: T.uint64
+        nvl_counter_value: T.uint32
+        smem_expert_count_value: T.uint32
+        tmem_allocated: T.uint32
+        dst_rank_idx_u32: T.uint32
+        dst_token_idx_u32: T.uint32
+        dst_topk_idx_u32: T.uint32
         sched_stage_idx: T.int32
         sched_phase: T.int32
         sched_num_total_m_blocks: T.int32
@@ -3003,22 +3042,18 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         counter_idx, sync_num_threads, sync_barrier_idx, sync_thread_idx
                     )
                 if sm_idx == 0:
-                    barrier_status = T.cast(
-                        T.bitwise_and(workspace_nvl_barrier_counter[0], T.uint32(3)), "int32"
-                    )
+                    load_global_u32(nvl_counter_value, workspace_nvl_barrier_counter.ptr_to([0]))
+                    barrier_status = T.cast(T.bitwise_and(nvl_counter_value, T.uint32(3)), "int32")
                     barrier_signal_phase = T.bitwise_and(barrier_status, T.int32(1))
                     barrier_signal_sign = T.shift_right(barrier_status, T.int32(1))
                     if sync_thread_idx < T.int32(num_processes):
                         barrier_target = T.int32(1)
                         if barrier_signal_sign != 0:
                             barrier_target = T.int32(-1)
+                        symm_rank_base = sym_buffer_base + T.cast(symm_rank_offsets[0], "uint64")
+                        load_symm_rank_base(symm_rank_base, smem_symm_rank_bases, sync_thread_idx)
                         peer_red_add_rel_sys_s32(
-                            symm_rank_base_expr(
-                                sym_buffer_base,
-                                symm_rank_offsets,
-                                smem_symm_rank_bases,
-                                sync_thread_idx,
-                            ),
+                            symm_rank_base,
                             T.uint64(workspace_layout.barrier_offset + 20)
                             + T.cast(barrier_signal_phase * 4, "uint64"),
                             barrier_target,
@@ -3043,13 +3078,16 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                         barrier_status_printf,
                                         workspace_nvl_barrier_signal.ptr_to([barrier_signal_phase]),
                                     )
+                                    load_global_u32(
+                                        nvl_counter_value, workspace_nvl_barrier_counter.ptr_to([0])
+                                    )
                                     T.cuda.printf(
                                         f"DeepGEMM NVLink barrier timeout "
                                         f"({nvlink_barrier_timeout_seconds}s): "
                                         "rank=%d, counter=%d, signal=%d, target=%d, "
                                         "phase=%d, sign=%d, tag=%d\n",
                                         rank_idx,
-                                        T.cast(workspace_nvl_barrier_counter[0], "int32"),
+                                        T.cast(nvl_counter_value, "int32"),
                                         barrier_status_printf,
                                         barrier_target,
                                         barrier_signal_phase,
@@ -3499,9 +3537,18 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
 
         @T.inline
         def store_token_src_metadata(pool_token_idx, src_rank_idx, src_token_idx, src_topk_idx):
-            workspace_token_src_metadata[pool_token_idx, 0] = T.cast(src_rank_idx, "uint32")
-            workspace_token_src_metadata[pool_token_idx, 1] = T.cast(src_token_idx, "uint32")
-            workspace_token_src_metadata[pool_token_idx, 2] = T.cast(src_topk_idx, "uint32")
+            store_global_u32(
+                workspace_token_src_metadata.ptr_to([pool_token_idx, 0]),
+                T.cast(src_rank_idx, "uint32"),
+            )
+            store_global_u32(
+                workspace_token_src_metadata.ptr_to([pool_token_idx, 1]),
+                T.cast(src_token_idx, "uint32"),
+            )
+            store_global_u32(
+                workspace_token_src_metadata.ptr_to([pool_token_idx, 2]),
+                T.cast(src_topk_idx, "uint32"),
+            )
 
         # Relaxed arrive — no prior memory effect needs to be released to peers
         # before TMEM alloc + mbarrier init below. Wait still .acquire (default).
@@ -3515,8 +3562,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
         if flat_warp_idx == 0:
             if num_processes > 1:
                 if lane_idx < num_processes:
-                    smem_symm_rank_bases[lane_idx] = sym_buffer_base + T.cast(
-                        symm_rank_offset_arg_expr(symm_rank_offsets, lane_idx), "uint64"
+                    st_shared_u64(
+                        smem_symm_rank_bases.ptr_to([lane_idx]),
+                        sym_buffer_base
+                        + T.cast(symm_rank_offset_arg_expr(symm_rank_offsets, lane_idx), "uint64"),
                     )
             if T.cuda.elect_sync():
                 T.evaluate(st_shared_bulk(smem_expert_count.ptr_to([0]), T.uint32(num_experts * 4)))
@@ -3593,7 +3642,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     )
                     if T.cast(token_idx, "uint32") < T.cast(num_tokens, "uint32"):
                         topk_idx = T.cast(lane_idx_u32 % T.uint32(num_topk), "int32")
-                        dispatch_expert_idx = T.cast(input_topk_idx[token_idx, topk_idx], "int32")
+                        load_global_s64(
+                            ordinary_global_s64, input_topk_idx.ptr_to([token_idx, topk_idx])
+                        )
+                        dispatch_expert_idx = T.cast(ordinary_global_s64, "int32")
                         if dispatch_expert_idx >= 0:
                             T.evaluate(
                                 T.cuda.atomic_add(
@@ -3613,8 +3665,11 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
             )
             dispatch_expert_idx = flat_warp_idx * 32 + lane_idx
             while T.cast(dispatch_expert_idx, "uint32") < T.uint32(num_experts):
+                load_shared_u32(
+                    smem_expert_count_value, smem_expert_count.ptr_to([dispatch_expert_idx])
+                )
                 send_value = T.bitwise_or(
-                    T.uint64(1 << 32), T.cast(smem_expert_count[dispatch_expert_idx], "uint64")
+                    T.uint64(1 << 32), T.cast(smem_expert_count_value, "uint64")
                 )
                 prev_send_count: T.uint64
                 T.ptx.atom.global_.add.u64(
@@ -3622,7 +3677,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     workspace_expert_send_count.ptr_to([dispatch_expert_idx]),
                     send_value,
                 )
-                smem_expert_count[dispatch_expert_idx] = T.cast(prev_send_count, "int32")
+                st_shared_u32(
+                    smem_expert_count.ptr_to([dispatch_expert_idx]),
+                    T.cast(prev_send_count, "uint32"),
+                )
                 dispatch_expert_idx = dispatch_expert_idx + kernel_config.num_dispatch_threads
             T.ptx.bar.sync(
                 T.uint32(dispatch_sync_barrier_idx), T.uint32(kernel_config.num_dispatch_threads)
@@ -3641,7 +3699,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     if T.cast(token_idx, "uint32") < T.cast(num_tokens, "uint32"):
                         topk_idx = T.cast(lane_idx_u32 % T.uint32(num_topk), "int32")
                         dispatch_token_topk_idx = token_idx * num_topk + topk_idx
-                        dispatch_expert_idx = T.cast(input_topk_idx[token_idx, topk_idx], "int32")
+                        load_global_s64(
+                            ordinary_global_s64, input_topk_idx.ptr_to([token_idx, topk_idx])
+                        )
+                        dispatch_expert_idx = T.cast(ordinary_global_s64, "int32")
                         if dispatch_expert_idx >= 0:
                             dispatch_expert_idx_u32 = T.cast(dispatch_expert_idx, "uint32")
                             dispatch_dst_rank_idx = T.cast(
@@ -3653,13 +3714,14 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                             dispatch_dst_slot_idx = T.cuda.atomic_add(
                                 smem_expert_count.ptr_to([dispatch_expert_idx]), 1
                             )
+                            symm_rank_base = sym_buffer_base + T.cast(
+                                symm_rank_offsets[0], "uint64"
+                            )
+                            load_symm_rank_base(
+                                symm_rank_base, smem_symm_rank_bases, dispatch_dst_rank_idx
+                            )
                             peer_store_u32(
-                                symm_rank_base_expr(
-                                    sym_buffer_base,
-                                    symm_rank_offsets,
-                                    smem_symm_rank_bases,
-                                    dispatch_dst_rank_idx,
-                                ),
+                                symm_rank_base,
                                 T.uint64(
                                     workspace_layout.src_token_topk_idx_offset
                                     + (
@@ -3697,14 +3759,14 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 dispatch_dst_local_expert_idx = T.cast(
                     dispatch_expert_idx_u32 % T.uint32(num_experts_per_rank), "int32"
                 )
-                scheduler_cached_status = workspace_expert_send_count[dispatch_expert_idx]
+                load_global_u64(
+                    scheduler_cached_status,
+                    workspace_expert_send_count.ptr_to([dispatch_expert_idx]),
+                )
+                symm_rank_base = sym_buffer_base + T.cast(symm_rank_offsets[0], "uint64")
+                load_symm_rank_base(symm_rank_base, smem_symm_rank_bases, dispatch_dst_rank_idx)
                 peer_store_u64(
-                    symm_rank_base_expr(
-                        sym_buffer_base,
-                        symm_rank_offsets,
-                        smem_symm_rank_bases,
-                        dispatch_dst_rank_idx,
-                    ),
+                    symm_rank_base,
                     T.uint64(
                         workspace_layout.expert_recv_count_offset
                         + (rank_idx * num_experts_per_rank + dispatch_dst_local_expert_idx) * 8
@@ -3712,14 +3774,11 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     T.bitwise_and(scheduler_cached_status, T.uint64(0xFFFFFFFF)),
                 )
                 peer_recv_count_sum_prev: T.uint64  # atom returns the old value; unused here
+                symm_rank_base = sym_buffer_base + T.cast(symm_rank_offsets[0], "uint64")
+                load_symm_rank_base(symm_rank_base, smem_symm_rank_bases, dispatch_dst_rank_idx)
                 peer_atomic_add_u64(
                     peer_recv_count_sum_prev,
-                    symm_rank_base_expr(
-                        sym_buffer_base,
-                        symm_rank_offsets,
-                        smem_symm_rank_bases,
-                        dispatch_dst_rank_idx,
-                    ),
+                    symm_rank_base,
                     T.uint64(
                         workspace_layout.expert_recv_count_sum_offset
                         + dispatch_dst_local_expert_idx * 8
@@ -3776,16 +3835,17 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     old_expert_idx = current_expert_idx
                     for rank_lane_idx in T.unroll(0, num_ranks_per_lane):
                         dispatch_dst_rank_idx = rank_lane_idx * 32 + lane_idx
-                        stored_rank_counts[rank_lane_idx] = T.Select(
-                            T.cast(dispatch_dst_rank_idx, "uint32") < T.uint32(num_processes),
-                            T.cast(
-                                workspace_expert_recv_count[
-                                    dispatch_dst_rank_idx, current_expert_idx
-                                ],
-                                "uint32",
-                            ),
-                            T.uint32(0),
-                        )
+                        stored_rank_counts[rank_lane_idx] = T.uint32(0)
+                        if T.cast(dispatch_dst_rank_idx, "uint32") < T.uint32(num_processes):
+                            load_global_u64(
+                                ordinary_global_u64,
+                                workspace_expert_recv_count.ptr_to(
+                                    [dispatch_dst_rank_idx, current_expert_idx]
+                                ),
+                            )
+                            stored_rank_counts[rank_lane_idx] = T.cast(
+                                ordinary_global_u64, "uint32"
+                            )
                 token_idx_in_expert = dispatch_token_iter - expert_start_idx
                 dispatch_dst_slot_idx = token_idx_in_expert
                 round_offset = T.int32(0)
@@ -3852,12 +3912,13 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         ] - T.min(
                             remaining_rank_counts[rank_lane_idx], T.cast(min_active_count, "uint32")
                         )
-                pull_src_token_topk_idx = T.cast(
-                    workspace_src_token_topk_idx[
-                        current_expert_idx, current_rank_in_expert_idx, token_idx_in_rank
-                    ],
-                    "int32",
+                load_global_u32(
+                    ordinary_global_u32,
+                    workspace_src_token_topk_idx.ptr_to(
+                        [current_expert_idx, current_rank_in_expert_idx, token_idx_in_rank]
+                    ),
                 )
+                pull_src_token_topk_idx = T.cast(ordinary_global_u32, "int32")
                 pull_src_token_topk_idx_u32 = T.cast(pull_src_token_topk_idx, "uint32")
                 pull_src_token_idx = T.cast(
                     pull_src_token_topk_idx_u32 // T.uint32(num_topk), "int32"
@@ -3883,14 +3944,13 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         )
                 if T.cuda.elect_sync():
                     for pull_chunk_idx in T.unroll(0, num_pull_chunks):
+                        symm_rank_base = sym_buffer_base + T.cast(symm_rank_offsets[0], "uint64")
+                        load_symm_rank_base(
+                            symm_rank_base, smem_symm_rank_bases, current_rank_in_expert_idx
+                        )
                         tma_load_1d_symm(
                             smem_send_buffers.ptr_to([flat_warp_idx, 0]),
-                            symm_rank_base_expr(
-                                sym_buffer_base,
-                                symm_rank_offsets,
-                                smem_symm_rank_bases,
-                                current_rank_in_expert_idx,
-                            ),
+                            symm_rank_base,
                             T.uint64(
                                 symm_buffer_layout.input_token_offset
                                 + pull_src_token_idx * hidden
@@ -3929,38 +3989,38 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 dispatch_dst_rank_idx = lane_idx
                 while dispatch_dst_rank_idx < hidden // 128:
                     pulled_sf: T.uint32
+                    symm_rank_base = sym_buffer_base + T.cast(symm_rank_offsets[0], "uint64")
+                    load_symm_rank_base(
+                        symm_rank_base, smem_symm_rank_bases, current_rank_in_expert_idx
+                    )
                     peer_load_u32(
                         pulled_sf,
-                        symm_rank_base_expr(
-                            sym_buffer_base,
-                            symm_rank_offsets,
-                            smem_symm_rank_bases,
-                            current_rank_in_expert_idx,
-                        ),
+                        symm_rank_base,
                         T.uint64(
                             symm_buffer_layout.input_sf_offset
                             + (pull_src_token_idx * (hidden // 128) + dispatch_dst_rank_idx) * 4
                         ),
                     )
-                    l1_acts_sf[dispatch_dst_rank_idx, sf_row_idx] = T.cast(pulled_sf, "int32")
+                    store_global_u32(
+                        l1_acts_sf.ptr_to([dispatch_dst_rank_idx, sf_row_idx]), pulled_sf
+                    )
                     dispatch_dst_rank_idx = dispatch_dst_rank_idx + 32
                 T.cuda.warp_sync()
                 if T.cuda.elect_sync():
                     pulled_weight: T.float32
+                    symm_rank_base = sym_buffer_base + T.cast(symm_rank_offsets[0], "uint64")
+                    load_symm_rank_base(
+                        symm_rank_base, smem_symm_rank_bases, current_rank_in_expert_idx
+                    )
                     peer_load_f32(
                         pulled_weight,
-                        symm_rank_base_expr(
-                            sym_buffer_base,
-                            symm_rank_offsets,
-                            smem_symm_rank_bases,
-                            current_rank_in_expert_idx,
-                        ),
+                        symm_rank_base,
                         T.uint64(
                             symm_buffer_layout.input_topk_weights_offset
                             + pull_src_token_topk_idx * 4
                         ),
                     )
-                    l1_topk_weights[pull_ring_token_idx] = pulled_weight
+                    store_global_f32(l1_topk_weights.ptr_to([pull_ring_token_idx]), pulled_weight)
                     store_token_src_metadata(
                         pull_pool_token_idx,
                         current_rank_in_expert_idx,
@@ -4016,17 +4076,21 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                 # SM 0: clear expert send count and schedule task counters
                 dispatch_expert_idx = thread_idx
                 while dispatch_expert_idx < num_experts:
-                    workspace_expert_send_count[dispatch_expert_idx] = T.uint64(0)
+                    store_global_u64(
+                        workspace_expert_send_count.ptr_to([dispatch_expert_idx]), T.uint64(0)
+                    )
                     dispatch_expert_idx = dispatch_expert_idx + kernel_config.num_dispatch_threads
                 if (flat_warp_idx == 0) & T.cuda.elect_sync() != 0:
-                    workspace_l1_task_count[0] = T.uint32(0)
-                    workspace_l2_task_count[0] = T.uint32(0)
-                    workspace_shared_l1_task_count[0] = T.uint32(0)
-                    workspace_shared_l2_task_count[0] = T.uint32(0)
+                    store_global_u32(workspace_l1_task_count.ptr_to([0]), T.uint32(0))
+                    store_global_u32(workspace_l2_task_count.ptr_to([0]), T.uint32(0))
+                    store_global_u32(workspace_shared_l1_task_count.ptr_to([0]), T.uint32(0))
+                    store_global_u32(workspace_shared_l2_task_count.ptr_to([0]), T.uint32(0))
                 T.cuda.warp_sync()
                 dispatch_expert_idx = thread_idx
                 while dispatch_expert_idx < workspace_layout.num_shared_l2_pool_blocks:
-                    workspace_shared_l2_full_count[dispatch_expert_idx] = T.uint32(0)
+                    store_global_u32(
+                        workspace_shared_l2_full_count.ptr_to([dispatch_expert_idx]), T.uint32(0)
+                    )
                     dispatch_expert_idx = dispatch_expert_idx + kernel_config.num_dispatch_threads
                 T.cuda.warp_sync()
             else:
@@ -4057,7 +4121,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         T.uint32(kernel_config.num_dispatch_threads),
                     )
                     if thread_idx == 0:
-                        workspace_expert_recv_count_sum[pull_local_expert_idx] = T.uint64(0)
+                        store_global_u64(
+                            workspace_expert_recv_count_sum.ptr_to([pull_local_expert_idx]),
+                            T.uint64(0),
+                        )
                     if kernel_collect_stats and flat_warp_idx == 1 and lane_idx == 0:
                         T.evaluate(
                             red_add_gpu_s32(
@@ -4067,9 +4134,12 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         )
                     dispatch_dst_rank_idx = thread_idx
                     while dispatch_dst_rank_idx < T.int32(num_processes):
-                        workspace_expert_recv_count[
-                            dispatch_dst_rank_idx, pull_local_expert_idx
-                        ] = T.uint64(0)
+                        store_global_u64(
+                            workspace_expert_recv_count.ptr_to(
+                                [dispatch_dst_rank_idx, pull_local_expert_idx]
+                            ),
+                            T.uint64(0),
+                        )
                         dispatch_dst_rank_idx = (
                             dispatch_dst_rank_idx + kernel_config.num_dispatch_threads
                         )
@@ -4078,10 +4148,18 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                         pull_ring_block_idx = (
                             pull_pool_block_offset + dispatch_dst_slot_idx
                         ) % num_ring_blocks
-                        workspace_l1_full_count[pull_ring_block_idx] = T.uint32(0)
-                        workspace_l1_empty_count[pull_ring_block_idx] = T.uint32(0)
-                        workspace_l2_full_count[pull_ring_block_idx] = T.uint32(0)
-                        workspace_l2_empty_count[pull_ring_block_idx] = T.uint32(0)
+                        store_global_u32(
+                            workspace_l1_full_count.ptr_to([pull_ring_block_idx]), T.uint32(0)
+                        )
+                        store_global_u32(
+                            workspace_l1_empty_count.ptr_to([pull_ring_block_idx]), T.uint32(0)
+                        )
+                        store_global_u32(
+                            workspace_l2_full_count.ptr_to([pull_ring_block_idx]), T.uint32(0)
+                        )
+                        store_global_u32(
+                            workspace_l2_empty_count.ptr_to([pull_ring_block_idx]), T.uint32(0)
+                        )
                         dispatch_dst_slot_idx = (
                             dispatch_dst_slot_idx + kernel_config.num_dispatch_threads
                         )
@@ -4493,7 +4571,8 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
             epilogue_bf16_packed = T.alloc_local((4,), "uint32")
             tmem_addr = T.alloc_local((1,), "uint32")
             reduced = T.alloc_local((num_uint4_per_lane * num_elems_per_uint4, 2), "float32")
-            T.cuda.trap_when_assert_failed(tmem_ptr_in_smem[0] == T.uint32(0))
+            load_shared_u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
+            T.cuda.trap_when_assert_failed(tmem_allocated == T.uint32(0))
             epilogue_warp_idx = flat_warp_idx - kernel_config.epilogue_warp_start_idx
             epilogue_warp_idx_u32 = T.cast(epilogue_warp_idx, "uint32")
             epilogue_wg_idx = T.cast(epilogue_warp_idx_u32 // T.uint32(4), "int32")
@@ -4665,8 +4744,11 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                     + i * (atom_m // 2)
                                     + lane_idx
                                 ) * 2
-                                smem_amax_reduction[amax_reduction_idx] = amax_values[i, 0]
-                                smem_amax_reduction[amax_reduction_idx + 1] = amax_values[i, 1]
+                                T.ptx.st.shared.v2.f32(
+                                    smem_amax_reduction.ptr_to([amax_reduction_idx]),
+                                    amax_values[i, 0],
+                                    amax_values[i, 1],
+                                )
                             T.cuda.warp_sync()
                         tma_stage_idx = s % num_tma_store_stages
                         T.evaluate(tma_store_wait(1))
@@ -4680,8 +4762,11 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                 + i * (atom_m // 2)
                                 + (lane_idx % 4)
                             ) * 2
-                            wp_amax[0] = smem_amax_reduction[amax_reduction_idx]
-                            wp_amax[1] = smem_amax_reduction[amax_reduction_idx + 1]
+                            T.ptx.ld.shared.v2.f32(
+                                wp_amax[0],
+                                wp_amax[1],
+                                smem_amax_reduction.ptr_to([amax_reduction_idx]),
+                            )
                             amax_values[i, 0] = T.max(amax_values[i, 0], wp_amax[0])
                             amax_values[i, 1] = T.max(amax_values[i, 1], wp_amax[1])
                             get_e4m3_sf_and_sf_inv(
@@ -4746,11 +4831,13 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                 )
                                 sf_bits = float_bits(sf[0])
                                 sf_bits_hi = float_bits(sf[1])
-                                l2_sf_buffer[sf_addr] = T.cast(
-                                    T.shift_right(sf_bits, T.uint32(23)), "int8"
+                                store_global_u8(
+                                    l2_sf_buffer.ptr_to([sf_addr]),
+                                    T.cast(T.shift_right(sf_bits, T.uint32(23)), "uint8"),
                                 )
-                                l2_sf_buffer[sf_addr + T.uint64(16)] = T.cast(
-                                    T.shift_right(sf_bits_hi, T.uint32(23)), "int8"
+                                store_global_u8(
+                                    l2_sf_buffer.ptr_to([sf_addr + T.uint64(16)]),
+                                    T.cast(T.shift_right(sf_bits_hi, T.uint32(23)), "uint8"),
                                 )
                         T.cuda.warp_sync()
                         T.ptx.bar.sync(
@@ -4878,11 +4965,18 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                             )
                             if T.cast(m_idx_in_block, "uint32") < T.cast(valid_m, "uint32"):
                                 src_metadata_idx = pool_m_idx + m_idx_in_block
-                                dst_rank_idx_u32 = workspace_token_src_metadata[src_metadata_idx, 0]
-                                dst_token_idx_u32 = workspace_token_src_metadata[
-                                    src_metadata_idx, 1
-                                ]
-                                dst_topk_idx_u32 = workspace_token_src_metadata[src_metadata_idx, 2]
+                                load_global_u32(
+                                    dst_rank_idx_u32,
+                                    workspace_token_src_metadata.ptr_to([src_metadata_idx, 0]),
+                                )
+                                load_global_u32(
+                                    dst_token_idx_u32,
+                                    workspace_token_src_metadata.ptr_to([src_metadata_idx, 1]),
+                                )
+                                load_global_u32(
+                                    dst_topk_idx_u32,
+                                    workspace_token_src_metadata.ptr_to([src_metadata_idx, 2]),
+                                )
                                 dst_rank_idx = T.cast(dst_rank_idx_u32, "int32")
                                 dst_token_base_offset = T.cast(
                                     dst_topk_idx_u32, "uint64"
@@ -4909,18 +5003,18 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                                     ]
                                 )
                                 lds128(smem_ptr, epilogue_bf16_packed)
-                                dst_peer_base = symm_rank_base_expr(
-                                    sym_buffer_base,
-                                    symm_rank_offsets,
-                                    smem_symm_rank_bases,
-                                    dst_rank_idx,
+                                symm_rank_base = sym_buffer_base + T.cast(
+                                    symm_rank_offsets[0], "uint64"
+                                )
+                                load_symm_rank_base(
+                                    symm_rank_base, smem_symm_rank_bases, dst_rank_idx
                                 )
                                 dst_ptr = (
                                     T.cast(symm_buffer_layout.combine_token_offset, "uint64")
                                     + dst_ptr
                                 )
                                 stg128_symm(
-                                    dst_peer_base,
+                                    symm_rank_base,
                                     dst_ptr,
                                     epilogue_bf16_packed[0],
                                     epilogue_bf16_packed[1],
@@ -4955,7 +5049,10 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
             while T.cast(token_idx, "uint32") < T.cast(num_tokens, "uint32"):
                 stored_topk_slot_idx = T.int32(-1)
                 if lane_idx < num_topk:
-                    stored_topk_slot_idx = T.cast(input_topk_idx[token_idx, lane_idx], "int32")
+                    load_global_s64(
+                        ordinary_global_s64, input_topk_idx.ptr_to([token_idx, lane_idx])
+                    )
+                    stored_topk_slot_idx = T.cast(ordinary_global_s64, "int32")
                 total_mask = ballot_sync(T.uint32(0xFFFFFFFF), stored_topk_slot_idx >= T.int32(0))
                 for chunk in T.unroll(0, num_chunks):
                     mask = total_mask

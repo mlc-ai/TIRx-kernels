@@ -1107,9 +1107,10 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     q_row_start,
                     (K_smem.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
                 )
-                desc_q_row = matrix_desc_from_anchor(
-                    MATRIX_DESC_F16_SS_LDO_512, q_row_start, 0
-                )
+                if not causal:
+                    desc_q_row = matrix_desc_from_anchor(
+                        MATRIX_DESC_F16_SS_LDO_512, q_row_start, 0
+                    )
                 desc_v_row = matrix_desc_from_anchor(
                     MATRIX_DESC_F16_SS_LDO_1024,
                     q_row_start,
@@ -1177,7 +1178,23 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     q_ph.advance()
                     accum_var = 0
                     if T.cuda.elect_sync():
-                        mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
+                        if causal:
+                            # Keep the causal Q-row descriptor issue-local.
+                            # Its address encoding is cheap to rebuild, while
+                            # carrying it across the whole 2-CTA MMA loop
+                            # creates avoidable uniform-register pressure.
+                            q_row_issue_addr: T.uint32 = T.cuda.cvta_generic_to_shared(
+                                Q_row.ptr_to([0, 0, 0])
+                            )
+                            q_row_issue_start: T.uint64 = T.cast(
+                                T.shift_right(q_row_issue_addr, T.uint32(4)), "uint64"
+                            )
+                            desc_q_row_issue: T.uint64 = matrix_desc_from_anchor(
+                                MATRIX_DESC_F16_SS_LDO_512, q_row_issue_start, 0
+                            )
+                            mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row_issue)
+                        else:
+                            mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
                     if T.cuda.elect_sync():
                         mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                         tcgen05_commit(
@@ -1222,7 +1239,19 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                         dq_tmem_free_ph.advance()
                         accum_var = 0
                         if T.cuda.elect_sync():
-                            mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
+                            if causal:
+                                q_row_issue_addr: T.uint32 = T.cuda.cvta_generic_to_shared(
+                                    Q_row.ptr_to([0, 0, 0])
+                                )
+                                q_row_issue_start: T.uint64 = T.cast(
+                                    T.shift_right(q_row_issue_addr, T.uint32(4)), "uint64"
+                                )
+                                desc_q_row_issue: T.uint64 = matrix_desc_from_anchor(
+                                    MATRIX_DESC_F16_SS_LDO_512, q_row_issue_start, 0
+                                )
+                                mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row_issue)
+                            else:
+                                mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
                         if T.cuda.elect_sync():
                             mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
                             tcgen05_commit(
@@ -1368,8 +1397,10 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     0, remote=1 - id_in_pair, pred=True
                 )
                 tmem_dealloc_mbar.wait(0, 0)
+                tmem_dealloc_addr: T.uint32
+                T.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_addr.ptr_to([0]))
                 T.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](
-                    tmem_addr[0], T.uint32(512)
+                    tmem_dealloc_addr, T.uint32(512)
                 )
 
         # ==============================================================
@@ -1447,13 +1478,17 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                     for stage in T.unroll(STRIP_SIZE // 32):
                         for j_inner in T.unroll(32 // 2):
                             j = T.meta_var(stage * (32 // 2) + j_inner)
+                            lse_pair_0: T.float32
+                            lse_pair_1: T.float32
+                            T.ptx.ld.shared.v2.f32(
+                                lse_pair_0,
+                                lse_pair_1,
+                                sLSE.ptr_to([0, strip_off + 2 * j]),
+                            )
                             scaled_pair: T.let = fma_scale_sub_f32x2(
                                 T.cuda.make_float2(S_strip[2 * j], S_strip[2 * j + 1]),
                                 T.cuda.make_float2(T.float32(scale_log2), T.float32(scale_log2)),
-                                T.cuda.make_float2(
-                                    sLSE[0, strip_off + 2 * j],
-                                    sLSE[0, strip_off + 2 * j + 1],
-                                ),
+                                T.cuda.make_float2(lse_pair_0, lse_pair_1),
                             )
                             S_strip[2 * j] = T.cuda.float2_x(scaled_pair)
                             S_strip[2 * j + 1] = T.cuda.float2_y(scaled_pair)
@@ -1535,13 +1570,17 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
 
                     # dS^T[n,m] = P^T[n,j] * (dP^T[n,j] - dpsum[m]).
                     for j in T.unroll(STRIP_SIZE // 2):
+                        dpsum_pair_0: T.float32
+                        dpsum_pair_1: T.float32
+                        T.ptx.ld.shared.v2.f32(
+                            dpsum_pair_0,
+                            dpsum_pair_1,
+                            sDPsum.ptr_to([strip_off + 2 * j]),
+                        )
                         T.ptx.sub.rn.ftz.f32x2(
                             dP_pairs[j],
                             T.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1]),
-                            T.cuda.make_float2(
-                                sDPsum[strip_off + 2 * j],
-                                sDPsum[strip_off + 2 * j + 1],
-                            ),
+                            T.cuda.make_float2(dpsum_pair_0, dpsum_pair_1),
                         )
                         T.ptx.mul.rn.ftz.f32x2(
                             dP_pairs[j],

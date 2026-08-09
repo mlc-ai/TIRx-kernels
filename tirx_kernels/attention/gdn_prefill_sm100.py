@@ -234,6 +234,13 @@ def _byte_ptr(ptr, byte_offset):
     return T.reinterpret("handle", T.reinterpret("uint64", ptr) + T.cast(byte_offset, "uint64"))
 
 
+@T.inline
+def _load_sequence_bounds(cu_seqlens, batch, bounds):
+    # Keep these scalar: an odd batch index is only four-byte aligned.
+    T.ptx.ld.global_.s32(bounds[0], cu_seqlens.ptr_to([batch]))
+    T.ptx.ld.global_.s32(bounds[1], cu_seqlens.ptr_to([batch + 1]))
+
+
 def _pipe_stage(count, stages):
     return T.cast(T.cast(count, "uint32") % T.uint32(stages), "int32")
 
@@ -329,11 +336,15 @@ def _producer_tail_state(smem_base_addr, empty_off, index, phase, stages):
 
 @T.inline
 def _descriptor_copy_payload(src_map, dst_ptr):
-    payload = T.decl_buffer(
-        (8,), "uint64", data=_byte_ptr(T.address_of(src_map), 0), scope="param", align=16
+    payload: T.uint64[4]
+    T.ptx.ld.global_.v4.b64(
+        payload[0], payload[1], payload[2], payload[3], _byte_ptr(T.address_of(src_map), 0)
     )
     T.ptx.st.global_.v4.b64(dst_ptr, payload[0], payload[1], payload[2], payload[3])
-    T.ptx.st.global_.v4.b64(_byte_ptr(dst_ptr, 32), payload[4], payload[5], payload[6], payload[7])
+    T.ptx.ld.global_.v4.b64(
+        payload[0], payload[1], payload[2], payload[3], _byte_ptr(T.address_of(src_map), 32)
+    )
+    T.ptx.st.global_.v4.b64(_byte_ptr(dst_ptr, 32), payload[0], payload[1], payload[2], payload[3])
 
 
 def _replace_global_address(desc, address):
@@ -909,7 +920,9 @@ def _copy_empty_state(initial_state, final_state, batch, output_head, thread, *,
         T.cast(batch, "int64") * T.cast(HV, "int64") + T.cast(output_head, "int64")
     ) * T.int64(D_HEAD * D_HEAD) + cg1_thread * T.int64(D_HEAD)
     for key in T.serial(0, D_HEAD):
-        final_state[state_base + key] = initial_state[state_base + key]
+        state_value: T.float32
+        T.ptx.ld.global_.f32(state_value, initial_state.ptr_to([state_base + key]))
+        T.ptx.st.global_.f32(final_state.ptr_to([state_base + key]), state_value)
 
 
 @T.inline
@@ -1190,12 +1203,20 @@ def _load_gate_beta_chunk(
         valid0 = T.cast(pos0 < batch_end, "int32")
         valid1 = T.cast(pos1 < batch_end, "int32")
         if valid0 != 0:
-            gate0 = gate[pos0 * T.cast(HV, "int64") + T.cast(output_head, "int64")]
+            T.ptx.ld.global_.f32(
+                gate0, gate.ptr_to([pos0 * T.cast(HV, "int64") + T.cast(output_head, "int64")])
+            )
         if valid1 != 0:
-            gate1 = gate[pos1 * T.cast(HV, "int64") + T.cast(output_head, "int64")]
+            T.ptx.ld.global_.f32(
+                gate1, gate.ptr_to([pos1 * T.cast(HV, "int64") + T.cast(output_head, "int64")])
+            )
     else:
-        gate0 = gate[pos0 * T.cast(HV, "int64") + T.cast(output_head, "int64")]
-        gate1 = gate[pos1 * T.cast(HV, "int64") + T.cast(output_head, "int64")]
+        T.ptx.ld.global_.f32(
+            gate0, gate.ptr_to([pos0 * T.cast(HV, "int64") + T.cast(output_head, "int64")])
+        )
+        T.ptx.ld.global_.f32(
+            gate1, gate.ptr_to([pos1 * T.cast(HV, "int64") + T.cast(output_head, "int64")])
+        )
 
     gate0 = _lg2_approx_ftz(gate0 + T.float32(1.0e-10))
     gate1 = _lg2_approx_ftz(gate1 + T.float32(1.0e-10))
@@ -1215,10 +1236,10 @@ def _load_gate_beta_chunk(
     # The register scan precedes stage acquisition in the frozen source.
     _producer_acquire_state(smem_base_addr, 184, gate_count, gate_phase)
     gate_stage: T.int32 = gate_count
-    s_cumsumlog[gate_stage * 64 + lane] = gate0
-    s_cumsumlog[gate_stage * 64 + lane + 32] = gate1
-    s_cumprod[gate_stage * 64 + lane] = cumprod0
-    s_cumprod[gate_stage * 64 + lane + 32] = cumprod1
+    T.ptx.st.shared.f32(s_cumsumlog.ptr_to([gate_stage * 64 + lane]), gate0)
+    T.ptx.st.shared.f32(s_cumsumlog.ptr_to([gate_stage * 64 + lane + 32]), gate1)
+    T.ptx.st.shared.f32(s_cumprod.ptr_to([gate_stage * 64 + lane]), cumprod0)
+    T.ptx.st.shared.f32(s_cumprod.ptr_to([gate_stage * 64 + lane + 32]), cumprod1)
     _software_commit_state(smem_base_addr, 144, gate_count)
 
     _producer_acquire_state(smem_base_addr, 264, beta_count, beta_phase)
@@ -1228,8 +1249,8 @@ def _load_gate_beta_chunk(
         smem_base_addr, SMEM_BETA_OFF + (beta_stage * 64 + lane + 32) * 4
     )
     if is_last_tile:
-        s_beta[beta_stage * 64 + lane] = T.float32(0.0)
-        s_beta[beta_stage * 64 + lane + 32] = T.float32(0.0)
+        T.ptx.st.shared.f32(s_beta.ptr_to([beta_stage * 64 + lane]), T.float32(0.0))
+        T.ptx.st.shared.f32(s_beta.ptr_to([beta_stage * 64 + lane + 32]), T.float32(0.0))
         T.ptx["cp.async.ca.shared.global"](
             beta_dst0,
             beta.ptr_to([pos0 * T.cast(HV, "int64") + T.cast(output_head, "int64")]),
@@ -1496,8 +1517,10 @@ def _kernel(
             # spelling another runtime modulus makes NVRTC emit rem.s32,
             # which is absent from the frozen PTX.
             batch_cg0: T.int32 = remain_cg0
-            batch_start_cg0: T.int64 = T.cast(cu_seqlens[batch_cg0], "int64")
-            batch_end_cg0: T.int64 = T.cast(cu_seqlens[batch_cg0 + 1], "int64")
+            sequence_bounds_cg0: T.int32[2]
+            _load_sequence_bounds(cu_seqlens, batch_cg0, sequence_bounds_cg0)
+            batch_start_cg0: T.int64 = T.cast(sequence_bounds_cg0[0], "int64")
+            batch_end_cg0: T.int64 = T.cast(sequence_bounds_cg0[1], "int64")
             seqlen_cg0: T.int32 = T.cast(batch_end_cg0 - batch_start_cg0, "int32")
             num_pairs_cg0: T.int32 = (seqlen_cg0 + PAIR_TOKENS - 1) // PAIR_TOKENS
 
@@ -1523,8 +1546,14 @@ def _kernel(
                 gate_consumer_phase_cg0 = _pipe_next_phase(gate1_count_cg0, gate1_phase_cg0, 5)
                 gate0_stage_cg0: T.int32 = gate0_count_cg0
                 gate1_stage_cg0: T.int32 = gate1_count_cg0
-                row_log0_cg0: T.float32 = s_cumsumlog[gate0_stage_cg0 * 64 + row_cg0]
-                row_log1_cg0: T.float32 = s_cumsumlog[gate1_stage_cg0 * 64 + row_cg0]
+                row_log0_cg0: T.float32
+                row_log1_cg0: T.float32
+                T.ptx.ld.shared.f32(
+                    row_log0_cg0, s_cumsumlog.ptr_to([gate0_stage_cg0 * 64 + row_cg0])
+                )
+                T.ptx.ld.shared.f32(
+                    row_log1_cg0, s_cumsumlog.ptr_to([gate1_stage_cg0 * 64 + row_cg0])
+                )
                 for frag_idx_cg0 in T.unroll(32):
                     col_cg0: T.int32 = col_base_cg0 + frag_idx_cg0
                     if frag_idx_cg0 >= 16:
@@ -1535,14 +1564,16 @@ def _kernel(
                     transfer_exp0_cg0: T.float32 = T.float32(0.0)
                     transfer_exp1_cg0: T.float32 = T.float32(0.0)
                     if row_cg0 >= col_cg0:
-                        T.ptx.ex2.approx.ftz.f32(
-                            transfer_exp0_cg0,
-                            row_log0_cg0 - s_cumsumlog[gate0_stage_cg0 * 64 + col_cg0],
+                        col_log0_cg0: T.float32
+                        col_log1_cg0: T.float32
+                        T.ptx.ld.shared.f32(
+                            col_log0_cg0, s_cumsumlog.ptr_to([gate0_stage_cg0 * 64 + col_cg0])
                         )
-                        T.ptx.ex2.approx.ftz.f32(
-                            transfer_exp1_cg0,
-                            row_log1_cg0 - s_cumsumlog[gate1_stage_cg0 * 64 + col_cg0],
+                        T.ptx.ld.shared.f32(
+                            col_log1_cg0, s_cumsumlog.ptr_to([gate1_stage_cg0 * 64 + col_cg0])
                         )
+                        T.ptx.ex2.approx.ftz.f32(transfer_exp0_cg0, row_log0_cg0 - col_log0_cg0)
+                        T.ptx.ex2.approx.ftz.f32(transfer_exp1_cg0, row_log1_cg0 - col_log1_cg0)
                     transfer0_cg0[frag_idx_cg0] = transfer_exp0_cg0
                     transfer1_cg0[frag_idx_cg0] = transfer_exp1_cg0
                 _consumer_release_state(smem_addr_cg0, 184, gate0_count_cg0)
@@ -1558,8 +1589,10 @@ def _kernel(
                 _consumer_wait_state(smem_addr_cg0, 224, beta1_count_cg0, beta1_phase_cg0)
                 beta_consumer_index_cg0 = _pipe_next_index(beta1_count_cg0, 5)
                 beta_consumer_phase_cg0 = _pipe_next_phase(beta1_count_cg0, beta1_phase_cg0, 5)
-                beta0_cg0: T.float32 = s_beta[beta0_count_cg0 * 64 + row_cg0]
-                beta1_cg0: T.float32 = s_beta[beta1_count_cg0 * 64 + row_cg0]
+                beta0_cg0: T.float32
+                beta1_cg0: T.float32
+                T.ptx.ld.shared.f32(beta0_cg0, s_beta.ptr_to([beta0_count_cg0 * 64 + row_cg0]))
+                T.ptx.ld.shared.f32(beta1_cg0, s_beta.ptr_to([beta1_count_cg0 * 64 + row_cg0]))
 
                 # KK0 seed: acquire Ainv, consume accumulator, then multiply
                 # packed f32x2 by transfer and the beta ROW before narrowing.
@@ -1654,16 +1687,17 @@ def _kernel(
                     inv_col0_cg0: T.int32 = col_base_cg0 + pair_frag_cg0 * 2
                     if pair_frag_cg0 >= 8:
                         inv_col0_cg0 = inv_col0_cg0 + 16
+                    beta_col0_cg0: T.uint64
+                    T.ptx.ld.shared.u64(
+                        beta_col0_cg0, s_beta.ptr_to([beta0_count_cg0 * 64 + inv_col0_cg0])
+                    )
                     inv_mul_cg0: T.uint64
                     T.ptx.mul.rn.f32x2(
                         inv_mul_cg0,
                         T.cuda.make_float2(
                             inv_values_cg0[pair_frag_cg0 * 2], inv_values_cg0[pair_frag_cg0 * 2 + 1]
                         ),
-                        T.cuda.make_float2(
-                            s_beta[beta0_count_cg0 * 64 + inv_col0_cg0],
-                            s_beta[beta0_count_cg0 * 64 + inv_col0_cg0 + 1],
-                        ),
+                        beta_col0_cg0,
                     )
                     inv_values_cg0[pair_frag_cg0 * 2] = T.cuda.float2_x(inv_mul_cg0)
                     inv_values_cg0[pair_frag_cg0 * 2 + 1] = T.cuda.float2_y(inv_mul_cg0)
@@ -1681,16 +1715,17 @@ def _kernel(
                     inv_col1_cg0: T.int32 = col_base_cg0 + pair_frag_cg0 * 2
                     if pair_frag_cg0 >= 8:
                         inv_col1_cg0 = inv_col1_cg0 + 16
+                    beta_col1_cg0: T.uint64
+                    T.ptx.ld.shared.u64(
+                        beta_col1_cg0, s_beta.ptr_to([beta1_count_cg0 * 64 + inv_col1_cg0])
+                    )
                     inv_mul_cg0: T.uint64
                     T.ptx.mul.rn.f32x2(
                         inv_mul_cg0,
                         T.cuda.make_float2(
                             inv_values_cg0[pair_frag_cg0 * 2], inv_values_cg0[pair_frag_cg0 * 2 + 1]
                         ),
-                        T.cuda.make_float2(
-                            s_beta[beta1_count_cg0 * 64 + inv_col1_cg0],
-                            s_beta[beta1_count_cg0 * 64 + inv_col1_cg0 + 1],
-                        ),
+                        beta_col1_cg0,
                     )
                     inv_values_cg0[pair_frag_cg0 * 2] = T.cuda.float2_x(inv_mul_cg0)
                     inv_values_cg0[pair_frag_cg0 * 2 + 1] = T.cuda.float2_y(inv_mul_cg0)
@@ -1784,8 +1819,10 @@ def _kernel(
             )
             remain_cg1: T.int32 = T.cast(remain_u32_cg1, "int32")
             batch_cg1: T.int32 = remain_cg1
-            batch_start_cg1: T.int64 = T.cast(cu_seqlens[batch_cg1], "int64")
-            batch_end_cg1: T.int64 = T.cast(cu_seqlens[batch_cg1 + 1], "int64")
+            sequence_bounds_cg1: T.int32[2]
+            _load_sequence_bounds(cu_seqlens, batch_cg1, sequence_bounds_cg1)
+            batch_start_cg1: T.int64 = T.cast(sequence_bounds_cg1[0], "int64")
+            batch_end_cg1: T.int64 = T.cast(sequence_bounds_cg1[1], "int64")
             seqlen_cg1: T.int32 = T.cast(batch_end_cg1 - batch_start_cg1, "int32")
             num_valid_chunks_cg1: T.int32 = (seqlen_cg1 + CHUNK - 1) // CHUNK
             num_pairs_cg1: T.int32 = (seqlen_cg1 + PAIR_TOKENS - 1) // PAIR_TOKENS
@@ -1821,7 +1858,10 @@ def _kernel(
                     gate_consumer_index_cg1 = _pipe_next_index(gate_count_cg1, 5)
                     gate_consumer_phase_cg1 = _pipe_next_phase(gate_count_cg1, gate_phase_cg1, 5)
                     gate_stage_cg1: T.int32 = gate_count_cg1
-                    cumprod_total_cg1: T.float32 = s_cumprod[gate_stage_cg1 * 64 + 63]
+                    cumprod_total_cg1: T.float32
+                    T.ptx.ld.shared.f32(
+                        cumprod_total_cg1, s_cumprod.ptr_to([gate_stage_cg1 * 64 + 63])
+                    )
 
                     # Previous recurrent state -> f16 state-input TMEM, then
                     # the same f32 fragment is decayed in place and restored.
@@ -1881,28 +1921,33 @@ def _kernel(
                     cumprod_factor_cg1: T.float32[16]
                     decay_factor_cg1: T.float32[16]
                     factor_col_base_cg1: T.int32 = T.bitwise_and(thread << 1, T.int32(6))
-                    last_log_cg1: T.float32 = s_cumsumlog[gate_stage_cg1 * 64 + 63]
+                    last_log_cg1: T.float32
+                    T.ptx.ld.shared.f32(
+                        last_log_cg1, s_cumsumlog.ptr_to([gate_stage_cg1 * 64 + 63])
+                    )
                     for factor_group_cg1 in T.unroll(8):
                         factor_col_cg1: T.int32 = factor_col_base_cg1 + factor_group_cg1 * 8
-                        cumprod_factor_cg1[factor_group_cg1 * 2] = s_cumprod[
-                            gate_stage_cg1 * 64 + factor_col_cg1
-                        ]
-                        cumprod_factor_cg1[factor_group_cg1 * 2 + 1] = s_cumprod[
-                            gate_stage_cg1 * 64 + factor_col_cg1 + 1
-                        ]
+                        T.ptx.ld.shared.v2.f32(
+                            cumprod_factor_cg1[factor_group_cg1 * 2],
+                            cumprod_factor_cg1[factor_group_cg1 * 2 + 1],
+                            s_cumprod.ptr_to([gate_stage_cg1 * 64 + factor_col_cg1]),
+                        )
                         # Frozen PTX spells this as scalar negations feeding
                         # add.rn.f32x2; ptxas folds those negations into the
                         # packed subtraction.  Express the resulting native
                         # operation directly so the CUDA C++ bridge does not
                         # materialize two standalone FADD negations.
                         decay_diff_cg1: T.uint64[1]
+                        cumsumlog_factor_cg1: T.float32[2]
+                        T.ptx.ld.shared.v2.f32(
+                            cumsumlog_factor_cg1[0],
+                            cumsumlog_factor_cg1[1],
+                            s_cumsumlog.ptr_to([gate_stage_cg1 * 64 + factor_col_cg1]),
+                        )
                         T.ptx.sub.rn.f32x2(
                             decay_diff_cg1[0],
                             T.cuda.make_float2(last_log_cg1, last_log_cg1),
-                            T.cuda.make_float2(
-                                s_cumsumlog[gate_stage_cg1 * 64 + factor_col_cg1],
-                                s_cumsumlog[gate_stage_cg1 * 64 + factor_col_cg1 + 1],
-                            ),
+                            T.cuda.make_float2(cumsumlog_factor_cg1[0], cumsumlog_factor_cg1[1]),
                         )
                         T.ptx.ex2.approx.ftz.f32(
                             decay_factor_cg1[factor_group_cg1 * 2],
@@ -2114,8 +2159,10 @@ def _kernel(
                 _udiv_u32_const(T.cast(work_linear_issuer0, "uint32"), HV), "int32"
             )
             batch_issuer0: T.int32 = remain_issuer0
-            batch_start_issuer0: T.int64 = T.cast(cu_seqlens[batch_issuer0], "int64")
-            batch_end_issuer0: T.int64 = T.cast(cu_seqlens[batch_issuer0 + 1], "int64")
+            sequence_bounds_issuer0: T.int32[2]
+            _load_sequence_bounds(cu_seqlens, batch_issuer0, sequence_bounds_issuer0)
+            batch_start_issuer0: T.int64 = T.cast(sequence_bounds_issuer0[0], "int64")
+            batch_end_issuer0: T.int64 = T.cast(sequence_bounds_issuer0[1], "int64")
             seqlen_issuer0: T.int32 = T.cast(batch_end_issuer0 - batch_start_issuer0, "int32")
             num_pairs_issuer0: T.int32 = (seqlen_issuer0 + PAIR_TOKENS - 1) // PAIR_TOKENS
 
@@ -2238,8 +2285,10 @@ def _kernel(
                 _udiv_u32_const(T.cast(work_linear_issuer1, "uint32"), HV), "int32"
             )
             batch_issuer1: T.int32 = remain_issuer1
-            batch_start_issuer1: T.int64 = T.cast(cu_seqlens[batch_issuer1], "int64")
-            batch_end_issuer1: T.int64 = T.cast(cu_seqlens[batch_issuer1 + 1], "int64")
+            sequence_bounds_issuer1: T.int32[2]
+            _load_sequence_bounds(cu_seqlens, batch_issuer1, sequence_bounds_issuer1)
+            batch_start_issuer1: T.int64 = T.cast(sequence_bounds_issuer1[0], "int64")
+            batch_end_issuer1: T.int64 = T.cast(sequence_bounds_issuer1[1], "int64")
             seqlen_issuer1: T.int32 = T.cast(batch_end_issuer1 - batch_start_issuer1, "int32")
             num_pairs_issuer1: T.int32 = (seqlen_issuer1 + PAIR_TOKENS - 1) // PAIR_TOKENS
             padded_chunks_issuer1: T.int32 = num_pairs_issuer1 * 2
@@ -2391,8 +2440,10 @@ def _kernel(
                 value_subhead_tma = head_tma - qk_head_tma * (HV // HQ)
             remain_tma: T.int32 = T.cast(remain_u32_tma, "int32")
             batch_tma: T.int32 = remain_tma
-            batch_start_tma: T.int64 = T.cast(cu_seqlens[batch_tma], "int64")
-            batch_end_tma: T.int64 = T.cast(cu_seqlens[batch_tma + 1], "int64")
+            sequence_bounds_tma: T.int32[2]
+            _load_sequence_bounds(cu_seqlens, batch_tma, sequence_bounds_tma)
+            batch_start_tma: T.int64 = T.cast(sequence_bounds_tma[0], "int64")
+            batch_end_tma: T.int64 = T.cast(sequence_bounds_tma[1], "int64")
             seqlen_tma: T.int32 = T.cast(batch_end_tma - batch_start_tma, "int32")
             num_valid_chunks_tma: T.int32 = (seqlen_tma + CHUNK - 1) // CHUNK
             num_pairs_tma: T.int32 = (seqlen_tma + PAIR_TOKENS - 1) // PAIR_TOKENS
@@ -2572,8 +2623,10 @@ def _kernel(
                 value_subhead_epi = head_epi - qk_head_epi * (HV // HQ)
             remain_epi: T.int32 = T.cast(remain_u32_epi, "int32")
             batch_epi: T.int32 = remain_epi
-            batch_start_epi: T.int64 = T.cast(cu_seqlens[batch_epi], "int64")
-            batch_end_epi: T.int64 = T.cast(cu_seqlens[batch_epi + 1], "int64")
+            sequence_bounds_epi: T.int32[2]
+            _load_sequence_bounds(cu_seqlens, batch_epi, sequence_bounds_epi)
+            batch_start_epi: T.int64 = T.cast(sequence_bounds_epi[0], "int64")
+            batch_end_epi: T.int64 = T.cast(sequence_bounds_epi[1], "int64")
             seqlen_epi: T.int32 = T.cast(batch_end_epi - batch_start_epi, "int32")
             num_valid_chunks_epi: T.int32 = (seqlen_epi + CHUNK - 1) // CHUNK
             num_pairs_epi: T.int32 = (seqlen_epi + PAIR_TOKENS - 1) // PAIR_TOKENS
