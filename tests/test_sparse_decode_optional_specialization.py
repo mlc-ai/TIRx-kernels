@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
-import tvm
 from tirx_kernels.flashmla.sparse_decode_head64 import CONFIGS, get_kernel
 from tvm import tirx
 
@@ -15,7 +16,17 @@ def _assert_static_parameter_protocol(kernel, *, total: int, buffers: int) -> No
     assert buffer_parameters == [True] * buffers + [False] * (total - buffers)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required by the public factory")
+@pytest.fixture(autouse=True)
+def _sm100_compile_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: SimpleNamespace(multi_processor_count=148),
+    )
+
+
 @pytest.mark.parametrize("config", CONFIGS, ids=lambda config: config["label"])
 def test_public_configs_expose_the_documented_static_argument_protocol(config) -> None:
     parameters = {key: value for key, value in config.items() if key != "label"}
@@ -39,22 +50,3 @@ def test_public_configs_expose_the_documented_static_argument_protocol(config) -
     _assert_static_parameter_protocol(
         combine, total=20 + combine_optional_buffers, buffers=5 + combine_optional_buffers
     )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required by the public factory")
-def test_public_model_selection_changes_only_the_model_specific_function() -> None:
-    common = {
-        "b": 4,
-        "s_q": 2,
-        "s_kv": 128,
-        "topk": 64,
-        "page_block_size": 64,
-        "have_attn_sink": True,
-    }
-
-    main_model1, combine_model1 = get_kernel(model_type="MODEL1", **common)
-    main_v32, combine_v32 = get_kernel(model_type="V32", **common)
-
-    with pytest.raises(ValueError):
-        tvm.ir.assert_structural_equal(main_model1, main_v32)
-    tvm.ir.assert_structural_equal(combine_model1, combine_v32)

@@ -63,13 +63,6 @@ _TMEM_LD_64 = "tcgen05.ld.sync.aligned.32x32b.x64.b32"
 _TMEM_ST_32 = "tcgen05.st.sync.aligned.32x32b.x32.b32"
 _Q_TMA_CACHE_HINT = T.uint64(0x12F0000000000000)
 _KV_TMA_CACHE_HINT = T.uint64(0x14F0000000000000)
-_CAST_F32X2_BF16X2_SOURCE = r"""
-__forceinline__ __device__ void h64_cast_float32x2_bfloat16x2(void* dst, void* src) {
-  ((nv_bfloat162*)dst)[0] = __float22bfloat162_rn(((float2*)src)[0]);
-}
-"""
-
-
 def _tmem_load(dst, tmem_col, width):
     chain = _TMEM_LD_32 if width == 32 else _TMEM_LD_64
     return T.ptx[chain](*[dst[i] for i in range(width)], tmem_col)
@@ -81,11 +74,9 @@ def _tmem_store(src, tmem_col, width=32):
 
 
 def _cast_f32x2_bf16x2(dst, src, offset):
-    return T.cuda.func_call(
-        "h64_cast_float32x2_bfloat16x2",
-        T.address_of(dst[offset]),
-        T.address_of(src[offset]),
-        source_code=_CAST_F32X2_BF16X2_SOURCE,
+    dst_words = dst.view("uint32")
+    return T.ptx.cvt.rn.bf16x2.f32(
+        dst_words[offset // 2], src[offset + 1], src[offset]
     )
 
 

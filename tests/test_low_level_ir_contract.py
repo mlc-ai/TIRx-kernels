@@ -202,7 +202,7 @@ def test_one_invalid_function_rejects_the_whole_nested_result() -> None:
     assert finding.node_type == "BufferLoad"
     assert "nested" in finding.function
     assert finding.span is not None
-    assert caught.value.report.to_dict()["ok"] is False
+    assert not caught.value.report.ok
 
 
 @pytest.mark.parametrize("scope", ["globalish", "shared_memory", "local", "tmem"])

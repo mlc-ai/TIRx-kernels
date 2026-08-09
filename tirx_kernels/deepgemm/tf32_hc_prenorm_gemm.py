@@ -401,6 +401,9 @@ def get_kernel(**kwargs: Any):
     cache_policy_evict_first = T.uint64(0x12F0000000000000)
     cache_policy_evict_last = T.uint64(0x14F0000000000000)
     tf32_instr_desc = T.uint32(67635472)
+    # The fixed TVM PTX table intentionally omits integer add. This helper
+    # performs uint32 wraparound in the descriptor's low half without a carry
+    # into the encoded layout fields.
     smem_desc_add_source = r"""
 __forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(
     uint64_t desc_base, int32_t offset) {
@@ -410,26 +413,14 @@ __forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(
     return desc.desc_;
 }
 """
-    cast_bf16x2_source = r"""
-__forceinline__ __device__ void tvm_builtin_cast_bfloat16x2_float32x2(
-    void* dst, void* src) {
-    ((float2*)dst)[0] = __bfloat1622float2(((nv_bfloat162*)src)[0]);
-}
-"""
-    pointer_offset_source = r"""
-template <typename T>
-__forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
-    return ptr + offset;
-}
-"""
 
-    def pointer_offset(ptr, offset):
+    def add_smem_desc_offset(desc, offset):
         return T.cuda.func_call(
-            "tvm_builtin_pointer_offset",
-            ptr,
+            "tvm_builtin_smem_desc_add_16B_offset",
+            desc,
             offset,
-            source_code=pointer_offset_source,
-            return_type=T.handle().ty,
+            source_code=smem_desc_add_source,
+            return_type="uint64",
         )
 
     def cuda_grid_dependency_synchronize():
@@ -647,9 +638,10 @@ __forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
                         # TFLOAT32 OOB-fill mode 11 so the load RN-truncates as
                         # before.  Coordinates are tensor-map order: K, then M/N.
                         T.ptx[tma_g2s_2d](
-                            pointer_offset(
+                            T.ptr_byte_offset(
                                 smem_a_mma.ptr_to([0, 0, 0]),
-                                stage_idx * T.uint32(block_m * block_k),
+                                stage_idx * T.uint32(block_m * block_k * 2),
+                                "bfloat16",
                             ),
                             T.address_of(a_tensormap),
                             T.cast(k_idx0, "int32"),
@@ -659,10 +651,11 @@ __forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
                         )
                         for b_atom in T.unroll(num_b_tma_atoms):
                             T.ptx[tma_g2s_2d](
-                                pointer_offset(
+                                T.ptr_byte_offset(
                                     smem_b_mma.ptr_to([0, 0, 0]),
-                                    stage_idx * T.uint32(block_n * block_k)
-                                    + T.uint32(b_atom * block_n * block_swizzled_bk),
+                                    stage_idx * T.uint32(block_n * block_k * 4)
+                                    + T.uint32(b_atom * block_n * block_swizzled_bk * 4),
+                                    "float32",
                                 ),
                                 T.address_of(b_tensormap),
                                 T.cast(k_idx0 + T.uint32(b_atom * block_swizzled_bk), "int32"),
@@ -703,16 +696,13 @@ __forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
                             T.ptx[tcgen05_mma_tf32](
                                 T.uint32(d_tmem_start_col),
                                 T.cast(a_col + T.int32(ki * umma_k), "uint32"),
-                                T.cuda.func_call(
-                                    "tvm_builtin_smem_desc_add_16B_offset",
+                                add_smem_desc_offset(
                                     desc_b,
                                     (
                                         T.uint32((ki // 4) * 1024 + (ki % 4) * 8)
                                         + stage_idx * T.uint32(block_n * block_k)
                                     )
                                     // T.uint32(4),
-                                    source_code=smem_desc_add_source,
-                                    return_type="uint64",
                                 ),
                                 tf32_instr_desc,
                                 T.uint32(0),
@@ -754,7 +744,11 @@ __forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
                         (compose_q ^ ((compose_q & T.uint32(56)) >> T.uint32(3))) << T.uint32(2)
                     ) + compose_m % T.uint32(4)
                     T.ptx.st.shared.v4.u32(
-                        pointer_offset(smem_cd_mma.ptr_to([0, 0]), smem_cd_offset),
+                        T.ptr_byte_offset(
+                            smem_cd_mma.ptr_to([0, 0]),
+                            smem_cd_offset * T.uint32(4),
+                            "float32",
+                        ),
                         d_words[0],
                         d_words[1],
                         d_words[2],
@@ -835,6 +829,7 @@ __forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
             a_flat = a_fp32.local()  # 1D physical-register view, 32 fp32 values per thread
             a_words = a_flat.view("uint32")
             a_bf16_flat = a_bf16.local()
+            a_bf16_u16 = a_bf16_flat.view("uint16")
             a_bf16_words = a_bf16_flat.view("uint32")
             sqr0[0] = T.float32(0)
             sqr0[1] = T.float32(0)
@@ -888,7 +883,9 @@ __forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
                         a_bf16_words[reg_base + 2],
                         a_bf16_words[reg_base + 4],
                         a_bf16_words[reg_base + 6],
-                        pointer_offset(smem_a_mma.ptr_to([0, 0, 0]), smem_off),
+                        T.ptr_byte_offset(
+                            smem_a_mma.ptr_to([0, 0, 0]), smem_off * 2, "bfloat16"
+                        ),
                     )
                 cast_pipe.empty.wait(cast_stage_idx, cast_cph)
                 # bf16->tf32 + sqr-fma + TMEM deposit: interleaved per 8-col atom on
@@ -896,11 +893,11 @@ __forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
                 if num_k_blocks_per_split <= 16:
                     for p in range(block_k // 8):
                         for f in range(2):
-                            T.cuda.func_call(
-                                "tvm_builtin_cast_bfloat16x2_float32x2",
-                                T.address_of(a_flat[p * 4 + f * 2]),
-                                T.address_of(a_bf16_flat[p * 4 + f * 2]),
-                                source_code=cast_bf16x2_source,
+                            T.ptx.cvt.f32.bf16(
+                                a_flat[p * 4 + f * 2], a_bf16_u16[p * 4 + f * 2]
+                            )
+                            T.ptx.cvt.f32.bf16(
+                                a_flat[p * 4 + f * 2 + 1], a_bf16_u16[p * 4 + f * 2 + 1]
                             )
                         # sqr{0,1} += a*a for this atom's packed pair per row.
                         pair0_lhs: T.uint64
@@ -928,12 +925,8 @@ __forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
                         )
                 else:
                     for f in range(cast_per_thread // 2):
-                        T.cuda.func_call(
-                            "tvm_builtin_cast_bfloat16x2_float32x2",
-                            T.address_of(a_flat[f * 2]),
-                            T.address_of(a_bf16_flat[f * 2]),
-                            source_code=cast_bf16x2_source,
-                        )
+                        T.ptx.cvt.f32.bf16(a_flat[f * 2], a_bf16_u16[f * 2])
+                        T.ptx.cvt.f32.bf16(a_flat[f * 2 + 1], a_bf16_u16[f * 2 + 1])
                     for p in T.unroll(cast_pairs):
                         pair0_lhs: T.uint64
                         pair0_rhs: T.uint64

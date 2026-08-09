@@ -16,48 +16,68 @@
 # under the License.
 from __future__ import annotations
 
+from types import ModuleType, SimpleNamespace
+
 import pytest
+import torch
 
-from tirx_kernels.attention import flash_attention_backward
-from tirx_kernels.deepgemm import paged_mqa_logits_fp4, paged_mqa_logits_fp8
-from tirx_kernels.flashkda import bf16_fused_m128 as flashkda_bf16_fused_m128
 from tirx_kernels.low_level_ir import check_low_level_ir
+from tirx_kernels.registry import discover_kernels
 
 
-@pytest.mark.parametrize(
-    "config", flash_attention_backward.CONFIGS, ids=lambda config: config["label"]
-)
-def test_flash_attention_backward_public_configs_satisfy_low_level_contract(config) -> None:
-    parameters = {key: value for key, value in config.items() if key != "label"}
+def _registry_cases() -> list:
+    registry = discover_kernels(strict=True)
+    assert registry, "no registered kernels discovered"
 
-    report = check_low_level_ir(flash_attention_backward.get_kernel(**parameters))
+    cases = []
+    for kernel_name, module in sorted(registry.items()):
+        assert callable(getattr(module, "get_kernel", None)), (
+            f"{kernel_name}: get_kernel must be callable"
+        )
+        configs = getattr(module, "CONFIGS", None)
+        assert isinstance(configs, list) and configs, (
+            f"{kernel_name}: CONFIGS must be a non-empty list"
+        )
 
-    assert report.checked_functions
+        labels = []
+        for config in configs:
+            assert isinstance(config, dict), f"{kernel_name}: config must be a dict"
+            assert all(isinstance(key, str) for key in config), (
+                f"{kernel_name}: config keys must be strings"
+            )
+            label = config.get("label")
+            assert isinstance(label, str) and label, f"{kernel_name}: config label must be set"
+            labels.append(label)
+            parameters = {key: value for key, value in config.items() if key != "label"}
+            cases.append(
+                pytest.param(kernel_name, module, parameters, id=f"{kernel_name}[{label}]")
+            )
+
+        assert len(labels) == len(set(labels)), f"{kernel_name}: duplicate config labels"
+    return cases
 
 
-@pytest.mark.parametrize(
-    "config", flashkda_bf16_fused_m128.CONFIGS, ids=lambda config: config["label"]
-)
-def test_flashkda_public_configs_satisfy_low_level_contract(config) -> None:
-    parameters = {key: value for key, value in config.items() if key != "label"}
-
-    report = check_low_level_ir(flashkda_bf16_fused_m128.get_kernel(**parameters))
-
-    assert report.checked_functions
-
-
-PAGED_MQA_KERNELS = (paged_mqa_logits_fp4, paged_mqa_logits_fp8)
-PAGED_MQA_CONFIGS = [(module, config) for module in PAGED_MQA_KERNELS for config in module.CONFIGS]
-
-
-@pytest.mark.parametrize(
-    ("module", "config"),
-    PAGED_MQA_CONFIGS,
-    ids=lambda value: value["label"] if isinstance(value, dict) else value.KERNEL_META["name"],
-)
-def test_paged_mqa_public_configs_satisfy_low_level_contract(module, config) -> None:
-    parameters = {key: value for key, value in config.items() if key != "label"}
+@pytest.mark.parametrize(("kernel_name", "module", "parameters"), _registry_cases())
+def test_registered_public_configs_satisfy_low_level_ir_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    kernel_name: str,
+    module: ModuleType,
+    parameters: dict[str, object],
+) -> None:
+    # Kernel construction is target-specific but must not require allocating a
+    # CUDA tensor.  Pin the two factories that derive compile-time scheduling
+    # constants from the target GPU to the repository's SM100 reference target.
+    monkeypatch.setenv("TIRX_DEEPGEMM_NUM_SMS_OVERRIDE", "148")
+    if kernel_name == "sparse_flashmla_decode_head64":
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+        monkeypatch.setattr(
+            torch.cuda,
+            "get_device_properties",
+            lambda _device: SimpleNamespace(multi_processor_count=148),
+        )
+        parameters = {**parameters, "device": "cuda:0"}
 
     report = check_low_level_ir(module.get_kernel(**parameters))
 
-    assert report.checked_functions
+    assert report.ok

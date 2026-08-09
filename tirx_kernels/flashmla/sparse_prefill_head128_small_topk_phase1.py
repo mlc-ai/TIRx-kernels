@@ -51,6 +51,29 @@ LAUNCH_TAGS = (
 BF16_BYTES = 2
 B_EPI = 64
 
+_SMEM_DESC_ADD_SOURCE = r"""
+__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(
+    uint64_t desc_base, int32_t offset) {
+    SmemDescriptor desc;
+    desc.desc_ = desc_base;
+    desc.lo += static_cast<uint32_t>(offset);
+    return desc.desc_;
+}
+"""
+
+
+def _add_smem_desc_offset(desc, offset):
+    # The fixed TVM PTX table intentionally does not register integer add.
+    # Keep the helper so uint32 descriptor address arithmetic cannot carry
+    # into the encoded layout fields in the upper half.
+    return T.cuda.func_call(
+        "tvm_builtin_smem_desc_add_16B_offset",
+        desc,
+        offset,
+        source_code=_SMEM_DESC_ADD_SOURCE,
+        return_type="uint64",
+    )
+
 BAR_WG0_SYNC = 0
 BAR_WG2_SYNC = 1
 BAR_WG2_WARP02 = 2
@@ -1218,18 +1241,23 @@ def _make_low_level_kernel(
                                     T.ptx.mul(buffer_19, buffer_19, buffer_20, "rz", "ftz", "", "f32x2", "")
                                     T.ptx.mov(buffer_17[f * 2], buffer_17[f * 2 + 1], buffer_19, "b64", "")
                                 buffer_19 = o_epi_bf16_frag.local(layout=T.TileLayout(T.S[(32, 2):(2, 1)]))
+                                buffer_19_words = buffer_19.view("uint32")
                                 buffer_20 = o_epi_frag.local(layout=T.TileLayout(T.S[(32, 2):(2, 1)]))
                                 for f in range(32):
                                     dst_lane_indices_0_0: T.int32 = f * 2
                                     dst_lane_indices_1_0: T.int32 = f * 2 + 1
-                                    T.cuda.func_call("tvm_builtin_cast_float32x2_bfloat16x2", T.address_of(buffer_19[f * 2]), T.address_of(buffer_20[f * 2]), source_code="\n__forceinline__ __device__ void tvm_builtin_cast_float32x2_bfloat16x2(void* dst, void* src) {\n    ((nv_bfloat162*)dst)[0] = __float22bfloat162_rn(((float2*)src)[0]);\n}\n")
+                                    T.ptx.cvt.rn.bf16x2.f32(
+                                        buffer_19_words[f], buffer_20[f * 2 + 1], buffer_20[f * 2]
+                                    )
                                 r_local = o_epi_bf16_frag.local()
                                 r_words = r_local.view("uint32")
                                 for f in range(8):
                                     ds: T.int32 = f % 8 * 8
                                     dr: T.int32 = f % 8 * 8
                                     s_off: T.int32 = v_5 // 64 * 16384 + epi_k % 4 * 4096 + v_5 % 64 * 64 + T.bitwise_xor(f * 8, T.shift_left(T.bitwise_and(v_5 // 64 * 256 + epi_k % 4 * 64 + v_5 % 64, 7), 3))
-                                    s_ptr: T.let[T.handle] = T.cuda.func_call("tvm_builtin_pointer_offset", T.address_of(q_smem_win[0, 0]), s_off, source_code="\ntemplate <typename T>\n__forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {\n    return ptr + offset;\n}\n", return_type=T.handle().ty)
+                                    s_ptr: T.let = T.ptr_byte_offset(
+                                        T.address_of(q_smem_win[0, 0]), s_off * BF16_BYTES, "bfloat16"
+                                    )
                                     r_w: T.int32 = dr // 2
                                     T.ptx.st(T.cuda.cvta_generic_to_shared(s_ptr), r_words[r_w], r_words[r_w + 1], r_words[r_w + 2], r_words[r_w + 3], "", "", "shared", "", "", "", "v4", "u32", "")
                             T.ptx.fence("proxy", "async", "shared::cta", "")
@@ -1298,18 +1326,23 @@ def _make_low_level_kernel(
                                 T.ptx.mul(buffer_19, buffer_19, buffer_20, "rz", "ftz", "", "f32x2", "")
                                 T.ptx.mov(buffer_17[f * 2], buffer_17[f * 2 + 1], buffer_19, "b64", "")
                             buffer_19 = o_epi_bf16_frag.local(layout=T.TileLayout(T.S[(32, 2):(2, 1)]))
+                            buffer_19_words = buffer_19.view("uint32")
                             buffer_20 = o_epi_frag.local(layout=T.TileLayout(T.S[(32, 2):(2, 1)]))
                             for f in range(32):
                                 dst_lane_indices_0_0: T.int32 = f * 2
                                 dst_lane_indices_1_0: T.int32 = f * 2 + 1
-                                T.cuda.func_call("tvm_builtin_cast_float32x2_bfloat16x2", T.address_of(buffer_19[f * 2]), T.address_of(buffer_20[f * 2]), source_code="\n__forceinline__ __device__ void tvm_builtin_cast_float32x2_bfloat16x2(void* dst, void* src) {\n    ((nv_bfloat162*)dst)[0] = __float22bfloat162_rn(((float2*)src)[0]);\n}\n")
+                                T.ptx.cvt.rn.bf16x2.f32(
+                                    buffer_19_words[f], buffer_20[f * 2 + 1], buffer_20[f * 2]
+                                )
                             r_local = o_epi_bf16_frag.local()
                             r_words = r_local.view("uint32")
                             for f in range(8):
                                 ds: T.int32 = f % 8 * 8
                                 dr: T.int32 = f % 8 * 8
                                 s_off: T.int32 = v_6 // 64 * 16384 + epi_k % 4 * 4096 + v_6 % 64 * 64 + T.bitwise_xor(f * 8, T.shift_left(T.bitwise_and(v_6 // 64 * 256 + epi_k % 4 * 64 + v_6 % 64, 7), 3))
-                                s_ptr: T.let[T.handle] = T.cuda.func_call("tvm_builtin_pointer_offset", T.address_of(q_smem_win[0, 0]), s_off, source_code="\ntemplate <typename T>\n__forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {\n    return ptr + offset;\n}\n", return_type=T.handle().ty)
+                                s_ptr: T.let = T.ptr_byte_offset(
+                                    T.address_of(q_smem_win[0, 0]), s_off * BF16_BYTES, "bfloat16"
+                                )
                                 r_w: T.int32 = dr // 2
                                 T.ptx.st(T.cuda.cvta_generic_to_shared(s_ptr), r_words[r_w], r_words[r_w + 1], r_words[r_w + 2], r_words[r_w + 3], "", "", "shared", "", "", "", "v4", "u32", "")
                         T.ptx.fence("proxy", "async", "shared::cta", "")
@@ -1409,7 +1442,7 @@ def _make_low_level_kernel(
                                                 for mi in T.unroll(1):
                                                     for ni in T.unroll(1):
                                                         for ki in T.unroll(16):
-                                                            T.ptx.tcgen05(T.Cast("uint32", ni * 64 + 384), T.Cast("uint32", ki * 8 + 256), T.cuda.func_call("tvm_builtin_smem_desc_add_16B_offset", descB_local, (ki // 1024 * 16384 + ni * 16384 + k_buf_idx * 16384 + ki % 16 // 4 * 4096 + ki % 1024 // 16 * 64 + ki % 4 * 16) // 8, source_code="\n__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(uint64_t desc_base, int32_t offset) {\n    SmemDescriptor desc;\n    desc.desc_ = desc_base;\n    desc.lo += static_cast<uint32_t>(offset);\n    return desc.desc_;\n}\n", return_type="uint64"), T.uint32(136316048), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), ki != 0 or T.Cast("bool", qk_accumulate), "mma", "cta_group::2", "kind::f16", "p12")
+                                                            T.ptx.tcgen05(T.Cast("uint32", ni * 64 + 384), T.Cast("uint32", ki * 8 + 256), _add_smem_desc_offset(descB_local, (ki // 1024 * 16384 + ni * 16384 + k_buf_idx * 16384 + ki % 16 // 4 * 4096 + ki % 1024 // 16 * 64 + ki % 4 * 16) // 8), T.uint32(136316048), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), ki != 0 or T.Cast("bool", qk_accumulate), "mma", "cta_group::2", "kind::f16", "p12")
                                                 qk_accumulate = T.uint32(1)
                                                 T.ptx.tcgen05(T.cuda.cvta_generic_to_shared(T.address_of(buffer_6[0])), T.Cast("uint16", 3), "commit", "cta_group::2", "mbarrier::arrive::one", "shared::cluster", "multicast::cluster", "b64", "")
                                                 if k == umma_num_k_blocks - 1:
@@ -1432,7 +1465,7 @@ def _make_low_level_kernel(
                                                 for mi in T.unroll(1):
                                                     for ni in T.unroll(1):
                                                         for ki in T.unroll(4):
-                                                            T.ptx.tcgen05(T.Cast("uint32", ni * 128), T.cuda.func_call("tvm_builtin_smem_desc_add_16B_offset", descA_local, (ki % 4 * 1024 + mi * 512 + ki // 4 * 8) // 8, source_code="\n__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(uint64_t desc_base, int32_t offset) {\n    SmemDescriptor desc;\n    desc.desc_ = desc_base;\n    desc.lo += static_cast<uint32_t>(offset);\n    return desc.desc_;\n}\n", return_type="uint64"), T.cuda.func_call("tvm_builtin_smem_desc_add_16B_offset", descB_local, ((ki * 16 + ni) // 64 * 16384 + prev_buf * 16384 + (ki * 16 + ni) % 64 * 64) // 8, source_code="\n__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(uint64_t desc_base, int32_t offset) {\n    SmemDescriptor desc;\n    desc.desc_ = desc_base;\n    desc.lo += static_cast<uint32_t>(offset);\n    return desc.desc_;\n}\n", return_type="uint64"), T.uint32(138478736), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), ki != 0 or T.Cast("bool", o_accumulate), "mma", "cta_group::2", "kind::f16", "p12")
+                                                            T.ptx.tcgen05(T.Cast("uint32", ni * 128), _add_smem_desc_offset(descA_local, (ki % 4 * 1024 + mi * 512 + ki // 4 * 8) // 8), _add_smem_desc_offset(descB_local, ((ki * 16 + ni) // 64 * 16384 + prev_buf * 16384 + (ki * 16 + ni) % 64 * 64) // 8), T.uint32(138478736), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), ki != 0 or T.Cast("bool", o_accumulate), "mma", "cta_group::2", "kind::f16", "p12")
                                                 buffer_14 = T.decl_buffer((64, 256), scope="tmem", layout=T.TileLayout(T.S[(64, 1, 2, 128):(1 @ Axis.TLane, 128 @ Axis.TCol, 64 @ Axis.TLane, 1 @ Axis.TCol)]), allocated_addr=128)
                                                 descB_local_1: T.uint64
                                                 T.cuda.tcgen05.encode_matrix_descriptor(T.address_of(descB_local_1), T.address_of(k_smem_gemm[0, 0, 0]), 512, 64, 3)
@@ -1441,7 +1474,7 @@ def _make_low_level_kernel(
                                                 for mi in T.unroll(1):
                                                     for ni in T.unroll(1):
                                                         for ki in T.unroll(4):
-                                                            T.ptx.tcgen05(T.Cast("uint32", ni * 128 + 128), T.cuda.func_call("tvm_builtin_smem_desc_add_16B_offset", descA_local_1, (ki % 4 * 1024 + mi * 512 + ki // 4 * 8) // 8, source_code="\n__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(uint64_t desc_base, int32_t offset) {\n    SmemDescriptor desc;\n    desc.desc_ = desc_base;\n    desc.lo += static_cast<uint32_t>(offset);\n    return desc.desc_;\n}\n", return_type="uint64"), T.cuda.func_call("tvm_builtin_smem_desc_add_16B_offset", descB_local_1, ((ki * 16 + ni) // 64 * 16384 + prev_buf * 16384 + (ki * 16 + ni) % 64 * 64 + 8192) // 8, source_code="\n__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(uint64_t desc_base, int32_t offset) {\n    SmemDescriptor desc;\n    desc.desc_ = desc_base;\n    desc.lo += static_cast<uint32_t>(offset);\n    return desc.desc_;\n}\n", return_type="uint64"), T.uint32(138478736), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), ki != 0 or T.Cast("bool", o_accumulate), "mma", "cta_group::2", "kind::f16", "p12")
+                                                            T.ptx.tcgen05(T.Cast("uint32", ni * 128 + 128), _add_smem_desc_offset(descA_local_1, (ki % 4 * 1024 + mi * 512 + ki // 4 * 8) // 8), _add_smem_desc_offset(descB_local_1, ((ki * 16 + ni) // 64 * 16384 + prev_buf * 16384 + (ki * 16 + ni) % 64 * 64 + 8192) // 8), T.uint32(138478736), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), T.uint32(0), ki != 0 or T.Cast("bool", o_accumulate), "mma", "cta_group::2", "kind::f16", "p12")
                                                 o_accumulate = T.uint32(1)
                                                 T.ptx.tcgen05(T.cuda.cvta_generic_to_shared(T.address_of(buffer_7[0])), T.Cast("uint16", 3), "commit", "cta_group::2", "mbarrier::arrive::one", "shared::cluster", "multicast::cluster", "b64", "")
                                                 T.ptx.tcgen05(T.cuda.cvta_generic_to_shared(T.address_of(buffer_5[prev_buf])), T.Cast("uint16", 3), "commit", "cta_group::2", "mbarrier::arrive::one", "shared::cluster", "multicast::cluster", "b64", "")
@@ -1661,7 +1694,11 @@ def _make_low_level_kernel(
                                     for f in range(4):
                                         ds: T.int32 = f % 4 * 512
                                         dr: T.int32 = f % 4 * 8
-                                        s_ptr: T.let[T.handle] = T.cuda.func_call("tvm_builtin_pointer_offset", T.address_of(s_smem_gemm[0, 0]), s_base + ds, source_code="\ntemplate <typename T>\n__forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {\n    return ptr + offset;\n}\n", return_type=T.handle().ty)
+                                        s_ptr: T.let = T.ptr_byte_offset(
+                                            T.address_of(s_smem_gemm[0, 0]),
+                                            (s_base + ds) * BF16_BYTES,
+                                            "bfloat16",
+                                        )
                                         r_w: T.int32 = dr // 2
                                         T.ptx.st(T.cuda.cvta_generic_to_shared(s_ptr), r_words[r_w], r_words[r_w + 1], r_words[r_w + 2], r_words[r_w + 3], "", "", "shared", "", "", "", "v4", "u32", "")
                                     if T.bitwise_and(k > 0, should_scale_o):

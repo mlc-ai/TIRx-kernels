@@ -77,14 +77,10 @@ __forceinline__ __device__ uint64_t fa4_smem_desc_add_16B_offset(
   return desc.desc_;
 }
 """
-_CAST_F32X2_F16X2_SOURCE = r"""
-__device__ __forceinline__ void fa4_cast_f32x2_f16x2(void* dst, void* src) {
-  ((half2*)dst)[0] = __float22half2_rn(((float2*)src)[0]);
-}
-"""
-
-
 def _smem_desc_add_16B_offset(desc_base, offset):
+    # The fixed TVM PTX table intentionally does not register integer add.
+    # Keep the helper so only the descriptor's uint32 low half wraps; a uint64
+    # TIR addition could carry into the descriptor's layout bits.
     return T.cuda.func_call(
         "fa4_smem_desc_add_16B_offset",
         desc_base,
@@ -95,12 +91,9 @@ def _smem_desc_add_16B_offset(desc_base, offset):
 
 
 def _cast_f32x2_f16x2(dst, src, offset):
-    return T.cuda.func_call(
-        "fa4_cast_f32x2_f16x2",
-        T.address_of(dst[offset]),
-        T.address_of(src[offset]),
-        source_code=_CAST_F32X2_F16X2_SOURCE,
-        return_type="void",
+    dst_words = dst.view("uint32")
+    return T.ptx.cvt.rn.f16x2.f32(
+        dst_words[offset // 2], src[offset + 1], src[offset]
     )
 
 

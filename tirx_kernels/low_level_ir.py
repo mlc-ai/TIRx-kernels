@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import tvm
@@ -67,10 +67,6 @@ class LowLevelIRFinding:
     scope: str | None
     span: str | None
 
-    def to_dict(self) -> dict[str, str | None]:
-        """Return a JSON-serializable representation."""
-        return asdict(self)
-
 
 @dataclass(frozen=True)
 class LowLevelIRReport:
@@ -84,15 +80,6 @@ class LowLevelIRReport:
     def ok(self) -> bool:
         """Whether every visited function satisfies the low-level IR contract."""
         return not self.violations
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable report suitable for audit artifacts."""
-        return {
-            "ok": self.ok,
-            "checked_functions": list(self.checked_functions),
-            "violations": [finding.to_dict() for finding in self.violations],
-            "address_only_loads": [finding.to_dict() for finding in self.address_only_loads],
-        }
 
     def summary(self) -> str:
         """Return a compact human-readable result."""
@@ -123,7 +110,7 @@ class LowLevelIRContractError(ValueError):
         super().__init__(report.summary())
 
 
-class LowLevelIRVisitor(StmtExprVisitor):
+class _LowLevelIRVisitor(StmtExprVisitor):
     """Collect forbidden operations from one pre-lowering ``PrimFunc`` body."""
 
     def __init__(self, function: str):
@@ -236,7 +223,7 @@ def inspect_low_level_ir(value: Any) -> LowLevelIRReport:
 
     for path, prim_func in _iter_prim_funcs(value):
         checked_functions.append(path)
-        visitor = LowLevelIRVisitor(path)
+        visitor = _LowLevelIRVisitor(path)
         visitor(prim_func.body)
         violations.extend(visitor.violations)
         address_only_loads.extend(visitor.address_only_loads)
@@ -263,7 +250,6 @@ __all__ = [
     "LowLevelIRContractError",
     "LowLevelIRFinding",
     "LowLevelIRReport",
-    "LowLevelIRVisitor",
     "check_low_level_ir",
     "inspect_low_level_ir",
 ]

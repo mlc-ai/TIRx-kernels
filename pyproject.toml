@@ -13,9 +13,6 @@ dependencies = ["pyyaml>=6.0"]
 [tool.setuptools.packages.find]
 include = ["tirx_kernels*"]
 
-[tool.setuptools.package-data]
-"tirx_kernels.bench_suite" = ["baseline.json", "config/*.yaml"]
-
 [tool.pytest.ini_options]
 # Repo root on sys.path so pytest imports the tirx_kernels package
 # without requiring PYTHONPATH each time. TIR (`tvm.tirx`) and external

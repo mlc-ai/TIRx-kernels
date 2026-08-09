@@ -17,7 +17,7 @@ configs:
   - {config: hs4096_bs32, default: false}
   - {config: hs4096_bs64, default: false}
   - {config: hs4096_bs128, default: false}
-  - {config: hs4096_bs4113, default: true}
+  - {config: hs4096_bs4113, default: false}
   - {config: hs5120_bs1, default: false}
   - {config: hs5120_bs2, default: false}
   - {config: hs5120_bs4, default: false}

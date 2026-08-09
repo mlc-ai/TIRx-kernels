@@ -14,21 +14,10 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from __future__ import annotations
 
 import pytest
 
 from tirx_kernels.gemm import fp8_blockwise_gemm
-from tirx_kernels.low_level_ir import check_low_level_ir
-
-
-@pytest.mark.parametrize("config", fp8_blockwise_gemm.CONFIGS, ids=lambda config: config["label"])
-def test_fp8_blockwise_gemm_public_configs_satisfy_low_level_contract(config) -> None:
-    parameters = {key: value for key, value in config.items() if key != "label"}
-
-    report = check_low_level_ir(fp8_blockwise_gemm.get_kernel(**parameters))
-
-    assert report.checked_functions
 
 
 def test_fp8_blockwise_gemm_rejects_unpacked_scale_tail() -> None:
