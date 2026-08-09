@@ -1,0 +1,8 @@
+kernel: silu_and_mul_nvfp4_experts_quantize
+configs:
+  - {config: fp16_b128_m2048_k2048, default: true}
+  - {config: bf16_b128_m2048_k2048, default: true}
+  - {config: fp16_b8_m512_k2048, default: true}
+  - {config: bf16_b8_m512_k2048, default: true}
+  - {config: fp16_b4_m128_k4096, default: true}
+  - {config: fp16_b8_m16_k2048, default: true}

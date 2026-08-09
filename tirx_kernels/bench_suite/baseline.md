@@ -2,10 +2,23 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '425f6f4c', 'tirx-kernels': 'a1349527-dirty', 'tirx-bench-ci': None}`
-- Workloads: 136 ok, 0 failed
+- Git:       `{'tir': '2417cfb0', 'tirx-kernels': '66c99ecb-dirty', 'tirx-bench-ci': None}`
+- Workloads: 150 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
+
+## act_and_mul
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `gelu_fp16_d11008_t8192` | tirx | 153.8830 | flashinfer | 253.1983 | 1.645 | — |
+| `gelu_tanh_fp16_d11008_t8192` | tirx | 97.5279 | flashinfer | 109.4587 | 1.122 | — |
+| `silu_bf16_d16384_t32768` | tirx | 454.4052 | flashinfer | 474.3242 | 1.044 | — |
+| `silu_bf16_d4096_t8192` | tirx | 33.2570 | flashinfer | 36.3874 | 1.094 | — |
+| `silu_fp16_d11008_t8192` | tirx | 97.7234 | flashinfer | 107.8325 | 1.103 | — |
+| `silu_fp16_d16384_t32768` | tirx | 453.1574 | flashinfer | 469.0037 | 1.035 | — |
+| `silu_fp16_d4096_t1` | tirx | 2.5835 | flashinfer | 2.7657 | 1.071 | — |
+| `silu_fp16_d4096_t8192` | tirx | 33.1831 | flashinfer | 35.7912 | 1.079 | — |
 
 ## allgather_gemm
 
@@ -192,6 +205,17 @@ Grouped workloads show one row per config and one timing column per implementati
 | `2048x2048x2048` | tir | 8.5260 | flashinfer | 7.5789 | 0.889 | cublaslt_nvfp4=7.6341 |
 | `4096x4096x4096` | tir | 29.5830 | cublaslt_nvfp4 | 27.6822 | 0.936 | flashinfer=28.8911 |
 | `8192x8192x8192` | tir | 186.1670 | cublaslt_nvfp4 | 177.5714 | 0.954 | flashinfer=177.6061 |
+
+## silu_and_mul_nvfp4_experts_quantize
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_b128_m2048_k2048` | tirx | 283.0116 | flashinfer | 317.3262 | 1.121 | — |
+| `bf16_b8_m512_k2048` | tirx | 8.8922 | flashinfer | 10.6704 | 1.200 | — |
+| `fp16_b128_m2048_k2048` | tirx | 274.6744 | flashinfer | 303.0726 | 1.103 | — |
+| `fp16_b4_m128_k4096` | tirx | 5.5265 | flashinfer | 5.7668 | 1.043 | — |
+| `fp16_b8_m16_k2048` | tirx | 3.4283 | flashinfer | 4.2711 | 1.246 | — |
+| `fp16_b8_m512_k2048` | tirx | 8.7729 | flashinfer | 10.2351 | 1.167 | — |
 
 ## sparse_flashmla_decode_head64
 
