@@ -235,6 +235,60 @@ def _ld_global_v4_u32(dst, ptr):
     return T.ptx.ld.global_.v4.b32(dst[0], dst[1], dst[2], dst[3], ptr)
 
 
+def _ld_global_s32(buffer, index):
+    out = T.alloc_local((1,), "int32")
+    T.evaluate(T.ptx.ld.global_.s32(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _ld_global_s64(buffer, index):
+    out = T.alloc_local((1,), "int64")
+    T.evaluate(T.ptx.ld.global_.s64(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _ld_global_f32(buffer, index):
+    out = T.alloc_local((1,), "float32")
+    T.evaluate(T.ptx.ld.global_.f32(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _ld_global_bf16(buffer, index):
+    bits = T.alloc_local((1,), "uint16")
+    T.evaluate(T.ptx.ld.global_.b16(bits[0], buffer.ptr_to([index])))
+    return T.reinterpret("bfloat16", bits[0])
+
+
+def _st_global_bf16(buffer, index, value):
+    return T.ptx.st.global_.b16(buffer.ptr_to([index]), T.reinterpret("uint16", value))
+
+
+def _ld_shared_f32(buffer, index):
+    out = T.alloc_local((1,), "float32")
+    T.evaluate(T.ptx.ld.shared.f32(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _ld_shared_v4_f32(dst, dst_offset, buffer, index):
+    return T.ptx.ld.shared.v4.f32(
+        dst[dst_offset],
+        dst[dst_offset + 1],
+        dst[dst_offset + 2],
+        dst[dst_offset + 3],
+        buffer.ptr_to([index]),
+    )
+
+
+def _ld_shared_bf16(buffer, index):
+    bits = T.alloc_local((1,), "uint16")
+    T.evaluate(T.ptx.ld.shared.b16(bits[0], buffer.ptr_to([index])))
+    return T.reinterpret("bfloat16", bits[0])
+
+
+def _st_shared_f32(buffer, index, value):
+    return T.ptx.st.shared.f32(buffer.ptr_to([index]), value)
+
+
 def _tanh_approx(x):
     # tanh.approx.f32 (prep-role sigmoid)
     return T.cuda.func_call(
@@ -1264,10 +1318,10 @@ def _kernel(
         T.ptx.setmaxnreg.inc.sync.aligned.u32(168)  # .cu:731
         # .cu:732 compute_main
         task_idx: T.int32 = bid  # .cu:733
-        seq_idx: T.int32 = seq_order[task_idx // h]  # .cu:734
+        seq_idx: T.int32 = _ld_global_s32(seq_order, task_idx // h)  # .cu:734
         head_idx: T.int32 = task_idx % h  # .cu:735
-        bos: T.int64 = cu_seqlens[seq_idx]  # .cu:736
-        eos: T.int64 = cu_seqlens[seq_idx + 1]  # .cu:737
+        bos: T.int64 = _ld_global_s64(cu_seqlens, seq_idx)  # .cu:736
+        eos: T.int64 = _ld_global_s64(cu_seqlens, seq_idx + 1)  # .cu:737
         seq_len: T.int32 = T.cast(eos - bos, "int32")  # .cu:738
         num_chunks: T.int32 = (seq_len + 32 - 1) // 32  # .cu:739
         warp_in_wg: T.int32 = warp % 4  # .cu:740
@@ -1355,13 +1409,16 @@ def _kernel(
                 )
                 state_scale: T.f32[16]
                 for state_half in T.unroll(2):  # .cu:850-859
-                    for state_col in T.unroll(16):
-                        state_scale[state_col] = smem_gt_all[
+                    for state_vec in T.unroll(4):
+                        _ld_shared_v4_f32(
+                            state_scale,
+                            state_vec * 4,
+                            smem_gt_all,
                             compute_stage * 10496
                             + state_col_block_1 * 32
                             + state_half * 16
-                            + state_col
-                        ]  # .cu:854
+                            + state_vec * 4,
+                        )  # .cu:854
                     for _ls in T.unroll(8):  # .cu:857-858
                         _pk = _mul_f32x2_inplace(
                             T.cuda.make_float2(
@@ -1400,11 +1457,13 @@ def _kernel(
                 for residual_col in T.unroll(16):  # .cu:874-881
                     token_col: T.int32 = residual_half * 16 + residual_col  # .cu:876
                     residual_v[residual_col] = T.cuda.bfloat162float(
-                        smem_v_all[compute_stage * 20992 + token_col * 128 + state_row]
+                        _ld_shared_bf16(
+                            smem_v_all, compute_stage * 20992 + token_col * 128 + state_row
+                        )
                     )  # .cu:877-879
-                    residual_beta[residual_col] = smem_prep_beta_all[
-                        compute_stage * 10496 + token_col
-                    ]  # .cu:880
+                    residual_beta[residual_col] = _ld_shared_f32(
+                        smem_prep_beta_all, compute_stage * 10496 + token_col
+                    )  # .cu:880
                 for _ls in T.unroll(8):  # .cu:882-884
                     _pk = _sub_f32x2_inplace(
                         T.cuda.make_float2(residual_v[_ls * 2], residual_v[_ls * 2 + 1]),
@@ -1521,10 +1580,10 @@ def _kernel(
         T.ptx.setmaxnreg.dec.sync.aligned.u32(48)  # .cu:965
         # .cu:966 epilogue_main
         task_idx_1: T.int32 = bid  # .cu:967
-        seq_idx_1: T.int32 = seq_order[task_idx_1 // h]  # .cu:968
+        seq_idx_1: T.int32 = _ld_global_s32(seq_order, task_idx_1 // h)  # .cu:968
         head_idx_1: T.int32 = task_idx_1 % h  # .cu:969
-        bos_1: T.int64 = cu_seqlens[seq_idx_1]  # .cu:970
-        eos_1: T.int64 = cu_seqlens[seq_idx_1 + 1]  # .cu:971
+        bos_1: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_1)  # .cu:970
+        eos_1: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_1 + 1)  # .cu:971
         seq_len_1: T.int32 = T.cast(eos_1 - bos_1, "int32")  # .cu:972
         num_chunks_1: T.int32 = (seq_len_1 + 32 - 1) // 32  # .cu:973
         warp_id_in_role_1: T.int32 = warp - 4  # .cu:974
@@ -1644,7 +1703,9 @@ def _kernel(
                         out_idx: T.int64 = (
                             out_token * T.cast(h, "int64") + T.cast(head_idx_1, "int64")
                         ) * 128 + T.cast(state_row_1, "int64")  # .cu:1073
-                        out[out_idx] = T.cast(_tmem_load_6[token_col_1], "bfloat16")  # .cu:1074
+                        _st_global_bf16(
+                            out, out_idx, T.cast(_tmem_load_6[token_col_1], "bfloat16")
+                        )  # .cu:1074
             epilogue_stage += 1  # .cu:1078
             if epilogue_stage == 5:  # .cu:1079
                 epilogue_stage = T.uint32(0)
@@ -1661,9 +1722,9 @@ def _kernel(
         # ---- Role: mma (.cu:1092-1247) ----
         # .cu:1093 mma_main
         task_idx_2: T.int32 = bid  # .cu:1094
-        seq_idx_2: T.int32 = seq_order[task_idx_2 // h]  # .cu:1095
-        bos_2: T.int64 = cu_seqlens[seq_idx_2]  # .cu:1096
-        eos_2: T.int64 = cu_seqlens[seq_idx_2 + 1]  # .cu:1097
+        seq_idx_2: T.int32 = _ld_global_s32(seq_order, task_idx_2 // h)  # .cu:1095
+        bos_2: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_2)  # .cu:1096
+        eos_2: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_2 + 1)  # .cu:1097
         seq_len_2: T.int32 = T.cast(eos_2 - bos_2, "int32")  # .cu:1098
         num_chunks_2: T.int32 = (seq_len_2 + 32 - 1) // 32  # .cu:1099
         mma_stage: T.uint32 = 0  # .cu:1100
@@ -1789,10 +1850,10 @@ def _kernel(
         # ---- Role: load (.cu:1248-1296) ----
         # .cu:1249 load_main
         task_idx_3: T.int32 = bid  # .cu:1250
-        seq_idx_3: T.int32 = seq_order[task_idx_3 // h]  # .cu:1251
+        seq_idx_3: T.int32 = _ld_global_s32(seq_order, task_idx_3 // h)  # .cu:1251
         head_idx_2: T.int32 = task_idx_3 % h  # .cu:1252
-        bos_3: T.int64 = cu_seqlens[seq_idx_3]  # .cu:1253
-        eos_3: T.int64 = cu_seqlens[seq_idx_3 + 1]  # .cu:1254
+        bos_3: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_3)  # .cu:1253
+        eos_3: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_3 + 1)  # .cu:1254
         seq_len_3: T.int32 = T.cast(eos_3 - bos_3, "int32")  # .cu:1255
         num_chunks_3: T.int32 = (seq_len_3 + 32 - 1) // 32  # .cu:1256
         load_stage: T.uint32 = 0  # .cu:1257
@@ -1869,10 +1930,10 @@ def _kernel(
         T.ptx.setmaxnreg.dec.sync.aligned.u32(48)  # .cu:1299
         # .cu:1300 prep_main
         task_idx_4: T.int32 = bid  # .cu:1301
-        seq_idx_4: T.int32 = seq_order[task_idx_4 // h]  # .cu:1302
+        seq_idx_4: T.int32 = _ld_global_s32(seq_order, task_idx_4 // h)  # .cu:1302
         head_idx_3: T.int32 = task_idx_4 % h  # .cu:1303
-        bos_4: T.int64 = cu_seqlens[seq_idx_4]  # .cu:1304
-        eos_4: T.int64 = cu_seqlens[seq_idx_4 + 1]  # .cu:1305
+        bos_4: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_4)  # .cu:1304
+        eos_4: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_4 + 1)  # .cu:1305
         seq_len_4: T.int32 = T.cast(eos_4 - bos_4, "int32")  # .cu:1306
         num_chunks_4: T.int32 = (seq_len_4 + 32 - 1) // 32  # .cu:1307
         instance_id: T.int32 = (warp - 12) // 4  # .cu:1308
@@ -1884,7 +1945,8 @@ def _kernel(
         prep_stage: T.uint32 = T.cast(prep_instance, "uint32")  # .cu:1314
         gate_rate_stage_f32: T.int32 = prep_instance * 10496  # .cu:1315
         if prep_tid == 0:  # .cu:1316-1319
-            smem_gate_rate_all[gate_rate_stage_f32] = _expf(A_log[head_idx_3])
+            a_log_value: T.f32 = _ld_global_f32(A_log, head_idx_3)
+            _st_shared_f32(smem_gate_rate_all, gate_rate_stage_f32, _expf(a_log_value))
         if prep_instance == 0:  # .cu:1320-1332
             T.ptx.bar.sync(T.uint32(11), T.uint32(128))
         elif prep_instance == 1:
@@ -1986,10 +2048,14 @@ def _kernel(
                         0.5
                     ) + T.float32(0.5)  # .cu:1377-1379
                 if prep_tid < 128:  # .cu:1381-1391
-                    early_gate_rate: T.f32 = smem_gate_rate_all[stage_f32]  # .cu:1382
-                    early_gate_bias: T.f32 = dt_bias[head_idx_3 * 128 + prep_tid]  # .cu:1383
+                    early_gate_rate: T.f32 = _ld_shared_f32(
+                        smem_gate_rate_all, stage_f32
+                    )  # .cu:1382
+                    early_gate_bias: T.f32 = _ld_global_f32(
+                        dt_bias, head_idx_3 * 128 + prep_tid
+                    )  # .cu:1383
                     early_gate_raw: T.f32 = T.cuda.bfloat162float(
-                        smem_g_raw_all[stage_bf16 + prep_tid]
+                        _ld_shared_bf16(smem_g_raw_all, stage_bf16 + prep_tid)
                     )  # .cu:1384-1385
                     early_gate_arg: T.f32 = early_gate_rate * (
                         early_gate_raw + early_gate_bias
@@ -2056,18 +2122,19 @@ def _kernel(
                 if chunk_is_full_2 == 0:  # .cu:1432-1440
                     beta_token: T.int64 = bos_4 + T.cast(chunk_idx_3 * 32 + lane, "int64")
                     if beta_token < eos_4:
-                        beta_logit_1: T.f32 = T.cast(
-                            beta[beta_token * T.cast(h, "int64") + T.cast(head_idx_3, "int64")],
-                            "float32",
+                        beta_logit_1: T.f32 = T.cuda.bfloat162float(
+                            _ld_global_bf16(
+                                beta, beta_token * T.cast(h, "int64") + T.cast(head_idx_3, "int64")
+                            )
                         )  # .cu:1435
                         beta_value = _tanh_approx(beta_logit_1 * T.float32(0.5)) * T.float32(
                             0.5
                         ) + T.float32(0.5)  # .cu:1436-1438
-                smem_prep_beta_all[stage_f32 + lane] = beta_value  # .cu:1441
+                _st_shared_f32(smem_prep_beta_all, stage_f32 + lane, beta_value)  # .cu:1441
             if prep_tid < 128:  # .cu:1443-1472
                 gate_col: T.int32 = prep_tid  # .cu:1444
-                gate_rate: T.f32 = smem_gate_rate_all[stage_f32]  # .cu:1445
-                gate_bias: T.f32 = dt_bias[head_idx_3 * 128 + gate_col]  # .cu:1446
+                gate_rate: T.f32 = _ld_shared_f32(smem_gate_rate_all, stage_f32)  # .cu:1445
+                gate_bias: T.f32 = _ld_global_f32(dt_bias, head_idx_3 * 128 + gate_col)  # .cu:1446
                 prefix_log2: T.f32 = T.float32(0.0)  # .cu:1447
                 for gate_row in T.serial(0, 32):  # .cu:1448-1471
                     gate_token: T.int64 = bos_4 + T.cast(
@@ -2082,7 +2149,9 @@ def _kernel(
                     if gate_needs_compute != 0:  # .cu:1458-1468
                         if gate_token < eos_4:
                             gate_raw: T.f32 = T.cuda.bfloat162float(
-                                smem_g_raw_all[stage_bf16 + gate_row * 128 + gate_col]
+                                _ld_shared_bf16(
+                                    smem_g_raw_all, stage_bf16 + gate_row * 128 + gate_col
+                                )
                             )  # .cu:1460-1461
                             gate_arg: T.f32 = gate_rate * (gate_raw + gate_bias)  # .cu:1462
                             gate_sigmoid: T.f32 = _tanh_approx(
@@ -2094,7 +2163,9 @@ def _kernel(
                                 * gate_sigmoid
                             )  # .cu:1466
                     prefix_log2 += gate_log2  # .cu:1469
-                    smem_gate_all[stage_f32 + gate_row * 128 + gate_col] = prefix_log2  # .cu:1470
+                    _st_shared_f32(
+                        smem_gate_all, stage_f32 + gate_row * 128 + gate_col, prefix_log2
+                    )  # .cu:1470
             if prep_instance == 0:  # .cu:1473-1485
                 T.ptx.bar.sync(T.uint32(11), T.uint32(128))
             elif prep_instance == 1:
@@ -2114,14 +2185,24 @@ def _kernel(
                     _phase_qk_raw_full,
                 )
             if prep_tid < 128:  # .cu:1489-1493
-                total_log2: T.f32 = smem_gt_prefix_all[stage_f32 + prep_tid]  # .cu:1490
-                smem_restore_factor_all[stage_f32 + prep_tid] = _approx_exp2(
-                    total_log2
-                    - T.float32(lower_bound) * T.float32(1.4426950408889634) * T.float32(16.0)
+                total_log2: T.f32 = _ld_shared_f32(
+                    smem_gt_prefix_all, stage_f32 + prep_tid
+                )  # .cu:1490
+                _st_shared_f32(
+                    smem_restore_factor_all,
+                    stage_f32 + prep_tid,
+                    _approx_exp2(
+                        total_log2
+                        - T.float32(lower_bound) * T.float32(1.4426950408889634) * T.float32(16.0)
+                    ),
                 )  # .cu:1491-1492
             if prep_tid == 0:  # .cu:1494-1497
-                smem_restore_factor_all[stage_f32 + 128] = _approx_exp2(
-                    T.float32(lower_bound) * T.float32(1.4426950408889634) * T.float32(16.0)
+                _st_shared_f32(
+                    smem_restore_factor_all,
+                    stage_f32 + 128,
+                    _approx_exp2(
+                        T.float32(lower_bound) * T.float32(1.4426950408889634) * T.float32(16.0)
+                    ),
                 )
             q_u32 = T.decl_buffer((total_tokens * h * D_HEAD // 2,), "uint32", data=q.data)
             k_u32 = T.decl_buffer((total_tokens * h * D_HEAD // 2,), "uint32", data=k.data)
@@ -2233,9 +2314,17 @@ def _kernel(
                 qd_vec: T.f32[8]  # .cu:1641
                 kd_vec: T.f32[8]  # .cu:1642
                 ki_vec: T.f32[8]  # .cu:1643
+                prefix_vec: T.f32[8]
+                for prefix_vec_idx in T.unroll(2):
+                    _ld_shared_v4_f32(
+                        prefix_vec,
+                        prefix_vec_idx * 4,
+                        smem_gate_all,
+                        stage_f32 + row_1 * 128 + segment_1 * 8 + prefix_vec_idx * 4,
+                    )
                 for elem_in_segment_1 in T.serial(0, 8):  # .cu:1644-1653
                     col: T.int32 = segment_1 * 8 + elem_in_segment_1  # .cu:1645
-                    prefix: T.f32 = smem_gate_all[stage_f32 + row_1 * 128 + col]  # .cu:1646
+                    prefix: T.f32 = prefix_vec[elem_in_segment_1]  # .cu:1646
                     common_log2: T.f32 = (
                         T.float32(lower_bound) * T.float32(1.4426950408889634) * T.float32(16.0)
                     )  # .cu:1647
@@ -2458,8 +2547,8 @@ def _kernel(
                 row0: T.int32 = pair_row_base + lane // 4  # .cu:1826
                 row1: T.int32 = row0 + 8  # .cu:1827
                 col0: T.int32 = pair_col_base + lane % 4 * 2  # .cu:1828
-                beta0: T.f32 = smem_prep_beta_all[stage_f32 + row0]  # .cu:1829
-                beta1: T.f32 = smem_prep_beta_all[stage_f32 + row1]  # .cu:1830
+                beta0: T.f32 = _ld_shared_f32(smem_prep_beta_all, stage_f32 + row0)  # .cu:1829
+                beta1: T.f32 = _ld_shared_f32(smem_prep_beta_all, stage_f32 + row1)  # .cu:1830
                 seed: T.f32[8]  # .cu:1831
                 for _zi in T.unroll(8):  # .cu:1832-1839
                     seed[_zi] = T.float32(0.0)
@@ -2687,18 +2776,26 @@ def _kernel(
                 else:
                     T.ptx.bar.sync(T.uint32(15), T.uint32(128))
             if prep_tid < 128:  # .cu:2065-2069
-                total_log2_1: T.f32 = smem_gt_prefix_all[stage_f32 + prep_tid]  # .cu:2066
-                smem_gt_all[stage_f32 + prep_tid] = _approx_exp2(total_log2_1)  # .cu:2067-2068
+                total_log2_1: T.f32 = _ld_shared_f32(
+                    smem_gt_prefix_all, stage_f32 + prep_tid
+                )  # .cu:2066
+                _st_shared_f32(
+                    smem_gt_all, stage_f32 + prep_tid, _approx_exp2(total_log2_1)
+                )  # .cu:2067-2068
             if prep_local_warp >= 2:  # .cu:2070-2187
                 stage_f32_0: T.int32 = T.cast(prep_stage, "int32") * 10496  # .cu:2071
-                restore_scale: T.f32 = smem_restore_factor_all[stage_f32_0 + 128]  # .cu:2072
+                restore_scale: T.f32 = _ld_shared_f32(
+                    smem_restore_factor_all, stage_f32_0 + 128
+                )  # .cu:2072
                 restore_factor: T.f32[8]  # .cu:2073
                 restore_segment: T.int32 = lane & 15  # .cu:2074
-                for restore_elem in T.unroll(8):  # .cu:2075-2079
-                    restore_col: T.int32 = restore_segment * 8 + restore_elem  # .cu:2077
-                    restore_factor[restore_elem] = smem_restore_factor_all[
-                        stage_f32_0 + restore_col
-                    ]  # .cu:2078
+                for restore_vec in T.unroll(2):  # .cu:2075-2079
+                    _ld_shared_v4_f32(
+                        restore_factor,
+                        restore_vec * 4,
+                        smem_restore_factor_all,
+                        stage_f32_0 + restore_segment * 8 + restore_vec * 4,
+                    )  # .cu:2078
                 for restore_pass in T.serial(
                     0, 6, unroll=False
                 ):  # .cu:2080-2081 (#pragma unroll 1)
@@ -3245,14 +3342,18 @@ def _kernel(
                 )
             elif prep_local_warp == 1:  # .cu:2405-2522
                 stage_f32_0_1: T.int32 = T.cast(prep_stage, "int32") * 10496  # .cu:2406
-                restore_scale_1: T.f32 = smem_restore_factor_all[stage_f32_0_1 + 128]  # .cu:2407
+                restore_scale_1: T.f32 = _ld_shared_f32(
+                    smem_restore_factor_all, stage_f32_0_1 + 128
+                )  # .cu:2407
                 restore_factor_1: T.f32[8]  # .cu:2408
                 restore_segment_1: T.int32 = lane & 15  # .cu:2409
-                for restore_elem_2 in T.unroll(8):  # .cu:2410-2414
-                    restore_col_1: T.int32 = restore_segment_1 * 8 + restore_elem_2  # .cu:2412
-                    restore_factor_1[restore_elem_2] = smem_restore_factor_all[
-                        stage_f32_0_1 + restore_col_1
-                    ]  # .cu:2413
+                for restore_vec_1 in T.unroll(2):  # .cu:2410-2414
+                    _ld_shared_v4_f32(
+                        restore_factor_1,
+                        restore_vec_1 * 4,
+                        smem_restore_factor_all,
+                        stage_f32_0_1 + restore_segment_1 * 8 + restore_vec_1 * 4,
+                    )  # .cu:2413
                 for restore_pass_1 in T.serial(0, 4, unroll=False):  # .cu:2415-2416
                     restore_row_1: T.int32 = restore_pass_1 * 2 + (lane >> 4)  # .cu:2417
                     restore_qd_values_1: T.f32[8]  # .cu:2418

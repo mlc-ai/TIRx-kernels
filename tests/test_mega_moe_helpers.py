@@ -31,7 +31,6 @@ from tirx_kernels.deepgemm.mega_moe import (
     _get_mega_moe_cuda_compile_mode,
     _get_num_bytes_per_pull,
     _make_symm_buffer_offsets,
-    _run_worker,
     get_deepgemm_launch_config,
     get_deepgemm_workspace_layout,
     run_bench,
@@ -257,12 +256,11 @@ def test_cuda_compile_mode_context_restores_environment(monkeypatch: pytest.Monk
     assert os.environ["TVM_CUDA_COMPILE_MODE"] == "nvrtc"
 
 
-def test_mega_moe_bench_inherits_shared_defaults() -> None:
+def test_mega_moe_bench_public_defaults() -> None:
     parameters = inspect.signature(run_bench).parameters
     assert parameters["warmup"].default is None
     assert parameters["repeat"].default is None
     assert parameters["timer"].default is None
-    assert "bench_tk" not in inspect.getsource(_run_worker)
 
 
 def test_megamoe_timer_wraps_deepgemm_bench_kineto(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -668,11 +668,13 @@ def _get_rmsnorm_kernel(hidden_size):
         x_smem = pool.alloc([hidden_size], "float32")
         sum_sq_smem = pool.alloc([bdy], "float32")
         pool.commit()
-        input_vec: T.f16[vec_size]
-        weight_vec: T.f16[vec_size]
+        input_words: T.uint32[vec_size // 2]
+        weight_words: T.uint32[vec_size // 2]
+        output_words: T.uint32[vec_size // 2]
         input_vec_f32: T.f32[vec_size]
         weight_vec_f32: T.f32[vec_size]
         x_vec: T.f32[vec_size]
+        packed_mul: T.uint64
         x_tmp: T.f32
         sum_sq: T.f32
         rms_norm: T.f32
@@ -682,34 +684,131 @@ def _get_rmsnorm_kernel(hidden_size):
             sum_sq = 0.0
             for ki in T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)):
                 for kv in T.unroll(vec_size):
-                    input_vec[kv] = 0.0
                     x_vec[kv] = 0.0
                 st = T.meta_var((ki * bdx * bdy + thread_id) * vec_size)
                 if st < hidden_size:
-                    Tx.copy(input_vec[:], input_global[idx, st : st + vec_size])
-                    Tx.cast(input_vec_f32[:], input_vec[:])
+                    T.ptx.ld.global_.v4.b32(
+                        input_words[0],
+                        input_words[1],
+                        input_words[2],
+                        input_words[3],
+                        input_global.ptr_to([idx, st]),
+                    )
+                    for pair in T.unroll(vec_size // 2):
+                        input_vec_f32[pair * 2] = T.cast(
+                            T.reinterpret(
+                                "float16",
+                                T.cast(
+                                    T.bitwise_and(input_words[pair], T.uint32(0xFFFF)), "uint16"
+                                ),
+                            ),
+                            "float32",
+                        )
+                        input_vec_f32[pair * 2 + 1] = T.cast(
+                            T.reinterpret(
+                                "float16",
+                                T.cast(T.shift_right(input_words[pair], T.uint32(16)), "uint16"),
+                            ),
+                            "float32",
+                        )
                     for kv in T.unroll(vec_size):
                         x_tmp = input_vec_f32[kv]
                         sum_sq = sum_sq + x_tmp * x_tmp
                         x_vec[kv] = x_tmp
-                    Tx.copy(x_smem[st : st + vec_size], x_vec[:])
-            sum_sq = T.cuda.cta_sum(sum_sq, bdy, sum_sq_smem.ptr_to([0]))
+                    T.ptx.st.shared.v4.f32(
+                        x_smem.ptr_to([st]), x_vec[0], x_vec[1], x_vec[2], x_vec[3]
+                    )
+                    T.ptx.st.shared.v4.f32(
+                        x_smem.ptr_to([st + 4]), x_vec[4], x_vec[5], x_vec[6], x_vec[7]
+                    )
+
+            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 16, bdx)
+            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 8, bdx)
+            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 4, bdx)
+            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 2, bdx)
+            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 1, bdx)
+            if tx == 0:
+                T.ptx.st.shared.f32(sum_sq_smem.ptr_to([ty]), sum_sq)
+            T.ptx.bar.sync(0, T.uint32(bdx * bdy))
+            if ty == 0:
+                if tx < bdy:
+                    T.ptx.ld.shared.f32(sum_sq, sum_sq_smem.ptr_to([tx]))
+                else:
+                    sum_sq = 0.0
+                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 16, bdx)
+                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 8, bdx)
+                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 4, bdx)
+                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 2, bdx)
+                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 1, bdx)
+                if tx == 0:
+                    T.ptx.st.shared.f32(sum_sq_smem.ptr_to([0]), sum_sq)
+            T.ptx.bar.sync(0, T.uint32(bdx * bdy))
+            T.ptx.ld.shared.f32(sum_sq, sum_sq_smem.ptr_to([0]))
             rms_norm = T.rsqrt(sum_sq / hidden_size + eps)
             for ki in T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)):
                 for kv in T.unroll(vec_size):
-                    input_vec[kv] = 0.0
                     weight_vec_f32[kv] = 0.0
                     x_vec[kv] = 0.0
                 st = T.meta_var((ki * bdx * bdy + thread_id) * vec_size)
                 if st < hidden_size:
-                    Tx.copy(weight_vec[:], weight_global[st : st + vec_size])
-                    Tx.copy(x_vec[:], x_smem[st : st + vec_size])
-                    Tx.cast(weight_vec_f32[:], weight_vec[:])
-                Tx.mul(input_vec_f32[:], x_vec[:], rms_norm)
-                Tx.mul(input_vec_f32[:], input_vec_f32[:], weight_vec_f32[:])
+                    T.ptx.ld.global_.v4.b32(
+                        weight_words[0],
+                        weight_words[1],
+                        weight_words[2],
+                        weight_words[3],
+                        weight_global.ptr_to([st]),
+                    )
+                    T.ptx.ld.shared.v4.f32(
+                        x_vec[0], x_vec[1], x_vec[2], x_vec[3], x_smem.ptr_to([st])
+                    )
+                    T.ptx.ld.shared.v4.f32(
+                        x_vec[4], x_vec[5], x_vec[6], x_vec[7], x_smem.ptr_to([st + 4])
+                    )
+                    for pair in T.unroll(vec_size // 2):
+                        weight_vec_f32[pair * 2] = T.cast(
+                            T.reinterpret(
+                                "float16",
+                                T.cast(
+                                    T.bitwise_and(weight_words[pair], T.uint32(0xFFFF)), "uint16"
+                                ),
+                            ),
+                            "float32",
+                        )
+                        weight_vec_f32[pair * 2 + 1] = T.cast(
+                            T.reinterpret(
+                                "float16",
+                                T.cast(T.shift_right(weight_words[pair], T.uint32(16)), "uint16"),
+                            ),
+                            "float32",
+                        )
+                for pair in T.unroll(vec_size // 2):
+                    T.ptx.mul.rz.ftz.f32x2(
+                        packed_mul,
+                        T.cuda.make_float2(x_vec[pair * 2], x_vec[pair * 2 + 1]),
+                        T.cuda.make_float2(rms_norm, rms_norm),
+                    )
+                    input_vec_f32[pair * 2] = T.cuda.float2_x(packed_mul)
+                    input_vec_f32[pair * 2 + 1] = T.cuda.float2_y(packed_mul)
+                for pair in T.unroll(vec_size // 2):
+                    T.ptx.mul.rz.ftz.f32x2(
+                        packed_mul,
+                        T.cuda.make_float2(input_vec_f32[pair * 2], input_vec_f32[pair * 2 + 1]),
+                        T.cuda.make_float2(weight_vec_f32[pair * 2], weight_vec_f32[pair * 2 + 1]),
+                    )
+                    input_vec_f32[pair * 2] = T.cuda.float2_x(packed_mul)
+                    input_vec_f32[pair * 2 + 1] = T.cuda.float2_y(packed_mul)
                 if st < hidden_size:
-                    Tx.cast(input_vec[:], input_vec_f32[:])
-                    Tx.copy(out_global[idx, st : st + vec_size], input_vec[:])
+                    for pair in T.unroll(vec_size // 2):
+                        T.ptx.cvt.rn.f16x2.f32(
+                            output_words[pair], input_vec_f32[pair * 2 + 1], input_vec_f32[pair * 2]
+                        )
+                    T.ptx.st.global_.v4.b32(
+                        out_global.ptr_to([idx, st]),
+                        output_words[0],
+                        output_words[1],
+                        output_words[2],
+                        output_words[3],
+                    )
             T.ptx.bar.sync(1, T.uint32(bdx * bdy))
             idx = idx + SM_COUNT
 

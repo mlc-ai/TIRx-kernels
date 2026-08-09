@@ -18,7 +18,8 @@ pip install -e .
 export TVM_PATH=/path/to/tvm
 export PYTHONPATH="${TVM_PATH}/python"
 export TVM_LIBRARY_PATH="${TVM_PATH}/build/lib"
-# Do NOT set CUDA_VISIBLE_DEVICES — GPU selection is automatic.
+# Normally leave CUDA_VISIBLE_DEVICES unset; administrators may restrict the
+# visible set when cards are reserved for unrelated jobs.
 ```
 
 Entry point: `python -m tirx_kernels.bench_suite` (same flags as `run.py`).
@@ -124,17 +125,23 @@ Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and 
    every round. The suite retains all round samples and reports their arithmetic mean.
 3. **Fail fast**: the first workload/subprocess `FAIL` stops new scheduling,
    terminates the suite's in-flight subprocesses, writes the partial run for
-   diagnosis, and exits with code 1. `INTERFERED` is not a workload failure and
-   is requeued; `SKIP` workloads are accepted without retry.
+   diagnosis, and exits with code 1. `INTERFERED` is requeued up to the configured
+   retry limit; exhausting that limit is a workload failure.
 4. **Dynamic free GPU queue** (one worker per probe-OK GPU):
    workers pull jobs from a shared queue; each job atomically claims all required
    free cards, runs one subprocess, then releases the full set. Whoever finishes
-   first grabs the next satisfiable job — no static workload→GPU binding and no
-   partial multi-GPU claims. Larger waiting claims take priority so single-GPU
-   traffic cannot starve 2/4/6-GPU workloads.
-5. **Ratio regression report** compares current ref/ours ratio vs the pinned
-   `baseline.json` ratio (computed from its ours + ref impls). Promote a run over
-   the baseline with `promote_baseline.py`.
+   first grabs the next satisfiable job; there are no partial multi-GPU claims.
+   Larger waiting claims take priority so single-GPU traffic cannot starve
+   2/4/6-GPU workloads. By default the free cards are sampled automatically.
+   `--replay-baseline-gpus --baseline <run.json>` instead requires each workload
+   to claim the exact ordered physical indices recorded by its baseline row,
+   while retaining the same probe, utilization, memory, and runtime-interference
+   gates.
+5. **Performance regression report** compares current ref/ours ratio vs the
+   pinned `baseline.json` ratio (computed from its ours + ref impls). A current
+   ours time below pinned ours is an absolute speedup and passes directly;
+   otherwise the ratio threshold is the drift-resistant gate. Promote a run
+   over the baseline with `promote_baseline.py`.
 
 ## Baseline files (git-tracked)
 
@@ -205,11 +212,24 @@ defaults to FlashInfer's `auto` backend; set
 |------|---------|---------|
 | `--rounds N` | `5` | Complete standard-timer calls per implementation/workload |
 | `--cooldown` | `1.0` | Seconds before every implementation in every round |
+| `--replay-baseline-gpus` | off | Reuse an explicit `--baseline` run's ordered physical GPU assignments |
+| `--max-interference-retries` | `3` | Retries after a foreign CUDA context invalidates a workload |
 | `--util-threshold` | `0` | Skip GPUs with SM utilization above this percent |
 | `--mem-threshold` | `0` | Skip GPUs with compute-app memory-used percent above this percent |
 
 Round aggregation is always the arithmetic mean. The raw five-element sample arrays
 remain in the run JSON for variance and outlier inspection.
+
+Baseline GPU replay is strict: every selected workload must have exactly one
+successful baseline row with a `gpus` list matching `num_gpus`. Missing, duplicate,
+legacy, or probe-unusable assignments are configuration errors instead of silently
+falling back to another card. An explicit `--baseline` is required because legacy
+checked-in baselines may predate per-row GPU evidence. The run protocol records the
+source baseline hash and complete replay mapping from the same byte snapshot used to
+build assignments. GPU/process telemetry failure or malformed output is a hard
+failure. The monitor checks once more after each benchmark subprocess exits; any
+compute context still resident then, including a child that outlives its workload
+root, conservatively invalidates that attempt.
 
 ## Ratio rules
 
@@ -217,6 +237,8 @@ remain in the run JSON for variance and outlier inspection.
 - **ratio** = ref/ours (>1 means ours is faster).
 - **ratio Δ** in `bench.md` = current ratio vs the baseline ratio (computed from
   `baseline.json`'s ours + ref impls).
+- **gate** = absolute ours speedup passes; otherwise a ratio Δ at or below the
+  negative `--threshold` is a regression.
 
 ## Outputs
 

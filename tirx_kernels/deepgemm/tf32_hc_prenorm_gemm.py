@@ -354,9 +354,8 @@ class TF32HCBenchCase:
 def get_kernel(**kwargs: Any):
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
     from tvm.script import tirx as T
-    from tvm.script.tirx import tile as Tx
     from tvm.tirx.lang.pipeline import Pipeline, TCGen05Bar
-    from tvm.tirx.layout import S, TCol, TileLayout, TLane, laneid, tcgen05_atom_layout
+    from tvm.tirx.layout import S, TCol, TileLayout, TLane, tcgen05_atom_layout
 
     config = _make_config(**kwargs)
     block_m = config.block_m
@@ -392,27 +391,49 @@ def get_kernel(**kwargs: Any):
     num_k_blocks = config.num_k_blocks
     num_k_blocks_per_split = num_k_blocks // num_splits
     remain_k_blocks = num_k_blocks % num_splits
+    tma_g2s_2d = (
+        "cp.async.bulk.tensor.2d.shared::cluster.global"
+        ".mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint"
+    )
+    tma_s2g_2d = "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group.L2::cache_hint"
+    tma_s2g_3d = "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group.L2::cache_hint"
+    tcgen05_mma_tf32 = "tcgen05.mma.cta_group::1.kind::tf32"
+    cache_policy_evict_first = T.uint64(0x12F0000000000000)
+    cache_policy_evict_last = T.uint64(0x14F0000000000000)
+    tf32_instr_desc = T.uint32(67635472)
+    smem_desc_add_source = r"""
+__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(
+    uint64_t desc_base, int32_t offset) {
+    SmemDescriptor desc;
+    desc.desc_ = desc_base;
+    desc.lo += static_cast<uint32_t>(offset);
+    return desc.desc_;
+}
+"""
+    cast_bf16x2_source = r"""
+__forceinline__ __device__ void tvm_builtin_cast_bfloat16x2_float32x2(
+    void* dst, void* src) {
+    ((float2*)dst)[0] = __bfloat1622float2(((nv_bfloat162*)src)[0]);
+}
+"""
+    pointer_offset_source = r"""
+template <typename T>
+__forceinline__ __device__ T* tvm_builtin_pointer_offset(T* ptr, int offset) {
+    return ptr + offset;
+}
+"""
+
+    def pointer_offset(ptr, offset):
+        return T.cuda.func_call(
+            "tvm_builtin_pointer_offset",
+            ptr,
+            offset,
+            source_code=pointer_offset_source,
+            return_type=T.handle().ty,
+        )
 
     def cuda_grid_dependency_synchronize():
         T.evaluate(T.ptx.griddepcontrol.wait())
-
-    def fma_sum_of_squares(acc0, acc1, a_flat, npairs, sc):
-        # Plain (non-@T.inline) Python helper: the parser executes this call's
-        # Python ``for`` at parse time, unrolling it so each 2-wide pair slice
-        # stays a compile-time-static rank-1 region (a TIR loop var or a
-        # middle-dim scalar index would make the fma reg path reject the op —
-        # non-static extent / "op rank 3 > anchor rank 2"). Fused packed
-        # fma.f32x2 accumulate (acc += pair*pair) into the two per-row dual
-        # accumulators, structurally mirroring the hand ffma2 sum0/sum1 float2
-        # pair (the T.fma f32x2 path emits fma.rz.ftz vs the hand's rn/non-ftz
-        # — a sub-ULP sqr difference, well within the kernel's 1e-8 gate). The
-        # flat A view exposes the .16x256b physical register order
-        # ``reg = v0p + 2*va + 4*vb``: each group of four registers contains a
-        # packed row-0 pair followed by the matching packed row-1 pair.
-        for p in range(npairs):
-            lo0, lo1 = 4 * p, 4 * p + 2
-            sc.fma(acc0, a_flat[lo0 : lo0 + 2], a_flat[lo0 : lo0 + 2], acc0)
-            sc.fma(acc1, a_flat[lo1 : lo1 + 2], a_flat[lo1 : lo1 + 2], acc1)
 
     @T.prim_func
     def sm100_tf32_hc_prenorm_gemm(
@@ -422,12 +443,106 @@ def get_kernel(**kwargs: Any):
         d: T.Buffer(config.d_shape, "float32"),
         sqr_sum: T.Buffer((config.num_splits * config.m,), "float32"),
     ):
+        # Build the same host-side tensor maps that copy_async previously
+        # synthesized, but make them part of the public pre-lowering IR.
+        d_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        if num_splits == 1:
+            T.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                d_tensormap,
+                "float32",
+                2,
+                T.handle_add_byte_offset(d.data, 0),
+                config.n,
+                config.m,
+                T.uint32(config.n * 4),
+                T.uint32(block_n),
+                T.uint32(block_m),
+                1,
+                1,
+                0,
+                3,
+                2,
+                0,
+            )
+        else:
+            T.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                d_tensormap,
+                "float32",
+                3,
+                T.handle_add_byte_offset(d.data, 0),
+                config.n,
+                config.m,
+                num_splits,
+                T.uint32(config.n * 4),
+                config.m * config.n * 4,
+                T.uint32(block_n),
+                T.uint32(block_m),
+                1,
+                1,
+                1,
+                1,
+                0,
+                3,
+                2,
+                0,
+            )
+        b_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            b_tensormap,
+            "float32",
+            2,
+            T.handle_add_byte_offset(b.data, 0),
+            config.k,
+            config.n,
+            config.k * 4,
+            T.uint32(block_swizzled_bk),
+            block_n,
+            1,
+            1,
+            0,
+            3,
+            2,
+            0,
+            11,
+        )
+        a_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            a_tensormap,
+            "bfloat16",
+            2,
+            T.handle_add_byte_offset(a.data, 0),
+            config.k,
+            config.m,
+            config.k * 2,
+            T.uint32(block_k),
+            T.uint32(block_m),
+            1,
+            1,
+            0,
+            3,
+            2,
+            0,
+        )
         T.device_entry()
         T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1})
         # TIRX_TRANSCRIBE_START sm100_tf32_hc_prenorm_gemm_impl
         warp_idx = T.warp_id([num_warps])
         T.warpgroup_id([num_warps // 4])
         lane_idx = T.lane_id([32])
+
+        if warp_idx == 0:
+            if T.cuda.elect_sync():
+                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(a_tensormap)))
+        if warp_idx == 0:
+            if T.cuda.elect_sync():
+                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(b_tensormap)))
+        if warp_idx == 0:
+            if T.cuda.elect_sync():
+                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(d_tensormap)))
         lane_u32: T.uint32 = T.cast(lane_idx, "uint32")
 
         # SMEMPool bump-allocates a 1024-aligned uint8 arena, reproducing the hand
@@ -528,29 +643,32 @@ def get_kernel(**kwargs: Any):
                         smem_pipe.empty.wait(stage_idx, tma_ph)
                         m_idx0: T.uint32 = m_block_idx * T.uint32(block_m)
                         k_idx0: T.uint32 = k_offset + s * T.uint32(block_k)
-                        # A as bf16 (exact in tf32); B as TFLOAT32 so TMA RN-truncates
-                        # on load, matching the tf32 MMA (else ~1 ULP divergence).
-                        Tx.copy_async(
-                            smem_a_mma[stage_idx],
-                            a[m_idx0 : m_idx0 + block_m, k_idx0 : k_idx0 + block_k],
-                            dispatch="tma_explicit",
-                            mbar=smem_pipe.full.ptr_to([stage_idx]),
-                            cta_group=1,
-                            cache_hint="evict_first",
-                            oob="zero",
-                            prefetch_tensormap=True,
+                        # A remains bf16 (exact in tf32); B's tensor map uses
+                        # TFLOAT32 OOB-fill mode 11 so the load RN-truncates as
+                        # before.  Coordinates are tensor-map order: K, then M/N.
+                        T.ptx[tma_g2s_2d](
+                            pointer_offset(
+                                smem_a_mma.ptr_to([0, 0, 0]),
+                                stage_idx * T.uint32(block_m * block_k),
+                            ),
+                            T.address_of(a_tensormap),
+                            T.cast(k_idx0, "int32"),
+                            T.cast(m_idx0, "int32"),
+                            smem_pipe.full.ptr_to([stage_idx]),
+                            cache_policy_evict_first,
                         )
-                        for b_atom in T.unroll(block_k // 32):
-                            Tx.copy_async(
-                                smem_b_mma[stage_idx, :, b_atom * 32 : b_atom * 32 + 32],
-                                b[0:block_n, k_idx0 + b_atom * 32 : k_idx0 + b_atom * 32 + 32],
-                                dispatch="tma_explicit",
-                                mbar=smem_pipe.full.ptr_to([stage_idx]),
-                                cta_group=1,
-                                cache_hint="evict_last",
-                                oob="zero",
-                                tma_dtype="tf32",
-                                prefetch_tensormap=True,
+                        for b_atom in T.unroll(num_b_tma_atoms):
+                            T.ptx[tma_g2s_2d](
+                                pointer_offset(
+                                    smem_b_mma.ptr_to([0, 0, 0]),
+                                    stage_idx * T.uint32(block_n * block_k)
+                                    + T.uint32(b_atom * block_n * block_swizzled_bk),
+                                ),
+                                T.address_of(b_tensormap),
+                                T.cast(k_idx0 + T.uint32(b_atom * block_swizzled_bk), "int32"),
+                                T.int32(0),
+                                smem_pipe.full.ptr_to([stage_idx]),
+                                cache_policy_evict_last,
                             )
                         smem_pipe.full.arrive(
                             stage_idx,
@@ -569,21 +687,40 @@ def get_kernel(**kwargs: Any):
                     stage_idx: T.uint32 = mma_st
                     cast_stage_idx: T.uint32 = mma_cs
                     cast_pipe.full.wait(cast_stage_idx, mma_ph)
-                    # int32 col base (a uint32 extent fails gemm_async's layout check).
+                    # TMEM A columns and the swizzled B matrix descriptor match
+                    # the former tcgen05 tile dispatch exactly.
                     a_col: T.int32 = T.cast(cast_stage_idx * T.uint32(block_k), "int32")
-                    # D += A(tmem tf32) @ B^T(smem); accum=(s != 0) mirrors the hand scale_c.
-                    Tx.warp.gemm_async(
-                        _tmem[0:block_m, d_tmem_start_col : d_tmem_start_col + block_n],
-                        _tmem[0:block_m, a_col : a_col + block_k],
-                        smem_b_mma[stage_idx],
-                        accum=(s != T.uint32(0)),
-                        is_AB_tf32=True,
-                        dispatch="tcgen05",
-                        cta_group=1,
-                        # "local_hoist": one encode per stage + one add per MMA,
-                        # mirroring the hand's shuffle + IADD descriptor pattern.
-                        smem_desc="local_hoist",
+                    desc_b: T.uint64
+                    T.cuda.tcgen05.encode_matrix_descriptor(
+                        T.address_of(desc_b),
+                        smem_b_mma.ptr_to([0, 0, 0]),
+                        ldo=256,
+                        sdo=64,
+                        swizzle=3,
                     )
+                    for ki in T.unroll(block_k // umma_k):
+                        if T.cuda.elect_sync():
+                            T.ptx[tcgen05_mma_tf32](
+                                T.uint32(d_tmem_start_col),
+                                T.cast(a_col + T.int32(ki * umma_k), "uint32"),
+                                T.cuda.func_call(
+                                    "tvm_builtin_smem_desc_add_16B_offset",
+                                    desc_b,
+                                    (
+                                        T.uint32((ki // 4) * 1024 + (ki % 4) * 8)
+                                        + stage_idx * T.uint32(block_n * block_k)
+                                    )
+                                    // T.uint32(4),
+                                    source_code=smem_desc_add_source,
+                                    return_type="uint64",
+                                ),
+                                tf32_instr_desc,
+                                T.uint32(0),
+                                T.uint32(0),
+                                T.uint32(0),
+                                T.uint32(0),
+                                T.ptx.pred((s != T.uint32(0)) if ki == 0 else T.bool(True)),
+                            )
                     if T.cuda.elect_sync():
                         cast_pipe.empty.arrive(cast_stage_idx)
                         smem_pipe.empty.arrive(stage_idx)
@@ -600,6 +737,7 @@ def get_kernel(**kwargs: Any):
             # D epilogue, hand-aligned: 8 x [tcgen05.ld.32x32b.x4 + wait.ld +
             # st.shared.v4 (lane<16) + syncwarp] into the 128B-swizzled smem_cd.
             d_frag = T.alloc_local((4,), "float32")
+            d_words = d_frag.view("uint32")
             for i in T.unroll(block_n // 4):
                 taddr_d: T.uint32 = T.uint32(d_tmem_start_col + i * 4)
                 T.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
@@ -607,10 +745,21 @@ def get_kernel(**kwargs: Any):
                 )
                 T.ptx.tcgen05.wait__ld.sync.aligned()
                 if lane_u32 < T.uint32(16):
-                    # Per-thread 4-col slice store; the swizzled layout of
-                    # smem_cd_mma computes the address, the 16B chunk emits v4.
+                    # Per-thread 4-col slice store; ptr_to applies the same
+                    # 128B-swizzled layout that the former tile copy selected.
                     m_row: T.uint32 = T.cast(warp_idx, "uint32") * T.uint32(16) + lane_u32
-                    Tx.copy(smem_cd_mma[m_row, i * 4 : (i + 1) * 4], d_frag[:])
+                    compose_m: T.uint32 = m_row * T.uint32(block_n) + T.uint32(i * 4)
+                    compose_q: T.uint32 = compose_m // T.uint32(4)
+                    smem_cd_offset: T.uint32 = (
+                        (compose_q ^ ((compose_q & T.uint32(56)) >> T.uint32(3))) << T.uint32(2)
+                    ) + compose_m % T.uint32(4)
+                    T.ptx.st.shared.v4.u32(
+                        pointer_offset(smem_cd_mma.ptr_to([0, 0]), smem_cd_offset),
+                        d_words[0],
+                        d_words[1],
+                        d_words[2],
+                        d_words[3],
+                    )
                 T.cuda.warp_sync()
 
             T.ptx.fence.proxy.async_.shared__cta()
@@ -620,24 +769,34 @@ def get_kernel(**kwargs: Any):
                     # D store via TMA (writes only the valid region of boundary tiles).
                     m0: T.uint32 = m_block_idx * T.uint32(block_m)
                     if num_splits == 1:
-                        Tx.copy_async(
-                            d[m0 : m0 + block_m, 0:block_n],
-                            smem_cd_mma,
-                            dispatch="tma_auto",
-                            prefetch_tensormap=True,
-                            cache_hint="evict_first",
+                        T.ptx[tma_s2g_2d](
+                            T.address_of(d_tensormap),
+                            T.int32(0),
+                            T.cast(m0, "int32"),
+                            smem_cd_mma.ptr_to([0, 0]),
+                            cache_policy_evict_first,
                         )
                     else:
                         ks: T.uint32 = k_split_idx
-                        Tx.copy_async(
-                            d[ks, m0 : m0 + block_m, 0:block_n],
-                            smem_cd_mma,
-                            dispatch="tma_auto",
-                            prefetch_tensormap=True,
-                            cache_hint="evict_first",
+                        T.ptx[tma_s2g_3d](
+                            T.address_of(d_tensormap),
+                            T.int32(0),
+                            T.cast(m0, "int32"),
+                            T.cast(ks, "int32"),
+                            smem_cd_mma.ptr_to([0, 0]),
+                            cache_policy_evict_first,
                         )
                     T.ptx.cp.async_.bulk.commit_group()
-            tmem_pool.dealloc()  # warp-1-guarded relinquish + tcgen05.dealloc
+            # Keep the TMEM teardown on warp 1, but spell the allocator-slot read
+            # explicitly so the public pre-lowering IR contains a real PTX shared
+            # load rather than a shared BufferLoad.
+            if warp_idx == 1:
+                T.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
+                tmem_dealloc_addr: T.uint32
+                T.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_ptr_in_smem.ptr_to([0]))
+                T.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
+                    tmem_dealloc_addr, T.uint32(num_tmem_cols)
+                )
         else:
             sub_warp_idx: T.uint32 = T.cast(
                 T.cast(warp_idx, "int32") - T.int32(num_mma_warps), "uint32"
@@ -658,7 +817,7 @@ def get_kernel(**kwargs: Any):
             # structurally incompatible with the wid_in_wg+split-laneid atom) and
             # falls to a 16x-scalar-LDS reg path that costs +25% on the latency-
             # bound tail. The square/accumulate runs on the flat ``.local()`` view
-            # (per-thread private regs via ``Tx.fill`` / ``Tx.fma``). Its physical
+            # (per-thread private regs via explicit PTX). Its physical
             # register order interleaves the two Layout-F rows in packed pairs:
             # regs [4*p:4*p+2] feed row m_idx0 and regs [4*p+2:4*p+4] feed row
             # m_idx1 (+8).
@@ -674,10 +833,13 @@ def get_kernel(**kwargs: Any):
             sqr0 = T.alloc_local((2,), "float32")
             sqr1 = T.alloc_local((2,), "float32")
             a_flat = a_fp32.local()  # 1D physical-register view, 32 fp32 values per thread
-            # Per-thread private regs: use thread-scope fill/fma (not Tx.warp — warp
-            # scope requires a laneid-distributed layout; see elementwise reg dispatch).
-            Tx.fill(sqr0, T.float32(0))
-            Tx.fill(sqr1, T.float32(0))
+            a_words = a_flat.view("uint32")
+            a_bf16_flat = a_bf16.local()
+            a_bf16_words = a_bf16_flat.view("uint32")
+            sqr0[0] = T.float32(0)
+            sqr0[1] = T.float32(0)
+            sqr1[0] = T.float32(0)
+            sqr1[1] = T.float32(0)
             cast_st: T.uint32 = T.uint32(0)
             cast_ph: T.uint32 = T.uint32(0)
             cast_cs: T.uint32 = T.uint32(0)
@@ -687,29 +849,112 @@ def get_kernel(**kwargs: Any):
                 cast_stage_idx: T.uint32 = cast_cs
                 a_col: T.int32 = T.cast(cast_stage_idx * T.uint32(block_k), "int32")
                 smem_pipe.full.wait(stage_idx, cast_ph)
-                # SMEM->reg A load via ldmatrix.x4 (T.copy dispatch).
-                Tx.warpgroup.copy(a_bf16, smem_a_mma[stage_idx])
+                # Four x4 ldmatrix instructions reproduce the warpgroup copy's
+                # physical register order.  Keep the dispatcher's explicit
+                # swizzled element offset so ptxas sees the same address DAG.
+                for mm in T.unroll(4):
+                    smem_off: T.uint32 = (
+                        T.cast(
+                            T.cast(sub_warp_idx, "int32") * T.int32(1024)
+                            + T.int32((mm // 2) * 512),
+                            "uint32",
+                        )
+                        + stage_idx * T.uint32(block_m * block_k)
+                        + T.cast(lane_idx % T.int32(8) * T.int32(block_k), "uint32")
+                        + (
+                            T.cast(
+                                T.int32((mm % 2) * 32) + lane_idx // T.int32(8) * T.int32(8),
+                                "uint32",
+                            )
+                            ^ (
+                                (
+                                    T.cast(
+                                        T.cast(sub_warp_idx, "int32") * T.int32(16)
+                                        + T.int32((mm // 2) * 8),
+                                        "uint32",
+                                    )
+                                    + stage_idx * T.uint32(block_k)
+                                    + T.cast(lane_idx % T.int32(8) * T.int32(block_k), "uint32")
+                                    // T.uint32(block_k)
+                                )
+                                & T.uint32(7)
+                            )
+                            << T.uint32(3)
+                        )
+                    )
+                    reg_base = (mm % 2) * 8 + mm // 2
+                    T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
+                        a_bf16_words[reg_base],
+                        a_bf16_words[reg_base + 2],
+                        a_bf16_words[reg_base + 4],
+                        a_bf16_words[reg_base + 6],
+                        pointer_offset(smem_a_mma.ptr_to([0, 0, 0]), smem_off),
+                    )
                 cast_pipe.empty.wait(cast_stage_idx, cast_cph)
                 # bf16->tf32 + sqr-fma + TMEM deposit: interleaved per 8-col atom on
                 # short mainloops (hand structure); single wide STTM.x8 on deep pipelines.
                 if num_k_blocks_per_split <= 16:
                     for p in range(block_k // 8):
-                        Tx.warpgroup.cast(
-                            a_fp32[:, p * 8 : (p + 1) * 8], a_bf16[:, p * 8 : (p + 1) * 8]
-                        )
+                        for f in range(2):
+                            T.cuda.func_call(
+                                "tvm_builtin_cast_bfloat16x2_float32x2",
+                                T.address_of(a_flat[p * 4 + f * 2]),
+                                T.address_of(a_bf16_flat[p * 4 + f * 2]),
+                                source_code=cast_bf16x2_source,
+                            )
                         # sqr{0,1} += a*a for this atom's packed pair per row.
-                        Tx.fma(sqr0, a_flat[4 * p : 4 * p + 2], a_flat[4 * p : 4 * p + 2], sqr0)
-                        Tx.fma(
-                            sqr1, a_flat[4 * p + 2 : 4 * p + 4], a_flat[4 * p + 2 : 4 * p + 4], sqr1
-                        )
-                        Tx.warpgroup.copy_async(
-                            _tmem[0:block_m, a_col + p * 8 : a_col + (p + 1) * 8],
-                            a_fp32[:, p * 8 : (p + 1) * 8],
+                        pair0_lhs: T.uint64
+                        pair0_rhs: T.uint64
+                        pair0_acc: T.uint64
+                        T.ptx.mov.b64(pair0_lhs, a_flat[p * 4], a_flat[p * 4 + 1])
+                        T.ptx.mov.b64(pair0_rhs, a_flat[p * 4], a_flat[p * 4 + 1])
+                        T.ptx.mov.b64(pair0_acc, sqr0[0], sqr0[1])
+                        T.ptx.fma.rz.ftz.f32x2(pair0_lhs, pair0_lhs, pair0_rhs, pair0_acc)
+                        T.ptx.mov.b64(sqr0[0], sqr0[1], pair0_lhs)
+                        pair1_lhs: T.uint64
+                        pair1_rhs: T.uint64
+                        pair1_acc: T.uint64
+                        T.ptx.mov.b64(pair1_lhs, a_flat[p * 4 + 2], a_flat[p * 4 + 3])
+                        T.ptx.mov.b64(pair1_rhs, a_flat[p * 4 + 2], a_flat[p * 4 + 3])
+                        T.ptx.mov.b64(pair1_acc, sqr1[0], sqr1[1])
+                        T.ptx.fma.rz.ftz.f32x2(pair1_lhs, pair1_lhs, pair1_rhs, pair1_acc)
+                        T.ptx.mov.b64(sqr1[0], sqr1[1], pair1_lhs)
+                        T.ptx["tcgen05.st.sync.aligned.16x256b.x1.b32"](
+                            T.cuda.get_tmem_addr(T.uint32(0), 0, a_col + p * 8),
+                            a_words[p * 4],
+                            a_words[p * 4 + 1],
+                            a_words[p * 4 + 2],
+                            a_words[p * 4 + 3],
                         )
                 else:
-                    Tx.warpgroup.cast(a_fp32, a_bf16)
-                    fma_sum_of_squares(sqr0, sqr1, a_flat, cast_pairs, Tx)
-                    Tx.warpgroup.copy_async(_tmem[0:block_m, a_col : a_col + block_k], a_fp32)
+                    for f in range(cast_per_thread // 2):
+                        T.cuda.func_call(
+                            "tvm_builtin_cast_bfloat16x2_float32x2",
+                            T.address_of(a_flat[f * 2]),
+                            T.address_of(a_bf16_flat[f * 2]),
+                            source_code=cast_bf16x2_source,
+                        )
+                    for p in T.unroll(cast_pairs):
+                        pair0_lhs: T.uint64
+                        pair0_rhs: T.uint64
+                        pair0_acc: T.uint64
+                        T.ptx.mov.b64(pair0_lhs, a_flat[p * 4], a_flat[p * 4 + 1])
+                        T.ptx.mov.b64(pair0_rhs, a_flat[p * 4], a_flat[p * 4 + 1])
+                        T.ptx.mov.b64(pair0_acc, sqr0[0], sqr0[1])
+                        T.ptx.fma.rz.ftz.f32x2(pair0_lhs, pair0_lhs, pair0_rhs, pair0_acc)
+                        T.ptx.mov.b64(sqr0[0], sqr0[1], pair0_lhs)
+                        pair1_lhs: T.uint64
+                        pair1_rhs: T.uint64
+                        pair1_acc: T.uint64
+                        T.ptx.mov.b64(pair1_lhs, a_flat[p * 4 + 2], a_flat[p * 4 + 3])
+                        T.ptx.mov.b64(pair1_rhs, a_flat[p * 4 + 2], a_flat[p * 4 + 3])
+                        T.ptx.mov.b64(pair1_acc, sqr1[0], sqr1[1])
+                        T.ptx.fma.rz.ftz.f32x2(pair1_lhs, pair1_lhs, pair1_rhs, pair1_acc)
+                        T.ptx.mov.b64(sqr1[0], sqr1[1], pair1_lhs)
+                    T.ptx["tcgen05.st.sync.aligned.16x256b.x8.b32"](
+                        T.cuda.get_tmem_addr(T.uint32(0), 0, a_col),
+                        *[a_words[i] for i in range(cast_per_thread)],
+                    )
                 T.ptx.tcgen05.wait__st.sync.aligned()
                 cast_pipe.full.arrive(cast_stage_idx)
                 cast_st = stage_idx + T.uint32(1)
@@ -722,19 +967,17 @@ def get_kernel(**kwargs: Any):
 
             # Cross-lane sum-of-squares reduce over the 4 K-lanes (the hand's
             # shfl_xor 2,1), then store the two per-row results.
-            sqr_part = T.alloc_buffer(
-                [2], "float32", scope="local", layout=TileLayout(S[(2,) : (1,)])
-            )
+            sqr_part = T.alloc_local((2,), "float32")
             sqr_part[0] = sqr0[0] + sqr0[1]
             sqr_part[1] = sqr1[0] + sqr1[1]
-            sqr_warp = sqr_part.view(
-                16,
-                4,
-                layout=TileLayout(S[(1, 1) : (1, 1)])
-                .tile(TileLayout(S[(8, 4) : (4 @ laneid, 1 @ laneid)]), (8, 4), (1, 1))
-                .tile(TileLayout(S[(2, 1) : (1, 1)]), (2, 1), (8, 4)),
-            )
-            Tx.warp.sum(sqr_warp, sqr_warp, thread_reduce=True)
+            for spa in range(2):
+                reduce_mask: T.uint32 = T.tvm_warp_activemask()
+                sqr_part[spa] = sqr_part[spa] + T.tvm_warp_shuffle_xor(
+                    reduce_mask, sqr_part[spa], 1, 32, 32
+                )
+                sqr_part[spa] = sqr_part[spa] + T.tvm_warp_shuffle_xor(
+                    reduce_mask, sqr_part[spa], 2, 32, 32
+                )
             reduced0: T.float32 = sqr_part[0]
             reduced1: T.float32 = sqr_part[1]
             m_idx0: T.uint32 = (
@@ -745,9 +988,13 @@ def get_kernel(**kwargs: Any):
             m_idx1: T.uint32 = m_idx0 + T.uint32(8)
             if (lane_u32 % T.uint32(4)) == T.uint32(0):
                 if m_idx0 < shape_m:
-                    sqr_sum[T.cast(m_offset + m_idx0, "int32")] = reduced0
+                    T.ptx.st.global_.f32(
+                        sqr_sum.ptr_to([T.cast(m_offset + m_idx0, "int32")]), reduced0
+                    )
                 if m_idx1 < shape_m:
-                    sqr_sum[T.cast(m_offset + m_idx1, "int32")] = reduced1
+                    T.ptx.st.global_.f32(
+                        sqr_sum.ptr_to([T.cast(m_offset + m_idx1, "int32")]), reduced1
+                    )
 
     return sm100_tf32_hc_prenorm_gemm.with_attr(
         "tirx.kernel_launch_params",

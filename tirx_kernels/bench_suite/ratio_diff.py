@@ -5,8 +5,10 @@ For each (kernel, config) we measure with multiple impls, compute the
 ratio ref/ours where ref = fastest non-ours impl picked in baseline and
 held fixed across runs. Higher ref/ours = ours is faster than ref =
 better. Diff that ratio between baseline and current: positive ratio Δ
-means we got faster vs ref (improvement), negative means slower
-(regression).
+means we got faster vs ref (improvement), negative means slower relative to
+the reference. A current ours time that is lower than the pinned ours time is
+an absolute speedup and always passes; otherwise a sufficiently negative ratio
+Δ is a regression.
 
 Rationale: under GPU contention every impl slows by a similar factor,
 so absolute-µs diffs are dominated by that noise. The ratio between
@@ -190,7 +192,13 @@ def build_report(
             )
         w()
 
-    n_regressions = sum(1 for r in rows if r[8] <= -threshold_pct)
+    # Absolute speedups cannot be performance regressions. The ratio remains
+    # the drift-resistant gate only when ours did not improve in absolute time.
+    # This also prevents a faster reference run from turning a faster ours run
+    # into a false failure.
+    ratio_regression_rows = [r for r in rows if r[8] <= -threshold_pct]
+    absolute_speedup_exemptions = [r for r in ratio_regression_rows if r[9] < 0.0]
+    n_regressions = sum(1 for r in ratio_regression_rows if r[9] >= 0.0)
     n_improvements = sum(1 for r in rows if r[8] >= threshold_pct)
 
     w("# bench-suite bench report")
@@ -202,11 +210,21 @@ def build_report(
         "ours/ref Δ vs pinned baseline abs µs. Sorted by ratio Δ."
     )
     w(
+        "- Gate: current ours faster than pinned ours passes as an absolute speedup; "
+        f"otherwise ratio Δ <= -{threshold_pct:g}% is a regression."
+    )
+    w(
         f"- Summary: {len(rows)} comparable implementation/reference measurements; "
         f"{n_improvements} > +{threshold_pct:g}%, {n_regressions} < -{threshold_pct:g}%"
         + (
             f"; {len(not_comparable)} not comparable in current run (see below)"
             if not_comparable
+            else ""
+        )
+        + (
+            f"; {len(absolute_speedup_exemptions)} negative-ratio row(s) passed because "
+            "ours is absolutely faster"
+            if absolute_speedup_exemptions
             else ""
         )
         + ". ⚠ = reference abs µs drifted >20% vs baseline (less trustworthy)."

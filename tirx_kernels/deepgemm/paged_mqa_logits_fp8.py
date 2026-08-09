@@ -681,37 +681,6 @@ def get_kernel(**kwargs: Any):
             return q_atom_idx
         return q_atom_idx // T.uint32(num_next_n_atoms)
 
-    def get_num_kv_expr(q_atom_idx, runtime_batch_size, context_lens_flat, indices):
-        if config.varlen:
-            is_paired = T.And(
-                q_atom_idx + T.uint32(1) < runtime_batch_size,
-                indices[T.cast(q_atom_idx, "int32")]
-                == indices[T.cast(q_atom_idx + T.uint32(1), "int32")],
-            )
-            ctx_len: T.uint32 = T.if_then_else(
-                is_paired,
-                T.cast(context_lens_flat[T.cast(q_atom_idx + T.uint32(1), "int32")], "uint32"),
-                T.cast(context_lens_flat[T.cast(q_atom_idx, "int32")], "uint32"),
-            )
-            return (ctx_len + T.uint32(umma_m - 1)) // T.uint32(umma_m)
-        q_idx: T.uint32 = q_atom_idx // T.uint32(num_next_n_atoms)
-        lens_idx: T.uint32 = q_idx * T.uint32(config.next_n) + T.uint32(config.next_n - 1)
-        ctx_len: T.uint32 = T.cast(context_lens_flat[T.cast(lens_idx, "int32")], "uint32")
-        return (ctx_len + T.uint32(umma_m - 1)) // T.uint32(umma_m)
-
-    def get_atom_advance_expr(q_atom_idx, bound, indices):
-        if config.varlen:
-            return T.if_then_else(
-                T.And(
-                    q_atom_idx + T.uint32(1) < bound,
-                    indices[T.cast(q_atom_idx, "int32")]
-                    == indices[T.cast(q_atom_idx + T.uint32(1), "int32")],
-                ),
-                T.uint32(2),
-                T.uint32(1),
-            )
-        return T.uint32(1)
-
     def should_refresh_num_kv_expr(q_atom_idx):
         if config.varlen:
             return T.bool(True)
@@ -937,6 +906,8 @@ def get_kernel(**kwargs: Any):
         )
         fetch_result = T.alloc_local((4,), "uint32")
         scheduler_result = T.alloc_local((7,), "uint32")
+        num_kv_result = T.alloc_local((1,), "uint32")
+        atom_advance_result = T.alloc_local((1,), "uint32")
 
         @T.inline
         def mbarrier_wait_phase(barrier_ptr, phase):
@@ -959,6 +930,46 @@ def get_kernel(**kwargs: Any):
         def get_kv_pipeline(kv_iter_idx):
             fetch_result[2] = kv_iter_idx % T.uint32(num_kv_stages)
             fetch_result[3] = (kv_iter_idx // T.uint32(num_kv_stages)) & T.uint32(1)
+
+        @T.inline
+        def load_num_kv(q_atom_idx_arg, runtime_batch_size_arg):
+            if config.varlen:
+                context_idx: T.uint32 = q_atom_idx_arg
+                if q_atom_idx_arg + T.uint32(1) < runtime_batch_size_arg:
+                    index_0 = T.local_scalar("int32")
+                    index_1 = T.local_scalar("int32")
+                    T.ptx.ld.global_.s32(index_0, indices.ptr_to([T.cast(q_atom_idx_arg, "int32")]))
+                    T.ptx.ld.global_.s32(
+                        index_1, indices.ptr_to([T.cast(q_atom_idx_arg + T.uint32(1), "int32")])
+                    )
+                    if index_0 == index_1:
+                        context_idx = q_atom_idx_arg + T.uint32(1)
+                context_len = T.local_scalar("uint32")
+                T.ptx.ld.global_.u32(
+                    context_len, context_lens_flat.ptr_to([T.cast(context_idx, "int32")])
+                )
+            else:
+                q_idx: T.uint32 = q_atom_idx_arg // T.uint32(num_next_n_atoms)
+                lens_idx: T.uint32 = q_idx * T.uint32(config.next_n) + T.uint32(config.next_n - 1)
+                context_len = T.local_scalar("uint32")
+                T.ptx.ld.global_.u32(
+                    context_len, context_lens_flat.ptr_to([T.cast(lens_idx, "int32")])
+                )
+            num_kv_result[0] = (context_len + T.uint32(umma_m - 1)) // T.uint32(umma_m)
+
+        @T.inline
+        def load_atom_advance(q_atom_idx_arg, bound_arg):
+            atom_advance_result[0] = T.uint32(1)
+            if config.varlen:
+                if q_atom_idx_arg + T.uint32(1) < bound_arg:
+                    index_0 = T.local_scalar("int32")
+                    index_1 = T.local_scalar("int32")
+                    T.ptx.ld.global_.s32(index_0, indices.ptr_to([T.cast(q_atom_idx_arg, "int32")]))
+                    T.ptx.ld.global_.s32(
+                        index_1, indices.ptr_to([T.cast(q_atom_idx_arg + T.uint32(1), "int32")])
+                    )
+                    if index_0 == index_1:
+                        atom_advance_result[0] = T.uint32(2)
 
         @T.inline
         def tma_load_2d_q(dst, barrier_ptr, tensor_map, coord0, coord1):
@@ -1080,47 +1091,52 @@ def get_kernel(**kwargs: Any):
                 scheduler_result[5] = current_kv_idx_arg + T.uint32(num_tiles_per_split)
                 if scheduler_result[5] >= current_num_kv_arg:
                     scheduler_result[5] = T.uint32(0)
-                    scheduler_result[4] = current_q_atom_idx_arg + get_atom_advance_expr(
-                        current_q_atom_idx_arg, end_q_atom_idx_arg, indices
-                    )
+                    load_atom_advance(current_q_atom_idx_arg, end_q_atom_idx_arg)
+                    scheduler_result[4] = current_q_atom_idx_arg + atom_advance_result[0]
                     if T.And(
                         should_refresh_num_kv_expr(scheduler_result[4]),
                         exist_q_atom_idx_expr(
                             scheduler_result[4], end_q_atom_idx_arg, end_kv_idx_arg
                         ),
                     ):
-                        scheduler_result[6] = get_num_kv_expr(
-                            scheduler_result[4], batch_size, context_lens_flat, indices
-                        )
+                        load_num_kv(scheduler_result[4], batch_size)
+                        scheduler_result[6] = num_kv_result[0]
                 scheduler_result[3] = T.uint32(1)
 
         # Early schedule-metadata load: issue the global loads before the
         # pipeline/barrier prologue so the ~200-cycle L2 latency overlaps with
         # the setup below (matches the CuTeDSL baseline).
-        start_q_atom_idx: T.let = T.cast(
-            schedule_meta_flat[T.cast(sm_idx_u32 * T.uint32(2), "int32")], "uint32"
+        start_q_atom_idx = T.local_scalar("uint32")
+        start_kv_tile_idx = T.local_scalar("uint32")
+        end_q_atom_idx = T.local_scalar("uint32")
+        end_kv_tile_idx = T.local_scalar("uint32")
+        T.ptx.ld.global_.u32(
+            start_q_atom_idx, schedule_meta_flat.ptr_to([T.cast(sm_idx_u32 * T.uint32(2), "int32")])
         )
-        start_kv_idx: T.let = T.cast(
-            schedule_meta_flat[T.cast(sm_idx_u32 * T.uint32(2) + T.uint32(1), "int32")], "uint32"
-        ) * T.uint32(num_tiles_per_split)
-        end_q_atom_idx: T.let = T.cast(
-            schedule_meta_flat[T.cast((sm_idx_u32 + T.uint32(1)) * T.uint32(2), "int32")], "uint32"
+        T.ptx.ld.global_.u32(
+            start_kv_tile_idx,
+            schedule_meta_flat.ptr_to([T.cast(sm_idx_u32 * T.uint32(2) + T.uint32(1), "int32")]),
         )
-        end_kv_idx: T.let = T.cast(
-            schedule_meta_flat[
-                T.cast((sm_idx_u32 + T.uint32(1)) * T.uint32(2) + T.uint32(1), "int32")
-            ],
-            "uint32",
-        ) * T.uint32(num_tiles_per_split)
+        T.ptx.ld.global_.u32(
+            end_q_atom_idx,
+            schedule_meta_flat.ptr_to([T.cast((sm_idx_u32 + T.uint32(1)) * T.uint32(2), "int32")]),
+        )
+        T.ptx.ld.global_.u32(
+            end_kv_tile_idx,
+            schedule_meta_flat.ptr_to(
+                [T.cast((sm_idx_u32 + T.uint32(1)) * T.uint32(2) + T.uint32(1), "int32")]
+            ),
+        )
+        start_kv_idx: T.let = start_kv_tile_idx * T.uint32(num_tiles_per_split)
+        end_kv_idx: T.let = end_kv_tile_idx * T.uint32(num_tiles_per_split)
         # Clamp the context-length read for zero-work CTAs (start == total q
         # atoms); the value is stale but never used because has_work is false
         # (same clamp as the CuTeDSL baseline).
-        start_num_kv: T.let = get_num_kv_expr(
+        load_num_kv(
             T.min(start_q_atom_idx, batch_size * T.uint32(num_next_n_atoms) - T.uint32(1)),
             batch_size,
-            context_lens_flat,
-            indices,
         )
+        start_num_kv: T.let = num_kv_result[0]
 
         # Warm the block table into L2 as early as possible. Race-safe: a stale
         # prefetched line is invalidated by any later producer write, so the
@@ -1227,7 +1243,8 @@ def get_kernel(**kwargs: Any):
             cached_kv_blocks = T.alloc_local((num_pages_per_tile,), "uint32")
 
             while fetched_next_task:
-                next_advance: T.uint32 = get_atom_advance_expr(next_q_atom_idx, batch_size, indices)
+                load_atom_advance(next_q_atom_idx, batch_size)
+                next_advance: T.uint32 = atom_advance_result[0]
                 prefetch_q: T.bool = T.And(
                     q_atom_idx != next_q_atom_idx,
                     exist_q_atom_idx_expr(
@@ -1269,20 +1286,19 @@ def get_kernel(**kwargs: Any):
                         # may still exceed the block table's row length, and an
                         # out-of-range garbage page id would send TMA out of
                         # bounds (page 0 is used as the masked-dumpster tile).
-                        cached_kv_blocks[block_i] = T.if_then_else(
-                            T.And(
-                                prefetch_tile_idx < num_kv,
-                                prefetch_tile_idx * T.uint32(num_pages_per_tile) + T.uint32(block_i)
-                                < T.uint32(config.max_num_pages),
-                            ),
-                            T.cast(
-                                block_table_flat[
-                                    T.cast(block_table_index + T.cast(block_i, "uint64"), "int64")
-                                ],
-                                "uint32",
-                            ),
-                            T.uint32(0),
-                        )
+                        if T.And(
+                            prefetch_tile_idx < num_kv,
+                            prefetch_tile_idx * T.uint32(num_pages_per_tile) + T.uint32(block_i)
+                            < T.uint32(config.max_num_pages),
+                        ):
+                            T.ptx.ld.global_.u32(
+                                cached_kv_blocks[block_i],
+                                block_table_flat.ptr_to(
+                                    [T.cast(block_table_index + T.cast(block_i, "uint64"), "int64")]
+                                ),
+                            )
+                        else:
+                            cached_kv_blocks[block_i] = T.uint32(0)
                 T.cuda.warp_sync()
 
                 kv_block_idx = T.alloc_local((num_pages_per_tile,), "uint32")
@@ -1386,20 +1402,19 @@ def get_kernel(**kwargs: Any):
                         # may still exceed the block table's row length, and an
                         # out-of-range garbage page id would send TMA out of
                         # bounds (page 0 is used as the masked-dumpster tile).
-                        cached_kv_blocks[block_i] = T.if_then_else(
-                            T.And(
-                                prefetch_tile_idx < num_kv,
-                                prefetch_tile_idx * T.uint32(num_pages_per_tile) + T.uint32(block_i)
-                                < T.uint32(config.max_num_pages),
-                            ),
-                            T.cast(
-                                block_table_flat[
-                                    T.cast(block_table_index + T.cast(block_i, "uint64"), "int64")
-                                ],
-                                "uint32",
-                            ),
-                            T.uint32(0),
-                        )
+                        if T.And(
+                            prefetch_tile_idx < num_kv,
+                            prefetch_tile_idx * T.uint32(num_pages_per_tile) + T.uint32(block_i)
+                            < T.uint32(config.max_num_pages),
+                        ):
+                            T.ptx.ld.global_.u32(
+                                cached_kv_blocks[block_i],
+                                block_table_flat.ptr_to(
+                                    [T.cast(block_table_index + T.cast(block_i, "uint64"), "int64")]
+                                ),
+                            )
+                        else:
+                            cached_kv_blocks[block_i] = T.uint32(0)
                 T.cuda.warp_sync()
 
                 kv_block_idx = T.alloc_local((num_pages_per_tile,), "uint32")
@@ -1803,11 +1818,15 @@ def get_kernel(**kwargs: Any):
                         scale_kv_half, fadd_rn_noftz(T.cuda.float2_x(sum_v), T.cuda.float2_y(sum_v))
                     )
                     result = T.cast(result_f32, logits_tir_dtype)
-                    logits_flat[
+                    logits_offset: T.uint64 = (
                         T.cast(kv_offset_arg, "uint64")
                         + T.cast(q_inner_i, "uint64") * T.cast(logits_stride, "uint64")
                         + T.cast(math_thread_idx, "uint64")
-                    ] = result
+                    )
+                    if config.logits_dtype == "float32":
+                        T.ptx.st.global_.f32(logits_flat.ptr_to([logits_offset]), result)
+                    else:
+                        T.ptx.st.global_.b16(logits_flat.ptr_to([logits_offset]), result)
 
             while fetched_next_task:
                 if q_atom_idx != next_q_atom_idx:
@@ -1833,17 +1852,16 @@ def get_kernel(**kwargs: Any):
                     for weight_i in T.unroll(0, next_n_atom):
                         for weight_j in T.unroll(0, num_heads // 4):
                             weight_col = weight_j * 4
-                            raw = smem_weights.vload(
-                                [q_stage_idx, weight_i, weight_col], dtype="float32x4"
+                            T.ptx.ld.shared.v4.f32(
+                                cached_weights[weight_i, weight_col],
+                                cached_weights[weight_i, weight_col + 1],
+                                cached_weights[weight_i, weight_col + 2],
+                                cached_weights[weight_i, weight_col + 3],
+                                smem_weights.ptr_to([q_stage_idx, weight_i, weight_col]),
                             )
-                            cached_weights[weight_i, weight_col] = T.Shuffle([raw], [0])
-                            cached_weights[weight_i, weight_col + 1] = T.Shuffle([raw], [1])
-                            cached_weights[weight_i, weight_col + 2] = T.Shuffle([raw], [2])
-                            cached_weights[weight_i, weight_col + 3] = T.Shuffle([raw], [3])
                     if config.varlen:
-                        is_paired_atom = get_atom_advance_expr(
-                            next_q_atom_idx, batch_size, indices
-                        ) == T.uint32(2)
+                        load_atom_advance(next_q_atom_idx, batch_size)
+                        is_paired_atom = atom_advance_result[0] == T.uint32(2)
                 q_atom_idx = next_q_atom_idx
                 kv_idx: T.uint32 = next_kv_idx
                 kv_offset: T.uint64 = T.cast(atom_to_token_idx_expr(q_atom_idx), "uint64") * T.cast(
