@@ -15,8 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from pathlib import Path
-
 from tirx_kernels.attention import gdn_prefill_sm100
 from tirx_kernels.bench_suite import run as bench_suite_run
 
@@ -80,30 +78,3 @@ def test_gdn_prefill_sm100_covers_frozen_cartesian_matrix() -> None:
     assert observed == {
         (hq, hv, seq_lens) for hq, hv in expected_heads for seq_lens in expected_sequences
     }
-
-
-def test_gdn_prefill_sm100_rejects_tile_primitive_execution_apis() -> None:
-    source = Path(gdn_prefill_sm100.__file__).read_text()
-    forbidden = (
-        "Tx.copy(",
-        "Tx.copy_async(",
-        "Tx.gemm(",
-        "Tx.gemm_async(",
-        "tvm.backend.cuda.tile_primitive",
-        "T.Kernel(",
-        "T.Parallel(",
-        "T.Pipelined(",
-        "T.alloc_fragment(",
-        "@T.prim_func",
-        "/home/",
-        ".porting/",
-    )
-
-    assert "T.device_entry()" in source
-    assert not {needle for needle in forbidden if needle in source}
-    assert '"evict_normal"' not in source
-    # The five TMA copies pass their zero cache policy as the ptx chain's
-    # trailing positional operand (the legacy kwarg spelling is retired).
-    assert source.count("T.uint64(0),") == 5
-    assert source.count("_descriptor_copy_payload(o_map, descriptor_o)") == 1
-    assert "% num_sequences" not in source

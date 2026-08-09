@@ -307,9 +307,8 @@ def _mqa_fp8_wrelu_reduce_src(num_heads: int) -> str:
 def get_kernel(**kwargs: Any):
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
     from tvm.script import tirx as T
-    from tvm.script.tirx import tile as Tx
     from tvm.tirx.lang.pipeline import Pipeline
-    from tvm.tirx.layout import S, TCol, TileLayout, TLane, wg_local_layout
+    from tvm.tirx.layout import S, TCol, TileLayout, TLane
 
     config = _make_config(**kwargs)
     num_heads = config.num_heads
@@ -357,9 +356,19 @@ def get_kernel(**kwargs: Any):
         raise ValueError(f"tensor memory columns {num_tmem_cols} exceeds SM100 single-CTA limit")
     tmem_layout = TileLayout(S[(128, num_tmem_cols) : (1 @ TLane, 1 @ TCol)])
     logits_tir_dtype = "float32" if config.logits_dtype == "float32" else "bfloat16"
-
-    def lane_id_u32():
-        return T.cast(T.cuda.mov_sreg(32, "laneid"), "uint32")
+    cache_policy_evict_normal = T.uint64(0x1000000000000000)
+    tma_g2s_1d = (
+        "cp.async.bulk.tensor.1d.shared::cluster.global"
+        ".mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint"
+    )
+    tma_g2s_2d = (
+        "cp.async.bulk.tensor.2d.shared::cluster.global"
+        ".mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint"
+    )
+    tcgen05_mma = "tcgen05.mma.cta_group::1.kind::f8f6f4"
+    tcgen05_ld = f"tcgen05.ld.sync.aligned.32x32b.x{num_heads // 2}.b32"
+    desc_sdo = head_dim // 2
+    desc_swizzle = {32: 1, 64: 2, 128: 3}[head_dim]
 
     def cuda_grid_dependency_synchronize():
         T.evaluate(T.ptx.griddepcontrol.wait())
@@ -399,6 +408,83 @@ def get_kernel(**kwargs: Any):
         kv_gmem = T.match_buffer(kv_gmem_h, (seq_len_kv, head_dim), "uint8")
         kv_scales_gmem = T.match_buffer(kv_scales_gmem_h, (seq_len_kv,), "float32")
         weights_gmem = T.match_buffer(weights_gmem_h, (seq_len, num_heads), "float32")
+
+        # Runtime lengths remain part of the public kernel ABI, so construct
+        # the four tensor maps in the host prologue instead of specializing
+        # sequence lengths into the PrimFunc.  Q/KV retain the dispatcher's
+        # head-dimension swizzle; weights and per-token KV scales are linear.
+        kv_scales_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            kv_scales_gmem_tensormap,
+            "float32",
+            1,
+            kv_scales_gmem.data,
+            seq_len_kv,
+            block_kv,
+            1,
+            0,
+            0,
+            2,
+            0,
+        )
+        kv_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            kv_gmem_tensormap,
+            "uint8",
+            2,
+            kv_gmem.data,
+            head_dim,
+            seq_len_kv,
+            head_dim,
+            head_dim,
+            block_kv,
+            1,
+            1,
+            0,
+            _SWZ.value,
+            2,
+            0,
+        )
+        weights_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            weights_gmem_tensormap,
+            "float32",
+            2,
+            weights_gmem.data,
+            num_heads,
+            seq_len,
+            num_heads * 4,
+            num_heads,
+            block_q,
+            1,
+            1,
+            0,
+            0,
+            2,
+            0,
+        )
+        q_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            q_gmem_tensormap,
+            "uint8",
+            2,
+            q_gmem.data,
+            head_dim,
+            seq_len * num_heads,
+            head_dim,
+            head_dim,
+            block_q * num_heads,
+            1,
+            1,
+            0,
+            _SWZ.value,
+            2,
+            0,
+        )
         T.device_entry()
         T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1})
         # TIRX_TRANSCRIBE_START sm100_fp8_mqa_logits
@@ -418,7 +504,22 @@ def get_kernel(**kwargs: Any):
         warp_idx_u32: T.let = T.cast(warp_idx, "uint32")
         warpgroup_idx = T.warpgroup_id([num_warps // 4])
         lane_idx = T.lane_id([32])
-        lane_idx_u32: T.let = lane_id_u32()
+        lane_idx_u32: T.let = T.cast(lane_idx, "uint32")
+
+        # Match the former dispatcher placement: one elected lane of warp 0
+        # prefetches every descriptor before pipeline traffic begins.
+        if warp_idx == 0:
+            if T.cuda.elect_sync():
+                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_gmem_tensormap)))
+        if warp_idx == 0:
+            if T.cuda.elect_sync():
+                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(weights_gmem_tensormap)))
+        if warp_idx == 0:
+            if T.cuda.elect_sync():
+                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(kv_gmem_tensormap)))
+        if warp_idx == 0:
+            if T.cuda.elect_sync():
+                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(kv_scales_gmem_tensormap)))
 
         # SMEMPool owns the smem offsets; q/kv carry the 128B MMA swizzle layout. Under
         # the pool .data is the arena base — use .ptr_to([0,...]) for a buffer's start.
@@ -472,11 +573,11 @@ def get_kernel(**kwargs: Any):
         @T.inline
         def store_logits(flat_offset, value):
             # Scalar predicated store: per-thread non-contiguous output, so TMA/bulk
-            # does not apply; bf16 stays a plain buffer store (predicated @P STG.E.U16).
+            # does not apply.  Both dtypes use explicit PTX global stores.
             if config.logits_dtype == "float32":
                 T.ptx.st.global_.f32(logits_flat.ptr_to([flat_offset]), value)
             else:
-                logits_flat[flat_offset] = value
+                T.ptx.st.global_.b16(logits_flat.ptr_to([flat_offset]), value)
 
         @T.inline
         def load_schedule(q_idx):
@@ -486,12 +587,14 @@ def get_kernel(**kwargs: Any):
                 row_idx: T.uint32 = T.min(
                     q_idx * T.uint32(block_q) + T.uint32(schedule_i), seq_len - T.uint32(1)
                 )
-                seq_k_start[schedule_i] = T.min(
-                    T.cast(cu_seq_len_k_start[row_idx], "uint32"), seq_len_kv
+                row_start: T.int32
+                row_end: T.int32
+                T.ptx.ld.global_.s32(
+                    row_start, cu_seq_len_k_start.ptr_to([T.cast(row_idx, "int32")])
                 )
-                seq_k_end[schedule_i] = T.min(
-                    T.cast(cu_seq_len_k_end[row_idx], "uint32"), seq_len_kv
-                )
+                seq_k_start[schedule_i] = T.min(T.cast(row_start, "uint32"), seq_len_kv)
+                T.ptx.ld.global_.s32(row_end, cu_seq_len_k_end.ptr_to([T.cast(row_idx, "int32")]))
+                seq_k_end[schedule_i] = T.min(T.cast(row_end, "uint32"), seq_len_kv)
                 schedule_start = T.min(schedule_start, seq_k_start[schedule_i])
                 schedule_end = T.max(schedule_end, seq_k_end[schedule_i])
             schedule_start = schedule_start // T.uint32(4) * T.uint32(4)
@@ -521,27 +624,25 @@ def get_kernel(**kwargs: Any):
                 q_idx: T.uint32 = sm_idx_u32
                 while q_idx < num_q_blocks:
                     q_pipe.empty.wait(q_stage_idx, q_phase ^ T.uint32(1))
-                    # u32 row bases — the copy_async(tma) gmem-layout grouping now
-                    # handles unsigned shape extents (no int32 cast needed).
+                    # Keep scheduler row bases in u32; cast only the TensorMap
+                    # coordinates consumed by the explicit TMA instruction.
                     q_row0: T.uint32 = q_idx * T.uint32(block_q * num_heads)
-                    Tx.copy_async(
-                        smem_q[q_stage_idx],
-                        q_gmem[q_row0 : q_row0 + block_q * num_heads, :],
-                        dispatch="tma_auto",
-                        mbar=q_pipe.full.ptr_to([q_stage_idx]),
-                        cta_group=1,
-                        cache_hint="evict_normal",
-                        prefetch_tensormap=True,
+                    T.ptx[tma_g2s_2d](
+                        smem_q.ptr_to([q_stage_idx, 0, 0]),
+                        T.address_of(q_gmem_tensormap),
+                        T.int32(0),
+                        T.cast(q_row0, "int32"),
+                        q_pipe.full.ptr_to([q_stage_idx]),
+                        cache_policy_evict_normal,
                     )
                     q_blk0: T.uint32 = q_idx * T.uint32(block_q)
-                    Tx.copy_async(
-                        smem_weights[q_stage_idx],
-                        weights_gmem[q_blk0 : q_blk0 + block_q, :],
-                        dispatch="tma_auto",
-                        mbar=q_pipe.full.ptr_to([q_stage_idx]),
-                        cta_group=1,
-                        cache_hint="evict_normal",
-                        prefetch_tensormap=True,
+                    T.ptx[tma_g2s_2d](
+                        smem_weights.ptr_to([q_stage_idx, 0, 0]),
+                        T.address_of(weights_gmem_tensormap),
+                        T.int32(0),
+                        T.cast(q_blk0, "int32"),
+                        q_pipe.full.ptr_to([q_stage_idx]),
+                        cache_policy_evict_normal,
                     )
                     q_pipe.full.arrive(
                         q_stage_idx, tx_count=smem_q_size_per_stage + smem_weight_size_per_stage
@@ -566,23 +667,20 @@ def get_kernel(**kwargs: Any):
                     while kv_idx < num_kv_blocks:
                         kv_pipe.empty.wait(kv_stage_idx, kv_phase ^ T.uint32(1))
                         kv_row0: T.uint32 = kv_start + kv_idx * T.uint32(block_kv)
-                        Tx.copy_async(
-                            smem_kv[kv_stage_idx],
-                            kv_gmem[kv_row0 : kv_row0 + block_kv, :],
-                            dispatch="tma_auto",
-                            mbar=kv_pipe.full.ptr_to([kv_stage_idx]),
-                            cta_group=1,
-                            cache_hint="evict_normal",
-                            prefetch_tensormap=True,
+                        T.ptx[tma_g2s_2d](
+                            smem_kv.ptr_to([kv_stage_idx, 0, 0]),
+                            T.address_of(kv_gmem_tensormap),
+                            T.int32(0),
+                            T.cast(kv_row0, "int32"),
+                            kv_pipe.full.ptr_to([kv_stage_idx]),
+                            cache_policy_evict_normal,
                         )
-                        Tx.copy_async(
-                            smem_kv_scales[kv_stage_idx, 0:block_kv],
-                            kv_scales_gmem[kv_row0 : kv_row0 + block_kv],
-                            dispatch="tma_auto",
-                            mbar=kv_pipe.full.ptr_to([kv_stage_idx]),
-                            cta_group=1,
-                            cache_hint="evict_normal",
-                            prefetch_tensormap=True,
+                        T.ptx[tma_g2s_1d](
+                            smem_kv_scales.ptr_to([kv_stage_idx, 0]),
+                            T.address_of(kv_scales_gmem_tensormap),
+                            T.cast(kv_row0, "int32"),
+                            kv_pipe.full.ptr_to([kv_stage_idx]),
+                            cache_policy_evict_normal,
                         )
                         kv_pipe.full.arrive(
                             kv_stage_idx,
@@ -596,9 +694,32 @@ def get_kernel(**kwargs: Any):
                     q_idx = q_idx + T.uint32(config.num_sms)
         elif warp_idx == spec_warp_start + 2:
             T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
-            T.cuda.trap_when_assert_failed(tmem_ptr_in_smem[0] == T.uint32(0))
-            # fp8 (e4m3) views over the 128B-swizzled uint8 SMEM; with descI omitted the
-            # tcgen05 dispatch constant-folds the dense instruction descriptor.
+            tmem_allocated: T.uint32
+            T.ptx.ld.shared.u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
+            T.cuda.trap_when_assert_failed(tmem_allocated == T.uint32(0))
+            # Dense E4M3 UMMA metadata is invariant across the persistent loop.
+            # Keep the runtime descriptor encoding that the former dispatcher
+            # produced, then update only the per-stage matrix descriptors.
+            desc_i: T.uint32
+            T.cuda.tcgen05.encode_instr_descriptor(
+                T.address_of(desc_i),
+                d_dtype="float32",
+                a_dtype="float8_e4m3fn",
+                b_dtype="float8_e4m3fn",
+                M=umma_m,
+                N=umma_n,
+                K=umma_k,
+                trans_a=False,
+                trans_b=False,
+                n_cta_groups=1,
+            )
+            runtime_instr_desc: T.uint64 = T.shift_left(T.cast(desc_i, "uint64"), T.uint64(32))
+            runtime_instr_desc_hi: T.uint32 = T.cast(
+                T.shift_right(runtime_instr_desc, T.uint64(32)), "uint32"
+            )
+            desc_a: T.uint64
+            desc_b: T.uint64
+            # FP8 (E4M3) views over the head-dimension-swizzled uint8 SMEM.
             smem_q_fp8 = smem_q.view("float8_e4m3fn")
             smem_kv_fp8 = smem_kv.view("float8_e4m3fn")
             # Whole MMA-warp loop in one elect scope: ring cursors stay elect-lane
@@ -620,27 +741,37 @@ def get_kernel(**kwargs: Any):
                         kv_pipe.full.wait(kv_stage_idx, kv_phase)
                         for math_wg_i in T.unroll(0, num_math_warpgroups):
                             tmem_addr: T.uint32 = tmem_stage_idx * T.uint32(umma_n)
-                            # int32 column base: a uint32 base would promote the slice
-                            # extent and fail the gemm dispatch's StructuralEqual check.
-                            tmem_col_start: T.int32 = T.cast(tmem_addr, "int32")
                             tmem_pipe.empty.wait(tmem_stage_idx, tmem_phase ^ T.uint32(1))
-                            # D = KV @ Q^T over full head_dim in one issue; the tcgen05
-                            # dispatch unrolls the umma_k tiling and accumulates internally.
-                            Tx.gemm_async(
-                                tmem[:, tmem_col_start : tmem_col_start + umma_n],
-                                smem_kv_fp8[
-                                    kv_stage_idx,
-                                    math_wg_i * umma_m : math_wg_i * umma_m + umma_m,
-                                    :,
-                                ],
-                                smem_q_fp8[q_stage_idx, :, :],
-                                accum=False,
-                                dispatch="tcgen05",
-                                cta_group=1,
-                                # SMEM descriptor handling: see the gemm_async tcgen05
-                                # dispatch for the hoist-vs-recompute rationale.
-                                smem_desc="hoist",
-                            )
+                            # D = KV @ Q^T.  Issue K=32 phases in increasing order;
+                            # phase zero overwrites and later phases accumulate.
+                            for ki in T.unroll(0, head_dim // umma_k):
+                                T.cuda.tcgen05.encode_matrix_descriptor(
+                                    T.address_of(desc_a),
+                                    smem_kv_fp8.ptr_to(
+                                        [kv_stage_idx, math_wg_i * umma_m, ki * umma_k]
+                                    ),
+                                    ldo=0,
+                                    sdo=desc_sdo,
+                                    swizzle=desc_swizzle,
+                                )
+                                T.cuda.tcgen05.encode_matrix_descriptor(
+                                    T.address_of(desc_b),
+                                    smem_q_fp8.ptr_to([q_stage_idx, 0, ki * umma_k]),
+                                    ldo=0,
+                                    sdo=desc_sdo,
+                                    swizzle=desc_swizzle,
+                                )
+                                T.ptx[tcgen05_mma](
+                                    tmem_addr,
+                                    desc_a,
+                                    desc_b,
+                                    runtime_instr_desc_hi,
+                                    T.uint32(0),
+                                    T.uint32(0),
+                                    T.uint32(0),
+                                    T.uint32(0),
+                                    T.ptx.pred(ki != 0),
+                                )
                             tmem_pipe.full.arrive(tmem_stage_idx)
                             tmem_stage_idx = tmem_stage_idx + T.uint32(1)
                             if tmem_stage_idx >= T.uint32(num_tmem_stages):
@@ -683,7 +814,16 @@ def get_kernel(**kwargs: Any):
                 num_kv_blocks: T.uint32 = schedule_result[1]
                 q_pipe.full.wait(q_stage_idx, q_phase)
                 if num_kv_blocks > T.uint32(0):
-                    Tx.warpgroup.copy(cached_weights, smem_weights[q_stage_idx])
+                    for weight_i in T.unroll(0, block_q):
+                        for weight_j in T.unroll(0, num_heads // 4):
+                            weight_col = weight_j * 4
+                            T.ptx.ld.shared.v4.f32(
+                                cached_weights[weight_i, weight_col],
+                                cached_weights[weight_i, weight_col + 1],
+                                cached_weights[weight_i, weight_col + 2],
+                                cached_weights[weight_i, weight_col + 3],
+                                smem_weights.ptr_to([q_stage_idx, weight_i, weight_col]),
+                            )
                     q_row_off_base[0] = T.cast(q_idx * T.uint32(block_q), "uint64") * T.cast(
                         logits_stride, "uint64"
                     )
@@ -706,18 +846,20 @@ def get_kernel(**kwargs: Any):
                         tmem_stage_base: T.uint32 = tmem_stage_idx * T.uint32(umma_n)
                         for q_inner_i in T.unroll(0, block_q):
                             tmem_addr: T.uint32 = tmem_stage_base + T.uint32(q_inner_i * num_heads)
-                            # TMEM->register read as 2x tcgen05.ld.32x32b.x32 with a
-                            # fence between (DeepGEMM tmem_load_no_fence shape for 64 heads).
-                            accum_2d = accum.view(128, num_heads, layout=wg_local_layout(num_heads))
+                            # TMEM->register read as two 32x32b chunks (x16 for 32 heads,
+                            # x32 for 64), with a tcgen05.wait.ld after each issue.
                             tmem_addr_hi: T.uint32 = tmem_addr + T.uint32(num_heads // 2)
-                            Tx.warpgroup.copy_async(
-                                accum_2d[:, 0 : num_heads // 2],
-                                tmem[:, tmem_addr : tmem_addr + num_heads // 2],
+                            T.ptx[tcgen05_ld](
+                                *[accum[head_i] for head_i in range(num_heads // 2)],
+                                T.cuda.get_tmem_addr(T.uint32(0), 0, tmem_addr),
                             )
                             T.ptx.tcgen05.wait__ld.sync.aligned()
-                            Tx.warpgroup.copy_async(
-                                accum_2d[:, num_heads // 2 : num_heads],
-                                tmem[:, tmem_addr_hi : tmem_addr_hi + num_heads // 2],
+                            T.ptx[tcgen05_ld](
+                                *[
+                                    accum[num_heads // 2 + head_i]
+                                    for head_i in range(num_heads // 2)
+                                ],
+                                T.cuda.get_tmem_addr(T.uint32(0), 0, tmem_addr_hi),
                             )
                             T.ptx.tcgen05.wait__ld.sync.aligned()
                             # Weighted-ReLU reduce via inline CUDA (see _mqa_fp8_wrelu_reduce_src).
@@ -874,8 +1016,8 @@ def _run_tirx_invocation(data: dict[str, Any], invocation: dict[str, Any]) -> to
     config: MQALogitsFP8Config = data["config"]
     executable = invocation["executable"]
     logits = invocation["logits"]
-    # Raw GMEM buffers: the in-kernel copy_async(tma) builds the descriptors; Q/KV move
-    # as uint8 (fp8 e4m3 bytes), KV-scales and weights stay float32.
+    # Raw GMEM buffers: the host prologue builds runtime TensorMaps, then explicit TMA
+    # moves Q/KV as uint8 (fp8 e4m3 bytes); KV scales and weights stay float32.
     kv_fp8, kv_scales = data["kv_in"]
     q_gmem = (
         data["q_in"].view(torch.uint8).reshape(config.seq_len * config.num_heads, config.head_dim)

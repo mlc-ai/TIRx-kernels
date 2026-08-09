@@ -31,7 +31,7 @@ _log = logging.getLogger(__name__)
 # CLI / package infra — not kernel categories.
 _SKIP_CATEGORIES = frozenset({"bench", "test", "bench_suite", "experimental"})
 
-_KERNEL_CACHE: dict[str, ModuleType] = {}
+_REQUIRED_META_TYPES = {"name": str, "category": str, "compute_capability": int}
 
 
 def _kernels_root() -> Path:
@@ -59,41 +59,58 @@ def _import_kernel_module(category: str, mod_name: str, *, strict: bool) -> Modu
             raise
         _log.warning("tirx_kernels: failed to import %s.%s: %s", pkg_name, mod_name, e)
         return None
-    meta = getattr(mod, "KERNEL_META", None)
-    if meta is not None and isinstance(meta, dict) and "name" in meta:
-        _KERNEL_CACHE[meta["name"]] = mod
-        return mod
-    return None
+    if not hasattr(mod, "KERNEL_META"):
+        return None
+
+    meta = mod.KERNEL_META
+    errors: list[str] = []
+    if not isinstance(meta, dict):
+        errors.append(f"expected dict, got {type(meta).__name__}")
+    else:
+        for field, expected_type in _REQUIRED_META_TYPES.items():
+            value = meta.get(field)
+            if not isinstance(value, expected_type) or isinstance(value, bool):
+                errors.append(f"{field!r} must be {expected_type.__name__}")
+            elif expected_type is str and not value:
+                errors.append(f"{field!r} must not be empty")
+        if meta.get("category") != category:
+            errors.append(
+                f"'category' is {meta.get('category')!r}, expected containing category {category!r}"
+            )
+
+    if errors:
+        message = f"tirx_kernels.{category}.{mod_name} has invalid KERNEL_META: " + "; ".join(
+            errors
+        )
+        if strict:
+            raise ValueError(message)
+        _log.warning(message)
+        return None
+
+    return mod
 
 
 def load_kernel(name: str, *, strict: bool = False) -> ModuleType:
     """Import a single kernel module by ``KERNEL_META['name']``.
 
-    Uses an in-process cache populated by prior ``load_kernel`` / ``discover_kernels``
-    calls. Raises ``KeyError`` when no matching kernel is installed.
+    The complete registry is validated before selecting the requested name, so
+    duplicate public identities can never be hidden by scan order or a cache.
+    Raises ``KeyError`` when no matching kernel is installed.
     """
-    if name in _KERNEL_CACHE:
-        return _KERNEL_CACHE[name]
-
-    for cat in discover_categories():
-        pkg_path = _kernels_root() / cat
-        if not pkg_path.is_dir():
-            continue
-        for _importer, mod_name, is_pkg in pkgutil.iter_modules([str(pkg_path)]):
-            if mod_name.startswith("_") or is_pkg:
-                continue
-            mod = _import_kernel_module(cat, mod_name, strict=strict)
-            if mod is not None and mod.KERNEL_META["name"] == name:
-                return mod
-
-    raise KeyError(name)
+    kernels = discover_kernels(strict=strict)
+    try:
+        return kernels[name]
+    except KeyError:
+        raise KeyError(name) from None
 
 
 def check_workload_imports(workloads: list[dict], *, strict: bool = True) -> list[str]:
     """Import every unique kernel referenced in a workloads list. Returns kernel names."""
     names = sorted({w["kernel"] for w in workloads})
+    kernels = discover_kernels(strict=strict)
     for name in names:
-        load_kernel(name, strict=strict)
+        if name not in kernels:
+            raise KeyError(name)
     return names
 
 
@@ -108,7 +125,13 @@ def _scan_category(category: str, *, strict: bool) -> dict[str, ModuleType]:
             continue
         mod = _import_kernel_module(category, mod_name, strict=strict)
         if mod is not None:
-            result[mod.KERNEL_META["name"]] = mod
+            name = mod.KERNEL_META["name"]
+            if name in result:
+                raise ValueError(
+                    f"duplicate kernel registry name {name!r}: "
+                    f"{result[name].__name__} and {mod.__name__}"
+                )
+            result[name] = mod
     return result
 
 
@@ -132,7 +155,14 @@ def discover_kernels(
     categories = [category] if category else discover_categories()
     result: dict[str, ModuleType] = {}
     for cat in categories:
-        result.update(_scan_category(cat, strict=strict))
+        category_kernels = _scan_category(cat, strict=strict)
+        for name, mod in category_kernels.items():
+            if name in result:
+                raise ValueError(
+                    f"duplicate kernel registry name {name!r}: "
+                    f"{result[name].__name__} and {mod.__name__}"
+                )
+            result[name] = mod
     if min_compute_capability is not None:
         result = {
             name: mod
