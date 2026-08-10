@@ -2,13 +2,13 @@
   "timestamp": "14",
   "label": "post-refactor",
   "git": {
-    "tir": "788bda49",
-    "tirx-kernels": "ab141a77",
+    "tir": "5f0a87e9",
+    "tirx-kernels": "adcbb1ba-dirty",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "526829344fb7f9e544ad3e9e5fe04b3952ab9cac",
-    "tirx-kernels:tirx_kernels": "698689cd82cc7398ea65897cc9906051e7e28d12"
+    "tirx-kernels:tirx_kernels": "a40cac0fe3552659ed3827dd1ebee0cd6bbc3c08"
   },
   "baselines": {
     "torch": {
@@ -1969,6 +1969,286 @@
       }
     },
     {
+      "kernel": "mxfp4_quantize",
+      "config": "bf16_128x4_m4096_k4096",
+      "label": "bf16_128x4_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.741981915988175,
+        "flashinfer": 10.72188199714278
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "bf16_linear_m4096_k4096",
+      "label": "bf16_linear_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.330799395756868,
+        "flashinfer": 10.69235683840988
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "fp16_128x4_m1024_k2048",
+      "label": "fp16_128x4_m1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.728838041021632,
+        "flashinfer": 3.75323771071675
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "fp16_128x4_m128_k1024",
+      "label": "fp16_128x4_m128_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.9533680335517385,
+        "flashinfer": 2.98375850842579
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "fp16_128x4_m16384_k7168",
+      "label": "fp16_128x4_m16384_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 52.1275835474831,
+        "flashinfer": 53.21675641602591
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "fp16_128x4_m4096_k4096",
+      "label": "fp16_128x4_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.716533752124382,
+        "flashinfer": 10.617317879077621
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "fp16_linear_m1024_k2048",
+      "label": "fp16_linear_m1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.5864197281594485,
+        "flashinfer": 3.6517344090847113
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "fp16_linear_m128_k1024",
+      "label": "fp16_linear_m128_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.3680044821586907,
+        "flashinfer": 2.4078891241745604
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "fp16_linear_m16384_k7168",
+      "label": "fp16_linear_m16384_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 50.5177126640784,
+        "flashinfer": 50.60187030261501
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp4_quantize",
+      "config": "fp16_linear_m4096_k4096",
+      "label": "fp16_linear_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.36375071626477,
+        "flashinfer": 10.405697660494575
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "bf16_128x4_m4096_k4096",
+      "label": "bf16_128x4_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 11.764310499883965,
+        "flashinfer": 11.827816100088876
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "bf16_linear_m4096_k4096",
+      "label": "bf16_linear_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 11.287215964678518,
+        "flashinfer": 11.193300809329948
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "fp16_128x4_m1024_k2048",
+      "label": "fp16_128x4_m1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.8630096045909035,
+        "flashinfer": 3.944670239533885
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "fp16_128x4_m128_k1024",
+      "label": "fp16_128x4_m128_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.692037675701104,
+        "flashinfer": 2.730974145449721
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "fp16_128x4_m16384_k7168",
+      "label": "fp16_128x4_m16384_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 59.943074332939425,
+        "flashinfer": 60.97059191808699
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "fp16_128x4_m4096_k4096",
+      "label": "fp16_128x4_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 11.670828678449936,
+        "flashinfer": 11.780982030306225
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "fp16_linear_m1024_k2048",
+      "label": "fp16_linear_m1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.7723720977603974,
+        "flashinfer": 3.8231208299798993
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "fp16_linear_m128_k1024",
+      "label": "fp16_linear_m128_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.6199674218081723,
+        "flashinfer": 2.6024787886424035
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "fp16_linear_m16384_k7168",
+      "label": "fp16_linear_m16384_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 62.30706806862382,
+        "flashinfer": 63.252581805240325
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "mxfp8_quantize",
+      "config": "fp16_linear_m4096_k4096",
+      "label": "fp16_linear_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 11.051507073198039,
+        "flashinfer": 11.186690341100883
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
       "kernel": "nvfp4_gemm",
       "config": "1024x1024x1024",
       "label": "1024x1024x1024",
@@ -2037,6 +2317,314 @@
         "tir": 186.1670212955984,
         "flashinfer": 177.6060508256525,
         "cublaslt_nvfp4": 177.57143791627956
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "bf16_128x4_m4096_k3584_silu",
+      "label": "bf16_128x4_m4096_k3584_silu",
+      "status": "ok",
+      "impls": {
+        "tirx": 20.60978545635845,
+        "flashinfer": 22.35939700667101
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "bf16_128x4_m4096_k4096",
+      "label": "bf16_128x4_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.782398435770277,
+        "flashinfer": 11.145288204935733
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "bf16_linear_m4096_k4096",
+      "label": "bf16_linear_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.012884392806544,
+        "flashinfer": 10.28621734866838
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_128x4_m1024_k2048",
+      "label": "fp16_128x4_m1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.691138695545344,
+        "flashinfer": 3.680208739606475
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_128x4_m128_k1024",
+      "label": "fp16_128x4_m128_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.5701844233332776,
+        "flashinfer": 2.583310299244074
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_128x4_m16384_k7168",
+      "label": "fp16_128x4_m16384_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 55.117804202363686,
+        "flashinfer": 55.19452005567728
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_128x4_m4096_k3584_silu",
+      "label": "fp16_128x4_m4096_k3584_silu",
+      "status": "ok",
+      "impls": {
+        "tirx": 20.37738613389982,
+        "flashinfer": 21.847355758020374
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_128x4_m4096_k4096",
+      "label": "fp16_128x4_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.765966291245892,
+        "flashinfer": 11.220163155045505
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_linear_m1024_k2048",
+      "label": "fp16_linear_m1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.625298426666291,
+        "flashinfer": 3.590256242590162
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_linear_m128_k1024",
+      "label": "fp16_linear_m128_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.4948882057356987,
+        "flashinfer": 2.4903840782201088
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_linear_m16384_k7168",
+      "label": "fp16_linear_m16384_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 50.58837977575804,
+        "flashinfer": 51.1227070010989
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize",
+      "config": "fp16_linear_m4096_k4096",
+      "label": "fp16_linear_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.674556259866364,
+        "flashinfer": 10.670720548070657
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "bf16_128x4_m4096_k4096",
+      "label": "bf16_128x4_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 12.711220526597488,
+        "flashinfer": 13.769429308128275
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "bf16_linear_m4096_k4096",
+      "label": "bf16_linear_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 12.199949697487087,
+        "flashinfer": 13.229440163867482
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "fp16_128x4_m1024_k2048",
+      "label": "fp16_128x4_m1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.981262831186381,
+        "flashinfer": 4.121173445377401
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "fp16_128x4_m128_k1024",
+      "label": "fp16_128x4_m128_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.73489195389086,
+        "flashinfer": 2.827182695862797
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "fp16_128x4_m16384_k7168",
+      "label": "fp16_128x4_m16384_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 57.71126421195724,
+        "flashinfer": 59.26916277021684
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "fp16_128x4_m4096_k4096",
+      "label": "fp16_128x4_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 12.667376353998112,
+        "flashinfer": 13.595629696371608
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "fp16_linear_m1024_k2048",
+      "label": "fp16_linear_m1024_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.8548659987704696,
+        "flashinfer": 3.9801304713245607
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "fp16_linear_m128_k1024",
+      "label": "fp16_linear_m128_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.906611630846872,
+        "flashinfer": 3.066980796635296
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "fp16_linear_m16384_k7168",
+      "label": "fp16_linear_m16384_k7168",
+      "status": "ok",
+      "impls": {
+        "tirx": 55.82576586992781,
+        "flashinfer": 57.46954903323014
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "nvfp4_quantize_per_token",
+      "config": "fp16_linear_m4096_k4096",
+      "label": "fp16_linear_m4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 11.973550983032206,
+        "flashinfer": 13.084771246375745
       },
       "aggregated": {
         "rounds": 5,

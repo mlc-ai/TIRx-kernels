@@ -1,0 +1,18 @@
+kernel: nvfp4_quantize_per_token
+defaults:
+  # Wider timing windows than the do_bench_proton defaults (25ms/100ms):
+  # these kernels are 2-100us and memory-bound, so longer windows average out
+  # mid-window clock wobble on the shared machine.
+  warmup: 50
+  repeat: 300
+configs:
+  - {config: fp16_linear_m4096_k4096, default: true}
+  - {config: bf16_linear_m4096_k4096, default: true}
+  - {config: fp16_128x4_m4096_k4096, default: true}
+  - {config: bf16_128x4_m4096_k4096, default: true}
+  - {config: fp16_linear_m16384_k7168, default: true}
+  - {config: fp16_128x4_m16384_k7168, default: true}
+  - {config: fp16_linear_m1024_k2048, default: true}
+  - {config: fp16_128x4_m1024_k2048, default: true}
+  - {config: fp16_linear_m128_k1024, default: true}
+  - {config: fp16_128x4_m128_k1024, default: true}

@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '788bda49', 'tirx-kernels': 'ab141a77', 'tirx-bench-ci': None}`
-- Workloads: 172 ok, 0 failed
+- Git:       `{'tir': '5f0a87e9', 'tirx-kernels': 'adcbb1ba-dirty', 'tirx-bench-ci': None}`
+- Workloads: 214 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -233,6 +233,36 @@ Grouped workloads show one row per config and one timing column per implementati
 | `moe_a3b_bs2048_all` | 339.3372 | 343.8899 | 355.3639 | 430.7005 | 392.3249 |
 | `moe_a3b_bs4096_all` | 562.7819 | 559.7292 | 574.0259 | 667.4069 | 604.9371 |
 
+## mxfp4_quantize
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_128x4_m4096_k4096` | tirx | 10.7420 | flashinfer | 10.7219 | 0.998 | — |
+| `bf16_linear_m4096_k4096` | tirx | 10.3308 | flashinfer | 10.6924 | 1.035 | — |
+| `fp16_128x4_m1024_k2048` | tirx | 3.7288 | flashinfer | 3.7532 | 1.007 | — |
+| `fp16_128x4_m128_k1024` | tirx | 2.9534 | flashinfer | 2.9838 | 1.010 | — |
+| `fp16_128x4_m16384_k7168` | tirx | 52.1276 | flashinfer | 53.2168 | 1.021 | — |
+| `fp16_128x4_m4096_k4096` | tirx | 10.7165 | flashinfer | 10.6173 | 0.991 | — |
+| `fp16_linear_m1024_k2048` | tirx | 3.5864 | flashinfer | 3.6517 | 1.018 | — |
+| `fp16_linear_m128_k1024` | tirx | 2.3680 | flashinfer | 2.4079 | 1.017 | — |
+| `fp16_linear_m16384_k7168` | tirx | 50.5177 | flashinfer | 50.6019 | 1.002 | — |
+| `fp16_linear_m4096_k4096` | tirx | 10.3638 | flashinfer | 10.4057 | 1.004 | — |
+
+## mxfp8_quantize
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_128x4_m4096_k4096` | tirx | 11.7643 | flashinfer | 11.8278 | 1.005 | — |
+| `bf16_linear_m4096_k4096` | tirx | 11.2872 | flashinfer | 11.1933 | 0.992 | — |
+| `fp16_128x4_m1024_k2048` | tirx | 3.8630 | flashinfer | 3.9447 | 1.021 | — |
+| `fp16_128x4_m128_k1024` | tirx | 2.6920 | flashinfer | 2.7310 | 1.014 | — |
+| `fp16_128x4_m16384_k7168` | tirx | 59.9431 | flashinfer | 60.9706 | 1.017 | — |
+| `fp16_128x4_m4096_k4096` | tirx | 11.6708 | flashinfer | 11.7810 | 1.009 | — |
+| `fp16_linear_m1024_k2048` | tirx | 3.7724 | flashinfer | 3.8231 | 1.013 | — |
+| `fp16_linear_m128_k1024` | tirx | 2.6200 | flashinfer | 2.6025 | 0.993 | — |
+| `fp16_linear_m16384_k7168` | tirx | 62.3071 | flashinfer | 63.2526 | 1.015 | — |
+| `fp16_linear_m4096_k4096` | tirx | 11.0515 | flashinfer | 11.1867 | 1.012 | — |
+
 ## nvfp4_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
@@ -242,6 +272,38 @@ Grouped workloads show one row per config and one timing column per implementati
 | `2048x2048x2048` | tir | 8.5260 | flashinfer | 7.5789 | 0.889 | cublaslt_nvfp4=7.6341 |
 | `4096x4096x4096` | tir | 29.5830 | cublaslt_nvfp4 | 27.6822 | 0.936 | flashinfer=28.8911 |
 | `8192x8192x8192` | tir | 186.1670 | cublaslt_nvfp4 | 177.5714 | 0.954 | flashinfer=177.6061 |
+
+## nvfp4_quantize
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_128x4_m4096_k3584_silu` | tirx | 20.6098 | flashinfer | 22.3594 | 1.085 | — |
+| `bf16_128x4_m4096_k4096` | tirx | 10.7824 | flashinfer | 11.1453 | 1.034 | — |
+| `bf16_linear_m4096_k4096` | tirx | 10.0129 | flashinfer | 10.2862 | 1.027 | — |
+| `fp16_128x4_m1024_k2048` | tirx | 3.6911 | flashinfer | 3.6802 | 0.997 | — |
+| `fp16_128x4_m128_k1024` | tirx | 2.5702 | flashinfer | 2.5833 | 1.005 | — |
+| `fp16_128x4_m16384_k7168` | tirx | 55.1178 | flashinfer | 55.1945 | 1.001 | — |
+| `fp16_128x4_m4096_k3584_silu` | tirx | 20.3774 | flashinfer | 21.8474 | 1.072 | — |
+| `fp16_128x4_m4096_k4096` | tirx | 10.7660 | flashinfer | 11.2202 | 1.042 | — |
+| `fp16_linear_m1024_k2048` | tirx | 3.6253 | flashinfer | 3.5903 | 0.990 | — |
+| `fp16_linear_m128_k1024` | tirx | 2.4949 | flashinfer | 2.4904 | 0.998 | — |
+| `fp16_linear_m16384_k7168` | tirx | 50.5884 | flashinfer | 51.1227 | 1.011 | — |
+| `fp16_linear_m4096_k4096` | tirx | 10.6746 | flashinfer | 10.6707 | 1.000 | — |
+
+## nvfp4_quantize_per_token
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_128x4_m4096_k4096` | tirx | 12.7112 | flashinfer | 13.7694 | 1.083 | — |
+| `bf16_linear_m4096_k4096` | tirx | 12.1999 | flashinfer | 13.2294 | 1.084 | — |
+| `fp16_128x4_m1024_k2048` | tirx | 3.9813 | flashinfer | 4.1212 | 1.035 | — |
+| `fp16_128x4_m128_k1024` | tirx | 2.7349 | flashinfer | 2.8272 | 1.034 | — |
+| `fp16_128x4_m16384_k7168` | tirx | 57.7113 | flashinfer | 59.2692 | 1.027 | — |
+| `fp16_128x4_m4096_k4096` | tirx | 12.6674 | flashinfer | 13.5956 | 1.073 | — |
+| `fp16_linear_m1024_k2048` | tirx | 3.8549 | flashinfer | 3.9801 | 1.032 | — |
+| `fp16_linear_m128_k1024` | tirx | 2.9066 | flashinfer | 3.0670 | 1.055 | — |
+| `fp16_linear_m16384_k7168` | tirx | 55.8258 | flashinfer | 57.4695 | 1.029 | — |
+| `fp16_linear_m4096_k4096` | tirx | 11.9736 | flashinfer | 13.0848 | 1.093 | — |
 
 ## silu_and_mul_nvfp4_experts_quantize
 
