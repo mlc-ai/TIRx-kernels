@@ -1475,7 +1475,7 @@ def get_kernel(**kwargs: Any):
                 T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                     T.address_of(tmem_ptr_in_smem[0]), T.uint32(num_tmem_cols)
                 )
-            T.ptx.bar.sync(9, T.uint32(num_math_threads + 2 * 32))
+            T.ptx.barrier.sync(9, T.uint32(num_math_threads + 2 * 32))
             current_q_atom_idx: T.uint32 = start_q_atom_idx
             current_kv_idx: T.uint32 = start_kv_idx
             current_num_kv: T.uint32 = start_num_kv
@@ -1608,7 +1608,7 @@ def get_kernel(**kwargs: Any):
             T.ptx.setmaxnreg.inc.sync.aligned.u32(num_math_registers)
             # Math warps consume TMEM: wait on named barrier 9 for the UMMA
             # warp's tcgen05.alloc (see the UMMA branch).
-            T.ptx.bar.sync(9, T.uint32(num_math_threads + 2 * 32))
+            T.ptx.barrier.sync(9, T.uint32(num_math_threads + 2 * 32))
             current_q_atom_idx: T.uint32 = start_q_atom_idx
             current_kv_idx: T.uint32 = start_kv_idx
             current_num_kv: T.uint32 = start_num_kv

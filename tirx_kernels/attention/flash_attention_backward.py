@@ -871,7 +871,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
                 T.ptx.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(
                     T.address_of(tmem_addr), T.uint32(512)
                 )
-                T.ptx.bar.sync(T.uint32(5), 416)
+                T.ptx.barrier.sync(T.uint32(5), 416)
             if warp_id == 1:
                 # ---- TMA warp: 2 loads per M-tile (Q, dO) ----
                 if T.cuda.elect_sync():
@@ -1377,7 +1377,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
         # ==============================================================
         elif (wg_id >= 1) & (wg_id <= 2):
             T.ptx.setmaxnreg.inc.sync.aligned.u32(136)
-            T.ptx.bar.sync(T.uint32(5), 416)
+            T.ptx.barrier.sync(T.uint32(5), 416)
             compute_wg = T.meta_var(wg_id - 1)
             gemm_s_ph = PipelineState(1)
             gemm_s_ph.init(0)
@@ -1771,7 +1771,7 @@ __forceinline__ __device__ unsigned long long tvm_builtin_fma_scale_sub_f32x2(
         # ==============================================================
         else:
             T.ptx.setmaxnreg.inc.sync.aligned.u32(136)
-            T.ptx.bar.sync(T.uint32(5), 416)
+            T.ptx.barrier.sync(T.uint32(5), 416)
             gemm_dq_ph_wg3 = PipelineState(1)
             gemm_dq_ph_wg3.init(0)
 
