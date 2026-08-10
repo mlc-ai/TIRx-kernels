@@ -223,6 +223,29 @@ __forceinline__ __device__ void enqueue_remote(
         : "memory");
 }
 """
+# Keep the acquire-load polling loop in one device helper.  Expanding the loop
+# into TIR can leave worker CTAs spinning indefinitely on queue publication.
+while_ld_global_acquire = """
+__forceinline__ __device__ int32_t while_ld_global_acquire(int32_t* addr) {
+    int32_t value;
+    asm volatile(
+        "ld.global.acquire.sys.b32 %0, [%1];"
+        : "=r"(value)
+        : "l"(addr)
+        : "memory");
+    while (value < 0) {
+        __nanosleep(40);
+        asm volatile(
+            "ld.global.acquire.sys.b32 %0, [%1];"
+            : "=r"(value)
+            : "l"(addr)
+            : "memory");
+    }
+    return value;
+}
+"""
+
+
 @Tx.meta_class
 class Pipeline:
     def __init__(
@@ -352,14 +375,12 @@ class GEMMMPMCQueue(MPMCQueue):
         Tx.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Tx.int32(1))
         if self.head_r[0] < self.num_tot_tasks:
             self.masked_pos[0] = self.head_r[0] & self.mask
-            Tx.ptx.ld.global_.acquire.sys.b32(
-                fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+            fetched_task_type[0] = Tx.cuda.func_call(
+                "while_ld_global_acquire",
+                self.task_types.ptr_to([self.masked_pos[0]]),
+                source_code=while_ld_global_acquire,
+                return_type="int32",
             )
-            while fetched_task_type[0] < 0:
-                Tx.cuda.nano_sleep(40)
-                Tx.ptx.ld.global_.acquire.sys.b32(
-                    fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
-                )
             Tx.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), Tx.int32(-1))
             Tx.ptx.ld.global_.s32(
                 fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])

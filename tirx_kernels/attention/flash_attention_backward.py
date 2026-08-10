@@ -110,44 +110,32 @@ def build_preprocess(B, S, H, D):
     NBLK = S // ROWS_PER_BLOCK
     LOG2_E = math.log2(math.e)
 
+    # This is a compound load/convert/FMA operation, not one packed PTX
+    # conversion instruction.  Keeping it together reproduces the pinned PTX
+    # argument lowering and instruction schedule exactly.
+    dot_f16x8_source_code = R"""
+__forceinline__ __device__ float tvm_builtin_dot_f16x8(
+    const half* lhs, const half* rhs) {
+    uint4 lhs_bits = *reinterpret_cast<const uint4*>(lhs);
+    uint4 rhs_bits = *reinterpret_cast<const uint4*>(rhs);
+    const half2* lhs2 = reinterpret_cast<const half2*>(&lhs_bits);
+    const half2* rhs2 = reinterpret_cast<const half2*>(&rhs_bits);
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        float2 l = __half22float2(lhs2[i]);
+        float2 r = __half22float2(rhs2[i]);
+        sum = fmaf(l.x, r.x, sum);
+        sum = fmaf(l.y, r.y, sum);
+    }
+    return sum;
+}
+"""
+
     try:
         from tvm.script import tir as T
     except ImportError:
         from tvm.script import tirx as T
-
-    def dot_f16x8(lhs, rhs):
-        lhs_words = T.alloc_local((4,), "uint32")
-        rhs_words = T.alloc_local((4,), "uint32")
-        lhs_halves = T.alloc_local((8,), "float16")
-        rhs_halves = T.alloc_local((8,), "float16")
-        lhs_value = T.alloc_local((1,), "float32")
-        rhs_value = T.alloc_local((1,), "float32")
-        result = T.alloc_local((1,), "float32")
-        T.evaluate(
-            T.ptx.ld.global_.v4.b32(
-                lhs_words[0], lhs_words[1], lhs_words[2], lhs_words[3], lhs
-            )
-        )
-        T.evaluate(
-            T.ptx.ld.global_.v4.b32(
-                rhs_words[0], rhs_words[1], rhs_words[2], rhs_words[3], rhs
-            )
-        )
-        for pair in range(4):
-            T.evaluate(
-                T.ptx.mov.b32(lhs_halves[pair * 2], lhs_halves[pair * 2 + 1], lhs_words[pair])
-            )
-            T.evaluate(
-                T.ptx.mov.b32(rhs_halves[pair * 2], rhs_halves[pair * 2 + 1], rhs_words[pair])
-            )
-        for element in range(8):
-            T.evaluate(T.ptx.cvt.f32.f16(lhs_value[0], lhs_halves[element]))
-            T.evaluate(T.ptx.cvt.f32.f16(rhs_value[0], rhs_halves[element]))
-            if element == 0:
-                T.evaluate(T.ptx.mul.rn.f32(result[0], lhs_value[0], rhs_value[0]))
-            else:
-                T.evaluate(T.ptx.fma.rn.f32(result[0], lhs_value[0], rhs_value[0], result[0]))
-        return result[0]
 
     @T.prim_func
     def preprocess_kernel(
@@ -181,9 +169,12 @@ def build_preprocess(B, S, H, D):
                             s: T.int32 = (
                                 bx * ROWS_PER_BLOCK + row_iter * ROWS_PER_WAVE + row_in_wave
                             )
-                            acc: T.float32 = dot_f16x8(
+                            acc: T.float32 = T.cuda.func_call(
+                                "tvm_builtin_dot_f16x8",
                                 T.address_of(dO_buf[bz, s, by, d_start]),
                                 T.address_of(O_buf[bz, s, by, d_start]),
+                                source_code=dot_f16x8_source_code,
+                                return_type="float32",
                             )
                             for chunk in T.unroll(ELEMS_PER_THREAD // 4):
                                 for d in T.vectorized(4):
