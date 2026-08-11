@@ -1,3 +1,16 @@
+# This file is a TIRx port of code from FlashMLA
+# (https://github.com/deepseek-ai/FlashMLA @ 9241ae3e), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.flashmla.txt for the full
+# license text.
+#
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
+#
+# TIRx port of FlashMLA's sparse prefill phase-1 kernel, 128 q-heads, small
+# top-k variant.
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+
 from __future__ import annotations
 
 import math
@@ -19,6 +32,7 @@ D_V = 512
 LOG_2_E = math.log2(math.e)
 
 BF16_BYTES = 2
+
 
 def _add_smem_desc_offset(desc, offset):
     # Descriptor offsets wrap in the low 32 bits without carrying into the
@@ -1034,8 +1048,8 @@ def run_bench(
 
     funcs = {"tirx": lambda: ex(*args)}
 
-    from tirx_kernels.flashmla._flashmla_bench import flashmla_reference_builder
-    from tirx_kernels.flashmla._trtllm_gen_bench import (
+    from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_reference_builder
+    from tirx_kernels.flashmla.utils._trtllm_gen_bench import (
         trtllm_gen_config_compatible,
         trtllm_gen_reference_builder,
     )

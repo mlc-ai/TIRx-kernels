@@ -1,0 +1,10 @@
+kernel: act_and_mul
+configs:
+  - {config: silu_fp16_d4096_t1, default: true}
+  - {config: silu_fp16_d4096_t8192, default: true}
+  - {config: silu_fp16_d11008_t8192, default: true}
+  - {config: silu_fp16_d16384_t32768, default: true}
+  - {config: silu_bf16_d4096_t8192, default: true}
+  - {config: silu_bf16_d16384_t32768, default: true}
+  - {config: gelu_fp16_d11008_t8192, default: true}
+  - {config: gelu_tanh_fp16_d11008_t8192, default: true}

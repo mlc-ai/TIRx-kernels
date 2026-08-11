@@ -1,19 +1,14 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# This file is a TIRx port of code from DeepGEMM
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
+# license text.
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+# TIRx port of DeepGEMM's paged-KV MQA logits kernel, FP4 variant.
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
 
 import ctypes
 import os
@@ -1284,11 +1279,7 @@ def get_kernel(**kwargs: Any):
             next_kv_idx: T.uint32 = current_kv_idx
             next_num_kv: T.uint32 = current_num_kv
             fetch_next_task(
-                current_q_atom_idx,
-                current_kv_idx,
-                current_num_kv,
-                end_q_atom_idx,
-                tma0_end_kv_idx,
+                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, tma0_end_kv_idx
             )
             next_q_atom_idx = scheduler_result[0]
             next_kv_idx = scheduler_result[1]
@@ -1310,9 +1301,7 @@ def get_kernel(**kwargs: Any):
                 prefetch_q: T.bool = T.And(
                     q_atom_idx != next_q_atom_idx,
                     exist_q_atom_idx_expr(
-                        next_q_atom_idx + next_advance,
-                        end_q_atom_idx,
-                        tma0_end_kv_idx,
+                        next_q_atom_idx + next_advance, end_q_atom_idx, tma0_end_kv_idx
                     ),
                 )
                 if q_atom_idx != next_q_atom_idx:
@@ -1433,11 +1422,7 @@ def get_kernel(**kwargs: Any):
             next_kv_idx: T.uint32 = current_kv_idx
             next_num_kv: T.uint32 = current_num_kv
             fetch_next_task(
-                current_q_atom_idx,
-                current_kv_idx,
-                current_num_kv,
-                end_q_atom_idx,
-                tma1_end_kv_idx,
+                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, tma1_end_kv_idx
             )
             next_q_atom_idx = scheduler_result[0]
             next_kv_idx = scheduler_result[1]
@@ -1596,11 +1581,7 @@ def get_kernel(**kwargs: Any):
             next_kv_idx: T.uint32 = current_kv_idx
             next_num_kv: T.uint32 = current_num_kv
             fetch_next_task(
-                current_q_atom_idx,
-                current_kv_idx,
-                current_num_kv,
-                end_q_atom_idx,
-                umma_end_kv_idx,
+                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, umma_end_kv_idx
             )
             next_q_atom_idx = scheduler_result[0]
             next_kv_idx = scheduler_result[1]
@@ -1794,11 +1775,7 @@ def get_kernel(**kwargs: Any):
             next_kv_idx: T.uint32 = current_kv_idx
             next_num_kv: T.uint32 = current_num_kv
             fetch_next_task(
-                current_q_atom_idx,
-                current_kv_idx,
-                current_num_kv,
-                end_q_atom_idx,
-                math_end_kv_idx,
+                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, math_end_kv_idx
             )
             next_q_atom_idx = scheduler_result[0]
             next_kv_idx = scheduler_result[1]

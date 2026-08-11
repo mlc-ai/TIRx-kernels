@@ -1,0 +1,46 @@
+# FlashInfer MTP horizontal: official batch/T/state sweep plus compile-shape
+# and execution-body guards. Every reference row uses algorithm="horizontal".
+# The pinned sweep keeps four points of the official batch curve
+# (b1/b64/b512/b2048, BF16 state); the rest stay benchable on request.
+kernel: selective_state_update_mtp_horizontal
+configs:
+  - {config: b1_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b2_h64_d64_s128_t6_r8_statebf16_official, default: false}
+  - {config: b4_h64_d64_s128_t6_r8_statebf16_official, default: false}
+  - {config: b8_h64_d64_s128_t6_r8_statebf16_official, default: false}
+  - {config: b16_h64_d64_s128_t6_r8_statebf16_official, default: false}
+  - {config: b32_h64_d64_s128_t6_r8_statebf16_official, default: false}
+  - {config: b64_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b128_h64_d64_s128_t6_r8_statebf16_official, default: false}
+  - {config: b256_h64_d64_s128_t6_r8_statebf16_official, default: false}
+  - {config: b512_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b1024_h64_d64_s128_t6_r8_statebf16_official, default: false}
+  - {config: b2048_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b1_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b2_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b4_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b8_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b16_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b32_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b64_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b128_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b256_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b512_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b1024_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b2048_h64_d64_s128_t6_r8_statef32_official, default: false}
+  - {config: b64_h64_d64_s128_t4_r8_update, default: false}
+  - {config: b64_h64_d64_s128_t1_r8, default: false}
+  - {config: b64_h64_d64_s128_t2_r8, default: false}
+  - {config: b64_h64_d64_s128_t8_r8, default: false}
+  - {config: b64_h64_d128_s128_t4_r8, default: false}
+  - {config: b64_h64_d64_s64_t4_r8, default: false}
+  - {config: b64_h64_d64_s96_t4_r8, default: false}
+  - {config: b64_h64_d64_s128_t4_r1, default: false}
+  - {config: b64_h64_d64_s128_t4_r16, default: false}
+  - {config: b64_h64_d64_s128_t4_r64, default: false}
+  - {config: b64_h64_d64_s128_t4_r8_statef16, default: false}
+  - {config: b64_h64_d64_s128_t4_r8_weightbf16, default: false}
+  - {config: b64_h64_d64_s128_t4_r8_indices_i32, default: false}
+  - {config: b64_h64_d64_s128_t4_r8_intermediate, default: false}
+  - {config: b64_h64_d64_s128_t4_r8_z, default: false}
+  - {config: b64_h64_d64_s128_t4_r8_philox10, default: false}

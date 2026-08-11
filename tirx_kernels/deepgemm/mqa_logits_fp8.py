@@ -1,19 +1,15 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# This file is a TIRx port of code from DeepGEMM
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
+# license text.
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+# TIRx port of DeepGEMM's MQA logits kernel
+# (deep_gemm/include/deep_gemm/impls/sm100_mqa_logits.cuh), FP8 variant.
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
 
 import os
 from dataclasses import asdict, dataclass
@@ -874,9 +870,7 @@ def get_kernel(**kwargs: Any):
                                 T.cuda.get_tmem_addr(T.uint32(0), 0, tmem_addr_hi),
                             )
                             T.ptx.tcgen05.wait__ld.sync.aligned()
-                            reduced: T.float32 = wrelu_reduce(
-                                accum, cached_weights, q_inner_i
-                            )
+                            reduced: T.float32 = wrelu_reduce(accum, cached_weights, q_inner_i)
                             result = T.cast(scale_kv * reduced, logits_tir_dtype)
                             q_offset: T.uint64 = q_row_off_base[0] + T.cast(
                                 q_inner_i, "uint64"

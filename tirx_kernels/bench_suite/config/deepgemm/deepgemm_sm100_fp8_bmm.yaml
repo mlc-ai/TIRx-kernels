@@ -1,0 +1,6 @@
+kernel: deepgemm_sm100_fp8_bmm
+configs:
+  - {config: bhr_hdr_bhd_b4096_h8_r4096_d1024, default: true}
+  - {config: bhr_hdr_bhd_b8192_h8_r4096_d1024, default: true}
+  - {config: bhd_hdr_bhr_b8192_h8_r4096_d1024, default: true}
+  - {config: bhd_bhr_hdr_b4096_h8_r4096_d1024, default: true}

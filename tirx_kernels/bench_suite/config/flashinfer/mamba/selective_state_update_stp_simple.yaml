@@ -1,0 +1,35 @@
+# Complete source-comparable STP simple sweep.  The nullable-D device branch is
+# correctness-only because FlashInfer's public API requires a D tensor.
+# The pinned sweep keeps four points: the base shape plus the dim, state,
+# and rank extremes; the rest stay benchable on request.
+kernel: selective_state_update_stp_simple
+configs:
+  - {config: b64_h64_d64_s128_r8_base, default: true}
+  - {config: b1_h64_d64_s128_r8_tiled, default: false}
+  - {config: b64_h8_d64_s128_r1, default: false}
+  - {config: b64_h64_d128_s128_r8, default: true}
+  - {config: b64_h64_d256_s128_r8, default: false}
+  - {config: b64_h64_d64_s64_r8, default: false}
+  - {config: b64_h64_d64_s96_r8, default: false}
+  - {config: b64_h64_d64_s256_r8, default: true}
+  - {config: b64_h64_d64_s128_r8_statef16, default: false}
+  - {config: b64_h64_d64_s128_r8_statef32, default: false}
+  - {config: b64_h64_d64_s128_r8_weightbf16, default: false}
+  - {config: b64_h64_d64_s128_r1, default: false}
+  - {config: b64_h64_d64_s128_r2, default: false}
+  - {config: b64_h64_d64_s128_r4, default: false}
+  - {config: b64_h64_d64_s128_r16, default: false}
+  - {config: b64_h64_d64_s128_r32, default: false}
+  - {config: b64_h64_d64_s128_r64, default: true}
+  - {config: b64_h64_d64_s128_r8_z, default: false}
+  - {config: b64_h64_d64_s128_r8_no_dt_bias, default: false}
+  - {config: b64_h64_d64_s128_r8_no_softplus, default: false}
+  - {config: b64_h64_d64_s128_r8_no_update, default: false}
+  - {config: b64_h64_d64_s128_r8_no_indices, default: false}
+  - {config: b64_h64_d64_s128_r8_indices_i32, default: false}
+  - {config: b64_h64_d64_s128_r8_stride2, default: false}
+  - {config: b64_h64_d64_s128_r8_dst2d, default: false}
+  - {config: b64_h64_d64_s128_r8_pad4, default: false}
+  - {config: b64_h64_d64_s128_r8_int16, default: false}
+  - {config: b64_h64_d64_s128_r8_philox10, default: false}
+  - {config: b64_h64_d64_s64_r8_philox10, default: false}

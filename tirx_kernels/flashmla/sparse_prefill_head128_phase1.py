@@ -1,3 +1,15 @@
+# This file is a TIRx port of code from FlashMLA
+# (https://github.com/deepseek-ai/FlashMLA @ 9241ae3e), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.flashmla.txt for the full
+# license text.
+#
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
+#
+# TIRx port of FlashMLA's sparse prefill phase-1 kernel, 128 q-heads.
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+
 from __future__ import annotations
 
 import math
@@ -7,8 +19,8 @@ from unittest import SkipTest
 
 import torch
 
-from tirx_kernels.flashmla._mask import pack_valid_mask8
-from tirx_kernels.flashmla._tma import leader_mbar
+from tirx_kernels.flashmla.utils._mask import pack_valid_mask8
+from tirx_kernels.flashmla.utils._tma import leader_mbar
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as T
 from tvm.tirx.cuda.iket import IketProfiler
@@ -69,6 +81,8 @@ _TCGEN_COMMIT = (
 _MMA_F16 = "tcgen05.mma.cta_group::2.kind::f16"
 _Q_TMA_CACHE_HINT = T.uint64(0x12F0000000000000)
 _KV_TMA_CACHE_HINT = T.uint64(0x14F0000000000000)
+
+
 def _tmem_load(dst, tmem_col, width):
     chain = _TMEM_LD_32 if width == 32 else _TMEM_LD_64
     return T.ptx[chain](*[dst[i] for i in range(width)], tmem_col)
@@ -81,9 +95,7 @@ def _tmem_store(src, tmem_col, width=32):
 
 def _cast_f32x2_bf16x2(dst, src, offset):
     dst_words = dst.view("uint32")
-    return T.ptx.cvt.rn.bf16x2.f32(
-        dst_words[offset // 2], src[offset + 1], src[offset]
-    )
+    return T.ptx.cvt.rn.bf16x2.f32(dst_words[offset // 2], src[offset + 1], src[offset])
 
 
 def _replace_smem_desc_addr(desc, smem_ptr):
@@ -1622,8 +1634,8 @@ def run_bench(
 
     funcs = {"tirx": lambda: ex(*args)}
 
-    from tirx_kernels.flashmla._flashmla_bench import flashmla_reference_builder
-    from tirx_kernels.flashmla._trtllm_gen_bench import (
+    from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_reference_builder
+    from tirx_kernels.flashmla.utils._trtllm_gen_bench import (
         trtllm_gen_config_compatible,
         trtllm_gen_reference_builder,
     )

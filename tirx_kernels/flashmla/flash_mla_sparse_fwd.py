@@ -1,3 +1,16 @@
+# This file is a TIRx port of code from FlashMLA
+# (https://github.com/deepseek-ai/FlashMLA @ 9241ae3e), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.flashmla.txt for the full
+# license text.
+#
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
+#
+# TIRx port of FlashMLA's sparse forward entry (csrc/api/sparse_fwd.h); it
+# dispatches to the phase1 kernels ported in the sibling modules.
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+
 """TIRx entry for FlashMLA's sparse prefill Python API.
 
 FlashMLA exposes sparse prefill as ``flash_mla.flash_mla_sparse_fwd`` in Python,

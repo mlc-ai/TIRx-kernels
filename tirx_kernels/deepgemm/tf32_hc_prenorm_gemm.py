@@ -1,19 +1,15 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# This file is a TIRx port of code from DeepGEMM
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
+# license text.
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+# TIRx port of DeepGEMM's TF32 prenorm GEMM. The split heuristic follows
+# SGLang's _compute_num_split_for_mhc_pre (Apache-2.0).
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
 
 from __future__ import annotations
 
@@ -401,6 +397,7 @@ def get_kernel(**kwargs: Any):
     cache_policy_evict_first = T.uint64(0x12F0000000000000)
     cache_policy_evict_last = T.uint64(0x14F0000000000000)
     tf32_instr_desc = T.uint32(67635472)
+
     def add_smem_desc_offset(desc, offset):
         # Descriptor offsets wrap in the low 32 bits without carrying into the
         # encoded layout fields in the high half.
@@ -734,9 +731,7 @@ def get_kernel(**kwargs: Any):
                     ) + compose_m % T.uint32(4)
                     T.ptx.st.shared.v4.u32(
                         T.ptr_byte_offset(
-                            smem_cd_mma.ptr_to([0, 0]),
-                            smem_cd_offset * T.uint32(4),
-                            "float32",
+                            smem_cd_mma.ptr_to([0, 0]), smem_cd_offset * T.uint32(4), "float32"
                         ),
                         d_words[0],
                         d_words[1],
@@ -872,9 +867,7 @@ def get_kernel(**kwargs: Any):
                         a_bf16_words[reg_base + 2],
                         a_bf16_words[reg_base + 4],
                         a_bf16_words[reg_base + 6],
-                        T.ptr_byte_offset(
-                            smem_a_mma.ptr_to([0, 0, 0]), smem_off * 2, "bfloat16"
-                        ),
+                        T.ptr_byte_offset(smem_a_mma.ptr_to([0, 0, 0]), smem_off * 2, "bfloat16"),
                     )
                 cast_pipe.empty.wait(cast_stage_idx, cast_cph)
                 # bf16->tf32 + sqr-fma + TMEM deposit: interleaved per 8-col atom on
@@ -882,9 +875,7 @@ def get_kernel(**kwargs: Any):
                 if num_k_blocks_per_split <= 16:
                     for p in range(block_k // 8):
                         for f in range(2):
-                            T.ptx.cvt.f32.bf16(
-                                a_flat[p * 4 + f * 2], a_bf16_u16[p * 4 + f * 2]
-                            )
+                            T.ptx.cvt.f32.bf16(a_flat[p * 4 + f * 2], a_bf16_u16[p * 4 + f * 2])
                             T.ptx.cvt.f32.bf16(
                                 a_flat[p * 4 + f * 2 + 1], a_bf16_u16[p * 4 + f * 2 + 1]
                             )

@@ -1,10 +1,8 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright (c) 2026 The TIRx Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
 #   http://www.apache.org/licenses/LICENSE-2.0
 #
@@ -14,17 +12,24 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 """Standard kernel interface protocol.
 
-Every kernel module under ``kernels/<category>/`` that wants to be
-discoverable by the registry must expose:
+Every kernel module under ``tirx_kernels/<category>/`` that wants to be
+discoverable by the registry must expose the members below.  A category may
+group its kernels into further subpackages (``flashinfer/`` buckets its ports
+by the FlashInfer Python entry point they back); the registry walks into those,
+skipping ``utils`` subpackages.
 
 Module-level constants
 ----------------------
 KERNEL_META : dict
     Required keys:
     - "name" (str): unique kernel name used by CLI (e.g. "rmsnorm")
-    - "category" (str): one of gemm, gemm_comm, attention, normalization, activation, ssm, loss, moe
+    - "category" (str): the bucket subdirectory the module lives in — one of
+      basic, deepgemm, flashattention, flashinfer, flashmla.
+      Each bucket holds the kernels ported from one upstream project;
+      ``basic`` holds native TIRx kernels with no single upstream project.
     - "compute_capability" (int): minimum SM version (e.g. 10 for sm100a)
 
 CONFIGS : list[dict]

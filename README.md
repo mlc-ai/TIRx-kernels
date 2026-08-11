@@ -5,21 +5,81 @@ High-performance GPU kernels written in [TIRx](https://github.com/apache/tvm).
 ## Kernels
 
 All kernels target `sm_100a`. Names are the registry names accepted by the
-`--kernel` CLI filters.
+`--kernel` CLI filters. Each category directory holds the kernels ported from
+one upstream project; `basic/` holds the native TIRx kernels with no single
+upstream project.
+
+`basic/` — native TIRx kernels:
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
 | `fp16_bf16_gemm` | fp16 / bf16 | Dense GEMM |
-| `fp8_blockwise_gemm` | fp8 | Blockwise-scaled dense GEMM |
-| `grouped_fp8_gemm_contiguous` | fp8 | M-grouped contiguous GEMM |
 | `nvfp4_gemm` | nvfp4 | Dense GEMM |
-| `flash_attention4` | bf16 | FlashAttention-4 |
-| `flash_attention_backward_sm100` | fp16 | Two-CTA FlashAttention backward (D=128); [schedule sketch](tirx_kernels/attention/flash_attention_backward_sm100_sketch.md) |
 | `rmsnorm` | fp16 / bf16 | RMSNorm |
 | `allgather_gemm` | fp16 | AllGather + GEMM (multi-GPU, NVSHMEM) |
 | `gemm_reduce_scatter` | fp16 | GEMM + ReduceScatter (multi-GPU, NVSHMEM) |
 
-FlashMLA sparse attention:
+`flashattention/` — Dao-AILab flash-attention ports:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `flash_attention4` | bf16 | FlashAttention-4 |
+| `flash_attention_backward_sm100` | fp16 | Two-CTA FlashAttention backward (D=128); [schedule sketch](tirx_kernels/flashattention/flash_attention_backward_sm100_sketch.md) |
+
+`flashinfer/` — FlashInfer ports, sub-bucketed by the FlashInfer Python entry
+point each port backs:
+
+`flashinfer/activation/` — `flashinfer.activation`:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `act_and_mul` | fp16 / bf16 | `silu_and_mul`, `gelu_and_mul`, `gelu_tanh_and_mul` (one templated kernel) |
+| `silu_and_mul_nvfp4_experts_quantize` | fp16 / bf16 → nvfp4 | SiLU*mul fused with per-expert NVFP4 quantization |
+
+`flashinfer/quantization/` — `flashinfer.quantization` (CuTe-DSL backend):
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `nvfp4_quantize` | fp16 / bf16 → nvfp4 | Block quantization, linear and swizzled SF layouts; also the `silu_and_mul` variant |
+| `nvfp4_quantize_per_token` | fp16 / bf16 → nvfp4 | Per-token-activation quantization |
+| `mxfp4_quantize` | fp16 / bf16 → mxfp4 | Block quantization with UE8M0 scales |
+| `mxfp8_quantize` | fp16 / bf16 → mxfp8 | Block quantization with UE8M0 scales |
+
+`flashinfer/mamba/` — `flashinfer.mamba.selective_state_update`, one port per
+`is_mtp` x `algorithm=` combination:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `selective_state_update_stp_simple` | bf16 + fp32 | Single-token, `algorithm="simple"` |
+| `selective_state_update_stp_vertical` | bf16 + fp32 | Single-token, `algorithm="vertical"` |
+| `selective_state_update_stp_horizontal` | bf16 + fp32 | Single-token, `algorithm="horizontal"` |
+| `selective_state_update_mtp_simple` | bf16 + fp32 | Multi-token, `algorithm="simple"` |
+| `selective_state_update_mtp_vertical` | bf16 + fp32 | Multi-token, `algorithm="vertical"` |
+| `selective_state_update_mtp_horizontal` | bf16 + fp32 | Multi-token, `algorithm="horizontal"` |
+
+`flashinfer/kda/` — `flashinfer.kda`:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `flashkda_bf16_fused_m128` | bf16 | Recurrent KDA prefill, M128 schedule |
+
+`flashinfer/gdn_prefill/` — `flashinfer.gdn_prefill`:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `gdn_prefill_sm100` | fp16 | Gated Delta Net prefill |
+
+`flashinfer/gemm/` — `flashinfer.gemm`:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `tinygemm2_sm100` | bf16 | TinyGEMM2 |
+
+Testing/benching against the `flashinfer_m128` reference requires
+`FLASHKDA_PR_WORKTREE` pointing at the flashinfer-ai/flashinfer#4262 head
+worktree containing the m128 kernel.
+
+`flashmla/` — FlashMLA sparse attention ports:
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
@@ -28,27 +88,21 @@ FlashMLA sparse attention:
 | `sparse_flashmla_prefill_head128_small_topk_phase1` | bf16 | Sparse prefill, 128 q-heads, small top-k (phase 1) |
 | `flash_mla_sparse_fwd` | bf16 | Sparse forward |
 
-DeepGEMM ports:
+`deepgemm/` — DeepGEMM ports:
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
+| `deepgemm_sm100_fp8_gemm_1d1d` | fp8 + fp4 / bf16 | Dense blockwise-scaled GEMM |
+| `deepgemm_sm100_m_grouped_fp8_gemm_contiguous` | fp8 + fp4 / bf16 | M-grouped contiguous GEMM (incl. psum layout) |
+| `deepgemm_sm100_m_grouped_fp8_gemm_masked` | fp8 + fp4 / bf16 | M-grouped masked GEMM |
+| `deepgemm_sm100_k_grouped_fp8_gemm_contiguous` | fp8 / fp32 | K-grouped contiguous GEMM (wgrad, incl. psum layout) |
+| `deepgemm_sm100_fp8_bmm` | fp8 / bf16 + fp32 | Batched GEMM behind `fp8_einsum` |
 | `deepgemm_sm100_fp4_mqa_logits` | fp4 / bf16 | MQA attention logits |
 | `deepgemm_sm100_fp8_mqa_logits` | fp8 / bf16 | MQA attention logits |
 | `deepgemm_sm100_fp4_paged_mqa_logits` | fp4 / bf16 | Paged-KV MQA attention logits |
 | `deepgemm_sm100_fp8_paged_mqa_logits` | fp8 / bf16 | Paged-KV MQA attention logits |
 | `deepgemm_sm100_tf32_hc_prenorm_gemm` | tf32 / bf16 | Prenorm GEMM |
 | `deepgemm_fp8_fp4_mega_moe` | fp8 + fp4 | Fused MoE megakernel (MegaMoE) |
-
-FlashInfer reference-kernel ports:
-
-| Kernel | dtype | What it is |
-| ------ | ----- | ---------- |
-| `flashkda_bf16_fused_m128` | bf16 | Recurrent KDA prefill, M128 schedule |
-| `gdn_prefill_sm100` | fp16 | Gated Delta Net prefill (chunked), SM100 |
-
-Testing/benching against the `flashinfer_m128` reference requires
-`FLASHKDA_PR_WORKTREE` pointing at the flashinfer-ai/flashinfer#4262 head
-worktree containing the m128 kernel.
 
 ## Performance
 
@@ -78,7 +132,7 @@ them — they are only needed to actually compile/run a kernel:
 | `tvm.tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tir/python`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels. |
-| `flashinfer`     | `nvfp4_gemm` data/baseline, `gdn_prefill_sm100` reference | Used for nvfp4 quantization and reference impls. |
+| `flashinfer`     | `nvfp4_gemm` data/baseline | Used for nvfp4 quantization and reference impls. |
 | `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` data/baseline | Current SM100 forward/backward reference. |
 | `flash_kda`      | `flashkda_bf16_fused_m128` baseline | Uses the installed package; results record its package, source, extension, and CUTLASS provenance when available. |
 | `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` reference; checkout on `PYTHONPATH`. |
@@ -132,4 +186,12 @@ and `CONFIGS` (the test/bench parameter sweeps) that the registry and CLI use.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Except where otherwise noted, this project is licensed under the Apache
+License 2.0; see [LICENSE](LICENSE). Required Apache attribution notices are
+collected in [NOTICE](NOTICE).
+
+Kernel ports derived from third-party projects (DeepGEMM, FlashMLA,
+flash-attention, FlashInfer) reproduce their upstream file headers verbatim and
+retain their upstream terms. The third-party section at the end of
+[LICENSE](LICENSE) lists which components fall under which license, and
+[`licenses/`](licenses) holds the corresponding license texts.
