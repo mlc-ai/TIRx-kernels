@@ -1735,7 +1735,7 @@ def get_kernel(
         )
 
     def sync_unaligned(barrier_idx, num_threads):
-        return T.ptx.bar.sync(T.uint32(barrier_idx), T.uint32(num_threads))
+        return T.ptx.barrier.sync(T.uint32(barrier_idx), T.uint32(num_threads))
 
     def prefetch_tensormap(tensor_map):
         return T.ptx.prefetch.tensormap(T.address_of(tensor_map))
@@ -2962,7 +2962,7 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
 
         @T.inline
         def workspace_grid_sync(counter_idx, sync_num_threads, sync_barrier_idx, sync_thread_idx):
-            T.ptx.bar.sync(T.uint32(sync_barrier_idx), T.uint32(sync_num_threads))
+            T.ptx.barrier.sync(T.uint32(sync_barrier_idx), T.uint32(sync_num_threads))
             if sync_thread_idx == 0:
                 if sm_idx == 0:
                     atomic_add_rel_u32(
@@ -2981,7 +2981,7 @@ __forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
                     load_acq_u32(
                         grid_sync_new_value, workspace_grid_sync_count.ptr_to([counter_idx])
                     )
-            T.ptx.bar.sync(T.uint32(sync_barrier_idx), T.uint32(sync_num_threads))
+            T.ptx.barrier.sync(T.uint32(sync_barrier_idx), T.uint32(sync_num_threads))
 
         @T.inline
         def nvlink_barrier(
