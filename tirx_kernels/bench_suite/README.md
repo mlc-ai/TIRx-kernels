@@ -5,10 +5,12 @@ sweep against the **working tree**, assigns GPUs automatically, and writes run
 JSON + reports under `.bench-suite/`.
 
 `config/` holds one file per kernel listing every config that kernel can bench,
-each flagged `default: true|false`. With no `--workloads`, the flagged configs
-across all files are assembled into `.bench-suite/workloads.generated.yaml` and
-that is what runs -- 128 representative single-GPU workloads, including the TP1
-AllGather+GEMM and GEMM+ReduceScatter profiles. Widening or narrowing the sweep
+each flagged `default: true|false`. The files are bucketed to mirror the kernel
+tree, so a kernel's configs sit at `config/<bucket>/<kernel>.yaml`. With no
+`--workloads`, the flagged configs across all files are assembled into
+`.bench-suite/workloads.generated.yaml` and that is what runs -- 128
+representative single-GPU workloads, including the TP1 AllGather+GEMM and
+GEMM+ReduceScatter profiles. Widening or narrowing the sweep
 is a flag flip, not a new file.
 
 ```bash
@@ -106,7 +108,7 @@ are outside both timed closures. For this port, only the results emitted by
 
 | Kind | Files |
 |------|--------|
-| **Run** | `run.py`, `config/<kernel>.yaml` (one per kernel, per-config `default:` flag) |
+| **Run** | `run.py`, `config/<bucket>/<kernel>.yaml` (one per kernel, per-config `default:` flag) |
 | **Pinned baseline (git)** | `baseline.json`, `baseline.md` |
 | **Promote / report** | `promote_baseline.py`, `ratio_diff.py`, `baseline_view.py` |
 
@@ -175,7 +177,7 @@ Spot-check one workload: `python -m tirx_kernels.bench --kernel ... --config ...
 
 ## Workload fields
 
-Each `config/<kernel>.yaml` entry requires `config` and `default`; the file
+Each `config/<bucket>/<kernel>.yaml` entry requires `config` and `default`; the file
 supplies `kernel` and an optional file-level `defaults:` mapping merged into
 every entry. Optional per-entry fields are `timer`, `warmup`, `repeat`, and
 `num_gpus` (default `1`). A file passed via `--workloads` uses the flat

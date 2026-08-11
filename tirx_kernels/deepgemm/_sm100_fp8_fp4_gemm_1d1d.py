@@ -1,25 +1,18 @@
-# Copyright (c) 2025 DeepSeek
-# Copyright (c) 2026 The TIRX Authors
+# This file is a TIRx port of code from DeepGEMM
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
+# license text.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
 #
 # This file is a TIRx port of DeepGEMM's
-# `deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh`, together with
-# the reachable helpers it instantiates (`scheduler/gemm.cuh`,
-# `epilogue/sm100_store_cd{,_swap_ab}.cuh`) and the host-side layout heuristic in
-# `csrc/jit_kernels/heuristics/sm100.hpp`.
-# See NOTICE and THIRD_PARTY_LICENSES.md for upstream attribution.
+# deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh, together with
+# the reachable helpers it instantiates (scheduler/gemm.cuh,
+# epilogue/sm100_store_cd{,_swap_ab}.cuh) and the host-side layout heuristic
+# in csrc/jit_kernels/heuristics/sm100.hpp.
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
 
 """Shared implementation of DeepGEMM's SM100 FP8/FP4 1D1D GEMM kernel template.
 

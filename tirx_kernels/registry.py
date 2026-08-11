@@ -1,4 +1,4 @@
-# Copyright (c) 2026 The TIRX Authors
+# Copyright (c) 2026 The TIRx Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 """Kernel registry — auto-discovers kernel modules with KERNEL_META."""
 
 from __future__ import annotations
@@ -29,6 +30,9 @@ _log = logging.getLogger(__name__)
 # CLI / package infra — not kernel categories.
 _SKIP_CATEGORIES = frozenset({"bench", "test", "bench_suite", "experimental"})
 
+# Shared-helper subpackages inside a category — they hold no kernel modules.
+_SKIP_SUBPACKAGES = frozenset({"utils"})
+
 _REQUIRED_META_TYPES = {"name": str, "category": str, "compute_capability": int}
 
 
@@ -45,6 +49,27 @@ def discover_categories() -> list[str]:
             continue
         if (child / "__init__.py").is_file():
             out.append(child.name)
+    return out
+
+
+def _iter_kernel_module_names(pkg_path: Path) -> list[str]:
+    """Return kernel module names under ``pkg_path``, relative to it and dot-separated.
+
+    Categories may group their kernels into subpackages (``flashinfer/quantization/``
+    and friends bucket the ports by the FlashInfer Python entry point they back), so
+    this walks into subpackages as well.  ``utils`` subpackages hold shared helpers,
+    not kernels, and are skipped.
+    """
+    out: list[str] = []
+    for _importer, mod_name, is_pkg in pkgutil.iter_modules([str(pkg_path)]):
+        if mod_name.startswith("_"):
+            continue
+        if not is_pkg:
+            out.append(mod_name)
+        elif mod_name not in _SKIP_SUBPACKAGES:
+            out.extend(
+                f"{mod_name}.{sub}" for sub in _iter_kernel_module_names(pkg_path / mod_name)
+            )
     return out
 
 
@@ -113,14 +138,12 @@ def check_workload_imports(workloads: list[dict], *, strict: bool = True) -> lis
 
 
 def _scan_category(category: str, *, strict: bool) -> dict[str, ModuleType]:
-    """Import all modules in tirx_kernels/<category>/ that expose KERNEL_META."""
+    """Import all modules under tirx_kernels/<category>/ that expose KERNEL_META."""
     result: dict[str, ModuleType] = {}
     pkg_path = _kernels_root() / category
     if not pkg_path.is_dir():
         return result
-    for _importer, mod_name, is_pkg in pkgutil.iter_modules([str(pkg_path)]):
-        if mod_name.startswith("_") or is_pkg:
-            continue
+    for mod_name in _iter_kernel_module_names(pkg_path):
         mod = _import_kernel_module(category, mod_name, strict=strict)
         if mod is not None:
             name = mod.KERNEL_META["name"]

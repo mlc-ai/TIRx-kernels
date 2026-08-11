@@ -1,4 +1,4 @@
-# Copyright (c) 2026 The TIRX Authors
+# Copyright (c) 2026 The TIRx Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,10 +12,14 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 """Standard kernel interface protocol.
 
 Every kernel module under ``tirx_kernels/<category>/`` that wants to be
-discoverable by the registry must expose:
+discoverable by the registry must expose the members below.  A category may
+group its kernels into further subpackages (``flashinfer/`` buckets its ports
+by the FlashInfer Python entry point they back); the registry walks into those,
+skipping ``utils`` subpackages.
 
 Module-level constants
 ----------------------

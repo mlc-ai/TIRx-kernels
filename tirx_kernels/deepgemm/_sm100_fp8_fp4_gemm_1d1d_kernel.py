@@ -1,24 +1,17 @@
-# Copyright (c) 2025 DeepSeek
-# Copyright (c) 2026 The TIRX Authors
+# This file is a TIRx port of code from DeepGEMM
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
+# license text.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
-#
-# TIRx transcription of DeepGEMM's `sm100_fp8_fp4_gemm_1d1d_impl`
-# (deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh) together with
-# `scheduler/gemm.cuh` and `epilogue/sm100_store_cd{,_swap_ab}.cuh`.
-# The structure follows `.agents/sketch/sm100_fp8_fp4_gemm_1d1d.md`.
-# See NOTICE and THIRD_PARTY_LICENSES.md for upstream attribution.
+# TIRx transcription of DeepGEMM's sm100_fp8_fp4_gemm_1d1d_impl
+# (deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh) together
+# with scheduler/gemm.cuh and epilogue/sm100_store_cd{,_swap_ab}.cuh. The
+# structure follows .agents/sketch/deepgemm/sm100_fp8_fp4_gemm_1d1d.md.
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
 
 """The kernel body: eight warps, five barrier families, one persistent walk.
 

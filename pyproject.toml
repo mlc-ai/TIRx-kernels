@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tirx-kernels"
 version = "0.1.0"
-description = "TIRX kernel library — test and benchmark infrastructure for TIR compiler kernels"
+description = "TIRx kernel library — test and benchmark infrastructure for TIR compiler kernels"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0 AND BSD-3-Clause AND MIT"
-license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md"]
+license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
 # tvm, torch, triton are runtime dependencies managed externally (not on PyPI)
 dependencies = ["pyyaml>=6.0"]
 

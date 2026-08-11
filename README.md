@@ -26,13 +26,54 @@ upstream project.
 | `flash_attention4` | bf16 | FlashAttention-4 |
 | `flash_attention_backward_sm100` | fp16 | Two-CTA FlashAttention backward (D=128); [schedule sketch](tirx_kernels/flashattention/flash_attention_backward_sm100_sketch.md) |
 
-`flashinfer/` — FlashInfer ports:
+`flashinfer/` — FlashInfer ports, sub-bucketed by the FlashInfer Python entry
+point each port backs:
+
+`flashinfer/activation/` — `flashinfer.activation`:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `act_and_mul` | fp16 / bf16 | `silu_and_mul`, `gelu_and_mul`, `gelu_tanh_and_mul` (one templated kernel) |
+| `silu_and_mul_nvfp4_experts_quantize` | fp16 / bf16 → nvfp4 | SiLU*mul fused with per-expert NVFP4 quantization |
+
+`flashinfer/quantization/` — `flashinfer.quantization` (CuTe-DSL backend):
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `nvfp4_quantize` | fp16 / bf16 → nvfp4 | Block quantization, linear and swizzled SF layouts; also the `silu_and_mul` variant |
+| `nvfp4_quantize_per_token` | fp16 / bf16 → nvfp4 | Per-token-activation quantization |
+| `mxfp4_quantize` | fp16 / bf16 → mxfp4 | Block quantization with UE8M0 scales |
+| `mxfp8_quantize` | fp16 / bf16 → mxfp8 | Block quantization with UE8M0 scales |
+
+`flashinfer/mamba/` — `flashinfer.mamba.selective_state_update`, one port per
+`is_mtp` x `algorithm=` combination:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `selective_state_update_stp_simple` | bf16 + fp32 | Single-token, `algorithm="simple"` |
+| `selective_state_update_stp_vertical` | bf16 + fp32 | Single-token, `algorithm="vertical"` |
+| `selective_state_update_stp_horizontal` | bf16 + fp32 | Single-token, `algorithm="horizontal"` |
+| `selective_state_update_mtp_simple` | bf16 + fp32 | Multi-token, `algorithm="simple"` |
+| `selective_state_update_mtp_vertical` | bf16 + fp32 | Multi-token, `algorithm="vertical"` |
+| `selective_state_update_mtp_horizontal` | bf16 + fp32 | Multi-token, `algorithm="horizontal"` |
+
+`flashinfer/kda/` — `flashinfer.kda`:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `flashkda_bf16_fused_m128` | bf16 | Recurrent KDA prefill, M128 schedule |
+
+`flashinfer/gdn_prefill/` — `flashinfer.gdn_prefill`:
+
+| Kernel | dtype | What it is |
+| ------ | ----- | ---------- |
+| `gdn_prefill_sm100` | fp16 | Gated Delta Net prefill |
+
+`flashinfer/gemm/` — `flashinfer.gemm`:
 
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
 | `tinygemm2_sm100` | bf16 | TinyGEMM2 |
-| `gdn_prefill_sm100` | fp16 | Gated Delta Net prefill |
-| `flashkda_bf16_fused_m128` | bf16 | Recurrent KDA prefill, M128 schedule |
 
 Testing/benching against the `flashinfer_m128` reference requires
 `FLASHKDA_PR_WORKTREE` pointing at the flashinfer-ai/flashinfer#4262 head
@@ -150,6 +191,7 @@ License 2.0; see [LICENSE](LICENSE). Required Apache attribution notices are
 collected in [NOTICE](NOTICE).
 
 Kernel ports derived from third-party projects (DeepGEMM, FlashMLA,
-flash-attention, FlashInfer) retain their upstream terms and per-file
-attribution headers; see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
-for the corresponding copyright notices and license texts.
+flash-attention, FlashInfer) reproduce their upstream file headers verbatim and
+retain their upstream terms. The third-party section at the end of
+[LICENSE](LICENSE) lists which components fall under which license, and
+[`licenses/`](licenses) holds the corresponding license texts.

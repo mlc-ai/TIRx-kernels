@@ -1,21 +1,14 @@
-# Copyright (c) 2026 The TIRX Authors
+# This file is a TIRx port of code from DeepGEMM
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
+# DeepSeek, licensed under the MIT License. The upstream sources carry no
+# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
+# license text.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Modifications Copyright (c) 2026 The TIRx Authors.
+# Modifications are licensed under the Apache License, Version 2.0.
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
-
-# This file contains code ported from DeepGEMM (https://github.com/deepseek-ai/DeepGEMM),
-# copyright (c) 2025 DeepSeek, licensed under the MIT License.
-# See THIRD_PARTY_LICENSES.md for the full license text.
+# TIRx port of DeepGEMM's paged-KV MQA logits kernel, FP8 variant.
+# See LICENSE, NOTICE, and licenses/ for the applicable terms.
 
 import ctypes
 from dataclasses import asdict, dataclass

@@ -199,3 +199,33 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+------------------------------------------------------------------------------------
+This product contains TIRx ports of kernels from third-party projects under other
+open source licenses. This section summarizes those components and their licenses.
+See licenses/ for text of these licenses.
+
+
+Apache Software Foundation License 2.0
+--------------------------------------
+
+tirx_kernels/flashinfer/ (ports of flashinfer-ai/flashinfer kernels, including
+                          kernels FlashInfer itself derived from NVIDIA
+                          TensorRT-LLM; except the BSD-3 file listed below)
+
+
+MIT License
+-----------
+
+tirx_kernels/deepgemm/ (ports of deepseek-ai/DeepGEMM kernels)
+tirx_kernels/flashmla/ (ports of deepseek-ai/FlashMLA kernels)
+
+
+BSD 3-Clause "New" or "Revised" License
+---------------------------------------
+
+tirx_kernels/flashattention/ (ports of Dao-AILab/flash-attention kernels; the
+                              AUTHORS file its copyright notice refers to is
+                              licenses/AUTHORS.flash-attention.txt)
+tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py (full license text is
+                              reproduced in the file header)
