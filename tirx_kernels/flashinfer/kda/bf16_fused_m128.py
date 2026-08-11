@@ -34,8 +34,6 @@ Target instance: BF16, head_dim 128, sm_100a, grid = num_seqs * num_heads,
 from __future__ import annotations
 
 import math
-import os
-import sys
 from dataclasses import dataclass, fields
 from typing import Any
 from unittest import SkipTest
@@ -859,41 +857,14 @@ def _reference_torch(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _load_flashinfer_recurrent_kda():
-    """Import flashinfer.recurrent_kda from the PR head worktree.
-
-    The flashinfer-ai/flashinfer#4262 head worktree is located via the
-    FLASHKDA_PR_WORKTREE environment variable.
-    Handles the case where an installed flashinfer (main, without kda.py) was
-    already imported by purging it and re-importing from the worktree.
-    """
-    worktree = os.environ.get("FLASHKDA_PR_WORKTREE")
-    if worktree is None:
-        try:
-            from flashinfer.kda import recurrent_kda
-
-            return recurrent_kda
-        except ImportError as e:
-            raise RuntimeError(
-                "flashinfer.kda is unavailable; set FLASHKDA_PR_WORKTREE to the "
-                "flashinfer-ai/flashinfer#4262 head worktree containing the m128 kernel"
-            ) from e
-    if worktree not in sys.path:
-        sys.path.insert(0, worktree)
-    import flashinfer
-
-    if not str(getattr(flashinfer, "__file__", "")).startswith(worktree):
-        for mod_name in [
-            m for m in list(sys.modules) if m == "flashinfer" or m.startswith("flashinfer.")
-        ]:
-            del sys.modules[mod_name]
-        import flashinfer
-
-        if not str(getattr(flashinfer, "__file__", "")).startswith(worktree):
-            raise RuntimeError(
-                f"failed to import flashinfer from PR worktree {worktree}; "
-                f"got {getattr(flashinfer, '__file__', None)}"
-            )
-    from flashinfer.kda import recurrent_kda
+    """Import the reference kernel from the installed flashinfer."""
+    try:
+        from flashinfer.kda import recurrent_kda
+    except ImportError as e:
+        raise RuntimeError(
+            "flashinfer.kda is unavailable; the m128 reference needs a flashinfer "
+            "release that carries it (flashinfer-ai/flashinfer#4262 or later)"
+        ) from e
 
     return recurrent_kda
 

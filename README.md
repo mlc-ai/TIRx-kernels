@@ -1,4 +1,4 @@
-# tirx-kernels
+# TIRx kernels
 
 High-performance GPU kernels written in [TIRx](https://github.com/apache/tvm).
 
@@ -74,10 +74,6 @@ point each port backs:
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
 | `tinygemm2_sm100` | bf16 | TinyGEMM2 |
-
-Testing/benching against the `flashinfer_m128` reference requires
-`FLASHKDA_PR_WORKTREE` pointing at the flashinfer-ai/flashinfer#4262 head
-worktree containing the m128 kernel.
 
 `flashmla/` — FlashMLA sparse attention ports:
 
