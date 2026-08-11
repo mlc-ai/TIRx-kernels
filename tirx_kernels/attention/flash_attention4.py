@@ -68,28 +68,14 @@ _MMA_F16 = "tcgen05.mma.cta_group::1.kind::f16"
 _TMEM_LD_16 = "tcgen05.ld.sync.aligned.32x32b.x16.b32"
 _TMEM_LD_32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
 _TMEM_ST_16 = "tcgen05.st.sync.aligned.32x32b.x16.b32"
-_SMEM_DESC_ADD_16B_SOURCE = r"""
-__forceinline__ __device__ uint64_t fa4_smem_desc_add_16B_offset(
-    uint64_t desc_base, int32_t offset) {
-  SmemDescriptor desc;
-  desc.desc_ = desc_base;
-  desc.lo += static_cast<uint32_t>(offset);
-  return desc.desc_;
-}
-"""
 
 
 def _smem_desc_add_16B_offset(desc_base, offset):
-    # Keep the descriptor update as one C++ expression.  Separate mov/add/mov
-    # T.ptx calls preserve low-32-bit wrap semantics, but perturb nvcc's PTX
-    # around this MMA hot path enough to regress long-sequence attention.
-    return T.cuda.func_call(
-        "fa4_smem_desc_add_16B_offset",
-        desc_base,
-        offset,
-        source_code=_SMEM_DESC_ADD_16B_SOURCE,
-        return_type="uint64",
-    )
+    # Update the address lane with uint32 wraparound without carrying into the descriptor bits.
+    desc_halves = T.reinterpret("uint32x2", desc_base)
+    desc_lo = T.Shuffle([desc_halves], [0]) + T.cast(offset, "uint32")
+    desc_hi = T.Shuffle([desc_halves], [1])
+    return T.reinterpret("uint64", T.Shuffle([desc_lo, desc_hi], [0, 1]))
 
 
 def _cast_f32x2_f16x2(dst, src, offset):
