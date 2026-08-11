@@ -274,6 +274,7 @@ __forceinline__ __device__ void enqueue_remote(int32_t* task_types, int32_t* tas
 }
 """
 
+
 @T.meta_class
 class Barriers:
     def __init__(self, shared_buffer_base, shared_buffer_offs, pipe_depth, pipe_width, is_p2c):

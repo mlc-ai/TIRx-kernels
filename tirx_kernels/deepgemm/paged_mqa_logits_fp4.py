@@ -1279,11 +1279,7 @@ def get_kernel(**kwargs: Any):
             next_kv_idx: T.uint32 = current_kv_idx
             next_num_kv: T.uint32 = current_num_kv
             fetch_next_task(
-                current_q_atom_idx,
-                current_kv_idx,
-                current_num_kv,
-                end_q_atom_idx,
-                tma0_end_kv_idx,
+                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, tma0_end_kv_idx
             )
             next_q_atom_idx = scheduler_result[0]
             next_kv_idx = scheduler_result[1]
@@ -1305,9 +1301,7 @@ def get_kernel(**kwargs: Any):
                 prefetch_q: T.bool = T.And(
                     q_atom_idx != next_q_atom_idx,
                     exist_q_atom_idx_expr(
-                        next_q_atom_idx + next_advance,
-                        end_q_atom_idx,
-                        tma0_end_kv_idx,
+                        next_q_atom_idx + next_advance, end_q_atom_idx, tma0_end_kv_idx
                     ),
                 )
                 if q_atom_idx != next_q_atom_idx:
@@ -1428,11 +1422,7 @@ def get_kernel(**kwargs: Any):
             next_kv_idx: T.uint32 = current_kv_idx
             next_num_kv: T.uint32 = current_num_kv
             fetch_next_task(
-                current_q_atom_idx,
-                current_kv_idx,
-                current_num_kv,
-                end_q_atom_idx,
-                tma1_end_kv_idx,
+                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, tma1_end_kv_idx
             )
             next_q_atom_idx = scheduler_result[0]
             next_kv_idx = scheduler_result[1]
@@ -1591,11 +1581,7 @@ def get_kernel(**kwargs: Any):
             next_kv_idx: T.uint32 = current_kv_idx
             next_num_kv: T.uint32 = current_num_kv
             fetch_next_task(
-                current_q_atom_idx,
-                current_kv_idx,
-                current_num_kv,
-                end_q_atom_idx,
-                umma_end_kv_idx,
+                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, umma_end_kv_idx
             )
             next_q_atom_idx = scheduler_result[0]
             next_kv_idx = scheduler_result[1]
@@ -1789,11 +1775,7 @@ def get_kernel(**kwargs: Any):
             next_kv_idx: T.uint32 = current_kv_idx
             next_num_kv: T.uint32 = current_num_kv
             fetch_next_task(
-                current_q_atom_idx,
-                current_kv_idx,
-                current_num_kv,
-                end_q_atom_idx,
-                math_end_kv_idx,
+                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, math_end_kv_idx
             )
             next_q_atom_idx = scheduler_result[0]
             next_kv_idx = scheduler_result[1]

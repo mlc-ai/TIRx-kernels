@@ -177,6 +177,7 @@ INITIAL_STATE_BARRIER = 4
 
 LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
+
 @T.inline
 def _init_pipeline(smem_raw, full_off, empty_off, stages, producers, consumers):
     for stage in range(stages):

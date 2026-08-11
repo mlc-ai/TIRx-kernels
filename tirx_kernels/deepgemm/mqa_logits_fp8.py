@@ -870,9 +870,7 @@ def get_kernel(**kwargs: Any):
                                 T.cuda.get_tmem_addr(T.uint32(0), 0, tmem_addr_hi),
                             )
                             T.ptx.tcgen05.wait__ld.sync.aligned()
-                            reduced: T.float32 = wrelu_reduce(
-                                accum, cached_weights, q_inner_i
-                            )
+                            reduced: T.float32 = wrelu_reduce(accum, cached_weights, q_inner_i)
                             result = T.cast(scale_kv * reduced, logits_tir_dtype)
                             q_offset: T.uint64 = q_row_off_base[0] + T.cast(
                                 q_inner_i, "uint64"

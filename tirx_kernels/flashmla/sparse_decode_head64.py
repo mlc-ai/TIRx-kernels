@@ -95,6 +95,8 @@ _TCGEN_CP_128X256 = "tcgen05.cp.cta_group::1.128x256b"
 _MMA_WS_F16 = "tcgen05.mma.ws.cta_group::1.kind::f16"
 _Q_TMA_CACHE_HINT = T.uint64(0x12F0000000000000)
 _KV_TMA_CACHE_HINT = T.uint64(0x14F0000000000000)
+
+
 def _tmem_load(dst, tmem_col, width):
     chain = _TMEM_LD_32 if width == 32 else _TMEM_LD_64
     return T.ptx[chain](*[dst[i] for i in range(width)], tmem_col)
@@ -107,9 +109,7 @@ def _tmem_store(src, tmem_col, width=64):
 
 def _cast_f32x2_bf16x2(dst, src, offset):
     dst_words = dst.view("uint32")
-    return T.ptx.cvt.rn.bf16x2.f32(
-        dst_words[offset // 2], src[offset + 1], src[offset]
-    )
+    return T.ptx.cvt.rn.bf16x2.f32(dst_words[offset // 2], src[offset + 1], src[offset])
 
 
 def _replace_smem_desc_addr(desc, smem_ptr):

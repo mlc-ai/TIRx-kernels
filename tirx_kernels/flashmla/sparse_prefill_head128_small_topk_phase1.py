@@ -33,6 +33,7 @@ LOG_2_E = math.log2(math.e)
 
 BF16_BYTES = 2
 
+
 def _add_smem_desc_offset(desc, offset):
     # Descriptor offsets wrap in the low 32 bits without carrying into the
     # encoded layout fields in the high half.
