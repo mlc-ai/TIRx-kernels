@@ -190,13 +190,13 @@ Grouped workloads show one row per config and one timing column per implementati
 
 ## flashkda_bf16_fused_m128
 
-| config | tirx (µs) | tirx_tx_tile (µs) | flashinfer_m128 (µs) | flashkda_raw (µs) |
-|---|---:|---:|---:|---:|
-| `h64_mixed` | 268.2399 | 271.6321 | 271.9395 | 667.1473 |
-| `h64_uniform` | 465.6187 | 472.4865 | 473.5961 | 764.6676 |
-| `h96_fixed8192` | 500.8359 | 512.0147 | 508.1553 | 1075.1109 |
-| `h96_mixed` | 609.2198 | 618.5170 | 622.6901 | 1403.8307 |
-| `h96_uniform` | 432.0196 | 437.4001 | 436.5378 | 708.6740 |
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `h64_mixed` | tirx | 268.2399 | flashinfer_m128 | 271.9395 | 1.014 | flashkda_raw=667.1473 |
+| `h64_uniform` | tirx | 465.6187 | flashinfer_m128 | 473.5961 | 1.017 | flashkda_raw=764.6676 |
+| `h96_fixed8192` | tirx | 500.8359 | flashinfer_m128 | 508.1553 | 1.015 | flashkda_raw=1075.1109 |
+| `h96_mixed` | tirx | 609.2198 | flashinfer_m128 | 622.6901 | 1.022 | flashkda_raw=1403.8307 |
+| `h96_uniform` | tirx | 432.0196 | flashinfer_m128 | 436.5378 | 1.010 | flashkda_raw=708.6740 |
 
 ## fp16_bf16_gemm
 

@@ -579,12 +579,7 @@ _CU_TENSOR_MAP_SWIZZLE_128B = 3
 _CU_TENSOR_MAP_SWIZZLE_NONE = 0
 
 
-def _encode_tma_descriptors(
-    case: dict[str, Any],
-    *,
-    output_key: str = "out",
-    descriptor_storage_key: str = "descriptor_storage",
-) -> None:
+def _encode_tma_descriptors(case: dict[str, Any]) -> None:
     """Publish the six CUtensorMaps into descriptor_storage (host side of
     EncodeTmaPointers<128> in flashkda_binding_common.cuh)."""
     cfg: FlashKDABf16FusedM128Config = case["config"]
@@ -624,15 +619,15 @@ def _encode_tma_descriptors(
     )
     # EncodeOutputTma<128>(out): same layout as q/k, SWIZZLE_128B.
     maps += _cu_tensor_map_encode_tiled(
-        case[output_key].data_ptr(),
+        case["out"].data_ptr(),
         4,
         [64, tokens, h, D_HEAD // 64],
         [h * D_HEAD * 2, D_HEAD * 2, 64 * 2],
         [64, 32, 1, 2],
         _CU_TENSOR_MAP_SWIZZLE_128B,
     )
-    case[descriptor_storage_key].copy_(
-        torch.frombuffer(maps, dtype=torch.uint8).to(case[descriptor_storage_key].device)
+    case["descriptor_storage"].copy_(
+        torch.frombuffer(maps, dtype=torch.uint8).to(case["descriptor_storage"].device)
     )
 
 
@@ -792,13 +787,10 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     else:
         initial_state = torch.empty(state_shape, device=device, dtype=torch.bfloat16)
     final_state = torch.empty(state_shape, device=device, dtype=torch.bfloat16)
-    final_state_tx_tile = torch.empty_like(final_state)
     out = torch.empty(shape, device=device, dtype=torch.bfloat16)
-    out_tx_tile = torch.empty_like(out)
     # Six CUtensorMap descriptors, 128 B each, 64 B aligned (torch storages are
     # 512 B aligned); the reference kernel publishes descriptors here.
     descriptor_storage = torch.empty((768,), device=device, dtype=torch.uint8)
-    descriptor_storage_tx_tile = torch.empty_like(descriptor_storage)
 
     case = {
         "config": cfg,
@@ -814,19 +806,13 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "seq_order": seq_order,
         "initial_state": initial_state,
         "out": out,
-        "out_tx_tile": out_tx_tile,
         "final_state": final_state,
-        "final_state_tx_tile": final_state_tx_tile,
         "descriptor_storage": descriptor_storage,
-        "descriptor_storage_tx_tile": descriptor_storage_tx_tile,
         "scale": 1.0 / math.sqrt(D_HEAD),
         "dispatch_reason": _m128_dispatch_reason(cfg),
     }
     if device != "cpu" and torch.device(device).type != "cpu":
         _encode_tma_descriptors(case)
-        _encode_tma_descriptors(
-            case, output_key="out_tx_tile", descriptor_storage_key="descriptor_storage_tx_tile"
-        )
     return case
 
 
@@ -943,8 +929,7 @@ def _flashinfer_cuda_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torc
     return ref_out.reshape(cfg.total_tokens, cfg.num_heads, D_HEAD), ref_state
 
 
-def _tirx_args(case: dict[str, Any], *, use_tx_tile: bool = False) -> tuple[Any, ...]:
-    suffix = "_tx_tile" if use_tx_tile else ""
+def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     return (
         case["q"].reshape(-1),
         case["k"].reshape(-1),
@@ -957,9 +942,9 @@ def _tirx_args(case: dict[str, Any], *, use_tx_tile: bool = False) -> tuple[Any,
         case["cu_seqlens"],
         case["seq_order"],
         case["initial_state"].reshape(-1),
-        case[f"out{suffix}"].reshape(-1),
-        case[f"final_state{suffix}"].reshape(-1),
-        case[f"descriptor_storage{suffix}"],
+        case["out"].reshape(-1),
+        case["final_state"].reshape(-1),
+        case["descriptor_storage"],
     )
 
 
@@ -3471,39 +3456,29 @@ def run_test(**kwargs: Any) -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for FlashKDA bf16 fused m128")
 
-    from tirx_kernels.flashinfer.kda.bf16_fused_m128_tx_tile import bf16_fused_m128_tx_tile
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
     cfg: FlashKDABf16FusedM128Config = case["config"]
     if not case["dispatch_reason"].startswith("m128:"):
         raise SkipTest(case["dispatch_reason"])
-    executables = (
-        (compile_kernel(bf16_fused_m128(**kwargs)), _tirx_args(case)),
-        (compile_kernel(bf16_fused_m128_tx_tile(**kwargs)), _tirx_args(case, use_tx_tile=True)),
-    )
-    for executable, args in executables:
-        executable(*args)
+    compile_kernel(bf16_fused_m128(**kwargs))(*_tirx_args(case))
     torch.cuda.synchronize()
 
     ref_out, ref_state = _reference_torch(case)
-    for suffix in ("", "_tx_tile"):
-        torch.testing.assert_close(case[f"out{suffix}"], ref_out, rtol=4.01 / 128, atol=5e-3)
-        if cfg.store_final_state:
-            torch.testing.assert_close(
-                case[f"final_state{suffix}"], ref_state, rtol=4.01 / 128, atol=5e-3
-            )
+    torch.testing.assert_close(case["out"], ref_out, rtol=4.01 / 128, atol=5e-3)
+    if cfg.store_final_state:
+        torch.testing.assert_close(case["final_state"], ref_state, rtol=4.01 / 128, atol=5e-3)
 
     flashinfer_out, flashinfer_state = _flashinfer_cuda_reference(case)
-    for suffix in ("", "_tx_tile"):
-        torch.testing.assert_close(case[f"out{suffix}"], flashinfer_out, rtol=4.01 / 128, atol=5e-3)
-        if cfg.store_final_state and flashinfer_state is not None:
-            torch.testing.assert_close(
-                case[f"final_state{suffix}"],
-                flashinfer_state.reshape(case[f"final_state{suffix}"].shape),
-                rtol=4.01 / 128,
-                atol=5e-3,
-            )
+    torch.testing.assert_close(case["out"], flashinfer_out, rtol=4.01 / 128, atol=5e-3)
+    if cfg.store_final_state and flashinfer_state is not None:
+        torch.testing.assert_close(
+            case["final_state"],
+            flashinfer_state.reshape(case["final_state"].shape),
+            rtol=4.01 / 128,
+            atol=5e-3,
+        )
     cfg.validate()
 
 
@@ -3515,7 +3490,6 @@ def run_bench(
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for FlashKDA bf16 fused m128 benchmark")
 
-    from tirx_kernels.flashinfer.kda.bf16_fused_m128_tx_tile import bf16_fused_m128_tx_tile
     from tirx_kernels.runner import compile_kernel
     from tvm.tirx.bench import bench
 
@@ -3524,10 +3498,8 @@ def run_bench(
     if not case["dispatch_reason"].startswith("m128:"):
         raise SkipTest(case["dispatch_reason"])
     args = _tirx_args(case)
-    tx_tile_args = _tirx_args(case, use_tx_tile=True)
     ex = compile_kernel(bf16_fused_m128(**kwargs))
-    tx_tile_ex = compile_kernel(bf16_fused_m128_tx_tile(**kwargs))
-    funcs = {"tirx": lambda: ex(*args), "tirx_tx_tile": lambda: tx_tile_ex(*tx_tile_args)}
+    funcs = {"tirx": lambda: ex(*args)}
 
     # Produce the expected buffers once.  The FlashKDA peer builder validates
     # against these outside the timed region before returning its pure launch.
