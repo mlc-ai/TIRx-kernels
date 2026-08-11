@@ -1,0 +1,44 @@
+# FlashInfer MTP vertical: official batch/T/state sweep plus compile-shape and
+# execution-body guards.  Every reference row uses algorithm="vertical".
+kernel: selective_state_update_mtp_vertical
+configs:
+  - {config: b1_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b2_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b4_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b8_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b16_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b32_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b64_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b128_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b256_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b512_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b1024_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b2048_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b1_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b2_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b4_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b8_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b16_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b32_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b64_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b128_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b256_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b512_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b1024_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b2048_h64_d64_s128_t6_r8_statef32_official, default: true}
+  - {config: b64_h64_d64_s128_t4_r8_update, default: true}
+  - {config: b64_h64_d64_s128_t1_r8, default: true}
+  - {config: b64_h64_d64_s128_t2_r8, default: true}
+  - {config: b64_h64_d64_s128_t8_r8, default: true}
+  - {config: b64_h64_d128_s128_t4_r8, default: true}
+  - {config: b64_h64_d64_s64_t4_r8, default: true}
+  - {config: b64_h64_d64_s96_t4_r8, default: true}
+  - {config: b64_h64_d64_s128_t4_r1, default: true}
+  - {config: b64_h64_d64_s128_t4_r16, default: true}
+  - {config: b64_h64_d64_s128_t4_r64, default: true}
+  - {config: b64_h64_d64_s128_t4_r8_statef16, default: true}
+  - {config: b64_h64_d64_s128_t4_r8_weightbf16, default: true}
+  - {config: b64_h64_d64_s128_t4_r8_indices_i32, default: true}
+  - {config: b64_h64_d64_s128_t4_r8_intermediate, default: true}
+  - {config: b64_h64_d64_s128_t4_r8_z, default: true}
+  - {config: b64_h64_d64_s128_t4_r8_philox10, default: true}
