@@ -34,9 +34,10 @@ CONFIGS : list[dict]
 
 Functions
 ---------
-get_kernel(**cfg) -> tvm.tirx.PrimFunc | list[tvm.tirx.PrimFunc]
-    Return the TIR PrimFunc(s) for this kernel.  Multi-kernel workloads
-    (e.g. split-k GEMM with a separate reduce kernel) return a list.
+get_kernel(**cfg) -> PrimFunc | IRModule | nested function collection
+    Return the pre-lowering TIRx function or functions for this kernel.
+    Multi-kernel workloads may return an ``IRModule`` or a nested list,
+    tuple, or mapping containing ``tvm.tirx.PrimFunc`` objects.
 
 prepare_data(**cfg) -> dict[str, Any]
     Prepare input/output tensors.  Returns a dict mapping argument names

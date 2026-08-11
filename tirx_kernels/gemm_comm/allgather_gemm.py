@@ -33,9 +33,8 @@ import tvm
 from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
 from tvm.script.ir_builder import IRBuilder
-from tvm.script.tirx import tile as Tx
 from tvm.tirx.bench import CudaProfiler
-from tvm.tirx.layout import TCol, TileLayout, TLane, tid_in_wg
+from tvm.tirx.layout import TCol, TileLayout, TLane
 
 from ._baselines import create_baseline_suite
 from ._baselines import ratios as baseline_ratios
@@ -123,9 +122,17 @@ assert SMEM_SIZE <= 232448
 TMEM_LD_SIZE = 64
 N_COLS = 512
 CTA_GROUP = 2
+# TMA instruction spellings emitted by the former ``tma_auto`` calls.
+_TMA_G2S_CG2 = (
+    "cp.async.bulk.tensor.2d.shared::cluster.global"
+    f".mbarrier::complete_tx::bytes.cta_group::{CTA_GROUP}"
+)
+_TMA_S2G = "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group"
 # tcgen05.mma spelling: kind::f16 from the (float32, DTYPE, DTYPE) dtypes.
 _MMA_CHAIN = f"tcgen05.mma.cta_group::{CTA_GROUP}.kind::f16"
 _MMA_ZERO_MASKS = [0] * (4 if CTA_GROUP == 1 else 8)
+_TMEM_LD_64 = "tcgen05.ld.sync.aligned.32x32b.x64.b32"
+_CVT_F32X2 = "cvt.rn.f16x2.f32"
 
 PIPE_CYCLE = (K // BLK_K) // PIPELINE_DEPTH
 PIPE_REMAIN_NUM = (K // BLK_K) % PIPELINE_DEPTH
@@ -189,8 +196,7 @@ def _mapa_u64_tx(ptr, rank):
 
     PTX has no defining form, so mapa writes a register the caller declares;
     a one-element local buffer gives both a writable lvalue and an Expr.
-    `Tx` is the tile-primitive namespace and has no allocation helpers, so the
-    scratch and the call go through `T`.
+    The scratch and the call both go through the full TIRx namespace.
     """
     mapped = T.alloc_local([1], "uint64")
     T.evaluate(T.ptx.mapa.u64(mapped[0], ptr, T.uint32(rank)))
@@ -248,25 +254,6 @@ def derive_config(
     )
 
 
-pack_values = """
-__forceinline__ __device__ void pack_values(int32_t rem, int32_t task_type, int32_t task_idx0, int32_t task_idx1, uint64_t* dst_addr) {
-    asm volatile("st.shared::cluster.v4.b32 [%0], {%1, %2, %3, %4};"
-                 :
-                 : "l"(dst_addr), "r"(rem), "r"(task_type), "r"(task_idx0), "r"(task_idx1)
-                 : "memory");
-}
-"""
-
-unpack_values = """
-__forceinline__ __device__ void unpack_values(uint64_t* src_addr, int32_t* rem, int32_t* task_type, int32_t* task_idx0, int32_t* task_idx1) {
-    asm volatile("ld.shared::cluster.v4.b32 {%0, %1, %2, %3}, [%4];"
-                 : "=r"(*rem), "=r"(*task_type), "=r"(*task_idx0), "=r"(*task_idx1)
-                 : "l"(src_addr)
-                 : "memory");
-
-}
-"""
-
 semaphore_notify_remote = """
 __forceinline__ __device__ uint64_t semaphore_notify_remote(int32_t signal_rank, uint64_t* addr, uint64_t signal_value) {
     auto dst_addr = reinterpret_cast<unsigned long long*>(nvshmem_ptr(addr, signal_rank));
@@ -288,36 +275,6 @@ __forceinline__ __device__ void enqueue_remote(int32_t* task_types, int32_t* tas
     __threadfence();
 }
 """
-
-ld_global_acquire = """
-__forceinline__ __device__ int32_t ld_global_acquire(int32_t* addr) {
-  int32_t res;
-  asm volatile ("ld.global.acquire.gpu.b32 %0, [%1];\\n" : "=r"(res) : "l"(addr));
-  return res;
-}
-"""
-
-while_ld_global_acquire = """
-__forceinline__ __device__ int32_t while_ld_global_acquire(int32_t* addr) {
-  int32_t res;
-  asm volatile ("ld.global.acquire.gpu.b32 %0, [%1];\\n" : "=r"(res) : "l"(addr));
-  while (res < 0) {
-    __nanosleep(40);
-    asm volatile ("ld.global.acquire.gpu.b32 %0, [%1];\\n" : "=r"(res) : "l"(addr));
-  }
-  return res;
-}
-"""
-
-warp_broadcast = """
-__forceinline__ __device__ void warp_broadcast(int32_t* rem, int32_t* task_type, int32_t* task_idx0, int32_t* task_idx1) {{
-    *rem = __shfl_sync(0xFFFFFFFF, *rem, 0);
-    *task_type = __shfl_sync(0xFFFFFFFF, *task_type, 0);
-    *task_idx0 = __shfl_sync(0xFFFFFFFF, *task_idx0, 0);
-    *task_idx1 = __shfl_sync(0xFFFFFFFF, *task_idx1, 0);
-}}
-"""
-
 
 @T.meta_class
 class Barriers:
@@ -461,9 +418,7 @@ class Semaphore:
     @T.inline
     def semaphore_wait(self, *coord):
         while 1:
-            T.ptx.ld.acquire.gpu.global_.b64(
-                self.state[0], self.sem.access_ptr("r", offset=self.sem.elem_offset_of(coord))
-            )
+            T.ptx.ld.acquire.gpu.global_.b64(self.state[0], self.sem.ptr_to(list(coord)))
             if self.state[0] == self.cnt:
                 break
             T.cuda.nano_sleep(40)
@@ -521,9 +476,7 @@ class GEMMMPMCQueue(MPMCQueue):
         bx,
         rank,
     ):
-        self.head_r[0] = T.cuda.atomic_add(
-            self.head.access_ptr("rw", offset=self.head.elem_offset_of([T.int32(0)])), 1
-        )
+        T.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), T.int32(1))
         if self.head_r[0] < self.num_tot_tasks:
             # TODO: modify the wait logic to make it faster
             remote_rank = (
@@ -533,17 +486,21 @@ class GEMMMPMCQueue(MPMCQueue):
                 sem.semaphore_wait(remote_rank)
 
             self.masked_pos[0] = self.head_r[0] & self.mask
-            fetched_task_type[0] = T.cuda.func_call(
-                "while_ld_global_acquire",
-                self.task_types.access_ptr(
-                    "r", offset=self.task_types.elem_offset_of([self.masked_pos[0]])
-                ),
-                source_code=while_ld_global_acquire,
-                return_type="int32",
+            T.ptx.ld.global_.acquire.gpu.b32(
+                fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
             )
-            self.task_types[self.masked_pos[0]] = -1
-            fetched_task_idx0[0] = self.task_idxs[self.masked_pos[0], 0]
-            fetched_task_idx1[0] = self.task_idxs[self.masked_pos[0], 1]
+            while fetched_task_type[0] < 0:
+                T.cuda.nano_sleep(40)
+                T.ptx.ld.global_.acquire.gpu.b32(
+                    fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+                )
+            T.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), T.int32(-1))
+            T.ptx.ld.global_.s32(
+                fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
+            )
+            T.ptx.ld.global_.s32(
+                fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
+            )
         else:
             fetched_task_type[0] = -1
 
@@ -559,14 +516,12 @@ def consumer_fetch(
     fetched_task_idx1,
 ):
     sch_pipe.consumer_wait(0)
-    T.cuda.func_call(
-        "unpack_values",
+    T.ptx.ld.shared__cluster.v4.b32(
+        rs_rem[0],
+        fetched_task_type[0],
+        fetched_task_idx0[0],
+        fetched_task_idx1[0],
         packed_value.ptr_to([0]),
-        rs_rem.ptr_to([0]),
-        fetched_task_type.ptr_to([0]),
-        fetched_task_idx0.ptr_to([0]),
-        fetched_task_idx1.ptr_to([0]),
-        source_code=unpack_values,
     )
     _rem2 = T.alloc_local([1], "uint64")
     T.ptx.mapa.shared__cluster.u64(_rem2[0], sch_pipe.mbar_c2p.ptr_to([sch_pipe.idx, 0]), T.uint32(0))
@@ -605,14 +560,12 @@ class SingleDynamicTileScheduler:
             if cbx == 0:
                 self.sch_pipe.producer_wait(0)
                 self.queue.dequeue(self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1, self.sem, cbx, bx, rank)
-                T.cuda.func_call(
-                    "pack_values",
+                T.ptx.st.shared__cluster.v4.b32(
+                    self.packed_value.ptr_to([0]),
                     self.rs_rem[0],
                     self.fetched_task_type[0],
                     self.fetched_task_idx0[0],
                     self.fetched_task_idx1[0],
-                    self.packed_value.ptr_to([0]),
-                    source_code=pack_values,
                 )
                 # T.cuda.thread_fence()
                 _rem3 = T.alloc_local([1], "uint64")
@@ -625,13 +578,33 @@ class SingleDynamicTileScheduler:
         if ENABLE_WARP_BROADCAST:
             if lane_id == 0:
                 consumer_fetch(self.sch_pipe, self.packed_value, self.rs_rem, self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1)
-            T.cuda.func_call(
-                "warp_broadcast",
-                self.rs_rem.ptr_to([0]),
-                self.fetched_task_type.ptr_to([0]),
-                self.fetched_task_idx0.ptr_to([0]),
-                self.fetched_task_idx1.ptr_to([0]),
-                source_code=warp_broadcast,
+            T.ptx.shfl_sync.idx.b32(
+                self.rs_rem[0],
+                self.rs_rem[0],
+                T.uint32(0),
+                T.uint32(31),
+                T.uint32(0xFFFFFFFF),
+            )
+            T.ptx.shfl_sync.idx.b32(
+                self.fetched_task_type[0],
+                self.fetched_task_type[0],
+                T.uint32(0),
+                T.uint32(31),
+                T.uint32(0xFFFFFFFF),
+            )
+            T.ptx.shfl_sync.idx.b32(
+                self.fetched_task_idx0[0],
+                self.fetched_task_idx0[0],
+                T.uint32(0),
+                T.uint32(31),
+                T.uint32(0xFFFFFFFF),
+            )
+            T.ptx.shfl_sync.idx.b32(
+                self.fetched_task_idx1[0],
+                self.fetched_task_idx1[0],
+                T.uint32(0),
+                T.uint32(31),
+                T.uint32(0xFFFFFFFF),
             )
         else:
             consumer_fetch(self.sch_pipe, self.packed_value, self.rs_rem, self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1)
@@ -686,6 +659,120 @@ def _build_kernel():
     def test_mma_ss_tma_2sm_persistent(A: T.Buffer((LOCAL_M, K), a_type), B: T.Buffer((LOCAL_N, K), b_type), ag_out: T.Buffer((M, K), a_type),
                                        semaphore: T.Buffer((WORLD_SIZE,), "uint64"), out: T.Buffer((M, LOCAL_N), d_type), profiler_buffer: T.Buffer((PROFILER_BUFFER_SIZE,), "uint64"),
                                        gemm_task_types: T.Buffer((CAPACITY,), "int32"), gemm_task_idxs: T.Buffer((CAPACITY, 2), "int32"), gemm_head: T.Buffer((1,), "int32"), gemm_tail: T.Buffer((1,), "int32")):
+        A_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        A_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        ag_out_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        ag_out_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        B_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        out_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            A_tensor_map,
+            a_type,
+            2,
+            A.data,
+            K,
+            LOCAL_M,
+            K * F16_BYTES,
+            BLK_K,
+            BLK_M,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            2,
+            0,
+        )
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            A_tensor_map_1,
+            a_type,
+            2,
+            A.data,
+            K,
+            LOCAL_M,
+            K * F16_BYTES,
+            BLK_K,
+            BLK_M,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            2,
+            0,
+        )
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            ag_out_tensor_map,
+            a_type,
+            2,
+            ag_out.data,
+            K,
+            M,
+            K * F16_BYTES,
+            BLK_K,
+            BLK_M,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            2,
+            0,
+        )
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            ag_out_tensor_map_1,
+            a_type,
+            2,
+            ag_out.data,
+            K,
+            M,
+            K * F16_BYTES,
+            BLK_K,
+            BLK_M,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            2,
+            0,
+        )
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            B_tensor_map,
+            b_type,
+            2,
+            B.data,
+            K,
+            LOCAL_N,
+            K * F16_BYTES,
+            BLK_K,
+            BLK_N,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            2,
+            0,
+        )
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            out_tensor_map,
+            d_type,
+            2,
+            out.data,
+            LOCAL_N,
+            M,
+            LOCAL_N * F16_BYTES,
+            EPI_TILE,
+            BLK_M,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            2,
+            0,
+        )
         T.device_entry()
         cbx, cby = T.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
         bx = T.cta_id([SM_NUMBER])
@@ -698,7 +785,7 @@ def _build_kernel():
         # alloc shared memory
         buf = T.alloc_buffer([SMEM_SIZE], "uint8", scope="shared.dyn")
         T.attr({"tirx.dyn_smem_bytes": SMEM_SIZE})
-        tmem_addr = T.decl_scalar("uint32", buf.data, scope="shared.dyn", elem_offset=0)
+        tmem_addr = T.decl_buffer((1,), "uint32", buf.data, scope="shared.dyn", elem_offset=0)
         A_smem = T.decl_buffer((PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type, buf.data, layout=A_layout,
                                 elem_offset=1024 // F16_BYTES)
         B_smem = T.decl_buffer((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, buf.data, layout=B_layout,
@@ -713,6 +800,7 @@ def _build_kernel():
         phase = T.alloc_buffer((1,), "int32", scope="local")
         phase_tmem = T.alloc_buffer((1,), "int32", scope="local")
         stage = T.local_scalar("int32")
+        tmem_addr_local = T.local_scalar("uint32")
 
         # ag + gemm
         sem = T.meta_var(Semaphore(cnt=1, buffer=semaphore))
@@ -754,7 +842,7 @@ def _build_kernel():
 
         # alloc TMEM
         if (wg_id == 0) & (warp_id == 0):
-            T.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](T.address_of(tmem_addr), T.uint32(N_COLS))
+            T.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](tmem_addr.ptr_to([0]), T.uint32(N_COLS))
 
         T.ptx.barrier.cluster.arrive()
         T.ptx.barrier.cluster.wait()
@@ -763,7 +851,8 @@ def _build_kernel():
         T.ptx.fence.mbarrier_init.release.cluster()
         tile_scheduler.init(cbx, bx, rank, warp_id_in_cta, lane_id)
 
-        T.cuda.trap_when_assert_failed(tmem_addr == 0)
+        T.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0]))
+        T.cuda.trap_when_assert_failed(tmem_addr_local == 0)
         tmem = T.decl_buffer((128, N_COLS), "float32", scope="tmem", allocated_addr=0, layout=TileLayout(T.S[(128, N_COLS) : (1@TLane, 1@TCol)]))
 
         @T.inline
@@ -801,20 +890,49 @@ def _build_kernel():
 
                             @T.inline
                             def tma_load(is_remain, ks):
-                                tma_copy = T.meta_var({"dispatch": "tma_auto", "mbar": tma_finished.ptr_to([ks]), "cta_group": CTA_GROUP})
                                 stage_k = T.meta_var(stage * BLK_K)
                                 mma2tma.wait(ks, 0, phase[0])
                                 if rank * LOCAL_GEMM_M_CLUSTERS <= m_idx and m_idx < (rank + 1) * LOCAL_GEMM_M_CLUSTERS:
                                     m_start0 = T.meta_var(((m_idx % LOCAL_GEMM_M_CLUSTERS) * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M)
                                     m_start1 = T.meta_var(((m_idx % LOCAL_GEMM_M_CLUSTERS) * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M)
-                                    Tx.copy_async(A_smem[ks, 0, :, :], A[m_start0 : m_start0 + BLK_M, stage_k : stage_k + BLK_K], **tma_copy)
-                                    Tx.copy_async(A_smem[ks, 1, :, :], A[m_start1 : m_start1 + BLK_M, stage_k : stage_k + BLK_K], **tma_copy)
+                                    T.ptx[_TMA_G2S_CG2](
+                                        A_smem.ptr_to([ks, 0, 0, 0]),
+                                        T.address_of(A_tensor_map),
+                                        T.cast(stage_k, "int32"),
+                                        T.cast(m_start0, "int32"),
+                                        T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
+                                    )
+                                    T.ptx[_TMA_G2S_CG2](
+                                        A_smem.ptr_to([ks, 1, 0, 0]),
+                                        T.address_of(A_tensor_map_1),
+                                        T.cast(stage_k, "int32"),
+                                        T.cast(m_start1, "int32"),
+                                        T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
+                                    )
                                 else:
                                     m_start0 = T.meta_var((m_idx * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M)
                                     m_start1 = T.meta_var((m_idx * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M)
-                                    Tx.copy_async(A_smem[ks, 0, :, :], ag_out[m_start0 : m_start0 + BLK_M, stage_k : stage_k + BLK_K], **tma_copy)
-                                    Tx.copy_async(A_smem[ks, 1, :, :], ag_out[m_start1 : m_start1 + BLK_M, stage_k : stage_k + BLK_K], **tma_copy)
-                                Tx.copy_async(B_smem[ks, :, :], B[n_start : n_start + BLK_N, stage_k : stage_k + BLK_K], **tma_copy)
+                                    T.ptx[_TMA_G2S_CG2](
+                                        A_smem.ptr_to([ks, 0, 0, 0]),
+                                        T.address_of(ag_out_tensor_map),
+                                        T.cast(stage_k, "int32"),
+                                        T.cast(m_start0, "int32"),
+                                        T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
+                                    )
+                                    T.ptx[_TMA_G2S_CG2](
+                                        A_smem.ptr_to([ks, 1, 0, 0]),
+                                        T.address_of(ag_out_tensor_map_1),
+                                        T.cast(stage_k, "int32"),
+                                        T.cast(m_start1, "int32"),
+                                        T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
+                                    )
+                                T.ptx[_TMA_G2S_CG2](
+                                    B_smem.ptr_to([ks, 0, 0]),
+                                    T.address_of(B_tensor_map),
+                                    T.cast(stage_k, "int32"),
+                                    T.cast(n_start, "int32"),
+                                    T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
+                                )
                                 if cbx == 0:
                                     tma2mma.arrive(ks, NUM_CONSUMER * BLK_K * (BLK_M * NUM_CONSUMER + BLK_N) * F16_BYTES)
 
@@ -877,8 +995,7 @@ def _build_kernel():
                     T.ptx.setmaxnreg.inc.sync.aligned.u32(224)
 
                     reg = T.alloc_buffer((TMEM_LD_SIZE,), "float32", scope="local")
-                    reg_wg = reg.view(128, TMEM_LD_SIZE, layout=TileLayout(T.S[(128, TMEM_LD_SIZE) : (1@tid_in_wg, 1)]))
-                    reg_fp16 = T.alloc_buffer((BLK_N * CTA_GROUP,), d_type, scope="local")
+                    reg_fp16 = T.alloc_buffer((TMEM_LD_SIZE // 2,), "uint32", scope="local", align=16)
 
                     mma2ld.wait(0, wg_id, phase_tmem[0])
                     phase_tmem[0] = phase_tmem[0] ^ 1
@@ -886,25 +1003,65 @@ def _build_kernel():
                     # TMEM -> RF (ld)
                     for i in T.unroll(MMA_N // TMEM_LD_SIZE): # load (MMA_M // 2, MMA_N)
                         col_st = T.meta_var(wg_id * MMA_N + i * TMEM_LD_SIZE)
-                        Tx.wg.copy_async(reg_wg[:, :], tmem[:, col_st : col_st + TMEM_LD_SIZE])
+                        T.ptx[_TMEM_LD_64](
+                            *[reg[j] for j in range(TMEM_LD_SIZE)],
+                            T.cast(col_st, "uint32"),
+                        )
                         T.ptx.tcgen05.wait__ld.sync.aligned()
-                        Tx.cast(reg_fp16[i * TMEM_LD_SIZE : (i + 1) * TMEM_LD_SIZE], reg[:])
 
-                    # the tmem can be overwritten by the next tile
-                    ld2mma.arrive(wg_id)
-                    # # RF -> GMEM
-                    for i in T.unroll(NUM_CONSUMER * BLK_N // EPI_TILE):
-                        Tx.copy(D_smem[wg_id, warp_id * 32 + lane_id, :], reg_fp16[i * EPI_TILE : (i + 1) * EPI_TILE])
+                        # Once the final asynchronous load has completed, no
+                        # later instruction consumes TMEM: conversion and
+                        # output staging read only the register payload.  Let
+                        # the producer reuse TMEM while that tail executes.
+                        if i == MMA_N // TMEM_LD_SIZE - 1:
+                            ld2mma.arrive(wg_id)
+
+                        for j in T.unroll(TMEM_LD_SIZE // 2):
+                            T.ptx[_CVT_F32X2](
+                                reg_fp16[j],
+                                reg[j * 2 + 1],
+                                reg[j * 2],
+                            )
+
+                        # Keep the preceding TMA store in flight while this
+                        # independent TMEM chunk is loaded and converted.  The
+                        # staging buffer is not overwritten until the elected
+                        # thread has observed completion and the warpgroup has
+                        # rendezvoused.
+                        if i > 0:
+                            if lane_id == 0 and warp_id == 0:
+                                T.ptx.cp.async_.bulk.wait_group(0)
+                            T.cuda.warpgroup_sync(wg_id)
+
+                        for jv in T.unroll(EPI_TILE // 8):
+                            r0 = T.meta_var(jv * 4)
+                            T.ptx.st.shared.v4.u32(
+                                D_smem.ptr_to([wg_id, warp_id * 32 + lane_id, jv * 8]),
+                                reg_fp16[r0],
+                                reg_fp16[r0 + 1],
+                                reg_fp16[r0 + 2],
+                                reg_fp16[r0 + 3],
+                            )
                         T.cuda.warpgroup_sync(wg_id)
                         T.ptx.fence.proxy.async_.shared__cta()
                         # st to gmem
                         if lane_id == 0 and warp_id == 0:
                             m_st = T.meta_var((m_idx * NUM_CONSUMER * CTA_GROUP + wg_id * CTA_GROUP + cbx) * BLK_M)
                             n_st = T.meta_var(n_idx * BLK_N * CTA_GROUP + i * EPI_TILE)
-                            Tx.copy_async(out[m_st : m_st + BLK_M, n_st : n_st + EPI_TILE], D_smem[wg_id, :, :], dispatch="tma_auto")
+                            T.ptx[_TMA_S2G](
+                                T.address_of(out_tensor_map),
+                                T.cast(n_st, "int32"),
+                                T.cast(m_st, "int32"),
+                                D_smem.ptr_to([wg_id, 0, 0]),
+                            )
                             T.ptx.cp.async_.bulk.commit_group()
-                            T.ptx.cp.async_.bulk.wait_group(0)
-                        T.cuda.warpgroup_sync(wg_id)
+
+                    # The last store has no following TMEM load to hide its
+                    # latency, but it still must complete before this staging
+                    # buffer is reused by the next scheduled tile.
+                    if lane_id == 0 and warp_id == 0:
+                        T.ptx.cp.async_.bulk.wait_group(0)
+                    T.cuda.warpgroup_sync(wg_id)
 
                 profiler.end(ProfileEventType.GEMM, tid == 0)
 
@@ -917,7 +1074,8 @@ def _build_kernel():
         # dealloc TMEM
         if (wg_id == 0) & (warp_id == 0):
             T.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
-            T.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](tmem_addr, T.uint32(N_COLS))
+            T.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0]))
+            T.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](tmem_addr_local, T.uint32(N_COLS))
 
     # fmt: on
 

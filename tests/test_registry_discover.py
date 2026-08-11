@@ -16,9 +16,14 @@
 # under the License.
 from __future__ import annotations
 
-from tvm import tirx
+import importlib
+import sys
 
+import pytest
+
+import tirx_kernels
 from tirx_kernels.registry import discover_categories, discover_kernels, load_kernel
+from tvm import tirx
 
 
 def test_discover_categories_includes_kernel_dirs() -> None:
@@ -57,3 +62,45 @@ def test_load_kernel_finds_flash_attention_backward() -> None:
     assert {config["is_causal"] for config in mod.CONFIGS} == {False, True}
     kernel = mod.get_kernel(batch_size=1, seq_len=256, num_heads=1, head_dim=128, is_causal=False)
     assert sum(tirx.is_buffer_var(param) for param in kernel.params) == 9
+
+
+def _use_temporary_kernel_package(monkeypatch, root) -> None:
+    (root / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(tirx_kernels, "__file__", str(root / "__init__.py"))
+    monkeypatch.setattr(tirx_kernels, "__path__", [str(root)])
+    importlib.invalidate_caches()
+
+
+def test_strict_discovery_rejects_malformed_declared_metadata(monkeypatch, tmp_path) -> None:
+    category = tmp_path / "fixturecat"
+    category.mkdir()
+    (category / "__init__.py").write_text("", encoding="utf-8")
+    (category / "broken.py").write_text("KERNEL_META = {'name': 'broken'}\n", encoding="utf-8")
+    _use_temporary_kernel_package(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="invalid KERNEL_META"):
+        discover_kernels(strict=True)
+
+    sys.modules.pop("tirx_kernels.fixturecat.broken", None)
+    sys.modules.pop("tirx_kernels.fixturecat", None)
+
+
+def test_discovery_rejects_duplicate_public_kernel_names(monkeypatch, tmp_path) -> None:
+    category = tmp_path / "fixturecat"
+    category.mkdir()
+    (category / "__init__.py").write_text("", encoding="utf-8")
+    metadata = (
+        "KERNEL_META = {'name': 'duplicate', 'category': 'fixturecat', 'compute_capability': 10}\n"
+    )
+    (category / "first.py").write_text(metadata, encoding="utf-8")
+    (category / "second.py").write_text(metadata, encoding="utf-8")
+    _use_temporary_kernel_package(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="duplicate kernel registry name 'duplicate'"):
+        discover_kernels(strict=True)
+    with pytest.raises(ValueError, match="duplicate kernel registry name 'duplicate'"):
+        load_kernel("duplicate", strict=True)
+
+    sys.modules.pop("tirx_kernels.fixturecat.first", None)
+    sys.modules.pop("tirx_kernels.fixturecat.second", None)
+    sys.modules.pop("tirx_kernels.fixturecat", None)
