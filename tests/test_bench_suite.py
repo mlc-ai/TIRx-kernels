@@ -309,25 +309,30 @@ def test_gpu_pool_prioritizes_larger_waiting_claims(monkeypatch: pytest.MonkeyPa
     single_thread.join()
 
 
-def test_resident_strangers_include_idle_compute_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        run,
-        "_compute_pids_by_gpu_uuid",
-        lambda: {"GPU-0": {101, 999}, "GPU-1": {202}, "GPU-unassigned": {303}},
-    )
-
-    assert run._resident_strangers_on_gpu_uuids(("GPU-0", "GPU-1"), {999}) == {101, 202}
-
-
-def test_monitored_subprocess_requeues_resident_context_before_spawn(
+def test_monitored_subprocess_allows_idle_foreign_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(run, "_gpu_uuid_of", lambda gpu_index: f"GPU-{gpu_index}")
-    monkeypatch.setattr(
-        run,
-        "_resident_strangers_on_gpu_uuids",
-        lambda gpu_uuids, our_pids: {123} if gpu_uuids == ("GPU-4",) else set(),
+    monkeypatch.setattr(run, "_pid_sm_on_gpus", lambda gpu_indices: {123: 0.0})
+    log_path = tmp_path / "subprocess.log"
+
+    result = run._run_subprocess_monitored(
+        [sys.executable, "-c", "print('spawned')"],
+        os.environ.copy(),
+        str(tmp_path),
+        log_path,
+        ("4",),
+        0.01,
+        5.0,
     )
+
+    assert result == (0, False, [], False)
+    assert "spawned" in log_path.read_text()
+
+
+def test_monitored_subprocess_requeues_active_foreign_process_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run, "_pid_sm_on_gpus", lambda gpu_indices: {123: 6.0})
     log_path = tmp_path / "subprocess.log"
 
     result = run._run_subprocess_monitored(
@@ -337,17 +342,17 @@ def test_monitored_subprocess_requeues_resident_context_before_spawn(
         log_path,
         ("4",),
         0.01,
-        0.0,
+        5.0,
     )
 
     assert result == (-1, True, [123], False)
-    assert "foreign compute contexts" in log_path.read_text()
+    assert "active foreign processes" in log_path.read_text()
 
 
-def test_monitored_subprocess_requeues_when_gpu_uuid_lookup_fails(
+def test_monitored_subprocess_requeues_when_utilization_sampling_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(run, "_gpu_uuid_of", lambda gpu_index: None)
+    monkeypatch.setattr(run, "_pid_sm_on_gpus", lambda gpu_indices: None)
     log_path = tmp_path / "subprocess.log"
 
     result = run._run_subprocess_monitored(
@@ -357,11 +362,11 @@ def test_monitored_subprocess_requeues_when_gpu_uuid_lookup_fails(
         log_path,
         ("4",),
         0.01,
-        0.0,
+        5.0,
     )
 
     assert result == (-1, True, [], False)
-    assert "could not resolve every assigned GPU UUID" in log_path.read_text()
+    assert "could not sample assigned GPU utilization" in log_path.read_text()
 
 
 def test_run_one_passes_multigpu_assignment_to_megamoe(

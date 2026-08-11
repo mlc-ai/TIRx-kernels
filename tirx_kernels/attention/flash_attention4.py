@@ -77,10 +77,12 @@ __forceinline__ __device__ uint64_t fa4_smem_desc_add_16B_offset(
   return desc.desc_;
 }
 """
+
+
 def _smem_desc_add_16B_offset(desc_base, offset):
-    # The fixed TVM PTX table intentionally does not register integer add.
-    # Keep the helper so only the descriptor's uint32 low half wraps; a uint64
-    # TIR addition could carry into the descriptor's layout bits.
+    # Keep the descriptor update as one C++ expression.  Separate mov/add/mov
+    # T.ptx calls preserve low-32-bit wrap semantics, but perturb nvcc's PTX
+    # around this MMA hot path enough to regress long-sequence attention.
     return T.cuda.func_call(
         "fa4_smem_desc_add_16B_offset",
         desc_base,
@@ -92,9 +94,7 @@ def _smem_desc_add_16B_offset(desc_base, offset):
 
 def _cast_f32x2_f16x2(dst, src, offset):
     dst_words = dst.view("uint32")
-    return T.ptx.cvt.rn.f16x2.f32(
-        dst_words[offset // 2], src[offset + 1], src[offset]
-    )
+    return T.ptx.cvt.rn.f16x2.f32(dst_words[offset // 2], src[offset + 1], src[offset])
 
 
 def _tmem_load(dst, dst_offset, tmem_col, width):
@@ -116,23 +116,23 @@ def shl_u32_clamp(val, shift):
     the fused ``max(col_limit - s*CHUNK, 0)`` (one VIADDMNMX, like cutedsl) and
     drop the ``min(.,CHUNK)`` clamp (which adds a VIMNMX above cutedsl's count):
     ``~shl_clamp(0xFFFFFFFF, k)`` is the low-k-bits mask for any k, no min."""
-    func_name = "shl_u32_clamp"
-    source_code = (
-        f"\n__device__ __forceinline__ unsigned int {func_name}"
-        "(unsigned int val, unsigned int shift) {\n"
-        "  unsigned int r;\n"
-        '  asm("shl.b32 %0, %1, %2;" : "=r"(r) : "r"(val), "r"(shift));\n'
-        "  return r;\n}\n"
-    )
-    return T.cuda.func_call(func_name, val, shift, source_code=source_code, return_type="uint32")
+    result = T.alloc_local((1,), "uint32")
+    T.evaluate(T.ptx.shl.b32(result[0], val, shift))
+    return result[0]
 
 
 def combine_int_frac_ex2(x_rounded, frac_ex2):
-    func_name = "combine_int_frac_ex2"
-    source_code = f'\n__device__ __forceinline__ float {func_name}(float x_rounded, float frac_ex2) {{\n  float out;\n  asm volatile(\n    "{{\\n\\t"\n    ".reg .s32 x_rounded_i, frac_ex_i, x_rounded_e, out_i;\\n\\t"\n    "mov.b32 x_rounded_i, %1;\\n\\t"\n    "mov.b32 frac_ex_i, %2;\\n\\t"\n    "shl.b32 x_rounded_e, x_rounded_i, 23;\\n\\t"\n    "add.s32 out_i, x_rounded_e, frac_ex_i;\\n\\t"\n    "mov.b32 %0, out_i;\\n\\t"\n    "}}\\n"\n    : "=f"(out) : "f"(x_rounded), "f"(frac_ex2));\n  return out;\n}}\n'
-    return T.cuda.func_call(
-        func_name, x_rounded, frac_ex2, source_code=source_code, return_type="float32"
-    )
+    x_rounded_i = T.alloc_local((1,), "int32")
+    frac_ex_i = T.alloc_local((1,), "int32")
+    x_rounded_e = T.alloc_local((1,), "int32")
+    out_i = T.alloc_local((1,), "int32")
+    out = T.alloc_local((1,), "float32")
+    T.evaluate(T.ptx.mov.b32(x_rounded_i[0], x_rounded))
+    T.evaluate(T.ptx.mov.b32(frac_ex_i[0], frac_ex2))
+    T.evaluate(T.ptx.shl.b32(x_rounded_e[0], x_rounded_i[0], T.uint32(23)))
+    T.evaluate(T.ptx.add.s32(out_i[0], x_rounded_e[0], frac_ex_i[0]))
+    T.evaluate(T.ptx.mov.b32(out[0], out_i[0]))
+    return out[0]
 
 
 def get_n_block_max(m_block_idx, causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE):

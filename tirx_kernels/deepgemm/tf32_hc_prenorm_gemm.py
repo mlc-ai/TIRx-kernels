@@ -401,27 +401,16 @@ def get_kernel(**kwargs: Any):
     cache_policy_evict_first = T.uint64(0x12F0000000000000)
     cache_policy_evict_last = T.uint64(0x14F0000000000000)
     tf32_instr_desc = T.uint32(67635472)
-    # The fixed TVM PTX table intentionally omits integer add. This helper
-    # performs uint32 wraparound in the descriptor's low half without a carry
-    # into the encoded layout fields.
-    smem_desc_add_source = r"""
-__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(
-    uint64_t desc_base, int32_t offset) {
-    SmemDescriptor desc;
-    desc.desc_ = desc_base;
-    desc.lo += static_cast<uint32_t>(offset);
-    return desc.desc_;
-}
-"""
-
     def add_smem_desc_offset(desc, offset):
-        return T.cuda.func_call(
-            "tvm_builtin_smem_desc_add_16B_offset",
-            desc,
-            offset,
-            source_code=smem_desc_add_source,
-            return_type="uint64",
-        )
+        # Descriptor offsets wrap in the low 32 bits without carrying into the
+        # encoded layout fields in the high half.
+        desc_lo = T.alloc_local((1,), "uint32")
+        desc_hi = T.alloc_local((1,), "uint32")
+        result = T.alloc_local((1,), "uint64")
+        T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], desc))
+        T.evaluate(T.ptx.add.u32(desc_lo[0], desc_lo[0], T.cast(offset, "uint32")))
+        T.evaluate(T.ptx.mov.b64(result[0], desc_lo[0], desc_hi[0]))
+        return result[0]
 
     def cuda_grid_dependency_synchronize():
         T.evaluate(T.ptx.griddepcontrol.wait())

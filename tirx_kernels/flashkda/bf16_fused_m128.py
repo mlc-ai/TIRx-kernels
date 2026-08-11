@@ -116,38 +116,8 @@ LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 # CUDA device helpers, transcribed in source order from
 # csrc/kda/flashkda_bf16_fused_m128.cu:110-496.
 #
-# Helpers whose PTX instruction form has an exact T.ptx/T.cuda wrapper use that
-# wrapper.  Helpers with no exact wrapper (token-returning waits, ticks waits,
-# raw-descriptor MMA, raw tensor-map TMA) keep the verbatim CUDA body behind a
-# target-local T.cuda.func_call inline fallback (see tirx_dsl_improve.md).
+# Helpers use the exact T.ptx/T.cuda wrappers available in the target TVM.
 # ---------------------------------------------------------------------------
-
-_FLASHKDA_SRCS = {
-    "flashkda_tensormap_acquire": r"""__device__ __forceinline__ void flashkda_tensormap_acquire(const void *tmap_ptr) {
-    asm volatile(
-        "fence.proxy.tensormap::generic.acquire.gpu [%0], 128;\n"
-        :: "l"(tmap_ptr) : "memory");
-}
-""",
-    "flashkda_tanh_approx": r"""// tanh.approx.f32 (sigmoid via tanh; used throughout the prep role)
-__device__ __forceinline__ float flashkda_tanh_approx(float x) {
-    float y;
-    asm volatile("tanh.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
-    return y;
-}
-""",
-    "flashkda_fmaf_rn": r"""// __fmaf_rn (value form of fma.rn.f32)
-__device__ __forceinline__ float flashkda_fmaf_rn(float a, float b, float c) {
-    return __fmaf_rn(a, b, c);
-}
-""",
-    "flashkda_rsqrtf": r"""// rsqrtf
-__device__ __forceinline__ float flashkda_rsqrtf(float x) {
-    return rsqrtf(x);
-}
-""",
-}
-
 
 # tcgen05.mma spelling: kind::f16 from the (float32, bfloat16, bfloat16) dtypes; the A
 # operand is a uint32 TMEM address (use_a_tmem), which selects the ts form.
@@ -291,12 +261,9 @@ def _st_shared_f32(buffer, index, value):
 
 def _tanh_approx(x):
     # tanh.approx.f32 (prep-role sigmoid)
-    return T.cuda.func_call(
-        "flashkda_tanh_approx",
-        x,
-        source_code=_FLASHKDA_SRCS["flashkda_tanh_approx"],
-        return_type="float32",
-    )
+    result = T.alloc_local((1,), "float32")
+    T.evaluate(T.ptx.tanh.approx.f32(result[0], x))
+    return result[0]
 
 
 def _expf(x):
@@ -307,22 +274,20 @@ def _expf(x):
 
 
 def _rsqrtf(x):
-    # rsqrtf verbatim
-    return T.cuda.func_call(
-        "flashkda_rsqrtf", x, source_code=_FLASHKDA_SRCS["flashkda_rsqrtf"], return_type="float32"
-    )
+    # CUDA's fast-math rsqrtf lowers to this exact PTX form.
+    result = T.alloc_local((1,), "float32")
+    T.evaluate(T.ptx.rsqrt.approx.ftz.f32(result[0], x))
+    return result[0]
 
 
 def _fmaf_rn(a, b, c):
-    # __fmaf_rn verbatim (value form)
-    return T.cuda.func_call(
-        "flashkda_fmaf_rn",
-        a,
-        b,
-        c,
-        source_code=_FLASHKDA_SRCS["flashkda_fmaf_rn"],
-        return_type="float32",
-    )
+    result = T.alloc_local((1,), "float32")
+    T.evaluate(T.ptx.fma.rn.f32(result[0], a, b, c))
+    return result[0]
+
+
+def _tensormap_acquire(tmap):
+    return T.ptx.fence.proxy.tensormap__generic.acquire.gpu(tmap)
 
 
 def _ld_shared_b32(smem_raw, smem, addr):
@@ -1113,42 +1078,12 @@ def _kernel(
 
     # .cu:504-521 (FLASHINFER INTEGRATION: acquire global tensor maps).
     if thread_idx == 0:
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            q_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            k_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            v_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            g_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            beta_tma_tmap,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            out_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
+        _tensormap_acquire(q_tma)
+        _tensormap_acquire(k_tma)
+        _tensormap_acquire(v_tma)
+        _tensormap_acquire(g_tma)
+        _tensormap_acquire(beta_tma_tmap)
+        _tensormap_acquire(out_tma)
     T.cuda.cta_sync()  # .cu:520 __syncthreads()
 
     # .cu:522-524

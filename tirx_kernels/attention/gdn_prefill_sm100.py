@@ -156,47 +156,6 @@ INITIAL_STATE_BARRIER = 4
 
 LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
-# Only source operations unavailable as exact native TIRx calls live here.
-_GDN_SRCS = {
-    "replace_global_address": r"""__device__ __forceinline__ void gdn_tensormap_replace_global_address(void *desc, const void *addr) {
-    asm volatile("tensormap.replace.tile.global_address.global.b1024.b64 [%0], %1;"
-                 :: "l"(desc), "l"(addr) : "memory");
-}
-""",
-    **{
-        f"replace_global_dim_{dim}": f"""__device__ __forceinline__ void gdn_tensormap_replace_global_dim_{dim}(void *desc, unsigned int value) {{
-    asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], {dim}, %1;"
-                 :: "l"(desc), "r"(value) : "memory");
-}}
-"""
-        for dim in range(5)
-    },
-    **{
-        f"replace_global_stride_{dim}": f"""__device__ __forceinline__ void gdn_tensormap_replace_global_stride_{dim}(void *desc, unsigned long long value) {{
-    asm volatile("tensormap.replace.tile.global_stride.global.b1024.b64 [%0], {dim}, %1;"
-                 :: "l"(desc), "l"(value) : "memory");
-}}
-"""
-        for dim in range(4)
-    },
-    "tensormap_release": r"""__device__ __forceinline__ void gdn_tensormap_release() {
-    asm volatile("fence.proxy.tensormap::generic.release.gpu;" ::: "memory");
-}
-""",
-    "tensormap_acquire": r"""__device__ __forceinline__ void gdn_tensormap_acquire(const void *desc) {
-    asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;"
-                 :: "l"(desc) : "memory");
-}
-""",
-    "lg2_approx_ftz": r"""__device__ __forceinline__ float gdn_lg2_approx_ftz(float value) {
-    float out;
-    asm volatile("lg2.approx.ftz.f32 %0, %1;" : "=f"(out) : "f"(value));
-    return out;
-}
-""",
-}
-
-
 @T.inline
 def _init_pipeline(smem_raw, full_off, empty_off, stages, producers, consumers):
     for stage in range(stages):
@@ -348,33 +307,17 @@ def _descriptor_copy_payload(src_map, dst_ptr):
 
 
 def _replace_global_address(desc, address):
-    return T.cuda.func_call(
-        "gdn_tensormap_replace_global_address",
-        desc,
-        address,
-        source_code=_GDN_SRCS["replace_global_address"],
-        return_type="void",
+    return T.ptx.tensormap_replace.tile.global_address.global_.b1024.b64(
+        desc, T.reinterpret("uint64", address)
     )
 
 
 def _replace_global_dim(desc, dim, value):
-    return T.cuda.func_call(
-        f"gdn_tensormap_replace_global_dim_{dim}",
-        desc,
-        value,
-        source_code=_GDN_SRCS[f"replace_global_dim_{dim}"],
-        return_type="void",
-    )
+    return T.ptx.tensormap_replace.tile.global_dim.global_.b1024.b32(desc, dim, value)
 
 
 def _replace_global_stride(desc, dim, value):
-    return T.cuda.func_call(
-        f"gdn_tensormap_replace_global_stride_{dim}",
-        desc,
-        value,
-        source_code=_GDN_SRCS[f"replace_global_stride_{dim}"],
-        return_type="void",
-    )
+    return T.ptx.tensormap_replace.tile.global_stride.global_.b1024.b64(desc, dim, value)
 
 
 @T.inline
@@ -394,24 +337,17 @@ def _replace_descriptor(desc, address, dim1, dim2, dim3, stride0, stride1, strid
 
 
 def _tensormap_release():
-    return T.cuda.func_call(
-        "gdn_tensormap_release", source_code=_GDN_SRCS["tensormap_release"], return_type="void"
-    )
+    return T.ptx.fence.proxy.tensormap__generic.release.gpu()
 
 
 def _tensormap_acquire(desc):
-    return T.cuda.func_call(
-        "gdn_tensormap_acquire",
-        desc,
-        source_code=_GDN_SRCS["tensormap_acquire"],
-        return_type="void",
-    )
+    return T.ptx.fence.proxy.tensormap__generic.acquire.gpu(desc)
 
 
 def _lg2_approx_ftz(value):
-    return T.cuda.func_call(
-        "gdn_lg2_approx_ftz", value, source_code=_GDN_SRCS["lg2_approx_ftz"], return_type="float32"
-    )
+    result = T.alloc_local((1,), "float32")
+    T.evaluate(T.ptx.lg2.approx.ftz.f32(result[0], value))
+    return result[0]
 
 
 def _smem_desc_b128(smem_addr):

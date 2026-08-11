@@ -1526,7 +1526,6 @@ def get_kernel(
     collect_stats: bool = False,
     emit_nvl_barrier_timeout_printf: bool = True,
 ):
-    from tvm.backend.cuda.op import cuda_func_call
     from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_tmem_layout
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
     from tvm.script import tirx as T
@@ -2034,49 +2033,39 @@ def get_kernel(
             "int32",
         )
 
-    # `ptx::st_async_cluster` (deep_gemm/include/deep_gemm/ptx/ld_st.cuh): map the
-    # destination smem + mbarrier into the peer CTA with `mapa`, then push the
-    # 32-byte TaskInfo as two `st.async...v4` transactions that complete the
-    # published-task mbarrier's tx count. No TIRx wrapper exists for
-    # `st.async.shared::cluster.mbarrier::complete_tx::bytes`; see
-    # `.porting/mega_moe/tirx_dsl_improve.md`.
-    _st_async_cluster_task_info_src = r"""
-__forceinline__ __device__ void tvm_builtin_st_async_cluster_task_info(
-    void* dst, void* bar, uint32_t dst_cta_idx,
-    uint32_t v0, uint32_t v1, uint32_t v2, uint32_t v3,
-    uint32_t v4, uint32_t v5, uint32_t v6, uint32_t v7) {
-    const uint32_t bar_addr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    const uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
-    uint32_t mapped_bar, mapped_dst;
-    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;"
-                 : "=r"(mapped_bar) : "r"(bar_addr), "r"(dst_cta_idx));
-    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;"
-                 : "=r"(mapped_dst) : "r"(dst_addr), "r"(dst_cta_idx));
-    asm volatile(
-        "st.async.shared::cluster.mbarrier::complete_tx::bytes.u32.v4 [%0], {%1, %2, %3, %4}, [%5];" ::
-        "r"(mapped_dst), "r"(v0), "r"(v1), "r"(v2), "r"(v3), "r"(mapped_bar));
-    asm volatile(
-        "st.async.shared::cluster.mbarrier::complete_tx::bytes.u32.v4 [%0], {%1, %2, %3, %4}, [%5];" ::
-        "r"(mapped_dst + 16), "r"(v4), "r"(v5), "r"(v6), "r"(v7), "r"(mapped_bar));
-}
-"""
-
     def st_async_cluster_task_info(dst_ptr, bar_ptr, dst_cta_idx, task_info_regs):
-        return cuda_func_call(
-            "tvm_builtin_st_async_cluster_task_info",
-            dst_ptr,
-            bar_ptr,
-            T.cast(dst_cta_idx, "uint32"),
-            task_info_regs[0],
-            task_info_regs[1],
-            task_info_regs[2],
-            task_info_regs[3],
+        mapped_bar = T.alloc_local((1,), "uint32")
+        mapped_dst = T.alloc_local((1,), "uint32")
+        mapped_dst_hi = T.alloc_local((1,), "uint32")
+        cta = T.cast(dst_cta_idx, "uint32")
+        T.evaluate(
+            T.ptx.mapa.shared__cluster.u32(
+                mapped_bar[0], T.cuda.cvta_generic_to_shared(bar_ptr), cta
+            )
+        )
+        T.evaluate(
+            T.ptx.mapa.shared__cluster.u32(
+                mapped_dst[0], T.cuda.cvta_generic_to_shared(dst_ptr), cta
+            )
+        )
+        T.evaluate(
+            T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
+                mapped_dst[0],
+                task_info_regs[0],
+                task_info_regs[1],
+                task_info_regs[2],
+                task_info_regs[3],
+                mapped_bar[0],
+            )
+        )
+        T.evaluate(T.ptx.add.u32(mapped_dst_hi[0], mapped_dst[0], T.uint32(16)))
+        return T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
+            mapped_dst_hi[0],
             task_info_regs[4],
             task_info_regs[5],
             task_info_regs[6],
             task_info_regs[7],
-            source_code=_st_async_cluster_task_info_src,
-            return_type="void",
+            mapped_bar[0],
         )
 
     def atomic_add_u32(dst, address, value):

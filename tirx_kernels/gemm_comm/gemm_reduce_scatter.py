@@ -204,14 +204,7 @@ def derive_config(
 
 
 ld_reduce_8xfp16 = '\n__forceinline__ __device__ void ld_reduce_8_fp16(void* src_addr, void* dst_addr) {\n    int4* source = (int4*) nvshmemx_mc_ptr(NVSHMEM_TEAM_WORLD, src_addr);\n    int4* dest = (int4*) dst_addr;\n    constexpr int UNROLL = 1;\n    union {\n        uint16_t u2[8 * UNROLL];\n        uint64_t u8[2 * UNROLL];\n    };\n    for (int u = 0; u < UNROLL; u++) {\n        asm("multimem.ld_reduce.global.add.v8.f16 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"\n            : "=h"(u2[8 * u]), "=h"(u2[8 * u + 1]), "=h"(u2[8 * u + 2]), "=h"(u2[8 * u + 3]), "=h"(u2[8 * u + 4]), "=h"(u2[8 * u + 5]), "=h"(u2[8 * u + 6]), "=h"(u2[8 * u + 7])\n            : "l"(source + u));\n    }\n    for (int u = 0; u < UNROLL; u++) {\n        asm("st.global.v2.b64 [%0], {%1, %2};" ::"l"(dest + u), "l"(u8[2 * u]),\n            "l"(u8[2 * u + 1]));\n    }\n}\n'
-pack_values = '\n__forceinline__ __device__ void pack_values(int32_t rem, int32_t task_type, int32_t task_idx0, int32_t task_idx1, uint64_t* dst_addr) {\n    asm volatile("st.shared::cluster.v4.b32 [%0], {%1, %2, %3, %4};"\n                 :\n                 : "l"(dst_addr), "r"(rem), "r"(task_type), "r"(task_idx0), "r"(task_idx1)\n                 : "memory");\n}\n'
-unpack_values = '\n__forceinline__ __device__ void unpack_values(uint64_t* src_addr, int32_t* rem, int32_t* task_type, int32_t* task_idx0, int32_t* task_idx1) {\n    asm volatile("ld.shared::cluster.v4.b32 {%0, %1, %2, %3}, [%4];"\n                 : "=r"(*rem), "=r"(*task_type), "=r"(*task_idx0), "=r"(*task_idx1)\n                 : "l"(src_addr)\n                 : "memory");\n\n}\n'
 semaphore_notify_remote = "\n__forceinline__ __device__ uint64_t semaphore_notify_remote(int32_t signal_rank, uint64_t* addr, uint64_t signal_value) {\n    auto dst_addr = reinterpret_cast<unsigned long long*>(nvshmem_ptr(addr, signal_rank));\n    return atomicAdd_system(dst_addr, signal_value);\n}\n"
-thread_fence_system = """
-__forceinline__ __device__ void thread_fence_system() {
-    __threadfence_system();
-}
-"""
 enqueue_remote = """
 __forceinline__ __device__ void enqueue_remote(
         int32_t* task_types, int32_t* task_idxs, int32_t* tail, int32_t mask,
@@ -230,17 +223,8 @@ __forceinline__ __device__ void enqueue_remote(
         : "memory");
 }
 """
-ld_global_acquire = """
-__forceinline__ __device__ int32_t ld_global_acquire(int32_t* addr) {
-    int32_t value;
-    asm volatile(
-        "ld.global.acquire.sys.b32 %0, [%1];"
-        : "=r"(value)
-        : "l"(addr)
-        : "memory");
-    return value;
-}
-"""
+# Keep the acquire-load polling loop in one device helper.  Expanding the loop
+# into TIR can leave worker CTAs spinning indefinitely on queue publication.
 while_ld_global_acquire = """
 __forceinline__ __device__ int32_t while_ld_global_acquire(int32_t* addr) {
     int32_t value;
@@ -427,11 +411,8 @@ class RSMPMCQueue(MPMCQueue):
             Tx.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Tx.int32(1))
         if self.head_r[0] < self.num_tot_tasks:
             self.masked_pos[0] = self.head_r[0] & self.mask
-            fetched_task_type[0] = Tx.cuda.func_call(
-                "ld_global_acquire",
-                self.task_types.ptr_to([self.masked_pos[0]]),
-                source_code=ld_global_acquire,
-                return_type="int32",
+            Tx.ptx.ld.global_.acquire.sys.b32(
+                fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
             )
             if fetched_task_type[0] < 0:
                 rs_rem[0] = self.head_r[0]
@@ -452,14 +433,12 @@ def consumer_fetch(
     sch_pipe, packed_value, rs_rem, fetched_task_type, fetched_task_idx0, fetched_task_idx1
 ):
     sch_pipe.consumer_wait(0)
-    Tx.cuda.func_call(
-        "unpack_values",
+    Tx.ptx.ld.shared__cluster.v4.b32(
+        rs_rem[0],
+        fetched_task_type[0],
+        fetched_task_idx0[0],
+        fetched_task_idx1[0],
         packed_value.ptr_to([0]),
-        rs_rem.ptr_to([0]),
-        fetched_task_type.ptr_to([0]),
-        fetched_task_idx0.ptr_to([0]),
-        fetched_task_idx1.ptr_to([0]),
-        source_code=unpack_values,
     )
     mapped = Tx.alloc_local([1], "uint64")
     Tx.ptx.mapa.shared__cluster.u64(
@@ -511,14 +490,12 @@ class MixedDynamicTileScheduler:
                         bx,
                         rank,
                     )
-                Tx.cuda.func_call(
-                    "pack_values",
+                Tx.ptx.st.shared__cluster.v4.b32(
+                    self.packed_value.ptr_to([0]),
                     self.rs_rem[0],
                     self.fetched_task_type[0],
                     self.fetched_task_idx0[0],
                     self.fetched_task_idx1[0],
-                    self.packed_value.ptr_to([0]),
-                    source_code=pack_values,
                 )
                 Tx.cuda.thread_fence()
                 mapped0 = Tx.alloc_local([1], "uint64")
@@ -564,7 +541,7 @@ class Semaphore:
     @Tx.inline
     def semaphore_notify(self, signal_rank, tid, m_idx, n_idx, rs_queue):
         if tid % 128 == 0:
-            Tx.cuda.func_call("thread_fence_system", source_code=thread_fence_system)
+            Tx.ptx.fence.sc.sys()
             self.state[0] = (
                 Tx.cuda.func_call(
                     "semaphore_notify_remote",
