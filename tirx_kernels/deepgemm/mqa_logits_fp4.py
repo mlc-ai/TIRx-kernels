@@ -282,8 +282,15 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 
 def _mqa_fp4_wrelu_reduce_src(num_heads: int) -> str:
-    """DeepGEMM f32 wrelu epilogue (sm100_mqa_logits.cuh): relu as x+|x| packed into
-    FADD2+FFMA2, tail /2; emitted as a kernel-local helper via T.cuda_func_call."""
+    """DeepGEMM's packed weighted-ReLU reduction.
+
+    The individual PTX operations are registered, and ptxas produces the same
+    FADD2/FFMA2 reduction from them.  However, expanding the reduction into
+    separate inline-asm wrappers prevents NVRTC from hoisting and uniform-
+    lowering surrounding runtime address calculations in the compressed BF16
+    kernel.  Keep this hot composite so those calculations stay on the uniform
+    datapath; the expanded form regresses its paired bench_suite result.
+    """
     return (
         f"__forceinline__ __device__ float tvm_builtin_mqa_fp4_wrelu_reduce_{num_heads}("
         "const float* __restrict__ accum, const float* __restrict__ weights) {\n"
@@ -1037,7 +1044,6 @@ def get_kernel(**kwargs: Any):
                             T.ptx.tcgen05.wait__ld.sync.aligned()
                             if q_inner_i == block_q - 1:
                                 tmem_pipe.empty.arrive(tmem_stage_idx)
-                            # Weighted-ReLU reduce via inline CUDA (see _mqa_fp4_wrelu_reduce_src).
                             result_f32: T.float32 = cuda_func_call(
                                 f"tvm_builtin_mqa_fp4_wrelu_reduce_{num_heads}",
                                 T.address_of(accum[0]),

@@ -22,7 +22,6 @@ import math
 from typing import Any
 
 from tirx_kernels.flashkda.bf16_fused_m128 import (
-    _FLASHKDA_SRCS,
     D_HEAD,
     LAUNCH_TAGS,
     MBAR_FINAL_READY_OFF,
@@ -115,6 +114,7 @@ from tirx_kernels.flashkda.bf16_fused_m128 import (
     _st_shared_b32,
     _sub_f32x2_inplace,
     _tanh_approx,
+    _tensormap_acquire,
     _tma_2d_gmem2smem,
     _tma_3d_gmem2smem,
     _tma_4d_gmem2smem,
@@ -271,42 +271,12 @@ def _kernel_tx_tile(
 
     # .cu:504-521 (FLASHINFER INTEGRATION: acquire global tensor maps).
     if thread_idx == 0:
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            q_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            k_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            v_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            g_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            beta_tma_tmap,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
-        T.cuda.func_call(
-            "flashkda_tensormap_acquire",
-            out_tma,
-            source_code=_FLASHKDA_SRCS["flashkda_tensormap_acquire"],
-            return_type="void",
-        )
+        _tensormap_acquire(q_tma)
+        _tensormap_acquire(k_tma)
+        _tensormap_acquire(v_tma)
+        _tensormap_acquire(g_tma)
+        _tensormap_acquire(beta_tma_tmap)
+        _tensormap_acquire(out_tma)
     T.cuda.cta_sync()  # .cu:520 __syncthreads()
 
     # .cu:522-524

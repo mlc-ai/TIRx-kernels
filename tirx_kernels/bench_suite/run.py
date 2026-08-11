@@ -468,63 +468,50 @@ def _visible_gpu_rows(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return [(index, uuid) for index, uuid in rows if index in visible or uuid in visible]
 
 
-def _gpu_uuid_of(idx: str) -> str | None:
-    """Look up the UUID for a GPU index via nvidia-smi."""
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout
-    except Exception:
-        return None
-    for line in out.splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 2 and parts[0] == idx:
-            return parts[1]
-    return None
+def _pid_sm_on_gpus(gpu_indices: tuple[str, ...]) -> dict[int, float] | None:
+    """Return the maximum per-process SM utilization on assigned GPUs.
 
-
-def _compute_pids_by_gpu_uuid() -> dict[str, set[int]]:
-    """Return every compute-app PID grouped by physical GPU UUID.
-
-    Unlike ``pmon`` SM utilization, a compute context remains visible between
-    short kernel bursts.  The authoritative benchmark gate already rejects
-    resident compute-app memory before assignment, so the runtime monitor must
-    apply the same isolation rule when a context appears after assignment.
+    ``None`` means the utilization snapshot failed and the caller must fail
+    closed.  Inactive rows use ``-`` for SM utilization and are equivalent to
+    zero, so a process that only keeps a CUDA context resident is shareable.
     """
+    if not gpu_indices:
+        return {}
     try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader"],
+        completed = subprocess.run(
+            ["nvidia-smi", "pmon", "-i", ",".join(gpu_indices), "-c", "1", "-s", "u"],
             capture_output=True,
             text=True,
-            timeout=5,
-        ).stdout
-    except Exception:
-        return {}
-    result: dict[str, set[int]] = {}
-    for line in out.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 2:
+            timeout=8,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if completed.returncode != 0:
+        return None
+
+    result: dict[int, float] = {}
+    assigned = set(gpu_indices)
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[0] not in assigned:
             continue
         try:
-            pid = int(parts[0])
+            pid = int(fields[1])
+            sm = float(fields[3])
         except ValueError:
             continue
-        result.setdefault(parts[1], set()).add(pid)
+        result[pid] = max(result.get(pid, 0.0), sm)
     return result
 
 
-def _resident_strangers_on_gpu_uuids(gpu_uuids: tuple[str, ...], our_pids: set[int]) -> set[int]:
-    """Foreign compute contexts resident on any assigned physical GPU."""
-    pids_by_uuid = _compute_pids_by_gpu_uuid()
-    return {
-        pid
-        for gpu_uuid in gpu_uuids
-        for pid in pids_by_uuid.get(gpu_uuid, ())
-        if pid not in our_pids
-    }
+def _active_strangers(
+    gpu_indices: tuple[str, ...], our_pids: set[int], sm_threshold: float
+) -> dict[int, float] | None:
+    """Foreign PIDs whose sampled SM utilization exceeds the threshold."""
+    snapshot = _pid_sm_on_gpus(gpu_indices)
+    if snapshot is None:
+        return None
+    return {pid: sm for pid, sm in snapshot.items() if pid not in our_pids and sm > sm_threshold}
 
 
 class _BenchPidRegistry:
@@ -633,11 +620,10 @@ def _run_subprocess_monitored(
 
     Returns (returncode, interfered, intruder_pids, cancelled).
 
-    Interference means any foreign CUDA compute context is resident on an
-    assigned card.  The acquisition gate already rejects compute-app memory at
-    the default zero threshold.  Applying the same rule while a workload runs
-    closes the sampling hole where a resident process launches only short
-    kernels between `pmon` SM-utilization snapshots.
+    Interference means a foreign CUDA process exceeds ``sm_threshold`` on an
+    assigned card.  Per-process ``pmon`` utilization stays meaningful while
+    the benchmark itself drives aggregate device utilization to 100%, and it
+    permits idle resident contexts when a nonzero threshold is requested.
 
     Protection is applied immediately before spawn and after every process wait
     poll.  Registered bench subprocesses and their descendants (for example
@@ -646,20 +632,19 @@ def _run_subprocess_monitored(
     proc: subprocess.Popen | None = None
     registered_pid: int | None = None
     intruders: list[int] = []
+    interfered = False
     cancelled = False
     if cancel_event is not None and cancel_event.is_set():
         return -1, False, [], True
-    resolved_gpu_uuids = [_gpu_uuid_of(gpu_index) for gpu_index in gpu_indices]
-    if any(gpu_uuid is None for gpu_uuid in resolved_gpu_uuids):
-        with open(log_path, "w") as lf:
-            lf.write("RACE_LOST: could not resolve every assigned GPU UUID for monitoring\n")
-        return -1, True, [], False
-    gpu_uuids = tuple(gpu_uuid for gpu_uuid in resolved_gpu_uuids if gpu_uuid is not None)
-    if gpu_uuids:
-        pre = _resident_strangers_on_gpu_uuids(gpu_uuids, _our_pids())
+    if gpu_indices:
+        pre = _active_strangers(gpu_indices, _our_pids(), sm_threshold)
+        if pre is None:
+            with open(log_path, "w") as lf:
+                lf.write("RACE_LOST: could not sample assigned GPU utilization\n")
+            return -1, True, [], False
         if pre:
             with open(log_path, "w") as lf:
-                lf.write(f"RACE_LOST: pre-spawn check — foreign compute contexts {pre}\n")
+                lf.write(f"RACE_LOST: pre-spawn check — active foreign processes {pre}\n")
             return -1, True, sorted(pre), False
     with open(log_path, "w") as lf:
         proc = subprocess.Popen(
@@ -678,11 +663,16 @@ def _run_subprocess_monitored(
                 break  # subprocess exited normally
             except subprocess.TimeoutExpired:
                 pass
-            if not gpu_uuids:
+            if not gpu_indices:
                 continue
-            resident = _resident_strangers_on_gpu_uuids(gpu_uuids, _our_pids())
-            if resident:
-                intruders = sorted(resident)
+            active = _active_strangers(gpu_indices, _our_pids(), sm_threshold)
+            if active is None:
+                interfered = True
+                _terminate_subprocess(proc)
+                break
+            if active:
+                interfered = True
+                intruders = sorted(active)
                 _terminate_subprocess(proc)
                 break
     except KeyboardInterrupt:
@@ -693,7 +683,7 @@ def _run_subprocess_monitored(
             _BenchPidRegistry.unregister(registered_pid)
         if proc is not None:
             _reap_subprocess(proc)
-    return proc.returncode, bool(intruders), intruders, cancelled
+    return proc.returncode, interfered, intruders, cancelled
 
 
 def run_one(
@@ -1508,8 +1498,8 @@ def main() -> None:
         "--util-threshold",
         type=float,
         default=DEFAULT_UTIL_THRESHOLD,
-        help="%% GPU utilization above which assignment skips a card. "
-        "Once assigned, any foreign CUDA compute context requeues the workload "
+        help="%% GPU utilization above which assignment skips a card; during a run, "
+        "a foreign process above this per-PID SM utilization requeues the workload "
         f"(default {DEFAULT_UTIL_THRESHOLD:g})",
     )
     ap.add_argument(

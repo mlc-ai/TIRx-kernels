@@ -69,16 +69,6 @@ _TCGEN_COMMIT = (
 _MMA_F16 = "tcgen05.mma.cta_group::2.kind::f16"
 _Q_TMA_CACHE_HINT = T.uint64(0x12F0000000000000)
 _KV_TMA_CACHE_HINT = T.uint64(0x14F0000000000000)
-_SMEM_DESC_ADD_SOURCE = r"""
-__forceinline__ __device__ uint64_t tvm_builtin_smem_desc_add_16B_offset(uint64_t desc_base, int32_t offset) {
-    SmemDescriptor desc;
-    desc.desc_ = desc_base;
-    desc.lo += static_cast<uint32_t>(offset);
-    return desc.desc_;
-}
-"""
-
-
 def _tmem_load(dst, tmem_col, width):
     chain = _TMEM_LD_32 if width == 32 else _TMEM_LD_64
     return T.ptx[chain](*[dst[i] for i in range(width)], tmem_col)
@@ -117,16 +107,15 @@ def _recompute_smem_desc(smem_ptr, upper, matrix_start):
 
 
 def _add_smem_desc_offset(desc, offset):
-    # The fixed TVM PTX table intentionally does not register integer add.
-    # Keep the helper so uint32 descriptor address arithmetic cannot carry
-    # into the encoded layout fields in the upper half.
-    return T.cuda.func_call(
-        "tvm_builtin_smem_desc_add_16B_offset",
-        desc,
-        offset,
-        source_code=_SMEM_DESC_ADD_SOURCE,
-        return_type="uint64",
-    )
+    # Descriptor offsets wrap in the low 32 bits without carrying into the
+    # encoded layout fields in the high half.
+    desc_lo = T.alloc_local((1,), "uint32")
+    desc_hi = T.alloc_local((1,), "uint32")
+    result = T.alloc_local((1,), "uint64")
+    T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], desc))
+    T.evaluate(T.ptx.add.u32(desc_lo[0], desc_lo[0], T.cast(offset, "uint32")))
+    T.evaluate(T.ptx.mov.b64(result[0], desc_lo[0], desc_hi[0]))
+    return result[0]
 
 
 def _mma_f16(d_tmem, a_operand, b_desc, idesc, enable_input_d):

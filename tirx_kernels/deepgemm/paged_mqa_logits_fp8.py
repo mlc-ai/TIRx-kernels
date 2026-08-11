@@ -695,41 +695,20 @@ def get_kernel(**kwargs: Any):
     def lane_id_u32():
         return T.cast(T.cuda.mov_sreg(32, "laneid"), "uint32")
 
-    # relu-weighted-accumulate of a packed f32x2 pair:
-    #   d = fma(a + |a|, w, c)
-    # Emitted as one asm block with non-ftz ``abs.f32`` so that ptxas folds the
-    # abs into the FADD2 source modifier (``FADD2 d, a, |a|``) instead of
-    # materializing standalone FADD abs instructions (which is what the
-    # ``fabsf`` -> ``abs.ftz.f32`` path produces, since an ftz abs cannot fold
-    # into a non-ftz add.rn.f32x2). This is the DeepGEMM/CuTeDSL SM100 epilogue
-    # pattern: it keeps the ReLU on the FMA pipe instead of scalar FMNMX on the
-    # ALU pipe.
-    _RELU2_FMA_F32X2_SRC = (
-        "__forceinline__ __device__ void tirx_relu2_fma_f32x2("
-        "uint64_t* d, unsigned long long a, unsigned long long w, unsigned long long c) {\n"
-        "    asm volatile(\n"
-        '        "{\\n"\n'
-        '        ".reg .f32 al, ah, rl, rh;\\n"\n'
-        '        ".reg .b64 rp;\\n"\n'
-        '        "mov.b64 {al, ah}, %1;\\n"\n'
-        '        "abs.f32 rl, al;\\n"\n'
-        '        "abs.f32 rh, ah;\\n"\n'
-        '        "mov.b64 rp, {rl, rh};\\n"\n'
-        '        "add.rn.f32x2 rp, %1, rp;\\n"\n'
-        '        "fma.rn.f32x2 %0, rp, %2, %3;\\n"\n'
-        '        "}\\n"\n'
-        '        : "=l"(*reinterpret_cast<uint64_t*>(d))\n'
-        '        : "l"(a), "l"(w), "l"(c));\n'
-        "}\n"
-    )
-
     def relu2_fma_f32x2(a, w, c):
+        a_lo = T.alloc_local((1,), "float32")
+        a_hi = T.alloc_local((1,), "float32")
+        abs_lo = T.alloc_local((1,), "float32")
+        abs_hi = T.alloc_local((1,), "float32")
+        abs_pair = T.alloc_local((1,), "uint64")
+        relu_pair = T.alloc_local((1,), "uint64")
         out = T.alloc_local((1,), "uint64")
-        T.evaluate(
-            T.cuda.func_call(
-                "tirx_relu2_fma_f32x2", out.ptr_to([0]), a, w, c, source_code=_RELU2_FMA_F32X2_SRC
-            )
-        )
+        T.evaluate(T.ptx.mov.b64(a_lo[0], a_hi[0], a))
+        T.evaluate(T.ptx.abs.f32(abs_lo[0], a_lo[0]))
+        T.evaluate(T.ptx.abs.f32(abs_hi[0], a_hi[0]))
+        T.evaluate(T.ptx.mov.b64(abs_pair[0], abs_lo[0], abs_hi[0]))
+        T.evaluate(T.ptx.add.rn.f32x2(relu_pair[0], a, abs_pair[0]))
+        T.evaluate(T.ptx.fma.rn.f32x2(out[0], relu_pair[0], w, c))
         return out[0]
 
     def fadd2_rn_noftz(a, b):
@@ -749,14 +728,6 @@ def get_kernel(**kwargs: Any):
 
     def cuda_grid_dependency_synchronize():
         T.evaluate(T.ptx.griddepcontrol.wait())
-
-    # Race-safe early L2 warm-up helper (see the block-table prefetch in the
-    # kernel prologue).
-    _PREFETCH_L2_SRC = (
-        "__forceinline__ __device__ void tirx_prefetch_l2(const void* p) {\n"
-        '    asm volatile("prefetch.global.L2 [%0];" :: "l"(p));\n'
-        "}\n"
-    )
 
     # Block-table L2 warm-up coverage (plain Python ints, evaluated at trace
     # time): prefetch the whole table, capped at 512 lines (64 KB).
@@ -1151,12 +1122,8 @@ def get_kernel(**kwargs: Any):
                     + T.uint32(pf_i * 64)
                 )
                 if line_idx < T.uint32(num_prefetch_lines):
-                    T.evaluate(
-                        T.cuda.func_call(
-                            "tirx_prefetch_l2",
-                            block_table_flat.ptr_to([T.cast(line_idx * T.uint32(32), "int64")]),
-                            source_code=_PREFETCH_L2_SRC,
-                        )
+                    T.ptx.prefetch.global_.L2(
+                        block_table_flat.ptr_to([T.cast(line_idx * T.uint32(32), "int64")])
                     )
 
         if warp_idx == tma_warp_0:

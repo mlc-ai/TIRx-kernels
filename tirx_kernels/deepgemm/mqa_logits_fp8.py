@@ -23,8 +23,6 @@ from unittest import SkipTest
 
 import torch
 
-from tvm.backend.cuda.op import cuda_func_call
-
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 5e-6
@@ -279,31 +277,6 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     }
 
 
-def _mqa_fp8_wrelu_reduce_src(num_heads: int) -> str:
-    """DeepGEMM f32 wrelu epilogue (sm100_mqa_logits.cuh): relu as x+|x| packed into
-    FADD2+FFMA2, tail /2; emitted as a kernel-local helper via T.cuda_func_call."""
-    return (
-        f"__forceinline__ __device__ float tvm_builtin_mqa_fp8_wrelu_reduce_{num_heads}("
-        "const float* __restrict__ accum, const float* __restrict__ weights) {\n"
-        "    float2 sum_0 = make_float2(0.0f, 0.0f);\n"
-        "    float2 sum_1 = make_float2(0.0f, 0.0f);\n"
-        "    #pragma unroll\n"
-        f"    for (int j = 0; j < {num_heads}; j += 4) {{\n"
-        "        float2 a_0 = make_float2(accum[j], accum[j + 1]);\n"
-        "        float2 a_1 = make_float2(fabsf(accum[j]), fabsf(accum[j + 1]));\n"
-        "        sum_0 = __ffma2_rn(__fadd2_rn(a_0, a_1),"
-        " make_float2(weights[j], weights[j + 1]), sum_0);\n"
-        "        float2 a_2 = make_float2(accum[j + 2], accum[j + 3]);\n"
-        "        float2 a_3 = make_float2(fabsf(accum[j + 2]), fabsf(accum[j + 3]));\n"
-        "        sum_1 = __ffma2_rn(__fadd2_rn(a_2, a_3),"
-        " make_float2(weights[j + 2], weights[j + 3]), sum_1);\n"
-        "    }\n"
-        "    float2 sum = __fadd2_rn(sum_0, sum_1);\n"
-        "    return (sum.x + sum.y) / 2.0f;\n"
-        "}"
-    )
-
-
 def get_kernel(**kwargs: Any):
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
     from tvm.script import tirx as T
@@ -369,6 +342,45 @@ def get_kernel(**kwargs: Any):
     tcgen05_ld = f"tcgen05.ld.sync.aligned.32x32b.x{num_heads // 2}.b32"
     desc_sdo = head_dim // 2
     desc_swizzle = {32: 1, 64: 2, 128: 3}[head_dim]
+
+    def wrelu_reduce(accum, weights, row):
+        sum_0 = T.alloc_local((1,), "uint64")
+        sum_1 = T.alloc_local((1,), "uint64")
+        accum_pair = T.alloc_local((1,), "uint64")
+        abs_pair = T.alloc_local((1,), "uint64")
+        relu_pair = T.alloc_local((1,), "uint64")
+        weight_pair = T.alloc_local((1,), "uint64")
+        abs_lo = T.alloc_local((1,), "float32")
+        abs_hi = T.alloc_local((1,), "float32")
+        total = T.alloc_local((1,), "uint64")
+        total_lo = T.alloc_local((1,), "float32")
+        total_hi = T.alloc_local((1,), "float32")
+        result = T.alloc_local((1,), "float32")
+        T.evaluate(T.ptx.mov.b64(sum_0[0], T.float32(0), T.float32(0)))
+        T.evaluate(T.ptx.mov.b64(sum_1[0], T.float32(0), T.float32(0)))
+        for head in range(0, num_heads, 4):
+            T.evaluate(T.ptx.mov.b64(accum_pair[0], accum[head], accum[head + 1]))
+            T.evaluate(T.ptx.abs.f32(abs_lo[0], accum[head]))
+            T.evaluate(T.ptx.abs.f32(abs_hi[0], accum[head + 1]))
+            T.evaluate(T.ptx.mov.b64(abs_pair[0], abs_lo[0], abs_hi[0]))
+            T.evaluate(T.ptx.add.rn.f32x2(relu_pair[0], accum_pair[0], abs_pair[0]))
+            T.evaluate(T.ptx.mov.b64(weight_pair[0], weights[row, head], weights[row, head + 1]))
+            T.evaluate(T.ptx.fma.rn.f32x2(sum_0[0], relu_pair[0], weight_pair[0], sum_0[0]))
+
+            T.evaluate(T.ptx.mov.b64(accum_pair[0], accum[head + 2], accum[head + 3]))
+            T.evaluate(T.ptx.abs.f32(abs_lo[0], accum[head + 2]))
+            T.evaluate(T.ptx.abs.f32(abs_hi[0], accum[head + 3]))
+            T.evaluate(T.ptx.mov.b64(abs_pair[0], abs_lo[0], abs_hi[0]))
+            T.evaluate(T.ptx.add.rn.f32x2(relu_pair[0], accum_pair[0], abs_pair[0]))
+            T.evaluate(
+                T.ptx.mov.b64(weight_pair[0], weights[row, head + 2], weights[row, head + 3])
+            )
+            T.evaluate(T.ptx.fma.rn.f32x2(sum_1[0], relu_pair[0], weight_pair[0], sum_1[0]))
+        T.evaluate(T.ptx.add.rn.f32x2(total[0], sum_0[0], sum_1[0]))
+        T.evaluate(T.ptx.mov.b64(total_lo[0], total_hi[0], total[0]))
+        T.evaluate(T.ptx.add.rn.f32(result[0], total_lo[0], total_hi[0]))
+        T.evaluate(T.ptx.mul.rn.f32(result[0], result[0], T.float32(0.5)))
+        return result[0]
 
     def cuda_grid_dependency_synchronize():
         T.evaluate(T.ptx.griddepcontrol.wait())
@@ -862,13 +874,8 @@ def get_kernel(**kwargs: Any):
                                 T.cuda.get_tmem_addr(T.uint32(0), 0, tmem_addr_hi),
                             )
                             T.ptx.tcgen05.wait__ld.sync.aligned()
-                            # Weighted-ReLU reduce via inline CUDA (see _mqa_fp8_wrelu_reduce_src).
-                            reduced: T.float32 = cuda_func_call(
-                                f"tvm_builtin_mqa_fp8_wrelu_reduce_{num_heads}",
-                                T.address_of(accum[0]),
-                                T.address_of(cached_weights[q_inner_i, 0]),
-                                source_code=_mqa_fp8_wrelu_reduce_src(num_heads),
-                                return_type="float32",
+                            reduced: T.float32 = wrelu_reduce(
+                                accum, cached_weights, q_inner_i
                             )
                             result = T.cast(scale_kv * reduced, logits_tir_dtype)
                             q_offset: T.uint64 = q_row_off_base[0] + T.cast(

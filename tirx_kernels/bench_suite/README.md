@@ -205,7 +205,7 @@ defaults to FlashInfer's `auto` backend; set
 |------|---------|---------|
 | `--rounds N` | `5` | Complete standard-timer calls per implementation/workload |
 | `--cooldown` | `1.0` | Seconds before every implementation in every round |
-| `--util-threshold` | `0` | Skip GPUs with SM utilization above this percent |
+| `--util-threshold` | `0` | Skip GPUs above this utilization; requeue if a foreign process exceeds it during a run |
 | `--mem-threshold` | `0` | Skip GPUs with compute-app memory-used percent above this percent |
 
 Round aggregation is always the arithmetic mean. The raw five-element sample arrays
