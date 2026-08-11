@@ -3,7 +3,7 @@
 - Timestamp: `14`
 - Label:     `post-refactor`
 - Git:       `{'tir': '5f0a87e9', 'tirx-kernels': 'adcbb1ba-dirty', 'tirx-bench-ci': None}`
-- Workloads: 214 ok, 0 failed
+- Workloads: 206 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -219,19 +219,6 @@ Grouped workloads show one row per config and one timing column per implementati
 | `tp1_m8192_n4096_k12288_fp16_dynamic` | tirx | 602.2152 | cublas_nccl_cudagraph | 564.3116 | 0.937 | cublasmp_split_p2p=754.4997 |
 | `tp1_m8192_n5120_k25600_fp16_dynamic` | tirx | 1501.6823 | cublas_nccl_cudagraph | 1411.5482 | 0.940 | cublasmp_split_p2p=1811.8186 |
 | `tp1_m8192_n8192_k28672_fp16_dynamic` | tirx | 2499.8367 | cublas_nccl_cudagraph | 2450.8611 | 0.980 | cublasmp_split_p2p=2886.1382 |
-
-## megakernel_moe
-
-| config | tir_static (µs) | tir_dynamic (µs) | tir_unfused (µs) | sglang_full (µs) | flashinfer_full (µs) |
-|---|---:|---:|---:|---:|---:|
-| `moe_a3b_bs1_all` | 33.8177 | 37.1881 | 33.2740 | 53.2202 | 60.1598 |
-| `moe_a3b_bs8_all` | 96.4288 | 100.0675 | 103.5619 | 126.5397 | 131.4599 |
-| `moe_a3b_bs32_all` | 192.3405 | 192.4070 | 198.5807 | 224.5717 | 218.3641 |
-| `moe_a3b_bs128_all` | 222.1318 | 220.2841 | 228.6052 | 245.3700 | 247.8075 |
-| `moe_a3b_bs512_all` | 239.2628 | 231.7671 | 244.3510 | 287.6833 | 274.4938 |
-| `moe_a3b_bs1024_all` | 259.9133 | 257.9804 | 275.5271 | 338.3083 | 312.4617 |
-| `moe_a3b_bs2048_all` | 339.3372 | 343.8899 | 355.3639 | 430.7005 | 392.3249 |
-| `moe_a3b_bs4096_all` | 562.7819 | 559.7292 | 574.0259 | 667.4069 | 604.9371 |
 
 ## mxfp4_quantize
 

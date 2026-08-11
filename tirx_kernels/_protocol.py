@@ -23,7 +23,7 @@ KERNEL_META : dict
     Required keys:
     - "name" (str): unique kernel name used by CLI (e.g. "rmsnorm")
     - "category" (str): the bucket subdirectory the module lives in — one of
-      basic, deepgemm, flashattention, flashinfer, flashmla, megakernel.
+      basic, deepgemm, flashattention, flashinfer, flashmla.
       Each bucket holds the kernels ported from one upstream project;
       ``basic`` holds native TIRx kernels with no single upstream project.
     - "compute_capability" (int): minimum SM version (e.g. 10 for sm100a)

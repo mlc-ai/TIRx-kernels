@@ -63,12 +63,6 @@ worktree containing the m128 kernel.
 | `deepgemm_sm100_tf32_hc_prenorm_gemm` | tf32 / bf16 | Prenorm GEMM |
 | `deepgemm_fp8_fp4_mega_moe` | fp8 + fp4 | Fused MoE megakernel (MegaMoE) |
 
-`megakernel/`:
-
-| Kernel | dtype | What it is |
-| ------ | ----- | ---------- |
-| `megakernel_moe` | bf16 | Fused MoE megakernel |
-
 ## Performance
 
 Per-workload numbers — our kernel time, every reference impl, and the
@@ -97,7 +91,7 @@ them — they are only needed to actually compile/run a kernel:
 | `tvm.tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tir/python`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
 | `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels. |
-| `flashinfer`     | `nvfp4_gemm` data/baseline, `megakernel_moe` baseline | Used for nvfp4 quantization and reference impls. |
+| `flashinfer`     | `nvfp4_gemm` data/baseline | Used for nvfp4 quantization and reference impls. |
 | `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` data/baseline | Current SM100 forward/backward reference. |
 | `flash_kda`      | `flashkda_bf16_fused_m128` baseline | Uses the installed package; results record its package, source, extension, and CUTLASS provenance when available. |
 | `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` reference; checkout on `PYTHONPATH`. |
