@@ -1,15 +1,7 @@
 # This file is a TIRx port of code from DeepGEMM
-# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
-# DeepSeek, licensed under the MIT License. The upstream sources carry no
-# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
-# license text.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# TIRx port of DeepGEMM's sm100_fp8_bmm host entry
-# (csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:393).
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """Batched FP8 GEMM -- `GemmType::Batched`.
 
@@ -26,6 +18,8 @@ expression                   (batch, m, n, k)            majors          output
 ``bhd,hdr->bhr``             ``(h, b, r, d)``            K, MN           bf16
 ``bhd,bhr->hdr``             ``(h, d, r, b)``            MN, MN          fp32+acc
 ===========================  ==========================  ==============  ========
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:393.
 """
 
 from __future__ import annotations

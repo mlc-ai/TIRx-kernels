@@ -1,15 +1,7 @@
 # This file is a TIRx port of code from DeepGEMM
-# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
-# DeepSeek, licensed under the MIT License. The upstream sources carry no
-# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
-# license text.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# TIRx port of DeepGEMM's sm100_m_grouped_fp8_fp4_gemm_contiguous_1d1d host
-# entry (csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:161).
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """M-grouped contiguous FP8/FP4 GEMM -- `MGroupedContiguous[WithPsumLayout]`.
 
@@ -18,6 +10,8 @@ Reference: `deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous` (aliased as
 to `GemmType::MGroupedContiguousWithPsumLayout`, which makes the scheduler walk
 per-group psum end offsets instead of a per-row expert id, and makes
 `ensure_zero_padding` meaningful (it gates the aligned-effective-M tail).
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:161.
 """
 
 from __future__ import annotations

@@ -1,15 +1,7 @@
 # This file is a TIRx port of code from FlashMLA
-# (https://github.com/deepseek-ai/FlashMLA @ 9241ae3e), Copyright (c) 2025
-# DeepSeek, licensed under the MIT License. The upstream sources carry no
-# per-file license header; see licenses/LICENSE.flashmla.txt for the full
-# license text.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# Shared TMA copy_async configuration for the TIRx ports of FlashMLA's sparse
-# phase-1 kernels.
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# (https://github.com/deepseek-ai/FlashMLA @ 9241ae3e), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """Shared TMA copy_async config for the sparse FlashMLA phase1 kernels."""
 

@@ -1,5 +1,4 @@
 # Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: BSD-3-Clause
 
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -25,20 +24,18 @@
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
 #
-# This file is a TIRx port of FlashInfer's
-# flashinfer/gdn_kernels/blackwell/gated_delta_net_chunked.py
-# (flashinfer-ai/flashinfer @ f2e04400, v0.6.18). FlashInfer's host adapter is
-# used only as an external correctness and benchmark oracle.
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# This file is a TIRx port of code from FlashInfer
+# (https://github.com/flashinfer-ai/flashinfer @ f2e04400)
+# SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """SM100a FP16 GDN prefill transcribed from FlashInfer's frozen CuTeDSL kernel.
 
 The implementation follows the frozen CuTeDSL source order and preserves its
 CUDA/PTX details instead of reorganizing them into a separate implementation.
+
+Upstream source: flashinfer/gdn_kernels/blackwell/gated_delta_net_chunked.py.
 """
 
 from __future__ import annotations

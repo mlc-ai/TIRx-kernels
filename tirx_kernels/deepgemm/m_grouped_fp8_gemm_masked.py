@@ -1,15 +1,7 @@
 # This file is a TIRx port of code from DeepGEMM
-# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
-# DeepSeek, licensed under the MIT License. The upstream sources carry no
-# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
-# license text.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# TIRx port of DeepGEMM's sm100_m_grouped_fp8_fp4_gemm_masked_1d1d host entry
-# (csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:244).
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """M-grouped masked FP8/FP4 GEMM -- `GemmType::MGroupedMasked`.
 
@@ -17,6 +9,8 @@ Reference: `deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked` (aliased as
 `m_grouped_fp8_gemm_nt_masked` / `fp8_m_grouped_gemm_nt_masked`).  A is
 `[G, max_m, K]` with a per-group valid row count in `masked_m`, so the shape is
 static while the work is dynamic -- the decode / CUDA-graph MoE path.
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:244.
 """
 
 from __future__ import annotations

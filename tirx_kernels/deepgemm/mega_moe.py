@@ -1,17 +1,13 @@
 # This file is a TIRx port of code from DeepGEMM
-# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
-# DeepSeek, licensed under the MIT License. The upstream sources carry no
-# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
-# license text.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# TIRx port of DeepGEMM's fused MoE megakernel
-# (deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh with its
-# layout/, scheduler/ and ptx/ helpers, plus csrc/apis/mega.h and
-# csrc/jit_kernels/heuristics/mega_moe.h).
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+"""TIRx port of DeepGEMM's MegaMoE kernel.
+
+Upstream sources: deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh, csrc/apis/mega.h,
+csrc/jit_kernels/heuristics/mega_moe.h.
+"""
 
 from __future__ import annotations
 

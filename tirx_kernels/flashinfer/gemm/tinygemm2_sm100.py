@@ -1,27 +1,13 @@
+# This file is a TIRx port of code from FlashInfer
+# (https://github.com/flashinfer-ai/flashinfer @ f2e04400),
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# This file is a TIRx port of FlashInfer's csrc/tinygemm2_sm100.cu
-# (flashinfer-ai/flashinfer @ f2e04400, v0.6.18). That generated source
-# records its Loom schedules as exact ports of NVIDIA TensorRT-LLM's TinyGEMM2
-# kernel.
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+"""FlashInfer TinyGEMM2 BF16 kernel port for SM100.
 
-"""FlashInfer TinyGEMM2 BF16 kernel port for SM100."""
+Upstream source: csrc/tinygemm2_sm100.cu.
+"""
 
 from __future__ import annotations
 

@@ -1,22 +1,16 @@
-# Copyright (c) 2022, the respective contributors, as shown by the AUTHORS
-# file (reproduced at licenses/AUTHORS.flash-attention.txt).
-#
-# Licensed under the BSD 3-Clause License; the full license text is
-# licenses/LICENSE.flash-attention.txt. The upstream source carries no
-# per-file copyright header.
-
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# This file is a TIRx port of Dao-AILab/flash-attention's
-# flash_attn/cute/flash_fwd_sm100.py (Dao-AILab/flash-attention @ 00756db9).
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# This file is a TIRx port of code from flash-attention
+# (https://github.com/Dao-AILab/flash-attention @ 00756db9), Copyright (c) 2022,
+# the respective contributors, as shown by licenses/AUTHORS.flash-attention.txt
+# SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """FlashAttention-4 TIRx kernel and direct NVIDIA IKET profiling entry point.
 
 Run ``python -m tirx_kernels.flashattention.flash_attention4`` to profile the
 annotated kernel.  Correctness and ordinary benchmarks remain exposed through
 ``run_test`` and ``run_bench``.
+
+Upstream source: flash_attn/cute/flash_fwd_sm100.py.
 """
 
 from __future__ import annotations

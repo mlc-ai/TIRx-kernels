@@ -1,15 +1,7 @@
 # This file is a TIRx port of code from DeepGEMM
-# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
-# DeepSeek, licensed under the MIT License. The upstream sources carry no
-# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
-# license text.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# TIRx port of DeepGEMM's sm100_k_grouped_fp8_gemm_1d1d host entry
-# (csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:313).
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """K-grouped contiguous FP8 GEMM -- `KGroupedContiguous[WithPsumLayout]`.
 
@@ -18,6 +10,8 @@ along K with per-group lengths, both operands are MN-major, and the output is
 always FP32 with accumulation (the MoE weight-gradient path), so the epilogue
 takes the `SM90_TMA_REDUCE_ADD` branch.  FP4 is not exercised here -- DeepGEMM's
 own enumerator keeps this entry FP8-only.
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:313.
 """
 
 from __future__ import annotations
