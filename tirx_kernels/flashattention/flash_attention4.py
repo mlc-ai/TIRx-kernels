@@ -1527,6 +1527,7 @@ def _kernel(
                 phase_tmem ^= 1
             phase_q ^= 1
         scheduler.next_tile()
+    T.cuda.cta_sync()
     if (wg_id == 0) & (warp_id == 0):
         dealloc_tmem_addr: T.uint32
         T.ptx.ld.shared.u32(dealloc_tmem_addr, tmem_addr.ptr_to([0]))
