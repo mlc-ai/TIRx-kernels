@@ -20,7 +20,7 @@ Transcribed from FlashInfer's frozen generated export
 **Fixed specialization.** `HEAD_DIM = 128`, `TOKENS = 2`, `GATE_KIND = 0`
 (precomputed log-gate), `VALUE_SPLIT = 4`, `LAUNCH_THREADS = 64`,
 `DIRECT_IMPL` unset. The sm100a selector returns 4 unconditionally at T=2
-(`recurrent_kda.py:1181-1182`), so split4 is the entire dispatch surface — there
+(`recurrent_kda.py:1177-1178`), so split4 is the entire dispatch surface — there
 is no split knob in this port.
 
 **Out of scope.** T ∈ {1,3,4,5,6}; the `GATE_KIND = 1` lower-bound variant; the
@@ -61,8 +61,10 @@ Structural operations do not move or compute data:
 
 ```python
 reg_tile(dtype, shape)                 # per-thread register array
-smem_view(name, offset, dtype, shape)  # a named region of the one arena
+smem_arena(bytes, align)               # the single shared allocation
+smem_view(name, offset, dtype, shape)  # a named region of that arena
 swz(byte_off)                          # byte_off ^ ((byte_off >> 7 & 7) << 4)
+widen(word)                            # one u32 -> two f32, as shl.b32 / and.b32
 ```
 
 Data movement:
@@ -153,8 +155,12 @@ token_base = cu_seqlens[n];  seq_len = cu_seqlens[n+1] - token_base
 # token_base -- the contract is the caller's and is deliberately unvalidated for
 # CUDA-graph capture. Padding is signalled ONLY by ssm_state_indices < 0.
 #
-# The source also calls make_warp_uniform(tid/32) at :101, which emits a dead
-# shfl.sync.idx.b32 at .loc :39. It is a uniformity hint; the port omits it.
+# The source computes `warp` as make_warp_uniform(tid/32) at :101, which emits a
+# shfl.sync.idx.b32 at .loc :39. It is semantically the identity -- a uniformity
+# hint -- but its result IS `warp` and is live throughout, so it is not dead
+# code; the port spells the same value as `tid // 32`. (The one-warp t1_direct
+# sibling emits the same instruction with an unused result, which is where the
+# "dead" characterization comes from; it does not carry over.)
 
 # ===========================================================================
 # Phase A: token preprocess, warp <-> token  (:180-290)
@@ -180,7 +186,8 @@ if warp < TOKENS:
     # ---- L2 norms: two independent full-warp butterflies ------------------
     # Association is index-ordered accumulation over i = 0..3  (:241-244)
     q_sq = dot(r_q, r_q);  k_sq = dot(r_k, r_k)
-    # instruction_selection: mul.ftz.f32 + fma.rn.ftz.f32; extent: 4-term chain each
+    # instruction_selection: fma.rn.ftz.f32; extent: 4-term chain each, the first
+    # with C = 0f00000000 -- there is no mul at these sites
     for offset in (16, 8, 4, 2, 1):
         q_sq = add(q_sq, bfly(q_sq, offset, 31, 0xFFFFFFFF))
     # instruction_selection: shfl.sync.bfly.b32 + add.ftz.f32; extent: 5 rounds
@@ -273,11 +280,16 @@ if warp < TOKENS:
         if source_token >= 0:
             dot_kk = 0.0; dot_qk = 0.0
             for i in range(4):
-                sk = sD_scaled = sK[source_token, elem_start + i]
+                sk = sK[source_token, elem_start + i]
                 dot_kk = fma(mul(r_k[i], sk), ratio[i], dot_kk)
                 dot_qk = fma(mul(r_q[i], sk), ratio[i], dot_qk)
-            # instruction_selection: ld.shared.b32 + mul.ftz.f32 + fma.rn.ftz.f32
-            # extent: 4 iterations; source order is `r * source_k * ratio` (:372-375)
+            # instruction_selection: ld.shared.v4.b32 (the 4 contiguous sK floats)
+            # + mul.ftz.f32 + fma.rn.ftz.f32; extent: 4 iterations
+            # Source order is `r * source_k * ratio` (:372-375). At
+            # source_offset == 0 the ratio is still 1.0 and folds away, so that
+            # offset emits 4 bare fma (the first with C = 0f00000000) and only
+            # source_offset == 1 emits the mul+fma pair -- 4 mul + 8 fma per dot
+            # line across the two offsets.
             for offset in (16, 8, 4, 2, 1):
                 dot_kk = add(dot_kk, bfly(dot_kk, offset, 31, 0xFFFFFFFF))
             for offset in (16, 8, 4, 2, 1):
@@ -293,12 +305,17 @@ if warp < TOKENS:
             if source_token > 0:
                 for i in range(4):
                     ratio[i] = mul(ratio[i], sD[source_token, elem_start + i])
-                # instruction_selection: ld.shared.b32 + mul.ftz.f32; extent: 4
+                # instruction_selection: ld.shared.v4.b32 + mul.ftz.f32; extent: 4
 
 cta_sync()
 # instruction_selection: bar.sync 0; extent: CTA
-# Orders sState (written by ALL 64 threads) -> the ldmatrix reads below (issued
-# by both warps, each reading its own 16 rows), and sVec/sL/sR -> their readers.
+# The genuinely cross-warp edges are sVec (warp 0 writes columns 0 and 4, warp 1
+# writes 1 and 5, and both warps' ldmatrix read columns 0..7) and sL/sR (written
+# by one warp's lane 0, read by both warps in phases E and F). The sState edge is
+# intra-warp by the same row-set argument as the phase-G warp barrier -- groups
+# 0,1 are warp 0 and write rows 0..15, which is exactly what warp 0 reads back --
+# and is ordered here only as a side effect. A port narrowing this barrier must
+# reason from sVec/sL/sR, not from sState.
 
 # ===========================================================================
 # Phase D: the MMA chain, warp <-> 16 value rows  (:406-438)
@@ -388,8 +405,10 @@ if warp < TOKENS and lane_quad == 2:
         active = sSlot[t] >= 0
         copy_r2g(cast(bf16, out_lo if active else 0.0), out[base_t + row_lo])
         copy_r2g(cast(bf16, out_hi if active else 0.0), out[base_t + row_hi])
-        # instruction_selection: cvt.rn.bf16.f32 + st.global.b16; extent: 2 scalars
-        # per token, both branches  (.loc :503,:504,:506,:507 and :523,:524,:526,:527)
+        # instruction_selection: st.global.b16, 2 per token per branch (8 total);
+        # cvt.rn.bf16.f32, 2 per token in the active branch but only 1 per token
+        # in the zero branch, where both stores reuse the single converted zero
+        # (6 total)  (.loc :503,:504,:506,:507 and :523,:524,:526,:527)
         # A padded row writes EXPLICIT zeros -- the upstream test asserts them
         # bit-exactly, so this is not an "unwritten" path.
 
@@ -424,13 +443,20 @@ for t in range(TOKENS):                   # serial over tokens
     for row_local in range(8):            # constexpr unroll
         row    = owned_row_base + row_local
         update = mul(sU[t, row], beta_t)
-        # instruction_selection: ld.shared.b32 x2 + mul.ftz.f32; extent: scalar
+        # instruction_selection: ld.shared.v4.b32 (the hoisted sBeta/sSlot block)
+        # + ld.shared.v2.b32/v4.b32 over the 8 consecutive sU rows + mul.ftz.f32
+        # extent: scalar per row; phase H emits no scalar ld.shared.b32 at all
         words = reg_tile(u32, [4])
         for i in range(8):
-            hist[row_local][i] = fma(update, sK[t, k_start + i],
-                                     mul(hist[row_local][i], sD[t, k_start + i]))
-            # instruction_selection: ld.shared.v2.b32 + mul.ftz.f32 + fma.rn.ftz.f32
-            # extent: 8 iterations
+            hist[row_local][i] = fma(hist[row_local][i], sD[t, k_start + i],
+                                     mul(update, sK[t, k_start + i]))
+            # instruction_selection: ld.shared.v4.b32 x2 (sD) + x2 (sK) per token
+            # + mul.ftz.f32 + fma.rn.ftz.f32; extent: 8 iterations
+            # The source writes `hist*sD + update*sK` (:673) and the compiler
+            # contracts the FIRST product: `update*sK` is the rounded one and
+            # `hist*sD` is fused into the FMA. Inverting this rounds the wrong
+            # product at the kernel's only stateful accumulation, which feeds
+            # both the checkpoint and token 1's history.
             # The recurrence advances UNCONDITIONALLY -- only the store below is
             # predicated -- and it stays FP32, so token 1 consumes the un-rounded
             # token-0 state rather than the bf16 checkpoint.
@@ -470,8 +496,8 @@ is statically dead, and the port carries none of it:
 | `vec_frag[2],[3]` | `:415` | the x4 loads sVec cols 8..15; the MMA reads 2 registers |
 | sVec columns 2,3 and 6..15 | — | never written; feed dead accumulator lanes. **Not zeroed** — zeroing is numerically safe but adds stores the source does not issue |
 | `sR[0][1]`, `sL[0][*]`, `sL[1][1]` | `:390-392` | of the two 2×2 matrices only `sL[1][0]` and `sR[{0,0},{1,0},{1,1}]` are written and read |
-| `elem_start < 128` guards | `:194` etc. | statically true at D=128 |
-| `make_warp_uniform` | `:101` | a uniformity hint; emits a dead `shfl.sync.idx.b32` |
+| `elem_start < 128` guards, and the `r_q/r_k/r_d = 0.0f` prologue they guard | `:188-194` etc. | statically true at D=128, so the zero-init is unreachable |
+| `group < 4` guards around phases B and H | `:294`, `:659` | statically true at 64 threads (`group = tid/16 ∈ {0..3}`) |
 | `A_log`, `dt_bias`, `lower_bound` | `:98` | `GATE_KIND 0`; never dereferenced |
 
 ## Instruction-selection summary
@@ -492,7 +518,7 @@ Body total **1570 instructions**; the counts every annotation above rests on:
 | `st.shared.v4.b32` | 18 | 16 sState stages + 2 sK/sD publishes |
 | `st.global.v4.b32` | 16 | the checkpoints, 8 rows × 2 tokens |
 | `cvt.rn.bf16.f32` | 14 | 8 sVec column stores + 8 output stores (both branches) |
-| `shfl.sync.idx.b32` | 13 | quad broadcasts + 1 dead `make_warp_uniform` |
+| `shfl.sync.idx.b32` | 13 | 12 quad broadcasts + 1 `make_warp_uniform` (identity, but its result is `warp`) |
 | `st.shared.b32` | 11 | scalars: sBeta/sSlot/sToken/sInit/sL/sR/sU |
 | `ldmatrix…x4.shared.b16` | **8** | the A operand, one per MMA issue |
 | `ldmatrix…x4.trans.shared.b16` | **8** | the B operand, one per MMA issue |
@@ -501,6 +527,9 @@ Body total **1570 instructions**; the counts every annotation above rests on:
 | `st.shared.b16` | 8 | the sVec columns |
 | `st.global.b16` | 8 | the outputs, both branches |
 | `ld.global.nc.{b16,b32,v2.b32}` | 5 / 5 / 3 | v+beta, metadata, q/k/g |
+| `ld.shared.v4.b32` | 19 | the sK/sD slices in phases C and H, the sBeta/sSlot block, sU runs |
+| `ld.shared.b32` | 19 | the scalars only: sInit, prefix gate, sBeta, sL, sR, sSlot, sToken |
+| `ld.shared.v2.b32` | 8 | sToken pairs and the sU row runs |
 | `sub.ftz.f32` | 6 | the WY residuals |
 | `cvt.f32.bf16` | 5 | the scalar v and beta loads |
 | `ex2.approx.ftz.f32` | 4 | the gate, one per lane element |
