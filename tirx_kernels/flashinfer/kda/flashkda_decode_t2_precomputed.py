@@ -770,20 +770,30 @@ def _flashkda_decode_t2_precomputed(
     # Phase H: recurrence and checkpoints, all 64 threads  (:659-695)
     # =======================================================================
     words_w = T.alloc_local((4,), "uint32")
+    sd_t = T.alloc_local((8,), "float32")
+    sk_t = T.alloc_local((8,), "float32")
     for t in T.unroll(NUM_TOKENS):
         slot_t: T.int32 = _ld_shared_i32(arena, OFF_SSLOT + t * 4)
         beta_t: T.float32 = _ld_shared_f32(arena, OFF_SBETA + t * 4)
+        # The gate and key slices depend only on (t, k_start), not on the row,
+        # so the source loads each 8-float slice once per token as two 16-byte
+        # reads instead of reloading them in the row loop (:673 is 12
+        # ld.shared.v4.b32 with no scalar shared loads at all).
+        _ld_shared_f32x4(arena, OFF_SD + (t * HEAD_DIM + k_start) * 4, sd_t, 0)
+        _ld_shared_f32x4(arena, OFF_SD + (t * HEAD_DIM + k_start + 4) * 4, sd_t, 4)
+        _ld_shared_f32x4(arena, OFF_SK + (t * HEAD_DIM + k_start) * 4, sk_t, 0)
+        _ld_shared_f32x4(arena, OFF_SK + (t * HEAD_DIM + k_start + 4) * 4, sk_t, 4)
         for row_local in T.unroll(8):
             row_h: T.int32 = owned_row_base + row_local
             update: T.float32 = _mul(_ld_shared_f32(arena, OFF_SU + (t * 32 + row_h) * 4), beta_t)
             for i in T.unroll(8):
-                sd_i: T.float32 = _ld_shared_f32(arena, OFF_SD + (t * HEAD_DIM + k_start + i) * 4)
-                sk_i: T.float32 = _ld_shared_f32(arena, OFF_SK + (t * HEAD_DIM + k_start + i) * 4)
                 # The source writes `hist*sD + update*sK` (:673) and the
                 # compiler contracts the FIRST product: update*sK is rounded,
                 # hist*sD is fused. This is the only stateful accumulation and
                 # it feeds both the checkpoint and token 1's history.
-                hist[row_local * 8 + i] = _fma(hist[row_local * 8 + i], sd_i, _mul(update, sk_i))
+                hist[row_local * 8 + i] = _fma(
+                    hist[row_local * 8 + i], sd_t[i], _mul(update, sk_t[i])
+                )
             for pr in T.unroll(4):
                 words_w[pr] = _pack_bf16x2(
                     hist[row_local * 8 + 2 * pr + 1], hist[row_local * 8 + 2 * pr]
