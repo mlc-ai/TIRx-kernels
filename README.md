@@ -62,6 +62,9 @@ point each port backs:
 | Kernel | dtype | What it is |
 | ------ | ----- | ---------- |
 | `flashkda_bf16_fused_m128` | bf16 | Recurrent KDA prefill, M128 schedule |
+| `recurrent_kda_decode_one_warp` | bf16 | Recurrent KDA decode, one warp per CTA (T=1, `sequence_heads >= 128`) |
+| `recurrent_kda_decode_grouped` | bf16 | Recurrent KDA decode, grouped CTA (small-batch T=1 and all speculative T>1) |
+| `flashkda_decode_t1_precomputed` | bf16 | FlashKDA "cake" decode, T=1 precomputed gate |
 
 `flashinfer/gdn_prefill/` — `flashinfer.gdn_prefill`:
 
