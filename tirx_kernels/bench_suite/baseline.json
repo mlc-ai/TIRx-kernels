@@ -2,13 +2,13 @@
   "timestamp": "14",
   "label": "post-refactor",
   "git": {
-    "tir": "664e979c",
-    "tirx-kernels": "9c6aa361",
+    "tir": "ea0950ab",
+    "tirx-kernels": "b3be0123",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "35a646aa22543959fd188e3d0d788ca914a44071"
+    "tirx-kernels:tirx_kernels": "ba8163542076d30ce12bc983cf424f2bcbbeb396"
   },
   "baselines": {
     "torch": {
@@ -57,7 +57,7 @@
       "importable": false,
       "source_dir": "/home/bohanhou/kernel-libs/sglang/python/sglang",
       "git_dir": "/home/bohanhou/kernel-libs/sglang",
-      "git_sha": "96a04cb1"
+      "git_sha": "c7c03ec5"
     },
     "cutlass": {
       "importable": true,
@@ -2582,6 +2582,300 @@
       "impls": {
         "tirx": 17.34466253221987,
         "flashinfer": 19.51631078654821
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "dec_hv12_b4",
+      "label": "dec_hv12_b4",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.6504416104104775,
+        "flashinfer_cutedsl": 3.9219190126523285
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "dec_hv12_b8",
+      "label": "dec_hv12_b8",
+      "status": "ok",
+      "impls": {
+        "tirx": 4.258375216340218,
+        "flashinfer_cutedsl": 4.613711138436537
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "dec_hv16_b1",
+      "label": "dec_hv16_b1",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.238843675914427,
+        "flashinfer_cutedsl": 3.5627867976997543
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "dec_hv16_b4",
+      "label": "dec_hv16_b4",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.7758930700028097,
+        "flashinfer_cutedsl": 4.078077874576345
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t2_hv16_b8",
+      "label": "ver_t2_hv16_b8",
+      "status": "ok",
+      "impls": {
+        "tirx": 6.837621219998657,
+        "flashinfer_cutedsl": 7.342065714437408
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t4_hv16_b32",
+      "label": "ver_t4_hv16_b32",
+      "status": "ok",
+      "impls": {
+        "tirx": 24.71303785423106,
+        "flashinfer_cutedsl": 33.888392143740184
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t8_hv12_b16",
+      "label": "ver_t8_hv12_b16",
+      "status": "ok",
+      "impls": {
+        "tirx": 22.030900675719998,
+        "flashinfer_cutedsl": 31.35296382096456
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t8_hv12_b64",
+      "label": "ver_t8_hv12_b64",
+      "status": "ok",
+      "impls": {
+        "tirx": 65.91840010332494,
+        "flashinfer_cutedsl": 92.41587041159222
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t8_hv16_b1",
+      "label": "ver_t8_hv16_b1",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.030776714313049,
+        "flashinfer_cutedsl": 14.815819035086784
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t8_hv16_b128",
+      "label": "ver_t8_hv16_b128",
+      "status": "ok",
+      "impls": {
+        "tirx": 161.9328744940579,
+        "flashinfer_cutedsl": 219.33161768748658
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t8_hv16_b16",
+      "label": "ver_t8_hv16_b16",
+      "status": "ok",
+      "impls": {
+        "tirx": 26.017330854831492,
+        "flashinfer_cutedsl": 34.95134749109404
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t8_hv16_b32",
+      "label": "ver_t8_hv16_b32",
+      "status": "ok",
+      "impls": {
+        "tirx": 44.59754916822601,
+        "flashinfer_cutedsl": 63.672738997515964
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t8_hv16_b4",
+      "label": "ver_t8_hv16_b4",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.247886679654943,
+        "flashinfer_cutedsl": 16.928763980944666
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_grouped",
+      "config": "ver_t8_hv16_b64",
+      "label": "ver_t8_hv16_b64",
+      "status": "ok",
+      "impls": {
+        "tirx": 83.1183969763617,
+        "flashinfer_cutedsl": 112.71690537963232
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_one_warp",
+      "config": "hv12_b16_tr16_lb",
+      "label": "hv12_b16_tr16_lb",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.695114378452278,
+        "flashinfer_cutedsl": 5.972974484759209
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_one_warp",
+      "config": "hv12_b64_tr16_lb",
+      "label": "hv12_b64_tr16_lb",
+      "status": "ok",
+      "impls": {
+        "tirx": 12.836577688146386,
+        "flashinfer_cutedsl": 13.868974685205652
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_one_warp",
+      "config": "hv16_b128_tr16_lb",
+      "label": "hv16_b128_tr16_lb",
+      "status": "ok",
+      "impls": {
+        "tirx": 26.685145709501946,
+        "flashinfer_cutedsl": 29.18576589228665
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_one_warp",
+      "config": "hv16_b16_tr16_lb",
+      "label": "hv16_b16_tr16_lb",
+      "status": "ok",
+      "impls": {
+        "tirx": 6.347254102290438,
+        "flashinfer_cutedsl": 6.483835513635386
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_one_warp",
+      "config": "hv16_b32_tr16_lb",
+      "label": "hv16_b32_tr16_lb",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.69739584957777,
+        "flashinfer_cutedsl": 10.239276177315428
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_one_warp",
+      "config": "hv16_b64_tr16_lb",
+      "label": "hv16_b64_tr16_lb",
+      "status": "ok",
+      "impls": {
+        "tirx": 15.268888603603104,
+        "flashinfer_cutedsl": 16.90398539436306
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "recurrent_kda_decode_one_warp",
+      "config": "hv16_b8_tr8_lb",
+      "label": "hv16_b8_tr8_lb",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.247230154049852,
+        "flashinfer_cutedsl": 5.337711133525542
       },
       "aggregated": {
         "rounds": 5,

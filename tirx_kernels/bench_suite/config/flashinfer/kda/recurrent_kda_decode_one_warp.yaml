@@ -1,0 +1,21 @@
+# Exactly the module's seven BENCH_CONFIGS rows.  All of them use the Kimi K3
+# safe gate (lower_bound = -5.0), the gate mode SGLang's production decode path
+# selects, and all stay inside the one-warp dispatch domain
+# (sequence_heads = num_seqs * num_value_heads >= 128; smaller shapes route to
+# FlashInfer's grouped-CTA kernel instead).
+#
+# hv16 rows mirror SGLang's own decode sweep
+# (benchmark/bench_linear_attention/bench_kda_flashinfer_mtp.py --batch-sizes),
+# restricted to the batches that reach this kernel; hv12 rows are the Kimi K3
+# TP8 per-rank head count.  Together they cover both tile schedules:
+# b8 -> sequence_heads 128 -> TILE_ROWS 8 + DOT_REDUCTION_TREE, every other row
+# -> TILE_ROWS 16 + DOT_REDUCTION_DUAL_ACCUM.
+kernel: recurrent_kda_decode_one_warp
+configs:
+  - {config: hv16_b8_tr8_lb, default: true}
+  - {config: hv16_b16_tr16_lb, default: true}
+  - {config: hv16_b32_tr16_lb, default: true}
+  - {config: hv16_b64_tr16_lb, default: true}
+  - {config: hv16_b128_tr16_lb, default: true}
+  - {config: hv12_b16_tr16_lb, default: true}
+  - {config: hv12_b64_tr16_lb, default: true}

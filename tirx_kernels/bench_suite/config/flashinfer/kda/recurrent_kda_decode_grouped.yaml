@@ -1,0 +1,36 @@
+# Exactly the module's fourteen BENCH_CONFIGS rows.  All use the Kimi K3 safe
+# gate (lower_bound = -5.0, GATE_MODE = 2), the gate mode SGLang's production
+# path selects; the softplus variants are correctness-only and are not
+# benchmarked.  Every row is inside the grouped-CTA dispatch domain, verified
+# by .porting/recurrent_kda_decode_grouped/verify_dispatch.py.
+#
+# The two families are the two SGLang call sites, and they select the two --
+# and only two -- tile shapes the host allows (KS = 4 if T == 1 else 2,
+# recurrent_kda.py:859-860):
+#
+#   dec_* : T=1 decode, KS=4, NT=128 (4 warps).  Reaches this kernel only when
+#           sequence_heads = num_seqs * num_value_heads < 128; larger decode
+#           shapes route to the one-warp kernel instead.
+#   ver_* : T>1 target_verify, KS=2, NT=64 (2 warps).  Reaches this kernel for
+#           every batch size.  T=8 is the DSPARK production point (gamma=7);
+#           the hv16 batch sweep mirrors SGLang's own MTP benchmark
+#           (benchmark/bench_linear_attention/bench_kda_flashinfer_mtp.py).
+#
+# hv12 rows are the Kimi K3 TP8 per-rank value-head count; T=4 and T=2 cover
+# the speculative-decode test parity point and the legal floor.
+kernel: recurrent_kda_decode_grouped
+configs:
+  - {config: dec_hv16_b1, default: true}
+  - {config: dec_hv16_b4, default: true}
+  - {config: dec_hv12_b4, default: true}
+  - {config: dec_hv12_b8, default: true}
+  - {config: ver_t8_hv16_b1, default: true}
+  - {config: ver_t8_hv16_b4, default: true}
+  - {config: ver_t8_hv16_b16, default: true}
+  - {config: ver_t8_hv16_b32, default: true}
+  - {config: ver_t8_hv16_b64, default: true}
+  - {config: ver_t8_hv16_b128, default: true}
+  - {config: ver_t8_hv12_b16, default: true}
+  - {config: ver_t8_hv12_b64, default: true}
+  - {config: ver_t4_hv16_b32, default: true}
+  - {config: ver_t2_hv16_b8, default: true}
