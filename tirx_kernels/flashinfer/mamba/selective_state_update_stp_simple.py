@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""TIRx port of FlashInfer's selective-state-update STP simple kernel."""
+"""TIRx port of FlashInfer's selective-state-update STP simple kernel.
+
+Upstream source: include/flashinfer/mamba/kernel_selective_state_update_stp.cuh.
+"""
 
 from __future__ import annotations
 

@@ -3,6 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
+"""TIRx port of DeepGEMM's MegaMoE kernel.
+
+Upstream sources: deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh, csrc/apis/mega.h,
+csrc/jit_kernels/heuristics/mega_moe.h.
+"""
+
 from __future__ import annotations
 
 import ctypes

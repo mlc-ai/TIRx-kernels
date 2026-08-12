@@ -8,6 +8,8 @@
 Reference: `deep_gemm.fp8_fp4_gemm_nt` (aliased as `deep_gemm.fp8_gemm_nt`).
 The kernel body lives in :mod:`tirx_kernels.deepgemm._sm100_fp8_fp4_gemm_1d1d`;
 this module only pins the descriptor and the test/benchmark matrices.
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:93.
 """
 
 from __future__ import annotations

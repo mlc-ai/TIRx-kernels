@@ -14,6 +14,9 @@ modules in this package acting as thin per-entry wrappers.
 
 Module names starting with an underscore are skipped by the kernel registry
 scan, so this file carries no ``KERNEL_META``.
+
+Upstream sources: deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh,
+scheduler/gemm.cuh, csrc/jit_kernels/heuristics/sm100.hpp.
 """
 
 from __future__ import annotations

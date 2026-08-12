@@ -4,7 +4,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""FlashInfer TinyGEMM2 BF16 kernel port for SM100."""
+"""FlashInfer TinyGEMM2 BF16 kernel port for SM100.
+
+Upstream source: csrc/tinygemm2_sm100.cu.
+"""
 
 from __future__ import annotations
 

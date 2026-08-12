@@ -9,6 +9,8 @@ Reference: `deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked` (aliased as
 `m_grouped_fp8_gemm_nt_masked` / `fp8_m_grouped_gemm_nt_masked`).  A is
 `[G, max_m, K]` with a per-group valid row count in `masked_m`, so the shape is
 static while the work is dynamic -- the decode / CUDA-graph MoE path.
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:244.
 """
 
 from __future__ import annotations

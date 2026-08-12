@@ -10,6 +10,8 @@ along K with per-group lengths, both operands are MN-major, and the output is
 always FP32 with accumulation (the MoE weight-gradient path), so the epilogue
 takes the `SM90_TMA_REDUCE_ADD` branch.  FP4 is not exercised here -- DeepGEMM's
 own enumerator keeps this entry FP8-only.
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:313.
 """
 
 from __future__ import annotations

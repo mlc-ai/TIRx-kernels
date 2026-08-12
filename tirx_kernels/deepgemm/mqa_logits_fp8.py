@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
+"""TIRx port of DeepGEMM's MQA logits kernel, FP8 variant.
+
+Upstream source: deep_gemm/include/deep_gemm/impls/sm100_mqa_logits.cuh.
+"""
+
 import os
 from dataclasses import asdict, dataclass
 from functools import cache

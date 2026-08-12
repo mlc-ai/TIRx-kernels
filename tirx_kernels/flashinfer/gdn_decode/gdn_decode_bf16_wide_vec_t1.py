@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""SM100 BF16 wide-vector single-token GDN decode kernel."""
+"""SM100 BF16 wide-vector single-token GDN decode kernel.
+
+Upstream source: flashinfer/gdn_kernels/gdn_decode_bf16_state.py.
+"""
 
 from __future__ import annotations
 

@@ -10,6 +10,8 @@ Reference: `deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous` (aliased as
 to `GemmType::MGroupedContiguousWithPsumLayout`, which makes the scheduler walk
 per-group psum end offsets instead of a per-row expert id, and makes
 `ensure_zero_padding` meaningful (it gates the aligned-effective-M tail).
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:161.
 """
 
 from __future__ import annotations

@@ -12,6 +12,8 @@ we build cannot drift from the layout the reference expects.
 
 `deep_gemm` is imported lazily inside each function: kernel discovery must work
 on hosts without it.
+
+Upstream sources: deep_gemm/utils/math.py, csrc/apis/layout.hpp, deep_gemm/testing/numeric.py.
 """
 
 from __future__ import annotations

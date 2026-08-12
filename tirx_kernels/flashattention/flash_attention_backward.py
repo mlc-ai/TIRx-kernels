@@ -1,5 +1,5 @@
 # This file is a TIRx port of code from flash-attention
-# (https://github.com/Dao-AILab/flash-attention @ 00756db9),
+# (https://github.com/Dao-AILab/flash-attention @ d7e4dba3),
 # Copyright (c) 2025, Ted Zadouri, Markus Hoehnerbach, Jay Shah, Tri Dao.
 # SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 # SPDX-FileCopyrightText: Copyright TIRx authors

@@ -9,6 +9,8 @@
 Run ``python -m tirx_kernels.flashattention.flash_attention4`` to profile the
 annotated kernel.  Correctness and ordinary benchmarks remain exposed through
 ``run_test`` and ``run_bench``.
+
+Upstream source: flash_attn/cute/flash_fwd_sm100.py.
 """
 
 from __future__ import annotations

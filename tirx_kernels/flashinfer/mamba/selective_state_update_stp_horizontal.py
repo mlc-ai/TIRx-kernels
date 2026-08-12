@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Integration scaffold for FlashInfer's STP producer-consumer horizontal kernel."""
+"""Integration scaffold for FlashInfer's STP producer-consumer horizontal kernel.
+
+Upstream source: include/flashinfer/mamba/kernel_selective_state_update_stp.cuh.
+"""
 
 from __future__ import annotations
 

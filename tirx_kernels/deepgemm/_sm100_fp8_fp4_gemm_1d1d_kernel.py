@@ -20,6 +20,9 @@ warp  role
 3     idle -- no branch selects it, deliberately
 4..   epilogue, bounded by ``kNumUMMAStoreThreads / 32``
 ===== ===============================================================
+
+Upstream sources: deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh,
+scheduler/gemm.cuh.
 """
 
 from __future__ import annotations

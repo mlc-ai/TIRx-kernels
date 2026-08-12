@@ -18,6 +18,8 @@ expression                   (batch, m, n, k)            majors          output
 ``bhd,hdr->bhr``             ``(h, b, r, d)``            K, MN           bf16
 ``bhd,bhr->hdr``             ``(h, d, r, b)``            MN, MN          fp32+acc
 ===========================  ==========================  ==============  ========
+
+Upstream source: csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp:393.
 """
 
 from __future__ import annotations

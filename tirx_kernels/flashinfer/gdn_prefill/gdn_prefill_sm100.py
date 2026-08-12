@@ -34,6 +34,8 @@
 
 The implementation follows the frozen CuTeDSL source order and preserves its
 CUDA/PTX details instead of reorganizing them into a separate implementation.
+
+Upstream source: flashinfer/gdn_kernels/blackwell/gated_delta_net_chunked.py.
 """
 
 from __future__ import annotations
