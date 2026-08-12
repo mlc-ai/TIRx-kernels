@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': 'ea0950ab', 'tirx-kernels': '98747523', 'tirx-bench-ci': None}`
-- Workloads: 269 ok, 0 failed
+- Git:       `{'tir': 'ea0950ab', 'tirx-kernels': '022c384a', 'tirx-bench-ci': None}`
+- Workloads: 278 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -213,6 +213,20 @@ Grouped workloads show one row per config and one timing column per implementati
 | `hv16h16_b8_s16` | tirx | 5.0008 | flashinfer_cake | 6.3387 | 1.268 | — |
 | `hv32h16_b32_s8` | tirx | 16.6276 | flashinfer_cake | 19.3684 | 1.165 | — |
 | `hv32h16_b8_s16` | tirx | 6.2427 | flashinfer_cake | 7.9132 | 1.268 | — |
+
+## flashkda_decode_t2_precomputed
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `hv12h12_b64_t2` | tirx | 20.8917 | flashinfer_cake | 24.0073 | 1.149 | — |
+| `hv12h12_b8_t2` | tirx | 6.3502 | flashinfer_cake | 8.2827 | 1.304 | — |
+| `hv16h16_b64_t2` | tirx | 25.3776 | flashinfer_cake | 30.1667 | 1.189 | — |
+| `hv16h16_b8_t2` | tirx | 6.9868 | flashinfer_cake | 8.8004 | 1.260 | — |
+| `hv32h16_b128_t2` | tirx | 83.2298 | flashinfer_cake | 94.8844 | 1.140 | — |
+| `hv32h16_b16_t2` | tirx | 15.4465 | flashinfer_cake | 17.8324 | 1.154 | — |
+| `hv32h16_b32_t2` | tirx | 25.3646 | flashinfer_cake | 29.9425 | 1.180 | — |
+| `hv32h16_b64_t2` | tirx | 44.9052 | flashinfer_cake | 51.2153 | 1.141 | — |
+| `hv32h16_b8_t2` | tirx | 9.0897 | flashinfer_cake | 10.9777 | 1.208 | — |
 
 ## fp16_bf16_gemm
 
