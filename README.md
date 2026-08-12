@@ -65,6 +65,7 @@ point each port backs:
 | `recurrent_kda_decode_one_warp` | bf16 | Recurrent KDA decode, one warp per CTA (T=1, `sequence_heads >= 128`) |
 | `recurrent_kda_decode_grouped` | bf16 | Recurrent KDA decode, grouped CTA (small-batch T=1 and all speculative T>1) |
 | `flashkda_decode_t1_precomputed` | bf16 | FlashKDA "cake" decode, T=1 precomputed gate |
+| `flashkda_decode_t2_precomputed` | bf16 | FlashKDA "cake" decode, T=2 precomputed gate (WY, tensor cores) |
 
 `flashinfer/gdn_prefill/` — `flashinfer.gdn_prefill`:
 
