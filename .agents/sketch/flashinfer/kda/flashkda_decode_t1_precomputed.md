@@ -73,8 +73,11 @@ Data movement:
 ```python
 copy_g2r(gmem_slice, reg, hint=None)   # global -> register
 copy_r2g(reg, gmem_slice, pred=None)   # register -> global
-bcast(value, src_lane)                 # one lane's value to the whole warp
-bfly(value, lane_xor)                  # butterfly exchange
+bcast(value, src_lane, 31, 0xFFFFFFFF) # one lane's value to the whole warp
+bfly(value, lane_xor, 31, 0xFFFFFFFF)  # butterfly exchange
+# Every shuffle in this kernel is width-32 with a full member mask; the operands
+# are always (clamp 31, mask 0xFFFFFFFF). A reduction that only wants 16 lanes
+# restricts its *xor offset set*, never the instruction width.
 ```
 
 Compute:
@@ -103,7 +106,7 @@ HEAD_DIM     = 128
 THREADS      = 32                       # __launch_bounds__(32); one warp
 VALUE_SPLIT                             # 16 or 8; the only free knob
 TILE_ROW_STRIDE = 128 // VALUE_SPLIT    # 8 or 16 value rows per CTA  (:79)
-ROW_BLOCKS      = TILE_ROW_STRIDE // 8  # 1 or 2                      (:182)
+ROW_BLOCKS      = TILE_ROW_STRIDE // 8  # 1 or 2                      (:181)
 K_LANES, V_LANES = 16, 2
 H, HV, HEAD_RATIO                       # HV % H == 0, HV >= H
 GATE_TOKEN_STRIDE                       # g.stride(1); the only non-compact input
@@ -125,6 +128,11 @@ hv         = work // VALUE_SPLIT
 n          = cta_id.y
 query_head = hv // HEAD_RATIO           # the GQA fold
 lane       = thread_id.x
+# The source also calls make_warp_uniform(tid/32) at :55. With one warp per CTA
+# the result is unused, but it is `asm volatile` so it survives DCE and emits a
+# dead `mov.b32 0` + `shfl.sync.idx.b32` at kernel entry (.loc :39). The port has
+# no reason to reproduce it; it is called out here only so the 29 shfl.sync.idx
+# in the table below reconcile.
 k_lane     = lane & 15                  # 16 lanes x 8 elements = 128 K
 v_lane     = lane // 16                 # selects one of two interleaved rows
 
@@ -174,15 +182,19 @@ q_sum_sq = dot(q_src, q_src)
 k_sum_sq = dot(k_src, k_src)
 # instruction_selection: mul.ftz.f32 + fma.rn.ftz.f32 + add.ftz.f32; extent: 4-term chain each
 
-for offset in (16, 8, 4, 2, 1):        # full-warp, unlike the 16-lane dot reduce
-    q_sum_sq = add(q_sum_sq, bfly(q_sum_sq, offset))
-    k_sum_sq = add(k_sum_sq, bfly(k_sum_sq, offset))
-# instruction_selection: shfl.sync.bfly.b32 + add.ftz.f32; extent: 5 rounds x 2 values
+# Two independent reduction loops, run back to back (:139-143 then :144-148).
+# They are NOT fused: q_sum_sq completes all five rounds before k_sum_sq starts.
+for offset in (16, 8, 4, 2, 1):        # offsets reach 16 -> the group is 32 lanes
+    q_sum_sq = add(q_sum_sq, bfly(q_sum_sq, offset, 31, 0xFFFFFFFF))
+# instruction_selection: shfl.sync.bfly.b32 + add.ftz.f32; extent: 5 rounds
+for offset in (16, 8, 4, 2, 1):
+    k_sum_sq = add(k_sum_sq, bfly(k_sum_sq, offset, 31, 0xFFFFFFFF))
+# instruction_selection: shfl.sync.bfly.b32 + add.ftz.f32; extent: 5 rounds
 
 q_scale = mul(rsqrt(add(q_sum_sq, 1e-6)), scale)   # `scale` multiplies q ONLY
 k_scale = rsqrt(add(k_sum_sq, 1e-6))
 # instruction_selection: rsqrt.approx.ftz.f32; extent: scalar (x2)
-# eps is hardcoded 1e-6f in the source (:148,:150), not a runtime argument.
+# eps is hardcoded 1e-6f in the source (:149,:151), not a runtime argument.
 
 # ===========================================================================
 # Phase 3: lane redistribution 4-per-lane -> 8-per-lane, and the gate  (:153-164)
@@ -190,12 +202,14 @@ k_scale = rsqrt(add(k_sum_sq, 1e-6))
 q_reg = reg_tile(f32, [8]); k_reg = reg_tile(f32, [8]); gate_reg = reg_tile(f32, [8])
 for i in range(8):                      # constexpr unroll
     src_lane = 2 * k_lane + i // 4      # the 4-per-lane -> 8-per-lane remap
-    q_reg[i]    = mul(bcast(q_src[i & 3], src_lane), q_scale)
-    k_reg[i]    = mul(bcast(k_src[i & 3], src_lane), k_scale)
-    gate_reg[i] = exp(bcast(gate_src[i & 3], src_lane))
-    # instruction_selection: shfl.sync.idx.b32 x3 + mul.ftz.f32 x2 + ex2.approx.ftz.f32
-    # extent: 8 iterations; the exp is __expf, i.e. a mul by log2(e) folded into
-    # the ex2 operand -- GATE_KIND == 0 means `g` arrives as a LOG-gate.
+    q_reg[i]    = mul(bcast(q_src[i & 3], src_lane, 31, 0xFFFFFFFF), q_scale)
+    k_reg[i]    = mul(bcast(k_src[i & 3], src_lane, 31, 0xFFFFFFFF), k_scale)
+    gate_reg[i] = exp(bcast(gate_src[i & 3], src_lane, 31, 0xFFFFFFFF))
+    # instruction_selection: shfl.sync.idx.b32 x3 + mul.ftz.f32 x3 + ex2.approx.ftz.f32
+    # extent: 8 iterations. `__expf(x)` lowers to `mul.ftz.f32 x, 0f3FB8AA3B`
+    # (log2 e) followed by `ex2.approx.ftz.f32` -- a separate emitted mul, not an
+    # operand fold, which is why this loop issues three muls per iteration.
+    # GATE_KIND == 0 means `g` arrives as a LOG-gate.
 
 # ===========================================================================
 # Phase 4: k_dot_q -- 16-lane butterfly  (:165-176)
@@ -205,11 +219,12 @@ for i in range(8):                      # constexpr unroll
 k_dot_q = dot(k_reg, q_reg)
 # instruction_selection: mul.ftz.f32 + fma.rn.ftz.f32 + add.ftz.f32; extent: 8-term chain
 
-for offset in (8, 4, 2, 1):            # 16-lane group only, NOT 32
-    k_dot_q = add(k_dot_q, bfly(k_dot_q, offset))
+for offset in (8, 4, 2, 1):            # offsets stop at 8 -> the group is 16 lanes
+    k_dot_q = add(k_dot_q, bfly(k_dot_q, offset, 31, 0xFFFFFFFF))
 # instruction_selection: shfl.sync.bfly.b32 + add.ftz.f32; extent: 4 rounds
-# Both half-warps end up holding the value they need; that is why the width is
-# 16 here and 32 for the L2 norms above.
+# The instruction stays full-warp (clamp 31, mask 0xFFFFFFFF); dropping the 16
+# offset is what makes each half-warp reduce only within itself, so both halves
+# end up holding the value their own value rows need.
 
 beta_value = cast(f32, beta[token_pos, hv])     # already sigmoided by the caller
 # instruction_selection: ld.global.nc.b16 + cvt.f32.bf16; extent: scalar
@@ -240,12 +255,13 @@ for row_block in range(ROW_BLOCKS):    # `#pragma unroll 1` in the source (:182)
         row = tile_row_base + v_lane + 2 * (row_block * 4 + row_local)
 
         # Decay and both projections share one pass over the row. The source
-        # accumulates sequentially (:212-216), not as a tree:
+        # accumulates sequentially (:217-223), not as a tree:
         pred = 0.0; base = 0.0
+        h_decay = reg_tile(f32, [8])       # stays live into the update below
         for i in range(8):
-            h_decay = mul(state_rows[row_local][i], gate_reg[i])
-            pred = fma(h_decay, k_reg[i], pred)
-            base = fma(h_decay, q_reg[i], base)
+            h_decay[i] = mul(state_rows[row_local][i], gate_reg[i])
+            pred = fma(h_decay[i], k_reg[i], pred)
+            base = fma(h_decay[i], q_reg[i], base)
         # instruction_selection: mul.ftz.f32 + fma.rn.ftz.f32 x2; extent: 8 iterations
 
         for offset in (8, 4, 2, 1):
@@ -267,16 +283,18 @@ for row_block in range(ROW_BLOCKS):    # `#pragma unroll 1` in the source (:182)
         delta = mul(sub(v_value, pred), beta_value)
         # instruction_selection: sub.ftz.f32 + mul.ftz.f32; extent: scalar
 
-        # ---- rank-1 update, in registers (:246-248) ------------------------
+        # ---- rank-1 update, in registers (:247-250) ------------------------
         for i in range(8):
-            state_rows[row_local][i] = fma(delta, k_reg[i],
-                                           mul(state_rows[row_local][i], gate_reg[i]))
-        # instruction_selection: mul.ftz.f32 + fma.rn.ftz.f32; extent: 8 iterations
-        # The decayed value is recomputed rather than reused from the pred/base
-        # pass; the source does the same, and it is what keeps the register tile
-        # at 32.
+            state_rows[row_local][i] = fma(delta, k_reg[i], h_decay[i])
+        # instruction_selection: fma.rn.ftz.f32; extent: 8 iterations, no mul
+        # The source spells this as `state*gate + delta*k` (:249), but the decayed
+        # product is the h_decay computed in the pred/base pass and the compiler
+        # keeps it: `.loc :249` emits 8 fma per row (32 across the unrolled tile)
+        # and ZERO mul, with the `.loc :219` h_decay registers as the addends.
+        # Recomputing the product here would add 8 mul per row that the source
+        # does not issue.
 
-        # ---- publish (:249-266) --------------------------------------------
+        # ---- publish (:251-266) --------------------------------------------
         if active:
             words = reg_tile(u32, [4])
             for p in range(4):
@@ -286,15 +304,20 @@ for row_block in range(ROW_BLOCKS):    # `#pragma unroll 1` in the source (:182)
             copy_r2g(words, state[initial_slot, hv, row, k_lane*8 : +8])
             # instruction_selection: st.global.v4.b32; extent: one 16-byte tile
             if k_lane == 0:
-                copy_r2g(cast(bf16, add(base, mul(delta, k_dot_q))),
+                copy_r2g(cast(bf16, fma(delta, k_dot_q, base)),
                          out[token_pos, hv, row])
                 # instruction_selection: fma.rn.ftz.f32 + cvt.rn.bf16.f32 +
                 # st.global.b16; extent: scalar
                 # o = q.S_new is folded as base + delta*k_dot_q, so the updated
-                # state is never re-read.
+                # state is never re-read. The source writes it as `base + delta*kq`
+                # (:262) and the compiler contracts it: `.loc :262` emits ONE
+                # fma.rn.ftz.f32 per row, not a mul and an add. Spelling it as
+                # mul-then-add would round twice and diverge in the last bits.
         elif has_token and k_lane == 0:
             copy_r2g(cast(bf16, 0.0), out[token_pos, hv, row])
-            # instruction_selection: st.global.b16; extent: scalar
+            # instruction_selection: mov.b32 0 + cvt.rn.bf16.f32 + st.global.b16
+            # extent: scalar. The zero is not constant-folded through the cvt,
+            # which is where 4 of the 8 cvt.rn.bf16.f32 come from.
             # An in-row but inactive sequence zeroes its output and leaves the
             # state slot untouched.
 ```
@@ -329,21 +352,26 @@ the evidence for every annotation above. Body totals, split16 / split8:
 
 | form | 16 | 8 | where |
 | --- | ---: | ---: | --- |
-| `fma.rn.ftz.f32` | 108 | 108 | every dot chain and the rank-1 update |
-| `mul.ftz.f32` | 69 | 69 | scales, decay, `delta`, the `__expf` log2(e) fold |
-| `add.ftz.f32` | 53 | 53 | butterflies and the dot tails |
-| `shfl.sync.bfly.b32` | 46 | 46 | 2x5 L2 rounds + 4 rounds x (k_dot_q, pred, base) |
-| `shfl.sync.idx.b32` | 29 | 29 | the 3x8 redistribution + one v broadcast per row |
-| `shl.b32` / `and.b32` | 31/25 | 34/25 | bf16 -> f32 widening, vectors and state rows |
+| `fma.rn.ftz.f32` | 108 | 108 | dot chains (L2, k_dot_q, pred/base) and the rank-1 update; also the contracted out store |
+| `mul.ftz.f32` | 69 | 69 | 4 L2 dots + 4 k_dot_q + 1 q_scale + 16 q/k_reg scaling + 8 `__expf` log2(e) + 32 h_decay + 4 delta |
+| `add.ftz.f32` | 53 | 53 | 10 L2 butterfly + 2 eps + 4 k_dot_q butterfly + 32 pred/base butterfly + 5 dot tails |
+| `shfl.sync.bfly.b32` | 46 | 46 | 5+5 L2 rounds, then 4 rounds x (k_dot_q, and pred/base per row) |
+| `shfl.sync.idx.b32` | 29 | 29 | 24 redistribution (:155-162) + 4 v broadcasts (:241,:244) + 1 dead `make_warp_uniform` (:39) |
+| `shl.b32` | 31 | 34 | 22 bf16 widening (6 vector at :102/:116/:130, 16 state at :205); the other 9 are index arithmetic |
+| `and.b32` | 25 | 25 | 23 at the widening sites, 2 index arithmetic (`lane & 15`, `tile_row_base`) |
 | `cvt.rn.bf16x2.f32` | 16 | 16 | 4 pairs x 4 rows, the state store |
 | `ex2.approx.ftz.f32` | 8 | 8 | the gate, one per K element per lane |
-| `cvt.rn.bf16.f32` + `st.global.b16` | 8 + 8 | 8 + 8 | the scalar out stores, both branches |
+| `cvt.rn.bf16.f32` | 8 | 8 | 4 active out stores + 4 zero-fill stores |
+| `st.global.b16` | 8 | 8 | the same two branches |
 | `cvt.f32.bf16` | 5 | 5 | `beta` (1) and `v` (4 rows) -- the scalar loads |
-| `ld.global.nc.v2.b32` | 3 | 3 | q, k, g |
-| `ld.global.L1::no_allocate.v4.b32` | 4 | 4 | the state rows |
+| `ld.global.nc.b16` | 5 | 5 | `beta` (1) and `v` (4 rows) |
+| `sub.ftz.f32` | 4 | 4 | `v - pred`, one per row |
 | `st.global.v4.b32` | 4 | 4 | the state rows |
+| `ld.global.L1::no_allocate.v4.b32` | 4 | 4 | the state rows |
+| `ld.global.nc.v2.b32` | 3 | 3 | q, k, g |
+| `ld.global.nc.b32` | 3 | 3 | `cu_seqlens[n]`, `cu_seqlens[n+1]`, `ssm_state_indices[n]` |
 | `rsqrt.approx.ftz.f32` | 2 | 2 | the two L2 norms |
-| total | 557 | 571 | |
+| total | 558 | 572 | including the trailing `ret` |
 
 Three consequences the port must honour:
 
@@ -360,9 +388,11 @@ Three consequences the port must honour:
    `shl`/`and` integer pair; the two scalar loads (`beta`, `v`) use
    `cvt.f32.bf16`. Both forms appear in the PTX and both must be reproduced.
 
-The two variants compile to the same instruction stream; the split8 body differs
-only by the extra `row_block` trip (+3 `shl.b32`, +3 `add.s32`, +1 `bra`, +4
-`mov.pred`), because `#pragma unroll 1` keeps a single copy of the row body.
+The two variants compile to the same instruction stream. `#pragma unroll 1` keeps
+a single copy of the row body, so the extra `row_block` trip costs only its loop
+mechanics -- the complete split16 -> split8 delta is `+3 shl.b32`, `+3 add.s32`,
+`+3 mov.pred`, `+2 mov.b32`, `+1 bra`, `+1 cvta.to.global.u64`,
+`+1 ld.param.b64` = +14, and every floating-point count is unchanged.
 
 ## TIRx module and benchmark contract
 
