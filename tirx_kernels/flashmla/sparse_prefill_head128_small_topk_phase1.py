@@ -33,6 +33,15 @@ LOG_2_E = math.log2(math.e)
 
 BF16_BYTES = 2
 
+IKET_EVENT_NAMES = (
+    "h128-small-q-load-output",
+    "h128-small-kv-load",
+    "h128-small-qk-pv-issue",
+    "h128-small-valid-mask",
+    "h128-small-clc",
+    "h128-small-softmax",
+)
+
 
 def _add_smem_desc_offset(desc, offset):
     # Descriptor offsets wrap in the low 32 bits without carrying into the
