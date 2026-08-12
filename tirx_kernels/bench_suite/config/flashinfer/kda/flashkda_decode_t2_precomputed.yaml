@@ -1,0 +1,28 @@
+# FlashKDA "cake" T=2 precomputed-gate decode, against the frozen FlashInfer
+# export it is ported from.
+#
+# Unlike the T=1 sibling there is no split dimension to cover: the sm100a
+# selector returns value_split 4 for every T=2 shape
+# (recurrent_kda.py:1177-1178), so d128_t2_precomputed_split4 is the entire
+# dispatch surface and the matrix varies only (HV, H, N).
+# .porting/.../verify_dispatch.py asserts that for every row by feeding the real
+# tensors into FlashInfer's own selector -- at T=2 what that actually guards is
+# the rest of the contract (num_spec_tokens == 1, ssm_state_indices of exactly
+# N*2 entries, cu_seqlens stepping by two), any of which makes the selector
+# return None rather than a wrong variant.
+#
+#   hv32h16_*   H=16, HV=32 (GQA ratio 2) -- exact parity with FlashInfer's own
+#               T=2 export bench, which sweeps N in {8,16,32,64,128}
+#   hv16h16_*   the non-GQA head count, at both ends of the batch range
+#   hv12h12_*   Kimi K3's TP8 per-rank head count, same two batch sizes
+kernel: flashkda_decode_t2_precomputed
+configs:
+  - {config: hv32h16_b8_t2, default: true}
+  - {config: hv32h16_b16_t2, default: true}
+  - {config: hv32h16_b32_t2, default: true}
+  - {config: hv32h16_b64_t2, default: true}
+  - {config: hv32h16_b128_t2, default: true}
+  - {config: hv16h16_b8_t2, default: true}
+  - {config: hv16h16_b64_t2, default: true}
+  - {config: hv12h12_b8_t2, default: true}
+  - {config: hv12h12_b64_t2, default: true}

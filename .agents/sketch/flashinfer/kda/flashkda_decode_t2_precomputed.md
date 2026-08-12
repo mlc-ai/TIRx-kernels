@@ -400,7 +400,10 @@ if warp < TOKENS and lane_quad == 2:
             coef = sR[t, s] if s <= t else 0.0    # sR[0][1] is never written
             out_lo = fma(coef, u_lo[s], out_lo)
             out_hi = fma(coef, u_hi[s], out_hi)
-            # instruction_selection: ld.shared.b32 + fma.rn.ftz.f32; extent: scalar x2
+            # instruction_selection: ld.shared.b32 (token 0 reads the single
+            # sR[0][0]) / ld.shared.v2.b32 (token 1 reads the sR[1][0..1] pair)
+            # + fma.rn.ftz.f32; extent: scalar x2 per (t, s). The s > t
+            # coefficient is a real zero-operand fma, not a skipped iteration.
         base_t = (sToken[t] * HV + hv) * 128 + tile_row_base
         active = sSlot[t] >= 0
         copy_r2g(cast(bf16, out_lo if active else 0.0), out[base_t + row_lo])
@@ -517,7 +520,7 @@ Body total **1570 instructions**; the counts every annotation above rests on:
 | `shfl.sync.bfly.b32` | 30 | 2 L2 norms + 2 coefficient dots per token, 5 rounds each |
 | `st.shared.v4.b32` | 18 | 16 sState stages + 2 sK/sD publishes |
 | `st.global.v4.b32` | 16 | the checkpoints, 8 rows × 2 tokens |
-| `cvt.rn.bf16.f32` | 14 | 8 sVec column stores + 8 output stores (both branches) |
+| `cvt.rn.bf16.f32` | 14 | 8 sVec column stores + 6 output conversions (2 per token in the active branch, 1 per token in the zero branch where both stores reuse the converted zero) |
 | `shfl.sync.idx.b32` | 13 | 12 quad broadcasts + 1 `make_warp_uniform` (identity, but its result is `warp`) |
 | `st.shared.b32` | 11 | scalars: sBeta/sSlot/sToken/sInit/sL/sR/sU |
 | `ldmatrix…x4.shared.b16` | **8** | the A operand, one per MMA issue |
@@ -528,8 +531,8 @@ Body total **1570 instructions**; the counts every annotation above rests on:
 | `st.global.b16` | 8 | the outputs, both branches |
 | `ld.global.nc.{b16,b32,v2.b32}` | 5 / 5 / 3 | v+beta, metadata, q/k/g |
 | `ld.shared.v4.b32` | 19 | the sK/sD slices in phases C and H, the sBeta/sSlot block, sU runs |
-| `ld.shared.b32` | 19 | the scalars only: sInit, prefix gate, sBeta, sL, sR, sSlot, sToken |
-| `ld.shared.v2.b32` | 8 | sToken pairs and the sU row runs |
+| `ld.shared.b32` | 19 | the scalars only: sInit, prefix gate, sBeta, sL, `sR[0][0]`, sSlot, sToken |
+| `ld.shared.v2.b32` | 8 | the sToken pair, the token-1 `sR[1][0..1]` pair, and the sU row runs |
 | `sub.ftz.f32` | 6 | the WY residuals |
 | `cvt.f32.bf16` | 5 | the scalar v and beta loads |
 | `ex2.approx.ftz.f32` | 4 | the gate, one per lane element |
