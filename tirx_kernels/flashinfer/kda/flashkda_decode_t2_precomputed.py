@@ -259,6 +259,16 @@ def _ld_shared_i32(arena, byte_off):
     return T.reinterpret("int32", out[0])
 
 
+def _ld_shared_f32x4(arena, byte_off, dst, base):
+    """``ld.shared.v4.b32`` -- four contiguous shared floats."""
+    words = T.alloc_local((4,), "uint32")
+    T.evaluate(
+        T.ptx.ld.shared.v4.b32(words[0], words[1], words[2], words[3], arena.ptr_to([byte_off]))
+    )
+    for i in range(4):
+        T.buffer_store(dst, T.reinterpret("float32", words[i]), [base + i])
+
+
 def _st_shared_u32x4(arena, byte_off, words):
     """``st.shared.v4.b32`` -- the sState stage and the sK/sD publish."""
     T.evaluate(
@@ -463,6 +473,12 @@ def _flashkda_decode_t2_precomputed(
     ssm_idx = T.match_buffer(ssm_state_indices_h, (STATE_INDEX_ELEMENTS,), "int32", scope="global")
     nat = T.match_buffer(num_accepted_tokens_h, (NAT_ELEMENTS,), "int32", scope="global")
     T.device_entry()
+    # The source body declares __launch_bounds__(256) -- a vestigial Loom
+    # constant, since the binding launches 64 threads -- together with
+    # --maxrregcount=128. TIRx would otherwise emit __launch_bounds__(64), which
+    # lets ptxas spend 118 registers per thread against the source's 105; at 64
+    # threads that is 8 blocks/SM instead of 9. Asking for 9 brings it to 96.
+    T.attr({"tirx.launch_bounds_min_blocks_per_sm": 9})
 
     # The source uses dynamic smem; 14720 B fits the static limit, so the same
     # bytes are declared statically at the same alignment. The region offsets
@@ -615,13 +631,14 @@ def _flashkda_decode_t2_precomputed(
             if source_token >= 0:
                 dot_kk: T.float32 = T.float32(0.0)
                 dot_qk: T.float32 = T.float32(0.0)
+                sk_vec = T.alloc_local((4,), "float32")
+                _ld_shared_f32x4(
+                    arena, OFF_SK + (source_token * HEAD_DIM + elem_start) * 4, sk_vec, 0
+                )
                 for i in T.unroll(4):
-                    sk: T.float32 = _ld_shared_f32(
-                        arena, OFF_SK + (source_token * HEAD_DIM + elem_start + i) * 4
-                    )
                     # Source order: r * source_k * ratio  (:372-375).
-                    dot_kk = _fma(_mul(r_k[i], sk), ratio[i], dot_kk)
-                    dot_qk = _fma(_mul(r_q[i], sk), ratio[i], dot_qk)
+                    dot_kk = _fma(_mul(r_k[i], sk_vec[i]), ratio[i], dot_kk)
+                    dot_qk = _fma(_mul(r_q[i], sk_vec[i]), ratio[i], dot_qk)
                 for off in T.unroll(5):
                     dot_kk = _add(dot_kk, _shfl_bfly(dot_kk, 16 >> off))
                 for off in T.unroll(5):
@@ -640,13 +657,12 @@ def _flashkda_decode_t2_precomputed(
                         _mul(beta_source, dot_qk),
                     )
                 if source_token > 0:
+                    sd_vec = T.alloc_local((4,), "float32")
+                    _ld_shared_f32x4(
+                        arena, OFF_SD + (source_token * HEAD_DIM + elem_start) * 4, sd_vec, 0
+                    )
                     for i in T.unroll(4):
-                        ratio[i] = _mul(
-                            ratio[i],
-                            _ld_shared_f32(
-                                arena, OFF_SD + (source_token * HEAD_DIM + elem_start + i) * 4
-                            ),
-                        )
+                        ratio[i] = _mul(ratio[i], sd_vec[i])
 
     T.cuda.cta_sync()
 
@@ -1179,10 +1195,47 @@ def run_bench(
     timer: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Benchmark entry point. Implemented in the performance gate."""
-    raise SkipTest(
-        "flashkda_decode_t2_precomputed is at the scaffold stage; benchmarking is "
-        "enabled in the performance gate"
+    """Time the port against the frozen cake export on identical inputs."""
+    rounds = int(kwargs.pop("rounds", 5))
+    cooldown_s = float(kwargs.pop("cooldown_s", 1.0))
+    from tirx_kernels.runner import compile_kernel
+    from tvm.tirx.bench import bench
+
+    case = prepare_data(**kwargs)
+    executable = compile_kernel(get_kernel(**kwargs))
+    args = _tirx_args(case)
+
+    # Validate once, outside the timed region. Both sides mutate their own state
+    # pool in place, so this also proves the pools stayed independent.
+    executable(*args)
+    reference_out = _flashinfer_reference(case)
+    torch.cuda.synchronize(case["device"])
+    torch.testing.assert_close(
+        case["tirx_out"].float(), reference_out.float(), rtol=_RTOL, atol=_ATOL
+    )
+    torch.testing.assert_close(
+        case["tirx_state_raw"].float(), case["reference_state_raw"].float(), rtol=_RTOL, atol=_ATOL
+    )
+
+    def flashinfer_builder():
+        # The nvcc JIT build and warmup both happen here, outside the timing.
+        for _ in range(2):
+            _flashinfer_reference(case)
+        torch.cuda.synchronize(case["device"])
+
+        def launch():
+            _flashinfer_reference(case)
+
+        return launch
+
+    return bench(
+        {"tirx": lambda: executable(*args)},
+        warmup=warmup,
+        repeat=repeat,
+        timer=timer,
+        references={"flashinfer_cake": flashinfer_builder},
+        rounds=rounds,
+        cooldown_s=cooldown_s,
     )
 
 
