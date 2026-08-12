@@ -1,0 +1,27 @@
+# FlashKDA "cake" T=1 precomputed-gate decode, against the frozen FlashInfer
+# export it is ported from.
+#
+# The export's value split is chosen by the host from work = num_seqs *
+# num_value_heads against 2 * sm_count (recurrent_kda.py:1169-1177), so on a
+# 148-SM B200 the boundary is 296. Rows below name the split their shape
+# actually selects, and .porting/.../verify_dispatch.py asserts each one against
+# FlashInfer's own selector -- a row that drifted across the boundary would
+# silently benchmark the other kernel.
+#
+#   hv16h16_b1..b16    split16, HV = H = 16, the whole low-occupancy side
+#   hv16h16_b32..b128  split8, the same head count past the boundary
+#   hv12h12_*          Kimi K3 TP8 per-rank head count, one row per split side
+#   hv32h16_*          GQA ratio 2, matching FlashInfer's own export bench
+kernel: flashkda_decode_t1_precomputed
+configs:
+  - {config: hv16h16_b1_s16, default: true}
+  - {config: hv16h16_b4_s16, default: true}
+  - {config: hv16h16_b8_s16, default: true}
+  - {config: hv16h16_b16_s16, default: true}
+  - {config: hv16h16_b32_s8, default: true}
+  - {config: hv16h16_b64_s8, default: true}
+  - {config: hv16h16_b128_s8, default: true}
+  - {config: hv12h12_b8_s16, default: true}
+  - {config: hv12h12_b64_s8, default: true}
+  - {config: hv32h16_b8_s16, default: true}
+  - {config: hv32h16_b32_s8, default: true}
