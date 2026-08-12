@@ -106,7 +106,7 @@ HEAD_DIM     = 128
 THREADS      = 32                       # __launch_bounds__(32); one warp
 VALUE_SPLIT                             # 16 or 8; the only free knob
 TILE_ROW_STRIDE = 128 // VALUE_SPLIT    # 8 or 16 value rows per CTA  (:79)
-ROW_BLOCKS      = TILE_ROW_STRIDE // 8  # 1 or 2                      (:181)
+ROW_BLOCKS      = TILE_ROW_STRIDE // 8  # 1 or 2                      (:182)
 K_LANES, V_LANES = 16, 2
 H, HV, HEAD_RATIO                       # HV % H == 0, HV >= H
 GATE_TOKEN_STRIDE                       # g.stride(1); the only non-compact input
@@ -234,7 +234,9 @@ beta_value = cast(f32, beta[token_pos, hv])     # already sigmoided by the calle
 # ===========================================================================
 state_rows = reg_tile(f32, [4, 8])     # 4 value rows x 8 K elements; 32 registers
 
-for row_block in range(ROW_BLOCKS):    # `#pragma unroll 1` in the source (:182)
+for row_block in range(ROW_BLOCKS):    # `#pragma unroll 1` in the source (:181)
+    # The trip count itself is the constant on :182, one of the three that
+    # differ between the two exports.
     # ---- issue all four state-row loads before any math (:184-208) ----------
     # Prefetching the whole tile first is the source's own structure; the decay
     # math below depends on every row, so interleaving would serialise the
@@ -358,7 +360,7 @@ the evidence for every annotation above. Body totals, split16 / split8:
 | `shfl.sync.bfly.b32` | 46 | 46 | 5+5 L2 rounds, then 4 rounds x (k_dot_q, and pred/base per row) |
 | `shfl.sync.idx.b32` | 29 | 29 | 24 redistribution (:155-162) + 4 v broadcasts (:241,:244) + 1 dead `make_warp_uniform` (:39) |
 | `shl.b32` | 31 | 34 | 22 bf16 widening (6 vector at :102/:116/:130, 16 state at :205); the other 9 are index arithmetic |
-| `and.b32` | 25 | 25 | 23 at the widening sites, 2 index arithmetic (`lane & 15`, `tile_row_base`) |
+| `and.b32` | 25 | 25 | 22 bf16 widening (paired 1:1 with the `shl`), 3 index arithmetic: `lane & 15`, `tile_row_base`, and `lane & 16` for the v-broadcast source lane |
 | `cvt.rn.bf16x2.f32` | 16 | 16 | 4 pairs x 4 rows, the state store |
 | `ex2.approx.ftz.f32` | 8 | 8 | the gate, one per K element per lane |
 | `cvt.rn.bf16.f32` | 8 | 8 | 4 active out stores + 4 zero-fill stores |
@@ -372,6 +374,12 @@ the evidence for every annotation above. Body totals, split16 / split8:
 | `ld.global.nc.b32` | 3 | 3 | `cu_seqlens[n]`, `cu_seqlens[n+1]`, `ssm_state_indices[n]` |
 | `rsqrt.approx.ftz.f32` | 2 | 2 | the two L2 norms |
 | total | 558 | 572 | including the trailing `ret` |
+
+Count the widening pair by its `0xffff0000` operand, not by source line: split16
+schedules `and.b32 %r, %r, 16` (the `v_lane*16` broadcast lane) into `.loc :205`,
+where the state-row widening lives, while split8 attributes the same instruction
+to `.loc :71`. A per-`.loc` census therefore reports a 23rd widening `and` in
+split16 that does not exist; the widening counts are 22 `shl` / 22 `and` in both.
 
 Three consequences the port must honour:
 
