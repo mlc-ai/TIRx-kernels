@@ -1,15 +1,8 @@
+# This file is a TIRx port of code from flash-attention
+# (https://github.com/Dao-AILab/flash-attention @ 00756db9),
 # Copyright (c) 2025, Ted Zadouri, Markus Hoehnerbach, Jay Shah, Tri Dao.
-
-# Licensed under the BSD 3-Clause License; the AUTHORS file its copyright
-# notice refers to is licenses/AUTHORS.flash-attention.txt and the full
-# license text is licenses/LICENSE.flash-attention.txt.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# This file is a TIRx port of Dao-AILab/flash-attention's
-# flash_attn/cute/flash_bwd_sm100.py (Dao-AILab/flash-attention @ 00756db9).
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """SM100 two-CTA FlashAttention backward kernel using raw CUDA/PTX wrappers.
 

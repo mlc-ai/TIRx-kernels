@@ -1,17 +1,7 @@
 # This file is a TIRx port of code from DeepGEMM
-# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
-# DeepSeek, licensed under the MIT License. The upstream sources carry no
-# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
-# license text.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# Data preparation and reference oracles for the TIRx port of DeepGEMM's
-# sm100_fp8_fp4_gemm_1d1d. The quantization recipes, scale-factor layout
-# transform and accuracy metric mirror deep_gemm/utils/math.py,
-# csrc/apis/layout.hpp and deep_gemm/testing/numeric.py.
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """Operand construction, scale-factor packing and correctness oracles.
 

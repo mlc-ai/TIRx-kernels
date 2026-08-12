@@ -1,15 +1,7 @@
 # This file is a TIRx port of code from DeepGEMM
-# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025
-# DeepSeek, licensed under the MIT License. The upstream sources carry no
-# per-file license header; see licenses/LICENSE.deepgemm.txt for the full
-# license text.
-#
-# Modifications Copyright (c) 2026 The TIRx Authors.
-# Modifications are licensed under the Apache License, Version 2.0.
-#
-# TIRx port of DeepGEMM's TF32 prenorm GEMM. The split heuristic follows
-# SGLang's _compute_num_split_for_mhc_pre (Apache-2.0).
-# See LICENSE, NOTICE, and licenses/ for the applicable terms.
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 from __future__ import annotations
 

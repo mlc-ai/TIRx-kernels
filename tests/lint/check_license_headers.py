@@ -1,62 +1,59 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 The TIRx Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
 
 """Check that every tracked Python file carries an acceptable license header.
 
-Two shapes are accepted:
+Headers are SPDX tags, in the style of vLLM's. Two shapes are accepted:
 
-* the TIRx Apache header, for code with no upstream lineage; and
-* a port header, for files ported from an upstream project: the upstream
-  copyright notice (reproduced verbatim from the upstream file, or an explicit
-  statement of the upstream terms where upstream ships no per-file header),
-  followed by the TIRx modification block.
+* the TIRx header alone, for code with no upstream lineage::
+
+      # SPDX-License-Identifier: Apache-2.0
+      # SPDX-FileCopyrightText: Copyright TIRx authors
+
+* a port header, for files ported from an upstream project: a citation naming
+  the project, its URL and the exact upstream commit, the upstream copyright
+  notice, and an SPDX expression covering the upstream license as well as ours::
+
+      # This file is a TIRx port of code from DeepGEMM
+      # (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+      # SPDX-License-Identifier: Apache-2.0 AND MIT
+      # SPDX-FileCopyrightText: Copyright TIRx authors
 
 Ports must use the second shape: dropping the upstream notice from a ported
 file is exactly the drift this check exists to prevent. Unlike ASF-style header
 checks, upstream ``Copyright`` lines are required rather than forbidden.
 
-Run ``--fix`` to insert the TIRx Apache header into files that have no header
-at all; port headers are never synthesized, since only a human knows what the
-upstream terms are.
+Full license texts live in ``licenses/``; ``LICENSE`` maps each bucket of the
+tree to its license. Where an upstream license requires the conditions text
+itself to travel with the source (BSD-3), that text stays in the file verbatim
+and is not replaced by a tag.
+
+Run ``--fix`` to insert the TIRx header into files that have no header at all;
+port headers are never synthesized, since only a human knows the upstream terms.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
-TIRX_APACHE = """\
-# Copyright (c) 2026 The TIRx Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License."""
+SPDX_ID = "# SPDX-License-Identifier: "
+SPDX_COPYRIGHT = "# SPDX-FileCopyrightText: Copyright TIRx authors"
+TIRX_HEADER = f"{SPDX_ID}Apache-2.0\n{SPDX_COPYRIGHT}"
+
+# Our own contribution is always Apache-2.0; a port additionally carries the
+# upstream license, spelled as an SPDX `AND` expression.
+ID_RE = re.compile(r"^Apache-2\.0(?: AND (?:MIT|BSD-3-Clause))?$")
+
+# A port must cite the upstream project, its URL and the exact commit ported.
+PORT_LINE = "# This file is a TIRx port of code from "
+CITATION_RE = re.compile(r"\(https://\S+ @ [0-9a-f]{7,40}\)")
 
 # Buckets holding ports of third-party kernels: every module under them must
 # carry a port header, not the plain TIRx one.
@@ -74,11 +71,15 @@ PORT_DIR_EXCEPTIONS = {
     "tirx_kernels/flashmla/utils/_trtllm_gen_bench.py",
 }
 
-MODS_LINE = "# Modifications Copyright (c) 2026 The TIRx Authors."
-MODS_LICENSE_LINE = "# Modifications are licensed under the Apache License, Version 2.0."
-
-# Retired file: attributions live in LICENSE + licenses/ now.
-BANNED = ("THIRD_PARTY_LICENSES", "TIRX Authors")
+# Retired: the old per-file "Modifications" block and the pointer paragraph that
+# went with it; attributions live in the SPDX tags, LICENSE and licenses/ now.
+BANNED = (
+    "THIRD_PARTY_LICENSES",
+    "TIRX Authors",
+    "Modifications Copyright",
+    "Modifications are licensed",
+    "See LICENSE, NOTICE",
+)
 
 
 def header_of(text: str) -> str:
@@ -115,22 +116,24 @@ def check(rel: str, text: str) -> list[str]:
         errors.append(f"{rel}: missing license header (run --fix to add the TIRx one)")
         return errors
 
-    has_tirx_apache = header.startswith(TIRX_APACHE)
-    has_mods = MODS_LINE in header and MODS_LICENSE_LINE in header
+    lines = header.splitlines()
+    ids = [ln[len(SPDX_ID) :] for ln in lines if ln.startswith(SPDX_ID)]
+    if len(ids) != 1:
+        errors.append(f"{rel}: expected exactly one {SPDX_ID.strip()} line, found {len(ids)}")
+    elif not ID_RE.match(ids[0]):
+        errors.append(f"{rel}: unexpected SPDX license expression {ids[0]!r}")
+    if SPDX_COPYRIGHT not in lines:
+        errors.append(f"{rel}: missing {SPDX_COPYRIGHT!r}")
 
     if is_port(rel):
-        if not has_mods:
-            errors.append(f"{rel}: ported file is missing the TIRx modification block")
-        upstream = header.split(MODS_LINE)[0]
-        if "Copyright" not in upstream and "licensed under" not in upstream:
-            errors.append(f"{rel}: ported file is missing its upstream copyright / license notice")
-        if has_tirx_apache:
-            errors.append(
-                f"{rel}: ported file uses the plain TIRx header; reproduce the upstream "
-                "header and add the modification block instead"
-            )
-    elif not has_tirx_apache and not has_mods:
-        errors.append(f"{rel}: header is neither the TIRx Apache header nor a port header")
+        if not any(ln.startswith(PORT_LINE) for ln in lines):
+            errors.append(f"{rel}: ported file is missing its {PORT_LINE.strip()!r} citation")
+        if not CITATION_RE.search(header):
+            errors.append(f"{rel}: ported file is missing an upstream '(url @ commit)' citation")
+        if "Copyright" not in header.split(SPDX_COPYRIGHT)[0]:
+            errors.append(f"{rel}: ported file is missing its upstream copyright notice")
+    elif header != TIRX_HEADER:
+        errors.append(f"{rel}: native file must carry exactly the two-line TIRx SPDX header")
 
     return errors
 
@@ -159,7 +162,7 @@ def main() -> int:
             shebang = [lines.pop(0)] if lines and lines[0].startswith("#!") else []
             body = "\n".join(lines).lstrip("\n")
             path.write_text(
-                "\n".join(shebang) + ("\n" if shebang else "") + TIRX_APACHE + "\n\n" + body
+                "\n".join(shebang) + ("\n" if shebang else "") + TIRX_HEADER + "\n\n" + body
             )
             text = path.read_text()
         errors += check(rel, text)

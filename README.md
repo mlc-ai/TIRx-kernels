@@ -186,8 +186,11 @@ Except where otherwise noted, this project is licensed under the Apache
 License 2.0; see [LICENSE](LICENSE). Required Apache attribution notices are
 collected in [NOTICE](NOTICE).
 
-Kernel ports derived from third-party projects (DeepGEMM, FlashMLA,
-flash-attention, FlashInfer) reproduce their upstream file headers verbatim and
-retain their upstream terms. The third-party section at the end of
-[LICENSE](LICENSE) lists which components fall under which license, and
-[`licenses/`](licenses) holds the corresponding license texts.
+Every file carries SPDX tags. Kernel ports derived from third-party projects
+(DeepGEMM, FlashMLA, flash-attention, FlashInfer) additionally cite the upstream
+project and the exact commit ported, retain the upstream copyright notice, and
+declare the combined terms — for example `Apache-2.0 AND MIT`. Where an upstream
+license requires its conditions text to travel with the source, that text is kept
+in the file verbatim. The third-party section at the end of [LICENSE](LICENSE)
+lists which components fall under which license, and [`licenses/`](licenses)
+holds the corresponding license texts.
