@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': 'ea0950ab', 'tirx-kernels': '61f08633', 'tirx-bench-ci': None}`
-- Workloads: 306 ok, 0 failed
+- Git:       `{'tir': 'ea0950ab', 'tirx-kernels': '8166f465', 'tirx-bench-ci': None}`
+- Workloads: 320 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -270,6 +270,25 @@ Grouped workloads show one row per config and one timing column per implementati
 | `hv32h16_b3_s4` | tirx | 8.7830 | flashinfer_cake | 10.1928 | 1.161 | — |
 | `hv32h16_b64_s1` | tirx | 81.5038 | flashinfer_cake | 83.4040 | 1.023 | — |
 | `hv32h16_b8_s1` | tirx | 14.1634 | flashinfer_cake | 16.0528 | 1.133 | — |
+
+## flashkda_decode_t6_gram
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `hv12h12_b64_s1` | tirx | 40.5521 | flashinfer_cake | 42.6733 | 1.052 | — |
+| `hv12h12_b8_s4` | tirx | 14.6156 | flashinfer_cake | 16.3846 | 1.121 | — |
+| `hv16h16_b2_s8` | tirx | 7.2648 | flashinfer_cake | 8.8093 | 1.213 | — |
+| `hv16h16_b5_s4` | tirx | 14.0451 | flashinfer_cake | 15.5771 | 1.109 | — |
+| `hv16h16_b64_s1` | tirx | 50.3282 | flashinfer_cake | 53.0568 | 1.054 | — |
+| `hv16h16_b8_s2` | tirx | 10.6076 | flashinfer_cake | 12.1318 | 1.144 | — |
+| `hv32h16_b128_s1` | tirx | 176.9601 | flashinfer_cake | 179.9378 | 1.017 | — |
+| `hv32h16_b16_s1` | tirx | 27.7680 | flashinfer_cake | 29.5093 | 1.063 | — |
+| `hv32h16_b1_s8` | tirx | 7.4356 | flashinfer_cake | 9.3149 | 1.253 | — |
+| `hv32h16_b2_s2` | tirx | 8.6672 | flashinfer_cake | 9.6263 | 1.111 | — |
+| `hv32h16_b32_s1` | tirx | 48.9775 | flashinfer_cake | 52.2079 | 1.066 | — |
+| `hv32h16_b3_s4` | tirx | 14.5367 | flashinfer_cake | 16.3726 | 1.126 | — |
+| `hv32h16_b64_s1` | tirx | 91.6520 | flashinfer_cake | 92.8344 | 1.013 | — |
+| `hv32h16_b8_s1` | tirx | 15.2837 | flashinfer_cake | 17.0185 | 1.114 | — |
 
 ## fp16_bf16_gemm
 
