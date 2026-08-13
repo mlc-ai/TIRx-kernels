@@ -79,6 +79,54 @@ _ldmatrix_x4 = _t2._ldmatrix_x4
 _mma_zero = _t2._mma_zero
 _mma_acc = _t2._mma_acc
 
+
+def _div(a, b):
+    """``div.approx.ftz.f32`` -- the lowering nvcc picks for ``k / prefix``.
+
+    Read off the exported PTX (8 of them in phase C′, none of the rcp+mul or
+    full-range forms). ``-use_fast_math`` is what selects the approximate line.
+    """
+    return _ptx_bin("div.approx.ftz.f32", a, b)
+
+
+def _named_bar_sync(bar_id: int, threads: int):
+    """``barrier.sync <id>, <count>`` -- blocks until `count` threads arrive."""
+    T.evaluate(T.ptx["barrier.sync"](bar_id, threads))
+
+
+def _named_bar_arrive(bar_id: int, threads: int):
+    """``barrier.arrive <id>, <count>`` -- releases, does NOT block or acquire."""
+    T.evaluate(T.ptx["barrier.arrive"](bar_id, threads))
+
+
+def _mma_zero_b(acc, a, b, b0: int):
+    """``mma.sync...m16n8k16`` with an explicit zero C, B taken at ``b[b0:b0+2]``.
+
+    The gram block issues two products from one pair of ``ldmatrix`` results, so
+    unlike the shared helper this one has to select the B half.
+    """
+    T.evaluate(
+        T.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+            acc[0], acc[1], acc[2], acc[3],
+            a[0], a[1], a[2], a[3],
+            b[b0], b[b0 + 1],
+            *_t2._MMA_ZERO_C,
+        )
+    )  # fmt: skip
+
+
+def _mma_acc_b(acc, a, b, b0: int):
+    """Same, accumulating: C aliases D, matching the source's `+f` tied registers."""
+    T.evaluate(
+        T.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+            acc[0], acc[1], acc[2], acc[3],
+            a[0], a[1], a[2], a[3],
+            b[b0], b[b0 + 1],
+            acc[0], acc[1], acc[2], acc[3],
+        )
+    )  # fmt: skip
+
+
 # --- source pinning -------------------------------------------------------
 # Raw and normalized digests differ for every T=5 export; the hash of the bytes
 # between the BEGIN/END markers is the raw one (verified for all four).
@@ -437,7 +485,498 @@ def _flashkda_decode_t5_gram(
     ssm_idx = T.match_buffer(ssm_state_indices_h, (STATE_INDEX_ELEMENTS,), "int32", scope="global")
     nat = T.match_buffer(num_accepted_tokens_h, (NAT_ELEMENTS,), "int32", scope="global")
     T.device_entry()
-    # TRANSCRIBE: the frozen body goes here (kernel-sketch stage).
+
+    # The source uses dynamic smem; every split's total fits the static limit
+    # (split1 with 128 B to spare), so the same bytes are declared statically at
+    # the same alignment. The region offsets and the alignment are what the
+    # swizzled ldmatrix addressing depends on.
+    arena = T.alloc_buffer((SMEM_TOTAL,), "uint8", scope="shared", align=1024)
+
+    # --- work decomposition and lane roles (:142-178) ----------------------
+    work, n = T.cta_id([NUM_VALUE_HEADS * VALUE_SPLIT, NUM_SEQS])
+    tid = T.thread_id([THREADS])
+    value_tile: T.int32 = work % VALUE_SPLIT
+    hv: T.int32 = work // VALUE_SPLIT
+    query_head: T.int32 = hv // HEAD_RATIO
+    warp: T.int32 = tid // 32  # == token index in phases A and C'
+    lane: T.int32 = tid % 32
+    lane_quad: T.int32 = lane % 4
+    frag_row: T.int32 = lane // 4
+    quad_base: T.int32 = lane - lane_quad
+    group: T.int32 = tid // 16
+    lane_group: T.int32 = tid % 16
+    k_start: T.int32 = lane_group * 8
+    elem_start: T.int32 = lane * 4
+    tile_row_base: T.int32 = value_tile * ROWS_PER_CTA
+    owned_row_base: T.int32 = group * ROWS_PER_GROUP
+    token_base: T.int32 = _load_i32(cu, n)
+    seq_len: T.int32 = _load_i32(cu, n + 1) - token_base
+
+    r_q = T.alloc_local((4,), "float32")
+    r_k = T.alloc_local((4,), "float32")
+    r_d = T.alloc_local((4,), "float32")
+
+    # =======================================================================
+    # Phase A: token preprocess, warp <-> token  (:180-290)
+    # =======================================================================
+    # Identical to the ported T=4 phase A apart from the token count, the
+    # ssm_state_indices stride and the nat clamp ceiling.
+    if warp < NUM_TOKENS:
+        token: T.int32 = warp
+        active_token = token < seq_len
+        token_pos: T.int32 = T.if_then_else(active_token, token_base + token, 0)
+        qk_base: T.int32 = (token_pos * NUM_HEADS + query_head) * HEAD_DIM + elem_start
+        gate_base: T.int32 = token_pos * GATE_TOKEN_STRIDE + hv * HEAD_DIM + elem_start
+
+        q_words = _load_u32x2(q, qk_base)
+        k_words = _load_u32x2(k, qk_base)
+        g_words = _load_u32x2(g, gate_base)
+        for pair in T.unroll(2):
+            r_q[2 * pair] = _widen_lo(q_words[pair])
+            r_q[2 * pair + 1] = _widen_hi(q_words[pair])
+            r_k[2 * pair] = _widen_lo(k_words[pair])
+            r_k[2 * pair + 1] = _widen_hi(k_words[pair])
+            r_d[2 * pair] = _widen_lo(g_words[pair])
+            r_d[2 * pair + 1] = _widen_hi(g_words[pair])
+
+        # Index-ordered accumulation (:241-244); the first term has a zero addend
+        # and the two chains interleave, because the source fuses them in one loop.
+        q_sq: T.float32 = _fma(
+            r_q[3],
+            r_q[3],
+            _fma(r_q[2], r_q[2], _fma(r_q[1], r_q[1], _fma(r_q[0], r_q[0], T.float32(0.0)))),
+        )
+        k_sq: T.float32 = _fma(
+            r_k[3],
+            r_k[3],
+            _fma(r_k[2], r_k[2], _fma(r_k[1], r_k[1], _fma(r_k[0], r_k[0], T.float32(0.0)))),
+        )
+        # Two sequential full-warp butterflies, not interleaved (:245-254).
+        for off in T.unroll(5):
+            q_sq = _add(q_sq, _shfl_bfly(q_sq, 16 >> off))
+        for off in T.unroll(5):
+            k_sq = _add(k_sq, _shfl_bfly(k_sq, 16 >> off))
+        q_norm: T.float32 = _mul(_rsqrt(_add(q_sq, T.float32(L2_EPS))), scale)
+        k_norm: T.float32 = _rsqrt(_add(k_sq, T.float32(L2_EPS)))
+
+        # GATE_KIND == 0: `g` already holds log(gamma), so one exp per element.
+        k_pub = T.alloc_local((4,), "uint32")
+        d_pub = T.alloc_local((4,), "uint32")
+        for i in T.unroll(4):
+            r_q[i] = _mul(r_q[i], q_norm)
+            r_k[i] = _mul(r_k[i], k_norm)
+            r_d[i] = _expf(r_d[i])
+            k_pub[i] = T.reinterpret("uint32", r_k[i])
+            d_pub[i] = T.reinterpret("uint32", r_d[i])
+        # Four contiguous f32 per lane: one 16-byte shared store each, not four
+        # scalar ones (:269-270 lower to 2 st.shared.v4.b32).
+        _st_shared_u32x4(arena, OFF_SK + (token * HEAD_DIM + elem_start) * 4, k_pub)
+        _st_shared_u32x4(arena, OFF_SD + (token * HEAD_DIM + elem_start) * 4, d_pub)
+
+        if lane == 0:
+            raw_slot: T.int32 = _load_i32(ssm_idx, n * NUM_TOKENS + token)
+            _st_shared_i32(arena, OFF_SSLOT + token * 4, T.if_then_else(active_token, raw_slot, -1))
+            _st_shared_i32(arena, OFF_STOKEN + token * 4, token_pos)
+            _st_shared_f32(
+                arena, OFF_SBETA + token * 4, _load_bf16_f32(beta, token_pos * NUM_VALUE_HEADS + hv)
+            )
+            if token == 0:
+                # nat picks the initial checkpoint slot; at T=5 the clamp ceiling
+                # is 4 and both edges are reachable (:279-287).
+                accepted: T.int32 = T.min(T.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1)
+                initial_slot: T.int32 = _load_i32(ssm_idx, n * NUM_TOKENS + accepted)
+                _st_shared_i32(arena, OFF_SINIT, T.max(initial_slot, 0))
+
+    T.cuda.cta_sync()
+
+    # =======================================================================
+    # Phase C': sVec columns and the gram operand  (:293-339)
+    # =======================================================================
+    # Runs BEFORE the state gather at T=5 -- the reverse of the T=4 order.
+    if warp < NUM_TOKENS:
+        token_c: T.int32 = warp
+        for i in T.unroll(4):
+            k_idx: T.int32 = elem_start + i
+            prefix: T.float32 = T.float32(1.0)
+            # Scalar loads: the walk is across tokens at a fixed key, so
+            # consecutive iterations are 512 B apart (:296-302).
+            for j in T.unroll(NUM_TOKENS):
+                if token_c >= j:
+                    prefix = _mul(
+                        prefix, _ld_shared_f32(arena, OFF_SD + (j * HEAD_DIM + k_idx) * 4)
+                    )
+            _st_shared_b16(
+                arena,
+                OFF_SVEC + _swz(k_idx * 32 + token_c * 2),
+                _ptx_un("cvt.rn.bf16.f32", _mul(prefix, r_k[i]), dtype="uint16"),
+            )
+            # The q column is 8 + token at T=5, not 4 + token: the generator
+            # emits `c_col = 4 + token` and immediately overrides it (:311-314).
+            _st_shared_b16(
+                arena,
+                OFF_SVEC + _swz(k_idx * 32 + (8 + token_c) * 2),
+                _ptx_un("cvt.rn.bf16.f32", _mul(prefix, r_q[i]), dtype="uint16"),
+            )
+            # The gate-DEFLATED key, the operand that makes the Gram product come
+            # out as T<=4's ratio_scan factor. div.approx.ftz.f32 per the PTX.
+            deflated = _ptx_un("cvt.rn.bf16.f32", _div(r_k[i], prefix), dtype="uint16")
+            if k_idx < 64:
+                _st_shared_b16(arena, OFF_SGRAMA0 + _swz(token_c * 128 + k_idx * 2), deflated)
+            else:
+                _st_shared_b16(
+                    arena, OFF_SGRAMA1 + _swz(token_c * 128 + (k_idx - 64) * 2), deflated
+                )
+
+    # =======================================================================
+    # Phase C'': the coefficient Gram block  (:340-408)  -- new at T=5
+    # =======================================================================
+    # One warp forms both token x token Gram products on tensor cores, replacing
+    # T<=4's inter-token butterfly path entirely. The barrier is partial: only
+    # the five token warps take part, which is why its count is 160 in every
+    # split, including split1's 256-thread launch.
+    if warp < NUM_TOKENS:
+        if GRAM_SYNC_ALL == 1:
+            # split4 hoists the wait out of the branch: all five token warps
+            # block, and the arrive arm below is `else if (0)` -- dead (S4:340-344).
+            _named_bar_sync(1, NUM_TOKENS * 32)
+        if warp == GRAM_WARP:
+            if GRAM_SYNC_ALL == 0:
+                _named_bar_sync(1, NUM_TOKENS * 32)
+            gram_a = T.alloc_local((4,), "uint32", align=4)
+            gram_b = T.alloc_local((4,), "uint32", align=4)
+            gram_k_acc = T.alloc_local((4,), "float32", align=4)
+            gram_q_acc = T.alloc_local((4,), "float32", align=4)
+            for gram_half in T.unroll(2):
+                for gram_step in T.unroll(4):
+                    gram_k: T.int32 = gram_step * 16
+                    global_gram_k: T.int32 = gram_half * 64 + gram_k
+                    a_off: T.int32 = (lane % 16 * 64 + (gram_k + lane // 16 * 8)) * 2
+                    if gram_half == 0:
+                        _ldmatrix_x4(arena, OFF_SGRAMA0 + _swz(a_off), gram_a, False)
+                    else:
+                        _ldmatrix_x4(arena, OFF_SGRAMA1 + _swz(a_off), gram_a, False)
+                    # Same sVec address formula as phase D's operand (:360-361
+                    # vs :454-455); frags 0,1 are columns 0..7 (the k side) and
+                    # 2,3 are columns 8..15 (the q side).
+                    _ldmatrix_x4(
+                        arena,
+                        OFF_SVEC + _swz(((global_gram_k + lane % 16) * 16 + lane // 16 * 8) * 2),
+                        gram_b,
+                        True,
+                    )
+                    if gram_half == 0 and gram_step == 0:
+                        _mma_zero_b(gram_k_acc, gram_a, gram_b, 0)
+                        _mma_zero_b(gram_q_acc, gram_a, gram_b, 2)
+                    else:
+                        _mma_acc_b(gram_k_acc, gram_a, gram_b, 0)
+                        _mma_acc_b(gram_q_acc, gram_a, gram_b, 2)
+
+            # The transpose of T<=4's roles: the MMA M index is the SOURCE token
+            # and the N index (the sVec column) is the TARGET (:387-404). Only
+            # acc[0],[1] are read -- acc[2],[3] hold M rows 8..15, past the five
+            # real tokens.
+            source_token: T.int32 = frag_row
+            target0: T.int32 = lane_quad * 2
+            target1: T.int32 = target0 + 1
+            if source_token < NUM_TOKENS:
+                beta_source: T.float32 = _ld_shared_f32(arena, OFF_SBETA + source_token * 4)
+                if source_token < target0 and target0 < NUM_TOKENS:
+                    _st_shared_f32(
+                        arena,
+                        OFF_SL + (target0 * NUM_TOKENS + source_token) * 4,
+                        _mul(beta_source, gram_k_acc[0]),
+                    )
+                if source_token < target1 and target1 < NUM_TOKENS:
+                    _st_shared_f32(
+                        arena,
+                        OFF_SL + (target1 * NUM_TOKENS + source_token) * 4,
+                        _mul(beta_source, gram_k_acc[1]),
+                    )
+                if source_token <= target0 and target0 < NUM_TOKENS:
+                    _st_shared_f32(
+                        arena,
+                        OFF_SR + (target0 * NUM_TOKENS + source_token) * 4,
+                        _mul(beta_source, gram_q_acc[0]),
+                    )
+                if source_token <= target1 and target1 < NUM_TOKENS:
+                    _st_shared_f32(
+                        arena,
+                        OFF_SR + (target1 * NUM_TOKENS + source_token) * 4,
+                        _mul(beta_source, gram_q_acc[1]),
+                    )
+        else:
+            if GRAM_SYNC_ALL == 0:
+                _named_bar_arrive(1, NUM_TOKENS * 32)
+
+    # =======================================================================
+    # Phase B: state gather and sState stage  (:410-446)
+    # =======================================================================
+    init_slot: T.int32 = _ld_shared_i32(arena, OFF_SINIT)
+    head_base = T.cast(init_slot, "int64") * T.cast(STATE_SLOT_STRIDE, "int64") + T.cast(
+        hv * HEAD_DIM * HEAD_DIM, "int64"
+    )
+    hist = T.alloc_local((ROWS_PER_GROUP * 8,), "float32")
+    if group < ROW_GROUPS:
+        for row_local in T.unroll(ROWS_PER_GROUP):
+            # Two distinct indices: row_l is CTA-local and addresses sState;
+            # tile_row_base + row_l is the global row of `state` (:414-415).
+            row_l: T.int32 = owned_row_base + row_local
+            pack = _load_u32x4(
+                state, head_base + T.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64")
+            )
+            for pr in T.unroll(4):
+                hist[row_local * 8 + 2 * pr] = _widen_lo(pack[pr])
+                hist[row_local * 8 + 2 * pr + 1] = _widen_hi(pack[pr])
+            # An if/ELSE selecting the destination half, not a guard: lanes 8..15
+            # stage keys 64..127 into sState1 (:438-442). The bf16 bits go to
+            # shared unmodified; the swizzle is on the byte offset.
+            if lane_group < 8:
+                _st_shared_u32x4(arena, OFF_SSTATE0 + _swz(row_l * 128 + k_start * 2), pack)
+            else:
+                _st_shared_u32x4(arena, OFF_SSTATE1 + _swz(row_l * 128 + (k_start - 64) * 2), pack)
+
+    T.cuda.cta_sync()
+    # Besides sState and sL/sR, this is the sVec publish edge for every MMA warp
+    # except the gram warp: `barrier.arrive` releases but does not acquire, so an
+    # arriving token warp has synchronized with the others only here.
+
+    # =======================================================================
+    # Phase D: the MMA chain, warp <-> 16 value rows  (:448-490)
+    # =======================================================================
+    # Two issues per step at T=5: the k side needs sVec columns 0..4 and the q
+    # side 8..12, which no single n=8 tile covers. `mma_acc_c` and
+    # `vec_frag[2],[3]` were dead at every T <= 4.
+    acc = T.alloc_local((4,), "float32", align=4)
+    acc_c = T.alloc_local((4,), "float32", align=4)
+    if warp < MMA_WARPS:
+        vec_frag = T.alloc_local((4,), "uint32", align=4)
+        state_frag = T.alloc_local((4,), "uint32", align=4)
+        for state_half in T.unroll(2):
+            for mma_step in T.unroll(4):
+                mma_k: T.int32 = mma_step * 16
+                global_k: T.int32 = state_half * 64 + mma_k
+                _ldmatrix_x4(
+                    arena,
+                    OFF_SVEC + _swz((global_k + lane % 16) * 32 + lane // 16 * 16),
+                    vec_frag,
+                    True,
+                )
+                if state_half == 0:
+                    _ldmatrix_x4(
+                        arena,
+                        OFF_SSTATE0
+                        + _swz((warp * 16 + lane % 16) * 128 + (mma_k + lane // 16 * 8) * 2),
+                        state_frag,
+                        False,
+                    )
+                else:
+                    _ldmatrix_x4(
+                        arena,
+                        OFF_SSTATE1
+                        + _swz((warp * 16 + lane % 16) * 128 + (mma_k + lane // 16 * 8) * 2),
+                        state_frag,
+                        False,
+                    )
+                if state_half == 0 and mma_step == 0:
+                    _mma_zero_b(acc, state_frag, vec_frag, 0)
+                    _mma_zero_b(acc_c, state_frag, vec_frag, 2)
+                else:
+                    _mma_acc_b(acc, state_frag, vec_frag, 0)
+                    _mma_acc_b(acc_c, state_frag, vec_frag, 2)
+
+    # =======================================================================
+    # Phase E: quad broadcast and the WY forward substitution  (:491-560)
+    # =======================================================================
+    u_lo = T.alloc_local((NUM_TOKENS,), "float32")
+    u_hi = T.alloc_local((NUM_TOKENS,), "float32")
+    # hc_* is declared out here because phase F consumes it from its own block;
+    # ha_* never leaves phase E.
+    hc_lo = T.alloc_local((NUM_TOKENS,), "float32")
+    hc_hi = T.alloc_local((NUM_TOKENS,), "float32")
+    if warp < MMA_WARPS:
+        # 20 broadcasts in the source's emission order (:491-531). m16n8k16 puts
+        # columns 2q, 2q+1 of row frag_row in lane quad_base+q's acc[0],[1] and
+        # rows +8 in acc[2],[3], so token t lives at (quad_base + t//2, t%2).
+        # ha_* is the k side (the solve), hc_* the q side (the outputs).
+        ha_lo = T.alloc_local((NUM_TOKENS,), "float32")
+        ha_hi = T.alloc_local((NUM_TOKENS,), "float32")
+        for t in T.unroll(4):
+            ha_lo[t] = _shfl_idx(acc[t % 2], quad_base + t // 2)
+        for t in T.unroll(4):
+            ha_hi[t] = _shfl_idx(acc[2 + t % 2], quad_base + t // 2)
+        ha_lo[4] = _shfl_idx(acc[0], quad_base + 2)
+        ha_hi[4] = _shfl_idx(acc[2], quad_base + 2)
+        for t in T.unroll(NUM_TOKENS):
+            hc_lo[t] = _shfl_idx(acc_c[t % 2], quad_base + t // 2)
+        for t in T.unroll(NUM_TOKENS):
+            hc_hi[t] = _shfl_idx(acc_c[2 + t % 2], quad_base + t // 2)
+
+        if lane_quad == 2:
+            row_lo: T.int32 = warp * 16 + frag_row
+            row_hi: T.int32 = row_lo + 8
+            for t in T.unroll(NUM_TOKENS):
+                base_t: T.int32 = (
+                    _ld_shared_i32(arena, OFF_STOKEN + t * 4) * NUM_VALUE_HEADS + hv
+                ) * HEAD_DIM
+                solved_lo: T.float32 = _sub(
+                    _load_bf16_f32(v, base_t + tile_row_base + row_lo), ha_lo[t]
+                )
+                solved_hi: T.float32 = _sub(
+                    _load_bf16_f32(v, base_t + tile_row_base + row_hi), ha_hi[t]
+                )
+                for prev in T.unroll(NUM_TOKENS):
+                    if prev < t:
+                        lts: T.float32 = _ld_shared_f32(arena, OFF_SL + (t * NUM_TOKENS + prev) * 4)
+                        solved_lo = _sub(solved_lo, _mul(lts, u_lo[prev]))
+                        solved_hi = _sub(solved_hi, _mul(lts, u_hi[prev]))
+                u_lo[t] = solved_lo
+                u_hi[t] = solved_hi
+
+        # The solve runs on lane_quad == 2 but lane_quad == 3 also writes output,
+        # so the residuals cross the quad (:554-560).
+        for t in T.unroll(NUM_TOKENS):
+            u_lo[t] = _shfl_idx(u_lo[t], quad_base + 2)
+            u_hi[t] = _shfl_idx(u_hi[t], quad_base + 2)
+
+    # =======================================================================
+    # Phase F: the outputs  (:562-640)
+    # =======================================================================
+    # The bases come from hc_* (the q-side MMA), not from acc: the source
+    # assigns acc[0..3] and then unconditionally overwrites (:567-582). The
+    # lane_quad == 3 remap uses STATIC indices, as the source does -- indexing
+    # hc_* by a runtime token would spill the register array to local memory.
+    if warp < MMA_WARPS and lane_quad >= 2:
+        token0: T.int32 = (lane_quad - 2) * 2
+        token1: T.int32 = token0 + 1
+        row_lo_f: T.int32 = warp * 16 + frag_row
+        row_hi_f: T.int32 = row_lo_f + 8
+        out0_lo: T.float32 = hc_lo[0]
+        out1_lo: T.float32 = hc_lo[1]
+        out0_hi: T.float32 = hc_hi[0]
+        out1_hi: T.float32 = hc_hi[1]
+        if lane_quad == 3:
+            out0_lo = hc_lo[2]
+            out1_lo = hc_lo[3]
+            out0_hi = hc_hi[2]
+            out1_hi = hc_hi[3]
+        for src in T.unroll(NUM_TOKENS):
+            residual_lo: T.float32 = u_lo[src]
+            residual_hi: T.float32 = u_hi[src]
+            coef0: T.float32 = T.float32(0.0)
+            coef1: T.float32 = T.float32(0.0)
+            # The masked-out coefficient is a real zero-operand fma, not a
+            # skipped iteration (:585-594).
+            if token0 >= src:
+                coef0 = _ld_shared_f32(arena, OFF_SR + (token0 * NUM_TOKENS + src) * 4)
+            if token1 >= src:
+                coef1 = _ld_shared_f32(arena, OFF_SR + (token1 * NUM_TOKENS + src) * 4)
+            out0_lo = _fma(coef0, residual_lo, out0_lo)
+            out1_lo = _fma(coef1, residual_lo, out1_lo)
+            out0_hi = _fma(coef0, residual_hi, out0_hi)
+            out1_hi = _fma(coef1, residual_hi, out1_hi)
+
+        for half in T.unroll(2):
+            token_o: T.int32 = T.if_then_else(half == 0, token0, token1)
+            o_lo: T.float32 = T.if_then_else(half == 0, out0_lo, out1_lo)
+            o_hi: T.float32 = T.if_then_else(half == 0, out0_hi, out1_hi)
+            active_o = _ld_shared_i32(arena, OFF_SSLOT + token_o * 4) >= 0
+            base_o: T.int32 = (
+                _ld_shared_i32(arena, OFF_STOKEN + token_o * 4) * NUM_VALUE_HEADS + hv
+            ) * HEAD_DIM + tile_row_base
+            # A padded row writes EXPLICIT zeros; the upstream test asserts them
+            # bit-exactly, so this is not an "unwritten" path.
+            _store_f32_as_bf16(out, base_o + row_lo_f, o_lo, active_o)
+            _store_f32_as_bf16(out, base_o + row_hi_f, o_hi, active_o)
+            _store_f32_as_bf16(out, base_o + row_lo_f, T.float32(0.0), T.Not(active_o))
+            _store_f32_as_bf16(out, base_o + row_hi_f, T.float32(0.0), T.Not(active_o))
+
+        # The fifth token has no partner lane, so lane_quad == 2 writes it too
+        # (:622-639). Row 4 of sR needs no mask -- target 4 >= every source.
+        if lane_quad == 2:
+            out4_lo: T.float32 = hc_lo[4]
+            out4_hi: T.float32 = hc_hi[4]
+            for src4 in T.unroll(NUM_TOKENS):
+                coef4: T.float32 = _ld_shared_f32(
+                    arena, OFF_SR + ((NUM_TOKENS - 1) * NUM_TOKENS + src4) * 4
+                )
+                out4_lo = _fma(coef4, u_lo[src4], out4_lo)
+                out4_hi = _fma(coef4, u_hi[src4], out4_hi)
+            active4 = _ld_shared_i32(arena, OFF_SSLOT + (NUM_TOKENS - 1) * 4) >= 0
+            base4: T.int32 = (
+                _ld_shared_i32(arena, OFF_STOKEN + (NUM_TOKENS - 1) * 4) * NUM_VALUE_HEADS + hv
+            ) * HEAD_DIM + tile_row_base
+            _store_f32_as_bf16(out, base4 + row_lo_f, out4_lo, active4)
+            _store_f32_as_bf16(out, base4 + row_hi_f, out4_hi, active4)
+            _store_f32_as_bf16(out, base4 + row_lo_f, T.float32(0.0), T.Not(active4))
+            _store_f32_as_bf16(out, base4 + row_hi_f, T.float32(0.0), T.Not(active4))
+
+    # =======================================================================
+    # Phase G: publish sU  (:641-654)
+    # =======================================================================
+    if warp < MMA_WARPS:
+        if lane_quad == 2:
+            row_lo_g: T.int32 = warp * 16 + frag_row
+            for t in T.unroll(NUM_TOKENS):
+                _st_shared_f32(arena, OFF_SU + (t * ROWS_PER_CTA + row_lo_g) * 4, u_lo[t])
+                _st_shared_f32(arena, OFF_SU + (t * ROWS_PER_CTA + row_lo_g + 8) * 4, u_hi[t])
+        if SU_SYNC_CTA == 0:
+            # Warp w produces rows [16w, 16w+16), exactly the rows its own groups
+            # consume in phase H, so a warp barrier suffices (:651-653).
+            T.cuda.warp_sync()
+    if SU_SYNC_CTA == 1:
+        # split8 has ONE MMA warp producing sU for eight consuming groups, so the
+        # generator emits a CTA barrier -- and it sits OUTSIDE the warp guard
+        # (S8:651 closes it, S8:652-654 follows). Keeping it inside would have
+        # one warp of five arrive at a CTA barrier and the kernel would hang.
+        T.cuda.cta_sync()
+
+    # =======================================================================
+    # Phase H: recurrence and checkpoints  (:768-804)
+    # =======================================================================
+    words_w = T.alloc_local((4,), "uint32")
+    sd_t = T.alloc_local((8,), "float32")
+    sk_t = T.alloc_local((8,), "float32")
+    if group < ROW_GROUPS:
+        for t in T.unroll(NUM_TOKENS):
+            slot_t: T.int32 = _ld_shared_i32(arena, OFF_SSLOT + t * 4)
+            beta_t: T.float32 = _ld_shared_f32(arena, OFF_SBETA + t * 4)
+            # The gate and key slices depend only on (t, k_start), not on the
+            # row, so they are hoisted out of the row loop as two 16-byte reads
+            # each rather than reloaded per key (:782).
+            _ld_shared_f32x4(arena, OFF_SD + (t * HEAD_DIM + k_start) * 4, sd_t, 0)
+            _ld_shared_f32x4(arena, OFF_SD + (t * HEAD_DIM + k_start + 4) * 4, sd_t, 4)
+            _ld_shared_f32x4(arena, OFF_SK + (t * HEAD_DIM + k_start) * 4, sk_t, 0)
+            _ld_shared_f32x4(arena, OFF_SK + (t * HEAD_DIM + k_start + 4) * 4, sk_t, 4)
+            for row_local in T.unroll(ROWS_PER_GROUP):
+                row_h: T.int32 = owned_row_base + row_local
+                update: T.float32 = _mul(
+                    _ld_shared_f32(arena, OFF_SU + (t * ROWS_PER_CTA + row_h) * 4), beta_t
+                )
+                for i in T.unroll(8):
+                    # `hist*sD + update*sK` (:782): the compiler contracts the
+                    # FIRST product and rounds update*sK. This is the only
+                    # stateful accumulation and it feeds both the checkpoint and
+                    # every later token's history.
+                    hist[row_local * 8 + i] = _fma(
+                        hist[row_local * 8 + i], sd_t[i], _mul(update, sk_t[i])
+                    )
+                for pr in T.unroll(4):
+                    words_w[pr] = _pack_bf16x2(
+                        hist[row_local * 8 + 2 * pr + 1], hist[row_local * 8 + 2 * pr]
+                    )
+                # The recurrence advances unconditionally; only the store is
+                # slot-predicated, and the carry stays FP32 so token t+1 consumes
+                # the un-rounded token-t state rather than the bf16 checkpoint.
+                if slot_t >= 0:
+                    _store_u32x4(
+                        state,
+                        T.cast(slot_t, "int64") * T.cast(STATE_SLOT_STRIDE, "int64")
+                        + T.cast(
+                            hv * HEAD_DIM * HEAD_DIM + (tile_row_base + row_h) * HEAD_DIM + k_start,
+                            "int64",
+                        ),
+                        words_w,
+                    )
 
 
 def get_kernel(**kwargs: Any):
@@ -715,7 +1254,87 @@ _ORACLE_ATOL = 6.0e-3
 
 def run_test(**kwargs: Any) -> None:
     """Validate one config against the frozen export and an independent oracle."""
-    raise NotImplementedError("scaffold stage: the kernel body is not written yet")
+    from tirx_kernels.runner import compile_kernel
+
+    case = prepare_data(**kwargs)
+    spec = case["spec"]
+    assert_frozen_source(spec["VALUE_SPLIT"])
+
+    executable = compile_kernel(get_kernel(**kwargs))
+    executable(*_tirx_args(case))
+    torch.cuda.synchronize(case["device"])
+
+    tirx_out = case["tirx_out"]
+    tirx_state = case["tirx_state_raw"].clone()
+
+    # 1. the frozen cake export itself, on an independent state pool
+    reference_out = _flashinfer_reference(case)
+    torch.testing.assert_close(
+        tirx_out.float(),
+        reference_out.float(),
+        rtol=_RTOL,
+        atol=_ATOL,
+        msg=lambda m: f"output vs flashinfer cake export (split {spec['VALUE_SPLIT']})\n{m}",
+    )
+    torch.testing.assert_close(
+        tirx_state.float(),
+        case["reference_state_raw"].float(),
+        rtol=_RTOL,
+        atol=_ATOL,
+        msg=lambda m: f"state vs flashinfer cake export (split {spec['VALUE_SPLIT']})\n{m}",
+    )
+
+    # 2. an independent FP32 oracle of the same recurrence
+    oracle_out, oracle_state = _torch_reference(case)
+    torch.testing.assert_close(
+        tirx_out.float(),
+        oracle_out.float(),
+        rtol=_ORACLE_RTOL,
+        atol=_ORACLE_ATOL,
+        msg=lambda m: f"output vs FP32 oracle\n{m}",
+    )
+    torch.testing.assert_close(
+        tirx_state.float(),
+        oracle_state.float(),
+        rtol=_ORACLE_RTOL,
+        atol=_ORACLE_ATOL,
+        msg=lambda m: f"state vs FP32 oracle\n{m}",
+    )
+
+    # 3. invariants the tolerances cannot express
+    num_seqs = spec["NUM_SEQS"]
+    slot_stride = spec["STATE_SLOT_STRIDE"]
+    payload = spec["NUM_VALUE_HEADS"] * HEAD_DIM * HEAD_DIM
+    slots2d = case["ssm_state_indices_2d"]
+    initial = case["initial_state_raw"]
+
+    touched: set[int] = set()
+    for seq in range(num_seqs):
+        for t in range(NUM_TOKENS):
+            slot = int(slots2d[seq, t])
+            row = seq * NUM_TOKENS + t
+            if slot < 0:
+                # A padded row writes explicit zeros, so this is exact.
+                assert tirx_out[0, row].abs().max().item() == 0.0, (
+                    f"padded row {seq} token {t} must have a zeroed output"
+                )
+            else:
+                touched.add(slot)
+    n_slots = initial.numel() // slot_stride
+    for slot in range(min(n_slots, num_seqs * NUM_TOKENS + 2)):
+        if slot in touched:
+            continue
+        lo, hi = slot * slot_stride, (slot + 1) * slot_stride
+        assert torch.equal(initial[lo:hi], tirx_state[lo:hi]), (
+            f"untouched state slot {slot} was modified"
+        )
+    if slot_stride > payload:
+        for slot in sorted(touched)[:4]:
+            lo = slot * slot_stride + payload
+            hi = (slot + 1) * slot_stride
+            assert torch.equal(initial[lo:hi], tirx_state[lo:hi]), (
+                f"inter-slot padding after slot {slot} was modified"
+            )
 
 
 def run_bench(
@@ -726,7 +1345,47 @@ def run_bench(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Time the port against the frozen cake export on identical inputs."""
-    raise NotImplementedError("scaffold stage: the kernel body is not written yet")
+    rounds = int(kwargs.pop("rounds", 5))
+    cooldown_s = float(kwargs.pop("cooldown_s", 1.0))
+    from tirx_kernels.runner import compile_kernel
+    from tvm.tirx.bench import bench
+
+    case = prepare_data(**kwargs)
+    executable = compile_kernel(get_kernel(**kwargs))
+    args = _tirx_args(case)
+
+    # Validate once, outside the timed region. Both sides mutate their own state
+    # pool in place, so this also proves the pools stayed independent.
+    executable(*args)
+    reference_out = _flashinfer_reference(case)
+    torch.cuda.synchronize(case["device"])
+    torch.testing.assert_close(
+        case["tirx_out"].float(), reference_out.float(), rtol=_RTOL, atol=_ATOL
+    )
+    torch.testing.assert_close(
+        case["tirx_state_raw"].float(), case["reference_state_raw"].float(), rtol=_RTOL, atol=_ATOL
+    )
+
+    def flashinfer_builder():
+        # The nvcc JIT build and warmup both happen here, outside the timing.
+        for _ in range(2):
+            _flashinfer_reference(case)
+        torch.cuda.synchronize(case["device"])
+
+        def launch():
+            _flashinfer_reference(case)
+
+        return launch
+
+    return bench(
+        {"tirx": lambda: executable(*args)},
+        warmup=warmup,
+        repeat=repeat,
+        timer=timer,
+        references={"flashinfer_cake": flashinfer_builder},
+        rounds=rounds,
+        cooldown_s=cooldown_s,
+    )
 
 
 __all__ = [

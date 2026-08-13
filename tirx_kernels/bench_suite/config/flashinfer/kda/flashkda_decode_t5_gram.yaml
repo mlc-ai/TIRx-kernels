@@ -1,0 +1,37 @@
+# FlashKDA "cake" T=5 coefficient-gram decode, against the frozen FlashInfer
+# exports it is ported from.
+#
+# T=5 is the first cake variant whose value split is chosen by SHAPE rather than
+# fixed by the token count. With W = num_seqs * num_value_heads and S SMs, the
+# policy at recurrent_kda.py:1181-1191 returns 8 for W <= 3S/8, 2 for W <= S/2,
+# 4 for W <= 3S/4, 2 again for W <= 3S/2, and 1 above that -- so the split4 band
+# sits *between* two split2 bands and the policy is not monotonic in W. All four
+# exports are production-reachable, so all four are ported and all four are
+# measured here; .porting/.../verify_dispatch.py asserts the split each row
+# selects by feeding its real tensors into FlashInfer's own selector.
+#
+#   hv32h16_b{8,16,32,64,128}_s1   parity with FlashInfer's own T=5 export bench,
+#                                  which pins split1 for exactly these five shapes
+#   hv32h16_b{1,2,3}_s{8,2,4}      small batch walks the first three bands
+#                                  (W = 32, 64, 96) on the same head count
+#   hv16h16_b{2,5,8,64}            the non-GQA head count; b8 (W = 128) lands in
+#                                  the SECOND split2 band, above the split4 island
+#   hv12h12_b{8,64}                Kimi K3's TP8 per-rank head count (W = 96, 768)
+#
+# Split coverage over the 14 rows: split1 x7, split2 x2, split4 x3, split8 x2.
+kernel: flashkda_decode_t5_gram
+configs:
+  - {config: hv32h16_b8_s1, default: true}
+  - {config: hv32h16_b16_s1, default: true}
+  - {config: hv32h16_b32_s1, default: true}
+  - {config: hv32h16_b64_s1, default: true}
+  - {config: hv32h16_b128_s1, default: true}
+  - {config: hv32h16_b1_s8, default: true}
+  - {config: hv32h16_b2_s2, default: true}
+  - {config: hv32h16_b3_s4, default: true}
+  - {config: hv16h16_b2_s8, default: true}
+  - {config: hv16h16_b5_s4, default: true}
+  - {config: hv16h16_b8_s2, default: true}
+  - {config: hv16h16_b64_s1, default: true}
+  - {config: hv12h12_b8_s4, default: true}
+  - {config: hv12h12_b64_s1, default: true}
