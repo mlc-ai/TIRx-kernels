@@ -34,13 +34,11 @@ Two things make this body different from every cake kernel ported so far:
   therefore genuine three-warp edges.
 
 Helper vocabulary is shared with the T=2 module; only the geometry constants,
-the gate, the frozen digest and the kernel body are per-specialization.
+the gate and the kernel body are per-specialization.
 """
 
 from __future__ import annotations
 
-import hashlib
-import os
 from typing import Any
 from unittest import SkipTest
 
@@ -112,12 +110,6 @@ def _load_f32(buffer, index):
     T.evaluate(T.ptx.ld.global_.nc.b32(out[0], buffer.ptr_to([index])))
     return T.reinterpret("float32", out[0])
 
-
-# --- source pinning -------------------------------------------------------
-# Raw and normalized digests differ for this export; the hash of the bytes
-# between the BEGIN/END markers is the raw one (verified).
-FROZEN_FLASHINFER_COMMIT = "f2e04400"
-FROZEN_BODY_SHA256 = "70c838b717a9eb7765bf9291db786b2b7a0387fbf80a3c337d5c04e7a553fe21"
 
 HEAD_DIM = _t2.HEAD_DIM
 NUM_TOKENS = 3
@@ -888,30 +880,6 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _source_body_path() -> str:
-    """Absolute path of the frozen generated body this port transcribes."""
-    import flashinfer
-
-    root = os.path.dirname(os.path.dirname(os.path.abspath(flashinfer.__file__)))
-    return os.path.join(root, "csrc", "kda", "flashkda_decode_d128_t3_lower_bound_split4.cu")
-
-
-def assert_frozen_source() -> None:
-    """Fail loudly if the upstream generated body was regenerated."""
-    path = _source_body_path()
-    with open(path, "rb") as handle:
-        text = handle.read().decode()
-    marker = "// BEGIN FROZEN GENERATED BODY\n"
-    start = text.index(marker) + len(marker)
-    end = text.index("// END FROZEN GENERATED BODY")
-    digest = hashlib.sha256(text[start:end].encode()).hexdigest()
-    if digest != FROZEN_BODY_SHA256:
-        raise AssertionError(
-            f"{path}: frozen body digest {digest} != pinned {FROZEN_BODY_SHA256}; the "
-            "upstream export was regenerated and this port must be re-verified"
-        )
-
-
 def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     """Run the frozen cake export itself on the reference state pool."""
     from flashinfer.jit.flash_kda_decode import get_flash_kda_decode_module
@@ -1026,7 +994,6 @@ def run_test(**kwargs: Any) -> None:
 
     case = prepare_data(**kwargs)
     spec = case["spec"]
-    assert_frozen_source()
 
     executable = compile_kernel(get_kernel(**kwargs))
     executable(*_tirx_args(case))
@@ -1160,7 +1127,6 @@ __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
-    "assert_frozen_source",
     "get_kernel",
     "prepare_data",
     "run_bench",

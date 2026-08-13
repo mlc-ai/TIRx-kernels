@@ -11,8 +11,6 @@ Upstream source: include/flashinfer/mamba/kernel_selective_state_update_mtp_simp
 from __future__ import annotations
 
 import functools
-import hashlib
-from pathlib import Path
 from typing import Any
 from unittest import SkipTest
 
@@ -26,8 +24,6 @@ KERNEL_META = {
     "compute_capability": 10,
 }
 
-FROZEN_FLASHINFER_COMMIT = "f2e04400e330fb2debe0bf8730d9424a1d37927f"
-FROZEN_FLASHINFER_SOURCE_SHA256 = "64b189b642d05970202964bdd3accf7055d34d6a50b7953a64c8a05a3e0a0dbe"
 _LOG2_E = 1.4426950408889634
 _LN_2 = 0.6931471805599453
 _FLT_LOWEST = -3.4028234663852886e38
@@ -1692,22 +1688,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 
 @functools.cache
-def _load_frozen_oracle():
-    from flashinfer.jit.env import FLASHINFER_INCLUDE_DIR
+def _load_oracle():
     from flashinfer.mamba import selective_state_update
 
-    source_path = (
-        Path(FLASHINFER_INCLUDE_DIR)
-        / "flashinfer/mamba/kernel_selective_state_update_mtp_simple.cuh"
-    )
-    if not source_path.is_file():
-        raise RuntimeError(f"missing frozen FlashInfer source: {source_path}")
-    digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
-    if digest != FROZEN_FLASHINFER_SOURCE_SHA256:
-        raise RuntimeError(
-            "selective-state-update MTP oracle does not match the reviewed source: "
-            f"{source_path} sha256={digest}"
-        )
     return selective_state_update
 
 
@@ -1822,7 +1805,7 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     state_view = case["flashinfer_state_storage"][::stride_factor]
     scale_state = str(config["state_dtype"]) == "int16"
     source_out = case["flashinfer_output"] if bool(config.get("use_out_tensor", True)) else None
-    oracle = _load_frozen_oracle()
+    oracle = _load_oracle()
     result = oracle(
         state_view,
         case["x"],

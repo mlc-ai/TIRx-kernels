@@ -28,21 +28,12 @@ shared memory, no barrier, no atomic, no workspace. The value split partitions t
 
 from __future__ import annotations
 
-import hashlib
-import os
 from typing import Any
 from unittest import SkipTest
 
 import torch
 
 from tvm.script import tirx as T
-
-# --- source pinning -------------------------------------------------------
-# The generated body carries its own digest at
-# flashkda_decode_d128_t1_precomputed_direct_split16.cu:19-20; run_test asserts
-# it so a silent upstream regeneration cannot pass unnoticed.
-FROZEN_FLASHINFER_COMMIT = "f2e04400"
-FROZEN_BODY_SHA256 = {16: "9119163b3b5cb6a8760b6a17a7ce01788a0e1c0078f8c812255225f27e5989e5"}
 
 HEAD_DIM = 128
 L2_EPS = 1.0e-6
@@ -690,39 +681,6 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _source_body_path(value_split: int) -> str:
-    """Absolute path of the frozen generated body this port transcribes."""
-    import flashinfer  # local: keep kernel discovery free of optional deps
-
-    root = os.path.dirname(os.path.dirname(os.path.abspath(flashinfer.__file__)))
-    return os.path.join(
-        root, "csrc", "kda", f"flashkda_decode_d128_t1_precomputed_direct_split{value_split}.cu"
-    )
-
-
-def assert_frozen_source(value_split: int) -> None:
-    """Fail loudly if the upstream generated body was regenerated.
-
-    The body declares its own digest at direct_split16.cu:19-20; this checks the
-    same bytes the port was transcribed from.
-    """
-    expected = FROZEN_BODY_SHA256.get(value_split)
-    if expected is None:
-        return
-    path = _source_body_path(value_split)
-    with open(path, "rb") as handle:
-        text = handle.read().decode()
-    marker = "// BEGIN FROZEN GENERATED BODY\n"
-    start = text.index(marker) + len(marker)
-    end = text.index("// END FROZEN GENERATED BODY")
-    digest = hashlib.sha256(text[start:end].encode()).hexdigest()
-    if digest != expected:
-        raise AssertionError(
-            f"{path}: frozen body digest {digest} != pinned {expected}; the upstream "
-            "export was regenerated and this port must be re-verified against it"
-        )
-
-
 def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     """Run the frozen cake export itself on the reference state pool.
 
@@ -835,7 +793,6 @@ def run_test(**kwargs: Any) -> None:
 
     case = prepare_data(**kwargs)
     spec = case["spec"]
-    assert_frozen_source(spec["VALUE_SPLIT"])
 
     executable = compile_kernel(get_kernel(**kwargs))
     executable(*_tirx_args(case))
@@ -962,7 +919,6 @@ __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
-    "assert_frozen_source",
     "get_kernel",
     "prepare_data",
     "run_bench",

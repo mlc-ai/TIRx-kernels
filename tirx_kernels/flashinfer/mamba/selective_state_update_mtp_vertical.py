@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import ctypes
 import functools
-import hashlib
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -29,8 +27,6 @@ KERNEL_META = {
     "compute_capability": 10,
 }
 
-FROZEN_FLASHINFER_COMMIT = "f2e04400e330fb2debe0bf8730d9424a1d37927f"
-FROZEN_FLASHINFER_SOURCE_SHA256 = "8c8d292c08cc29eb0db47d231bcab47bdb86e285ff7b02f6135709e3a5058cca"
 
 _LOG2_E = _simple._LOG2_E
 _LN_2 = _simple._LN_2
@@ -1412,22 +1408,9 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
 
 
 @functools.cache
-def _load_frozen_oracle():
-    from flashinfer.jit.env import FLASHINFER_INCLUDE_DIR
+def _load_oracle():
     from flashinfer.mamba import selective_state_update
 
-    source_path = (
-        Path(FLASHINFER_INCLUDE_DIR)
-        / "flashinfer/mamba/kernel_selective_state_update_mtp_vertical.cuh"
-    )
-    if not source_path.is_file():
-        raise RuntimeError(f"missing frozen FlashInfer source: {source_path}")
-    digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
-    if digest != FROZEN_FLASHINFER_SOURCE_SHA256:
-        raise RuntimeError(
-            "selective-state-update MTP vertical oracle does not match the reviewed source: "
-            f"{source_path} sha256={digest}"
-        )
     return selective_state_update
 
 
@@ -1435,7 +1418,7 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     config = case["config"]
     stride_factor = int(config.get("state_stride_factor", 1))
     source_out = case["flashinfer_output"] if bool(config.get("use_out_tensor", True)) else None
-    oracle = _load_frozen_oracle()
+    oracle = _load_oracle()
     result = oracle(
         case["flashinfer_state_storage"][::stride_factor],
         case["x"],

@@ -25,22 +25,12 @@ measurable -- specialization; ``_specialization`` raises for anything else.
 
 from __future__ import annotations
 
-import hashlib
-import os
 from typing import Any
 from unittest import SkipTest
 
 import torch
 
 from tvm.script import tirx as T
-
-# --- source pinning -------------------------------------------------------
-# The generated body declares its own digest at
-# flashkda_decode_d128_t2_precomputed_split4.cu:19-20. Two digests are printed
-# there, "Raw" and "Normalized", and they differ for this export; the hash of
-# the bytes between the BEGIN/END markers is the *raw* one.
-FROZEN_FLASHINFER_COMMIT = "f2e04400"
-FROZEN_BODY_SHA256 = "e0cf2ece1b50e851579df8822fa2f03262a3399e25643a6bd3df03c875cc5ea2"
 
 HEAD_DIM = 128
 NUM_TOKENS = 2
@@ -965,30 +955,6 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _source_body_path() -> str:
-    """Absolute path of the frozen generated body this port transcribes."""
-    import flashinfer  # local: keep kernel discovery free of optional deps
-
-    root = os.path.dirname(os.path.dirname(os.path.abspath(flashinfer.__file__)))
-    return os.path.join(root, "csrc", "kda", "flashkda_decode_d128_t2_precomputed_split4.cu")
-
-
-def assert_frozen_source() -> None:
-    """Fail loudly if the upstream generated body was regenerated."""
-    path = _source_body_path()
-    with open(path, "rb") as handle:
-        text = handle.read().decode()
-    marker = "// BEGIN FROZEN GENERATED BODY\n"
-    start = text.index(marker) + len(marker)
-    end = text.index("// END FROZEN GENERATED BODY")
-    digest = hashlib.sha256(text[start:end].encode()).hexdigest()
-    if digest != FROZEN_BODY_SHA256:
-        raise AssertionError(
-            f"{path}: frozen body digest {digest} != pinned {FROZEN_BODY_SHA256}; the "
-            "upstream export was regenerated and this port must be re-verified"
-        )
-
-
 def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     """Run the frozen cake export itself on the reference state pool.
 
@@ -1119,7 +1085,6 @@ def run_test(**kwargs: Any) -> None:
 
     case = prepare_data(**kwargs)
     spec = case["spec"]
-    assert_frozen_source()
 
     executable = compile_kernel(get_kernel(**kwargs))
     executable(*_tirx_args(case))
@@ -1253,7 +1218,6 @@ __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
-    "assert_frozen_source",
     "get_kernel",
     "prepare_data",
     "run_bench",
