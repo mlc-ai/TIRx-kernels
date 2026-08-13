@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': 'ea0950ab', 'tirx-kernels': '022c384a', 'tirx-bench-ci': None}`
-- Workloads: 278 ok, 0 failed
+- Git:       `{'tir': 'ea0950ab', 'tirx-kernels': '919312eb', 'tirx-bench-ci': None}`
+- Workloads: 292 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -202,31 +202,55 @@ Grouped workloads show one row per config and one timing column per implementati
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv12h12_b64_s8` | tirx | 14.2594 | flashinfer_cake | 15.7364 | 1.104 | — |
-| `hv12h12_b8_s16` | tirx | 4.7195 | flashinfer_cake | 6.2621 | 1.327 | — |
-| `hv16h16_b128_s8` | tirx | 28.7788 | flashinfer_cake | 32.1391 | 1.117 | — |
-| `hv16h16_b16_s16` | tirx | 6.2600 | flashinfer_cake | 8.1529 | 1.302 | — |
-| `hv16h16_b1_s16` | tirx | 4.1365 | flashinfer_cake | 5.7675 | 1.394 | — |
-| `hv16h16_b32_s8` | tirx | 10.0152 | flashinfer_cake | 13.3563 | 1.334 | — |
-| `hv16h16_b4_s16` | tirx | 4.5148 | flashinfer_cake | 5.7302 | 1.269 | — |
-| `hv16h16_b64_s8` | tirx | 16.6093 | flashinfer_cake | 19.4175 | 1.169 | — |
-| `hv16h16_b8_s16` | tirx | 5.0008 | flashinfer_cake | 6.3387 | 1.268 | — |
-| `hv32h16_b32_s8` | tirx | 16.6276 | flashinfer_cake | 19.3684 | 1.165 | — |
-| `hv32h16_b8_s16` | tirx | 6.2427 | flashinfer_cake | 7.9132 | 1.268 | — |
+| `hv12h12_b64_s8` | tirx | 14.3395 | flashinfer_cake | 15.7034 | 1.095 | — |
+| `hv12h12_b8_s16` | tirx | 4.7702 | flashinfer_cake | 6.4468 | 1.351 | — |
+| `hv16h16_b128_s8` | tirx | 28.7487 | flashinfer_cake | 31.4956 | 1.096 | — |
+| `hv16h16_b16_s16` | tirx | 6.3019 | flashinfer_cake | 7.8545 | 1.246 | — |
+| `hv16h16_b1_s16` | tirx | 4.0110 | flashinfer_cake | 5.6094 | 1.398 | — |
+| `hv16h16_b32_s8` | tirx | 9.9658 | flashinfer_cake | 13.3446 | 1.339 | — |
+| `hv16h16_b4_s16` | tirx | 4.4257 | flashinfer_cake | 6.0140 | 1.359 | — |
+| `hv16h16_b64_s8` | tirx | 16.4855 | flashinfer_cake | 19.3742 | 1.175 | — |
+| `hv16h16_b8_s16` | tirx | 4.9470 | flashinfer_cake | 6.8255 | 1.380 | — |
+| `hv32h16_b32_s8` | tirx | 16.8039 | flashinfer_cake | 19.1705 | 1.141 | — |
+| `hv32h16_b8_s16` | tirx | 6.2091 | flashinfer_cake | 8.3277 | 1.341 | — |
 
 ## flashkda_decode_t2_precomputed
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv12h12_b64_t2` | tirx | 20.8917 | flashinfer_cake | 24.0073 | 1.149 | — |
-| `hv12h12_b8_t2` | tirx | 6.3502 | flashinfer_cake | 8.2827 | 1.304 | — |
-| `hv16h16_b64_t2` | tirx | 25.3776 | flashinfer_cake | 30.1667 | 1.189 | — |
-| `hv16h16_b8_t2` | tirx | 6.9868 | flashinfer_cake | 8.8004 | 1.260 | — |
-| `hv32h16_b128_t2` | tirx | 83.2298 | flashinfer_cake | 94.8844 | 1.140 | — |
-| `hv32h16_b16_t2` | tirx | 15.4465 | flashinfer_cake | 17.8324 | 1.154 | — |
-| `hv32h16_b32_t2` | tirx | 25.3646 | flashinfer_cake | 29.9425 | 1.180 | — |
-| `hv32h16_b64_t2` | tirx | 44.9052 | flashinfer_cake | 51.2153 | 1.141 | — |
-| `hv32h16_b8_t2` | tirx | 9.0897 | flashinfer_cake | 10.9777 | 1.208 | — |
+| `hv12h12_b64_t2` | tirx | 20.8492 | flashinfer_cake | 24.2890 | 1.165 | — |
+| `hv12h12_b8_t2` | tirx | 6.3742 | flashinfer_cake | 8.3778 | 1.314 | — |
+| `hv16h16_b64_t2` | tirx | 25.4150 | flashinfer_cake | 29.9882 | 1.180 | — |
+| `hv16h16_b8_t2` | tirx | 7.0329 | flashinfer_cake | 9.3116 | 1.324 | — |
+| `hv32h16_b128_t2` | tirx | 83.1122 | flashinfer_cake | 95.1880 | 1.145 | — |
+| `hv32h16_b16_t2` | tirx | 15.6699 | flashinfer_cake | 18.2420 | 1.164 | — |
+| `hv32h16_b32_t2` | tirx | 25.6408 | flashinfer_cake | 30.0217 | 1.171 | — |
+| `hv32h16_b64_t2` | tirx | 44.9137 | flashinfer_cake | 51.7398 | 1.152 | — |
+| `hv32h16_b8_t2` | tirx | 9.0071 | flashinfer_cake | 11.3129 | 1.256 | — |
+
+## flashkda_decode_t3_lower_bound
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `hv16h16_b16_t3` | tirx | 13.5810 | flashinfer_cake | 14.0161 | 1.032 | — |
+| `hv16h16_b1_t3` | tirx | 5.9240 | flashinfer_cake | 6.0771 | 1.026 | — |
+| `hv16h16_b2_t3` | tirx | 6.0873 | flashinfer_cake | 6.2932 | 1.034 | — |
+| `hv16h16_b4_t3` | tirx | 6.7617 | flashinfer_cake | 6.9744 | 1.031 | — |
+| `hv16h16_b8_t3` | tirx | 7.8870 | flashinfer_cake | 7.9694 | 1.010 | — |
+
+## flashkda_decode_t4_precomputed
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `hv12h12_b64_t4` | tirx | 32.1851 | flashinfer_cake | 33.9351 | 1.054 | — |
+| `hv12h12_b8_t4` | tirx | 8.8183 | flashinfer_cake | 10.4810 | 1.189 | — |
+| `hv16h16_b64_t4` | tirx | 40.8246 | flashinfer_cake | 42.5370 | 1.042 | — |
+| `hv16h16_b8_t4` | tirx | 9.1515 | flashinfer_cake | 10.8211 | 1.182 | — |
+| `hv32h16_b128_t4` | tirx | 136.0434 | flashinfer_cake | 138.2981 | 1.017 | — |
+| `hv32h16_b16_t4` | tirx | 22.3698 | flashinfer_cake | 24.6335 | 1.101 | — |
+| `hv32h16_b32_t4` | tirx | 40.4661 | flashinfer_cake | 41.8081 | 1.033 | — |
+| `hv32h16_b64_t4` | tirx | 71.7158 | flashinfer_cake | 73.7345 | 1.028 | — |
+| `hv32h16_b8_t4` | tirx | 12.7664 | flashinfer_cake | 14.7454 | 1.155 | — |
 
 ## fp16_bf16_gemm
 

@@ -3,12 +3,12 @@
   "label": "post-refactor",
   "git": {
     "tir": "ea0950ab",
-    "tirx-kernels": "022c384a",
+    "tirx-kernels": "919312eb",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "65581c0667f9f4fc84412841bef4e99d5c8bfbdc"
+    "tirx-kernels:tirx_kernels": "76f435495502685fed7b2ec94dbb52eac22bef3e"
   },
   "baselines": {
     "torch": {
@@ -1651,8 +1651,8 @@
       "label": "hv12h12_b64_s8",
       "status": "ok",
       "impls": {
-        "tirx": 14.259361494303159,
-        "flashinfer_cake": 15.736388312899836
+        "tirx": 14.339483202981903,
+        "flashinfer_cake": 15.70338554328622
       },
       "aggregated": {
         "rounds": 5,
@@ -1665,8 +1665,8 @@
       "label": "hv12h12_b8_s16",
       "status": "ok",
       "impls": {
-        "tirx": 4.719541169780189,
-        "flashinfer_cake": 6.262137962531812
+        "tirx": 4.7702013154223275,
+        "flashinfer_cake": 6.446833962335925
       },
       "aggregated": {
         "rounds": 5,
@@ -1679,8 +1679,8 @@
       "label": "hv16h16_b128_s8",
       "status": "ok",
       "impls": {
-        "tirx": 28.778753873422723,
-        "flashinfer_cake": 32.13913212721831
+        "tirx": 28.748726959138207,
+        "flashinfer_cake": 31.495596942173464
       },
       "aggregated": {
         "rounds": 5,
@@ -1693,8 +1693,8 @@
       "label": "hv16h16_b16_s16",
       "status": "ok",
       "impls": {
-        "tirx": 6.260000532182204,
-        "flashinfer_cake": 8.152864308839414
+        "tirx": 6.301943875449133,
+        "flashinfer_cake": 7.854504115629423
       },
       "aggregated": {
         "rounds": 5,
@@ -1707,8 +1707,8 @@
       "label": "hv16h16_b1_s16",
       "status": "ok",
       "impls": {
-        "tirx": 4.136541655453699,
-        "flashinfer_cake": 5.7675148024992735
+        "tirx": 4.011037211573264,
+        "flashinfer_cake": 5.609428760453247
       },
       "aggregated": {
         "rounds": 5,
@@ -1721,8 +1721,8 @@
       "label": "hv16h16_b32_s8",
       "status": "ok",
       "impls": {
-        "tirx": 10.015249772128083,
-        "flashinfer_cake": 13.356300670442216
+        "tirx": 9.965755244470524,
+        "flashinfer_cake": 13.344626777624649
       },
       "aggregated": {
         "rounds": 5,
@@ -1735,8 +1735,8 @@
       "label": "hv16h16_b4_s16",
       "status": "ok",
       "impls": {
-        "tirx": 4.5147843857516365,
-        "flashinfer_cake": 5.7301633125823015
+        "tirx": 4.425668303444357,
+        "flashinfer_cake": 6.013968566001348
       },
       "aggregated": {
         "rounds": 5,
@@ -1749,8 +1749,8 @@
       "label": "hv16h16_b64_s8",
       "status": "ok",
       "impls": {
-        "tirx": 16.60930283625364,
-        "flashinfer_cake": 19.417524169162398
+        "tirx": 16.485547640087454,
+        "flashinfer_cake": 19.3742274750777
       },
       "aggregated": {
         "rounds": 5,
@@ -1763,8 +1763,8 @@
       "label": "hv16h16_b8_s16",
       "status": "ok",
       "impls": {
-        "tirx": 5.000787580254269,
-        "flashinfer_cake": 6.338666961276744
+        "tirx": 4.947001416376249,
+        "flashinfer_cake": 6.825502754014199
       },
       "aggregated": {
         "rounds": 5,
@@ -1777,8 +1777,8 @@
       "label": "hv32h16_b32_s8",
       "status": "ok",
       "impls": {
-        "tirx": 16.627576137423702,
-        "flashinfer_cake": 19.36841917895613
+        "tirx": 16.80393459426296,
+        "flashinfer_cake": 19.170531987141658
       },
       "aggregated": {
         "rounds": 5,
@@ -1791,8 +1791,8 @@
       "label": "hv32h16_b8_s16",
       "status": "ok",
       "impls": {
-        "tirx": 6.2427481930603355,
-        "flashinfer_cake": 7.913243303966552
+        "tirx": 6.209117871436839,
+        "flashinfer_cake": 8.327738443563472
       },
       "aggregated": {
         "rounds": 5,
@@ -1805,8 +1805,8 @@
       "label": "hv12h12_b64_t2",
       "status": "ok",
       "impls": {
-        "tirx": 20.891704334660023,
-        "flashinfer_cake": 24.007318980868945
+        "tirx": 20.849174827140168,
+        "flashinfer_cake": 24.28899769693229
       },
       "aggregated": {
         "rounds": 5,
@@ -1819,8 +1819,8 @@
       "label": "hv12h12_b8_t2",
       "status": "ok",
       "impls": {
-        "tirx": 6.350220182292079,
-        "flashinfer_cake": 8.282665345053852
+        "tirx": 6.374156442481507,
+        "flashinfer_cake": 8.377837915302791
       },
       "aggregated": {
         "rounds": 5,
@@ -1833,8 +1833,8 @@
       "label": "hv16h16_b64_t2",
       "status": "ok",
       "impls": {
-        "tirx": 25.377645220511624,
-        "flashinfer_cake": 30.16673546717479
+        "tirx": 25.414999029017768,
+        "flashinfer_cake": 29.988170488854422
       },
       "aggregated": {
         "rounds": 5,
@@ -1847,8 +1847,8 @@
       "label": "hv16h16_b8_t2",
       "status": "ok",
       "impls": {
-        "tirx": 6.986833881473316,
-        "flashinfer_cake": 8.800366793582626
+        "tirx": 7.032893290308618,
+        "flashinfer_cake": 9.311554206473549
       },
       "aggregated": {
         "rounds": 5,
@@ -1861,8 +1861,8 @@
       "label": "hv32h16_b128_t2",
       "status": "ok",
       "impls": {
-        "tirx": 83.2297856610106,
-        "flashinfer_cake": 94.88444040868747
+        "tirx": 83.1121574697481,
+        "flashinfer_cake": 95.18804950568678
       },
       "aggregated": {
         "rounds": 5,
@@ -1875,8 +1875,8 @@
       "label": "hv32h16_b16_t2",
       "status": "ok",
       "impls": {
-        "tirx": 15.446455942158458,
-        "flashinfer_cake": 17.832382828820197
+        "tirx": 15.66989601299443,
+        "flashinfer_cake": 18.241979632674116
       },
       "aggregated": {
         "rounds": 5,
@@ -1889,8 +1889,8 @@
       "label": "hv32h16_b32_t2",
       "status": "ok",
       "impls": {
-        "tirx": 25.36455503688244,
-        "flashinfer_cake": 29.94247059479419
+        "tirx": 25.640840713336193,
+        "flashinfer_cake": 30.02172307480613
       },
       "aggregated": {
         "rounds": 5,
@@ -1903,8 +1903,8 @@
       "label": "hv32h16_b64_t2",
       "status": "ok",
       "impls": {
-        "tirx": 44.90519007664209,
-        "flashinfer_cake": 51.21532156395486
+        "tirx": 44.91374631310782,
+        "flashinfer_cake": 51.739787532167675
       },
       "aggregated": {
         "rounds": 5,
@@ -1917,8 +1917,204 @@
       "label": "hv32h16_b8_t2",
       "status": "ok",
       "impls": {
-        "tirx": 9.08968844266317,
-        "flashinfer_cake": 10.977688391352567
+        "tirx": 9.007080987034804,
+        "flashinfer_cake": 11.312913600352381
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t3_lower_bound",
+      "config": "hv16h16_b16_t3",
+      "label": "hv16h16_b16_t3",
+      "status": "ok",
+      "impls": {
+        "tirx": 13.581029397577948,
+        "flashinfer_cake": 14.016056104796148
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t3_lower_bound",
+      "config": "hv16h16_b1_t3",
+      "label": "hv16h16_b1_t3",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.924036915949224,
+        "flashinfer_cake": 6.077056287911471
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t3_lower_bound",
+      "config": "hv16h16_b2_t3",
+      "label": "hv16h16_b2_t3",
+      "status": "ok",
+      "impls": {
+        "tirx": 6.0873213148889,
+        "flashinfer_cake": 6.293167199493816
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t3_lower_bound",
+      "config": "hv16h16_b4_t3",
+      "label": "hv16h16_b4_t3",
+      "status": "ok",
+      "impls": {
+        "tirx": 6.761728764387974,
+        "flashinfer_cake": 6.974412798265498
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t3_lower_bound",
+      "config": "hv16h16_b8_t3",
+      "label": "hv16h16_b8_t3",
+      "status": "ok",
+      "impls": {
+        "tirx": 7.886985979694978,
+        "flashinfer_cake": 7.969388697231371
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv12h12_b64_t4",
+      "label": "hv12h12_b64_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 32.185142335409466,
+        "flashinfer_cake": 33.9351206883906
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv12h12_b8_t4",
+      "label": "hv12h12_b8_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 8.818268273311162,
+        "flashinfer_cake": 10.481047852053491
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv16h16_b64_t4",
+      "label": "hv16h16_b64_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 40.82463446971685,
+        "flashinfer_cake": 42.53704180234865
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv16h16_b8_t4",
+      "label": "hv16h16_b8_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.15147500667413,
+        "flashinfer_cake": 10.821097204367238
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv32h16_b128_t4",
+      "label": "hv32h16_b128_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 136.04335459411334,
+        "flashinfer_cake": 138.298075534864
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv32h16_b16_t4",
+      "label": "hv32h16_b16_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 22.369841016036652,
+        "flashinfer_cake": 24.63347483171318
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv32h16_b32_t4",
+      "label": "hv32h16_b32_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 40.46614351015531,
+        "flashinfer_cake": 41.808063391071784
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv32h16_b64_t4",
+      "label": "hv32h16_b64_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 71.71584813869262,
+        "flashinfer_cake": 73.734534104721
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t4_precomputed",
+      "config": "hv32h16_b8_t4",
+      "label": "hv32h16_b8_t4",
+      "status": "ok",
+      "impls": {
+        "tirx": 12.766413260734272,
+        "flashinfer_cake": 14.745371736659923
       },
       "aggregated": {
         "rounds": 5,

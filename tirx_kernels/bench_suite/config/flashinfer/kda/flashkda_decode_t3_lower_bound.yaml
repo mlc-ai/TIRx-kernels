@@ -1,0 +1,25 @@
+# FlashKDA "cake" T=3 lower-bound decode, against the frozen FlashInfer export
+# it is ported from.
+#
+# These five rows are not a sample of the kernel's domain -- they are the whole
+# of it. T=3 is the only cake variant that computes its gate in-kernel
+# (GATE_KIND 1), and the dispatcher pins its shape box hard: H == HV == 16 and
+# N in {1,2,4,8,16} (recurrent_kda.py:1352-1359), on top of requiring
+# num_spec_tokens == 2, use_gate_in_kernel, a finite lower_bound < 0 and fp32
+# contiguous A_log/dt_bias (:1285-1294, :1406-1416). There is also no split
+# dimension: the variant is early-returned at :1437-1438 without ever consulting
+# the value-split selector.
+#
+# .porting/.../verify_dispatch.py checks both directions for this kernel --
+# every row below selects d128_t3_lower_bound_split4, and ten near-miss
+# contracts plus four out-of-domain shapes are refused -- because for T=3 the
+# negative space is most of the contract.
+#
+#   hv16h16_b{1,2,4,8,16}_t3   parity with FlashInfer's own T=3 export bench
+kernel: flashkda_decode_t3_lower_bound
+configs:
+  - {config: hv16h16_b1_t3, default: true}
+  - {config: hv16h16_b2_t3, default: true}
+  - {config: hv16h16_b4_t3, default: true}
+  - {config: hv16h16_b8_t3, default: true}
+  - {config: hv16h16_b16_t3, default: true}

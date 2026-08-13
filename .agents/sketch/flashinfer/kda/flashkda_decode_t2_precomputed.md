@@ -386,8 +386,10 @@ if warp < TOKENS:
                 # extent: scalar, taken once (only s=0 < t=1)
             u_lo[t] = solved_lo;  u_hi[t] = solved_hi
     # The source then broadcasts u_lo/u_hi from quad_base+2 to the whole quad
-    # (:476-482). Its only consumer is the dead BLOCK_CHECKPOINT_MMA block;
-    # every live consumer below is already lane_quad == 2. Dead here.
+    # (:476-482). At T=2 that is an IDENTITY: every live consumer below runs on
+    # lane_quad == 2, which is the broadcast's own source lane. Dropped here.
+    # (At T=3/T=4 phase F runs on lane_quad >= 2 and the broadcast becomes
+    # load-bearing -- see flashkda_decode_t3_t4_wy.md.)
 
 # ===========================================================================
 # Phase F: both tokens' outputs  (:484-531)
@@ -495,7 +497,7 @@ is statically dead, and the port carries none of it:
 | `sGramA0`, `sGramA1` | `:81-86`, `:136-139` | t5/t6 coefficient-gram; alias sVec, never touched |
 | the whole `BLOCK_CHECKPOINT_MMA` block, incl. the 3rd `mma.sync` | `:546-658` | macro is 0, static-asserted |
 | `ha_lo[2],[3]`, `ha_hi[2],[3]` + their 4 broadcasts | `:443-446`, `:451-454` | MMA columns 2,3 — T=4 territory |
-| the `u_lo`/`u_hi` quad broadcasts | `:476-482` | only the dead block consumes them |
+| the `u_lo`/`u_hi` quad broadcasts | `:476-482` | an identity at T=2: the source lane `quad_base+2` is the only consuming lane |
 | `vec_frag[2],[3]` | `:415` | the x4 loads sVec cols 8..15; the MMA reads 2 registers |
 | sVec columns 2,3 and 6..15 | — | never written; feed dead accumulator lanes. **Not zeroed** — zeroing is numerically safe but adds stores the source does not issue |
 | `sR[0][1]`, `sL[0][*]`, `sL[1][1]` | `:390-392` | of the two 2×2 matrices only `sL[1][0]` and `sR[{0,0},{1,0},{1,1}]` are written and read |
