@@ -1,0 +1,52 @@
+# Complete SM100 BF16 ILP4 fallback production dispatch matrix for Qwen3-Next
+# TP1/2/4/8 and T=1/2/4/8. Every row is required by the port performance gate.
+kernel: gdn_decode_bf16_ilp4
+configs:
+  - {config: t1_b1_h16_hv32_tv16, default: true}
+  - {config: t1_b4_h16_hv32_tv16, default: true}
+  - {config: t1_b8_h16_hv32_tv32, default: true}
+  - {config: t1_b1_h8_hv16_tv16, default: true}
+  - {config: t1_b4_h8_hv16_tv16, default: true}
+  - {config: t1_b8_h8_hv16_tv16, default: true}
+  - {config: t1_b16_h8_hv16_tv32, default: true}
+  - {config: t1_b1_h4_hv8_tv16, default: true}
+  - {config: t1_b4_h4_hv8_tv16, default: true}
+  - {config: t1_b8_h4_hv8_tv16, default: true}
+  - {config: t1_b16_h4_hv8_tv16, default: true}
+  - {config: t1_b32_h4_hv8_tv32, default: true}
+  - {config: t1_b1_h2_hv4_tv16, default: true}
+  - {config: t1_b4_h2_hv4_tv16, default: true}
+  - {config: t1_b8_h2_hv4_tv16, default: true}
+  - {config: t1_b16_h2_hv4_tv16, default: true}
+  - {config: t1_b32_h2_hv4_tv16, default: true}
+  - {config: t1_b64_h2_hv4_tv32, default: true}
+  - {config: t2_b1_h16_hv32_tv16, default: true}
+  - {config: t2_b1_h8_hv16_tv16, default: true}
+  - {config: t2_b4_h8_hv16_tv16, default: true}
+  - {config: t2_b1_h4_hv8_tv16, default: true}
+  - {config: t2_b4_h4_hv8_tv16, default: true}
+  - {config: t2_b8_h4_hv8_tv16, default: true}
+  - {config: t2_b1_h2_hv4_tv16, default: true}
+  - {config: t2_b4_h2_hv4_tv16, default: true}
+  - {config: t2_b8_h2_hv4_tv16, default: true}
+  - {config: t2_b16_h2_hv4_tv16, default: true}
+  - {config: t4_b1_h16_hv32_tv16, default: true}
+  - {config: t4_b1_h8_hv16_tv16, default: true}
+  - {config: t4_b4_h8_hv16_tv16, default: true}
+  - {config: t4_b1_h4_hv8_tv16, default: true}
+  - {config: t4_b4_h4_hv8_tv16, default: true}
+  - {config: t4_b8_h4_hv8_tv16, default: true}
+  - {config: t4_b1_h2_hv4_tv16, default: true}
+  - {config: t4_b4_h2_hv4_tv16, default: true}
+  - {config: t4_b8_h2_hv4_tv16, default: true}
+  - {config: t4_b16_h2_hv4_tv16, default: true}
+  - {config: t8_b1_h16_hv32_tv16, default: true}
+  - {config: t8_b1_h8_hv16_tv16, default: true}
+  - {config: t8_b4_h8_hv16_tv16, default: true}
+  - {config: t8_b1_h4_hv8_tv16, default: true}
+  - {config: t8_b4_h4_hv8_tv16, default: true}
+  - {config: t8_b8_h4_hv8_tv16, default: true}
+  - {config: t8_b1_h2_hv4_tv16, default: true}
+  - {config: t8_b4_h2_hv4_tv16, default: true}
+  - {config: t8_b8_h2_hv4_tv16, default: true}
+  - {config: t8_b16_h2_hv4_tv16, default: true}
