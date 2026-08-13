@@ -145,7 +145,7 @@ Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and 
 
 The set-device/in-place-retry portions below are the superseding target, not a
 claim about the current implementation snapshot. Their migration is paused at
-the FlashInfer feasibility blocker documented under Workload fields.
+the reachable DeepGEMM MegaMoE dependency issue documented under Workload fields.
 
 1. **Pinned baseline lives in git** (`baseline.json`, `baseline.md`).
 2. **One fresh process per workload.** Each child performs CPU prepare exactly
@@ -256,13 +256,16 @@ never be represented by zero, null, or an empty cell. Explicit multi-GPU workloa
 files remain supported, but the default sweep and routine acceptance do not run them.
 
 Implementation note (2026-08-13): the set-device/in-place-retry target above
-supersedes the current implementation snapshot's live-mask/fresh-prepare retry behavior,
-but migration is paused. The installed FlashInfer MegaMoE package contains real
-runner paths that call `torch.cuda.set_device(0)` (and one bootstrap path also
-constructs `Device(0)`), which can override a late assignment. This is recorded
-as a feasibility blocker pending a human scope/upstream decision; it is not an
-implicit exemption, and no local workaround or automatic fallback to masking is
-permitted.
+supersedes the current implementation snapshot's live-mask/fresh-prepare retry
+behavior. External-device audits use runtime reachability, not grep presence:
+FlashInfer MegaMoE's device-0 CLI/benchmark/debug functions are not imported by
+this project and are non-blocking. Migration is currently paused on a reachable
+path instead: this project's MegaMoE worker calls pinned DeepGEMM
+`utils.dist.init_dist`, which executes `torch.cuda.set_device(local_rank)` and can
+override a nonzero physical assignment. The installed package lacks that API and
+fails earlier, which does not validate the intended dependency. This requires a
+human dependency/scope decision; no external monkey-patch, replacement init, or
+automatic fallback to masking is permitted.
 
 MegaMoE entries use `timer: megamoe`, which invokes the dedicated DeepGEMM
 `bench_kineto` protocol. Do not set `warmup` or `repeat` for this timer because

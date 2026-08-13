@@ -31,7 +31,7 @@ multi-GPU runtime exemption.
   timer budgets, reference construction, correctness work, raw samples, and
   arithmetic-mean aggregation.
 
-## Superseding set-device decision and feasibility stop
+## Superseding set-device decision and reachability audit
 
 The human-directed target keeps all physical GPUs visible in the prepare child,
 so logical and physical ordinals are identical. CPU prepare must still leave CUDA
@@ -55,8 +55,8 @@ class, not a clean fresh-process/first-attempt sample. Unless the human explicit
 approves that semantic change, in-place retries cannot be mixed into clean AC-10
 A/B evidence. No such approval has been recorded.
 
-The required external-library audit found a blocking device-0 dependency in the
-installed FlashInfer package before implementation began:
+The first external-library audit found these device-0 source matches in the
+installed FlashInfer package:
 
 - `flashinfer/moe_ep/kernel_src/cutedsl_megamoe/shim/comm.py:84` calls
   `torch.cuda.set_device(0)` in the real single-rank `bootstrap_dist()` path, and
@@ -68,17 +68,44 @@ installed FlashInfer package before implementation began:
   `torch.cuda.set_device(0)` on executable runner/benchmark paths, followed in at
   least one path by bare `device="cuda"` allocations.
 
-These are not comments or dead source-text matches. They can override a late
-assignment and direct subsequent relative allocations to physical GPU 0. The
-repository's embedded `tirx_kernels/deepgemm/mega_moe.py` does not directly
-import these helpers, but the human required the audit to stop on any real
-external hard-coding rather than infer an exemption or add a workaround.
-Accordingly, the set-device and in-place-retry implementation has not started.
-The remaining external packages are not claimed as positively cleared by this
-stopped audit. A human decision is required: explicitly exclude/exempt these
-FlashInfer paths, require an upstream fix, or treat the finding as invalidating
-the set-device architecture. The implementation must not independently return
-to the mask design.
+The human review corrected the audit criterion from source presence to runtime
+reachability. AST inspection confirms every binding above is inside a function;
+the runner matches are CLI/benchmark/debug entry points, `flashinfer.__init__`
+does not import `moe_ep`, and this repository has no `moe_ep` or
+`cutedsl_megamoe` import or call. They are therefore not blockers and must not be
+presented as such. The durable rule is: a blocker requires evidence of who
+imports and calls the binding. Docstrings/examples, standalone CLI or benchmark
+scripts, and unimported subpackages do not qualify. A module-level binding or a
+function on a bench workload's real call graph does qualify; once confirmed, it
+must be reported without modifying the external library, adding a workaround,
+or reverting to masking.
+
+The continued audit found such a reachable path in the intended DeepGEMM
+MegaMoE dependency:
+
+```text
+PreparedMegaMoeBench.run_gpu
+  -> tirx_kernels.deepgemm.mega_moe._run_distributed
+  -> tirx_kernels.deepgemm.mega_moe._run_worker
+  -> deep_gemm.utils.dist.init_dist(local_rank, num_processes)
+  -> torch.cuda.set_device(local_rank)
+```
+
+The repository identifies this port against DeepGEMM `559d79fb`; that pinned
+source calls `torch.cuda.set_device(local_rank)` in `deep_gemm/utils/dist.py:33`.
+For a one-rank workload assigned physical GPU 6, `local_rank` remains 0 and the
+dependency switches execution to GPU 0. This is a real call edge from the bench
+workload, not a grep-only finding. The currently installed `deep_gemm` package
+lacks `utils.dist`, so this machine fails the path earlier with an API mismatch;
+that absence is not positive evidence for the intended dependency. Work on the
+binding/retry migration is paused pending a human decision for this reachable
+dependency. No external-library modification, monkey-patch, replacement
+initializer, or mask fallback has been added.
+
+The remaining external audit found no runtime AST hard-coded device-0 calls in
+the imported `deep_gemm`, `flash_attn`, CUTLASS DSL, or `flash_kda` Python trees.
+That statement is scoped to the inspected Python call sites and is not a GPU
+runtime validation claim.
 
 Three repository no-op calls were also inspected and left unchanged:
 
@@ -394,7 +421,7 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | criterion | status | evidence boundary |
 |---|---|---|
 | AC-1 | satisfied | Unified process-local prepare/run-GPU contract, CUDA prepare guards, serialization rejection, and standalone composition tests |
-| AC-2 | incomplete under superseding design | The earlier mask-based protocol has assignment validation and CUDA guards, but live-process masking is obsolete. `set_device(physical_index)`, per-attempt UUID proof, and non-assigned-card allocation/launch rejection are not implemented; the FlashInfer device-0 finding blocks feasibility pending a human decision |
+| AC-2 | incomplete under superseding design | The earlier mask-based protocol has assignment validation and CUDA guards, but live-process masking is obsolete. `set_device(physical_index)`, per-attempt UUID proof, and non-assigned-card allocation/launch rejection are not complete; the reachable DeepGEMM MegaMoE `init_dist -> set_device(local_rank)` path requires a human decision |
 | AC-3 | satisfied | Bounded one-shot concurrency/backlog, condition-driven dispatch, same-GPU serialization, logical multi-GPU concurrency, and dynamic eligibility tests |
 | AC-4 | satisfied for first attempts; unresolved for in-place retry | Default 5 rounds/1.0s, finalization, raw samples, and timer schemas are unchanged. A retry in an already-used GPU process is a distinct hot-process condition and cannot enter clean AC-10 evidence without human approval |
 | AC-5 | incomplete under superseding design | Existing fail-fast and cleanup evidence remains valid, but the fresh-child retry is obsolete. One-prepare in-place GPU retry, exact ownership transfer, GPU-state rebuild, and abandoned-card primary-context VRAM reporting are not implemented |
@@ -406,7 +433,7 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | AC-11 | satisfied | 112 defaults, all 992 configs retained, and 33/33 reviewed three-point selections with YAML-owned small/medium/large roles and rationale |
 
 The plan as a whole is therefore not marked complete. The immediate blocker is
-the human decision required by the FlashInfer device-0 audit; after that is
+the human decision required by the reachable DeepGEMM MegaMoE device override; after that is
 resolved, AC-2 and AC-5 require the superseding implementation and structural
 evidence. AC-10 still requires admissible single-GPU timer-family runtime
 evidence on a suitable machine. Multi-GPU runtime rows remain the explicit
@@ -461,8 +488,9 @@ human-directed exemption, not missing evidence.
   key/consumption tests and a repository CPU-only READY→CANCEL ledger, but no
   UUID-verified GPU runtime evidence and no runtime pass claim.
 - Multi-GPU runtime behavior remains intentionally unmeasured.
-- The FlashInfer device-0 finding is a feasibility blocker, not a failed runtime
-  benchmark and not an implicit exemption. No GPU validation or workaround was
-  attempted after it was found.
+- The former FlashInfer device-0 finding is explicitly reclassified as
+  unreachable and non-blocking. The DeepGEMM MegaMoE call chain above is the
+  current feasibility blocker; it is neither a runtime pass/fail placeholder nor
+  an implicit exemption. No external workaround or GPU validation was attempted.
 - The full 112-workload measured sweep and baseline promotion remain deferred
   until the shared machine is available; they were not required or run here.

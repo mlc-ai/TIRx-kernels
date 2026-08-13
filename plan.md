@@ -257,7 +257,7 @@ child 负责：
 4. 实现全 kernel exact module resolution 和 prepared-child IPC。
    - Phase A: 从 canonical `KERNEL_META` 派生完整 public-name → module 索引，处理 alias、duplicate 和 cache invalidation，runtime import 后复核。
    - Phase B: 实现 READY/ASSIGN/CANCEL/RESULT framing、独立日志通道和 process-group lifecycle。
-   - Phase C: 独立验证 late `torch.cuda.set_device` binding、逐次 UUID handshake 和非分配卡 allocation/launch 负向拒绝；外部库若硬编码 device 0 或 import 期缓存设备，记录证据并停止，不得私加 workaround。
+   - Phase C: 独立验证 late `torch.cuda.set_device` binding、逐次 UUID handshake 和非分配卡 allocation/launch 负向拒绝。外部库审计以可达性为判据：docstring/示例、CLI/`__main__`、benchmark/debug 脚本和本项目不 import 的子包不构成阻塞；模块级绑定或 bench suite 实际 import/call graph 会执行到的固定设备绑定才构成阻塞。声明阻塞必须同时给出调用者和调用链证据，不能只凭 grep 命中。确认可达后仍须记录证据并停止，不得修改外部库、私加 workaround 或自行回退 mask。
 
 5. 将 bench-suite 调度器改造成有界 producer/consumer pipeline。
    - Phase A: 并行 PREPARING children 与 bounded READY queue。
@@ -341,11 +341,13 @@ child 负责：
 ### Convergence Status
 
 - Final Status: `blocked_pending_human_decision`
-- Blocking evidence: installed FlashInfer MegaMoE runtime paths hard-code device 0; per the human stop condition, implementation cannot continue until their scope/upstream disposition is decided.
+- FlashInfer correction: earlier MegaMoE device-0 matches are function-local CLI/benchmark/debug paths in a subpackage absent from this repository's import/call graph, so they are not blockers under the reachability criterion.
+- Current blocking evidence: `tirx_kernels/deepgemm/mega_moe.py::_run_worker()` directly calls `deep_gemm.utils.dist.init_dist(local_rank, num_processes)`. The pinned DeepGEMM `559d79fb` implementation then calls `torch.cuda.set_device(local_rank)`, so a single-rank workload assigned physical GPU 6 is switched to GPU 0. The currently installed DeepGEMM lacks `utils.dist` and fails earlier; that mismatch does not make the intended runtime path safe. Per the retained stop condition, this requires a human decision before implementation continues.
 
 ## Pending User Decisions
 
-- `torch.cuda.set_device` 可行性审计发现当前安装的 FlashInfer MegaMoE 代码存在真实 device-0 硬编码：`shim/comm.py` 的 single-rank `bootstrap_dist()` 调用 `torch.cuda.set_device(0)` 和 `Device(0)`，其 `nvfp4.py`/`mxfp8.py` 调用该 helper；另有 MegaMoE runner/benchmark 路径直接调用 `set_device(0)`。按人的边界，当前实现暂停，等待决定这些 FlashInfer 路径是明确排除/豁免、需要上游修复，还是使 set-device 架构不可行；不得自行 workaround 或回退 mask。
+- FlashInfer MegaMoE 的 device-0 grep 命中已经按人的可达性裁决重新分类为非阻塞：命中全部位于本项目未 import 的 CLI/benchmark/debug 子树，没有从 bench workload 到这些函数的调用链。
+- DeepGEMM MegaMoE 存在不同的可达阻塞：本项目 `_run_worker()` 直接调用 pinned DeepGEMM `utils.dist.init_dist`，后者固定 `set_device(local_rank)`。请决定由上游/依赖修复、明确排除该 workload，或另行调整架构；实现不得自行复制替换外部初始化函数、monkey-patch 或回退 mask。
 - 原地 retry 是已经运行过 GPU attempt 的热进程测量。计划将其作为独立 evidence class，默认不进入 clean AC-10；若要让它和 fresh-process 数据同类使用，需要人的明确批准。
 
 ## Implementation Notes
