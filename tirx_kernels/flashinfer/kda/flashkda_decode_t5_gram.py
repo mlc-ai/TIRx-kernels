@@ -83,10 +83,32 @@ _mma_acc = _t2._mma_acc
 def _div(a, b):
     """``div.approx.ftz.f32`` -- the lowering nvcc picks for ``k / prefix``.
 
-    Read off the exported PTX (8 of them in phase C′, none of the rcp+mul or
-    full-range forms). ``-use_fast_math`` is what selects the approximate line.
+    Read off the exported PTX (8 of them in the sVec/sGramA publish, none of
+    the rcp+mul or full-range forms); -use_fast_math selects the approximate line.
     """
     return _ptx_bin("div.approx.ftz.f32", a, b)
+
+
+def _make_warp_uniform(value):
+    """``shfl.sync.idx.b32 %0, %1, 0, 0x1F, 0xFFFFFFFF`` -- the source's :36-39.
+
+    Semantically the identity (every lane of a warp already holds the same
+    ``tid / 32``), which is why the ported T<=4 siblings spell it ``tid // 32``
+    and drop the instruction. It is NOT droppable here: it is the hint that lets
+    ptxas prove ``warp_0 < 5`` is warp-uniform. Without it, at split1 -- the only
+    geometry where that guard is live -- ptxas cannot assume the shuffles inside
+    phase A are collectively executed and wraps them in a
+    ``WARPSYNC.COLLECTIVE``/``ENDCOLLECTIVE`` retry region with a back-edge over
+    most of the kernel: 14 WARPSYNC, 10 ENDCOLLECTIVE and 10 duplicate
+    register-operand ``SHFL.BFLY`` against the export's zero.
+    """
+    out = T.alloc_local((1,), "uint32")
+    T.evaluate(
+        T.ptx.shfl_sync.idx.b32(
+            out[0], T.reinterpret("uint32", value), T.uint32(0), T.uint32(31), T.uint32(0xFFFFFFFF)
+        )
+    )
+    return T.reinterpret("int32", out[0])
 
 
 def _named_bar_sync(bar_id: int, threads: int):
@@ -498,7 +520,7 @@ def _flashkda_decode_t5_gram(
     value_tile: T.int32 = work % VALUE_SPLIT
     hv: T.int32 = work // VALUE_SPLIT
     query_head: T.int32 = hv // HEAD_RATIO
-    warp: T.int32 = tid // 32  # == token index in phases A and C'
+    warp: T.int32 = _make_warp_uniform(tid // 32)  # == token index in A and C'
     lane: T.int32 = tid % 32
     lane_quad: T.int32 = lane % 4
     frag_row: T.int32 = lane // 4
