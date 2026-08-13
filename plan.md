@@ -264,9 +264,9 @@ child 负责：
 
 8. 在主要功能锚点做独立验证并收口。
    - Phase A: protocol/state-machine/metadata行为测试。
-   - Phase B: 少量单卡 workload 和动态外部负载 A/B；不跑全量、不占多张卡。
+   - Phase B: 少量单卡 workload 和动态外部负载 A/B；迁移前一侧从保留 one-stage scheduler 的 `a91a1b7` 独立 worktree 运行，迁移后一侧从当前 pipeline worktree 运行。两侧必须使用完全相同的显式 workload matrix、物理 GPU、默认 5 rounds/1.0s cooldown、timer/reference/correctness 协议和外层 wall timer；不跑全量、不占多张卡。
    - Phase C: 对多卡路径只做 assignment mismatch、原子 claim 和 rank lifecycle 等无多卡结构验证，并将 runtime 状态记为 `exempted_by_human_unmeasured`。
-   - Phase D: 依据 timeline 检查 `T_unexplained`、ratio、correctness和资源边界；只保留可复现的端到端收益。
+   - Phase D: 依据 timeline 检查 `T_unexplained`、ratio、correctness和资源边界；只保留可复现的端到端收益。迁移前/后同 matrix 的 pipeline overlap 加速与 YAML 默认覆盖从 234 降到 112 的独立工作量缩减必须分别归因，不得合并、相乘或汇总成一个加速比。
 
 ## Feature Map / Capability Map
 

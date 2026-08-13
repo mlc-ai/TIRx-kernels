@@ -35,10 +35,12 @@ The capability audit reports:
 - 992 module-owned benchmark configs.
 - 992 YAML inventory entries, with no module-only or YAML-only config.
 - 21 generic lazy-replay adapters checked at AST level.
+- 5 DeepGEMM direct-compile adapters with exact prepared-cache key and
+  consumption validation.
 - 112 single-GPU default workloads, with at most three defaults per kernel.
 - 27 multi-GPU configs, none selected by the default measured sweep.
 
-`tests/test_bench_pipeline_protocol.py` has 36 passing behavior tests covering:
+`tests/test_bench_pipeline_protocol.py` has 49 passing behavior tests covering:
 
 - one-shot process/IPC behavior, log isolation, cancellation, fail-fast, dynamic
   external eligibility, fresh-process interference retry, and resource bounds;
@@ -53,11 +55,19 @@ The capability audit reports:
 - MegaMoE alternating implementation order, sample-wise rank max aggregation,
   mismatched rank-round rejection, and distributed cleanup on failure;
 - lazy replay skipping its builder exactly once, with under/over-consumption
-  rejected, plus a static gate against moving builder work back to GPU stage.
+  rejected, plus a static gate against moving builder work back to GPU stage;
+- strict prepared-cache replay for the five DeepGEMM `compile_spec` users:
+  mismatched keys, missing consumption, and extra consumption all fail before a
+  GPU-stage compilation can silently enter the critical path;
+- missing/incomplete cost-model evidence never publishes expected wall,
+  residual, starvation, foreign-wait, or latency values as zero;
+- summaries watermark non-default rounds/cooldown as diagnostic, including old
+  run JSON whose protocol must be derived from its result rows.
 
 ## CPU prepare evidence without GPU assignment
 
-Three fresh prepared children were run only through READY and then cancelled.
+Three representative fresh prepared children were run only through READY and
+then cancelled.
 `TIRX_PREPARE_NUM_SMS=148` supplied the compile profile; no GPU was assigned.
 
 | workload | wall to READY | framework import | exact import | specialize/generate/compile | result |
@@ -68,6 +78,22 @@ Three fresh prepared children were run only through READY and then cancelled.
 
 These measurements demonstrate that parsing/generation/compilation—not only
 imports—are on the parallel CPU side of the boundary.
+
+After strict prepared-cache replay was added, each of the five DeepGEMM
+`compile_spec` adapters was also run in a fresh child through READY and then
+cancelled, again without a GPU assignment:
+
+| workload family | specialize/generate/compile | result |
+|---|---:|---|
+| FP8 BMM | 1.284s | READY, clean CANCEL |
+| FP8 GEMM 1D1D | 1.217s | READY, clean CANCEL |
+| K-grouped contiguous | 1.224s | READY, clean CANCEL |
+| M-grouped contiguous | 1.275s | READY, clean CANCEL |
+| M-grouped masked | 1.300s | READY, clean CANCEL |
+
+This proves that each family can create its specialization in the CPU-only
+phase. Exact replay consumption is independently enforced by the process-local
+cache-key tests and the all-config AST capability gate described above.
 
 ## Targeted single-GPU measured evidence
 
@@ -83,9 +109,9 @@ The three-small-GEMM pipeline run produced:
 - dispatch p95: 0.056s;
 - unexplained residual: 0.065s (0.14% of observed wall).
 
-This run has no matching same-protocol migration-before artifact. The older
-prototype evidence—29.70s sequential versus 19.17s pipelined, 1.55×—is retained
-only as directional cost-model evidence, not claimed as a final A/B.
+The older prototype evidence—29.70s sequential versus 19.17s pipelined, 1.55×—
+is retained only as directional cost-model evidence. A same-protocol A/B is
+reported separately below.
 
 After the generic lazy-replay correction, one small `act_and_mul` workload was
 run on one automatically selected idle B200:
@@ -99,6 +125,65 @@ run on one automatically selected idle B200:
 - 5 raw samples per implementation, Proton timer, 1.0s cooldown;
 - no interference retry;
 - host peaks: 3 processes, 1.999 GiB RSS, 218 file descriptors.
+
+### Default-protocol migration A/B
+
+The migration-before side was checked out in a detached worktree at `a91a1b7`,
+which still contains the one-stage scheduler. Both sides used exactly these
+three explicit workloads:
+
+- `fp16_bf16_gemm/fp16_1024x1024x1024`;
+- `fp16_bf16_gemm/fp16_2048x2048x2048`;
+- `fp16_bf16_gemm/fp16_4096x4096x4096`.
+
+Both sides were restricted to physical GPU 6, ran serial GPU stages, skipped the
+probe, and retained 5 rounds, 1.0 second cooldown, Proton warmup/repeat defaults,
+both implementations, correctness/reference setup, raw samples, and arithmetic
+mean. An outer monotonic timer measured the complete command:
+
+| path | wall | result |
+|---|---:|---|
+| one-stage `a91a1b7` | 95.712s | 3/3 ok, no interference |
+| pipeline | 50.792s | 3/3 ok, no interference |
+
+For this fixed three-workload matrix, the pipeline is 1.884× faster and reduces
+wall time by 46.9%. The pipeline's internal model measured 44.237s from scheduler
+start through final RESULT: first READY 6.208s, GPU list schedule 37.980s, no
+READY starvation or foreign wait, dispatch p95 0.036s, and unexplained residual
+0.049s. The additional outer-command time is startup/provenance/report work that
+both complete commands include.
+
+A prior back-to-back pair on the same matrix also showed the pipeline win. Its
+old/new kernel ratios differed by -0.75%, -0.55%, and -0.13% for the 1024, 2048,
+and 4096 shapes. In the precisely outer-timed pair, the 1024 and 4096 ratio deltas
+were +0.04% and +0.11%; the migration-before 2048 reference had one 34.329µs raw
+sample while its other four samples were 15.977–16.011µs, so that row's aggregate
+ratio is explicitly treated as an outlier-contaminated measurement rather than
+evidence of a pipeline semantic shift. No samples were trimmed or replaced.
+
+This A/B isolates orchestration by using the same three workload identities on
+both sides. The independent default-coverage change from 234 to 112 workloads is
+not included in this speedup. It reduces routine sweep work by 52.1% at the YAML
+configuration source and must be reported as a separate coverage/runtime effect,
+never multiplied into or merged with the 1.884× pipeline result.
+
+### DeepGEMM strict-cache runtime evidence boundary
+
+A default-protocol single-GPU attempt was made for
+`deepgemm_sm100_m_grouped_fp8_gemm_masked/g32_m192_n6144_k7168`. It completed
+CPU prepare, reported READY, received a one-GPU assignment, and then failed
+before launch construction because the installed `deep_gemm 2.3.0+35c4bc8`
+package does not export `cast_back_from_fp4` or `cast_back_from_fp8` from
+`deep_gemm.utils.math`, while the existing reference-data builder imports those
+helpers. This is an external reference-package API mismatch, not evidence that
+the strict replay path passed or failed at launch.
+
+The partial run is retained at
+`.bench-suite/targeted-strict-cache-run/runs/1.json`. Its cost model is correctly
+published as `measurement_status: missing`, with 0 complete GPU timelines out
+of 1 record and no `expected_s`, `unexplained_s`, starvation, foreign-wait, or
+latency fields. No replacement dequantization algorithm was introduced solely
+to manufacture runtime evidence.
 
 ## Multi-GPU runtime validation exemption
 
@@ -123,9 +208,12 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 ## Remaining evidence boundary
 
 - The implementation, static all-config migration gate, no-card structural tests,
-  CPU-only prepare evidence, and targeted single-GPU execution are complete.
+  CPU-only prepare evidence, default-protocol orchestration A/B, and generic
+  lazy-replay single-GPU execution are complete.
+- The five DeepGEMM adapters have strict key/consumption behavior tests and
+  CPU-only READY evidence; their real GPU replay attempt is blocked before
+  launch by the installed DeepGEMM reference API mismatch and is not marked
+  passed.
 - Multi-GPU runtime behavior remains intentionally unmeasured.
-- A final same-protocol migration-before versus migration-after single-GPU A/B is
-  not available. It must not be inferred from the prototype or unrelated runs.
 - The full 112-workload measured sweep and baseline promotion remain deferred
   until the shared machine is available; they were not required or run here.

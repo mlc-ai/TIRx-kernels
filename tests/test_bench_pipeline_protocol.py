@@ -22,15 +22,20 @@ from tirx_kernels.bench_suite import run as bench_run
 from tirx_kernels.bench_suite.run import (
     GpuPool,
     _audit_generic_adapter_source,
+    _audit_strict_cache_adapter_source,
     _finalize_bench_record,
     _pipeline_cost_model,
     check_workload_capabilities,
+    write_summary,
 )
 from tirx_kernels.runner import (
     PreparedKernelBenchmark,
+    PreparedRunBench,
     compile_kernel_lazy,
+    consume_prepared_cache,
     cuda_initialization_guard,
     replay_compiled_kernels,
+    replay_prepared_cache,
     run_prepared_kernel_bench,
 )
 
@@ -529,6 +534,52 @@ def test_compile_kernel_lazy_replay_skips_builder_and_consumes_exactly_once():
             pass
 
 
+def test_prepared_cache_replay_requires_exact_key_and_consumption():
+    executable = object()
+
+    def builder():
+        raise AssertionError("GPU-stage replay must not compile a cached artifact")
+
+    with replay_prepared_cache(
+        (kernel_runner.PreparedCacheEntry("compile_spec", (1, 2), executable),)
+    ):
+        assert consume_prepared_cache("compile_spec", (1, 2), builder) is executable
+
+    with pytest.raises(RuntimeError, match="does not match CPU prepare"):
+        with replay_prepared_cache(
+            (kernel_runner.PreparedCacheEntry("compile_spec", (1, 2), executable),)
+        ):
+            consume_prepared_cache("compile_spec", (1, 3), builder)
+
+    with pytest.raises(RuntimeError, match="consumed 0 of 1"):
+        with replay_prepared_cache(
+            (kernel_runner.PreparedCacheEntry("compile_spec", (1, 2), executable),)
+        ):
+            pass
+
+    with pytest.raises(RuntimeError, match="unprepared cached artifact"):
+        with replay_prepared_cache(()):
+            consume_prepared_cache("compile_spec", (1, 2), builder)
+
+
+def test_prepared_run_bench_enforces_custom_cache_consumption():
+    executable = object()
+    module = SimpleNamespace(
+        __name__="fake_cached_module",
+        run_bench=lambda **_kwargs: consume_prepared_cache(
+            "compile_spec", "shape", lambda: pytest.fail("must not build")
+        ),
+    )
+    prepared = PreparedRunBench(
+        module=module,
+        params={},
+        compiled=(),
+        cached=(kernel_runner.PreparedCacheEntry("compile_spec", "shape", executable),),
+    )
+
+    assert prepared.run_gpu() is executable
+
+
 def test_generic_adapter_static_gate_rejects_gpu_stage_builder_work(tmp_path: Path):
     valid = tmp_path / "valid.py"
     valid.write_text(
@@ -556,6 +607,52 @@ def test_generic_adapter_static_gate_rejects_gpu_stage_builder_work(tmp_path: Pa
     )
     with pytest.raises(TypeError, match="compile_kernel_lazy"):
         _audit_generic_adapter_source("eager", eager)
+
+
+def test_strict_cache_adapter_gate_rejects_direct_compile_spec_prepare(tmp_path: Path):
+    valid = tmp_path / "valid_cache.py"
+    valid.write_text(
+        textwrap.dedent(
+            """
+            def prepare_bench(**config):
+                return prepare_compile_spec_bench(__name__, config, _spec_for(config))
+
+            def _tirx_launch(data, config):
+                return build_launch(_spec_for(config), a=data)
+
+            def run_bench(**config):
+                return _tirx_launch({}, config)
+            """
+        )
+    )
+    assert _audit_strict_cache_adapter_source("valid", valid) is True
+
+    invalid = tmp_path / "invalid_cache.py"
+    invalid.write_text(
+        valid.read_text().replace(
+            "return prepare_compile_spec_bench(__name__, config, _spec_for(config))",
+            "compile_spec(_spec_for(config))\n"
+            "    return prepared_cached_run_bench(__name__, config)",
+        )
+    )
+    with pytest.raises(TypeError, match="strict compile-spec cache entry"):
+        _audit_strict_cache_adapter_source("invalid", invalid)
+
+    mismatched = tmp_path / "mismatched_cache.py"
+    mismatched.write_text(valid.read_text().replace(
+        "return build_launch(_spec_for(config), a=data)",
+        "return build_launch(_spec_for(other_config), a=data)",
+    ))
+    with pytest.raises(TypeError, match=r"canonical _spec_for\(config\)"):
+        _audit_strict_cache_adapter_source("mismatched", mismatched)
+
+    bypassed = tmp_path / "bypassed_launch.py"
+    bypassed.write_text(valid.read_text().replace(
+        "return _tirx_launch({}, config)",
+        "return object()",
+    ))
+    with pytest.raises(TypeError, match=r"exactly one _tirx_launch\(\) call"):
+        _audit_strict_cache_adapter_source("bypassed", bypassed)
 
 
 def test_cuda_initialization_guard_rejects_prepare_side_effect(monkeypatch):
@@ -947,6 +1044,7 @@ def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
 def test_cost_model_charges_ready_starvation_and_result_handoff():
     def record(*, ready, assigned, gpu_started, gpu_finished, result_received, reaped):
         return {
+            "status": "ok",
             "gpus": ["0"],
             "phase_timestamps": {
                 "process_started": 0.0,
@@ -991,6 +1089,8 @@ def test_cost_model_charges_ready_starvation_and_result_handoff():
         external_history=[(0.0, ())],
     )
 
+    assert model["measurement_status"] == "measured"
+    assert model["complete_timeline_count"] == model["record_count"] == 2
     assert model["ideal_gpu_list_schedule_s"] == pytest.approx(3.7)
     assert model["ready_constrained_gpu_list_schedule_s"] == pytest.approx(4.2)
     assert model["ready_starvation_s"] == pytest.approx(0.5)
@@ -1009,9 +1109,232 @@ def test_cost_model_charges_ready_starvation_and_result_handoff():
     assert model["dispatch_latency_s"]["max"] == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize(
+    ("records", "reason"),
+    [
+        ([], "no terminal workload records"),
+        (
+            [{"status": "FAIL", "phase_timestamps": {"process_started": 0.0}}],
+            (
+                "no workload produced an ok result with a complete timeline and valid "
+                "GPU assignment"
+            ),
+        ),
+    ],
+)
+def test_cost_model_never_publishes_zeroes_for_missing_gpu_evidence(records, reason):
+    model = _pipeline_cost_model(
+        records,
+        run_started=0.0,
+        critical_finished=5.0,
+        known_gpu_indices=("0",),
+        external_history=[(0.0, ())],
+    )
+
+    assert model == {
+        "measurement_status": "missing",
+        "record_count": len(records),
+        "complete_timeline_count": 0,
+        "complete_measurement_count": 0,
+        "missing_reason": reason,
+    }
+    for field in (
+        "expected_s",
+        "expected_with_foreign_s",
+        "unexplained_s",
+        "dispatch_latency_s",
+        "assignment_handoff_s",
+        "ready_starvation_s",
+        "foreign_wait_s",
+    ):
+        assert field not in model
+
+
+def test_cost_model_requires_complete_coverage_for_every_record():
+    complete = {
+        "status": "ok",
+        "gpus": ["0"],
+        "phase_timestamps": {
+            "process_started": 0.0,
+            "child_started": 0.1,
+            "prepare_started": 0.1,
+            "framework_import_started": 0.12,
+            "framework_loaded": 0.15,
+            "module_loaded": 0.2,
+            "config_resolved": 0.3,
+            "ready": 1.0,
+            "assigned": 1.0,
+            "gpu_started": 1.0,
+            "gpu_finished": 2.0,
+            "result_received": 2.0,
+            "process_reaped": 2.1,
+        },
+    }
+    incomplete = {"status": "FAIL", "phase_timestamps": {"process_started": 0.0}}
+
+    model = _pipeline_cost_model(
+        [complete, incomplete],
+        run_started=0.0,
+        critical_finished=2.0,
+        known_gpu_indices=("0",),
+        external_history=[(0.0, ())],
+    )
+
+    assert model["measurement_status"] == "missing"
+    assert model["record_count"] == 2
+    assert model["complete_timeline_count"] == 1
+    assert model["complete_measurement_count"] == 1
+    assert "ok result, complete GPU timeline" in model["missing_reason"]
+    assert "unexplained_s" not in model
+
+
+@pytest.mark.parametrize(
+    "record_update",
+    [
+        {"gpus": []},
+        {"gpus": ["1"]},
+        {"gpus": ["0", "0"], "num_gpus": 2},
+        {"gpus": ["0"], "num_gpus": 2},
+    ],
+)
+def test_cost_model_requires_a_valid_gpu_assignment_for_every_record(record_update):
+    record = {
+        "status": "ok",
+        "gpus": ["0"],
+        "num_gpus": 1,
+        "phase_timestamps": {
+            "process_started": 0.0,
+            "child_started": 0.1,
+            "prepare_started": 0.1,
+            "framework_import_started": 0.12,
+            "framework_loaded": 0.15,
+            "module_loaded": 0.2,
+            "config_resolved": 0.3,
+            "ready": 1.0,
+            "assigned": 1.0,
+            "gpu_started": 1.0,
+            "gpu_finished": 2.0,
+            "result_received": 2.0,
+            "process_reaped": 2.1,
+        },
+    }
+    record.update(record_update)
+
+    model = _pipeline_cost_model(
+        [record],
+        run_started=0.0,
+        critical_finished=2.0,
+        known_gpu_indices=("0",),
+        external_history=[(0.0, ())],
+    )
+
+    assert model["measurement_status"] == "missing"
+    assert model["complete_timeline_count"] == 1
+    assert model["complete_measurement_count"] == 0
+    assert "valid GPU assignment" in model["missing_reason"]
+    assert "expected_s" not in model
+
+
+def test_summary_marks_nondefault_protocol_and_missing_cost_evidence(tmp_path: Path):
+    current = {
+        "timestamp": "diagnostic",
+        "label": "diagnostic-run",
+        "git": {},
+        "results": [{"kernel": "fake", "config": "shape", "status": "FAIL"}],
+        "pipeline": {
+            "process_model": "one_shot_child_per_workload_attempt",
+            "measurement_protocol": {
+                "rounds": 1,
+                "cooldown_s": 0.0,
+                "default_rounds": 5,
+                "default_cooldown_s": 1.0,
+                "is_default": False,
+            },
+            "cost_model": {
+                "measurement_status": "missing",
+                "record_count": 1,
+                "complete_timeline_count": 0,
+                "complete_measurement_count": 0,
+                "missing_reason": "no workload reached a complete GPU timeline",
+            },
+        },
+    }
+
+    report = write_summary(tmp_path, current).read_text()
+
+    assert "DIAGNOSTIC, NON-DEFAULT MEASUREMENT PROTOCOL" in report
+    assert "used `1` round(s) and `0.0`s cooldown" in report
+    assert "cost-model evidence: `missing`" in report
+    assert "complete GPU timelines: `0` / `1`" in report
+    assert "complete cost-model measurements: `0` / `1`" in report
+    assert "unexplained residual:" not in report
+    assert "dispatch latency p95/max:" not in report
+
+
+def test_summary_derives_diagnostic_watermark_for_older_run_json(tmp_path: Path):
+    current = {
+        "timestamp": "legacy-diagnostic",
+        "label": "legacy-diagnostic",
+        "git": {},
+        "results": [
+            {
+                "kernel": "fake",
+                "config": "shape",
+                "status": "ok",
+                "benchmark_protocol": {"rounds": 1, "cooldown_s": 0.0},
+            }
+        ],
+        "pipeline": {
+            "process_model": "one_shot_child_per_workload_attempt",
+            "cost_model": {
+                "measurement_status": "missing",
+                "record_count": 1,
+                "complete_timeline_count": 0,
+                "complete_measurement_count": 0,
+                "missing_reason": "no workload reached a complete GPU timeline",
+            },
+        },
+    }
+
+    report = write_summary(tmp_path, current).read_text()
+
+    assert "DIAGNOSTIC, NON-DEFAULT MEASUREMENT PROTOCOL" in report
+    assert "used `1` round(s) and `0.0`s cooldown" in report
+
+
+def test_summary_does_not_mark_default_protocol_as_diagnostic(tmp_path: Path):
+    current = {
+        "timestamp": "default",
+        "label": "default-run",
+        "git": {},
+        "results": [],
+        "pipeline": {
+            "process_model": "one_shot_child_per_workload_attempt",
+            "measurement_protocol": {
+                "rounds": 5,
+                "cooldown_s": 1.0,
+                "default_rounds": 5,
+                "default_cooldown_s": 1.0,
+                "is_default": True,
+            },
+            "cost_model": {
+                "measurement_status": "missing",
+                "record_count": 0,
+                "complete_timeline_count": 0,
+                "complete_measurement_count": 0,
+                "missing_reason": "no terminal workload records",
+            },
+        },
+    }
+
+    report = write_summary(tmp_path, current).read_text()
+
+    assert "DIAGNOSTIC, NON-DEFAULT" not in report
+
 def test_cost_model_attributes_lost_parallelism_to_external_occupancy():
     def record(*, gpu, assigned, gpu_finished, result_received, reaped):
         return {
+            "status": "ok",
             "gpus": [gpu],
             "phase_timestamps": {
                 "process_started": 0.0,
@@ -1052,6 +1375,7 @@ def test_cost_model_attributes_lost_parallelism_to_external_occupancy():
 
 def test_cost_model_treats_pre_snapshot_gpus_as_ineligible():
     record = {
+        "status": "ok",
         "gpus": ["0"],
         "phase_timestamps": {
             "process_started": 0.0,

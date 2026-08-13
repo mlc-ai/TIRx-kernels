@@ -333,6 +333,99 @@ def _audit_generic_adapter_source(kernel: str, source_path: Path) -> bool:
     return True
 
 
+def _audit_strict_cache_adapter_source(kernel: str, source_path: Path) -> bool:
+    """Require DeepGEMM ``build_launch`` adapters to consume their prepared spec."""
+    source = source_path.read_text()
+    tree = ast.parse(source, filename=str(source_path))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    prepare_bench = functions.get("prepare_bench")
+    if prepare_bench is None:
+        return False
+    tirx_launch = functions.get("_tirx_launch")
+    run_bench = functions.get("run_bench")
+    if tirx_launch is None or run_bench is None:
+        return False
+
+    build_launch_calls = [
+        node
+        for node in ast.walk(tirx_launch)
+        if isinstance(node, ast.Call) and _call_name(node) == "build_launch"
+    ]
+    if not build_launch_calls:
+        return False
+    if len(build_launch_calls) != 1:
+        raise TypeError(
+            f"kernel {kernel!r} must contain exactly one build_launch() call in "
+            f"_tirx_launch(), found {len(build_launch_calls)}"
+        )
+
+    def is_config_spec(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and _call_name(node) == "_spec_for"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "config"
+            and not node.keywords
+        )
+
+    canonical_spec_names = {
+        target.id
+        for node in ast.walk(tirx_launch)
+        if isinstance(node, ast.Assign) and is_config_spec(node.value)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    launch_call = build_launch_calls[0]
+    launch_spec = launch_call.args[0] if launch_call.args else None
+    launch_uses_config_spec = is_config_spec(launch_spec) or (
+        isinstance(launch_spec, ast.Name) and launch_spec.id in canonical_spec_names
+    )
+    if not launch_uses_config_spec:
+        raise TypeError(
+            f"kernel {kernel!r} _tirx_launch() must derive build_launch()'s spec "
+            "from canonical _spec_for(config)"
+        )
+    helper_calls = [
+        node
+        for node in ast.walk(prepare_bench)
+        if isinstance(node, ast.Call) and _call_name(node) == "prepare_compile_spec_bench"
+    ]
+    if len(helper_calls) != 1:
+        raise TypeError(
+            f"kernel {kernel!r} uses DeepGEMM build_launch() and must prepare exactly "
+            f"one strict compile-spec cache entry, found {len(helper_calls)}"
+        )
+    helper_call = helper_calls[0]
+    if len(helper_call.args) < 3 or not is_config_spec(helper_call.args[2]):
+        raise TypeError(
+            f"kernel {kernel!r} prepare_bench() must derive its strict cache key "
+            "from canonical _spec_for(config)"
+        )
+    if any(
+        isinstance(node, ast.Call) and _call_name(node) == "compile_spec"
+        for node in ast.walk(prepare_bench)
+    ):
+        raise TypeError(
+            f"kernel {kernel!r} prepare_bench() bypasses strict compile-spec replay"
+        )
+    run_launch_calls = [
+        node
+        for node in ast.walk(run_bench)
+        if isinstance(node, ast.Call) and _call_name(node) == "_tirx_launch"
+    ]
+    if len(run_launch_calls) != 1:
+        raise TypeError(
+            f"kernel {kernel!r} run_bench() must consume the prepared spec through "
+            f"exactly one _tirx_launch() call, found {len(run_launch_calls)}"
+        )
+    return True
+
+
 def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
     """Statically prove exact resolution and explicit pipeline coverage."""
     from tirx_kernels.registry import kernel_index, load_kernel
@@ -345,6 +438,7 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
     multi_gpu_exemptions: list[dict[str, Any]] = []
     module_config_count = 0
     generic_adapter_count = 0
+    strict_cache_adapter_count = 0
 
     for name in sorted(records):
         module = load_kernel(name, strict=True)
@@ -355,6 +449,9 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         if not source_path.is_file():
             raise FileNotFoundError(f"kernel {name!r} has no inspectable source file")
         generic_adapter_count += int(_audit_generic_adapter_source(name, source_path))
+        strict_cache_adapter_count += int(
+            _audit_strict_cache_adapter_source(name, source_path)
+        )
         configs = _bench_configs(module)
         prepare_bench = module.prepare_bench
         labels: dict[str, dict] = {}
@@ -432,6 +529,7 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         "module_config_count": module_config_count,
         "yaml_config_count": yaml_config_count,
         "generic_adapter_count": generic_adapter_count,
+        "strict_cache_adapter_count": strict_cache_adapter_count,
         "multi_gpu_runtime_validation": {
             "validation_status": "exempted_by_human_unmeasured",
             "workload_count": len(multi_gpu_exemptions),
@@ -453,6 +551,7 @@ def write_pipeline_capability_report(out_dir: Path, capability: dict[str, Any]) 
         f"- module configs: `{capability['module_config_count']}`",
         f"- YAML configs: `{capability['yaml_config_count']}`",
         f"- generic lazy-replay adapters: `{capability['generic_adapter_count']}`",
+        f"- strict custom-cache replay adapters: `{capability['strict_cache_adapter_count']}`",
         "",
         "## Multi-GPU runtime validation exemption",
         "",
@@ -1601,6 +1700,44 @@ def _our_impl(row_impls: dict) -> str | None:
     return next(iter(our_impls(row_impls)), None)
 
 
+def _run_measurement_protocol(current: dict) -> dict[str, Any] | None:
+    """Return run-level rounds/cooldown, deriving older artifacts from result rows."""
+    pipeline = current.get("pipeline") or {}
+    declared = pipeline.get("measurement_protocol")
+    if isinstance(declared, dict):
+        return declared
+
+    observed = set()
+    for result in current.get("results") or []:
+        protocol = result.get("benchmark_protocol") or {}
+        rounds = protocol.get("rounds")
+        cooldown = protocol.get("cooldown_s", protocol.get("round_cooldown_s"))
+        if (
+            isinstance(rounds, int)
+            and not isinstance(rounds, bool)
+            and isinstance(cooldown, (int, float))
+            and not isinstance(cooldown, bool)
+        ):
+            observed.add((rounds, float(cooldown)))
+    if len(observed) != 1:
+        return None
+    rounds, cooldown = observed.pop()
+    return {
+        "rounds": rounds,
+        "cooldown_s": cooldown,
+        "default_rounds": DEFAULT_ROUNDS,
+        "default_cooldown_s": DEFAULT_COOLDOWN_S,
+        "is_default": rounds == DEFAULT_ROUNDS
+        and math.isclose(
+            cooldown,
+            DEFAULT_COOLDOWN_S,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ),
+        "source": "derived_from_result_protocols",
+    }
+
+
 def write_summary(out_dir: Path, current: dict) -> Path:
     """Human-readable per-run report, grouped by kernel.
 
@@ -1634,6 +1771,17 @@ def write_summary(out_dir: Path, current: dict) -> Path:
     pipeline = current.get("pipeline") or {}
     cost = pipeline.get("cost_model") or {}
     if pipeline:
+        measurement = _run_measurement_protocol(current) or {}
+        if measurement and not measurement.get("is_default", False):
+            lines.append(
+                "> **DIAGNOSTIC, NON-DEFAULT MEASUREMENT PROTOCOL:** "
+                f"this run used `{measurement.get('rounds', '?')}` round(s) and "
+                f"`{measurement.get('cooldown_s', '?')}`s cooldown; the acceptance "
+                f"default is `{measurement.get('default_rounds', DEFAULT_ROUNDS)}` "
+                f"rounds and `{measurement.get('default_cooldown_s', DEFAULT_COOLDOWN_S)}`s. "
+                "Do not use this run as default-protocol performance evidence."
+            )
+            lines.append("")
         lines.append("## Pipeline critical path")
         lines.append("")
         lines.append(
@@ -1642,45 +1790,61 @@ def write_summary(out_dir: Path, current: dict) -> Path:
         )
         lines.append("")
         lines.append(f"- process model: `{pipeline.get('process_model', '?')}`")
-        lines.append(
-            f"- observed critical wall: `{cost.get('observed_critical_s', 0.0):.3f}s`"
-        )
-        lines.append(
-            f"- first child spawn / spawn span: "
-            f"`{cost.get('first_process_started_s', 0.0):.3f}s` / "
-            f"`{cost.get('prepare_spawn_span_s', 0.0):.3f}s`"
-        )
-        lines.append(f"- first READY latency: `{cost.get('first_ready_s', 0.0):.3f}s`")
-        lines.append(
-            "- ideal GPU list schedule (all workloads READY at time zero): "
-            f"`{cost.get('ideal_gpu_list_schedule_s', 0.0):.3f}s`"
-        )
-        lines.append(
-            "- READY-constrained GPU list schedule: "
-            f"`{cost.get('ready_constrained_gpu_list_schedule_s', 0.0):.3f}s`"
-        )
-        lines.append(
-            "- eligibility-constrained GPU list schedule: "
-            f"`{cost.get('eligibility_constrained_gpu_list_schedule_s', 0.0):.3f}s`"
-        )
-        lines.append(f"- READY starvation: `{cost.get('ready_starvation_s', 0.0):.3f}s`")
-        lines.append(f"- foreign GPU wait: `{cost.get('foreign_wait_s', 0.0):.3f}s`")
-        lines.append(f"- expected critical wall: `{cost.get('expected_s', 0.0):.3f}s`")
-        lines.append(
-            "- expected critical wall including foreign occupancy: "
-            f"`{cost.get('expected_with_foreign_s', 0.0):.3f}s`"
-        )
-        lines.append(f"- unexplained residual: `{cost.get('unexplained_s', 0.0):.3f}s`")
-        dispatch = cost.get("dispatch_latency_s") or {}
-        handoff = cost.get("assignment_handoff_s") or {}
-        lines.append(
-            f"- dispatch latency p95/max: `{dispatch.get('p95', 0.0):.3f}s` / "
-            f"`{dispatch.get('max', 0.0):.3f}s`"
-        )
-        lines.append(
-            f"- ASSIGN-to-GPU-start p95/max: `{handoff.get('p95', 0.0):.3f}s` / "
-            f"`{handoff.get('max', 0.0):.3f}s`"
-        )
+        lines.append(f"- cost-model evidence: `{cost.get('measurement_status', 'missing')}`")
+        if cost.get("measurement_status") == "measured":
+            lines.append(f"- observed critical wall: `{cost['observed_critical_s']:.3f}s`")
+            lines.append(
+                f"- first child spawn / spawn span: "
+                f"`{cost['first_process_started_s']:.3f}s` / "
+                f"`{cost['prepare_spawn_span_s']:.3f}s`"
+            )
+            lines.append(f"- first READY latency: `{cost['first_ready_s']:.3f}s`")
+            lines.append(
+                "- ideal GPU list schedule (all workloads READY at time zero): "
+                f"`{cost['ideal_gpu_list_schedule_s']:.3f}s`"
+            )
+            lines.append(
+                "- READY-constrained GPU list schedule: "
+                f"`{cost['ready_constrained_gpu_list_schedule_s']:.3f}s`"
+            )
+            lines.append(
+                "- eligibility-constrained GPU list schedule: "
+                f"`{cost['eligibility_constrained_gpu_list_schedule_s']:.3f}s`"
+            )
+            lines.append(f"- READY starvation: `{cost['ready_starvation_s']:.3f}s`")
+            lines.append(f"- foreign GPU wait: `{cost['foreign_wait_s']:.3f}s`")
+            lines.append(f"- expected critical wall: `{cost['expected_s']:.3f}s`")
+            lines.append(
+                "- expected critical wall including foreign occupancy: "
+                f"`{cost['expected_with_foreign_s']:.3f}s`"
+            )
+            lines.append(f"- unexplained residual: `{cost['unexplained_s']:.3f}s`")
+            dispatch = cost["dispatch_latency_s"]
+            handoff = cost["assignment_handoff_s"]
+            lines.append(
+                f"- dispatch latency p95/max: `{dispatch['p95']:.3f}s` / "
+                f"`{dispatch['max']:.3f}s`"
+            )
+            lines.append(
+                f"- ASSIGN-to-GPU-start p95/max: `{handoff['p95']:.3f}s` / "
+                f"`{handoff['max']:.3f}s`"
+            )
+        else:
+            lines.append(f"- missing reason: {cost.get('missing_reason', 'unknown')}")
+            lines.append(
+                f"- complete GPU timelines: `{cost.get('complete_timeline_count', 0)}` / "
+                f"`{cost.get('record_count', 0)}`"
+            )
+            lines.append(
+                "- complete cost-model measurements: "
+                f"`{cost.get('complete_measurement_count', 0)}` / "
+                f"`{cost.get('record_count', 0)}`"
+            )
+            lines.append(
+                "- expected wall, residual, starvation, foreign wait, and latency "
+                "percentiles are intentionally unpublished because the run lacks "
+                "complete measurement evidence"
+            )
         lines.append(
             f"- final process-reap tail: `{pipeline.get('final_reap_tail_s', 0.0):.3f}s`"
         )
@@ -1984,33 +2148,82 @@ def _pipeline_cost_model(
     known_gpu_indices: tuple[str, ...],
     external_history: list[tuple[float, tuple[str, ...]]],
 ) -> dict[str, Any]:
-    timelines = [record.get("phase_timestamps") or {} for record in records]
-    complete = [
-        timeline
-        for timeline in timelines
-        if all(
-            name in timeline
-            for name in (
-                "process_started",
-                "child_started",
-                "prepare_started",
-                "framework_import_started",
-                "framework_loaded",
-                "module_loaded",
-                "config_resolved",
-                "ready",
-                "assigned",
-                "gpu_started",
-                "gpu_finished",
-                "result_received",
-                "process_reaped",
-            )
+    required_timeline_phases = (
+        "process_started",
+        "child_started",
+        "prepare_started",
+        "framework_import_started",
+        "framework_loaded",
+        "module_loaded",
+        "config_resolved",
+        "ready",
+        "assigned",
+        "gpu_started",
+        "gpu_finished",
+        "result_received",
+        "process_reaped",
+    )
+    known_gpus = set(known_gpu_indices)
+
+    def has_complete_timeline(record: dict) -> bool:
+        timeline = record.get("phase_timestamps") or {}
+        return record.get("status") == "ok" and all(
+            name in timeline for name in required_timeline_phases
         )
+
+    def has_valid_assignment(record: dict) -> bool:
+        gpus = record.get("gpus")
+        if not isinstance(gpus, (list, tuple)) or not gpus:
+            return False
+        assigned_gpus = tuple(str(gpu) for gpu in gpus)
+        required_num_gpus = record.get("num_gpus", len(assigned_gpus))
+        return (
+            type(required_num_gpus) is int
+            and required_num_gpus == len(assigned_gpus)
+            and len(set(assigned_gpus)) == len(assigned_gpus)
+            and set(assigned_gpus).issubset(known_gpus)
+        )
+
+    timelines = [record.get("phase_timestamps") or {} for record in records]
+    complete_timelines = [
+        timeline
+        for record, timeline in zip(records, timelines, strict=True)
+        if has_complete_timeline(record)
     ]
-    process_starts = [timeline["process_started"] for timeline in complete]
-    first_ready = min((timeline["ready"] for timeline in complete), default=critical_finished)
+    complete_measurements = [
+        timeline
+        for record, timeline in zip(records, timelines, strict=True)
+        if has_complete_timeline(record) and has_valid_assignment(record)
+    ]
+    coverage = {
+        "measurement_status": "missing",
+        "record_count": len(records),
+        "complete_timeline_count": len(complete_timelines),
+        "complete_measurement_count": len(complete_measurements),
+    }
+    if not records:
+        return {**coverage, "missing_reason": "no terminal workload records"}
+    if not complete_measurements:
+        return {
+            **coverage,
+            "missing_reason": (
+                "no workload produced an ok result with a complete timeline and valid "
+                "GPU assignment"
+            ),
+        }
+    if len(complete_measurements) != len(records):
+        return {
+            **coverage,
+            "missing_reason": (
+                "cost model requires an ok result, complete GPU timeline, and valid "
+                "nonempty GPU assignment from this run for every record"
+            ),
+        }
+    process_starts = [timeline["process_started"] for timeline in complete_measurements]
+    first_ready = min(timeline["ready"] for timeline in complete_measurements)
     assignment_handoffs = [
-        max(0.0, timeline["gpu_started"] - timeline["assigned"]) for timeline in complete
+        max(0.0, timeline["gpu_started"] - timeline["assigned"])
+        for timeline in complete_measurements
     ]
     gpu_intervals_by_index: dict[str, list[tuple[float, float]]] = {}
     for record in records:
@@ -2025,21 +2238,8 @@ def _pipeline_cost_model(
         gpu: sum(end - start for start, end in gpu_intervals_by_index.get(gpu, []))
         for gpu in known_gpu_indices
     }
-    scheduled_records = [
-        record
-        for record in records
-        if all(
-            name in (record.get("phase_timestamps") or {})
-            for name in (
-                "ready",
-                "assigned",
-                "gpu_started",
-                "gpu_finished",
-                "result_received",
-            )
-        )
-        and record.get("gpus")
-    ]
+    scheduled_records = records
+
     def external_occupied_at(timestamp: float) -> set[str]:
         occupied: tuple[str, ...] | None = None
         for changed_at, value in external_history:
@@ -2081,8 +2281,6 @@ def _pipeline_cost_model(
         return candidate
 
     def list_schedule(*, respect_ready: bool, respect_external: bool = False) -> float:
-        if not scheduled_records or not gpu_indices:
-            return 0.0
         available = {gpu: 0.0 for gpu in gpu_indices}
         finish = 0.0
         ordered = sorted(
@@ -2146,20 +2344,16 @@ def _pipeline_cost_model(
     unexplained_s = observed_s - first_ready_s - ready_constrained_gpu_s - foreign_wait_s
 
     def percentile(values: list[float], fraction: float) -> float:
-        if not values:
-            return 0.0
         ordered = sorted(values)
         index = min(len(ordered) - 1, max(0, math.ceil(len(ordered) * fraction) - 1))
         return ordered[index]
 
     return {
+        "measurement_status": "measured",
+        "record_count": len(records),
         "observed_critical_s": observed_s,
-        "first_process_started_s": (
-            max(0.0, min(process_starts) - run_started) if process_starts else 0.0
-        ),
-        "prepare_spawn_span_s": (
-            max(process_starts) - min(process_starts) if process_starts else 0.0
-        ),
+        "first_process_started_s": max(0.0, min(process_starts) - run_started),
+        "prepare_spawn_span_s": max(process_starts) - min(process_starts),
         "first_ready_s": first_ready_s,
         "ideal_gpu_list_schedule_s": ideal_gpu_s,
         "ready_constrained_gpu_list_schedule_s": ready_constrained_gpu_s,
@@ -2171,16 +2365,17 @@ def _pipeline_cost_model(
         "unexplained_s": unexplained_s,
         "dispatch_latency_s": {
             "count": len(dispatch_latencies),
-            "max": max(dispatch_latencies, default=0.0),
+            "max": max(dispatch_latencies),
             "p95": percentile(dispatch_latencies, 0.95),
         },
         "assignment_handoff_s": {
             "count": len(assignment_handoffs),
-            "max": max(assignment_handoffs, default=0.0),
+            "max": max(assignment_handoffs),
             "p95": percentile(assignment_handoffs, 0.95),
         },
         "ready_starvation_s": max(0.0, ready_constrained_gpu_s - ideal_gpu_s),
-        "complete_timeline_count": len(complete),
+        "complete_timeline_count": len(complete_timelines),
+        "complete_measurement_count": len(complete_measurements),
     }
 
 
@@ -2679,6 +2874,21 @@ def run_scheduled_jobs(
     pipeline_meta = {
         "execution_mode": "pipeline",
         "process_model": "one_shot_child_per_workload_attempt",
+        "measurement_protocol": {
+            "rounds": rounds,
+            "cooldown_s": cooldown,
+            "default_rounds": DEFAULT_ROUNDS,
+            "default_cooldown_s": DEFAULT_COOLDOWN_S,
+            "is_default": (
+                rounds == DEFAULT_ROUNDS
+                and math.isclose(
+                    cooldown,
+                    DEFAULT_COOLDOWN_S,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ),
+        },
         "compile_profile": compile_profile,
         "max_prepare_processes": max_prepare_processes,
         "ready_backlog": ready_backlog,

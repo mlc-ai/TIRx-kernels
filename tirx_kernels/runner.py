@@ -72,8 +72,26 @@ class _CompileReplay:
     next_index: int = 0
 
 
+@dataclass(frozen=True)
+class PreparedCacheEntry:
+    """One process-local cached artifact that the GPU stage must consume."""
+
+    namespace: str
+    key: Any
+    value: Any
+
+
+@dataclass
+class _CacheReplay:
+    prepared: list[PreparedCacheEntry]
+    next_index: int = 0
+
+
 _COMPILE_REPLAY: ContextVar[_CompileReplay | None] = ContextVar(
     "tirx_compile_replay", default=None
+)
+_CACHE_REPLAY: ContextVar[_CacheReplay | None] = ContextVar(
+    "tirx_cache_replay", default=None
 )
 _NVML_LOCK = threading.Lock()
 _NVML_MODULE: Any | None = None
@@ -93,13 +111,15 @@ class PreparedRunBench:
     module: ModuleType
     params: dict[str, Any]
     compiled: tuple[tuple[Any, Any], ...]
+    cached: tuple[PreparedCacheEntry, ...] = ()
 
     def run_gpu(self, **kwargs: Any) -> dict[str, Any]:
         run_bench_fn = getattr(self.module, "run_bench", None)
         if run_bench_fn is None:
             raise TypeError(f"module {self.module.__name__!r} has no run_bench()")
         with replay_compiled_kernels(self.compiled):
-            return run_bench_fn(**self.params, **kwargs)
+            with replay_prepared_cache(self.cached):
+                return run_bench_fn(**self.params, **kwargs)
 
 
 def _current_process_cuda_gpus() -> tuple[int, ...]:
@@ -211,6 +231,26 @@ def compile_kernel_lazy(builder):
     return compile_kernel(builder())
 
 
+def consume_prepared_cache(namespace: str, key: Any, builder):
+    """Build/cache normally, or consume the exact CPU-prepared artifact on replay."""
+    replay = _CACHE_REPLAY.get()
+    if replay is None:
+        return builder()
+    if replay.next_index >= len(replay.prepared):
+        raise RuntimeError(
+            f"GPU stage requested an unprepared cached artifact {namespace!r} key={key!r}"
+        )
+    expected = replay.prepared[replay.next_index]
+    if namespace != expected.namespace or key != expected.key:
+        raise RuntimeError(
+            "GPU-stage cached artifact request does not match CPU prepare: "
+            f"requested {namespace!r} key={key!r}, expected "
+            f"{expected.namespace!r} key={expected.key!r}"
+        )
+    replay.next_index += 1
+    return expected.value
+
+
 @contextmanager
 def replay_compiled_kernels(compiled: tuple[tuple[Any, Any], ...]):
     """Make prepared executables available to matching GPU-stage compile calls."""
@@ -225,6 +265,22 @@ def replay_compiled_kernels(compiled: tuple[tuple[Any, Any], ...]):
             )
     finally:
         _COMPILE_REPLAY.reset(token)
+
+
+@contextmanager
+def replay_prepared_cache(cached: tuple[PreparedCacheEntry, ...]):
+    """Require the GPU stage to consume every declared custom cached artifact."""
+    replay = _CacheReplay(list(cached))
+    token = _CACHE_REPLAY.set(replay)
+    try:
+        yield
+        if replay.next_index != len(replay.prepared):
+            raise RuntimeError(
+                "GPU stage consumed "
+                f"{replay.next_index} of {len(replay.prepared)} CPU-prepared cached artifacts"
+            )
+    finally:
+        _CACHE_REPLAY.reset(token)
 
 
 def prepare_run_bench(module: ModuleType, params: dict[str, Any]) -> PreparedRunBench:
@@ -248,10 +304,16 @@ def prepare_module_bench(module_name: str, params: dict[str, Any]) -> PreparedRu
     return prepare_run_bench(sys.modules[module_name], params)
 
 
-def prepared_cached_run_bench(module_name: str, params: dict[str, Any]) -> PreparedRunBench:
+def prepared_cached_run_bench(
+    module_name: str,
+    params: dict[str, Any],
+    *,
+    cached: tuple[tuple[str, Any, Any], ...] = (),
+) -> PreparedRunBench:
     """Wrap ``run_bench`` after its custom CPU compile cache was populated."""
     module = sys.modules[module_name]
-    return PreparedRunBench(module=module, params=dict(params), compiled=())
+    entries = tuple(PreparedCacheEntry(namespace, key, value) for namespace, key, value in cached)
+    return PreparedRunBench(module=module, params=dict(params), compiled=(), cached=entries)
 
 
 def run_kernel_test(kernel_name: str, config: dict[str, Any], *, registry=None):

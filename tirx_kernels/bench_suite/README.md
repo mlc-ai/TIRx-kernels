@@ -71,7 +71,9 @@ critical path. The current inventory is 992 module configs and 992 YAML configs.
 The gate requires exact bidirectional inventory coverage and statically enforces
 the generic-adapter boundary: CPU prepare compiles canonical `get_kernel()` output,
 while GPU execution may only consume it through lazy replay and cannot regenerate
-or compile the PrimFunc after assignment.
+or compile the PrimFunc after assignment. The five DeepGEMM `compile_spec`
+adapters use the same contract through strict custom-cache replay: GPU execution
+must request the exact prepared namespace/key and consume every prepared artifact.
 
 ### SGLang FP8 paged MQA exploration
 
@@ -167,6 +169,9 @@ handoff, GPU stage, result handoff, and final reap tail. Foreign GPU wait, READY
 starvation, dispatch latency, and unexplained residual are reported separately.
 Each run also records peak owned process-tree size, aggregate RSS, and open file
 descriptors so one-shot process concurrency remains an observable bounded resource.
+If any workload lacks an `ok` result, complete timeline, or valid GPU assignment,
+the run-level cost model is explicitly `missing` and does not publish expected
+wall time, residuals, starvation, foreign-wait, or latency values as zero.
 
 ## Baseline files (git-tracked)
 
@@ -188,7 +193,9 @@ python tirx_kernels/bench_suite/promote_baseline.py \
 ```
 
 The default is already five independent rounds. Use `--rounds 1` only for a quick
-diagnostic run that will not be promoted.
+diagnostic run that will not be promoted. `summary.md` prominently watermarks any
+non-default rounds/cooldown combination as diagnostic; this is also derived for
+older run JSON that predates the run-level protocol field.
 
 ### Refresh the pinned baseline (rare)
 

@@ -146,13 +146,10 @@ def prepare_data(**config):
 
 def prepare_bench(**config):
     """Compile the exact DeepGEMM specialization without initializing CUDA."""
-    from tirx_kernels.runner import prepared_cached_run_bench
-
-    from ._sm100_fp8_fp4_gemm_1d1d import compile_spec
+    from ._sm100_fp8_fp4_gemm_1d1d import prepare_compile_spec_bench
 
     config.pop("label", None)
-    compile_spec(_spec_for(config))
-    return prepared_cached_run_bench(__name__, config)
+    return prepare_compile_spec_bench(__name__, config, _spec_for(config))
 
 
 def _tirx_launch(data, config):

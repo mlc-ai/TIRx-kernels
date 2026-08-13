@@ -1090,7 +1090,7 @@ __all__ += [
 
 
 @cache
-def compile_spec(spec: GemmSpec):
+def _compile_spec_cached(spec: GemmSpec):
     """Compile one specialization.  `GemmSpec` is frozen, so it keys the cache."""
     import tvm
 
@@ -1105,6 +1105,32 @@ def compile_spec(spec: GemmSpec):
         tvm.IRModule({"main": func}),
         target=tvm.target.Target({"kind": "cuda", "arch": "sm_100f"}),
         tir_pipeline="tirx",
+    )
+
+
+COMPILE_SPEC_CACHE_NAMESPACE = "deepgemm.sm100_fp8_fp4_gemm_1d1d.compile_spec"
+
+
+def compile_spec(spec: GemmSpec):
+    """Compile normally or consume the exact artifact declared during CPU prepare."""
+    from tirx_kernels.runner import consume_prepared_cache
+
+    return consume_prepared_cache(
+        COMPILE_SPEC_CACHE_NAMESPACE,
+        spec,
+        lambda: _compile_spec_cached(spec),
+    )
+
+
+def prepare_compile_spec_bench(module_name: str, config: dict, spec: GemmSpec):
+    """Compile one spec and declare its exact GPU-stage cache consumption."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    executable = compile_spec(spec)
+    return prepared_cached_run_bench(
+        module_name,
+        config,
+        cached=((COMPILE_SPEC_CACHE_NAMESPACE, spec, executable),),
     )
 
 
