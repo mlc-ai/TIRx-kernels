@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
+import hashlib
 import importlib
 import json
+import os
 import pickle
 import statistics
 import subprocess
@@ -10,6 +12,7 @@ import sys
 import textwrap
 import time
 from contextlib import nullcontext
+from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,10 +22,12 @@ import pytest
 from tirx_kernels import registry
 from tirx_kernels import runner as kernel_runner
 from tirx_kernels.basic.utils import _runtime
-from tirx_kernels.bench.__main__ import _validated_gpu_assignment
+from tirx_kernels.bench.__main__ import _validated_gpu_assignment, _validated_physical_gpu_uuids
 from tirx_kernels.bench_suite import run as bench_run
 from tirx_kernels.bench_suite.run import (
     GpuPool,
+    _audit_custom_cache_adapter_source,
+    _audit_driver_safe_cuda_targets,
     _audit_generic_adapter_source,
     _audit_strict_cache_adapter_source,
     _finalize_bench_record,
@@ -35,9 +40,12 @@ from tirx_kernels.bench_suite.run import (
 from tirx_kernels.runner import (
     PreparedKernelBenchmark,
     PreparedRunBench,
+    _offline_nvcc_arch,
     compile_kernel_lazy,
     consume_prepared_cache,
     cuda_initialization_guard,
+    gpu_stage_compile_guard,
+    physical_cuda_uuids,
     replay_compiled_kernels,
     replay_prepared_cache,
     run_kernel_bench,
@@ -84,8 +92,22 @@ _FAKE_PREPARED_CHILD = textwrap.dedent(
         raise SystemExit(0)
     if command.get("type") != "ASSIGN":
         raise RuntimeError(f"unexpected command: {command}")
+    gpu_uuids = command.get("gpu_uuids")
+    if not isinstance(gpu_uuids, list) or len(gpu_uuids) != int(
+        workload.get("num_gpus", 1)
+    ):
+        raise RuntimeError(f"invalid test GPU UUID assignment: {gpu_uuids}")
 
     gpu_started = time.time()
+    if workload.get("mode") == "wrong_gpu_uuid":
+        gpu_uuids = ["GPU-wrong"] * len(gpu_uuids)
+    send(
+        {
+            "type": "RUNNING_GPU",
+            "gpu_started": gpu_started,
+            "physical_gpu_uuids": gpu_uuids,
+        }
+    )
     time.sleep(float(workload.get("gpu_s", 0.05)))
     if workload.get("mode") == "fail_gpu":
         send(
@@ -105,7 +127,6 @@ _FAKE_PREPARED_CHILD = textwrap.dedent(
     send(
         {
             "type": "RESULT",
-            "gpu_started": gpu_started,
             "gpu_finished": gpu_finished,
             "result": {
                 "round_samples": {"tir": [1.0] * rounds},
@@ -140,15 +161,11 @@ def _fake_pipeline(
 
     monkeypatch.setattr(bench_run, "_prepared_child_command", command)
     monkeypatch.setattr(
-        bench_run,
-        "_active_strangers",
-        active_strangers or (lambda *_args, **_kwargs: {}),
+        bench_run, "_active_strangers", active_strangers or (lambda *_args, **_kwargs: {})
     )
     pool = GpuPool(allowed=set(gpu_indices))
     monkeypatch.setattr(
-        pool,
-        "_all_gpus",
-        lambda: [(index, f"GPU-{index}") for index in gpu_indices],
+        pool, "_all_gpus", lambda: [(index, f"GPU-{index}") for index in gpu_indices]
     )
     monkeypatch.setattr(pool, "_occupied_indices", lambda: set())
     log_dir = tmp_path / "logs"
@@ -159,7 +176,7 @@ def _fake_pipeline(
         log_dir,
         rounds=5,
         cooldown=1.0,
-        compile_profile={"num_sms": 148},
+        compile_profile={"cuda_arch": "sm_100a", "num_sms": 148},
         max_prepare_processes=max_prepare_processes,
         ready_backlog=ready_backlog,
     )
@@ -205,10 +222,7 @@ def test_one_shot_pipeline_parallelizes_across_logical_gpus_and_isolates_logs(
     )
     for gpu in ("0", "1"):
         per_gpu = sorted(
-            (
-                record["phase_timestamps"]["gpu_started"],
-                record["phase_timestamps"]["gpu_finished"],
-            )
+            (record["phase_timestamps"]["gpu_started"], record["phase_timestamps"]["gpu_finished"])
             for record in records
             if record["gpu"] == gpu
         )
@@ -223,22 +237,12 @@ def test_ready_backpressure_resumes_without_dropping_or_reusing_workloads(
     monkeypatch, tmp_path: Path
 ):
     workloads = [
-        {
-            "kernel": "fake",
-            "config": f"w{index}",
-            "num_gpus": 1,
-            "prepare_s": 0.01,
-            "gpu_s": 0.08,
-        }
+        {"kernel": "fake", "config": f"w{index}", "num_gpus": 1, "prepare_s": 0.01, "gpu_s": 0.08}
         for index in range(6)
     ]
 
     records, retries, pipeline = _fake_pipeline(
-        monkeypatch,
-        tmp_path,
-        workloads,
-        max_prepare_processes=2,
-        ready_backlog=2,
+        monkeypatch, tmp_path, workloads, max_prepare_processes=2, ready_backlog=2
     )
 
     assert retries == []
@@ -247,12 +251,9 @@ def test_ready_backpressure_resumes_without_dropping_or_reusing_workloads(
     assert all(record["attempt"] == 1 for record in records)
     assert pipeline["max_observed_preparing"] <= 2
     assert pipeline["max_observed_buffered"] <= 2
-    first_gpu_started = min(
-        record["phase_timestamps"]["gpu_started"] for record in records
-    )
+    first_gpu_started = min(record["phase_timestamps"]["gpu_started"] for record in records)
     assert any(
-        record["phase_timestamps"]["process_started"] > first_gpu_started
-        for record in records
+        record["phase_timestamps"]["process_started"] > first_gpu_started for record in records
     )
 
 
@@ -273,6 +274,24 @@ def test_pipeline_assigns_a_complete_multigpu_claim_before_gpu_stage(monkeypatch
     assert timeline["ready"] <= timeline["assigned"] <= timeline["gpu_started"]
 
 
+def test_pipeline_rejects_physical_gpu_identity_mismatch_before_gpu_stage(
+    monkeypatch, tmp_path: Path
+):
+    records, retries, _pipeline = _fake_pipeline(
+        monkeypatch,
+        tmp_path,
+        [{"kernel": "fake", "config": "wrong-uuid", "num_gpus": 1, "mode": "wrong_gpu_uuid"}],
+        max_prepare_processes=1,
+        ready_backlog=1,
+    )
+
+    assert retries == []
+    assert records[0]["status"] == "FAIL"
+    assert "physical GPU UUID mismatch" in records[0]["error"]
+    assert "gpu_started" not in records[0]["phase_timestamps"]
+    assert bench_run._BenchPidRegistry._roots == set()
+
+
 def test_pipeline_fail_fast_cancels_nonterminal_children(monkeypatch, tmp_path: Path):
     workloads = [
         {"kernel": "fake", "config": "fail", "num_gpus": 1, "mode": "fail_prepare"},
@@ -281,11 +300,7 @@ def test_pipeline_fail_fast_cancels_nonterminal_children(monkeypatch, tmp_path: 
     ]
 
     records, retries, _pipeline = _fake_pipeline(
-        monkeypatch,
-        tmp_path,
-        workloads,
-        max_prepare_processes=2,
-        ready_backlog=2,
+        monkeypatch, tmp_path, workloads, max_prepare_processes=2, ready_backlog=2
     )
 
     assert retries == []
@@ -311,11 +326,7 @@ def test_pipeline_fail_fast_cancels_ready_and_running_children(monkeypatch, tmp_
 
     started = time.monotonic()
     records, retries, _pipeline = _fake_pipeline(
-        monkeypatch,
-        tmp_path,
-        workloads,
-        max_prepare_processes=3,
-        ready_backlog=3,
+        monkeypatch, tmp_path, workloads, max_prepare_processes=3, ready_backlog=3
     )
     elapsed = time.monotonic() - started
 
@@ -335,14 +346,7 @@ def test_keyboard_interrupt_reaps_preparing_children_and_resources(monkeypatch, 
             "-c",
             _FAKE_PREPARED_CHILD,
             str(control_fd),
-            json.dumps(
-                {
-                    **workload,
-                    "prepare_s": 5.0,
-                    "_rounds": rounds,
-                    "_cooldown": cooldown,
-                }
-            ),
+            json.dumps({**workload, "prepare_s": 5.0, "_rounds": rounds, "_cooldown": cooldown}),
         ],
     )
     monkeypatch.setattr(bench_run, "_active_strangers", lambda *_args, **_kwargs: {})
@@ -371,7 +375,7 @@ def test_keyboard_interrupt_reaps_preparing_children_and_resources(monkeypatch, 
             log_dir,
             rounds=5,
             cooldown=1.0,
-            compile_profile={"num_sms": 148},
+            compile_profile={"cuda_arch": "sm_100a", "num_sms": 148},
             max_prepare_processes=1,
             ready_backlog=1,
         )
@@ -414,7 +418,7 @@ def test_external_busy_to_eligible_poll_dispatches_ready_child(monkeypatch, tmp_
         log_dir,
         rounds=5,
         cooldown=1.0,
-        compile_profile={"num_sms": 148},
+        compile_profile={"cuda_arch": "sm_100a", "num_sms": 148},
         max_prepare_processes=1,
         ready_backlog=1,
     )
@@ -423,8 +427,7 @@ def test_external_busy_to_eligible_poll_dispatches_ready_child(monkeypatch, tmp_
     assert records[0]["status"] == "ok"
     assert records[0]["phase_timestamps"]["assigned"] > records[0]["phase_timestamps"]["ready"]
     assert any(
-        entry["occupied_gpu_indices"] == ["0"]
-        for entry in pipeline["external_occupancy_timeline"]
+        entry["occupied_gpu_indices"] == ["0"] for entry in pipeline["external_occupancy_timeline"]
     )
     assert pipeline["external_occupancy_timeline"][-1]["occupied_gpu_indices"] == []
     assert bench_run._BenchPidRegistry._roots == set()
@@ -488,10 +491,7 @@ def test_exact_alias_load_imports_only_the_target_module():
         """
     )
     completed = subprocess.run(
-        [sys.executable, "-c", script],
-        check=True,
-        capture_output=True,
-        text=True,
+        [sys.executable, "-c", script], check=True, capture_output=True, text=True
     )
     payload = json.loads(completed.stdout)
 
@@ -517,25 +517,13 @@ def test_registry_rejects_duplicate_and_invalid_source_metadata(tmp_path: Path):
 
     duplicate_snapshot = (
         ("fake", "one", str(valid), valid.stat().st_mtime_ns, valid.stat().st_size),
-        (
-            "fake",
-            "two",
-            str(duplicate),
-            duplicate.stat().st_mtime_ns,
-            duplicate.stat().st_size,
-        ),
+        ("fake", "two", str(duplicate), duplicate.stat().st_mtime_ns, duplicate.stat().st_size),
     )
     with pytest.raises(ValueError, match="duplicate kernel registry name"):
         registry._build_kernel_index(duplicate_snapshot)
 
     invalid_snapshot = (
-        (
-            "fake",
-            "invalid",
-            str(invalid),
-            invalid.stat().st_mtime_ns,
-            invalid.stat().st_size,
-        ),
+        ("fake", "invalid", str(invalid), invalid.stat().st_mtime_ns, invalid.stat().st_size),
     )
     records, diagnostics = registry._build_kernel_index(invalid_snapshot)
     assert records == {}
@@ -548,14 +536,11 @@ def test_registry_cache_key_changes_with_source_provenance(tmp_path: Path):
         'KERNEL_META = {"name": "before", "category": "fake", "compute_capability": 10}\n'
     )
     first_stat = source.stat()
-    first_snapshot = (
-        ("fake", "kernel", str(source), first_stat.st_mtime_ns, first_stat.st_size),
-    )
+    first_snapshot = (("fake", "kernel", str(source), first_stat.st_mtime_ns, first_stat.st_size),)
     first, _ = registry._build_kernel_index(first_snapshot)
 
     source.write_text(
-        'KERNEL_META = {"name": "after_longer", "category": "fake", '
-        '"compute_capability": 10}\n'
+        'KERNEL_META = {"name": "after_longer", "category": "fake", "compute_capability": 10}\n'
     )
     second_stat = source.stat()
     second_snapshot = (
@@ -578,6 +563,62 @@ def test_assignment_rejects_partial_duplicate_and_invalid_claims():
     assert _validated_gpu_assignment([3, "7"], 2) == ["3", "7"]
 
 
+def test_child_rejects_index_match_when_physical_gpu_uuid_differs():
+    with pytest.raises(RuntimeError, match="late GPU assignment identity mismatch"):
+        _validated_physical_gpu_uuids(["GPU-expected"], ("GPU-visible",), 1)
+
+
+def test_physical_cuda_uuids_uses_driver_identity_without_creating_a_context(monkeypatch):
+    from cuda.bindings import driver
+
+    calls = []
+    uuid_bytes = (
+        bytes.fromhex("ef5a8300123434567890abcdefabcdef"),
+        bytes.fromhex("e56ad157aaaabbbbccccdddd11112222"),
+    )
+    success = driver.CUresult.CUDA_SUCCESS
+    monkeypatch.setattr(driver, "cuInit", lambda flags: calls.append(("init", flags)) or (success,))
+    monkeypatch.setattr(
+        driver, "cuDeviceGetCount", lambda: calls.append(("count",)) or (success, 2)
+    )
+    monkeypatch.setattr(
+        driver,
+        "cuDeviceGet",
+        lambda index: calls.append(("device", index)) or (success, index + 10),
+    )
+    monkeypatch.setattr(
+        driver,
+        "cuDeviceGetUuid",
+        lambda device: (
+            calls.append(("uuid", device))
+            or (success, SimpleNamespace(bytes=uuid_bytes[device - 10]))
+        ),
+    )
+
+    assert physical_cuda_uuids(2) == (
+        "GPU-ef5a8300-1234-3456-7890-abcdefabcdef",
+        "GPU-e56ad157-aaaa-bbbb-cccc-dddd11112222",
+    )
+    assert calls == [
+        ("init", 0),
+        ("count",),
+        ("device", 0),
+        ("uuid", 10),
+        ("device", 1),
+        ("uuid", 11),
+    ]
+
+
+def test_physical_cuda_uuids_rejects_partial_visibility(monkeypatch):
+    from cuda.bindings import driver
+
+    success = driver.CUresult.CUDA_SUCCESS
+    monkeypatch.setattr(driver, "cuInit", lambda _flags: (success,))
+    monkeypatch.setattr(driver, "cuDeviceGetCount", lambda: (success, 1))
+    with pytest.raises(RuntimeError, match=r"exposed 1 device\(s\), expected 2"):
+        physical_cuda_uuids(2)
+
+
 def test_prepared_benchmark_is_process_local_and_not_serializable(monkeypatch):
     prepared = PreparedKernelBenchmark(
         kernel="fake",
@@ -598,8 +639,10 @@ def test_standalone_runner_composes_prepare_and_gpu_stage(monkeypatch):
     module = SimpleNamespace(
         __name__="fake_module",
         prepare_bench=lambda value: SimpleNamespace(
-            run_gpu=lambda **kwargs: events.append(("gpu", value, kwargs))
-            or {"round_samples": {"tir": [1.0] * kwargs["rounds"]}}
+            run_gpu=lambda **kwargs: (
+                events.append(("gpu", value, kwargs))
+                or {"round_samples": {"tir": [1.0] * kwargs["rounds"]}}
+            )
         ),
     )
 
@@ -613,13 +656,7 @@ def test_standalone_runner_composes_prepare_and_gpu_stage(monkeypatch):
         cooldown=1.0,
     )
 
-    assert events == [
-        (
-            "gpu",
-            7,
-            {"timer": "proton", "rounds": 5, "cooldown_s": 1.0},
-        )
-    ]
+    assert events == [("gpu", 7, {"timer": "proton", "rounds": 5, "cooldown_s": 1.0})]
     assert result["kernel"] == "fake"
     assert result["label"] == "shape"
 
@@ -708,6 +745,104 @@ def test_prepared_run_bench_enforces_custom_cache_consumption():
     assert prepared.run_gpu() is executable
 
 
+def test_gpu_stage_compile_guard_rejects_direct_tvm_compile(monkeypatch):
+    original_compile = kernel_runner.tvm.compile
+    with pytest.raises(RuntimeError, match="completed before READY"):
+        with gpu_stage_compile_guard():
+            kernel_runner.tvm.compile(object())
+    assert kernel_runner.tvm.compile is original_compile
+
+
+def test_offline_nvcc_arch_preserves_family_specific_blackwell_features():
+    assert _offline_nvcc_arch("sm_100a") == ["-gencode", "arch=compute_100a,code=sm_100a"]
+    assert _offline_nvcc_arch("sm_100f") == ["-gencode", "arch=compute_100f,code=sm_100f"]
+    assert _offline_nvcc_arch("sm_100") == "sm_100"
+
+
+def test_run_prepared_benchmark_applies_gpu_stage_compile_guard(monkeypatch):
+    module = SimpleNamespace(run_gpu=lambda **_kwargs: kernel_runner.tvm.compile(object()))
+    prepared = PreparedKernelBenchmark(kernel="fake", label="shape", benchmark=module)
+
+    with pytest.raises(RuntimeError, match=r"GPU stage attempted tvm\.compile"):
+        run_prepared_kernel_bench(prepared)
+
+
+@pytest.mark.parametrize(
+    ("module_name", "config_name", "compile_name", "key_name", "compile_args"),
+    [
+        (
+            "tirx_kernels.deepgemm.tf32_hc_prenorm_gemm",
+            "TF32HCPrenormGemmConfig",
+            "_compile_tirx_tf32_hc",
+            "_compile_tirx_tf32_hc_key",
+            (),
+        ),
+        (
+            "tirx_kernels.deepgemm.mqa_logits_fp4",
+            "MQALogitsConfig",
+            "_compile_tirx_mqa",
+            "_compile_tirx_mqa_key",
+            (0,),
+        ),
+        (
+            "tirx_kernels.deepgemm.mqa_logits_fp8",
+            "MQALogitsFP8Config",
+            "_compile_tirx_mqa",
+            "_compile_tirx_mqa_key",
+            (0,),
+        ),
+        (
+            "tirx_kernels.deepgemm.paged_mqa_logits_fp4",
+            "PagedMQALogitsFP4Config",
+            "_compile_tirx_paged_mqa",
+            "_compile_tirx_paged_mqa_key",
+            (),
+        ),
+        (
+            "tirx_kernels.deepgemm.paged_mqa_logits_fp8",
+            "PagedMQALogitsFP8Config",
+            "_compile_tirx_paged_mqa",
+            "_compile_tirx_paged_mqa_key",
+            (),
+        ),
+    ],
+)
+def test_deepgemm_custom_compilers_consume_exact_prepared_artifact(
+    monkeypatch,
+    module_name: str,
+    config_name: str,
+    compile_name: str,
+    key_name: str,
+    compile_args: tuple,
+):
+    module = importlib.import_module(module_name)
+    config = getattr(module, config_name)()
+    compile_fn = getattr(module, compile_name)
+    key_fn = getattr(module, key_name)
+    namespace = module._COMPILE_CACHE_NAMESPACE
+    raw_compiler_name = next(
+        name for name in vars(module) if name.startswith(compile_name + "_for_config")
+    )
+    monkeypatch.setattr(
+        module,
+        raw_compiler_name,
+        lambda **_kwargs: pytest.fail("prepared replay must not call the raw compiler"),
+    )
+    executable = object()
+
+    with replay_prepared_cache(
+        (kernel_runner.PreparedCacheEntry(namespace, key_fn(config), executable),)
+    ):
+        assert compile_fn(config, *compile_args) is executable
+
+    mismatched_config = replace(config, num_sms=config.num_sms + 1)
+    with pytest.raises(RuntimeError, match="does not match CPU prepare"):
+        with replay_prepared_cache(
+            (kernel_runner.PreparedCacheEntry(namespace, key_fn(config), executable),)
+        ):
+            compile_fn(mismatched_config, *compile_args)
+
+
 def test_generic_adapter_static_gate_rejects_gpu_stage_builder_work(tmp_path: Path):
     valid = tmp_path / "valid.py"
     valid.write_text(
@@ -735,6 +870,33 @@ def test_generic_adapter_static_gate_rejects_gpu_stage_builder_work(tmp_path: Pa
     )
     with pytest.raises(TypeError, match="compile_kernel_lazy"):
         _audit_generic_adapter_source("eager", eager)
+
+
+def test_driver_safe_target_gate_rejects_import_time_device_detection(tmp_path: Path):
+    safe_helper = tmp_path / "safe_helper.py"
+    safe_helper.write_text("target = cuda_target()\n")
+    _audit_driver_safe_cuda_targets("safe-helper", safe_helper)
+
+    safe_explicit = tmp_path / "safe_explicit.py"
+    safe_explicit.write_text(
+        'target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})\n'
+        "tvm.compile(mod, target=target)\n"
+    )
+    _audit_driver_safe_cuda_targets("safe-explicit", safe_explicit)
+
+    unsafe_target = tmp_path / "unsafe_target.py"
+    unsafe_target.write_text(
+        'first = tvm.target.Target("cuda")\nsecond = tvm.target.Target({"kind": "cuda"})\n'
+    )
+    with pytest.raises(TypeError, match=r"Target line\(s\) \[1, 2\]"):
+        _audit_driver_safe_cuda_targets("unsafe-target", unsafe_target)
+
+    unsafe_compile = tmp_path / "unsafe_compile.py"
+    unsafe_compile.write_text(
+        'first = tvm.compile(mod, target="cuda")\nsecond = tvm.compile(mod, {"kind": "cuda"})\n'
+    )
+    with pytest.raises(TypeError, match=r"compile line\(s\) \[1, 2\]"):
+        _audit_driver_safe_cuda_targets("unsafe-compile", unsafe_compile)
 
 
 def test_strict_cache_adapter_gate_rejects_direct_compile_spec_prepare(tmp_path: Path):
@@ -767,20 +929,91 @@ def test_strict_cache_adapter_gate_rejects_direct_compile_spec_prepare(tmp_path:
         _audit_strict_cache_adapter_source("invalid", invalid)
 
     mismatched = tmp_path / "mismatched_cache.py"
-    mismatched.write_text(valid.read_text().replace(
-        "return build_launch(_spec_for(config), a=data)",
-        "return build_launch(_spec_for(other_config), a=data)",
-    ))
+    mismatched.write_text(
+        valid.read_text().replace(
+            "return build_launch(_spec_for(config), a=data)",
+            "return build_launch(_spec_for(other_config), a=data)",
+        )
+    )
     with pytest.raises(TypeError, match=r"canonical _spec_for\(config\)"):
         _audit_strict_cache_adapter_source("mismatched", mismatched)
 
     bypassed = tmp_path / "bypassed_launch.py"
-    bypassed.write_text(valid.read_text().replace(
-        "return _tirx_launch({}, config)",
-        "return object()",
-    ))
+    bypassed.write_text(
+        valid.read_text().replace("return _tirx_launch({}, config)", "return object()")
+    )
     with pytest.raises(TypeError, match=r"exactly one _tirx_launch\(\) call"):
         _audit_strict_cache_adapter_source("bypassed", bypassed)
+
+
+def test_custom_cache_adapter_gate_rejects_missing_registration_and_bypass(tmp_path: Path):
+    valid = tmp_path / "valid_custom_cache.py"
+    valid.write_text(
+        textwrap.dedent(
+            """
+            CACHE_NAMESPACE = "custom.compile"
+
+            def compile_key(config):
+                return config.shape
+
+            def raw_compile(**kwargs):
+                return object()
+
+            def compile_artifact(config):
+                kwargs = {"shape": config.shape}
+                return consume_prepared_cache(
+                    CACHE_NAMESPACE,
+                    compile_key(config),
+                    lambda: raw_compile(**kwargs),
+                )
+
+            def prepare_bench(**kwargs):
+                config = make_config(**kwargs)
+                executable = compile_artifact(config)
+                return prepared_cached_run_bench(
+                    __name__,
+                    kwargs,
+                    cached=((CACHE_NAMESPACE, compile_key(config), executable),),
+                )
+
+            def prepare_invocation(config):
+                return compile_artifact(config)
+
+            def run_bench(**kwargs):
+                return prepare_invocation(make_config(**kwargs))
+            """
+        )
+    )
+    assert _audit_custom_cache_adapter_source("valid", valid) is True
+
+    unregistered = tmp_path / "unregistered_custom_cache.py"
+    unregistered.write_text(
+        valid.read_text().replace(
+            "cached=((CACHE_NAMESPACE, compile_key(config), executable),),", "cached=(),"
+        )
+    )
+    with pytest.raises(TypeError, match="exactly one cache entry"):
+        _audit_custom_cache_adapter_source("unregistered", unregistered)
+
+    wrong_key = tmp_path / "wrong_key_custom_cache.py"
+    wrong_key.write_text(
+        valid.read_text().replace(
+            "cached=((CACHE_NAMESPACE, compile_key(config), executable),),",
+            "cached=((CACHE_NAMESPACE, other_key(config), executable),),",
+        )
+    )
+    with pytest.raises(TypeError, match="canonical key helper"):
+        _audit_custom_cache_adapter_source("wrong-key", wrong_key)
+
+    bypassed = tmp_path / "bypassed_custom_cache.py"
+    bypassed.write_text(
+        valid.read_text().replace(
+            "return prepare_invocation(make_config(**kwargs))",
+            "return raw_compile(shape=kwargs['shape'])",
+        )
+    )
+    with pytest.raises(TypeError, match="does not consume"):
+        _audit_custom_cache_adapter_source("bypassed", bypassed)
 
 
 def test_cuda_initialization_guard_rejects_prepare_side_effect(monkeypatch):
@@ -802,8 +1035,7 @@ def test_cuda_initialization_guard_rejects_existing_driver_context(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "missing_field",
-    ["round_samples", "errors", "timer", "benchmark_protocol"],
+    "missing_field", ["round_samples", "errors", "timer", "benchmark_protocol"]
 )
 def test_finalize_rejects_incomplete_measurement_schema(missing_field):
     row = {
@@ -878,9 +1110,7 @@ def test_finalize_accepts_megamoe_alternating_round_orders():
         ("cudagraph_proton", "_do_bench_cudagraph_proton"),
     ],
 )
-def test_local_timer_families_emit_the_strict_measurement_schema(
-    monkeypatch, timer, timer_attr
-):
+def test_local_timer_families_emit_the_strict_measurement_schema(monkeypatch, timer, timer_attr):
     bench_module = importlib.import_module("tvm.tirx.bench")
 
     def fake_event_or_proton(fn, warmup=25, rep=100):
@@ -899,7 +1129,7 @@ def test_local_timer_families_emit_the_strict_measurement_schema(
 
     result = bench_module.bench(
         {"tirx": lambda: None},
-        references={"reference": lambda: (lambda: None)},
+        references={"reference": lambda: lambda: None},
         timer=timer,
         rounds=5,
         cooldown_s=1.0,
@@ -909,10 +1139,7 @@ def test_local_timer_families_emit_the_strict_measurement_schema(
     assert result["status"] == "ok"
     assert result["timer"] == timer
     assert result["benchmark_protocol"]["order"] == ["tirx", "reference"]
-    assert result["round_samples"] == {
-        "tirx": [1.0] * 5,
-        "reference": [1.0] * 5,
-    }
+    assert result["round_samples"] == {"tirx": [1.0] * 5, "reference": [1.0] * 5}
 
 
 def test_kineto_schema_retains_complete_span_barrier_and_rank_max(monkeypatch):
@@ -939,19 +1166,12 @@ def test_kineto_schema_retains_complete_span_barrier_and_rank_max(monkeypatch):
         stream=SimpleNamespace(cuda_stream=7),
     )
     result = bench_module._bench_distributed_kineto_span(
-        {"tirx": lambda: None, "reference": lambda: None},
-        {},
-        distributed,
-        rounds=5,
-        cooldown_s=1.0,
+        {"tirx": lambda: None, "reference": lambda: None}, {}, distributed, rounds=5, cooldown_s=1.0
     )
     _finalize_bench_record(result, rounds=5, cooldown=1.0)
 
     assert result["status"] == "ok"
-    assert result["round_samples"] == {
-        "tirx": [12.0] * 5,
-        "reference": [12.0] * 5,
-    }
+    assert result["round_samples"] == {"tirx": [12.0] * 5, "reference": [12.0] * 5}
     assert reductions == [1.0, 3.0] * 10
     assert len(barriers) == 10
     protocol = result["benchmark_protocol"]
@@ -978,10 +1198,7 @@ def test_megamoe_timer_schema_retains_barriers_spans_and_round_orders(monkeypatc
 
     monkeypatch.setattr(mega_moe.time, "sleep", lambda _seconds: None)
     result = mega_moe._bench_megamoe_mode(
-        {
-            "tirx": lambda: launches.append("tirx"),
-            "deepgemm": lambda: launches.append("deepgemm"),
-        },
+        {"tirx": lambda: launches.append("tirx"), "deepgemm": lambda: launches.append("deepgemm")},
         {"tirx": "tirx_kernel", "deepgemm": "deepgemm_kernel"},
         bench_kineto,
         lambda: barriers.append("barrier"),
@@ -1020,10 +1237,7 @@ def test_gpu_pool_never_retains_a_partial_claim():
 def _megamoe_rank_result(*, tirx, deepgemm):
     return {
         "status": "OK",
-        "impls": {
-            "tirx": sum(tirx) / len(tirx),
-            "deepgemm": sum(deepgemm) / len(deepgemm),
-        },
+        "impls": {"tirx": sum(tirx) / len(tirx), "deepgemm": sum(deepgemm) / len(deepgemm)},
         "round_samples": {"tirx": tirx, "deepgemm": deepgemm},
         "errors": {},
         "timer": "megamoe",
@@ -1050,10 +1264,7 @@ def test_megamoe_aggregates_rank_samples_by_sample_wise_max():
         ]
     )
 
-    assert result["round_samples"] == {
-        "tirx": [5.0, 7.0],
-        "deepgemm": [4.0, 8.0],
-    }
+    assert result["round_samples"] == {"tirx": [5.0, 7.0], "deepgemm": [4.0, 8.0]}
     assert result["impls"] == {"tirx": 6.0, "deepgemm": 6.0}
     assert [entry["rank"] for entry in result["rank_results"]] == [0, 1]
 
@@ -1141,9 +1352,7 @@ def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
     monkeypatch.setattr(_runtime, "_broadcast_nvshmem_uid", lambda _rank: object())
     monkeypatch.setattr(_runtime, "_create_runtime", lambda *_args: fake_runtime)
     monkeypatch.setattr(
-        _runtime,
-        "_cleanup_runtime",
-        lambda runtime: events.append(("cleanup_runtime", runtime)),
+        _runtime, "_cleanup_runtime", lambda runtime: events.append(("cleanup_runtime", runtime))
     )
 
     def worker(*_args):
@@ -1243,10 +1452,7 @@ def test_cost_model_charges_ready_starvation_and_result_handoff():
         ([], "no terminal workload records"),
         (
             [{"status": "FAIL", "phase_timestamps": {"process_started": 0.0}}],
-            (
-                "no workload produced an ok result with a complete timeline and valid "
-                "GPU assignment"
-            ),
+            ("no workload produced an ok result with a complete timeline and valid GPU assignment"),
         ),
     ],
 )
@@ -1459,6 +1665,7 @@ def test_summary_does_not_mark_default_protocol_as_diagnostic(tmp_path: Path):
 
     assert "DIAGNOSTIC, NON-DEFAULT" not in report
 
+
 def test_cost_model_attributes_lost_parallelism_to_external_occupancy():
     def record(*, gpu, assigned, gpu_finished, result_received, reaped):
         return {
@@ -1585,20 +1792,26 @@ def test_capability_audit_accounts_for_every_adapter_and_curated_selection():
     adapter_sets = [set(names) for names in capability["adapter_kernels"].values()]
     assert sum(map(len, adapter_sets)) == len(set.union(*adapter_sets))
     assert set.union(*adapter_sets) == set(registry.kernel_index(strict=True))
-    assert [len(names) for names in adapter_sets] == [21, 5, 15]
+    assert [len(names) for names in adapter_sets] == [21, 10, 10]
     assert len(capability["curated_default_selections"]) == 33
     assert all(
-        set(selection["configs"]) == {"small", "medium", "large"}
-        and selection["rationale"]
+        set(selection["configs"]) == {"small", "medium", "large"} and selection["rationale"]
         for selection in capability["curated_default_selections"]
     )
 
 
-def test_tracked_default_protocol_ab_evidence_recomputes():
+def test_tracked_default_protocol_ab_evidence_is_internally_consistent():
     evidence_path = Path(__file__).resolve().parents[1] / "bench_pipeline_ab_evidence.json"
     evidence = json.loads(evidence_path.read_text())
 
+    assert (
+        evidence["evidence_status"]
+        == "recorded_default_protocol_run_invalidated_physical_identity_unverified"
+    )
+    assert evidence["acceptance_use"]["ac_10_performance_evidence"] is False
     conditions = evidence["fixed_conditions"]
+    assert conditions["requested_physical_gpu_index"] == 6
+    assert conditions["physical_gpu_identity"]["same_physical_gpu_verified"] is False
     assert conditions["rounds"] == 5
     assert conditions["cooldown_s"] == 1.0
     assert conditions["implementation_order"] == ["tir", "torch-cublas"]
@@ -1606,25 +1819,28 @@ def test_tracked_default_protocol_ab_evidence_recomputes():
 
     before_wall = evidence["before"]["outer_wall_s"]
     after_wall = evidence["after"]["outer_wall_s"]
-    assert evidence["derived"]["wall_speedup"] == pytest.approx(
-        before_wall / after_wall, abs=1e-6
-    )
+    assert evidence["derived"]["wall_speedup"] == pytest.approx(before_wall / after_wall, abs=1e-6)
     assert evidence["derived"]["wall_reduction_percent"] == pytest.approx(
         (1.0 - after_wall / before_wall) * 100.0, abs=1e-4
+    )
+    assert (
+        evidence["derived"]["performance_claim_status"]
+        == "arithmetic_only_invalidated_for_acceptance"
     )
 
     before_by_config = {row["config"]: row for row in evidence["before"]["results"]}
     after_by_config = {row["config"]: row for row in evidence["after"]["results"]}
-    assert list(before_by_config) == list(after_by_config) == [
-        workload.split("/", 1)[1] for workload in evidence["matrix"]
-    ]
+    assert (
+        list(before_by_config)
+        == list(after_by_config)
+        == [workload.split("/", 1)[1] for workload in evidence["matrix"]]
+    )
     for config, before in before_by_config.items():
         after = after_by_config[config]
         for row in (before, after):
             assert list(row["round_samples_us"]) == conditions["implementation_order"]
             assert all(
-                len(samples) == conditions["rounds"]
-                for samples in row["round_samples_us"].values()
+                len(samples) == conditions["rounds"] for samples in row["round_samples_us"].values()
             )
         before_ratio = statistics.mean(before["round_samples_us"]["torch-cublas"]) / (
             statistics.mean(before["round_samples_us"]["tir"])
@@ -1646,8 +1862,7 @@ def test_tracked_default_protocol_ab_evidence_recomputes():
     assert all(current[0] >= previous[1] for previous, current in pairwise(intervals))
     cost = evidence["after"]["pipeline_cost_model"]
     first_ready = min(
-        row["timeline_s_from_scheduler_start"]["ready"]
-        for row in evidence["after"]["results"]
+        row["timeline_s_from_scheduler_start"]["ready"] for row in evidence["after"]["results"]
     )
     measured_gpu_schedule = sum(
         row["timeline_s_from_scheduler_start"]["result_received"]
@@ -1655,13 +1870,10 @@ def test_tracked_default_protocol_ab_evidence_recomputes():
         for row in evidence["after"]["results"]
     )
     assert cost["first_ready_s"] == pytest.approx(first_ready, abs=1e-6)
-    assert cost["ideal_gpu_list_schedule_s"] == pytest.approx(
-        measured_gpu_schedule, abs=1e-6
-    )
+    assert cost["ideal_gpu_list_schedule_s"] == pytest.approx(measured_gpu_schedule, abs=1e-6)
     assert cost["expected_s"] == pytest.approx(first_ready + measured_gpu_schedule, abs=1e-6)
     assert cost["unexplained_s"] == pytest.approx(
-        cost["observed_critical_s"] - cost["expected_s"] - cost["foreign_wait_s"],
-        abs=1e-6,
+        cost["observed_critical_s"] - cost["expected_s"] - cost["foreign_wait_s"], abs=1e-6
     )
     assert cost["ready_starvation_s"] == 0.0
     assert cost["foreign_wait_s"] == 0.0
@@ -1669,10 +1881,84 @@ def test_tracked_default_protocol_ab_evidence_recomputes():
     assert cost["unexplained_s"] <= max(0.5, 0.05 * cost["observed_critical_s"])
 
 
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_tracked_default_protocol_ab_evidence_matches_local_source_artifact_when_present(side: str):
+    repo_root = Path(__file__).resolve().parents[1]
+    evidence = json.loads((repo_root / "bench_pipeline_ab_evidence.json").read_text())
+    source = evidence[side]["source_artifact"]
+    artifact_path = Path(source["path"])
+    if not artifact_path.is_absolute():
+        artifact_path = repo_root / artifact_path
+    if not artifact_path.is_file():
+        pytest.skip(
+            f"{side} source artifact is gitignored local state and is unavailable: {artifact_path}"
+        )
+
+    artifact_bytes = artifact_path.read_bytes()
+    assert hashlib.sha256(artifact_bytes).hexdigest() == evidence[side]["source_sha256"]
+    artifact = json.loads(artifact_bytes)
+    artifact_results = artifact["results"]
+    tracked_results = evidence[side]["results"]
+    assert [row["config"] for row in artifact_results] == [
+        workload.split("/", 1)[1] for workload in evidence["matrix"]
+    ]
+    assert [row["config"] for row in tracked_results] == [row["config"] for row in artifact_results]
+
+    conditions = evidence["fixed_conditions"]
+    for artifact_row, tracked_row in zip(artifact_results, tracked_results, strict=True):
+        assert artifact_row["kernel"] == "fp16_bf16_gemm"
+        assert artifact_row["status"] == "ok"
+        assert artifact_row["timer"] == conditions["timer"]
+        protocol = artifact_row["benchmark_protocol"]
+        assert protocol["rounds"] == conditions["rounds"]
+        assert protocol["cooldown_s"] == conditions["cooldown_s"]
+        assert protocol["warmup"] == conditions["warmup_ms"]
+        assert protocol["repeat"] == conditions["repeat_ms"]
+        assert protocol["round_aggregate"] == conditions["round_aggregate"]
+        assert protocol["order"] == conditions["implementation_order"]
+        for implementation in conditions["implementation_order"]:
+            assert artifact_row["round_samples"][implementation] == pytest.approx(
+                tracked_row["round_samples_us"][implementation], abs=1e-9
+            )
+
+    if side == "after":
+        pipeline = artifact["pipeline"]
+        assert pipeline["measurement_protocol"]["is_default"] is True
+        for artifact_row, tracked_row in zip(artifact_results, tracked_results, strict=True):
+            timeline = {
+                name: timestamp - pipeline["started"]
+                for name, timestamp in artifact_row["phase_timestamps"].items()
+            }
+            tracked_timeline = tracked_row["timeline_s_from_scheduler_start"]
+            assert set(tracked_timeline) <= set(timeline)
+            for phase, timestamp in tracked_timeline.items():
+                assert timestamp == pytest.approx(timeline[phase], abs=1e-6)
+
+        artifact_cost = pipeline["cost_model"]
+        tracked_cost = evidence["after"]["pipeline_cost_model"]
+        direct_fields = {
+            "observed_critical_s",
+            "first_ready_s",
+            "ideal_gpu_list_schedule_s",
+            "ready_constrained_gpu_list_schedule_s",
+            "eligibility_constrained_gpu_list_schedule_s",
+            "ready_starvation_s",
+            "foreign_wait_s",
+            "expected_s",
+            "unexplained_s",
+        }
+        for field in direct_fields:
+            assert tracked_cost[field] == pytest.approx(artifact_cost[field], abs=1e-9)
+        assert tracked_cost["dispatch_latency_p95_s"] == pytest.approx(
+            artifact_cost["dispatch_latency_s"]["p95"], abs=1e-9
+        )
+        assert tracked_cost["assignment_handoff_p95_s"] == pytest.approx(
+            artifact_cost["assignment_handoff_s"]["p95"], abs=1e-9
+        )
+
+
 def test_tracked_large_prepare_evidence_respects_resource_bounds():
-    evidence_path = (
-        Path(__file__).resolve().parents[1] / "bench_pipeline_cpu_prepare_evidence.json"
-    )
+    evidence_path = Path(__file__).resolve().parents[1] / "bench_pipeline_cpu_prepare_evidence.json"
     evidence = json.loads(evidence_path.read_text())
 
     assert evidence["evidence_status"] == "measured_cpu_only_ready_then_cancelled"
@@ -1695,3 +1981,205 @@ def test_tracked_large_prepare_evidence_respects_resource_bounds():
         "temporary_directories_removed": True,
         "cuda_initialized": False,
     }
+
+
+def test_tracked_custom_cache_prepare_evidence_has_no_gpu_claim():
+    evidence_path = (
+        Path(__file__).resolve().parents[1]
+        / "bench_pipeline_custom_cache_prepare_evidence.json"
+    )
+    evidence = json.loads(evidence_path.read_text())
+
+    assert evidence["evidence_status"] == "measured_cpu_only_ready_then_cancelled"
+    assert evidence["protocol"] == {
+        "fresh_one_shot_child_per_workload": True,
+        "gpu_assignment_sent": False,
+        "terminal_command": "CANCEL",
+        "rounds_forwarded_but_not_executed": 5,
+        "cooldown_s_forwarded_but_not_executed": 1.0,
+    }
+    expected_workloads = [
+        (
+            "deepgemm_sm100_tf32_hc_prenorm_gemm",
+            "m64_n24_k28672_s112",
+        ),
+        (
+            "deepgemm_sm100_fp4_mqa_logits",
+            "s2048_skv4096_h64_d128_f32_dense_cp",
+        ),
+        (
+            "deepgemm_sm100_fp8_mqa_logits",
+            "s2048_skv4096_h64_d128_f32_dense_cp",
+        ),
+        (
+            "deepgemm_sm100_fp4_paged_mqa_logits",
+            "b1_n1_mp1_ps32_h64_d128_f32_fixed",
+        ),
+        (
+            "deepgemm_sm100_fp8_paged_mqa_logits",
+            "b1_n1_mp4_ps64_h64_d128_f32_fixed",
+        ),
+    ]
+    workloads = evidence["workloads"]
+    assert [(row["kernel"], row["config"]) for row in workloads] == expected_workloads
+    assert all(row["exit_code"] == 0 for row in workloads)
+    assert all(row["wall_to_ready_s"] >= row["cpu_prepare_s"] > 0 for row in workloads)
+    assert all(row["specialize_generate_compile_s"] > 0 for row in workloads)
+    assert "AC-10" in evidence["evidence_boundary"]["does_not_prove"]
+    assert "no raw run JSON" in evidence["evidence_boundary"]["raw_artifact"]
+
+
+def test_outer_timer_persists_complete_command_provenance(tmp_path: Path):
+    artifact = tmp_path / "outer.json"
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+    script = Path(__file__).resolve().parents[1] / "scripts/run_with_outer_timer.py"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--artifact",
+            str(artifact),
+            "--stdout-log",
+            str(stdout_log),
+            "--stderr-log",
+            str(stderr_log),
+            "--",
+            sys.executable,
+            "-c",
+            "import sys; print('out'); print('err', file=sys.stderr); raise SystemExit(7)",
+        ],
+        check=False,
+    )
+
+    assert completed.returncode == 7
+    evidence = json.loads(artifact.read_text())
+    assert evidence["status"] == "completed"
+    assert evidence["returncode"] == 7
+    assert evidence["wrapper_returncode"] == 7
+    assert evidence["command_wall_ns"] == (
+        evidence["command_finished_monotonic_ns"]
+        - evidence["command_started_monotonic_ns"]
+    )
+    assert evidence["command_wall_s"] == pytest.approx(
+        evidence["command_wall_ns"] / 1_000_000_000
+    )
+    assert evidence["wrapper_wall_ns"] == (
+        evidence["wrapper_finished_monotonic_ns"]
+        - evidence["wrapper_started_monotonic_ns"]
+    )
+    assert evidence["wrapper_wall_s"] == pytest.approx(
+        evidence["wrapper_wall_ns"] / 1_000_000_000
+    )
+    assert evidence["wrapper_wall_ns"] >= evidence["command_wall_ns"]
+    assert evidence["cwd"] == str(Path.cwd())
+    assert evidence["argv"][-2:] == [
+        "-c",
+        "import sys; print('out'); print('err', file=sys.stderr); raise SystemExit(7)",
+    ]
+    assert stdout_log.read_text() == "out\n"
+    assert stderr_log.read_text() == "err\n"
+
+
+def test_outer_timer_records_one_physical_gpu_without_masking_the_child(tmp_path: Path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_smi = fake_bin / "nvidia-smi"
+    fake_smi.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "query = next(arg for arg in sys.argv if arg.startswith('--query-'))\n"
+        "if query.startswith('--query-gpu='):\n"
+        "    print('1, GPU-test-uuid, NVIDIA B200, 0, 128, 183359')\n"
+        "elif query.startswith('--query-compute-apps='):\n"
+        "    pass\n"
+    )
+    fake_smi.chmod(0o755)
+    artifact = tmp_path / "outer.json"
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+    script = Path(__file__).resolve().parents[1] / "scripts/run_with_outer_timer.py"
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--artifact",
+            str(artifact),
+            "--stdout-log",
+            str(stdout_log),
+            "--stderr-log",
+            str(stderr_log),
+            "--physical-gpu-index",
+            "1",
+            "--",
+            sys.executable,
+            "-c",
+            "import os; print(os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>'))",
+        ],
+        check=False,
+        env=env,
+    )
+
+    assert completed.returncode == 0
+    evidence = json.loads(artifact.read_text())
+    assert evidence["status"] == "completed"
+    assert evidence["physical_gpu"]["requested_index"] == "1"
+    assert evidence["physical_gpu"]["before"]["uuid"] == "GPU-test-uuid"
+    assert evidence["physical_gpu"]["after"]["uuid"] == "GPU-test-uuid"
+    assert evidence["physical_gpu"]["same_uuid_before_after"] is True
+    assert evidence["cuda_visible_devices_at_wrapper_start"] is None
+    assert "environment_overrides" not in evidence
+    assert stdout_log.read_text() == "<unset>\n"
+
+
+def test_outer_timer_rejects_a_nonidle_gpu_before_launch(tmp_path: Path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_smi = fake_bin / "nvidia-smi"
+    fake_smi.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "query = next(arg for arg in sys.argv if arg.startswith('--query-'))\n"
+        "if query.startswith('--query-gpu='):\n"
+        "    print('1, GPU-test-uuid, NVIDIA B200, 0, 2048, 183359')\n"
+        "elif query.startswith('--query-compute-apps='):\n"
+        "    pass\n"
+    )
+    fake_smi.chmod(0o755)
+    artifact = tmp_path / "outer.json"
+    marker = tmp_path / "launched"
+    script = Path(__file__).resolve().parents[1] / "scripts/run_with_outer_timer.py"
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--artifact",
+            str(artifact),
+            "--stdout-log",
+            str(tmp_path / "stdout.log"),
+            "--stderr-log",
+            str(tmp_path / "stderr.log"),
+            "--physical-gpu-index",
+            "1",
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ],
+        check=False,
+        env=env,
+    )
+
+    assert completed.returncode == 75
+    assert not marker.exists()
+    evidence = json.loads(artifact.read_text())
+    assert evidence["status"] == "preflight_rejected"
+    assert "memory 2048.0 MiB exceeds 512.0 MiB" in evidence["error"]

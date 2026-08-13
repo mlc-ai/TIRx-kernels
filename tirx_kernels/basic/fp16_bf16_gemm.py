@@ -676,12 +676,12 @@ def get_kernel(dtype, M, N, K, **kwargs):
 
 def run_test(dtype, M, N, K, **kwargs):
     """Compile, run, and verify fp16/bf16 GEMM kernel."""
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel, cuda_target
 
     A, B, C = prepare_data(dtype, M, N, K)
     kernel = tir_kernel(dtype, M, N, K)
     C_tvm = torch.zeros_like(C)
-    target = tvm.target.Target("cuda")
+    target = cuda_target()
     with target:
         ex = compile_kernel(kernel)
         ex(A, B, C_tvm)
@@ -741,11 +741,11 @@ class PreparedBench:
 
 def prepare_bench(dtype, M, N, K, **kwargs):
     """Specialize and compile the GEMM without initializing CUDA."""
-    from tirx_kernels.runner import cuda_initialization_guard
+    from tirx_kernels.runner import cuda_initialization_guard, cuda_target
 
     with cuda_initialization_guard():
         kernel = tir_kernel(dtype, M, N, K)
-        target = tvm.target.Target("cuda")
+        target = cuda_target()
         with target:
             mod = tvm.IRModule({"main": kernel})
             ex = tvm.compile(mod, target=target, tir_pipeline="tirx")

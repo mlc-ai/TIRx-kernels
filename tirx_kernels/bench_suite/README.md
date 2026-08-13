@@ -74,9 +74,13 @@ critical path. The current inventory is 992 module configs and 992 YAML configs.
 The gate requires exact bidirectional inventory coverage and statically enforces
 the generic-adapter boundary: CPU prepare compiles canonical `get_kernel()` output,
 while GPU execution may only consume it through lazy replay and cannot regenerate
-or compile the PrimFunc after assignment. The five DeepGEMM `compile_spec`
-adapters use the same contract through strict custom-cache replay: GPU execution
-must request the exact prepared namespace/key and consume every prepared artifact.
+or compile the PrimFunc after assignment. Ten strict-cache adapters use the same
+contract through exact custom-cache replay: five DeepGEMM
+`compile_spec`/`build_launch` adapters and five direct custom-compiler adapters.
+GPU execution must request the exact prepared namespace/key and consume every
+prepared artifact. Independently, the runner rejects any in-process
+`tvm.compile` after GPU assignment, so a cache miss cannot silently move
+compilation back onto the measured GPU critical path.
 The remaining explicit/custom adapters retain process-local executables, delegate
 to an already-audited prepared implementation, or export distributed libraries
 before assignment. Capability accounting must total 41/41 adapters.
@@ -137,19 +141,27 @@ are outside both timed closures. For this port, only the results emitted by
 
 Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and are not committed.
 
-## Strategy (TL;DR)
+## Target strategy (TL;DR)
+
+The set-device/in-place-retry portions below are the superseding target, not a
+claim about the current implementation snapshot. Their migration is paused at
+the FlashInfer feasibility blocker documented under Workload fields.
 
 1. **Pinned baseline lives in git** (`baseline.json`, `baseline.md`).
-2. **One fresh process per workload attempt.** Each child performs exactly
-   `PREPARING → READY → ASSIGNED → RUNNING_GPU → RESULT → exit`. Import/parsing,
+2. **One fresh process per workload.** Each child performs CPU prepare exactly
+   once, then one or more GPU attempts before `RESULT → exit`. Import/parsing,
    config resolution, specialization, IR generation, and compilation happen in
    CPU prepare without initializing CUDA or owning a GPU. The compiled executable
-   remains in that process; children and runtime objects are never recycled or
-   serialized across processes.
+   remains in that process; children and runtime objects are never recycled across
+   workloads or serialized across processes.
 3. **Bounded CPU/GPU pipeline.** The orchestrator starts multiple one-shot prepare
    children up to `--max-prepare-processes`, bounds PREPARING+READY children with
-   `--ready-backlog`, and late-binds an atomic GPU claim only after READY. GPU
-   stages run concurrently across currently eligible cards and serially per card.
+   `--ready-backlog`, and late-binds an atomic GPU claim only after READY. Prepare
+   children retain all physical GPUs visible; after ASSIGN the child selects the
+   physical index with `torch.cuda.set_device()` and verifies it through the UUID
+   handshake. GPU stages run concurrently across currently eligible cards and
+   serially per card. Live-process `CUDA_VISIBLE_DEVICES` mutation is not a valid
+   late-binding mechanism.
    Internal RESULT releases dispatch immediately; polling is only for foreign GPU
    occupancy changes. The initial occupancy snapshot starts alongside the first
    CPU prepares; assignment remains blocked until that snapshot is complete.
@@ -160,9 +172,13 @@ Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and 
 5. **Fail fast**: the first workload/subprocess `FAIL` stops new scheduling,
    terminates the suite's in-flight subprocesses, writes the partial run for
    diagnosis, and exits with code 1. `INTERFERED` is not a workload failure and
-   is retried from a fresh child and fresh prepare; `SKIP` is accepted without retry.
-   Every interference retry is retained as a structured ledger entry with the old
-   PID, intruder PIDs, attempt identity, and new retry attempt.
+   is retried in the same child without repeating CPU prepare; `SKIP` is accepted
+   without retry. The old claim is released before reassignment, and the child
+   rebuilds all GPU tensors, references, workspaces, and timer state on the newly
+   assigned card. Every interference retry is retained as a structured ledger
+   entry with the PID, intruder PIDs, assignments, UUIDs, and attempt identities.
+   Artifacts mark `retry_in_place: true`; these hot-process measurements are a
+   separate evidence class and are not clean first-attempt A/B samples.
 6. **Ratio regression report** compares current ref/ours ratio vs the pinned
    `baseline.json` ratio (computed from its ours + ref impls). Promote a run over
    the baseline with `promote_baseline.py`.
@@ -224,9 +240,11 @@ Each `config/<bucket>/<kernel>.yaml` entry requires `config` and `default`; the 
 supplies `kernel` and an optional file-level `defaults:` mapping merged into
 every entry. Optional per-entry fields are `timer`, `warmup`, `repeat`, and
 `num_gpus` (default `1`). A file passed via `--workloads` uses the flat
-`workloads:` list form instead, where each entry carries its own `kernel`. Multi-GPU jobs receive
-the acquired physical indices as an ordered, comma-separated
-`CUDA_VISIBLE_DEVICES` value and all assigned cards are monitored for interference.
+`workloads:` list form instead, where each entry carries its own `kernel`.
+Single-GPU jobs receive a physical index and UUID and select that index after
+assignment. Multi-GPU jobs receive the complete ordered physical-index/UUID claim;
+rank workers synchronize their runtime device selection only after that atomic
+claim, and all assigned cards are monitored for interference.
 
 Multi-GPU, distributed, Kineto, and MegaMoE adapters use the same pipeline-only
 lifecycle. The scheduler rejects assignment-count mismatches and only launches
@@ -236,6 +254,15 @@ benchmark host, multi-GPU runtime validation is intentionally recorded as
 `exempted_by_human_unmeasured`: this is neither `passed` nor `missing`, and must
 never be represented by zero, null, or an empty cell. Explicit multi-GPU workload
 files remain supported, but the default sweep and routine acceptance do not run them.
+
+Implementation note (2026-08-13): the set-device/in-place-retry target above
+supersedes the current implementation snapshot's live-mask/fresh-prepare retry behavior,
+but migration is paused. The installed FlashInfer MegaMoE package contains real
+runner paths that call `torch.cuda.set_device(0)` (and one bootstrap path also
+constructs `Device(0)`), which can override a late assignment. This is recorded
+as a feasibility blocker pending a human scope/upstream decision; it is not an
+implicit exemption, and no local workaround or automatic fallback to masking is
+permitted.
 
 MegaMoE entries use `timer: megamoe`, which invokes the dedicated DeepGEMM
 `bench_kineto` protocol. Do not set `warmup` or `repeat` for this timer because

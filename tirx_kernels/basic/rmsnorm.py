@@ -603,10 +603,12 @@ def build_tirx_soln(
 ) -> tuple[np.ndarray, tvm.runtime.Executable]:
     import torch
 
+    from tirx_kernels.runner import cuda_target
+
     input_cat_tir = input_cat.cuda() if not input_cat.is_cuda else input_cat
     weights_tir = weights.cuda() if not weights.is_cuda else weights
     output_tir = torch.empty((batch_size, dim), dtype=torch.float16, device="cuda")
-    target = tvm.target.Target("cuda")
+    target = cuda_target()
     with target:
         mod = tvm.IRModule({"main": func(dim, batch_size)})
         mod = tvm.compile(mod, target=target, tir_pipeline="tirx")

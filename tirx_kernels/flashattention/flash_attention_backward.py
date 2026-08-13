@@ -194,7 +194,9 @@ def build_preprocess(B, S, H, D):
                             )
 
     mod = tvm.IRModule({"main": preprocess_kernel})
-    return tvm.compile(mod, target=tvm.target.Target("cuda"))
+    from tirx_kernels.runner import cuda_target
+
+    return tvm.compile(mod, target=cuda_target())
 
 
 def build_cast_f32_to_f16(B, S, H, D, scale):
@@ -254,7 +256,9 @@ def build_cast_f32_to_f16(B, S, H, D, scale):
                         )
 
     mod = tvm.IRModule({"main": cast_kernel})
-    return tvm.compile(mod, target=tvm.target.Target("cuda"))
+    from tirx_kernels.runner import cuda_target
+
+    return tvm.compile(mod, target=cuda_target())
 
 
 # ---------------------------------------------------------------------------
@@ -1874,9 +1878,11 @@ def build_kernel(
 
 @cache
 def _compile_pipeline(B: int, H: int, S: int, D: int, causal: bool, attention_scale: float):
+    from tirx_kernels.runner import cuda_target
+
     preprocess_ex = build_preprocess(B, S, H, D)
     cast_ex = build_cast_f32_to_f16(B, S, H, D, attention_scale)
-    target = tvm.target.Target("cuda")
+    target = cuda_target()
     with target:
         kernel_func = build_kernel(B, H, S, D, causal=causal, attention_scale=attention_scale)
         kernel_mod = tvm.IRModule({"main": kernel_func})

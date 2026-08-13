@@ -49,7 +49,11 @@ import yaml
 
 from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S as DEFAULT_COOLDOWN_S
 from tirx_kernels.runner import DEFAULT_BENCH_ROUNDS as DEFAULT_ROUNDS
-from tirx_kernels.runner import PREPARE_NUM_SMS_ENV
+from tirx_kernels.runner import (
+    PREPARE_CUDA_ARCH_ENV,
+    PREPARE_NUM_SMS_ENV,
+    TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV,
+)
 
 try:
     from tirx_kernels.bench_suite.impls import our_impls
@@ -169,8 +173,7 @@ def _read_kernel_config(path: Path) -> tuple[str, list[dict], str | None]:
     if len(entries) > MAX_DEFAULT_CONFIGS_PER_KERNEL and default_count == 3:
         if selection_rationale is None:
             raise ValueError(
-                f"{path.name}: curated three-point default selection requires "
-                "selection_rationale"
+                f"{path.name}: curated three-point default selection requires selection_rationale"
             )
         default_roles = {
             entry.get("selection_role") for entry in entries if entry.get("default", False)
@@ -187,8 +190,7 @@ def _read_kernel_config(path: Path) -> tuple[str, list[dict], str | None]:
         ]
         if nondefault_roles:
             raise ValueError(
-                f"{path.name}: non-default configs cannot have selection_role: "
-                f"{nondefault_roles}"
+                f"{path.name}: non-default configs cannot have selection_role: {nondefault_roles}"
             )
     elif selection_rationale is not None:
         raise ValueError(
@@ -340,20 +342,18 @@ def _audit_generic_adapter_source(kernel: str, source_path: Path) -> bool:
     ]
     if eager_compiles:
         raise TypeError(
-            f"kernel {kernel!r} generic run_bench() eagerly compiles on line(s) "
-            f"{eager_compiles}"
+            f"kernel {kernel!r} generic run_bench() eagerly compiles on line(s) {eager_compiles}"
         )
 
     lazy_call = lazy_calls[0]
     if len(lazy_call.args) != 1 or not isinstance(lazy_call.args[0], ast.Lambda):
-        raise TypeError(
-            f"kernel {kernel!r} compile_kernel_lazy() must receive one builder lambda"
-        )
+        raise TypeError(f"kernel {kernel!r} compile_kernel_lazy() must receive one builder lambda")
     builder_lambda = lazy_call.args[0]
-    if not isinstance(builder_lambda.body, ast.Call) or _call_name(builder_lambda.body) != "get_kernel":
-        raise TypeError(
-            f"kernel {kernel!r} generic lazy builder must call canonical get_kernel()"
-        )
+    if (
+        not isinstance(builder_lambda.body, ast.Call)
+        or _call_name(builder_lambda.body) != "get_kernel"
+    ):
+        raise TypeError(f"kernel {kernel!r} generic lazy builder must call canonical get_kernel()")
     builder_names = {
         name
         for node in ast.walk(builder_lambda.body)
@@ -378,9 +378,7 @@ def _audit_generic_adapter_source(kernel: str, source_path: Path) -> bool:
         isinstance(node, ast.Call) and _call_name(node) == "compile_kernel_lazy"
         for node in ast.walk(run_test)
     ):
-        raise TypeError(
-            f"kernel {kernel!r} run_test() must keep standalone eager compilation"
-        )
+        raise TypeError(f"kernel {kernel!r} run_test() must keep standalone eager compilation")
     return True
 
 
@@ -461,9 +459,7 @@ def _audit_strict_cache_adapter_source(kernel: str, source_path: Path) -> bool:
         isinstance(node, ast.Call) and _call_name(node) == "compile_spec"
         for node in ast.walk(prepare_bench)
     ):
-        raise TypeError(
-            f"kernel {kernel!r} prepare_bench() bypasses strict compile-spec replay"
-        )
+        raise TypeError(f"kernel {kernel!r} prepare_bench() bypasses strict compile-spec replay")
     run_launch_calls = [
         node
         for node in ast.walk(run_bench)
@@ -475,6 +471,201 @@ def _audit_strict_cache_adapter_source(kernel: str, source_path: Path) -> bool:
             f"exactly one _tirx_launch() call, found {len(run_launch_calls)}"
         )
     return True
+
+
+def _audit_custom_cache_adapter_source(kernel: str, source_path: Path) -> bool:
+    """Require custom compiler adapters to declare and consume one exact artifact."""
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    prepare_bench = functions.get("prepare_bench")
+    run_bench = functions.get("run_bench")
+    if prepare_bench is None or run_bench is None:
+        return False
+
+    consumers = [
+        (name, function, calls)
+        for name, function in functions.items()
+        if (
+            calls := [
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call) and _call_name(node) == "consume_prepared_cache"
+            ]
+        )
+    ]
+    if not consumers:
+        return False
+    if len(consumers) != 1 or len(consumers[0][2]) != 1:
+        raise TypeError(
+            f"kernel {kernel!r} custom cache adapter must have exactly one "
+            "consume_prepared_cache() wrapper"
+        )
+    consumer_name, consumer, consumer_calls = consumers[0]
+    consume_call = consumer_calls[0]
+    if len(consume_call.args) != 3 or not isinstance(consume_call.args[2], ast.Lambda):
+        raise TypeError(
+            f"kernel {kernel!r} consume_prepared_cache() must receive namespace, key, "
+            "and one lazy compiler"
+        )
+    if not consumer.args.args:
+        raise TypeError(f"kernel {kernel!r} custom cache consumer has no config argument")
+    config_arg = consumer.args.args[0].arg
+    key_call = consume_call.args[1]
+    if not (
+        isinstance(key_call, ast.Call)
+        and isinstance(key_call.func, ast.Name)
+        and len(key_call.args) == 1
+        and isinstance(key_call.args[0], ast.Name)
+        and key_call.args[0].id == config_arg
+        and not key_call.keywords
+    ):
+        raise TypeError(
+            f"kernel {kernel!r} custom cache consumer must derive its key from "
+            "the canonical config argument"
+        )
+    key_helper = key_call.func.id
+    namespace = ast.dump(consume_call.args[0], include_attributes=False)
+    builder = consume_call.args[2].body
+    if not isinstance(builder, ast.Call) or not isinstance(builder.func, ast.Name):
+        raise TypeError(
+            f"kernel {kernel!r} custom cache consumer must keep compilation in one lazy call"
+        )
+    raw_compiler = builder.func.id
+
+    prepare_consumer_calls = [
+        node
+        for node in ast.walk(prepare_bench)
+        if isinstance(node, ast.Call) and _call_name(node) == consumer_name
+    ]
+    if len(prepare_consumer_calls) != 1:
+        raise TypeError(
+            f"kernel {kernel!r} prepare_bench() must invoke {consumer_name}() exactly once"
+        )
+    executable_names = {
+        target.id
+        for node in ast.walk(prepare_bench)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and isinstance(node.value, ast.Call)
+        and _call_name(node.value) == consumer_name
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    }
+    if len(executable_names) != 1:
+        raise TypeError(
+            f"kernel {kernel!r} prepare_bench() must retain the custom compiled executable"
+        )
+
+    prepared_calls = [
+        node
+        for node in ast.walk(prepare_bench)
+        if isinstance(node, ast.Call) and _call_name(node) == "prepared_cached_run_bench"
+    ]
+    if len(prepared_calls) != 1:
+        raise TypeError(
+            f"kernel {kernel!r} prepare_bench() must declare exactly one prepared cache"
+        )
+    cached_keywords = [keyword for keyword in prepared_calls[0].keywords if keyword.arg == "cached"]
+    if len(cached_keywords) != 1:
+        raise TypeError(f"kernel {kernel!r} prepared cache declaration is missing cached=")
+    cached = cached_keywords[0].value
+    if not (
+        isinstance(cached, ast.Tuple)
+        and len(cached.elts) == 1
+        and isinstance(cached.elts[0], ast.Tuple)
+        and len(cached.elts[0].elts) == 3
+    ):
+        raise TypeError(f"kernel {kernel!r} prepare_bench() must declare exactly one cache entry")
+    cached_namespace, cached_key, cached_value = cached.elts[0].elts
+    if ast.dump(cached_namespace, include_attributes=False) != namespace:
+        raise TypeError(f"kernel {kernel!r} prepare and GPU cache namespaces differ")
+    if not (
+        isinstance(cached_key, ast.Call)
+        and _call_name(cached_key) == key_helper
+        and len(cached_key.args) == 1
+        and isinstance(cached_key.args[0], ast.Name)
+        and not cached_key.keywords
+    ):
+        raise TypeError(
+            f"kernel {kernel!r} prepare_bench() must use the consumer's canonical key helper"
+        )
+    if not isinstance(cached_value, ast.Name) or cached_value.id not in executable_names:
+        raise TypeError(f"kernel {kernel!r} prepare_bench() must register the retained executable")
+
+    call_graph = {
+        name: {
+            called
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and (called := _call_name(node)) in functions
+        }
+        for name, function in functions.items()
+    }
+    reachable = set()
+    pending = ["run_bench"]
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        pending.extend(call_graph.get(name, ()))
+    if consumer_name not in reachable:
+        raise TypeError(
+            f"kernel {kernel!r} run_bench() does not consume its prepared custom artifact"
+        )
+    raw_calls_outside_consumer = [
+        (name, node.lineno)
+        for name in reachable - {consumer_name}
+        for node in ast.walk(functions[name])
+        if isinstance(node, ast.Call) and _call_name(node) == raw_compiler
+    ]
+    if raw_calls_outside_consumer:
+        raise TypeError(
+            f"kernel {kernel!r} GPU-stage call graph bypasses strict cache replay: "
+            f"{raw_calls_outside_consumer}"
+        )
+    return True
+
+
+def _audit_driver_safe_cuda_targets(kernel: str, source_path: Path) -> None:
+    """Reject CUDA targets that can query physical devices before ASSIGN."""
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+
+    def literal_cuda_without_arch(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return node.value == "cuda"
+        if not isinstance(node, ast.Dict):
+            return False
+        literal = {
+            key.value: value.value
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
+        }
+        return literal.get("kind") == "cuda" and not literal.get("arch")
+
+    unsafe_targets = []
+    unsafe_compiles = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _call_name(node)
+        if call_name == "Target" and node.args and literal_cuda_without_arch(node.args[0]):
+            unsafe_targets.append(node.lineno)
+        if call_name != "compile":
+            continue
+        target_nodes = [keyword.value for keyword in node.keywords if keyword.arg == "target"]
+        if len(node.args) >= 2:
+            target_nodes.append(node.args[1])
+        if any(literal_cuda_without_arch(target) for target in target_nodes):
+            unsafe_compiles.append(node.lineno)
+    if unsafe_targets or unsafe_compiles:
+        raise TypeError(
+            f"kernel {kernel!r} has driver-sensitive CUDA target literals: "
+            f"Target line(s) {unsafe_targets}, compile line(s) {unsafe_compiles}; "
+            "use runner.cuda_target() or an explicit CUDA arch"
+        )
 
 
 def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
@@ -503,8 +694,15 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         source_path = Path(inspect.getsourcefile(module) or "")
         if not source_path.is_file():
             raise FileNotFoundError(f"kernel {name!r} has no inspectable source file")
+        _audit_driver_safe_cuda_targets(name, source_path)
         is_generic = _audit_generic_adapter_source(name, source_path)
-        is_strict_cache = _audit_strict_cache_adapter_source(name, source_path)
+        strict_cache_contracts = (
+            _audit_strict_cache_adapter_source(name, source_path),
+            _audit_custom_cache_adapter_source(name, source_path),
+        )
+        if sum(strict_cache_contracts) > 1:
+            raise TypeError(f"kernel {name!r} matches multiple strict-cache contracts")
+        is_strict_cache = any(strict_cache_contracts)
         if is_generic and is_strict_cache:
             raise TypeError(
                 f"kernel {name!r} matches both generic and strict-cache adapter contracts"
@@ -573,15 +771,11 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         if selection_rationale is not None:
             defaults = [entry for entry in entries if entry.get("default", False)]
             if any(_normalize_workload(dict(entry))["num_gpus"] != 1 for entry in defaults):
-                raise ValueError(
-                    f"{path}: curated default selection contains a multi-GPU config"
-                )
+                raise ValueError(f"{path}: curated default selection contains a multi-GPU config")
             curated_default_selections.append(
                 {
                     "kernel": kernel,
-                    "configs": {
-                        entry["selection_role"]: entry["config"] for entry in defaults
-                    },
+                    "configs": {entry["selection_role"]: entry["config"] for entry in defaults},
                     "rationale": selection_rationale.strip(),
                 }
             )
@@ -596,8 +790,7 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
     }
     if missing_yaml_configs:
         raise ValueError(
-            "module benchmark configs missing from YAML inventory: "
-            f"{missing_yaml_configs}"
+            f"module benchmark configs missing from YAML inventory: {missing_yaml_configs}"
         )
     if len(curated_default_selections) != EXPECTED_CURATED_DEFAULT_KERNELS:
         raise ValueError(
@@ -657,8 +850,7 @@ def write_pipeline_capability_report(out_dir: Path, capability: dict[str, Any]) 
         *[
             f"| `{selection['kernel']}` | "
             + ", ".join(
-                f"{role}: `{selection['configs'][role]}`"
-                for role in DEFAULT_SELECTION_ROLES
+                f"{role}: `{selection['configs'][role]}`" for role in DEFAULT_SELECTION_ROLES
             )
             + f" | {selection['rationale']} |"
             for selection in capability["curated_default_selections"]
@@ -913,9 +1105,7 @@ class GpuPool:
     def wait_for_change(self, generation: int, stop: threading.Event) -> int:
         """Block a notifier thread until eligibility/ownership changes or stop."""
         with self._changed:
-            self._changed.wait_for(
-                lambda: self._change_generation != generation or stop.is_set()
-            )
+            self._changed.wait_for(lambda: self._change_generation != generation or stop.is_set())
             return self._change_generation
 
     def wake(self) -> None:
@@ -1044,6 +1234,7 @@ def gpu_compile_profile(indices: set[str]) -> dict:
                 {
                     "name": name,
                     "compute_capability": list(compute_capability),
+                    "cuda_arch": "sm_100a",
                     "num_sms": core_count // cores_per_sm,
                 }
             )
@@ -1238,11 +1429,7 @@ def _process_tree_resources(root_pids: set[int]) -> dict[str, int]:
             observed_processes += 1
         except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
             continue
-    return {
-        "rss_bytes": rss_bytes,
-        "open_fds": open_fds,
-        "processes": observed_processes,
-    }
+    return {"rss_bytes": rss_bytes, "open_fds": open_fds, "processes": observed_processes}
 
 
 def _terminate_subprocess(proc: subprocess.Popen) -> None:
@@ -1271,6 +1458,7 @@ class _PreparedAttempt:
     state: str = "PREPARING_CPU"
     buffer: bytearray = field(default_factory=bytearray)
     gpus: tuple[str, ...] = ()
+    physical_gpu_uuids: tuple[str, ...] = ()
     gpu_ownership_released: bool = False
     timeline: dict[str, float] = field(default_factory=dict)
     record: dict | None = None
@@ -1282,11 +1470,7 @@ class _PreparedAttempt:
 
 
 def _prepared_child_command(
-    workload: dict,
-    *,
-    control_fd: int,
-    rounds: int,
-    cooldown: float,
+    workload: dict, *, control_fd: int, rounds: int, cooldown: float
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1334,6 +1518,8 @@ def _spawn_prepared_attempt(
     env = os.environ.copy()
     env.pop("CUDA_VISIBLE_DEVICES", None)
     env["TIRX_BENCH_JSON"] = "1"
+    env[TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV] = "1"
+    env[PREPARE_CUDA_ARCH_ENV] = str(compile_profile["cuda_arch"])
     env[PREPARE_NUM_SMS_ENV] = str(compile_profile["num_sms"])
     repo_root = str(_kernels_repo_root())
     python_path = env.get("PYTHONPATH")
@@ -1342,10 +1528,7 @@ def _spawn_prepared_attempt(
     cache_dir.mkdir(parents=True, exist_ok=True)
     env["TIRX_BENCH_CACHE_DIR"] = str(cache_dir)
     command = _prepared_child_command(
-        workload,
-        control_fd=child_control.fileno(),
-        rounds=rounds,
-        cooldown=cooldown,
+        workload, control_fd=child_control.fileno(), rounds=rounds, cooldown=cooldown
     )
     process_started = time.time()
     try:
@@ -1839,12 +2022,7 @@ def _run_measurement_protocol(current: dict) -> dict[str, Any] | None:
         "default_rounds": DEFAULT_ROUNDS,
         "default_cooldown_s": DEFAULT_COOLDOWN_S,
         "is_default": rounds == DEFAULT_ROUNDS
-        and math.isclose(
-            cooldown,
-            DEFAULT_COOLDOWN_S,
-            rel_tol=0.0,
-            abs_tol=1e-9,
-        ),
+        and math.isclose(cooldown, DEFAULT_COOLDOWN_S, rel_tol=0.0, abs_tol=1e-9),
         "source": "derived_from_result_protocols",
     }
 
@@ -1933,12 +2111,10 @@ def write_summary(out_dir: Path, current: dict) -> Path:
             dispatch = cost["dispatch_latency_s"]
             handoff = cost["assignment_handoff_s"]
             lines.append(
-                f"- dispatch latency p95/max: `{dispatch['p95']:.3f}s` / "
-                f"`{dispatch['max']:.3f}s`"
+                f"- dispatch latency p95/max: `{dispatch['p95']:.3f}s` / `{dispatch['max']:.3f}s`"
             )
             lines.append(
-                f"- ASSIGN-to-GPU-start p95/max: `{handoff['p95']:.3f}s` / "
-                f"`{handoff['max']:.3f}s`"
+                f"- ASSIGN-to-GPU-start p95/max: `{handoff['p95']:.3f}s` / `{handoff['max']:.3f}s`"
             )
         else:
             lines.append(f"- missing reason: {cost.get('missing_reason', 'unknown')}")
@@ -1956,9 +2132,7 @@ def write_summary(out_dir: Path, current: dict) -> Path:
                 "percentiles are intentionally unpublished because the run lacks "
                 "complete measurement evidence"
             )
-        lines.append(
-            f"- final process-reap tail: `{pipeline.get('final_reap_tail_s', 0.0):.3f}s`"
-        )
+        lines.append(f"- final process-reap tail: `{pipeline.get('final_reap_tail_s', 0.0):.3f}s`")
         lines.append(
             f"- observed bounds: preparing={pipeline.get('max_observed_preparing', 0)}, "
             f"READY={pipeline.get('max_observed_ready', 0)}, "
@@ -1992,9 +2166,7 @@ def write_summary(out_dir: Path, current: dict) -> Path:
                 "exact import | config resolve | specialize/compile | CPU prepare | "
                 "READY wait | ASSIGN handoff | GPU stage | result handoff | reap tail |"
             )
-            lines.append(
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
-            )
+            lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
             for record, breakdown in phase_rows:
                 workload = f"{record['kernel']}/{record.get('config') or record.get('label')}"
                 lines.append(
@@ -2018,9 +2190,7 @@ def write_summary(out_dir: Path, current: dict) -> Path:
         if exemption:
             lines.append("## Multi-GPU runtime validation exemption")
             lines.append("")
-            lines.append(
-                f"- validation status: `{exemption.get('validation_status', '?')}`"
-            )
+            lines.append(f"- validation status: `{exemption.get('validation_status', '?')}`")
             lines.append(
                 "- runtime evidence: not collected, by explicit human direction; this is "
                 "neither a pass nor a missing-result placeholder"
@@ -2170,10 +2340,7 @@ def _finalize_bench_record(row: dict, *, rounds: int, cooldown: float) -> None:
         row["status"] = "FAIL"
         row["error"] = "benchmark protocol must declare round_aggregate='mean'"
         return
-    protocol_cooldown = protocol.get(
-        "cooldown_s",
-        protocol.get("round_cooldown_s"),
-    )
+    protocol_cooldown = protocol.get("cooldown_s", protocol.get("round_cooldown_s"))
     if (
         not isinstance(protocol_cooldown, (int, float))
         or isinstance(protocol_cooldown, bool)
@@ -2360,11 +2527,10 @@ def _pipeline_cost_model(
         # Before the first complete snapshot, no physical GPU is eligible for
         # assignment. CPU preparation may still proceed in parallel.
         return set(known_gpu_indices if occupied is None else occupied)
+
     actual_available_at: dict[str, float] = {}
     dispatch_latencies: list[float] = []
-    for record in sorted(
-        scheduled_records, key=lambda item: item["phase_timestamps"]["assigned"]
-    ):
+    for record in sorted(scheduled_records, key=lambda item: item["phase_timestamps"]["assigned"]):
         timeline = record["phase_timestamps"]
         available_at = max(
             [timeline["ready"]]
@@ -2396,10 +2562,7 @@ def _pipeline_cost_model(
         finish = 0.0
         ordered = sorted(
             scheduled_records,
-            key=lambda item: (
-                item["phase_timestamps"]["ready"],
-                -len(item.get("gpus") or ()),
-            ),
+            key=lambda item: (item["phase_timestamps"]["ready"], -len(item.get("gpus") or ())),
         )
         for record in ordered:
             count = len(record["gpus"])
@@ -2420,10 +2583,7 @@ def _pipeline_cost_model(
                     candidates.append((start, selected))
                 start, selected = min(
                     candidates,
-                    key=lambda candidate: (
-                        candidate[0],
-                        tuple(int(gpu) for gpu in candidate[1]),
-                    ),
+                    key=lambda candidate: (candidate[0], tuple(int(gpu) for gpu in candidate[1])),
                 )
                 if not math.isfinite(start):
                     return math.inf
@@ -2443,10 +2603,7 @@ def _pipeline_cost_model(
 
     ideal_gpu_s = list_schedule(respect_ready=False)
     ready_constrained_gpu_s = list_schedule(respect_ready=True)
-    eligibility_constrained_gpu_s = list_schedule(
-        respect_ready=True,
-        respect_external=True,
-    )
+    eligibility_constrained_gpu_s = list_schedule(respect_ready=True, respect_external=True)
     foreign_wait_s = max(0.0, eligibility_constrained_gpu_s - ready_constrained_gpu_s)
     first_ready_s = max(0.0, first_ready - run_started)
     expected_s = first_ready_s + ready_constrained_gpu_s
@@ -2513,9 +2670,7 @@ def _workload_phase_breakdown(record: dict) -> dict[str, float] | None:
     return {
         "process_startup_s": timeline["child_started"] - timeline["process_started"],
         "cli_bootstrap_s": timeline["framework_import_started"] - timeline["child_started"],
-        "framework_import_s": (
-            timeline["framework_loaded"] - timeline["framework_import_started"]
-        ),
+        "framework_import_s": (timeline["framework_loaded"] - timeline["framework_import_started"]),
         "exact_import_s": timeline["module_loaded"] - timeline["framework_loaded"],
         "config_resolve_s": timeline["config_resolved"] - timeline["module_loaded"],
         "specialize_generate_compile_s": timeline["ready"] - timeline["config_resolved"],
@@ -2591,9 +2746,7 @@ def run_scheduled_jobs(
         return [], [], {}
     visible = pool.total_visible()
     if max_prepare_processes is None:
-        max_prepare_processes = min(
-            n_jobs, max(1, min(os.cpu_count() or 1, max(4, visible * 2)))
-        )
+        max_prepare_processes = min(n_jobs, max(1, min(os.cpu_count() or 1, max(4, visible * 2))))
     if ready_backlog is None:
         ready_backlog = max(max_prepare_processes, visible * 2)
     if max_prepare_processes < 1 or ready_backlog < 1:
@@ -2619,6 +2772,7 @@ def run_scheduled_jobs(
     last_resource_sample = 0.0
     run_started = time.time()
     critical_finished: float | None = None
+    physical_uuid_by_index = dict(pool._all_gpus())
 
     def preparing_count() -> int:
         return sum(item.state == "PREPARING_CPU" for item in active.values())
@@ -2664,10 +2818,7 @@ def run_scheduled_jobs(
         completed += 1
         failed = True
         detail = item.record.get("error") or "unknown workload failure"
-        log(
-            f"[bench-suite] >>> FAIL-FAST {item.label} attempt {item.attempt}: "
-            f"{detail[:160]} <<<"
-        )
+        log(f"[bench-suite] >>> FAIL-FAST {item.label} attempt {item.attempt}: {detail[:160]} <<<")
 
     def requeue_interfered(item: _PreparedAttempt, intruders: list[int], detail: str) -> None:
         retry_log.append(
@@ -2744,12 +2895,11 @@ def run_scheduled_jobs(
             remove_ready(item)
             item.gpus = gpus
             item.gpu_ownership_released = False
-            item.state = "RUNNING_GPU"
+            item.state = "ASSIGNED"
             item.timeline["assigned"] = time.time()
-            _send_child(item, {"type": "ASSIGN", "gpu_indices": list(gpus)})
-            log(
-                f"[bench-suite] {now_iso()} gpus={','.join(gpus)} GPU_START "
-                f"{item.label} (attempt {item.attempt})"
+            expected_gpu_uuids = [physical_uuid_by_index[gpu] for gpu in gpus]
+            _send_child(
+                item, {"type": "ASSIGN", "gpu_indices": list(gpus), "gpu_uuids": expected_gpu_uuids}
             )
 
     external_stop = threading.Event()
@@ -2778,14 +2928,10 @@ def run_scheduled_jobs(
                 return
 
     external_thread = threading.Thread(
-        target=monitor_external_occupancy,
-        name="bench-gpu-occupancy",
-        daemon=True,
+        target=monitor_external_occupancy, name="bench-gpu-occupancy", daemon=True
     )
     dispatch_thread = threading.Thread(
-        target=notify_dispatch_on_pool_change,
-        name="bench-gpu-dispatch-notifier",
-        daemon=True,
+        target=notify_dispatch_on_pool_change, name="bench-gpu-dispatch-notifier", daemon=True
     )
     dispatch_thread.start()
     external_thread.start()
@@ -2805,7 +2951,7 @@ def run_scheduled_jobs(
             if now - last_interference_poll >= MONITOR_INTERVAL:
                 last_interference_poll = now
                 for item in list(active.values()):
-                    if item.state != "RUNNING_GPU" or not item.gpus:
+                    if item.state not in ("ASSIGNED", "RUNNING_GPU") or not item.gpus:
                         continue
                     strangers = _active_strangers(item.gpus, _our_pids(), pool.util_threshold)
                     if strangers is None or strangers:
@@ -2842,10 +2988,7 @@ def run_scheduled_jobs(
                 try:
                     messages, eof = _receive_child_messages(item)
                 except (json.JSONDecodeError, OSError) as error:
-                    fail(
-                        item,
-                        {"phase": "protocol", "error": f"invalid control message: {error}"},
-                    )
+                    fail(item, {"phase": "protocol", "error": f"invalid control message: {error}"})
                     break
                 for message in messages:
                     message_type = message.get("type")
@@ -2879,12 +3022,34 @@ def run_scheduled_jobs(
                             f"[bench-suite] {now_iso()} READY {item.label} "
                             f"prepare={item.timeline['ready'] - item.timeline['prepare_started']:.3f}s"
                         )
-                    elif message_type == "RESULT" and item.state == "RUNNING_GPU":
+                    elif message_type == "RUNNING_GPU" and item.state == "ASSIGNED":
+                        physical_gpu_uuids = message.get("physical_gpu_uuids")
+                        expected_gpu_uuids = [physical_uuid_by_index[gpu] for gpu in item.gpus]
+                        if physical_gpu_uuids != expected_gpu_uuids:
+                            fail(
+                                item,
+                                {
+                                    "phase": "assignment",
+                                    "error": (
+                                        "physical GPU UUID mismatch: "
+                                        f"expected {expected_gpu_uuids}, got {physical_gpu_uuids!r}"
+                                    ),
+                                },
+                            )
+                            break
+                        item.physical_gpu_uuids = tuple(physical_gpu_uuids)
                         item.timeline["gpu_started"] = message["gpu_started"]
+                        item.state = "RUNNING_GPU"
+                        log(
+                            f"[bench-suite] {now_iso()} gpus={','.join(item.gpus)} GPU_START "
+                            f"{item.label} (attempt {item.attempt})"
+                        )
+                    elif message_type == "RESULT" and item.state == "RUNNING_GPU":
                         item.timeline["gpu_finished"] = message["gpu_finished"]
                         item.timeline["result_received"] = time.time()
                         release_gpus(item)
                         record = _base_attempt_record(item)
+                        record["physical_gpu_uuids"] = list(item.physical_gpu_uuids)
                         result = message.get("result") or {}
                         status = result.get("status")
                         if status == "SKIP":
@@ -2992,12 +3157,7 @@ def run_scheduled_jobs(
             "default_cooldown_s": DEFAULT_COOLDOWN_S,
             "is_default": (
                 rounds == DEFAULT_ROUNDS
-                and math.isclose(
-                    cooldown,
-                    DEFAULT_COOLDOWN_S,
-                    rel_tol=0.0,
-                    abs_tol=1e-9,
-                )
+                and math.isclose(cooldown, DEFAULT_COOLDOWN_S, rel_tol=0.0, abs_tol=1e-9)
             ),
         },
         "compile_profile": compile_profile,
@@ -3169,10 +3329,7 @@ def main() -> None:
         and args.ready_backlog is not None
         and args.ready_backlog < args.max_prepare_processes
     ):
-        print(
-            "[bench-suite] --ready-backlog must be >= --max-prepare-processes",
-            file=sys.stderr,
-        )
+        print("[bench-suite] --ready-backlog must be >= --max-prepare-processes", file=sys.stderr)
         sys.exit(2)
 
     if args.workloads is None:
@@ -3339,14 +3496,7 @@ def main() -> None:
 
     results.sort(key=lambda r: (r["kernel"], r.get("label") or r.get("config")))
     probe_meta = {"enabled": not args.no_probe, "usable": sorted(usable), "failed": probe_failures}
-    run_path = write_run(
-        out_dir,
-        stamp,
-        results,
-        label,
-        probe=probe_meta,
-        pipeline=pipeline_meta,
-    )
+    run_path = write_run(out_dir, stamp, results, label, probe=probe_meta, pipeline=pipeline_meta)
     current = json.loads(run_path.read_text())
 
     latest = out_dir / "latest.json"

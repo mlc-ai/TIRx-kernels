@@ -4,12 +4,16 @@ Validation date: 2026-08-13.
 
 This report records implementation and acceptance evidence for the one-shot
 benchmark pipeline. It deliberately distinguishes static migration, structural
-tests, measured single-GPU evidence, and the human-directed multi-GPU runtime
-exemption.
+tests, invalidated or missing single-GPU evidence, and the human-directed
+multi-GPU runtime exemption.
 
-## Implementation status
+## Current implementation status before the superseding binding decision
 
-- Lifecycle: every workload attempt uses one fresh process and follows
+- The current implementation snapshot uses the earlier design: every workload
+  attempt uses one fresh process, late binding mutates `CUDA_VISIBLE_DEVICES`,
+  and interference starts a fresh child that repeats CPU prepare. Those details
+  are now obsolete and are not accepted as the target implementation.
+- Its lifecycle follows
   `PREPARING → READY → ASSIGNED → RUNNING_GPU → RESULT → exit`.
 - CPU prepare owns exact module import/parsing, config resolution,
   specialization, IR generation, compilation, and any compile-cache population.
@@ -27,6 +31,67 @@ exemption.
   timer budgets, reference construction, correctness work, raw samples, and
   arithmetic-mean aggregation.
 
+## Superseding set-device decision and feasibility stop
+
+The human-directed target keeps all physical GPUs visible in the prepare child,
+so logical and physical ordinals are identical. CPU prepare must still leave CUDA
+uninitialized. After each ASSIGN, the child must call
+`torch.cuda.set_device(physical_index)` and prove the current physical device with
+the existing UUID handshake before allocation or launch. Mutating
+`CUDA_VISIBLE_DEVICES` in a live prepared process is no longer permitted.
+
+Interference handling is also superseded. A workload owns one one-shot process
+and performs CPU prepare exactly once. After an interfered GPU attempt, the
+orchestrator must release the old atomic claim and may assign the same or another
+card to that same child. The child must select the new card and rebuild all
+GPU-side tensors, references, workspaces, and timer state without repeating
+import, specialization, generation, or compilation. The run artifact must mark
+`retry_in_place: true` and preserve per-attempt assignment, UUID, ownership, and
+phase records.
+
+This changes the measurement condition: a retry occurs in a process that has
+already executed a GPU attempt. It is therefore a distinct hot-process evidence
+class, not a clean fresh-process/first-attempt sample. Unless the human explicitly
+approves that semantic change, in-place retries cannot be mixed into clean AC-10
+A/B evidence. No such approval has been recorded.
+
+The required external-library audit found a blocking device-0 dependency in the
+installed FlashInfer package before implementation began:
+
+- `flashinfer/moe_ep/kernel_src/cutedsl_megamoe/shim/comm.py:84` calls
+  `torch.cuda.set_device(0)` in the real single-rank `bootstrap_dist()` path, and
+  line 89 constructs `Device(0)`;
+- `shim/nvfp4.py` and `shim/mxfp8.py` call that helper;
+- `src/moe_mxfp8_glu/mega_runner.py:891`,
+  `src/moe_nvfp4_swapab/mega_runner.py:2736`, and
+  `src/moe_nvfp4_swapab/benchmark_p2p.py:512` also call
+  `torch.cuda.set_device(0)` on executable runner/benchmark paths, followed in at
+  least one path by bare `device="cuda"` allocations.
+
+These are not comments or dead source-text matches. They can override a late
+assignment and direct subsequent relative allocations to physical GPU 0. The
+repository's embedded `tirx_kernels/deepgemm/mega_moe.py` does not directly
+import these helpers, but the human required the audit to stop on any real
+external hard-coding rather than infer an exemption or add a workaround.
+Accordingly, the set-device and in-place-retry implementation has not started.
+The remaining external packages are not claimed as positively cleared by this
+stopped audit. A human decision is required: explicitly exclude/exempt these
+FlashInfer paths, require an upstream fix, or treat the finding as invalidating
+the set-device architecture. The implementation must not independently return
+to the mask design.
+
+Three repository no-op calls were also inspected and left unchanged:
+
+- `deepgemm/tf32_hc_prenorm_gemm.py:285`;
+- `deepgemm/mqa_logits_fp4.py:217`;
+- `deepgemm/mqa_logits_fp8.py:229`.
+
+Each calls `torch.cuda.set_device(torch.cuda.current_device())` at the start of
+GPU `prepare_data()`, before capability checks and bare CUDA allocations. They
+date to the original import commit, but no explanatory commit context was found.
+Their intent is therefore recorded as unresolved rather than deleted or used as
+evidence that the new design works.
+
 ## Static and no-card evidence
 
 The capability audit reports:
@@ -35,9 +100,10 @@ The capability audit reports:
 - 992 module-owned benchmark configs.
 - 992 YAML inventory entries, with no module-only or YAML-only config.
 - 21 generic lazy-replay adapters checked at AST level.
-- 5 DeepGEMM direct-compile adapters with exact prepared-cache key and
-  consumption validation.
-- 15 explicit/custom adapters covering process-local executables, dispatcher
+- 10 strict-cache adapters with exact prepared-cache key and consumption
+  validation: five DeepGEMM `compile_spec`/`build_launch` adapters and five
+  direct custom-compiler adapters.
+- 10 explicit/custom adapters covering process-local executables, dispatcher
   delegation, hardware-profile compile caches, and distributed export/load
   lifecycles; together the three adapter classes account for 41/41 kernels.
 - 112 single-GPU default workloads, with at most three defaults per kernel.
@@ -46,10 +112,12 @@ The capability audit reports:
   kernel YAML and emitted by the capability report.
 - 27 multi-GPU configs, none selected by the default measured sweep.
 
-`tests/test_bench_pipeline_protocol.py` has 56 passing behavior tests covering:
+Before the superseding set-device decision,
+`tests/test_bench_pipeline_protocol.py` had 73 passing behavior tests covering:
 
 - one-shot process/IPC behavior, log isolation, cancellation, fail-fast, dynamic
-  external eligibility, fresh-process interference retry, bounded-backlog
+  external eligibility, the now-obsolete fresh-process interference retry,
+  bounded-backlog
   drain/refill without dropped or reused attempts, and resource bounds;
 - same-GPU serialization, concurrent logical-GPU execution, complete atomic
   claims, assignment-count/duplicate/index rejection, and no partial ownership;
@@ -63,9 +131,13 @@ The capability audit reports:
   mismatched rank-round rejection, and distributed cleanup on failure;
 - lazy replay skipping its builder exactly once, with under/over-consumption
   rejected, plus a static gate against moving builder work back to GPU stage;
-- strict prepared-cache replay for the five DeepGEMM `compile_spec` users:
-  mismatched keys, missing consumption, and extra consumption all fail before a
-  GPU-stage compilation can silently enter the critical path;
+- strict prepared-cache replay for both DeepGEMM forms: the five
+  `compile_spec`/`build_launch` users and the five direct custom-compiler users.
+  Mismatched keys, missing consumption, extra consumption, and specialization
+  drift all fail before a GPU-stage compilation can enter the critical path;
+- a runner-level GPU-stage guard rejects any `tvm.compile` after assignment,
+  closing cache-miss fallback for every in-process adapter rather than relying
+  only on per-adapter discipline;
 - missing/incomplete cost-model evidence never publishes expected wall,
   residual, starvation, foreign-wait, or latency values as zero;
 - summaries watermark non-default rounds/cooldown as diagnostic, including old
@@ -75,6 +147,11 @@ The capability audit reports:
   overlapping ownership intervals on the same GPU;
 - capability accounting proves 41/41 adapters and 33/33 reviewed three-point
   selections from canonical sources.
+
+Those historical tests remain evidence for the contracts they actually exercise,
+but they do not prove the new `set_device` binding, non-assigned-card
+allocation/launch rejection, one-prepare in-place retry, hot-process evidence
+classification, or abandoned-card primary-context VRAM accounting.
 
 ## CPU prepare evidence without GPU assignment
 
@@ -107,6 +184,29 @@ This proves that each family can create its specialization in the CPU-only
 phase. Exact replay consumption is independently enforced by the process-local
 cache-key tests and the all-config AST capability gate described above.
 
+The five newly migrated direct custom-compiler adapters were separately run in
+fresh children through READY and then cancelled without assignment:
+
+| workload | wall to READY | framework import | module load | specialize/generate/compile | result |
+|---|---:|---:|---:|---:|---|
+| `deepgemm_sm100_tf32_hc_prenorm_gemm/m64_n24_k28672_s112` | 4.702s | 2.245s | 0.716s | 1.705s | READY, clean CANCEL |
+| `deepgemm_sm100_fp4_mqa_logits/s2048_skv4096_h64_d128_f32_dense_cp` | 4.338s | 2.216s | 0.287s | 1.801s | READY, clean CANCEL |
+| `deepgemm_sm100_fp8_mqa_logits/s2048_skv4096_h64_d128_f32_dense_cp` | 4.388s | 2.226s | 0.299s | 1.828s | READY, clean CANCEL |
+| `deepgemm_sm100_fp4_paged_mqa_logits/b1_n1_mp1_ps32_h64_d128_f32_fixed` | 4.591s | 2.339s | 0.324s | 1.893s | READY, clean CANCEL |
+| `deepgemm_sm100_fp8_paged_mqa_logits/b1_n1_mp4_ps64_h64_d128_f32_fixed` | 4.227s | 2.215s | 0.340s | 1.636s | READY, clean CANCEL |
+
+`bench_pipeline_custom_cache_prepare_evidence.json` records the exact values and
+their boundary. The timings were transcribed from command output and have no
+persisted raw run JSON or log, so this is a repository CPU-prepare ledger rather
+than independently rehashable source evidence. It proves neither prepared replay
+after assignment, GPU correctness/runtime, nor AC-10 performance.
+
+The TF32 HC prepare initially exposed an offline compiler defect: passing only
+`nvcc -arch sm_100a` selected a non-family intermediate target and `ptxas`
+rejected `tcgen05` instructions. Offline materialization now emits
+`-gencode arch=compute_100a,code=sm_100a` (and the analogous `sm_100f` form),
+preserving the Blackwell family architecture without initializing the driver.
+
 ### Concurrent large-shape resource envelope
 
 One CPU-only run prepared three deliberately large representatives concurrently:
@@ -129,7 +229,10 @@ the protocol test suite.
 No full sweep was run. All targeted measurements retained 5 rounds and a 1.0
 second cooldown.
 
-The three-small-GEMM pipeline run produced:
+The historical three-small-GEMM pipeline run produced the following internal
+timeline. It predates physical-UUID verification, so its requested GPU index is
+not proof of the physical device used and the numbers are retained only as
+directional cost-model data:
 
 - observed critical wall: 46.787s;
 - first READY: 7.087s;
@@ -139,11 +242,14 @@ The three-small-GEMM pipeline run produced:
 - unexplained residual: 0.065s (0.14% of observed wall).
 
 The older prototype evidence—29.70s sequential versus 19.17s pipelined, 1.55×—
-is retained only as directional cost-model evidence. A same-protocol A/B is
-reported separately below.
+is likewise retained only as directional cost-model evidence. The historical
+same-protocol pair below is also invalidated for performance acceptance.
 
 After the generic lazy-replay correction, one small `act_and_mul` workload was
-run on one automatically selected idle B200:
+recorded after requesting an automatically selected idle B200. This also
+predates the UUID handshake; the scheduler's idle-card selection cannot prove
+which physical GPU the prepared child ultimately used, so this is not accepted
+single-GPU runtime evidence:
 
 - CPU prepare: 4.082s;
 - GPU stage: 14.918s;
@@ -155,7 +261,7 @@ run on one automatically selected idle B200:
 - no interference retry;
 - host peaks: 3 processes, 1.999 GiB RSS, 218 file descriptors.
 
-### Default-protocol migration A/B
+### Invalidated historical default-protocol A/B
 
 The migration-before side was checked out in a detached worktree at `a91a1b7`,
 which still contains the one-stage scheduler. Both sides used exactly these
@@ -165,29 +271,44 @@ three explicit workloads:
 - `fp16_bf16_gemm/fp16_2048x2048x2048`;
 - `fp16_bf16_gemm/fp16_4096x4096x4096`.
 
-Both sides were restricted to physical GPU 6, ran serial GPU stages, skipped the
-probe, and retained 5 rounds, 1.0 second cooldown, Proton warmup/repeat defaults,
-both implementations, correctness/reference setup, raw samples, and arithmetic
-mean. An outer monotonic timer measured the complete command:
+Both commands requested GPU index 6, ran serial GPU stages, skipped the probe,
+and retained 5 rounds, 1.0 second cooldown, Proton warmup/repeat defaults, both
+implementations, correctness/reference setup, raw samples, and arithmetic mean.
+The old pipeline path did not persist or verify the physical UUID. It has since
+been reproduced mapping `assigned_env=6` to logical device 0 UUID
+`GPU-ef5a8300-...` (NVML index 0), while NVML index 6 is
+`GPU-e56ad157-...`. The pipeline side's actual physical identity is therefore
+unknown, and the premise that both sides used the same physical GPU is false as
+an evidence claim. The recorded outer monotonic values were:
 
 | path | wall | result |
 |---|---:|---|
 | one-stage `a91a1b7` | 95.712s | 3/3 ok, no interference |
 | pipeline | 50.792s | 3/3 ok, no interference |
 
-For this fixed three-workload matrix, the pipeline is 1.884× faster and reduces
-wall time by 46.9%. The pipeline's internal model measured 44.237s from scheduler
-start through final RESULT: first READY 6.208s, GPU list schedule 37.980s, no
-READY starvation or foreign wait, dispatch p95 0.036s, and unexplained residual
-0.049s. The additional outer-command time is startup/provenance/report work that
-both complete commands include.
+The quotient is 1.884× and the arithmetic reduction is 46.9%, but this is now
+classified as an internally reproducible historical calculation, not a valid
+migration speedup. It must not be used for AC-10 or any default-protocol
+performance claim until both sides are remeasured on the same UUID-verified idle
+GPU. The pipeline's internal model remains internally checkable: 44.237s from
+scheduler start through final RESULT, first READY 6.208s, GPU list schedule
+37.980s, no READY starvation or foreign wait, dispatch p95 0.036s, and
+unexplained residual 0.049s.
 
 The tracked artifact `bench_pipeline_ab_evidence.json` retains both sides' five
-raw samples, protocol, exact source-artifact SHA-256 values, after-side timeline
-offsets, and cost-model fields. Its derived values are independently
-recomputable without relying on gitignored `.bench-suite/` state. The after-side
-provenance intentionally remains `b427de3b-dirty`, the working tree that was
-actually measured; it is not relabeled as a later cleanup commit.
+raw samples, protocol, recorded source-artifact SHA-256 values, after-side
+timeline offsets, and cost-model fields. Its derived arithmetic is internally
+recomputable from fields in that same JSON; that is not independent provenance
+for those inputs. Both hashes name gitignored run JSONs. They match the copies
+currently present in this workspace, but the before worktree/artifact was absent
+in the third-party audit environment and neither source artifact is tracked.
+Artifact-backed verification must therefore explicitly skip when a local file is
+unavailable, never silently pass. The two outer-wall inputs exist only in the
+tracked evidence JSON: the after run JSON supports 44.237s critical wall plus
+0.616s final reap tail, not the additional 5.939s needed to reach 50.792s. Thus
+the headline quotient has no persisted raw outer-timer artifact on either side.
+The after-side provenance intentionally remains `b427de3b-dirty`, the working
+tree that was actually measured; it is not relabeled as a later cleanup commit.
 
 A prior back-to-back pair on the same matrix also showed the pipeline win. Its
 old/new kernel ratios differed by -0.75%, -0.55%, and -0.13% for the 1024, 2048,
@@ -197,33 +318,33 @@ sample while its other four samples were 15.977–16.011µs, so that row's aggre
 ratio is explicitly treated as an outlier-contaminated measurement rather than
 evidence of a pipeline semantic shift. No samples were trimmed or replaced.
 
-This A/B isolates orchestration by using the same three workload identities on
-both sides. The independent default-coverage change from 234 to 112 workloads is
-not included in this speedup. It reduces routine sweep work by 52.1% at the YAML
-configuration source and must be reported as a separate coverage/runtime effect,
-never multiplied into or merged with the 1.884× pipeline result.
+The historical pair used the same three workload identities, but it does not
+isolate orchestration because same-device identity is unverified. The independent
+default-coverage change from 234 to 112 workloads is not included in the recorded
+quotient. It reduces routine sweep work by 52.1% at the YAML configuration source
+and must be reported as a separate coverage/runtime effect, never multiplied into
+or merged with any future UUID-verified pipeline result.
 
 ### Single-GPU timer-family evidence ledger
 
 The plan requires a migration-before versus pipeline A/B for every timer family
-that can run on one GPU. Only Proton currently has complete runtime evidence;
-the other rows remain explicitly unmeasured rather than being inferred from
-their structural tests.
+that can run on one GPU. None currently has admissible same-physical-GPU A/B
+evidence. Completed runs are recorded below but remain unmeasured for AC-10 until
+repeated through the UUID-verified path.
 
 | timer family | runtime evidence | status |
 |---|---|---|
-| Proton | Fixed three-GEMM default-protocol A/B above, with tracked raw samples and timelines | measured, targeted A/B passed |
-| Event | The one-stage side completed at the default protocol; three fresh pipeline attempts were invalidated by foreign PIDs before a valid result, and a fourth was cancelled | pipeline side missing due shared-machine interference; no A/B claim |
-| CUDA-graph Proton | Not launched after repeated Event-timer interference established that the shared machine was unsuitable for another targeted run | unmeasured due shared-machine interference |
+| Proton | The fixed three-GEMM pair retained default 5 rounds/1.0s data, but the old pipeline side did not verify its physical UUID; its 1.884× arithmetic also relies on unpersisted outer timers | invalidated; AC-10 unmeasured pending UUID-verified same-card rerun |
+| Event | Clean zero-retry default-protocol runs exist locally on both sides; the pipeline result is TIRx 6.180µs and requested index 6, but the old pipeline path did not verify physical UUID | completed local runs, but physical identity invalidates the A/B; no claim |
+| CUDA-graph Proton | Clean default-protocol runs exist locally on both sides; before TIRx is 1.675µs and pipeline TIRx is 1.931µs. This discrepancy helped expose the binding defect; the old pipeline path did not verify physical UUID | completed local runs, but physical identity invalidates the A/B; no claim |
 | Kineto | Correlated-span, barrier, sample-wise-max, schema, and cleanup behavior pass structurally; the runtime path also requires the locked NCCL/cuBLAS/cuBLASMp/NVSHMEM environment | structural only; runtime A/B unmeasured |
 | MegaMoE | Alternating order, per-rank samples, sample-wise max, mismatch rejection, and cleanup pass structurally | structural only; runtime A/B unmeasured due shared-machine interference |
 
-The completed one-stage Event run and the interfered pipeline attempts exist
-only in gitignored local run logs, so they are not presented as persistent
-review evidence. After three independently spawned attempts encountered foreign
-processes, further GPU measurement stopped in accordance with the shared-machine
-discipline. No reduced rounds, cooldown, timer budget, reference coverage, or
-correctness work was used to manufacture a result.
+The Event and CUDA-graph runs exist only in gitignored local run logs, so they are
+not persistent review evidence. Their clean completion corrects the earlier
+ledger rationale, but does not cure the unverified physical identity. No reduced
+rounds, cooldown, timer budget, reference coverage, or correctness work was used
+to manufacture a result.
 
 ### DeepGEMM strict-cache runtime evidence boundary
 
@@ -242,6 +363,11 @@ no `expected_s`, `unexplained_s`, starvation, foreign-wait, or latency fields.
 This diagnostic artifact is gitignored and is not claimed as persistent review
 evidence. No replacement dequantization algorithm was introduced solely to
 manufacture runtime evidence.
+
+That failed attempt covers one of the original five
+`compile_spec`/`build_launch` adapters. The five direct custom-compiler adapters
+have the CPU-only READY→CANCEL evidence above, but none has UUID-verified GPU
+runtime evidence. Neither subgroup is therefore marked as runtime-passed.
 
 ## Multi-GPU runtime validation exemption
 
@@ -268,28 +394,31 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | criterion | status | evidence boundary |
 |---|---|---|
 | AC-1 | satisfied | Unified process-local prepare/run-GPU contract, CUDA prepare guards, serialization rejection, and standalone composition tests |
-| AC-2 | satisfied | Dedicated protocol, late assignment, pre-run CUDA recheck, assignment cardinality/index/duplicate rejection, and no-assignment no-GPU tests |
+| AC-2 | incomplete under superseding design | The earlier mask-based protocol has assignment validation and CUDA guards, but live-process masking is obsolete. `set_device(physical_index)`, per-attempt UUID proof, and non-assigned-card allocation/launch rejection are not implemented; the FlashInfer device-0 finding blocks feasibility pending a human decision |
 | AC-3 | satisfied | Bounded one-shot concurrency/backlog, condition-driven dispatch, same-GPU serialization, logical multi-GPU concurrency, and dynamic eligibility tests |
-| AC-4 | satisfied | Default 5 rounds/1.0s unchanged, baseline-equivalent finalization, raw-sample/schema checks for every timer family, and tracked Proton A/B |
-| AC-5 | satisfied | State-aware fail-fast, Ctrl-C cleanup, fresh-process interference retry, process-group/PID/temp-dir/GPU-claim cleanup tests |
+| AC-4 | satisfied for first attempts; unresolved for in-place retry | Default 5 rounds/1.0s, finalization, raw samples, and timer schemas are unchanged. A retry in an already-used GPU process is a distinct hot-process condition and cannot enter clean AC-10 evidence without human approval |
+| AC-5 | incomplete under superseding design | Existing fail-fast and cleanup evidence remains valid, but the fresh-child retry is obsolete. One-prepare in-place GPU retry, exact ownership transfer, GPU-state rebuild, and abandoned-card primary-context VRAM reporting are not implemented |
 | AC-6 | satisfied | Bounded process/RSS/FD evidence, cancellation cleanup, immediate internal release, and resource accounting tests |
-| AC-7 | satisfied | Complete timeline validation, no-data cost-model gating, diagnostic-protocol watermarking, and recomputable tracked cost model |
+| AC-7 | satisfied | Complete timeline validation, no-data cost-model gating, diagnostic-protocol watermarking, and tracked internal cost-model arithmetic; source-artifact verification is conditional on gitignored artifacts being present |
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
 | AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
-| AC-10 | incomplete | Proton targeted A/B passes the wall-time/residual/ratio requirements; Event, CUDA-graph Proton, Kineto, and MegaMoE runtime A/B evidence remains unmeasured as itemized above |
+| AC-10 | incomplete | The former Proton claim is invalidated by unverified physical identity and unpersisted outer timers; Event and CUDA-graph runs have the same identity defect, while Kineto and MegaMoE runtime A/B evidence remains unmeasured |
 | AC-11 | satisfied | 112 defaults, all 992 configs retained, and 33/33 reviewed three-point selections with YAML-owned small/medium/large roles and rationale |
 
-The plan as a whole is therefore not marked complete: AC-10 still requires the
-missing single-GPU timer-family runtime evidence on a suitable machine. The
-multi-GPU runtime rows are outside that remaining requirement because their
-status is the explicit human-directed exemption, not missing evidence.
+The plan as a whole is therefore not marked complete. The immediate blocker is
+the human decision required by the FlashInfer device-0 audit; after that is
+resolved, AC-2 and AC-5 require the superseding implementation and structural
+evidence. AC-10 still requires admissible single-GPU timer-family runtime
+evidence on a suitable machine. Multi-GPU runtime rows remain the explicit
+human-directed exemption, not missing evidence.
 
 ## Engineering-principles audit
 
 - **Occam's razor:** the implementation uses one one-shot child lifecycle and
   two explicit replay mechanisms (generic lazy replay and strict keyed replay);
   it introduces no resident workers, reusable pools, fork templates, or compile
-  thread pools.
+  thread pools. The superseding target preserves one process per workload and
+  removes repeated CPU prepare rather than adding a reusable worker system.
 - **Single source of truth:** kernel identity comes from `KERNEL_META`, complete
   config/default/selection metadata comes from the kernel YAML, and measurement
   defaults remain owned by the runner. Reports and gates derive from those
@@ -299,30 +428,41 @@ status is the explicit human-directed exemption, not missing evidence.
   missing, exempted, diagnostic, and measured evidence are distinct states.
 - **Broad understanding and independent evidence:** the retained tests protect
   lifecycle, scheduling, measurement, cleanup, and inventory contracts; tracked
-  artifacts preserve the reproducible wall-time A/B and CPU resource evidence.
-- **Optimize the real objective:** the retained performance result is complete
-  command wall time on a fixed workload/GPU/protocol matrix, not a proxy such as
-  process count or compiler concurrency.
+  artifacts preserve CPU resource evidence and explicitly delimit the historical
+  A/B's provenance gaps instead of presenting it as independently verified.
+- **Optimize the real objective:** complete-command wall time on a fixed
+  UUID-verified workload/GPU/protocol matrix remains the oracle; no current
+  performance result meets that evidence boundary.
 - **Cost model and falsifiability:** expected critical time is reconstructed
   from first READY plus GPU scheduling, with foreign wait and residual separate;
-  incomplete timelines publish no numeric performance fields. Only the
-  reproducible Proton A/B win is retained as a performance conclusion.
-- **Stop low-quality experiments:** Event-timer validation stopped after three
-  fresh attempts were independently interfered with; the remaining rows are
-  reported as unmeasured instead of weakening the protocol or claiming success.
+  incomplete timelines publish no numeric performance fields. The historical
+  Proton quotient is retained only as invalidated ledger arithmetic.
+- **Stop low-quality experiments:** invalid runs remain unmeasured instead of
+  weakening the protocol or claiming success. Future in-place retries must retain
+  the UUID handshake and be labeled as hot-process evidence, not silently folded
+  into a clean first-attempt A/B.
 
 ## Remaining evidence boundary
 
 - The implementation, static all-config migration gate, no-card structural
-  tests, CPU-only prepare evidence, tracked default-protocol orchestration A/B,
-  and generic lazy-replay single-GPU execution are complete.
-- Proton has complete targeted runtime A/B evidence. Event has only a completed
-  before-side run, while CUDA-graph Proton, Kineto, and MegaMoE lack valid
-  runtime A/B evidence; AC-10 and the overall plan remain incomplete.
-- The five DeepGEMM adapters have strict key/consumption behavior tests and
-  CPU-only READY evidence; their real GPU replay attempt is blocked before
-  launch by the installed DeepGEMM reference API mismatch and is not marked
-  passed.
+  tests, and CPU-only prepare evidence for the earlier pipeline are complete.
+  The superseding device-binding and retry lifecycle are not implemented.
+  Historical generic
+  lazy-replay GPU runs predate the UUID handshake and are not runtime acceptance
+  evidence; the tracked A/B is explicitly invalidated.
+- Proton, Event, and CUDA-graph Proton have no admissible UUID-verified targeted
+  A/B. Kineto and MegaMoE also lack valid runtime A/B evidence; AC-10 and the
+  overall plan remain incomplete.
+- The original five DeepGEMM `compile_spec`/`build_launch` adapters have strict
+  key/consumption tests and CPU-only READY evidence; their attempted real GPU
+  replay is blocked before launch by the installed DeepGEMM reference API
+  mismatch and is not marked passed.
+- The five newly migrated DeepGEMM direct custom-compiler adapters have strict
+  key/consumption tests and a repository CPU-only READY→CANCEL ledger, but no
+  UUID-verified GPU runtime evidence and no runtime pass claim.
 - Multi-GPU runtime behavior remains intentionally unmeasured.
+- The FlashInfer device-0 finding is a feasibility blocker, not a failed runtime
+  benchmark and not an implicit exemption. No GPU validation or workaround was
+  attempted after it was found.
 - The full 112-workload measured sweep and baseline promotion remain deferred
   until the shared machine is available; they were not required or run here.

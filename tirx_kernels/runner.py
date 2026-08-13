@@ -14,9 +14,10 @@ kernel modules to use.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import ModuleType
@@ -27,6 +28,9 @@ import tvm
 DEFAULT_BENCH_ROUNDS = 5
 DEFAULT_BENCH_COOLDOWN_S = 1.0
 PREPARE_NUM_SMS_ENV = "TIRX_PREPARE_NUM_SMS"
+PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
+TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
+TVM_COMPILE_FORCE_FALLBACK_ENV = "TVM_COMPILE_FORCE_FALLBACK"
 
 
 @runtime_checkable
@@ -87,15 +91,14 @@ class _CacheReplay:
     next_index: int = 0
 
 
-_COMPILE_REPLAY: ContextVar[_CompileReplay | None] = ContextVar(
-    "tirx_compile_replay", default=None
-)
-_CACHE_REPLAY: ContextVar[_CacheReplay | None] = ContextVar(
-    "tirx_cache_replay", default=None
-)
+_COMPILE_REPLAY: ContextVar[_CompileReplay | None] = ContextVar("tirx_compile_replay", default=None)
+_CACHE_REPLAY: ContextVar[_CacheReplay | None] = ContextVar("tirx_cache_replay", default=None)
 _NVML_LOCK = threading.Lock()
 _NVML_MODULE: Any | None = None
 _NVML_UNAVAILABLE = False
+_PREPARE_COMPILE_SCOPE = ContextVar("tirx_prepare_compile_scope", default=False)
+_PREPARE_COMPILE_LOCK = threading.RLock()
+_ORIGINAL_TVM_COMPILE = tvm.compile
 
 
 @dataclass(frozen=True)
@@ -181,8 +184,195 @@ def hardware_num_sms(default: int = 148) -> int:
 
     torch = sys.modules.get("torch")
     if torch is not None and torch.cuda.is_initialized():
-        return int(torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count)
+        return int(
+            torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+        )
     return default
+
+
+def cuda_target(*, arch: str | None = None) -> tvm.target.Target:
+    """Construct CUDA target metadata without querying a late-bound device."""
+    configured = arch or os.environ.get(PREPARE_CUDA_ARCH_ENV)
+    if configured is not None:
+        if not configured.startswith("sm_"):
+            raise ValueError(f"{PREPARE_CUDA_ARCH_ENV} must start with 'sm_', got {configured!r}")
+        return tvm.target.Target({"kind": "cuda", "arch": configured})
+    return tvm.target.Target("cuda")
+
+
+def physical_cuda_uuids(required_num_gpus: int) -> tuple[str, ...]:
+    """Resolve visible logical CUDA devices to canonical physical UUIDs."""
+    if required_num_gpus < 1:
+        raise ValueError("required_num_gpus must be positive")
+    from cuda.bindings import driver as driver_api
+
+    (result,) = driver_api.cuInit(0)
+    if result != driver_api.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuInit failed while validating GPU assignment: {result}")
+    result, count = driver_api.cuDeviceGetCount()
+    if result != driver_api.CUresult.CUDA_SUCCESS or count != required_num_gpus:
+        raise RuntimeError(
+            "late GPU assignment exposed "
+            f"{count if result == driver_api.CUresult.CUDA_SUCCESS else 'unknown'} device(s), "
+            f"expected {required_num_gpus}"
+        )
+    uuids = []
+    for logical_index in range(required_num_gpus):
+        result, device = driver_api.cuDeviceGet(logical_index)
+        if result != driver_api.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"cuDeviceGet({logical_index}) failed: {result}")
+        result, uuid = driver_api.cuDeviceGetUuid(device)
+        if result != driver_api.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"cuDeviceGetUuid({logical_index}) failed: {result}")
+        hex_uuid = uuid.bytes.hex()
+        uuids.append(
+            "GPU-"
+            f"{hex_uuid[0:8]}-{hex_uuid[8:12]}-{hex_uuid[12:16]}-"
+            f"{hex_uuid[16:20]}-{hex_uuid[20:32]}"
+        )
+    return tuple(uuids)
+
+
+def _restore_environment(name: str, previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = previous
+
+
+def _offline_nvcc_arch(arch: str) -> str | list[str]:
+    """Preserve family-specific CUDA features through nvcc's virtual-arch stage."""
+    if arch.startswith("sm_") and arch.endswith(("a", "f")):
+        suffix = arch.removeprefix("sm_")
+        return ["-gencode", f"arch=compute_{suffix},code=sm_{suffix}"]
+    return arch
+
+
+def _materialize_cuda_import(module: Any, target: tvm.target.Target) -> Any:
+    """Compile one fallback CUDA source offline and rebuild a lazy runtime module."""
+    if module.kind != "cuda" or module.is_runnable():
+        return module
+    if not module.is_binary_serializable():
+        raise RuntimeError(
+            f"CPU prepare produced non-runnable, non-serializable module kind={module.kind!r}"
+        )
+    source = module.inspect_source("cuda")
+    if not source:
+        raise RuntimeError("CPU prepare produced a CUDA fallback module without source")
+
+    from tvm.support.nvcc import compile_cuda
+
+    nvcc_options = shlex.split(os.environ.get("TVM_CUDA_NVRTC_EXTRA_OPTS", ""))
+    with target:
+        compiled = compile_cuda(
+            source,
+            target_format="fatbin",
+            arch=_offline_nvcc_arch(target.arch),
+            options=nvcc_options or None,
+            compiler="nvcc",
+        )
+    serialized = tvm.ir.save_json(module)
+    previous_callback = tvm.get_global_func("tvm_callback_cuda_compile")
+
+    @tvm.register_global_func("tvm_callback_cuda_compile", override=True)
+    def _reuse_precompiled_cuda(_source):
+        return compiled
+
+    try:
+        materialized = tvm.ir.load_json(serialized)
+    finally:
+        tvm.register_global_func("tvm_callback_cuda_compile", previous_callback, override=True)
+    if materialized.kind != "cuda" or not materialized.is_runnable():
+        raise RuntimeError("offline CUDA materialization did not produce a runnable module")
+    return materialized
+
+
+def _materialize_cuda_import_tree(module: Any, target: tvm.target.Target) -> None:
+    imports = list(module.imports)
+    if not imports:
+        return
+    replacements = []
+    changed = False
+    for imported in imports:
+        _materialize_cuda_import_tree(imported, target)
+        replacement = _materialize_cuda_import(imported, target)
+        replacements.append(replacement)
+        changed |= replacement is not imported
+    if changed:
+        module.clear_imports()
+        for replacement in replacements:
+            module.import_module(replacement)
+
+
+def _assert_runnable_cuda_imports(module: Any) -> None:
+    for imported in module.imports:
+        if imported.kind == "cuda" and not imported.is_runnable():
+            raise RuntimeError("READY cannot retain a non-runnable CUDA fallback module")
+        _assert_runnable_cuda_imports(imported)
+
+
+def compile_executable(
+    mod: Any, target: Any = None, *, relax_pipeline: Any = "default", tir_pipeline: Any = "default"
+):
+    """Compile normally, or use driver-safe offline CUDA materialization in prepare."""
+    if not _PREPARE_COMPILE_SCOPE.get():
+        return _ORIGINAL_TVM_COMPILE(
+            mod, target, relax_pipeline=relax_pipeline, tir_pipeline=tir_pipeline
+        )
+    if target is None:
+        target = tvm.target.Target.current(allow_none=True)
+    target = tvm.target.Target(target)
+    if target.kind.name != "cuda":
+        return _ORIGINAL_TVM_COMPILE(
+            mod, target, relax_pipeline=relax_pipeline, tir_pipeline=tir_pipeline
+        )
+    if not getattr(target, "arch", None):
+        target = cuda_target()
+
+    previous_fallback = os.environ.get(TVM_COMPILE_FORCE_FALLBACK_ENV)
+    os.environ[TVM_COMPILE_FORCE_FALLBACK_ENV] = "1"
+    try:
+        executable = _ORIGINAL_TVM_COMPILE(
+            mod, target, relax_pipeline=relax_pipeline, tir_pipeline=tir_pipeline
+        )
+        _materialize_cuda_import_tree(executable.mod, target)
+        _assert_runnable_cuda_imports(executable.mod)
+        return executable
+    finally:
+        _restore_environment(TVM_COMPILE_FORCE_FALLBACK_ENV, previous_fallback)
+
+
+@contextmanager
+def cpu_prepare_compile_scope():
+    """Route every ``tvm.compile`` in one prepare through the driver-safe path."""
+    with _PREPARE_COMPILE_LOCK:
+        token = _PREPARE_COMPILE_SCOPE.set(True)
+        previous_compile = tvm.compile
+        tvm.compile = compile_executable
+        try:
+            yield
+        finally:
+            tvm.compile = previous_compile
+            _PREPARE_COMPILE_SCOPE.reset(token)
+
+
+@contextmanager
+def gpu_stage_compile_guard():
+    """Reject TIRx compilation after a prepared workload receives GPU ownership."""
+
+    def reject_compile(*_args: Any, **_kwargs: Any):
+        raise RuntimeError(
+            "GPU stage attempted tvm.compile; all TIRx specialization and compilation "
+            "must be completed before READY"
+        )
+
+    with _PREPARE_COMPILE_LOCK:
+        previous_compile = tvm.compile
+        tvm.compile = reject_compile
+        try:
+            yield
+        finally:
+            tvm.compile = previous_compile
 
 
 @contextmanager
@@ -195,8 +385,7 @@ def cuda_initialization_guard(*, require_uninitialized: bool = False):
     after = cuda_is_initialized()
     if after != before:
         raise RuntimeError(
-            "CPU prepare changed CUDA initialization state "
-            f"from {before!r} to {after!r}"
+            f"CPU prepare changed CUDA initialization state from {before!r} to {after!r}"
         )
 
 
@@ -214,7 +403,7 @@ def compile_kernel(func):
             )
         replay.next_index += 1
         return executable
-    target = tvm.target.Target("cuda")
+    target = cuda_target()
     mod = tvm.IRModule({"main": func})
     return tvm.compile(mod, target=target, tir_pipeline="tirx")
 
@@ -287,16 +476,10 @@ def prepare_run_bench(module: ModuleType, params: dict[str, Any]) -> PreparedRun
     """Prepare the common one-PrimFunc ``get_kernel``/``run_bench`` contract."""
     get_kernel_fn = getattr(module, "get_kernel", None)
     if get_kernel_fn is None or getattr(module, "run_bench", None) is None:
-        raise TypeError(
-            f"module {module.__name__!r} needs an explicit prepare_bench() adapter"
-        )
+        raise TypeError(f"module {module.__name__!r} needs an explicit prepare_bench() adapter")
     prim_func = get_kernel_fn(**dict(params))
     executable = compile_kernel(prim_func)
-    return PreparedRunBench(
-        module=module,
-        params=dict(params),
-        compiled=((prim_func, executable),),
-    )
+    return PreparedRunBench(module=module, params=dict(params), compiled=((prim_func, executable),))
 
 
 def prepare_module_bench(module_name: str, params: dict[str, Any]) -> PreparedRunBench:
@@ -305,10 +488,7 @@ def prepare_module_bench(module_name: str, params: dict[str, Any]) -> PreparedRu
 
 
 def prepared_cached_run_bench(
-    module_name: str,
-    params: dict[str, Any],
-    *,
-    cached: tuple[tuple[str, Any, Any], ...] = (),
+    module_name: str, params: dict[str, Any], *, cached: tuple[tuple[str, Any, Any], ...] = ()
 ) -> PreparedRunBench:
     """Wrap ``run_bench`` after its custom CPU compile cache was populated."""
     module = sys.modules[module_name]
@@ -358,18 +538,10 @@ def run_kernel_bench(
     label = config.get("label", "default")
 
     prepared = prepare_kernel_bench(
-        kernel_name,
-        config,
-        module=mod,
-        require_cuda_uninitialized=False,
+        kernel_name, config, module=mod, require_cuda_uninitialized=False
     )
     return run_prepared_kernel_bench(
-        prepared,
-        warmup=warmup,
-        repeat=repeat,
-        timer=timer,
-        rounds=rounds,
-        cooldown=cooldown,
+        prepared, warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown=cooldown
     )
 
 
@@ -384,17 +556,19 @@ def prepare_kernel_bench(
     label = config.get("label", "default")
     params = {key: value for key, value in config.items() if key != "label"}
     with cuda_initialization_guard(require_uninitialized=require_cuda_uninitialized):
-        if module is None:
-            from tirx_kernels.registry import load_kernel
+        compile_scope = cpu_prepare_compile_scope() if require_cuda_uninitialized else nullcontext()
+        with compile_scope:
+            if module is None:
+                from tirx_kernels.registry import load_kernel
 
-            module = load_kernel(kernel_name, strict=True)
-        prepare_bench_fn = getattr(module, "prepare_bench", None)
-        if prepare_bench_fn is None:
-            raise TypeError(
-                f"kernel {kernel_name!r} module {module.__name__!r} has no prepare_bench(); "
-                "benchable kernels cannot use a one-stage fallback"
-            )
-        benchmark = prepare_bench_fn(**params)
+                module = load_kernel(kernel_name, strict=True)
+            prepare_bench_fn = getattr(module, "prepare_bench", None)
+            if prepare_bench_fn is None:
+                raise TypeError(
+                    f"kernel {kernel_name!r} module {module.__name__!r} has no prepare_bench(); "
+                    "benchable kernels cannot use a one-stage fallback"
+                )
+            benchmark = prepare_bench_fn(**params)
 
     if not isinstance(benchmark, PreparedBenchmark):
         raise TypeError(
@@ -426,7 +600,8 @@ def run_prepared_kernel_bench(
     if cooldown is not None:
         bench_kwargs["cooldown_s"] = cooldown
 
-    result = prepared.benchmark.run_gpu(**bench_kwargs)
+    with gpu_stage_compile_guard():
+        result = prepared.benchmark.run_gpu(**bench_kwargs)
     if not isinstance(result, dict):
         result = {}
     result.setdefault("kernel", prepared.kernel)

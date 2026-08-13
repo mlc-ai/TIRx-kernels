@@ -7,9 +7,11 @@
 1. **CPU prepare**：多个独立 workload 并行完成目标模块加载、shape specialization、IR 生成和编译；该阶段不得初始化 CUDA、分配显存、运行 setup kernel 或持有 GPU token。
 2. **GPU stage**：prepared child 报告 READY 后，调度器根据实时可用 GPU 数量动态分配卡；每张卡同一时刻只执行一个 GPU stage，不同空闲卡并行执行。GPU stage 保留当前完整的 CUDA allocation、reference setup/autotune、正确性 warmup、timer、rounds、cooldown、原始 round samples、aggregation 和干扰检测语义。
 
-prepared executable 必须从 CPU prepare 到 GPU stage 始终留在同一个 child process 内，避免序列化不可移植的 runtime object。child 在 READY 后等待父进程通过独立控制通道发送 GPU assignment，确认 CUDA 尚未初始化后设置 `CUDA_VISIBLE_DEVICES`，再进入 GPU stage。
+prepared executable 必须从 CPU prepare 到 GPU stage 始终留在同一个 child process 内，避免序列化不可移植的 runtime object。prepare child 启动时保留全部物理 GPU 可见，因此逻辑序号等于物理序号；child 在 READY 后等待父进程通过独立控制通道发送 GPU assignment，确认 CUDA 尚未初始化后调用 `torch.cuda.set_device(<physical_index>)`，再以 UUID handshake 证明当前执行设备与原子 claim 一致后进入 GPU stage。不得再依赖在存活进程中修改 `CUDA_VISIBLE_DEVICES` 完成晚绑定。
 
-每个 workload attempt 使用一个一次性 child process：该进程只执行一次 `CPU prepare → READY → ASSIGN → GPU stage → RESULT → exit`，跑过 GPU stage 后不得回收或复用去准备另一个 workload。这里的 prepare 并发上限只约束同时存在的一次性 prepare 子进程数量，不是常驻 worker pool；实现不得引入常驻 prepare worker、worker 复用池、fork 模板，或在 orchestrator 同一解释器中用编译线程池并行执行 workload specialization/编译。
+每个 workload 使用一个一次性 child process：该进程只为这一条 workload 执行一次 CPU prepare，之后完成一个或多个 GPU attempt，最终 `RESULT → exit`；跑过 GPU stage 后不得回收或复用去准备另一个 workload。若 GPU attempt 检测到外部闯入，child 保留 prepared executable，释放原 claim，等待同卡或另一张卡的新 assignment，重新 `set_device` 并重建全部 GPU tensor、reference、workspace 和 timer state，只重跑 GPU stage，不得重新 import/specialize/generate/compile。这里的 prepare 并发上限只约束同时存在的一次性 workload 子进程数量，不是常驻 worker pool；实现不得引入常驻 prepare worker、worker 复用池、fork 模板，或在 orchestrator 同一解释器中用编译线程池并行执行 workload specialization/编译。
+
+原地重试会在已经执行过 GPU attempt 的热进程内重新测量，和 fresh process 的测量条件不同。每个 run artifact 必须显式记录 `retry_in_place`、GPU attempt identity、每次 assignment/UUID 和被放弃卡的 resident-context 状态；此类结果必须作为独立证据类别，未经人的明确批准不得与 fresh-process/first-attempt 数据合并，也不得用于 clean AC-10 A/B。
 
 稳态目标时间模型为：
 
@@ -42,13 +44,14 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 
 - AC-2: prepared child 支持 READY 后的晚绑定 GPU assignment，且控制协议不受普通日志输出影响。
   - Positive Tests (expected to PASS):
-    - child 在 import torch/TVM 和完成 CPU prepare 后，通过专用 pipe/socket 发送结构化 READY；父进程发送一个物理 GPU index 后，child 在首次 CUDA 初始化前设置可见设备并只在该卡运行。
+    - child 在全部物理 GPU 可见的环境中 import torch/TVM 并完成 CPU prepare，通过专用 pipe/socket 发送结构化 READY；父进程发送一个物理 GPU index 后，child 在首次 CUDA 初始化前调用 `torch.cuda.set_device(index)` 并只在该卡运行。
     - 两个 prepared child 被分别分配到两张空闲 GPU 时可并行运行，结果记录正确的物理 GPU identity。
     - stdout/stderr 中包含任意 kernel、compiler 或 reference 日志时，READY/ASSIGN/RESULT 协议仍正确解析。
   - Negative Tests (expected to FAIL):
     - child 在 ASSIGN 前已初始化 CUDA 时必须拒绝 assignment，不得静默运行到错误 GPU。
     - 非法、重复或与 workload `num_gpus` 不匹配的 assignment 必须被协议层拒绝。
     - 未收到 assignment 的 child 不得触碰 GPU，即使进程已 READY。
+    - assignment index 正确但当前设备 UUID 与 claim UUID 不匹配时必须 FAIL；在非分配卡上发生 tensor allocation 或 kernel launch 也必须由逐次 UUID/设备校验检出，不能静默成功。
 
 - AC-3: bench-suite 调度器实现并行 prepare、READY queue 和基于实时 eligible GPU 的事件驱动 GPU dispatch。
   - Positive Tests (expected to PASS):
@@ -66,6 +69,7 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
     - 相同 workload 在迁移前基线与 pipeline 路径下使用相同实现集合、实现顺序、timer、warmup/repeat、rounds、cooldown、reference builder、round aggregation 和结果 schema。
     - targeted A/B 中每个实现均保留规定数量的 raw round samples，且 `_finalize_bench_record` 的验证和算术平均逻辑不变。
     - 默认 `5 rounds + 1.0s cooldown` 保持不变；此前用于诊断的 `0.1s cooldown` 不进入默认协议。
+    - first-attempt/fresh-process 与 `retry_in_place: true` 的热进程测量必须分属不同证据类别，汇总和 A/B 不得静默混合。
   - Negative Tests (expected to FAIL):
     - 为获得 wall-time 提升而减少 rounds、timer budget、cooldown、reference coverage 或 correctness preparation。
     - pipeline 路径缺少 reference error、protocol metadata 或 raw samples 时仍被标为 `ok`。
@@ -73,11 +77,13 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 - AC-5: fail-fast、取消、外部干扰检测和 retry 语义覆盖 PREPARING、READY 和 RUNNING_GPU 三种生命周期状态。
   - Positive Tests (expected to PASS):
     - 一个 workload 确定性失败时，停止启动新的 prepare，取消 PREPARING/READY children，并终止其他 RUNNING_GPU process groups，最终只记录真实 failure。
-    - RUNNING_GPU 检测到 foreign active PID 时，释放 GPU claim、记录 `INTERFERED` 和 intruder PIDs，并以新 child/新 attempt 从 prepare 阶段重新排队。
+    - RUNNING_GPU 检测到 foreign active PID 时，释放 GPU claim、记录 `INTERFERED` 和 intruder PIDs；同一 child 保留 prepared executable，等待新的完整 claim 后重新选择设备、重建 GPU-side state 并只重跑 GPU stage。
+    - phase timestamps 证明一次或多次干扰重试不会出现第二次 prepare，GPU ownership ledger 证明旧 claim 在新 claim 前已完整释放，且任何时刻一张卡最多由一个 workload 持有。
+    - 从一张卡切换到另一张卡后，测量并报告被放弃卡的 primary-context resident VRAM；该数据只报告，不由实现自行决定是否可接受。
     - Ctrl-C 或 suite cancellation 能回收所有 child/process-group、控制 FD、临时目录和 GPU ownership。
   - Negative Tests (expected to FAIL):
     - 被取消的 READY child 后续仍收到 GPU assignment。
-    - 干扰后复用可能已污染的 prepared/CUDA state 继续计时。
+    - 干扰后重新执行 CPU prepare，或未重建 GPU tensor/reference/workspace/timer state 就继续计时。
     - child 退出或控制通道断开后 GPU ownership 未释放。
 
 - AC-6: 流水线具备背压和资源边界，不以无限并发换取表面速度。
@@ -122,7 +128,7 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 
 - AC-10: targeted 性能验证满足结构性关键路径目标，而非只改善代理指标。
   - Positive Tests (expected to PASS):
-    - 在固定 B200 runner 上，只用少量代表性单卡 workload、默认 5 rounds/1.0s cooldown 做迁移前基线与 pipeline A/B；pipeline wall time 可由 timeline 复现。
+    - 在固定 B200 runner 上，只用少量代表性单卡 workload、默认 5 rounds/1.0s cooldown 做迁移前基线与 pipeline A/B；两侧必须持久记录并核对同一物理 GPU UUID，pipeline wall time 可由 timeline 和独立 outer-timer artifact 复现。
     - 排除明确记录的 foreign wait 后，`T_unexplained <= max(0.5 seconds, 5% of T_observed)`。
     - 首个 GPU stage 开始后，在 prepare concurrency 足够且 READY backlog 未被配置限制的 targeted matrix 中，不出现由 CPU prepare starvation 导致的 recurring GPU idle gap。
     - 单卡运行和不占多卡的 scheduler/state-machine evidence 共同证明：同卡 GPU stages 不重叠、完整原子 claim 无法满足时不部分分配、外部 eligibility 变化仍通过统一 dispatch 合同处理。
@@ -130,6 +136,7 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
     - 多卡 runtime 验证状态必须写为 `exempted_by_human_unmeasured`，并单列迁移内容、结构性验证与未实测事实；不得写成 pass、`MISSING`、0 或空值。
   - Negative Tests (expected to FAIL):
     - 只报告 compiler 并发数、进程数或 GPU call 数下降，而没有端到端 wall time 和 correctness/ratio 证据。
+    - 只按 GPU index 限制两侧、但未持久记录和核对物理 UUID，或 outer wall 输入只手填进汇总 JSON 而没有原始 timer artifact。
     - 使用全量 suite 作为开发循环，或在有其他 session 跑 suite 时占用所有 GPU。
     - 通过修改 benchmark protocol 获得性能验收结果。
 
@@ -160,13 +167,14 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 
 - Can use:
   - `subprocess.Popen`、专用 pipe/socketpair、结构化 JSON/message framing 或等价的本地 IPC。
-  - 同一 prepared child 内设置 late-bound `CUDA_VISIBLE_DEVICES`，前提是 CUDA 未初始化且有独立 integration evidence。
-  - 有界的一次性 prepare 子进程并发、READY queue/backpressure、condition/event-driven internal wakeup；每个 workload attempt 一个 fresh process，RESULT 后直接退出。
+  - prepare child 保持所有物理 GPU 可见；同一 prepared child 在每次 ASSIGN 后用 `torch.cuda.set_device(physical_index)` 选择设备，并以 assignment index + UUID handshake 双重验证。
+  - 有界的一次性 prepare 子进程并发、READY queue/backpressure、condition/event-driven internal wakeup；每个 workload 一个 fresh process、CPU prepare 只执行一次，GPU attempt 可在干扰后原地重试，最终 RESULT 后直接退出。
   - 从源码中的 canonical `KERNEL_META` 派生完整 public-name → module 索引；runtime import 后必须复核。
   - 对 local、distributed、Kineto 和 MegaMoE 使用不同 adapter 实现，只要都满足相同两阶段生命周期合同。
   - 直接调整各 kernel YAML 的现有 `default` flags；使用 shape、数据量、序列长度、group/expert 数、dispatch path 和实测 GPU-stage cost 辅助判断小/中/大代表性。
 - Cannot use:
   - 在 CPU prepare 前获取 GPU、在 READY 前初始化 CUDA、或把 compiled executable 跨进程序列化。
+  - 在存活的 prepared child 中修改 `CUDA_VISIBLE_DEVICES` 作为晚绑定手段，或依赖 import/driver-init 时序窗口维持设备隔离。
   - 通过减 rounds、cooldown、timer budget、reference coverage 或 correctness work 加速。
   - 无限 child 并发、无限 READY backlog、固定 GPU pinning、静态 workload→GPU 映射。
   - 为 public kernel name 再维护一份手写 module manifest/YAML module map。
@@ -187,31 +195,36 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 SPAWNED
   -> PREPARING_CPU
   -> READY
-  -> ASSIGNED(gpu_indices)
-  -> RUNNING_GPU
+  -> ASSIGNED(gpu_indices, gpu_uuids, attempt)
+  -> RUNNING_GPU(attempt)
   -> RESULT
   -> REAPED
 
 任意非终态 -> CANCELLED / FAILED
-RUNNING_GPU + foreign activity -> INTERFERED -> REAPED -> new attempt
+RUNNING_GPU + foreign activity
+  -> INTERFERED
+  -> RELEASED
+  -> READY_FOR_GPU_RETRY
+  -> ASSIGNED(..., next_attempt)
 ```
 
 父进程负责：
 
 1. 根据 prepare concurrency 和 READY backlog 补充 child。
-2. 读取独立 control channel 上的 READY/RESULT/FAIL 消息。
+2. 读取独立 control channel 上的 READY/INTERFERED/RESULT/FAIL 消息。
 3. 在 READY 与 GPU release 事件上运行 dispatcher；只有外部 GPU 状态变化使用定时 polling。
 4. assignment 前执行现有 foreign-process precheck，原子记录 ownership，再发送物理 GPU indices。
-5. RESULT 到达且 GPU work 已同步完成后立即释放 ownership并派发下一条；child 日志/退出回收异步进行。
+5. INTERFERED 到达后先原子释放旧 ownership，再把同一 prepared child 重新放入 GPU-ready queue；RESULT 到达且 GPU work 已同步完成后立即释放 ownership并派发下一条。
 6. RESULT 写出后采用最小化 child teardown，并测量 `gpu_finished -> process_reaped` tail；不得让普通 Python/CUDA destructor tail 阻塞下一条 GPU stage。
 
 child 负责：
 
-1. 在未绑定 GPU 的 fresh process 中只 import 目标 module。
+1. 在所有物理 GPU 可见但 CUDA 未初始化的 fresh process 中只 import 目标 module。
 2. 执行 `prepare_bench` 并验证 CUDA initialization state 未变化。
 3. 发送 READY，阻塞等待 ASSIGN/CANCEL。
-4. ASSIGN 后设置可见设备、再次验证尚未初始化 CUDA，再执行 `prepared.run_gpu(...)`。
-5. Proton finalize、CUDA synchronize 和结果落盘完成后发送 RESULT；之后不再持有 GPU eligibility。
+4. 首次 ASSIGN 后再次验证尚未初始化 CUDA，调用 `torch.cuda.set_device(physical_index)`，核对当前设备 UUID，再执行 `prepared.run_gpu(...)`。
+5. 检测到干扰时停止该次测量、销毁本次 GPU-side tensor/reference/workspace/timer state、发送 INTERFERED 并等待新 ASSIGN；不得重新执行步骤 1–2。新 ASSIGN 可选择同卡或另一张卡，必须再次 `set_device` 和 UUID 校验。
+6. Proton finalize、CUDA synchronize 和结果落盘完成后发送 RESULT；之后不再持有 GPU eligibility。若发生过原地重试，artifact 显式标记热进程条件并记录各 attempt。
 
 ### Relevant References
 
@@ -244,7 +257,7 @@ child 负责：
 4. 实现全 kernel exact module resolution 和 prepared-child IPC。
    - Phase A: 从 canonical `KERNEL_META` 派生完整 public-name → module 索引，处理 alias、duplicate 和 cache invalidation，runtime import 后复核。
    - Phase B: 实现 READY/ASSIGN/CANCEL/RESULT framing、独立日志通道和 process-group lifecycle。
-   - Phase C: 独立验证 late `CUDA_VISIBLE_DEVICES` binding；验证失败时停止该方向，不得静默降级。
+   - Phase C: 独立验证 late `torch.cuda.set_device` binding、逐次 UUID handshake 和非分配卡 allocation/launch 负向拒绝；外部库若硬编码 device 0 或 import 期缓存设备，记录证据并停止，不得私加 workaround。
 
 5. 将 bench-suite 调度器改造成有界 producer/consumer pipeline。
    - Phase A: 并行 PREPARING children 与 bounded READY queue。
@@ -253,8 +266,9 @@ child 负责：
 
 6. 恢复完整 failure semantics 和资源治理。
    - Phase A: PREPARING/READY/RUNNING_GPU cancellation 和 fail-fast。
-   - Phase B: interference kill/requeue、attempt identity、temporary resource cleanup。
-   - Phase C: backpressure、host RSS/FD/process bounds 和 minimal finalization tail。
+   - Phase B: interference 原地 GPU retry、旧 claim 释放、GPU-side state 重建、attempt identity、热进程证据分类和 temporary resource cleanup。
+   - Phase C: 换卡重试时测量被放弃卡的 primary-context resident VRAM，并把可接受性留给人裁决。
+   - Phase D: backpressure、host RSS/FD/process bounds 和 minimal finalization tail。
 
 7. 分波完成全 kernel 迁移，不在调度器中堆 workload-specific fast path。
    - Phase A: `fp16_bf16_gemm` 完成正式迁移并删除仅为实验存在的局部结构。
@@ -276,7 +290,7 @@ child 负责：
 | cap2 | 全 kernel exact module resolution | AC-8 | cap1 | Business: CPU prepare 只加载目标 kernel；Design: direct 和 alias 共用 canonical metadata；Implementation: complete source index + runtime validation | `registry.py`, `bench/__main__.py` |
 | cap3 | Prepared-child IPC 与晚绑定 GPU | AC-2 | cap1, cap2 | Business: 让 CPU prepare 与 GPU availability 解耦；Design: READY/ASSIGN/RESULT；Implementation: dedicated control FD, no executable serialization | `bench/__main__.py`, runner protocol |
 | cap4 | 动态 GPU pipeline scheduler | AC-3, AC-6 | cap3 | Business: N 张空闲卡维持 N 路 GPU stage；Design: bounded READY queue + event dispatch；Implementation: pool ownership, condition wakeups | `bench_suite/run.py` |
-| cap5 | Failure/interference lifecycle | AC-5 | cap3, cap4 | Business: 加速不能削弱可信度；Design: state-aware cancel/retry；Implementation: process groups, monitor, new-attempt restart | `bench_suite/run.py` |
+| cap5 | Failure/interference lifecycle | AC-5 | cap3, cap4 | Business: 加速不能削弱可信度；Design: state-aware cancel/retry；Implementation: process groups, monitor, in-place GPU retry without repeat prepare | `bench_suite/run.py` |
 | cap6 | Phase observability 与成本模型 | AC-7, AC-10 | cap3, cap4 | Business: 用真实 wall-time oracle验收；Design: explain every idle interval；Implementation: timestamps, run summary, model residual | run JSON/report writers |
 | cap7 | 全 workload pipeline coverage | AC-9 | cap1, cap2, cap3, cap4, cap5 | Business: 所有 bench 工作都获得流水线收益；Design: pipeline-only capability gate；Implementation: local/distributed adapters and one-stage deletion | all kernel modules, distributed launchers, README |
 | cap8 | 小/中/大默认 measured coverage | AC-11 | - | Business: 将日常 sweep 数量减半且保留规模代表性；Design: 每 kernel 最多 3 个 YAML-owned default 点；Implementation: semantic curation, flags, static gates | `bench_suite/config/**/*.yaml`, config loaders, README |
@@ -291,7 +305,7 @@ child 负责：
 | task4 | 将调度器完整改造成有界 CPU prepare/READY/GPU pipeline，并整合动态 GPU eligibility、背压、phase telemetry、fail-fast、取消、干扰 retry 和资源回收 | AC-3, AC-5, AC-6, AC-7 | coding | task3 |
 | task5 | 按通用 contract 迁移全部 local single-GPU kernel/config，修正共性缺口并由 all-config capability gate 证明无遗漏 | AC-1, AC-4, AC-8, AC-9, AC-11 | coding | task2, task4 |
 | task6 | 迁移 multi-GPU、distributed、Kineto 和 MegaMoE 生命周期，保留原子 claim/rank/timer 语义并删除 one-stage execution path | AC-2, AC-3, AC-4, AC-5, AC-9 | coding | task5 |
-| task7 | 执行主要行为锚点与代表性单卡/动态负载 A/B；对多卡只做不占多卡的协议/原子 claim/rank lifecycle 结构验证，并在报告中以 `exempted_by_human_unmeasured` 单列未实测事实；验证关键路径、ratio、correctness、全 config coverage 和工程原则，并更新文档 | AC-1, AC-2, AC-3, AC-4, AC-5, AC-6, AC-7, AC-8, AC-9, AC-10, AC-11 | analyze | task6 |
+| task7 | 执行主要行为锚点与代表性单卡/动态负载 A/B；单卡 A/B 必须经 UUID handshake 证明两侧使用同一物理卡，并持久保存 outer timer 原始证据，旧的 index-only 结果一律记为 invalidated/unmeasured；对多卡只做不占多卡的协议/原子 claim/rank lifecycle 结构验证，并在报告中以 `exempted_by_human_unmeasured` 单列未实测事实；验证关键路径、ratio、correctness、全 config coverage 和工程原则，并更新文档 | AC-1, AC-2, AC-3, AC-4, AC-5, AC-6, AC-7, AC-8, AC-9, AC-10, AC-11 | analyze | task6 |
 
 ## Future Work / Out of Scope
 
@@ -310,6 +324,8 @@ child 负责：
 ### Agreements
 
 - 用户已确认最终结构：CPU prepare 高并发，GPU stage 依可用卡数动态并行，每卡串行，不让解析/生成/编译占用 GPU critical path。
+- 晚绑定使用 ASSIGN 后的 `torch.cuda.set_device(physical_index)`，prepare child 保持全部物理卡可见；live-process `CUDA_VISIBLE_DEVICES` mask 方案已被取代。
+- 干扰重试保留同一 child 的 prepared executable，只重建并重跑 GPU stage；热进程重试必须作为独立证据类别。
 - GEMM 原型证明拆分可行且端到端收益显著，下一步应优化真实 wall-time critical path而不是代理指标。
 - measurement protocol、correctness、reference coverage、fail-fast和干扰隔离不能为速度让步。
 - 所有 benchable workload 必须迁移，包括 exact/alias module resolution 和 distributed rank lifecycle；不接受 fallback。
@@ -324,11 +340,13 @@ child 负责：
 
 ### Convergence Status
 
-- Final Status: `converged`
+- Final Status: `blocked_pending_human_decision`
+- Blocking evidence: installed FlashInfer MegaMoE runtime paths hard-code device 0; per the human stop condition, implementation cannot continue until their scope/upstream disposition is decided.
 
 ## Pending User Decisions
 
-- 无。量化指标已按用户意图解释为：关键路径结构和每 kernel 默认最多 3 个 config 是硬要求；当前总数 112 与跨机器绝对秒数是当前树/当前 runner 的派生证据；内部 dispatch和无法解释的残差是硬验收门槛。
+- `torch.cuda.set_device` 可行性审计发现当前安装的 FlashInfer MegaMoE 代码存在真实 device-0 硬编码：`shim/comm.py` 的 single-rank `bootstrap_dist()` 调用 `torch.cuda.set_device(0)` 和 `Device(0)`，其 `nvfp4.py`/`mxfp8.py` 调用该 helper；另有 MegaMoE runner/benchmark 路径直接调用 `set_device(0)`。按人的边界，当前实现暂停，等待决定这些 FlashInfer 路径是明确排除/豁免、需要上游修复，还是使 set-device 架构不可行；不得自行 workaround 或回退 mask。
+- 原地 retry 是已经运行过 GPU attempt 的热进程测量。计划将其作为独立 evidence class，默认不进入 clean AC-10；若要让它和 fresh-process 数据同类使用，需要人的明确批准。
 
 ## Implementation Notes
 

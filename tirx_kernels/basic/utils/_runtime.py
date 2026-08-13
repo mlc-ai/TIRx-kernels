@@ -363,6 +363,7 @@ def run_distributed(
     worker_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Compile once in the parent, then execute one rank-local worker per GPU."""
+    from tirx_kernels.runner import cuda_target
 
     require_sm100(world_size)
     if not callable(worker):
@@ -370,7 +371,7 @@ def run_distributed(
 
     with tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-") as tmpdir:
         library_path = Path(tmpdir) / "kernel.so"
-        executable = tvm.compile(ir_module, target=tvm.target.Target("cuda"), tir_pipeline="tirx")
+        executable = tvm.compile(ir_module, target=cuda_target(), tir_pipeline="tirx")
         executable.export_library(str(library_path))
 
         context = mp.get_context("spawn")
@@ -410,6 +411,8 @@ def prepare_distributed_bench(
     required_timer: str,
 ) -> PreparedDistributedBench:
     """Compile/export before assignment and retain the artifact in this process."""
+    from tirx_kernels.runner import cuda_target
+
     if not isinstance(world_size, int) or isinstance(world_size, bool) or world_size <= 0:
         raise ValueError("world_size must be a positive integer")
     if not callable(worker):
@@ -417,9 +420,7 @@ def prepare_distributed_bench(
     temporary_directory = tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-prepared-")
     library_path = Path(temporary_directory.name) / "kernel.so"
     try:
-        executable = tvm.compile(
-            ir_module, target=tvm.target.Target("cuda"), tir_pipeline="tirx"
-        )
+        executable = tvm.compile(ir_module, target=cuda_target(), tir_pipeline="tirx")
         executable.export_library(str(library_path))
     except BaseException:
         temporary_directory.cleanup()

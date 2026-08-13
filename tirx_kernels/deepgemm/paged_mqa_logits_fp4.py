@@ -19,6 +19,7 @@ from tvm.ir.type import PointerType, PrimType
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 5e-6
+_COMPILE_CACHE_NAMESPACE = "deepgemm.paged_mqa_logits_fp4.compile"
 
 
 def _mxf4_block32_mma_src() -> str:
@@ -2100,20 +2101,35 @@ def _compile_tirx_paged_mqa_for_config(
 _compile_tirx_paged_mqa_for_config = cache(_compile_tirx_paged_mqa_for_config)
 
 
+def _compile_tirx_paged_mqa_kwargs(config: PagedMQALogitsFP4Config) -> dict[str, Any]:
+    return {
+        "batch_size": config.batch_size,
+        "next_n": config.next_n,
+        "max_num_pages": config.max_num_pages,
+        "num_pages": config.num_pages,
+        "num_heads": config.num_heads,
+        "head_dim": config.head_dim,
+        "page_size": config.page_size,
+        "logits_dtype": config.logits_dtype,
+        "num_sms": config.num_sms,
+        "context_lens_2d": config.context_lens_2d,
+        "varlen": config.varlen,
+        "indices_pair_stride": config.indices_pair_stride,
+    }
+
+
+def _compile_tirx_paged_mqa_key(config: PagedMQALogitsFP4Config) -> tuple[tuple[str, Any], ...]:
+    return tuple(_compile_tirx_paged_mqa_kwargs(config).items())
+
+
 def _compile_tirx_paged_mqa(config: PagedMQALogitsFP4Config) -> Any:
-    return _compile_tirx_paged_mqa_for_config(
-        batch_size=config.batch_size,
-        next_n=config.next_n,
-        max_num_pages=config.max_num_pages,
-        num_pages=config.num_pages,
-        num_heads=config.num_heads,
-        head_dim=config.head_dim,
-        page_size=config.page_size,
-        logits_dtype=config.logits_dtype,
-        num_sms=config.num_sms,
-        context_lens_2d=config.context_lens_2d,
-        varlen=config.varlen,
-        indices_pair_stride=config.indices_pair_stride,
+    from tirx_kernels.runner import consume_prepared_cache
+
+    compile_kwargs = _compile_tirx_paged_mqa_kwargs(config)
+    return consume_prepared_cache(
+        _COMPILE_CACHE_NAMESPACE,
+        _compile_tirx_paged_mqa_key(config),
+        lambda: _compile_tirx_paged_mqa_for_config(**compile_kwargs),
     )
 
 
@@ -2394,8 +2410,13 @@ def prepare_bench(**kwargs: Any):
     """Compile the paged MQA executable without allocating CUDA data."""
     from tirx_kernels.runner import prepared_cached_run_bench
 
-    _compile_tirx_paged_mqa(_make_config(**kwargs))
-    return prepared_cached_run_bench(__name__, kwargs)
+    config = _make_config(**kwargs)
+    executable = _compile_tirx_paged_mqa(config)
+    return prepared_cached_run_bench(
+        __name__,
+        kwargs,
+        cached=((_COMPILE_CACHE_NAMESPACE, _compile_tirx_paged_mqa_key(config), executable),),
+    )
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:

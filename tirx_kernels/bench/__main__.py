@@ -42,6 +42,22 @@ def _validated_gpu_assignment(gpu_indices: object, required_num_gpus: int) -> li
     return normalized
 
 
+def _validated_physical_gpu_uuids(
+    expected_gpu_uuids: object,
+    actual_gpu_uuids: tuple[str, ...],
+    required_num_gpus: int,
+) -> list[str]:
+    if not isinstance(expected_gpu_uuids, list) or len(expected_gpu_uuids) != required_num_gpus:
+        raise ValueError(f"invalid physical GPU UUID assignment: {expected_gpu_uuids!r}")
+    actual = list(actual_gpu_uuids)
+    if actual != expected_gpu_uuids:
+        raise RuntimeError(
+            "late GPU assignment identity mismatch: "
+            f"requested {expected_gpu_uuids}, visible {actual}"
+        )
+    return actual
+
+
 def _prepared_child_main(args, *, child_started: float) -> int:
     """CPU-prepare in this process, then wait for a late GPU assignment."""
     control = socket.socket(fileno=args.prepared_control_fd)
@@ -55,6 +71,7 @@ def _prepared_child_main(args, *, child_started: float) -> int:
                 DEFAULT_BENCH_COOLDOWN_S,
                 DEFAULT_BENCH_ROUNDS,
                 cuda_is_initialized,
+                physical_cuda_uuids,
                 prepare_kernel_bench,
                 run_prepared_kernel_bench,
             )
@@ -131,8 +148,23 @@ def _prepared_child_main(args, *, child_started: float) -> int:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(normalized_gpu_indices)
         if cuda_is_initialized():
             raise RuntimeError("setting CUDA_VISIBLE_DEVICES initialized CUDA")
+        actual_gpu_uuids = _validated_physical_gpu_uuids(
+            command.get("gpu_uuids"),
+            physical_cuda_uuids(args.prepared_num_gpus),
+            args.prepared_num_gpus,
+        )
+        if cuda_is_initialized():
+            raise RuntimeError("physical GPU identity validation initialized a CUDA context")
 
         gpu_started = time.time()
+        _send_control(
+            control,
+            {
+                "type": "RUNNING_GPU",
+                "gpu_started": gpu_started,
+                "physical_gpu_uuids": actual_gpu_uuids,
+            },
+        )
         try:
             result = run_prepared_kernel_bench(
                 prepared,
@@ -174,7 +206,6 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             control,
             {
                 "type": "RESULT",
-                "gpu_started": gpu_started,
                 "gpu_finished": time.time(),
                 "result": result,
             },

@@ -1,0 +1,74 @@
+{
+  "evidence_status": "measured_cpu_only_ready_then_cancelled",
+  "measurement_date": "2026-08-13",
+  "scope": "Five DeepGEMM direct custom-compiler adapters newly migrated to strict prepared-cache replay.",
+  "protocol": {
+    "fresh_one_shot_child_per_workload": true,
+    "gpu_assignment_sent": false,
+    "terminal_command": "CANCEL",
+    "rounds_forwarded_but_not_executed": 5,
+    "cooldown_s_forwarded_but_not_executed": 1.0
+  },
+  "evidence_boundary": {
+    "proves": "Each listed adapter completed import, specialization, generation, and offline compilation before READY, then exited cleanly after CANCEL without entering the GPU stage.",
+    "does_not_prove": [
+      "prepared artifact replay after assignment",
+      "GPU execution or correctness",
+      "single-GPU runtime performance",
+      "AC-10"
+    ],
+    "raw_artifact": "The measurements were transcribed from command output; no raw run JSON or log was persisted. Treat the timings as a tracked ledger, not independently rehashable source evidence."
+  },
+  "workloads": [
+    {
+      "kernel": "deepgemm_sm100_tf32_hc_prenorm_gemm",
+      "config": "m64_n24_k28672_s112",
+      "wall_to_ready_s": 4.701940,
+      "cpu_prepare_s": 4.669680,
+      "framework_import_s": 2.245035,
+      "module_load_s": 0.716242,
+      "specialize_generate_compile_s": 1.705491,
+      "exit_code": 0
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_dense_cp",
+      "wall_to_ready_s": 4.337717,
+      "cpu_prepare_s": 4.307183,
+      "framework_import_s": 2.216473,
+      "module_load_s": 0.286620,
+      "specialize_generate_compile_s": 1.801350,
+      "exit_code": 0
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_dense_cp",
+      "wall_to_ready_s": 4.388265,
+      "cpu_prepare_s": 4.355778,
+      "framework_import_s": 2.225793,
+      "module_load_s": 0.298687,
+      "specialize_generate_compile_s": 1.828375,
+      "exit_code": 0
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_paged_mqa_logits",
+      "config": "b1_n1_mp1_ps32_h64_d128_f32_fixed",
+      "wall_to_ready_s": 4.590575,
+      "cpu_prepare_s": 4.558593,
+      "framework_import_s": 2.339320,
+      "module_load_s": 0.323550,
+      "specialize_generate_compile_s": 1.892770,
+      "exit_code": 0
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp4_ps64_h64_d128_f32_fixed",
+      "wall_to_ready_s": 4.226872,
+      "cpu_prepare_s": 4.194559,
+      "framework_import_s": 2.215326,
+      "module_load_s": 0.340439,
+      "specialize_generate_compile_s": 1.635898,
+      "exit_code": 0
+    }
+  ]
+}

@@ -18,6 +18,7 @@ import torch
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 1e-8
+_COMPILE_CACHE_NAMESPACE = "deepgemm.tf32_hc_prenorm_gemm.compile"
 
 
 def _tf32_hc_cuda_postproc(code: str) -> str:
@@ -1003,8 +1004,19 @@ def _compile_tirx_tf32_hc_for_config(
 _compile_tirx_tf32_hc_for_config = cache(_compile_tirx_tf32_hc_for_config)
 
 
+def _compile_tirx_tf32_hc_key(config: TF32HCPrenormGemmConfig) -> tuple[tuple[str, Any], ...]:
+    return tuple(asdict(config).items())
+
+
 def _compile_tirx_tf32_hc(config: TF32HCPrenormGemmConfig) -> Any:
-    return _compile_tirx_tf32_hc_for_config(**asdict(config))
+    from tirx_kernels.runner import consume_prepared_cache
+
+    compile_kwargs = asdict(config)
+    return consume_prepared_cache(
+        _COMPILE_CACHE_NAMESPACE,
+        _compile_tirx_tf32_hc_key(config),
+        lambda: _compile_tirx_tf32_hc_for_config(**compile_kwargs),
+    )
 
 
 def _build_tirx_tensor_maps(data: dict[str, Any]) -> dict[str, Any]:
@@ -1135,8 +1147,12 @@ def prepare_bench(**kwargs: Any):
     runtime_config = TF32HCPrenormGemmConfig(
         **{**asdict(config), "num_sms": hardware_num_sms(config.num_sms)}
     )
-    _compile_tirx_tf32_hc(runtime_config)
-    return prepared_cached_run_bench(__name__, kwargs)
+    executable = _compile_tirx_tf32_hc(runtime_config)
+    return prepared_cached_run_bench(
+        __name__,
+        kwargs,
+        cached=((_COMPILE_CACHE_NAMESPACE, _compile_tirx_tf32_hc_key(runtime_config), executable),),
+    )
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:

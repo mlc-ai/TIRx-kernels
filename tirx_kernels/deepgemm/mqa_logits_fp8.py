@@ -19,6 +19,7 @@ import torch
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 5e-6
+_COMPILE_CACHE_NAMESPACE = "deepgemm.mqa_logits_fp8.compile"
 
 
 @dataclass(frozen=True)
@@ -957,19 +958,35 @@ def _compile_tirx_mqa_for_config(
 _compile_tirx_mqa_for_config = cache(_compile_tirx_mqa_for_config)
 
 
+def _compile_tirx_mqa_kwargs(config: MQALogitsFP8Config) -> dict[str, Any]:
+    return {
+        "seq_len": config.block_q,
+        "seq_len_kv": config.block_kv,
+        "num_heads": config.num_heads,
+        "head_dim": config.head_dim,
+        "logits_dtype": config.logits_dtype,
+        "compressed_logits": config.compressed_logits,
+        "disable_cp": True,
+        "num_sms": config.num_sms,
+        "logits_stride_override": None,
+    }
+
+
+def _compile_tirx_mqa_key(config: MQALogitsFP8Config) -> tuple[tuple[str, Any], ...]:
+    return tuple(_compile_tirx_mqa_kwargs(config).items())
+
+
 def _compile_tirx_mqa(config: MQALogitsFP8Config, max_seqlen_k: int) -> Any:
     # The kernel is independent of seq_len/seq_len_kv/disable_cp/logits_stride (all
     # runtime): canonical values let the cache dedup to one kernel per structural config.
-    return _compile_tirx_mqa_for_config(
-        seq_len=config.block_q,
-        seq_len_kv=config.block_kv,
-        num_heads=config.num_heads,
-        head_dim=config.head_dim,
-        logits_dtype=config.logits_dtype,
-        compressed_logits=config.compressed_logits,
-        disable_cp=True,
-        num_sms=config.num_sms,
-        logits_stride_override=None,
+    del max_seqlen_k
+    from tirx_kernels.runner import consume_prepared_cache
+
+    compile_kwargs = _compile_tirx_mqa_kwargs(config)
+    return consume_prepared_cache(
+        _COMPILE_CACHE_NAMESPACE,
+        _compile_tirx_mqa_key(config),
+        lambda: _compile_tirx_mqa_for_config(**compile_kwargs),
     )
 
 
@@ -1114,8 +1131,13 @@ def prepare_bench(**kwargs: Any):
     """Compile the TIRx executable without allocating CUDA data."""
     from tirx_kernels.runner import prepared_cached_run_bench
 
-    _compile_tirx_mqa(_make_config(**kwargs), 0)
-    return prepared_cached_run_bench(__name__, kwargs)
+    config = _make_config(**kwargs)
+    executable = _compile_tirx_mqa(config, 0)
+    return prepared_cached_run_bench(
+        __name__,
+        kwargs,
+        cached=((_COMPILE_CACHE_NAMESPACE, _compile_tirx_mqa_key(config), executable),),
+    )
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:

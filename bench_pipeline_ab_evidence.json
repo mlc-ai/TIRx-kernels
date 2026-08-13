@@ -1,5 +1,10 @@
 {
-  "evidence_status": "measured_single_gpu_default_protocol",
+  "evidence_status": "recorded_default_protocol_run_invalidated_physical_identity_unverified",
+  "acceptance_use": {
+    "ac_10_performance_evidence": false,
+    "reason": "The pipeline child did not persist or verify physical GPU UUIDs. The measured implementation was subsequently shown capable of mapping requested index 6 to physical GPU 0 after CPU prepare had already frozen device visibility. Same-physical-GPU comparability is therefore unproven.",
+    "required_remeasurement": "Repeat both sides on one idle physical GPU with the UUID-verified assignment path before publishing a default-protocol speedup."
+  },
   "measurement_date": "2026-08-13",
   "matrix": [
     "fp16_bf16_gemm/fp16_1024x1024x1024",
@@ -7,7 +12,13 @@
     "fp16_bf16_gemm/fp16_4096x4096x4096"
   ],
   "fixed_conditions": {
-    "physical_gpu": 6,
+    "requested_physical_gpu_index": 6,
+    "physical_gpu_identity": {
+      "before": "UUID not persisted; requested index 6 was bound before the one-stage child started",
+      "after": "UUID not persisted or verified; actual physical identity is unknown and may differ from requested index 6",
+      "same_physical_gpu_verified": false,
+      "known_failure_mode": "A child prepared under the old late-binding implementation with assigned_env=6 was later observed as logical device 0 UUID GPU-ef5a8300-..., which is NVML index 0, while NVML index 6 UUID is GPU-e56ad157-...."
+    },
     "gpu_stage_concurrency": 1,
     "rounds": 5,
     "cooldown_s": 1.0,
@@ -28,6 +39,11 @@
     "tirx_kernels_commit": "a91a1b76",
     "outer_wall_s": 95.712197416,
     "source_sha256": "1f8a0f3a768a6bdc17bfe2d8c7b8fe790f5061c08c9fd79caa977f79405c4634",
+    "source_artifact": {
+      "path": "/home/hongyij/workspace/worktrees/tirx-kernels-a91a1b7-before/.bench-suite/default-protocol-ab-exact/runs/1.json",
+      "persistence": "gitignored_local_only_not_tracked",
+      "review_boundary": "The hash matches the current local worktree copy, but that worktree/artifact is not repository evidence and was absent in the third-party audit environment. The tracked raw samples must therefore be treated as ledger data when the local artifact is unavailable."
+    },
     "results": [
       {
         "config": "fp16_1024x1024x1024",
@@ -58,6 +74,11 @@
     "tirx_kernels_commit": "b427de3b-dirty",
     "outer_wall_s": 50.792163705,
     "source_sha256": "f1a1fdd56699f5210292210f60d2e190907dc3f46c4a95949e95133caf46808c",
+    "source_artifact": {
+      "path": ".bench-suite/default-protocol-ab-exact/runs/1.json",
+      "persistence": "gitignored_local_only_not_tracked",
+      "review_boundary": "The hash matches the current local run JSON, but the artifact is excluded from git and is not portable tracked evidence."
+    },
     "pipeline_cost_model": {
       "observed_critical_s": 44.23693895339966,
       "first_ready_s": 6.207627058029175,
@@ -125,6 +146,8 @@
   "derived": {
     "wall_speedup": 1.884389,
     "wall_reduction_percent": 46.9324,
+    "performance_claim_status": "arithmetic_only_invalidated_for_acceptance",
+    "performance_claim_boundary": "These values are internally recomputable from outer_wall_s, but neither outer wall input has a persisted raw timer artifact and same-physical-GPU identity is unverified. They must not be cited as a migration speedup or AC-10 evidence.",
     "ratio_delta_percent": {
       "fp16_1024x1024x1024": 0.0431,
       "fp16_2048x2048x2048": -19.2946,
@@ -133,6 +156,11 @@
     "interpretation": {
       "fp16_2048x2048x2048": "The before reference contains one 34.3289423491us sample while its other four samples are 15.9772883582-16.0114927184us. No sample is trimmed; the aggregate ratio is outlier-contaminated and is not treated as evidence of a semantic shift."
     }
+  },
+  "artifact_boundary": {
+    "source_run_jsons": "Both source hashes refer to gitignored local artifacts. Hash and field comparison can be performed only where those files still exist; absence must be reported as unavailable, never treated as a successful verification.",
+    "outer_wall_s": "The 95.712197416s and 50.792163705s complete-command timers have no persisted raw timing artifact. In particular, the after run JSON records critical_wall_s=44.23693895339966 and final_reap_tail_s=0.615727424621582, totaling 44.85266637802124s; it does not substantiate the remaining 5.93949732697876s of the recorded after outer_wall_s.",
+    "tracked_test_scope": "The permanent tracked test proves protocol shape and internal arithmetic consistency. A separate artifact-backed check hashes and compares raw run JSONs only when those gitignored artifacts are present, and explicitly skips otherwise."
   },
   "scope_separation": "The independent default-sweep reduction from 234 to 112 workloads is not included in this A/B speedup."
 }
