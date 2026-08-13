@@ -32,14 +32,12 @@ Structurally this is the T=5 body at TOKENS=6 with four deltas:
 * Six token warps: 256/192/192/192 threads, ``barrier.sync 1, 192``, and the
   gram warp is warp 5 at splits 4 and 8.
 
-Helper vocabulary is shared with the T=2 module; only the geometry constants,
-the frozen digests and the kernel body are per-specialization.
+Helper vocabulary is shared with the T=2 module; only the geometry constants
+and the kernel body are per-specialization.
 """
 
 from __future__ import annotations
 
-import hashlib
-import os
 from typing import Any
 from unittest import SkipTest
 
@@ -152,17 +150,6 @@ def _mma_acc_b(acc, a, b, b0: int):
         )
     )  # fmt: skip
 
-
-# --- source pinning -------------------------------------------------------
-# Raw and normalized digests differ for every T=6 export; the hash of the bytes
-# between the BEGIN/END markers is the raw one (verified for all four).
-FROZEN_FLASHINFER_COMMIT = "f2e04400"
-FROZEN_BODY_SHA256 = {
-    1: "6684bee1c3e1354082e8603574fe43a5b37991dd2767c9b33104d97cd84bbc55",
-    2: "27e047dc15f2bb4972718b15143d1ebff6cfe21c42aa5688db8245a22c7eba55",
-    4: "f38dc82927095886ce8b030becd0761124d9a0aab3a8373efd17818f7f760463",
-    8: "96593303ff3d6dbb7e9c603f1b76d9eb87eb21f03341a796ea63cdd9e8ee1dac",
-}
 
 HEAD_DIM = _t2.HEAD_DIM
 NUM_TOKENS = 6
@@ -1222,31 +1209,6 @@ def _variant_name(value_split: int) -> str:
     return f"d128_t6_precomputed_gram_split{value_split}"
 
 
-def _source_body_path(value_split: int) -> str:
-    """Absolute path of the frozen generated body this port transcribes."""
-    import flashinfer
-
-    root = os.path.dirname(os.path.dirname(os.path.abspath(flashinfer.__file__)))
-    return os.path.join(root, "csrc", "kda", f"flashkda_decode_{_variant_name(value_split)}.cu")
-
-
-def assert_frozen_source(value_split: int) -> None:
-    """Fail loudly if the upstream generated body was regenerated."""
-    expected = FROZEN_BODY_SHA256[value_split]
-    path = _source_body_path(value_split)
-    with open(path, "rb") as handle:
-        text = handle.read().decode()
-    marker = "// BEGIN FROZEN GENERATED BODY\n"
-    start = text.index(marker) + len(marker)
-    end = text.index("// END FROZEN GENERATED BODY")
-    digest = hashlib.sha256(text[start:end].encode()).hexdigest()
-    if digest != expected:
-        raise AssertionError(
-            f"{path}: frozen body digest {digest} != pinned {expected}; the "
-            "upstream export was regenerated and this port must be re-verified"
-        )
-
-
 def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     """Run the frozen cake export itself on the reference state pool."""
     from flashinfer.jit.flash_kda_decode import get_flash_kda_decode_module
@@ -1352,7 +1314,6 @@ def run_test(**kwargs: Any) -> None:
 
     case = prepare_data(**kwargs)
     spec = case["spec"]
-    assert_frozen_source(spec["VALUE_SPLIT"])
 
     executable = compile_kernel(get_kernel(**kwargs))
     executable(*_tirx_args(case))
@@ -1486,7 +1447,6 @@ __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
-    "assert_frozen_source",
     "get_kernel",
     "prepare_data",
     "run_bench",

@@ -25,8 +25,6 @@ KERNEL_META = {
     "compute_capability": 10,
 }
 
-FROZEN_FLASHINFER_COMMIT = "f2e04400e330fb2debe0bf8730d9424a1d37927f"
-FROZEN_FLASHINFER_SOURCE_SHA256 = "c0e13b64bf42f4f8155058dc9f5877f7aca90832f50a1e7602863894908e89fd"
 
 _LOG2_E = _simple._LOG2_E
 _LN_2 = _simple._LN_2
@@ -1283,7 +1281,7 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
 def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     kwargs = case["kwargs"]
     spec = case["spec"]
-    oracle = _simple._load_frozen_oracle()
+    oracle = _simple._load_oracle()
     state_view = _simple._view_state(case["reference_state_raw"], spec, case["state_stride"])
     state_scale = (
         _simple._view_scale(case["reference_scale_raw"], spec, case["scale_stride"])

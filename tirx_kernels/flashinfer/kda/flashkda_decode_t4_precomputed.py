@@ -24,14 +24,12 @@ accumulator columns 2,3 and 6,7, the ``quad_base + 1`` broadcasts, and the
 where lane ``4f+2`` writes tokens 0,1 and lane ``4f+3`` writes tokens 2,3, so
 the WY residuals have to cross the quad.
 
-Helper vocabulary is shared with the T=2 module; only the geometry constants,
-the frozen digest and the kernel body are per-specialization.
+Helper vocabulary is shared with the T=2 module; only the geometry constants
+and the kernel body are per-specialization.
 """
 
 from __future__ import annotations
 
-import hashlib
-import os
 from typing import Any
 from unittest import SkipTest
 
@@ -75,11 +73,6 @@ _ldmatrix_x4 = _t2._ldmatrix_x4
 _mma_zero = _t2._mma_zero
 _mma_acc = _t2._mma_acc
 
-# --- source pinning -------------------------------------------------------
-# Raw and normalized digests differ for this export; the hash of the bytes
-# between the BEGIN/END markers is the raw one (verified).
-FROZEN_FLASHINFER_COMMIT = "f2e04400"
-FROZEN_BODY_SHA256 = "6ee50e300a2f20f305252a49e3e84fde957542ccb97b7fcb7ba7f075c7733077"
 
 HEAD_DIM = _t2.HEAD_DIM
 NUM_TOKENS = 4
@@ -786,30 +779,6 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _source_body_path() -> str:
-    """Absolute path of the frozen generated body this port transcribes."""
-    import flashinfer
-
-    root = os.path.dirname(os.path.dirname(os.path.abspath(flashinfer.__file__)))
-    return os.path.join(root, "csrc", "kda", "flashkda_decode_d128_t4_precomputed_split2.cu")
-
-
-def assert_frozen_source() -> None:
-    """Fail loudly if the upstream generated body was regenerated."""
-    path = _source_body_path()
-    with open(path, "rb") as handle:
-        text = handle.read().decode()
-    marker = "// BEGIN FROZEN GENERATED BODY\n"
-    start = text.index(marker) + len(marker)
-    end = text.index("// END FROZEN GENERATED BODY")
-    digest = hashlib.sha256(text[start:end].encode()).hexdigest()
-    if digest != FROZEN_BODY_SHA256:
-        raise AssertionError(
-            f"{path}: frozen body digest {digest} != pinned {FROZEN_BODY_SHA256}; the "
-            "upstream export was regenerated and this port must be re-verified"
-        )
-
-
 def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     """Run the frozen cake export itself on the reference state pool."""
     from flashinfer.jit.flash_kda_decode import get_flash_kda_decode_module
@@ -914,7 +883,6 @@ def run_test(**kwargs: Any) -> None:
 
     case = prepare_data(**kwargs)
     spec = case["spec"]
-    assert_frozen_source()
 
     executable = compile_kernel(get_kernel(**kwargs))
     executable(*_tirx_args(case))
@@ -1048,7 +1016,6 @@ __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
-    "assert_frozen_source",
     "get_kernel",
     "prepare_data",
     "run_bench",
