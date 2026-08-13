@@ -4,10 +4,12 @@
 import importlib
 import json
 import pickle
+import statistics
 import subprocess
 import sys
 import textwrap
 import time
+from contextlib import nullcontext
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +27,8 @@ from tirx_kernels.bench_suite.run import (
     _audit_strict_cache_adapter_source,
     _finalize_bench_record,
     _pipeline_cost_model,
+    _validate_pipeline_timelines,
+    audit_pipeline_capabilities,
     check_workload_capabilities,
     write_summary,
 )
@@ -36,6 +40,7 @@ from tirx_kernels.runner import (
     cuda_initialization_guard,
     replay_compiled_kernels,
     replay_prepared_cache,
+    run_kernel_bench,
     run_prepared_kernel_bench,
 )
 
@@ -214,6 +219,43 @@ def test_one_shot_pipeline_parallelizes_across_logical_gpus_and_isolates_logs(
     assert "compiler/reference log after assignment" in logs
 
 
+def test_ready_backpressure_resumes_without_dropping_or_reusing_workloads(
+    monkeypatch, tmp_path: Path
+):
+    workloads = [
+        {
+            "kernel": "fake",
+            "config": f"w{index}",
+            "num_gpus": 1,
+            "prepare_s": 0.01,
+            "gpu_s": 0.08,
+        }
+        for index in range(6)
+    ]
+
+    records, retries, pipeline = _fake_pipeline(
+        monkeypatch,
+        tmp_path,
+        workloads,
+        max_prepare_processes=2,
+        ready_backlog=2,
+    )
+
+    assert retries == []
+    assert sorted(record["config"] for record in records) == [f"w{index}" for index in range(6)]
+    assert len({record["process_pid"] for record in records}) == len(workloads)
+    assert all(record["attempt"] == 1 for record in records)
+    assert pipeline["max_observed_preparing"] <= 2
+    assert pipeline["max_observed_buffered"] <= 2
+    first_gpu_started = min(
+        record["phase_timestamps"]["gpu_started"] for record in records
+    )
+    assert any(
+        record["phase_timestamps"]["process_started"] > first_gpu_started
+        for record in records
+    )
+
+
 def test_pipeline_assigns_a_complete_multigpu_claim_before_gpu_stage(monkeypatch, tmp_path: Path):
     records, retries, _pipeline = _fake_pipeline(
         monkeypatch,
@@ -282,6 +324,61 @@ def test_pipeline_fail_fast_cancels_ready_and_running_children(monkeypatch, tmp_
     assert len(records) == 1
     assert records[0]["config"] == "fail"
     assert bench_run._BenchPidRegistry._roots == set()
+
+
+def test_keyboard_interrupt_reaps_preparing_children_and_resources(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        bench_run,
+        "_prepared_child_command",
+        lambda workload, *, control_fd, rounds, cooldown: [
+            sys.executable,
+            "-c",
+            _FAKE_PREPARED_CHILD,
+            str(control_fd),
+            json.dumps(
+                {
+                    **workload,
+                    "prepare_s": 5.0,
+                    "_rounds": rounds,
+                    "_cooldown": cooldown,
+                }
+            ),
+        ],
+    )
+    monkeypatch.setattr(bench_run, "_active_strangers", lambda *_args, **_kwargs: {})
+    pool = GpuPool(allowed={"0"})
+    monkeypatch.setattr(pool, "_all_gpus", lambda: [("0", "GPU-0")])
+    monkeypatch.setattr(pool, "_occupied_indices", lambda: set())
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    original_select = bench_run.select.select
+    interrupted = False
+
+    def interrupt_once(*args, **kwargs):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return original_select(*args, **kwargs)
+
+    monkeypatch.setattr(bench_run.select, "select", interrupt_once)
+
+    with pytest.raises(KeyboardInterrupt):
+        bench_run.run_scheduled_jobs(
+            [{"kernel": "fake", "config": "interrupt", "num_gpus": 1}],
+            pool,
+            log_dir,
+            rounds=5,
+            cooldown=1.0,
+            compile_profile={"num_sms": 148},
+            max_prepare_processes=1,
+            ready_backlog=1,
+        )
+
+    assert bench_run._BenchPidRegistry._roots == set()
+    assert list(tmp_path.glob("bench-suite-*")) == []
+    assert pool._owned == set()
 
 
 def test_external_busy_to_eligible_poll_dispatches_ready_child(monkeypatch, tmp_path: Path):
@@ -494,6 +591,37 @@ def test_prepared_benchmark_is_process_local_and_not_serializable(monkeypatch):
     monkeypatch.setattr("tirx_kernels.runner.os.getpid", lambda: prepared.owner_pid + 1)
     with pytest.raises(RuntimeError, match="process-local"):
         run_prepared_kernel_bench(prepared)
+
+
+def test_standalone_runner_composes_prepare_and_gpu_stage(monkeypatch):
+    events = []
+    module = SimpleNamespace(
+        __name__="fake_module",
+        prepare_bench=lambda value: SimpleNamespace(
+            run_gpu=lambda **kwargs: events.append(("gpu", value, kwargs))
+            or {"round_samples": {"tir": [1.0] * kwargs["rounds"]}}
+        ),
+    )
+
+    monkeypatch.setattr(kernel_runner, "cuda_initialization_guard", lambda **_kwargs: nullcontext())
+    result = run_kernel_bench(
+        "fake",
+        {"label": "shape", "value": 7},
+        registry={"fake": module},
+        timer="proton",
+        rounds=5,
+        cooldown=1.0,
+    )
+
+    assert events == [
+        (
+            "gpu",
+            7,
+            {"timer": "proton", "rounds": 5, "cooldown_s": 1.0},
+        )
+    ]
+    assert result["kernel"] == "fake"
+    assert result["label"] == "shape"
 
 
 def test_compile_kernel_lazy_builds_and_compiles_without_replay(monkeypatch):
@@ -1405,3 +1533,165 @@ def test_cost_model_treats_pre_snapshot_gpus_as_ineligible():
     assert model["eligibility_constrained_gpu_list_schedule_s"] == pytest.approx(2.0)
     assert model["foreign_wait_s"] == pytest.approx(1.0)
     assert model["unexplained_s"] == pytest.approx(0.0)
+
+
+def _complete_timeline_record(*, label: str, gpu: str, assigned: float, received: float):
+    return {
+        "kernel": "fake",
+        "config": label,
+        "status": "ok",
+        "gpus": [gpu],
+        "phase_timestamps": {
+            "process_started": 0.0,
+            "child_started": 0.1,
+            "prepare_started": 0.1,
+            "framework_import_started": 0.12,
+            "framework_loaded": 0.15,
+            "module_loaded": 0.2,
+            "config_resolved": 0.3,
+            "ready": 1.0,
+            "assigned": assigned,
+            "gpu_started": assigned,
+            "gpu_finished": received,
+            "result_received": received,
+            "process_reaped": received + 0.1,
+        },
+    }
+
+
+def test_timeline_validation_rejects_missing_out_of_order_and_overlapping_records():
+    missing = _complete_timeline_record(label="missing", gpu="0", assigned=1.0, received=2.0)
+    missing["phase_timestamps"].pop("ready")
+    with pytest.raises(RuntimeError, match="missing timeline phases"):
+        _validate_pipeline_timelines([missing])
+
+    reversed_timeline = _complete_timeline_record(
+        label="reversed", gpu="0", assigned=1.0, received=2.0
+    )
+    reversed_timeline["phase_timestamps"]["gpu_started"] = 0.5
+    with pytest.raises(RuntimeError, match="out-of-order timeline"):
+        _validate_pipeline_timelines([reversed_timeline])
+
+    first = _complete_timeline_record(label="first", gpu="0", assigned=1.0, received=3.0)
+    second = _complete_timeline_record(label="second", gpu="0", assigned=2.0, received=4.0)
+    with pytest.raises(RuntimeError, match="ownership intervals overlap"):
+        _validate_pipeline_timelines([first, second])
+
+
+def test_capability_audit_accounts_for_every_adapter_and_curated_selection():
+    capability = audit_pipeline_capabilities()
+
+    assert capability["kernel_count"] == 41
+    adapter_sets = [set(names) for names in capability["adapter_kernels"].values()]
+    assert sum(map(len, adapter_sets)) == len(set.union(*adapter_sets))
+    assert set.union(*adapter_sets) == set(registry.kernel_index(strict=True))
+    assert [len(names) for names in adapter_sets] == [21, 5, 15]
+    assert len(capability["curated_default_selections"]) == 33
+    assert all(
+        set(selection["configs"]) == {"small", "medium", "large"}
+        and selection["rationale"]
+        for selection in capability["curated_default_selections"]
+    )
+
+
+def test_tracked_default_protocol_ab_evidence_recomputes():
+    evidence_path = Path(__file__).resolve().parents[1] / "bench_pipeline_ab_evidence.json"
+    evidence = json.loads(evidence_path.read_text())
+
+    conditions = evidence["fixed_conditions"]
+    assert conditions["rounds"] == 5
+    assert conditions["cooldown_s"] == 1.0
+    assert conditions["implementation_order"] == ["tir", "torch-cublas"]
+    assert conditions["round_aggregate"] == "mean"
+
+    before_wall = evidence["before"]["outer_wall_s"]
+    after_wall = evidence["after"]["outer_wall_s"]
+    assert evidence["derived"]["wall_speedup"] == pytest.approx(
+        before_wall / after_wall, abs=1e-6
+    )
+    assert evidence["derived"]["wall_reduction_percent"] == pytest.approx(
+        (1.0 - after_wall / before_wall) * 100.0, abs=1e-4
+    )
+
+    before_by_config = {row["config"]: row for row in evidence["before"]["results"]}
+    after_by_config = {row["config"]: row for row in evidence["after"]["results"]}
+    assert list(before_by_config) == list(after_by_config) == [
+        workload.split("/", 1)[1] for workload in evidence["matrix"]
+    ]
+    for config, before in before_by_config.items():
+        after = after_by_config[config]
+        for row in (before, after):
+            assert list(row["round_samples_us"]) == conditions["implementation_order"]
+            assert all(
+                len(samples) == conditions["rounds"]
+                for samples in row["round_samples_us"].values()
+            )
+        before_ratio = statistics.mean(before["round_samples_us"]["torch-cublas"]) / (
+            statistics.mean(before["round_samples_us"]["tir"])
+        )
+        after_ratio = statistics.mean(after["round_samples_us"]["torch-cublas"]) / (
+            statistics.mean(after["round_samples_us"]["tir"])
+        )
+        assert evidence["derived"]["ratio_delta_percent"][config] == pytest.approx(
+            (after_ratio / before_ratio - 1.0) * 100.0, abs=1e-4
+        )
+
+    intervals = sorted(
+        (
+            row["timeline_s_from_scheduler_start"]["gpu_started"],
+            row["timeline_s_from_scheduler_start"]["result_received"],
+        )
+        for row in evidence["after"]["results"]
+    )
+    assert all(current[0] >= previous[1] for previous, current in pairwise(intervals))
+    cost = evidence["after"]["pipeline_cost_model"]
+    first_ready = min(
+        row["timeline_s_from_scheduler_start"]["ready"]
+        for row in evidence["after"]["results"]
+    )
+    measured_gpu_schedule = sum(
+        row["timeline_s_from_scheduler_start"]["result_received"]
+        - row["timeline_s_from_scheduler_start"]["gpu_started"]
+        for row in evidence["after"]["results"]
+    )
+    assert cost["first_ready_s"] == pytest.approx(first_ready, abs=1e-6)
+    assert cost["ideal_gpu_list_schedule_s"] == pytest.approx(
+        measured_gpu_schedule, abs=1e-6
+    )
+    assert cost["expected_s"] == pytest.approx(first_ready + measured_gpu_schedule, abs=1e-6)
+    assert cost["unexplained_s"] == pytest.approx(
+        cost["observed_critical_s"] - cost["expected_s"] - cost["foreign_wait_s"],
+        abs=1e-6,
+    )
+    assert cost["ready_starvation_s"] == 0.0
+    assert cost["foreign_wait_s"] == 0.0
+    assert cost["dispatch_latency_p95_s"] < 0.1
+    assert cost["unexplained_s"] <= max(0.5, 0.05 * cost["observed_critical_s"])
+
+
+def test_tracked_large_prepare_evidence_respects_resource_bounds():
+    evidence_path = (
+        Path(__file__).resolve().parents[1] / "bench_pipeline_cpu_prepare_evidence.json"
+    )
+    evidence = json.loads(evidence_path.read_text())
+
+    assert evidence["evidence_status"] == "measured_cpu_only_ready_then_cancelled"
+    assert evidence["protocol"] == {
+        "concurrency_limit": 3,
+        "gpu_assignment_sent": False,
+        "terminal_command": "CANCEL",
+        "rounds_forwarded_but_not_executed": 5,
+        "cooldown_s_forwarded_but_not_executed": 1.0,
+    }
+    assert len(evidence["workloads"]) == 3
+    assert evidence["wall_to_all_ready_s"] == pytest.approx(
+        max(workload["ready_s"] for workload in evidence["workloads"])
+    )
+    assert evidence["resource_peaks"]["owned_process_tree"] <= 4
+    assert evidence["resource_peaks"]["rss_bytes"] > 0
+    assert evidence["resource_peaks"]["open_fds"] > 0
+    assert evidence["cleanup"] == {
+        "remaining_registered_pids": [],
+        "temporary_directories_removed": True,
+        "cuda_initialized": False,
+    }

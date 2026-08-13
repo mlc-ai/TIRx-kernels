@@ -1,6 +1,7 @@
 # The pinned sweep keeps three scale-layout/size representatives: the linear
 # base plus small and large 128x4 shapes; the rest stay benchable on request.
 kernel: nvfp4_quantize
+selection_rationale: The linear 4096 square anchors the base layout; small and large 128x4 rows bound the alternate scale-layout work range.
 defaults:
   # Wider timing windows than the do_bench_proton defaults (25ms/100ms):
   # these kernels are 2-100us and memory-bound, so longer windows average out
@@ -8,15 +9,15 @@ defaults:
   warmup: 50
   repeat: 300
 configs:
-  - {config: fp16_linear_m4096_k4096, default: true}
+  - {config: fp16_linear_m4096_k4096, default: true, selection_role: medium}
   - {config: bf16_linear_m4096_k4096, default: false}
   - {config: fp16_128x4_m4096_k4096, default: false}
   - {config: bf16_128x4_m4096_k4096, default: false}
   - {config: fp16_linear_m16384_k7168, default: false}
-  - {config: fp16_128x4_m16384_k7168, default: true}
+  - {config: fp16_128x4_m16384_k7168, default: true, selection_role: large}
   - {config: fp16_linear_m1024_k2048, default: false}
   - {config: fp16_128x4_m1024_k2048, default: false}
   - {config: fp16_linear_m128_k1024, default: false}
-  - {config: fp16_128x4_m128_k1024, default: true}
+  - {config: fp16_128x4_m128_k1024, default: true, selection_role: small}
   - {config: fp16_128x4_m4096_k3584_silu, default: false}
   - {config: bf16_128x4_m4096_k3584_silu, default: false}

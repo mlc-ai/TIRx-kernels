@@ -72,6 +72,8 @@ CONFIG_DIR = SCRIPT_DIR / "config"
 GENERATED_WORKLOADS_NAME = "workloads.generated.yaml"
 EXPECTED_DEFAULT_WORKLOADS = 112
 MAX_DEFAULT_CONFIGS_PER_KERNEL = 3
+EXPECTED_CURATED_DEFAULT_KERNELS = 33
+DEFAULT_SELECTION_ROLES = ("small", "medium", "large")
 # Single pinned baseline: every run benches our kernel + all reference impls,
 # so one JSON holds both. Promote a run over it via promote_baseline.py.
 DEFAULT_BASELINE = SCRIPT_DIR / "baseline.json"
@@ -127,7 +129,7 @@ def _normalize_workload(workload: dict) -> dict:
     return workload
 
 
-def _read_kernel_config(path: Path) -> tuple[str, list[dict]]:
+def _read_kernel_config(path: Path) -> tuple[str, list[dict], str | None]:
     data = yaml.safe_load(path.read_text()) or {}
     kernel = data.get("kernel")
     if not kernel:
@@ -147,13 +149,58 @@ def _read_kernel_config(path: Path) -> tuple[str, list[dict]]:
         labels.add(label)
         if entry.get("default", False):
             default_count += 1
+        selection_role = entry.get("selection_role")
+        if selection_role is not None and selection_role not in DEFAULT_SELECTION_ROLES:
+            raise ValueError(
+                f"{path.name}: selection_role must be one of "
+                f"{DEFAULT_SELECTION_ROLES}, got {selection_role!r}"
+            )
         entries.append({"kernel": kernel, **defaults, **entry})
     if default_count > MAX_DEFAULT_CONFIGS_PER_KERNEL:
         raise ValueError(
             f"{path.name}: kernel {kernel!r} has {default_count} default configs; "
             f"maximum is {MAX_DEFAULT_CONFIGS_PER_KERNEL}"
         )
-    return kernel, entries
+    selection_rationale = data.get("selection_rationale")
+    if selection_rationale is not None and (
+        not isinstance(selection_rationale, str) or not selection_rationale.strip()
+    ):
+        raise ValueError(f"{path.name}: selection_rationale must be a non-empty string")
+    if len(entries) > MAX_DEFAULT_CONFIGS_PER_KERNEL and default_count == 3:
+        if selection_rationale is None:
+            raise ValueError(
+                f"{path.name}: curated three-point default selection requires "
+                "selection_rationale"
+            )
+        default_roles = {
+            entry.get("selection_role") for entry in entries if entry.get("default", False)
+        }
+        if default_roles != set(DEFAULT_SELECTION_ROLES):
+            raise ValueError(
+                f"{path.name}: curated defaults must have exactly the roles "
+                f"{DEFAULT_SELECTION_ROLES}, got {sorted(default_roles, key=str)}"
+            )
+        nondefault_roles = [
+            entry["config"]
+            for entry in entries
+            if not entry.get("default", False) and entry.get("selection_role") is not None
+        ]
+        if nondefault_roles:
+            raise ValueError(
+                f"{path.name}: non-default configs cannot have selection_role: "
+                f"{nondefault_roles}"
+            )
+    elif selection_rationale is not None:
+        raise ValueError(
+            f"{path.name}: selection_rationale is only valid for a curated "
+            "three-of-many default selection"
+        )
+    elif any(entry.get("selection_role") is not None for entry in entries):
+        raise ValueError(
+            f"{path.name}: selection_role is only valid for a curated "
+            "three-of-many default selection"
+        )
+    return kernel, entries, selection_rationale
 
 
 def load_kernel_configs(kernel: str, config_dir: Path = CONFIG_DIR) -> list[dict]:
@@ -168,8 +215,11 @@ def load_kernel_configs(kernel: str, config_dir: Path = CONFIG_DIR) -> list[dict
     if len(matches) > 1:
         raise ValueError(f"kernel {kernel!r} has more than one config file: {matches}")
     path = matches[0]
-    _, entries = _read_kernel_config(path)
-    return [_normalize_workload(e) for e in entries]
+    _, entries, _selection_rationale = _read_kernel_config(path)
+    return [
+        _normalize_workload({key: value for key, value in entry.items() if key != "selection_role"})
+        for entry in entries
+    ]
 
 
 def load_config_dir(config_dir: Path = CONFIG_DIR) -> list[dict]:
@@ -184,10 +234,11 @@ def load_config_dir(config_dir: Path = CONFIG_DIR) -> list[dict]:
         raise FileNotFoundError(f"no kernel config files under {config_dir}")
     out: list[dict] = []
     for path in files:
-        _, entries = _read_kernel_config(path)
+        _, entries, _selection_rationale = _read_kernel_config(path)
         for entry in entries:
             if not entry.pop("default", False):
                 continue
+            entry.pop("selection_role", None)
             workload = _normalize_workload(entry)
             if workload["num_gpus"] != 1:
                 raise ValueError(
@@ -437,8 +488,12 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
     labels_by_kernel: dict[str, dict[str, dict]] = {}
     multi_gpu_exemptions: list[dict[str, Any]] = []
     module_config_count = 0
-    generic_adapter_count = 0
-    strict_cache_adapter_count = 0
+    adapter_kernels: dict[str, list[str]] = {
+        "generic_lazy_replay": [],
+        "strict_cache_replay": [],
+        "explicit_custom": [],
+    }
+    curated_default_selections: list[dict[str, Any]] = []
 
     for name in sorted(records):
         module = load_kernel(name, strict=True)
@@ -448,10 +503,20 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         source_path = Path(inspect.getsourcefile(module) or "")
         if not source_path.is_file():
             raise FileNotFoundError(f"kernel {name!r} has no inspectable source file")
-        generic_adapter_count += int(_audit_generic_adapter_source(name, source_path))
-        strict_cache_adapter_count += int(
-            _audit_strict_cache_adapter_source(name, source_path)
+        is_generic = _audit_generic_adapter_source(name, source_path)
+        is_strict_cache = _audit_strict_cache_adapter_source(name, source_path)
+        if is_generic and is_strict_cache:
+            raise TypeError(
+                f"kernel {name!r} matches both generic and strict-cache adapter contracts"
+            )
+        adapter_class = (
+            "generic_lazy_replay"
+            if is_generic
+            else "strict_cache_replay"
+            if is_strict_cache
+            else "explicit_custom"
         )
+        adapter_kernels[adapter_class].append(name)
         configs = _bench_configs(module)
         prepare_bench = module.prepare_bench
         labels: dict[str, dict] = {}
@@ -486,7 +551,7 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
     yaml_kernel_names: set[str] = set()
     yaml_labels_by_kernel: dict[str, set[str]] = {}
     for path in sorted(config_dir.rglob("*.yaml")):
-        kernel, entries = _read_kernel_config(path)
+        kernel, entries, selection_rationale = _read_kernel_config(path)
         yaml_kernel_names.add(kernel)
         if kernel not in modules:
             raise KeyError(f"{path}: unknown kernel {kernel!r}")
@@ -505,6 +570,21 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
                     f"{path}: {kernel}/{label} declares num_gpus={declared_num_gpus}, "
                     f"module config requires {expected_num_gpus}"
                 )
+        if selection_rationale is not None:
+            defaults = [entry for entry in entries if entry.get("default", False)]
+            if any(_normalize_workload(dict(entry))["num_gpus"] != 1 for entry in defaults):
+                raise ValueError(
+                    f"{path}: curated default selection contains a multi-GPU config"
+                )
+            curated_default_selections.append(
+                {
+                    "kernel": kernel,
+                    "configs": {
+                        entry["selection_role"]: entry["config"] for entry in defaults
+                    },
+                    "rationale": selection_rationale.strip(),
+                }
+            )
 
     missing_yaml = sorted(set(records) - yaml_kernel_names)
     if missing_yaml:
@@ -519,6 +599,12 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
             "module benchmark configs missing from YAML inventory: "
             f"{missing_yaml_configs}"
         )
+    if len(curated_default_selections) != EXPECTED_CURATED_DEFAULT_KERNELS:
+        raise ValueError(
+            "curated default-selection inventory has "
+            f"{len(curated_default_selections)} kernels; "
+            f"expected {EXPECTED_CURATED_DEFAULT_KERNELS}"
+        )
     if cuda_is_initialized() != before_cuda:
         raise RuntimeError("pipeline capability audit changed CUDA initialization state")
 
@@ -528,8 +614,11 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         "kernel_count": len(records),
         "module_config_count": module_config_count,
         "yaml_config_count": yaml_config_count,
-        "generic_adapter_count": generic_adapter_count,
-        "strict_cache_adapter_count": strict_cache_adapter_count,
+        "generic_adapter_count": len(adapter_kernels["generic_lazy_replay"]),
+        "strict_cache_adapter_count": len(adapter_kernels["strict_cache_replay"]),
+        "custom_adapter_count": len(adapter_kernels["explicit_custom"]),
+        "adapter_kernels": adapter_kernels,
+        "curated_default_selections": curated_default_selections,
         "multi_gpu_runtime_validation": {
             "validation_status": "exempted_by_human_unmeasured",
             "workload_count": len(multi_gpu_exemptions),
@@ -552,6 +641,28 @@ def write_pipeline_capability_report(out_dir: Path, capability: dict[str, Any]) 
         f"- YAML configs: `{capability['yaml_config_count']}`",
         f"- generic lazy-replay adapters: `{capability['generic_adapter_count']}`",
         f"- strict custom-cache replay adapters: `{capability['strict_cache_adapter_count']}`",
+        f"- explicit/custom adapters: `{capability['custom_adapter_count']}`",
+        f"- total pipeline adapters: `{capability['kernel_count']}` / "
+        f"`{capability['kernel_count']}`",
+        f"- reviewed three-point default selections: "
+        f"`{len(capability['curated_default_selections'])}`",
+        "",
+        "## Reviewed default selections",
+        "",
+        "The config labels and rationale below are derived from each kernel YAML; "
+        "there is no second selection manifest.",
+        "",
+        "| kernel | selected configs | rationale |",
+        "|---|---|---|",
+        *[
+            f"| `{selection['kernel']}` | "
+            + ", ".join(
+                f"{role}: `{selection['configs'][role]}`"
+                for role in DEFAULT_SELECTION_ROLES
+            )
+            + f" | {selection['rationale']} |"
+            for selection in capability["curated_default_selections"]
+        ],
         "",
         "## Multi-GPU runtime validation exemption",
         "",

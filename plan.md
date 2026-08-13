@@ -139,7 +139,7 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
     - 当前 33 个受影响 kernel 各保留 exactly 3 个 default config，经逐 kernel 审查分别代表低、中、高语义工作量，并尽可能覆盖不同生产 dispatch regime。
     - `load_config_dir()` 生成的默认 sweep 只包含选定代表点；`load_kernel_configs()` 和显式 `--workloads` 仍可解析并执行所有未选 config。
     - 所有 `default: false` config 仍通过 AC-9 的 all-config pipeline capability gate，不因退出日常 sweep 而失去 benchmark 支持。
-    - 选择结果只由各 kernel YAML 中现有 `default` flags 拥有；报告或校验工具从这些 flags 派生，不维护第二份 selection manifest。
+    - 选择结果只由各 kernel YAML 中现有 `default` flags 拥有；同一 YAML 的 `selection_rationale` 记录该三点选择的语义依据，报告或校验工具从二者派生，不维护第二份 selection manifest。
   - Negative Tests (expected to FAIL):
     - 任一 kernel 在默认 measured sweep 中保留 4 条或更多 config。
     - scheduler 在运行时按前 3 条、随机 3 条或 label 排序动态截断 workload。
@@ -234,7 +234,7 @@ child 负责：
 
 2. 审查并缩减默认 measured config 集合，不改变完整 benchmark 能力。
    - Phase A: 枚举每个 kernel 的全部 config、当前 default 集合、规模轴、production dispatch regime 和已有 baseline GPU time。
-   - Phase B: 对 33 个 default config 超过 3 条的 kernel，逐个确定小/中/大代表点并记录选择理由；不能用统一的首/中/尾机械规则替代语义判断。
+   - Phase B: 对 33 个 default config 超过 3 条的 kernel，逐个确定小/中/大代表点，并在 canonical kernel YAML 的 `selection_rationale` 记录选择理由；不能用统一的首/中/尾机械规则替代语义判断。
    - Phase C: 只修改 YAML `default` flags，加入每 kernel `default <= 3`、当前 generated count = 112、未选 config 仍可解析的静态 gate。
 
 3. 固化通用两阶段合同：从 GEMM 原型提炼 runner primitive，保持 standalone API 兼容。

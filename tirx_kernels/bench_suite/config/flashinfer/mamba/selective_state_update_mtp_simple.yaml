@@ -3,8 +3,9 @@
 # The pinned sweep keeps the b1/b512/b2048 small/medium/large points of the
 # official BF16-state batch curve; the rest stay benchable on request.
 kernel: selective_state_update_mtp_simple
+selection_rationale: The official BF16-state production curve is represented at batch 1, 512, and 2048 to provide small, medium, and large semantic work.
 configs:
-  - {config: b1_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b1_h64_d64_s128_t6_r8_statebf16_official, default: true, selection_role: small}
   - {config: b2_h64_d64_s128_t6_r8_statebf16_official, default: false}
   - {config: b4_h64_d64_s128_t6_r8_statebf16_official, default: false}
   - {config: b8_h64_d64_s128_t6_r8_statebf16_official, default: false}
@@ -13,9 +14,9 @@ configs:
   - {config: b64_h64_d64_s128_t6_r8_statebf16_official, default: false}
   - {config: b128_h64_d64_s128_t6_r8_statebf16_official, default: false}
   - {config: b256_h64_d64_s128_t6_r8_statebf16_official, default: false}
-  - {config: b512_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b512_h64_d64_s128_t6_r8_statebf16_official, default: true, selection_role: medium}
   - {config: b1024_h64_d64_s128_t6_r8_statebf16_official, default: false}
-  - {config: b2048_h64_d64_s128_t6_r8_statebf16_official, default: true}
+  - {config: b2048_h64_d64_s128_t6_r8_statebf16_official, default: true, selection_role: large}
   - {config: b1_h64_d64_s128_t6_r8_statef32_official, default: false}
   - {config: b2_h64_d64_s128_t6_r8_statef32_official, default: false}
   - {config: b4_h64_d64_s128_t6_r8_statef32_official, default: false}

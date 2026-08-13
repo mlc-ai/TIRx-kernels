@@ -7,13 +7,14 @@
 # registry correctness manifest hung instead of failing. cutlass-dsl 4.6.0.dev0
 # compiles it correctly and the reference returns in ~4s, so the rows are back.
 kernel: flash_attention_backward_sm100
+selection_rationale: The selected rows increase sequence/token work and cover causal versus noncausal execution plus the batch-4 production-sized backward regime.
 configs:
-  - {config: b1_s2048_h16_causal, default: true}
+  - {config: b1_s2048_h16_causal, default: true, selection_role: small}
   - {config: b1_s4096_h16_causal, default: false}
   - {config: b2_s4096_h16_causal, default: false}
   - {config: b1_s8192_h16_causal, default: false}
-  - {config: b1_s8192_h16_noncausal, default: true}
+  - {config: b1_s8192_h16_noncausal, default: true, selection_role: medium}
   # flash-attn's default benchmark_attn.py shape: hd128, s8192, 32k total
   # tokens (batch 4), 16 heads, causal and non-causal.
   - {config: b4_s8192_h16_causal, default: false}
-  - {config: b4_s8192_h16_noncausal, default: true}
+  - {config: b4_s8192_h16_noncausal, default: true, selection_role: large}

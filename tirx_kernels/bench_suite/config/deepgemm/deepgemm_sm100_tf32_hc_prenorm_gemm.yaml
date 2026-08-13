@@ -1,9 +1,11 @@
 kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
+selection_rationale: A small-M many-split case and two large-M single-split cases cover the split-count transition plus the major 7168/28672 K production regimes.
 configs:
 - config: m64_n24_k28672_s112
   default: false
 - config: m128_n24_k16384_s64
   default: true
+  selection_role: small
 - config: m128_n24_k28672_s74
   default: false
 - config: m192_n24_k16384_s49
@@ -98,11 +100,13 @@ configs:
   default: false
 - config: m8192_n24_k28672_s1
   default: true
+  selection_role: large
 - config: m13_n24_k7168_s1
   default: false
 - config: m137_n24_k7680_s16
   default: false
 - config: m4096_n24_k7168_s1
   default: true
+  selection_role: medium
 - config: m4096_n24_k28672_s16
   default: false

@@ -3,13 +3,14 @@
 # The pinned sweep keeps the base plus larger-dim and larger-state points;
 # the remaining dispatch and dtype variants stay benchable on request.
 kernel: selective_state_update_stp_vertical
+selection_rationale: The base shape plus larger-dimension and larger-state shapes cover the reviewed vertical dispatch domain and its main work-scaling axes.
 configs:
-  - {config: b64_h64_d64_s128_r8_base, default: true}
+  - {config: b64_h64_d64_s128_r8_base, default: true, selection_role: small}
   - {config: b64_h8_d64_s128_r1, default: false}
-  - {config: b64_h64_d128_s128_r8, default: true}
+  - {config: b64_h64_d128_s128_r8, default: true, selection_role: medium}
   - {config: b64_h64_d64_s64_r8, default: false}
   - {config: b64_h64_d64_s96_r8, default: false}
-  - {config: b64_h64_d64_s256_r8, default: true}
+  - {config: b64_h64_d64_s256_r8, default: true, selection_role: large}
   - {config: b64_h64_d64_s128_r8_statef16, default: false}
   - {config: b64_h64_d64_s128_r8_statef32, default: false}
   - {config: b64_h64_d64_s128_r8_weightbf16, default: false}

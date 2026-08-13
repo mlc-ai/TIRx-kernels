@@ -1,8 +1,9 @@
 # Complete SM100 BF16 wide-vector T1 production dispatch matrix for Qwen3-Next
 # TP1/2/4/8.  Every shape is required by the port's performance gate.
 kernel: gdn_decode_bf16_wide_vec_t1
+selection_rationale: Batch grows from 16 to 128 to 512 while head/value-head counts cover the TP1, TP2, and TP4/8 production dispatch families.
 configs:
-  - {config: b16_h16_hv32_tv64, default: true}
+  - {config: b16_h16_hv32_tv64, default: true, selection_role: small}
   - {config: b32_h16_hv32_tv128, default: false}
   - {config: b64_h16_hv32_tv128, default: false}
   - {config: b128_h16_hv32_tv128, default: false}
@@ -10,13 +11,13 @@ configs:
   - {config: b512_h16_hv32_tv128, default: false}
   - {config: b32_h8_hv16_tv64, default: false}
   - {config: b64_h8_hv16_tv128, default: false}
-  - {config: b128_h8_hv16_tv128, default: true}
+  - {config: b128_h8_hv16_tv128, default: true, selection_role: medium}
   - {config: b256_h8_hv16_tv128, default: false}
   - {config: b512_h8_hv16_tv128, default: false}
   - {config: b64_h4_hv8_tv64, default: false}
   - {config: b128_h4_hv8_tv128, default: false}
   - {config: b256_h4_hv8_tv128, default: false}
-  - {config: b512_h4_hv8_tv128, default: true}
+  - {config: b512_h4_hv8_tv128, default: true, selection_role: large}
   - {config: b128_h2_hv4_tv64, default: false}
   - {config: b256_h2_hv4_tv128, default: false}
   - {config: b512_h2_hv4_tv128, default: false}

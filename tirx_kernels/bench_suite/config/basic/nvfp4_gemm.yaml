@@ -1,7 +1,8 @@
 kernel: nvfp4_gemm
+selection_rationale: Square GEMMs at 1024, 4096, and 16384 provide increasing small, medium, and large FP4 work while retaining the same reference/autotune contract.
 configs:
-  - {config: 1024x1024x1024, default: true}
+  - {config: 1024x1024x1024, default: true, selection_role: small}
   - {config: 2048x2048x2048, default: false}
-  - {config: 4096x4096x4096, default: true}
+  - {config: 4096x4096x4096, default: true, selection_role: medium}
   - {config: 8192x8192x8192, default: false}
-  - {config: 16384x16384x16384, default: true}
+  - {config: 16384x16384x16384, default: true, selection_role: large}

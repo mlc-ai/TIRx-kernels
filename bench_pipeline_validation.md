@@ -37,13 +37,20 @@ The capability audit reports:
 - 21 generic lazy-replay adapters checked at AST level.
 - 5 DeepGEMM direct-compile adapters with exact prepared-cache key and
   consumption validation.
+- 15 explicit/custom adapters covering process-local executables, dispatcher
+  delegation, hardware-profile compile caches, and distributed export/load
+  lifecycles; together the three adapter classes account for 41/41 kernels.
 - 112 single-GPU default workloads, with at most three defaults per kernel.
+- 33 historically over-broad default selections, each now exactly three points
+  with its rationale stored beside the canonical `default` flags in the same
+  kernel YAML and emitted by the capability report.
 - 27 multi-GPU configs, none selected by the default measured sweep.
 
-`tests/test_bench_pipeline_protocol.py` has 49 passing behavior tests covering:
+`tests/test_bench_pipeline_protocol.py` has 56 passing behavior tests covering:
 
 - one-shot process/IPC behavior, log isolation, cancellation, fail-fast, dynamic
-  external eligibility, fresh-process interference retry, and resource bounds;
+  external eligibility, fresh-process interference retry, bounded-backlog
+  drain/refill without dropped or reused attempts, and resource bounds;
 - same-GPU serialization, concurrent logical-GPU execution, complete atomic
   claims, assignment-count/duplicate/index rejection, and no partial ownership;
 - process-local prepared objects, serialization rejection, and CUDA prepare
@@ -62,7 +69,12 @@ The capability audit reports:
 - missing/incomplete cost-model evidence never publishes expected wall,
   residual, starvation, foreign-wait, or latency values as zero;
 - summaries watermark non-default rounds/cooldown as diagnostic, including old
-  run JSON whose protocol must be derived from its result rows.
+  run JSON whose protocol must be derived from its result rows;
+- standalone `run_kernel_bench()` composes the same prepare/run-GPU contract;
+- timeline validation rejects missing transitions, reversed timestamps, and
+  overlapping ownership intervals on the same GPU;
+- capability accounting proves 41/41 adapters and 33/33 reviewed three-point
+  selections from canonical sources.
 
 ## CPU prepare evidence without GPU assignment
 
@@ -94,6 +106,23 @@ cancelled, again without a GPU assignment:
 This proves that each family can create its specialization in the CPU-only
 phase. Exact replay consumption is independently enforced by the process-local
 cache-key tests and the all-config AST capability gate described above.
+
+### Concurrent large-shape resource envelope
+
+One CPU-only run prepared three deliberately large representatives concurrently:
+
+- `fp16_bf16_gemm/fp16_16384x16384x16384`;
+- `flash_attention4/s8192_h32kv32`;
+- `gdn_prefill_sm100/hq32_hv32_s8192x16`.
+
+All three fresh children reached READY within 8.780 seconds. The owned process
+tree peaked at 4 processes, 3,828,740,096 RSS bytes (3.566 GiB), and 287 open
+file descriptors. The orchestrator then sent CANCEL without ever assigning a
+GPU; the PID registry was empty afterward, all temporary directories were
+removed, and CUDA remained uninitialized. The tracked artifact
+`bench_pipeline_cpu_prepare_evidence.json` contains the individual phase times,
+resource peaks, protocol, and cleanup state, and its invariants are checked by
+the protocol test suite.
 
 ## Targeted single-GPU measured evidence
 
@@ -153,6 +182,13 @@ READY starvation or foreign wait, dispatch p95 0.036s, and unexplained residual
 0.049s. The additional outer-command time is startup/provenance/report work that
 both complete commands include.
 
+The tracked artifact `bench_pipeline_ab_evidence.json` retains both sides' five
+raw samples, protocol, exact source-artifact SHA-256 values, after-side timeline
+offsets, and cost-model fields. Its derived values are independently
+recomputable without relying on gitignored `.bench-suite/` state. The after-side
+provenance intentionally remains `b427de3b-dirty`, the working tree that was
+actually measured; it is not relabeled as a later cleanup commit.
+
 A prior back-to-back pair on the same matrix also showed the pipeline win. Its
 old/new kernel ratios differed by -0.75%, -0.55%, and -0.13% for the 1024, 2048,
 and 4096 shapes. In the precisely outer-timed pair, the 1024 and 4096 ratio deltas
@@ -167,6 +203,28 @@ not included in this speedup. It reduces routine sweep work by 52.1% at the YAML
 configuration source and must be reported as a separate coverage/runtime effect,
 never multiplied into or merged with the 1.884× pipeline result.
 
+### Single-GPU timer-family evidence ledger
+
+The plan requires a migration-before versus pipeline A/B for every timer family
+that can run on one GPU. Only Proton currently has complete runtime evidence;
+the other rows remain explicitly unmeasured rather than being inferred from
+their structural tests.
+
+| timer family | runtime evidence | status |
+|---|---|---|
+| Proton | Fixed three-GEMM default-protocol A/B above, with tracked raw samples and timelines | measured, targeted A/B passed |
+| Event | The one-stage side completed at the default protocol; three fresh pipeline attempts were invalidated by foreign PIDs before a valid result, and a fourth was cancelled | pipeline side missing due shared-machine interference; no A/B claim |
+| CUDA-graph Proton | Not launched after repeated Event-timer interference established that the shared machine was unsuitable for another targeted run | unmeasured due shared-machine interference |
+| Kineto | Correlated-span, barrier, sample-wise-max, schema, and cleanup behavior pass structurally; the runtime path also requires the locked NCCL/cuBLAS/cuBLASMp/NVSHMEM environment | structural only; runtime A/B unmeasured |
+| MegaMoE | Alternating order, per-rank samples, sample-wise max, mismatch rejection, and cleanup pass structurally | structural only; runtime A/B unmeasured due shared-machine interference |
+
+The completed one-stage Event run and the interfered pipeline attempts exist
+only in gitignored local run logs, so they are not presented as persistent
+review evidence. After three independently spawned attempts encountered foreign
+processes, further GPU measurement stopped in accordance with the shared-machine
+discipline. No reduced rounds, cooldown, timer budget, reference coverage, or
+correctness work was used to manufacture a result.
+
 ### DeepGEMM strict-cache runtime evidence boundary
 
 A default-protocol single-GPU attempt was made for
@@ -178,12 +236,12 @@ package does not export `cast_back_from_fp4` or `cast_back_from_fp8` from
 helpers. This is an external reference-package API mismatch, not evidence that
 the strict replay path passed or failed at launch.
 
-The partial run is retained at
-`.bench-suite/targeted-strict-cache-run/runs/1.json`. Its cost model is correctly
-published as `measurement_status: missing`, with 0 complete GPU timelines out
-of 1 record and no `expected_s`, `unexplained_s`, starvation, foreign-wait, or
-latency fields. No replacement dequantization algorithm was introduced solely
-to manufacture runtime evidence.
+The local partial-run artifact's cost model was correctly published as
+`measurement_status: missing`, with 0 complete GPU timelines out of 1 record and
+no `expected_s`, `unexplained_s`, starvation, foreign-wait, or latency fields.
+This diagnostic artifact is gitignored and is not claimed as persistent review
+evidence. No replacement dequantization algorithm was introduced solely to
+manufacture runtime evidence.
 
 ## Multi-GPU runtime validation exemption
 
@@ -205,11 +263,62 @@ Therefore these workloads are not marked passed and are not represented as
 `MISSING`, zero, null, or empty values. The complete per-config exemption inventory
 is generated in `.bench-suite/reports/pipeline-capability.md`.
 
+## Acceptance ledger
+
+| criterion | status | evidence boundary |
+|---|---|---|
+| AC-1 | satisfied | Unified process-local prepare/run-GPU contract, CUDA prepare guards, serialization rejection, and standalone composition tests |
+| AC-2 | satisfied | Dedicated protocol, late assignment, pre-run CUDA recheck, assignment cardinality/index/duplicate rejection, and no-assignment no-GPU tests |
+| AC-3 | satisfied | Bounded one-shot concurrency/backlog, condition-driven dispatch, same-GPU serialization, logical multi-GPU concurrency, and dynamic eligibility tests |
+| AC-4 | satisfied | Default 5 rounds/1.0s unchanged, baseline-equivalent finalization, raw-sample/schema checks for every timer family, and tracked Proton A/B |
+| AC-5 | satisfied | State-aware fail-fast, Ctrl-C cleanup, fresh-process interference retry, process-group/PID/temp-dir/GPU-claim cleanup tests |
+| AC-6 | satisfied | Bounded process/RSS/FD evidence, cancellation cleanup, immediate internal release, and resource accounting tests |
+| AC-7 | satisfied | Complete timeline validation, no-data cost-model gating, diagnostic-protocol watermarking, and recomputable tracked cost model |
+| AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
+| AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
+| AC-10 | incomplete | Proton targeted A/B passes the wall-time/residual/ratio requirements; Event, CUDA-graph Proton, Kineto, and MegaMoE runtime A/B evidence remains unmeasured as itemized above |
+| AC-11 | satisfied | 112 defaults, all 992 configs retained, and 33/33 reviewed three-point selections with YAML-owned small/medium/large roles and rationale |
+
+The plan as a whole is therefore not marked complete: AC-10 still requires the
+missing single-GPU timer-family runtime evidence on a suitable machine. The
+multi-GPU runtime rows are outside that remaining requirement because their
+status is the explicit human-directed exemption, not missing evidence.
+
+## Engineering-principles audit
+
+- **Occam's razor:** the implementation uses one one-shot child lifecycle and
+  two explicit replay mechanisms (generic lazy replay and strict keyed replay);
+  it introduces no resident workers, reusable pools, fork templates, or compile
+  thread pools.
+- **Single source of truth:** kernel identity comes from `KERNEL_META`, complete
+  config/default/selection metadata comes from the kernel YAML, and measurement
+  defaults remain owned by the runner. Reports and gates derive from those
+  authorities rather than maintaining competing manifests.
+- **No slop:** the one-stage path is deleted, every registered adapter is
+  accounted for, selection audit metadata is stripped before execution, and
+  missing, exempted, diagnostic, and measured evidence are distinct states.
+- **Broad understanding and independent evidence:** the retained tests protect
+  lifecycle, scheduling, measurement, cleanup, and inventory contracts; tracked
+  artifacts preserve the reproducible wall-time A/B and CPU resource evidence.
+- **Optimize the real objective:** the retained performance result is complete
+  command wall time on a fixed workload/GPU/protocol matrix, not a proxy such as
+  process count or compiler concurrency.
+- **Cost model and falsifiability:** expected critical time is reconstructed
+  from first READY plus GPU scheduling, with foreign wait and residual separate;
+  incomplete timelines publish no numeric performance fields. Only the
+  reproducible Proton A/B win is retained as a performance conclusion.
+- **Stop low-quality experiments:** Event-timer validation stopped after three
+  fresh attempts were independently interfered with; the remaining rows are
+  reported as unmeasured instead of weakening the protocol or claiming success.
+
 ## Remaining evidence boundary
 
-- The implementation, static all-config migration gate, no-card structural tests,
-  CPU-only prepare evidence, default-protocol orchestration A/B, and generic
-  lazy-replay single-GPU execution are complete.
+- The implementation, static all-config migration gate, no-card structural
+  tests, CPU-only prepare evidence, tracked default-protocol orchestration A/B,
+  and generic lazy-replay single-GPU execution are complete.
+- Proton has complete targeted runtime A/B evidence. Event has only a completed
+  before-side run, while CUDA-graph Proton, Kineto, and MegaMoE lack valid
+  runtime A/B evidence; AC-10 and the overall plan remain incomplete.
 - The five DeepGEMM adapters have strict key/consumption behavior tests and
   CPU-only READY evidence; their real GPU replay attempt is blocked before
   launch by the installed DeepGEMM reference API mismatch and is not marked

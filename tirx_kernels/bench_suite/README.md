@@ -16,6 +16,9 @@ assembles 112 workloads. Widening or narrowing the sweep is a YAML `default`
 flag flip, not a scheduler rule or a second selection file. Multi-GPU configs
 are deliberately absent from the default measured sweep but remain available
 to explicit workload files.
+For each of the 33 kernels reduced from more than three defaults, the same YAML
+also owns a `selection_rationale`; the capability gate requires exactly three
+single-GPU defaults and renders those rationales for review.
 
 ```bash
 cd /path/to/tirx-kernels
@@ -74,6 +77,9 @@ while GPU execution may only consume it through lazy replay and cannot regenerat
 or compile the PrimFunc after assignment. The five DeepGEMM `compile_spec`
 adapters use the same contract through strict custom-cache replay: GPU execution
 must request the exact prepared namespace/key and consume every prepared artifact.
+The remaining explicit/custom adapters retain process-local executables, delegate
+to an already-audited prepared implementation, or export distributed libraries
+before assignment. Capability accounting must total 41/41 adapters.
 
 ### SGLang FP8 paged MQA exploration
 

@@ -3,15 +3,16 @@
 # The pinned sweep keeps the base plus larger-dim and larger-state points;
 # the remaining dispatch and dtype variants stay benchable on request.
 kernel: selective_state_update_stp_simple
+selection_rationale: The base shape plus larger-dimension and larger-state shapes cover the principal simple-kernel compute and state-capacity regimes.
 configs:
-  - {config: b64_h64_d64_s128_r8_base, default: true}
+  - {config: b64_h64_d64_s128_r8_base, default: true, selection_role: small}
   - {config: b1_h64_d64_s128_r8_tiled, default: false}
   - {config: b64_h8_d64_s128_r1, default: false}
-  - {config: b64_h64_d128_s128_r8, default: true}
+  - {config: b64_h64_d128_s128_r8, default: true, selection_role: medium}
   - {config: b64_h64_d256_s128_r8, default: false}
   - {config: b64_h64_d64_s64_r8, default: false}
   - {config: b64_h64_d64_s96_r8, default: false}
-  - {config: b64_h64_d64_s256_r8, default: true}
+  - {config: b64_h64_d64_s256_r8, default: true, selection_role: large}
   - {config: b64_h64_d64_s128_r8_statef16, default: false}
   - {config: b64_h64_d64_s128_r8_statef32, default: false}
   - {config: b64_h64_d64_s128_r8_weightbf16, default: false}

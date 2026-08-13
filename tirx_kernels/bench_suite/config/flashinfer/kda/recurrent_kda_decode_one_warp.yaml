@@ -11,11 +11,12 @@
 # b8 -> sequence_heads 128 -> TILE_ROWS 8 + DOT_REDUCTION_TREE, every other row
 # -> TILE_ROWS 16 + DOT_REDUCTION_DUAL_ACCUM.
 kernel: recurrent_kda_decode_one_warp
+selection_rationale: The defaults cover the TILE_ROWS=8 boundary, the large-batch TILE_ROWS=16 path, and the hv12 TP8 value-head family.
 configs:
-  - {config: hv16_b8_tr8_lb, default: true}
+  - {config: hv16_b8_tr8_lb, default: true, selection_role: small}
   - {config: hv16_b16_tr16_lb, default: false}
   - {config: hv16_b32_tr16_lb, default: false}
   - {config: hv16_b64_tr16_lb, default: false}
-  - {config: hv16_b128_tr16_lb, default: true}
+  - {config: hv16_b128_tr16_lb, default: true, selection_role: large}
   - {config: hv12_b16_tr16_lb, default: false}
-  - {config: hv12_b64_tr16_lb, default: true}
+  - {config: hv12_b64_tr16_lb, default: true, selection_role: medium}
