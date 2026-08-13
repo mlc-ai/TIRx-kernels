@@ -68,6 +68,7 @@ point each port backs:
 | `flashkda_decode_t2_precomputed` | bf16 | FlashKDA "cake" decode, T=2 precomputed gate (WY, tensor cores) |
 | `flashkda_decode_t3_lower_bound` | bf16 | FlashKDA "cake" decode, T=3 lower-bound gate computed in-kernel |
 | `flashkda_decode_t4_precomputed` | bf16 | FlashKDA "cake" decode, T=4 precomputed gate (WY, tensor cores) |
+| `flashkda_decode_t5_gram` | bf16 | FlashKDA "cake" decode, T=5 coefficient-Gram gate (tensor-core WY coefficients, all four value splits) |
 
 `flashinfer/gdn_prefill/` — `flashinfer.gdn_prefill`:
 

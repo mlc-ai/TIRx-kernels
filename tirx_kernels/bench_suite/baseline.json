@@ -3,12 +3,12 @@
   "label": "post-refactor",
   "git": {
     "tir": "ea0950ab",
-    "tirx-kernels": "919312eb",
+    "tirx-kernels": "61f08633",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "76f435495502685fed7b2ec94dbb52eac22bef3e"
+    "tirx-kernels:tirx_kernels": "736afe707c184d6025b9662b25e12d6a9b20f312"
   },
   "baselines": {
     "torch": {
@@ -2115,6 +2115,202 @@
       "impls": {
         "tirx": 12.766413260734272,
         "flashinfer_cake": 14.745371736659923
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv12h12_b64_s1",
+      "label": "hv12h12_b64_s1",
+      "status": "ok",
+      "impls": {
+        "tirx": 36.1510371254478,
+        "flashinfer_cake": 38.32829333904619
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv12h12_b8_s4",
+      "label": "hv12h12_b8_s4",
+      "status": "ok",
+      "impls": {
+        "tirx": 8.669738480597802,
+        "flashinfer_cake": 10.189374955525105
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv16h16_b2_s8",
+      "label": "hv16h16_b2_s8",
+      "status": "ok",
+      "impls": {
+        "tirx": 7.674385458877931,
+        "flashinfer_cake": 9.609337139041145
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv16h16_b5_s4",
+      "label": "hv16h16_b5_s4",
+      "status": "ok",
+      "impls": {
+        "tirx": 8.601157209006193,
+        "flashinfer_cake": 10.065586214393935
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv16h16_b64_s1",
+      "label": "hv16h16_b64_s1",
+      "status": "ok",
+      "impls": {
+        "tirx": 45.355691766974545,
+        "flashinfer_cake": 46.932935995056724
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv16h16_b8_s2",
+      "label": "hv16h16_b8_s2",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.71949928041993,
+        "flashinfer_cake": 11.458234216395514
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv32h16_b128_s1",
+      "label": "hv32h16_b128_s1",
+      "status": "ok",
+      "impls": {
+        "tirx": 157.7329388841835,
+        "flashinfer_cake": 160.06139548741302
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv32h16_b16_s1",
+      "label": "hv32h16_b16_s1",
+      "status": "ok",
+      "impls": {
+        "tirx": 24.79908811773751,
+        "flashinfer_cake": 26.708729977899676
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv32h16_b1_s8",
+      "label": "hv32h16_b1_s8",
+      "status": "ok",
+      "impls": {
+        "tirx": 7.611494501660651,
+        "flashinfer_cake": 9.328511323359672
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv32h16_b2_s2",
+      "label": "hv32h16_b2_s2",
+      "status": "ok",
+      "impls": {
+        "tirx": 7.8625942489277465,
+        "flashinfer_cake": 9.350423591783107
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv32h16_b32_s1",
+      "label": "hv32h16_b32_s1",
+      "status": "ok",
+      "impls": {
+        "tirx": 45.413918972428526,
+        "flashinfer_cake": 46.60646318216883
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv32h16_b3_s4",
+      "label": "hv32h16_b3_s4",
+      "status": "ok",
+      "impls": {
+        "tirx": 8.782956599934174,
+        "flashinfer_cake": 10.192771113296926
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv32h16_b64_s1",
+      "label": "hv32h16_b64_s1",
+      "status": "ok",
+      "impls": {
+        "tirx": 81.50379606666836,
+        "flashinfer_cake": 83.4039683537322
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashkda_decode_t5_gram",
+      "config": "hv32h16_b8_s1",
+      "label": "hv32h16_b8_s1",
+      "status": "ok",
+      "impls": {
+        "tirx": 14.163372720071113,
+        "flashinfer_cake": 16.052781192062394
       },
       "aggregated": {
         "rounds": 5,
