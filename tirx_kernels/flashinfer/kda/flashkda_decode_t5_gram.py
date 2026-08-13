@@ -15,7 +15,7 @@ Dispatch reaches these bodies whenever ``num_tokens == 5`` with
 ``num_spec_tokens == 4`` and a precomputed (host-side) log-space gate. Unlike
 T=2 (always split4) and T=4 (always split2), the T=5 value split is
 **shape-dependent**: with ``work = num_seqs * num_value_heads`` and ``S`` SMs,
-``recurrent_kda.py:1179-1187`` returns 8, 2, 4, 2, 1 across five bands, so all
+``recurrent_kda.py:1181-1191`` returns 8, 2, 4, 2, 1 across five bands, so all
 four exports are reachable and all four are in this port's scope. The split is
 a constexpr here, exactly as in the two-split T=1 sibling.
 
@@ -230,7 +230,7 @@ def _case(label: str, **overrides: Any) -> dict[str, Any]:
 
 # The T=5 split moves with shape: with W = num_seqs * num_value_heads and S SMs
 # the bands are W <= 3S/8 -> 8, W <= S/2 -> 2, W <= 3S/4 -> 4, W <= 3S/2 -> 2,
-# else 1 (recurrent_kda.py:1179-1187). Every label names the split its shape
+# else 1 (recurrent_kda.py:1181-1191). Every label names the split its shape
 # actually selects on a 148-SM B200, and verify_dispatch.py asserts that
 # against the real selector. The five hv32h16 rows are FlashInfer's own T=5
 # export-bench matrix (all split1); the rest exist to cover the other three
@@ -301,7 +301,7 @@ def _sm_count(kwargs: dict[str, Any]) -> int:
 def _select_value_split(work: int, sm_count: int) -> int:
     """Reproduce ``_select_flash_kda_decode_value_split_current`` for T = 5.
 
-    recurrent_kda.py:1179-1187. `work` is `num_seqs * num_value_heads`. Note the
+    recurrent_kda.py:1181-1191. `work` is `num_seqs * num_value_heads`. Note the
     split4 island sits *between* two split2 bands, so this is not monotonic.
     """
     three_wave_ctas = 3 * sm_count
