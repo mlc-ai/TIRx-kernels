@@ -969,27 +969,31 @@ def _flashkda_decode_t5_gram(
             _ld_shared_f32x4(arena, OFF_SD + (t * HEAD_DIM + k_start + 4) * 4, sd_t, 4)
             _ld_shared_f32x4(arena, OFF_SK + (t * HEAD_DIM + k_start) * 4, sk_t, 0)
             _ld_shared_f32x4(arena, OFF_SK + (t * HEAD_DIM + k_start + 4) * 4, sk_t, 4)
-            for row_local in T.unroll(ROWS_PER_GROUP):
-                row_h: T.int32 = owned_row_base + row_local
-                update: T.float32 = _mul(
-                    _ld_shared_f32(arena, OFF_SU + (t * ROWS_PER_CTA + row_h) * 4), beta_t
-                )
-                for i in T.unroll(8):
-                    # `hist*sD + update*sK` (:782): the compiler contracts the
-                    # FIRST product and rounds update*sK. This is the only
-                    # stateful accumulation and it feeds both the checkpoint and
-                    # every later token's history.
-                    hist[row_local * 8 + i] = _fma(
-                        hist[row_local * 8 + i], sd_t[i], _mul(update, sk_t[i])
+            # The store predicate is hoisted OUT of the row loop and the loop
+            # duplicated, which is the shape nvcc produces for the source's
+            # per-row `if (slot_t >= 0)` (:788): its phase H appears 2*TOKENS-1
+            # times in the export's SASS, against a single copy when the branch
+            # stays inside. Keeping the branch per row costs DRAM utilisation at
+            # the largest split1 shapes -- the stores cannot be issued as densely.
+            # The recurrence itself is identical in both arms: it advances
+            # unconditionally, in FP32, so token t+1 consumes the un-rounded
+            # token-t state rather than the bf16 checkpoint.
+            if slot_t >= 0:
+                for row_local in T.unroll(ROWS_PER_GROUP):
+                    row_h: T.int32 = owned_row_base + row_local
+                    update: T.float32 = _mul(
+                        _ld_shared_f32(arena, OFF_SU + (t * ROWS_PER_CTA + row_h) * 4), beta_t
                     )
-                for pr in T.unroll(4):
-                    words_w[pr] = _pack_bf16x2(
-                        hist[row_local * 8 + 2 * pr + 1], hist[row_local * 8 + 2 * pr]
-                    )
-                # The recurrence advances unconditionally; only the store is
-                # slot-predicated, and the carry stays FP32 so token t+1 consumes
-                # the un-rounded token-t state rather than the bf16 checkpoint.
-                if slot_t >= 0:
+                    for i in T.unroll(8):
+                        # `hist*sD + update*sK` (:782): the compiler contracts the
+                        # FIRST product and rounds update*sK.
+                        hist[row_local * 8 + i] = _fma(
+                            hist[row_local * 8 + i], sd_t[i], _mul(update, sk_t[i])
+                        )
+                    for pr in T.unroll(4):
+                        words_w[pr] = _pack_bf16x2(
+                            hist[row_local * 8 + 2 * pr + 1], hist[row_local * 8 + 2 * pr]
+                        )
                     _store_u32x4(
                         state,
                         T.cast(slot_t, "int64") * T.cast(STATE_SLOT_STRIDE, "int64")
@@ -999,6 +1003,16 @@ def _flashkda_decode_t5_gram(
                         ),
                         words_w,
                     )
+            else:
+                for row_local_p in T.unroll(ROWS_PER_GROUP):
+                    row_p: T.int32 = owned_row_base + row_local_p
+                    update_p: T.float32 = _mul(
+                        _ld_shared_f32(arena, OFF_SU + (t * ROWS_PER_CTA + row_p) * 4), beta_t
+                    )
+                    for i in T.unroll(8):
+                        hist[row_local_p * 8 + i] = _fma(
+                            hist[row_local_p * 8 + i], sd_t[i], _mul(update_p, sk_t[i])
+                        )
 
 
 def get_kernel(**kwargs: Any):
