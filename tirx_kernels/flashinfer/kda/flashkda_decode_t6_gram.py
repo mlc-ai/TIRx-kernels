@@ -8,15 +8,15 @@
 
 Source: ``csrc/kda/flashkda_decode_d128_t6_precomputed_gram_split{1,2,4,8}.cu``,
 symbol ``kernel_flashinfer_recurrent_kda_wy_vtile_short`` -- the T=6 member of
-the same ``coefficient_gram`` generator family as the ported T=6 sibling, and
+the same ``coefficient_gram`` generator family as the ported T=5 sibling, and
 the last cake variant upstream exports.
 
 Dispatch reaches these bodies whenever ``num_tokens == 6`` with
-``num_spec_tokens == 5`` and a precomputed log-space gate. T=6 and T=6 share
+``num_spec_tokens == 5`` and a precomputed log-space gate. T=5 and T=6 share
 one arm of the sm100a value-split policy (``recurrent_kda.py:1181-1191``), so
 the split is shape-dependent here too and all four exports are in scope.
 
-Structurally this is the T=6 body at TOKENS=6 with four deltas:
+Structurally this is the T=5 body at TOKENS=6 with four deltas:
 
 * **The arena is dynamic shared memory.** split1 needs 50560 B, past the
   49152 B static ceiling every earlier cake port used, so all four splits
@@ -99,7 +99,7 @@ def _make_warp_uniform(value):
     Semantically the identity (every lane of a warp already holds the same
     ``tid / 32``), which is why the ported T<=4 siblings spell it ``tid // 32``
     and drop the instruction. It is NOT droppable here: it is the hint that lets
-    ptxas prove ``warp_0 < 5`` is warp-uniform. Without it, at split1 -- the only
+    ptxas prove ``warp_0 < 6`` is warp-uniform. Without it, at split1 -- the only
     geometry where that guard is live -- ptxas cannot assume the shuffles inside
     phase A are collectively executed and wraps them in a
     ``WARPSYNC.COLLECTIVE``/``ENDCOLLECTIVE`` retry region with a back-edge over
@@ -171,7 +171,7 @@ LOG2_E = _t2.LOG2_E
 
 # Per-split geometry, transcribed from the four bodies' `#define` blocks and
 # their guard expressions (`.cu:45-88`, `:143-166`, `:180`, `:411`, `:448`,
-# `:652`). `threads` is FLASHKDA_DECODE_LAUNCH_THREADS (the `#define THREADS
+# `:671`, `:681-684`). `threads` is FLASHKDA_DECODE_LAUNCH_THREADS (the `#define THREADS
 # 256` in every body is vestigial -- it only feeds a static_assert in
 # binding_impl.cuh:40); it is derived upstream by
 # `max(tokens, value_rows/16, ((value_rows/rows_per_group)+1)/2) * 32`
@@ -494,7 +494,7 @@ def _flashkda_decode_t6_gram(
     OFF_SGRAMA0: T.constexpr,
     OFF_SGRAMA1: T.constexpr,
 ):
-    """FlashKDA "cake" T=6 coefficient-gram decode; 5 token warps.
+    """FlashKDA "cake" T=6 coefficient-gram decode; 6 token warps.
 
     Scaffold only -- the body is written in the kernel-sketch stage, from the
     reviewer-approved sketch at
@@ -514,6 +514,13 @@ def _flashkda_decode_t6_gram(
     nat = T.match_buffer(num_accepted_tokens_h, (NAT_ELEMENTS,), "int32", scope="global")
     T.device_entry()
     # TRANSCRIBE: the frozen body goes here (kernel-sketch stage).
+
+
+# The dynamic-shared arena is only backed at launch when the kernel asks for
+# it; without this tag the launch reserves zero bytes and every arena access
+# faults at runtime (.porting/flashkda_decode_t6_gram/probe_dyn_smem.py). The
+# grid is 2-D (binding_impl.cuh:64).
+LAUNCH_TAGS = ("blockIdx.x", "blockIdx.y", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 
 def get_kernel(**kwargs: Any):
@@ -542,9 +549,9 @@ def _accepted_tensor(kind: Any, num_seqs: int, device: str) -> torch.Tensor:
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Build one deterministic case with independent TIRx / reference state.
 
-    Same recipe as the ported T=2/T=4 siblings at T=6: packed [1, N*5, ...]
+    Same recipe as the ported T=2/T=4 siblings at T=6: packed [1, N*6, ...]
     bf16, a log-space gate (GATE_KIND 0 -- the kernel applies exp()),
-    pre-sigmoided beta, flat [N*5] slot indices with slot 0 never a target.
+    pre-sigmoided beta, flat [N*6] slot indices with slot 0 never a target.
     """
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
