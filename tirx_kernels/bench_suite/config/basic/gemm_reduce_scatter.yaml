@@ -1,7 +1,45 @@
 kernel: gemm_reduce_scatter
-defaults: {num_gpus: 1, timer: kineto}
+defaults:
+  num_gpus: 1
+  timer: kineto
 configs:
-  - {config: tp1_m8192_n4096_k12288_fp16_dynamic, default: true}
-  - {config: tp1_m8192_n5120_k25600_fp16_dynamic, default: true}
-  - {config: tp1_m8192_n8192_k28672_fp16_dynamic, default: true}
-  - {config: tp1_m8192_n16384_k53248_fp16_dynamic, default: true}
+- config: tp1_m8192_n4096_k12288_fp16_dynamic
+  default: true
+- config: tp4_m8192_n4096_k12288_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n4096_k14336_fp16_dynamic
+  default: false
+- config: tp4_m8192_n4096_k14336_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n3584_k14336_fp16_dynamic
+  default: false
+- config: tp4_m8192_n3584_k14336_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n4608_k36864_fp16_dynamic
+  default: false
+- config: tp4_m8192_n4608_k36864_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n5120_k25600_fp16_dynamic
+  default: false
+- config: tp4_m8192_n5120_k25600_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n8192_k28672_fp16_dynamic
+  default: true
+- config: tp4_m8192_n8192_k28672_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n12288_k49152_fp16_dynamic
+  default: false
+- config: tp4_m8192_n12288_k49152_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n16384_k53248_fp16_dynamic
+  default: true
+- config: tp4_m8192_n16384_k53248_fp16_dynamic
+  default: false
+  num_gpus: 4

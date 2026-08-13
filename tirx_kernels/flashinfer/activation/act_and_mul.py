@@ -15,6 +15,8 @@ token, ``min(d / 8, 1024)`` threads, 16-byte vectorized access, scalar
 remainder loop, and ``griddepcontrol`` PDL intrinsics.
 """
 
+from typing import Any
+
 from tvm.script import tirx as T
 from tvm.tirx.bench import bench
 
@@ -224,6 +226,13 @@ def prepare_data(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     return (input_data,)
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
@@ -260,11 +269,12 @@ def run_bench(
     """Benchmark the TIRx port against the flashinfer source kernel."""
     import torch
 
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
 
     (input_data,) = prepare_data(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
-    kernel = get_kernel(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
-    ex = compile_kernel(kernel)
+    ex = compile_kernel_lazy(
+        lambda: get_kernel(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
+    )
     out_tirx = torch.empty((num_tokens, d), dtype=_torch_dtype(dtype), device="cuda")
 
     funcs = {"tirx": lambda: ex(input_data, out_tirx)}

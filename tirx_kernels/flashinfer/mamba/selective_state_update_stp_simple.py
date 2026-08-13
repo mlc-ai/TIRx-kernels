@@ -1311,6 +1311,13 @@ def _assert_case_close(case: dict[str, Any]) -> None:
         )
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(**kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
@@ -1327,11 +1334,11 @@ def run_bench(
 ) -> dict[str, Any]:
     rounds = int(kwargs.pop("rounds", 5))
     cooldown_s = float(kwargs.pop("cooldown_s", 1.0))
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
     from tvm.tirx.bench import bench
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel_lazy(lambda: get_kernel(**kwargs))
     args = _tirx_args(case)
     executable(*args)
     _run_reference(case)

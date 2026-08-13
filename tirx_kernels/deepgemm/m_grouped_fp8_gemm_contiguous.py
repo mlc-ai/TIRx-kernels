@@ -129,9 +129,9 @@ def make_desc(
     (`sm100_fp8_fp4_gemm_1d1d.hpp:193-195`).
     """
     if num_sms is None:
-        import torch
+        from tirx_kernels.runner import hardware_num_sms
 
-        num_sms = torch.cuda.get_device_properties(0).multi_processor_count
+        num_sms = hardware_num_sms()
     alignment = get_theoretical_mk_alignment()
     m = sum(make_aligned_ms(num_groups, expected_m_per_group, seed, alignment))
     return GemmDesc(
@@ -178,6 +178,17 @@ def prepare_data(**config):
 
     config.pop("label", None)
     return prepare_m_grouped_contiguous(**config)
+
+
+def prepare_bench(**config):
+    """Compile the exact DeepGEMM specialization without initializing CUDA."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    from ._sm100_fp8_fp4_gemm_1d1d import compile_spec
+
+    config.pop("label", None)
+    compile_spec(_spec_for(config))
+    return prepared_cached_run_bench(__name__, config)
 
 
 def _tirx_launch(data, config):
@@ -265,6 +276,7 @@ __all__ = [
     "KERNEL_META",
     "get_kernel",
     "make_desc",
+    "prepare_bench",
     "prepare_data",
     "run_bench",
     "run_test",

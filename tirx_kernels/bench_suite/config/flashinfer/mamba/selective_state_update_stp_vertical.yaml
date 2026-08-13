@@ -1,7 +1,7 @@
 # Complete source-comparable STP vertical sweep.  DIM=64/128 is the reviewed
 # vertical dispatch domain; nullable-D and small-batch aliases stay correctness-only.
-# The pinned sweep keeps four points: the base shape plus the dim, state,
-# and rank extremes; the rest stay benchable on request.
+# The pinned sweep keeps the base plus larger-dim and larger-state points;
+# the remaining dispatch and dtype variants stay benchable on request.
 kernel: selective_state_update_stp_vertical
 configs:
   - {config: b64_h64_d64_s128_r8_base, default: true}
@@ -18,7 +18,7 @@ configs:
   - {config: b64_h64_d64_s128_r4, default: false}
   - {config: b64_h64_d64_s128_r16, default: false}
   - {config: b64_h64_d64_s128_r32, default: false}
-  - {config: b64_h64_d64_s128_r64, default: true}
+  - {config: b64_h64_d64_s128_r64, default: false}
   - {config: b64_h64_d64_s128_r8_z, default: false}
   - {config: b64_h64_d64_s128_r8_no_dt_bias, default: false}
   - {config: b64_h64_d64_s128_r8_no_softplus, default: false}

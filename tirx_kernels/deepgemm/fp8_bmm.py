@@ -77,9 +77,9 @@ def shape_of(expr: str, *, H: int, R: int, D: int, B: int) -> tuple[int, int, in
 def make_desc(*, expr: str, H: int, R: int, D: int, B: int, num_sms: int | None = None) -> GemmDesc:
     """Build the descriptor `sm100_fp8_bmm` would build."""
     if num_sms is None:
-        import torch
+        from tirx_kernels.runner import hardware_num_sms
 
-        num_sms = torch.cuda.get_device_properties(0).multi_processor_count
+        num_sms = hardware_num_sms()
     major_a, major_b, cd_dtype, accumulate = _EXPRESSIONS[expr]
     batch, m, n, k = shape_of(expr, H=H, R=R, D=D, B=B)
     return GemmDesc(
@@ -115,6 +115,17 @@ def prepare_data(**config):
 
     config.pop("label", None)
     return prepare_bmm(**config)
+
+
+def prepare_bench(**config):
+    """Compile the exact DeepGEMM specialization without initializing CUDA."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    from ._sm100_fp8_fp4_gemm_1d1d import compile_spec
+
+    config.pop("label", None)
+    compile_spec(_spec_for(config))
+    return prepared_cached_run_bench(__name__, config)
 
 
 def _tirx_launch(data, config):
@@ -189,6 +200,7 @@ __all__ = [
     "KERNEL_META",
     "get_kernel",
     "make_desc",
+    "prepare_bench",
     "prepare_data",
     "run_bench",
     "run_test",

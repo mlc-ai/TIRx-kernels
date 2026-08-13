@@ -1,6 +1,5 @@
-# The pinned sweep keeps four points: the m4096_k4096 base shape in both
-# scale layouts, plus the 128x4 layout at the small and large shapes; the
-# rest stay benchable on request.
+# The pinned sweep keeps three scale-layout/size representatives: the linear
+# base plus small and large 128x4 shapes; the rest stay benchable on request.
 kernel: mxfp8_quantize
 defaults:
   # Wider timing windows than the do_bench_proton defaults (25ms/100ms):
@@ -11,7 +10,7 @@ defaults:
 configs:
   - {config: fp16_linear_m4096_k4096, default: true}
   - {config: bf16_linear_m4096_k4096, default: false}
-  - {config: fp16_128x4_m4096_k4096, default: true}
+  - {config: fp16_128x4_m4096_k4096, default: false}
   - {config: bf16_128x4_m4096_k4096, default: false}
   - {config: fp16_linear_m16384_k7168, default: false}
   - {config: fp16_128x4_m16384_k7168, default: true}

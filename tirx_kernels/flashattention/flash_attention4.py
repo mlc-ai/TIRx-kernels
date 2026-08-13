@@ -19,6 +19,7 @@ import argparse
 import math
 import os
 from functools import partial
+from typing import Any
 
 import numpy as np
 import torch
@@ -1634,6 +1635,13 @@ def get_kernel(
     )
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=False, **kwargs):
     """Compile, run, and verify flash attention 4 kernel."""
     from tirx_kernels.runner import compile_kernel
@@ -1683,12 +1691,18 @@ def run_bench(
     **kwargs,
 ):
     """Benchmark flash attention 4."""
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
 
-    prim_func = get_flash_attention4_kernel(
-        batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=is_causal
+    ex = compile_kernel_lazy(
+        lambda: get_kernel(
+            batch_size,
+            seq_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            is_causal,
+        )
     )
-    ex = compile_kernel(prim_func)
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     Q, K, V, _ = prepare_data(batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim)

@@ -2937,6 +2937,13 @@ def get_kernel(**kwargs: Any):
     )
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(**kwargs: Any) -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for GDN prefill SM100")
@@ -2981,11 +2988,11 @@ def run_bench(
     if capability[0] != 10:
         raise SkipTest(f"GDN prefill SM100 requires compute capability 10.x, got {capability}")
 
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
     from tvm.tirx.bench import bench
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel_lazy(lambda: get_kernel(**kwargs))
     args = _tirx_args(case)
 
     def _flashinfer_cutedsl_builder():

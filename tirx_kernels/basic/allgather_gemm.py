@@ -33,6 +33,7 @@ from .utils._model_shapes import (
 from .utils._runtime import (
     DistributedRuntime,
     barrier_on_compute_stream,
+    prepare_distributed_bench,
     run_distributed,
     symmetric_empty,
     sync_communication_to_compute,
@@ -1401,11 +1402,39 @@ def run_bench(
         raise ValueError("distributed AllGather+GEMM supports only timer='kineto'")
     if warmup is not None or repeat is not None:
         raise ValueError("timer='kineto' uses fixed iteration counts and rejects overrides")
-    return run_distributed(
+    return prepare_bench(
+        M=M,
+        N=N,
+        K=K,
+        world_size=world_size,
+        dtype=dtype,
+        scheduler=scheduler,
+    ).run_gpu(
+        warmup=warmup,
+        repeat=repeat,
+        timer=timer,
+        rounds=rounds,
+        cooldown_s=cooldown_s,
+    )
+
+
+def prepare_bench(
+    M: int = M,
+    N: int = N,
+    K: int = K,
+    world_size: int = WORLD_SIZE,
+    dtype: str = "float16",
+    *,
+    scheduler: str = "dynamic",
+    **_kwargs: Any,
+):
+    """Compile/export before assignment; ranks start CUDA in run_gpu."""
+    _check_config(M, N, K, world_size, dtype)
+    _check_scheduler(scheduler)
+    return prepare_distributed_bench(
         _get_benchmark_kernel(M, N, K, world_size, dtype, scheduler=scheduler),
         world_size=world_size,
         worker=_run_worker,
-        mode="bench",
         worker_kwargs={
             "M": M,
             "N": N,
@@ -1413,10 +1442,8 @@ def run_bench(
             "world_size": world_size,
             "dtype": dtype,
             "scheduler": scheduler,
-            "timer": "kineto",
-            "rounds": rounds,
-            "cooldown_s": cooldown_s,
         },
+        required_timer="kineto",
     )
 
 

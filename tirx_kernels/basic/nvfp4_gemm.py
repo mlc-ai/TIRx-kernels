@@ -7,11 +7,8 @@ import hashlib
 import json
 import os
 from enum import IntEnum
+from functools import cache
 from pathlib import Path
-
-import flashinfer
-import torch
-from flashinfer import SfLayout, nvfp4_quantize
 
 import tvm
 from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
@@ -48,6 +45,9 @@ _EVICT_FIRST_L2_POLICY = 0x12F0000000000000
 
 
 def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
+    import torch
+    from flashinfer import SfLayout, nvfp4_quantize
+
     torch.manual_seed(0)
     A_origin = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     B_origin = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
@@ -992,20 +992,23 @@ def get_kernel(M, N, K):
     return tir_ws_kernel(M, N, K)
 
 
+@cache
+def _compile_executable(M: int, N: int, K: int):
+    from tirx_kernels.runner import compile_kernel
+
+    return compile_kernel(get_kernel(M, N, K))
+
+
 def run_test(M=1024, N=1024, K=1024):
     """Compile, run, and verify kernel."""
     import torch
     import torch.nn.functional as F
 
-    kernel = tir_ws_kernel(M, N, K)
     A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
     alpha_tensor = torch.tensor([alpha], device="cuda", dtype=torch.float)
     out = torch.empty_like(C_ref).to("cuda").to(torch.bfloat16)
-    target = tvm.target.Target("cuda")
-    with target:
-        mod = tvm.IRModule({"main": kernel})
-        ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
-        ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out)
+    ex = _compile_executable(M, N, K)
+    ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out)
     cosine_sim = F.cosine_similarity(
         out.reshape(-1).float(), C_ref.to("cuda").reshape(-1).float(), dim=0
     )
@@ -1023,6 +1026,7 @@ def _flashinfer_autotune_cache_path(
     # FlashInfer rejects cache metadata from a different software/GPU stack.
     # Put each stack in its own directory as well, so an obsolete file cannot
     # prevent the current process from saving its newly tuned result.
+    import flashinfer
     from flashinfer.autotuner import _collect_metadata
 
     environment = _collect_metadata()
@@ -1090,16 +1094,21 @@ def _flashinfer_tuned_choice(
 # cudaDeviceSynchronize), and since the nvfp4 kernel (~28µs) is faster than that dispatch,
 # event wall-clock is host-starved and over-credits us ~4x. Proton measures pure GPU
 # kernel time -> honest ~parity (verified 0.996 vs event 4.11).
+def prepare_bench(M=1024, N=1024, K=1024, **kwargs):
+    """Compile the TIRx GEMM before CUDA allocation and reference autotuning."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    _compile_executable(M, N, K)
+    return prepared_cached_run_bench(__name__, {"M": M, "N": N, "K": K, **kwargs})
+
+
 def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark."""
+    import flashinfer
     import torch
 
     metadata = {}
-    kernel = tir_ws_kernel(M, N, K)
-    target = tvm.target.Target("cuda")
-    with target:
-        mod = tvm.IRModule({"main": kernel})
-        ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
+    ex = _compile_executable(M, N, K)
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)

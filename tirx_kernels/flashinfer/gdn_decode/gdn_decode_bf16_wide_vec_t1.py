@@ -1061,6 +1061,24 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
+def prepare_bench(**kwargs: Any):
+    """Compile the selected wide-vector specialization before CUDA setup."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    config = dict(kwargs)
+    _require_supported_config(config)
+    _compile_tirx(
+        int(config["num_heads"]),
+        int(config["num_v_heads"]),
+        int(config["tile_v"]),
+        bool(config.get("use_qk_l2norm", True)),
+        bool(config.get("disable_state_update", False)),
+        bool(config.get("cache_intermediate_states", False)),
+        bool(config.get("same_pool", True)),
+    )
+    return prepared_cached_run_bench(__name__, kwargs)
+
+
 def run_bench(
     *,
     warmup: int | None = None,

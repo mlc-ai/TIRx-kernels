@@ -8,10 +8,14 @@ JSON + reports under `.bench-suite/`.
 each flagged `default: true|false`. The files are bucketed to mirror the kernel
 tree, so a kernel's configs sit at `config/<bucket>/<kernel>.yaml`. With no
 `--workloads`, the flagged configs across all files are assembled into
-`.bench-suite/workloads.generated.yaml` and that is what runs -- 128
-representative single-GPU workloads, including the TP1 AllGather+GEMM and
-GEMM+ReduceScatter profiles. Widening or narrowing the sweep
-is a flag flip, not a new file.
+`.bench-suite/workloads.generated.yaml` and that is what runs. The generated
+file is the inspectable source of truth for the current representative sweep,
+including the TP1 AllGather+GEMM and GEMM+ReduceScatter profiles. Every kernel
+has at most three default small/medium/large representatives; the current tree
+assembles 112 workloads. Widening or narrowing the sweep is a YAML `default`
+flag flip, not a scheduler rule or a second selection file. Multi-GPU configs
+are deliberately absent from the default measured sweep but remain available
+to explicit workload files.
 
 ```bash
 cd /path/to/tirx-kernels
@@ -52,11 +56,22 @@ grep -vE "allgather_gemm|gemm_reduce_scatter" \
 python -m tirx_kernels.bench_suite --workloads /tmp/workloads_no_comm.yaml
 ```
 
-Import gate (kernels in the assembled default sweep only):
+Pipeline capability gate (all 41 registered kernels, all module configs, all
+YAML labels, and declared GPU counts; no prepare, compile, or GPU use):
 
 ```bash
 python -m tirx_kernels.bench_suite --check-imports
 ```
+
+The command also writes `.bench-suite/reports/pipeline-capability.md`, including
+the complete multi-GPU exemption inventory and its
+`exempted_by_human_unmeasured` runtime status. This explicit audit costs several
+seconds of CPU import work, so normal timed runs do not repeat it on their
+critical path. The current inventory is 992 module configs and 992 YAML configs.
+The gate requires exact bidirectional inventory coverage and statically enforces
+the generic-adapter boundary: CPU prepare compiles canonical `get_kernel()` output,
+while GPU execution may only consume it through lazy replay and cannot regenerate
+or compile the PrimFunc after assignment.
 
 ### SGLang FP8 paged MQA exploration
 
@@ -117,26 +132,41 @@ Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and 
 ## Strategy (TL;DR)
 
 1. **Pinned baseline lives in git** (`baseline.json`, `baseline.md`).
-2. **One job = one workload** (kernel + config). A worker atomically acquires the
-   workload's requested GPU count, then runs **one**
-   bench subprocess that always benches our kernel **and** every reference impl:
-   compile/prepare once, then **`--rounds N` in-bench**. Each round is one complete
-   call to the selected Triton-standard timer (including its own estimate, warmup,
-   and measurement), and `--cooldown` is applied before every implementation in
-   every round. The suite retains all round samples and reports their arithmetic mean.
-3. **Fail fast**: the first workload/subprocess `FAIL` stops new scheduling,
+2. **One fresh process per workload attempt.** Each child performs exactly
+   `PREPARING → READY → ASSIGNED → RUNNING_GPU → RESULT → exit`. Import/parsing,
+   config resolution, specialization, IR generation, and compilation happen in
+   CPU prepare without initializing CUDA or owning a GPU. The compiled executable
+   remains in that process; children and runtime objects are never recycled or
+   serialized across processes.
+3. **Bounded CPU/GPU pipeline.** The orchestrator starts multiple one-shot prepare
+   children up to `--max-prepare-processes`, bounds PREPARING+READY children with
+   `--ready-backlog`, and late-binds an atomic GPU claim only after READY. GPU
+   stages run concurrently across currently eligible cards and serially per card.
+   Internal RESULT releases dispatch immediately; polling is only for foreign GPU
+   occupancy changes. The initial occupancy snapshot starts alongside the first
+   CPU prepares; assignment remains blocked until that snapshot is complete.
+4. **Measurement semantics stay in the GPU stage.** Each child benches our kernel
+   and every reference implementation, retaining the original implementation
+   order, correctness/reference setup, timer, warmup/repeat, five rounds, 1.0s
+   cooldown before every implementation/round, raw samples, and arithmetic mean.
+5. **Fail fast**: the first workload/subprocess `FAIL` stops new scheduling,
    terminates the suite's in-flight subprocesses, writes the partial run for
    diagnosis, and exits with code 1. `INTERFERED` is not a workload failure and
-   is requeued; `SKIP` workloads are accepted without retry.
-4. **Dynamic free GPU queue** (one worker per probe-OK GPU):
-   workers pull jobs from a shared queue; each job atomically claims all required
-   free cards, runs one subprocess, then releases the full set. Whoever finishes
-   first grabs the next satisfiable job — no static workload→GPU binding and no
-   partial multi-GPU claims. Larger waiting claims take priority so single-GPU
-   traffic cannot starve 2/4/6-GPU workloads.
-5. **Ratio regression report** compares current ref/ours ratio vs the pinned
+   is retried from a fresh child and fresh prepare; `SKIP` is accepted without retry.
+   Every interference retry is retained as a structured ledger entry with the old
+   PID, intruder PIDs, attempt identity, and new retry attempt.
+6. **Ratio regression report** compares current ref/ours ratio vs the pinned
    `baseline.json` ratio (computed from its ours + ref impls). Promote a run over
    the baseline with `promote_baseline.py`.
+
+The target critical path is first-READY latency plus the eligibility-constrained
+GPU list schedule. Run JSON and `summary.md` break this into first child spawn,
+process startup, CLI bootstrap, common framework import, exact module import,
+config resolution, specialization/generation/compile, READY wait, assignment
+handoff, GPU stage, result handoff, and final reap tail. Foreign GPU wait, READY
+starvation, dispatch latency, and unexplained residual are reported separately.
+Each run also records peak owned process-tree size, aggregate RSS, and open file
+descriptors so one-shot process concurrency remains an observable bounded resource.
 
 ## Baseline files (git-tracked)
 
@@ -185,6 +215,15 @@ every entry. Optional per-entry fields are `timer`, `warmup`, `repeat`, and
 the acquired physical indices as an ordered, comma-separated
 `CUDA_VISIBLE_DEVICES` value and all assigned cards are monitored for interference.
 
+Multi-GPU, distributed, Kineto, and MegaMoE adapters use the same pipeline-only
+lifecycle. The scheduler rejects assignment-count mismatches and only launches
+rank/CUDA runtimes after a complete atomic claim. Their barriers, sample-wise max
+aggregation, Kineto spans, and process-group cleanup are preserved. On the shared
+benchmark host, multi-GPU runtime validation is intentionally recorded as
+`exempted_by_human_unmeasured`: this is neither `passed` nor `missing`, and must
+never be represented by zero, null, or an empty cell. Explicit multi-GPU workload
+files remain supported, but the default sweep and routine acceptance do not run them.
+
 MegaMoE entries use `timer: megamoe`, which invokes the dedicated DeepGEMM
 `bench_kineto` protocol. Do not set `warmup` or `repeat` for this timer because
 the protocol fixes its own 30-test schedule. Both compared MegaMoE launches have
@@ -209,6 +248,9 @@ defaults to FlashInfer's `auto` backend; set
 | `--cooldown` | `1.0` | Seconds before every implementation in every round |
 | `--util-threshold` | `0` | Skip GPUs above this utilization; requeue if a foreign process exceeds it during a run |
 | `--mem-threshold` | `0` | Skip GPUs with compute-app memory-used percent above this percent |
+| `--max-prepare-processes N` | host/GPU-derived | Maximum concurrent one-shot CPU prepare children |
+| `--ready-backlog N` | at least prepare bound and 2× visible GPUs | Maximum PREPARING+READY children awaiting assignment |
+| `--check-imports` | off | Run the no-GPU all-config pipeline capability audit and exit |
 
 Round aggregation is always the arithmetic mean. The raw five-element sample arrays
 remain in the run JSON for variance and outlier inspection.
@@ -224,8 +266,8 @@ remain in the run JSON for variance and outlier inspection.
 
 | Path | Description |
 |------|-------------|
-| `.bench-suite/runs/<id>.json` | Aggregated run results (times in microseconds) |
-| `.bench-suite/reports/<id>/summary.md` | Run overview: label, git provenance, ok/fail counts, per-row table |
+| `.bench-suite/runs/<id>.json` | Aggregated results, phase timestamps, pipeline cost model, and raw samples |
+| `.bench-suite/reports/<id>/summary.md` | Critical-path/phase breakdown, multi-GPU exemption, provenance, and per-row times |
 | `.bench-suite/reports/<id>/bench.md` | Main diff report (ratio Δ vs pinned baseline) |
 | `.bench-suite/logs/*__a<N>.log` | Benchmark subprocess stdout for each attempt |
 

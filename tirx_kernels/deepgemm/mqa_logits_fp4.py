@@ -1294,6 +1294,14 @@ def run_test(**kwargs: Any) -> None:
         )
 
 
+def prepare_bench(**kwargs: Any):
+    """Compile the TIRx executable without allocating CUDA data."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    _compile_tirx_mqa(_make_config(**kwargs), 0)
+    return prepared_cached_run_bench(__name__, kwargs)
+
+
 def run_bench(**kwargs: Any) -> dict[str, Any]:
     from tvm.tirx.bench import bench
 

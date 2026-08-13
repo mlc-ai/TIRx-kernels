@@ -26,6 +26,8 @@ The implementation structure follows the reviewer-approved sketch
 helpers live in ``tirx_kernels/flashinfer/utils/fp_quant.py``.
 """
 
+from typing import Any
+
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_8,
     cvt_e2m1x8,
@@ -292,6 +294,13 @@ def _run_reference(a, gs_inv, sf_layout: str, enable_pdl: bool):
     )
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(
     dtype: str,
     m: int,
@@ -336,11 +345,14 @@ def run_bench(
 ):
     """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
 
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
 
     a, gs_inv = prepare_data(dtype=dtype, m=m, k=k, sf_layout=sf_layout, zero_row=zero_row)
-    kernel = get_kernel(dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl)
-    ex = compile_kernel(kernel)
+    ex = compile_kernel_lazy(
+        lambda: get_kernel(
+            dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl
+        )
+    )
     out_tirx, sf_tirx, pts_tirx = _alloc_outputs(m, k, sf_layout)
 
     def tirx_launch():

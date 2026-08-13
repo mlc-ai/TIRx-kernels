@@ -21,16 +21,16 @@
 kernel: recurrent_kda_decode_grouped
 configs:
   - {config: dec_hv16_b1, default: true}
-  - {config: dec_hv16_b4, default: true}
-  - {config: dec_hv12_b4, default: true}
-  - {config: dec_hv12_b8, default: true}
-  - {config: ver_t8_hv16_b1, default: true}
-  - {config: ver_t8_hv16_b4, default: true}
-  - {config: ver_t8_hv16_b16, default: true}
-  - {config: ver_t8_hv16_b32, default: true}
-  - {config: ver_t8_hv16_b64, default: true}
+  - {config: dec_hv16_b4, default: false}
+  - {config: dec_hv12_b4, default: false}
+  - {config: dec_hv12_b8, default: false}
+  - {config: ver_t8_hv16_b1, default: false}
+  - {config: ver_t8_hv16_b4, default: false}
+  - {config: ver_t8_hv16_b16, default: false}
+  - {config: ver_t8_hv16_b32, default: false}
+  - {config: ver_t8_hv16_b64, default: false}
   - {config: ver_t8_hv16_b128, default: true}
   - {config: ver_t8_hv12_b16, default: true}
-  - {config: ver_t8_hv12_b64, default: true}
-  - {config: ver_t4_hv16_b32, default: true}
-  - {config: ver_t2_hv16_b8, default: true}
+  - {config: ver_t8_hv12_b64, default: false}
+  - {config: ver_t4_hv16_b32, default: false}
+  - {config: ver_t2_hv16_b8, default: false}

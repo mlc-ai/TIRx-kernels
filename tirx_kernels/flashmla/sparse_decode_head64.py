@@ -2539,16 +2539,19 @@ def _kernel_shape_params(
     cfg: SparseFlashMLADecodeHead64Config,
     device: torch.device | str,
     *,
+    prepared_num_sms: int | None = None,
     prepared_num_blocks: int | None = None,
     prepared_extra_num_blocks: int | None = None,
 ) -> dict[str, int]:
-    device_obj = torch.device(device)
-    device_index = device_obj.index
-    if device_index is None:
-        device_index = torch.cuda.current_device()
-    num_sm_parts = (
-        int(torch.cuda.get_device_properties(device_index).multi_processor_count) // cfg.s_q
-    )
+    if prepared_num_sms is None:
+        device_obj = torch.device(device)
+        device_index = device_obj.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        num_sms = int(torch.cuda.get_device_properties(device_index).multi_processor_count)
+    else:
+        num_sms = prepared_num_sms
+    num_sm_parts = num_sms // cfg.s_q
     num_sm_parts = max(num_sm_parts, 1)
     num_blocks = (
         prepared_num_blocks
@@ -3274,15 +3277,25 @@ def _compile_combine_kernel_cached(max_splits: int, have_attn_sink: bool, use_pd
 
 
 def _compile_decode_kernels(**kwargs: Any):
+    from tirx_kernels.runner import hardware_num_sms
+
     cfg = _cfg(**kwargs)
     device = kwargs.get("device", "cuda")
-    shape = _kernel_shape_params(cfg, device)
+    shape = _kernel_shape_params(cfg, device, prepared_num_sms=hardware_num_sms())
     presence = _main_presence_mask(cfg)
     use_pdl = cfg.b == 2
     return (
         _compile_main_kernel_cached(cfg.normalized_model_type, presence, use_pdl),
         _compile_combine_kernel_cached(shape["max_splits"], presence[1], use_pdl),
     )
+
+
+def prepare_bench(**kwargs: Any):
+    """Compile both sparse-decode executables without touching CUDA."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    _compile_decode_kernels(**kwargs)
+    return prepared_cached_run_bench(__name__, kwargs)
 
 
 def _launch_tirx(case: dict[str, Any], executables: tuple[Any, Any]) -> None:

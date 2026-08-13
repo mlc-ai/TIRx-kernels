@@ -6,19 +6,201 @@
 import argparse
 import json
 import os
+import socket
 import sys
+import time
 import traceback
 from unittest import SkipTest
-
-from tirx_kernels.registry import discover_kernels, load_kernel
-from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S, DEFAULT_BENCH_ROUNDS, run_kernel_bench
 
 
 def _get_bench_configs(mod):
     return getattr(mod, "BENCH_CONFIGS", getattr(mod, "CONFIGS", []))
 
 
+def _find_bench_config(mod, label: str) -> dict:
+    matches = [config for config in _get_bench_configs(mod) if config.get("label") == label]
+    if len(matches) != 1:
+        raise KeyError(
+            f"kernel {mod.KERNEL_META['name']!r} config {label!r}: "
+            f"expected exactly one match, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def _send_control(control: socket.socket, message: dict) -> None:
+    control.sendall(json.dumps(message, separators=(",", ":")).encode() + b"\n")
+
+
+def _validated_gpu_assignment(gpu_indices: object, required_num_gpus: int) -> list[str]:
+    if not isinstance(gpu_indices, list) or len(gpu_indices) != required_num_gpus:
+        raise ValueError(f"invalid GPU assignment: {gpu_indices!r}")
+    normalized = [str(index) for index in gpu_indices]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"GPU assignment contains duplicates: {gpu_indices!r}")
+    if any(not index.isdigit() for index in normalized):
+        raise ValueError(f"GPU assignment contains an invalid physical index: {gpu_indices!r}")
+    return normalized
+
+
+def _prepared_child_main(args, *, child_started: float) -> int:
+    """CPU-prepare in this process, then wait for a late GPU assignment."""
+    control = socket.socket(fileno=args.prepared_control_fd)
+    reader = control.makefile("r", encoding="utf-8")
+    prepare_started = child_started
+    try:
+        try:
+            framework_import_started = time.time()
+            from tirx_kernels.registry import load_kernel
+            from tirx_kernels.runner import (
+                DEFAULT_BENCH_COOLDOWN_S,
+                DEFAULT_BENCH_ROUNDS,
+                cuda_is_initialized,
+                prepare_kernel_bench,
+                run_prepared_kernel_bench,
+            )
+
+            framework_loaded = time.time()
+            if args.rounds is None:
+                args.rounds = DEFAULT_BENCH_ROUNDS
+            if args.cooldown is None:
+                args.cooldown = DEFAULT_BENCH_COOLDOWN_S
+            if args.rounds < 1:
+                raise ValueError("--rounds must be >= 1")
+            if args.cooldown < 0:
+                raise ValueError("--cooldown must be >= 0")
+            if not args.kernel or not args.config:
+                raise ValueError("prepared child requires --kernel and --config")
+            if cuda_is_initialized():
+                raise RuntimeError("CUDA was initialized before CPU prepare")
+            module = load_kernel(args.kernel, strict=True)
+            module_loaded = time.time()
+            config = _find_bench_config(module, args.config)
+            config_resolved = time.time()
+            prepared = prepare_kernel_bench(
+                args.kernel,
+                config,
+                module=module,
+                require_cuda_uninitialized=True,
+            )
+            if prepared.required_num_gpus != args.prepared_num_gpus:
+                raise ValueError(
+                    f"workload declares num_gpus={args.prepared_num_gpus}, but prepared "
+                    f"benchmark requires {prepared.required_num_gpus}"
+                )
+            ready = time.time()
+            _send_control(
+                control,
+                {
+                    "type": "READY",
+                    "child_started": child_started,
+                    "prepare_started": prepare_started,
+                    "framework_import_started": framework_import_started,
+                    "framework_loaded": framework_loaded,
+                    "module_loaded": module_loaded,
+                    "config_resolved": config_resolved,
+                    "ready": ready,
+                    "required_num_gpus": prepared.required_num_gpus,
+                },
+            )
+        except BaseException as error:
+            _send_control(
+                control,
+                {
+                    "type": "FAIL",
+                    "phase": "prepare",
+                    "error": f"{type(error).__name__}: {error}",
+                    "traceback": traceback.format_exc(),
+                },
+            )
+            return 1
+
+        line = reader.readline()
+        if not line:
+            return 1
+        command = json.loads(line)
+        if command.get("type") == "CANCEL":
+            return 0
+        if command.get("type") != "ASSIGN":
+            raise ValueError(f"expected ASSIGN or CANCEL, got {command!r}")
+
+        normalized_gpu_indices = _validated_gpu_assignment(
+            command.get("gpu_indices"), args.prepared_num_gpus
+        )
+        if cuda_is_initialized():
+            raise RuntimeError("CUDA was initialized before late GPU assignment")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(normalized_gpu_indices)
+        if cuda_is_initialized():
+            raise RuntimeError("setting CUDA_VISIBLE_DEVICES initialized CUDA")
+
+        gpu_started = time.time()
+        try:
+            result = run_prepared_kernel_bench(
+                prepared,
+                warmup=args.warmup,
+                repeat=args.repeat,
+                timer=args.timer,
+                rounds=args.rounds,
+                cooldown=args.cooldown,
+            )
+            # RESULT is the GPU-ownership handoff. Complete all device work and
+            # return cached allocations before telling the scheduler to reuse
+            # the physical card; subsequent process teardown is host-only.
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.cuda.is_initialized():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except SkipTest as error:
+            result = {
+                "kernel": args.kernel,
+                "label": args.config,
+                "status": "SKIP",
+                "reason": str(error),
+            }
+        except BaseException as error:
+            _send_control(
+                control,
+                {
+                    "type": "FAIL",
+                    "phase": "gpu",
+                    "gpu_started": gpu_started,
+                    "gpu_finished": time.time(),
+                    "error": f"{type(error).__name__}: {error}",
+                    "traceback": traceback.format_exc(),
+                },
+            )
+            return 1
+
+        _send_control(
+            control,
+            {
+                "type": "RESULT",
+                "gpu_started": gpu_started,
+                "gpu_finished": time.time(),
+                "result": result,
+            },
+        )
+        return 0
+    except BaseException as error:
+        try:
+            _send_control(
+                control,
+                {
+                    "type": "FAIL",
+                    "phase": "protocol",
+                    "error": f"{type(error).__name__}: {error}",
+                    "traceback": traceback.format_exc(),
+                },
+            )
+        except OSError:
+            pass
+        return 1
+    finally:
+        reader.close()
+        control.close()
+
+
 def main():
+    child_started = time.time()
     parser = argparse.ArgumentParser(description="Run kernel benchmarks")
     parser.add_argument("--kernel", type=str, default=None, help="Run only this kernel")
     parser.add_argument("--config", type=str, default=None, help="Run only this config label")
@@ -55,31 +237,44 @@ def main():
     parser.add_argument(
         "--rounds",
         type=int,
-        default=DEFAULT_BENCH_ROUNDS,
-        help=(
-            f"Independent standard-timer calls inside one process (default {DEFAULT_BENCH_ROUNDS})"
-        ),
+        default=None,
+        help="Independent standard-timer calls inside one process (default: runner protocol)",
     )
     parser.add_argument(
         "--cooldown",
         type=float,
-        default=DEFAULT_BENCH_COOLDOWN_S,
+        default=None,
         help=(
             "Seconds before every implementation in every round "
-            f"(default {DEFAULT_BENCH_COOLDOWN_S:g})"
+            "(default: runner protocol)"
         ),
     )
+    parser.add_argument("--prepared-control-fd", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--prepared-num-gpus", type=int, default=1, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.prepared_num_gpus < 1:
+        print("ERROR: --prepared-num-gpus must be >= 1", file=sys.stderr)
+        sys.exit(2)
 
+    if args.json or args.json_file:
+        os.environ["TIRX_BENCH_JSON"] = "1"
+
+    if args.prepared_control_fd is not None:
+        sys.exit(_prepared_child_main(args, child_started=child_started))
+
+    from tirx_kernels.registry import discover_kernels, load_kernel
+    from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S, DEFAULT_BENCH_ROUNDS, run_kernel_bench
+
+    if args.rounds is None:
+        args.rounds = DEFAULT_BENCH_ROUNDS
+    if args.cooldown is None:
+        args.cooldown = DEFAULT_BENCH_COOLDOWN_S
     if args.rounds < 1:
         print("ERROR: --rounds must be >= 1", file=sys.stderr)
         sys.exit(2)
     if args.cooldown < 0:
         print("ERROR: --cooldown must be >= 0", file=sys.stderr)
         sys.exit(2)
-
-    if args.json or args.json_file:
-        os.environ["TIRX_BENCH_JSON"] = "1"
 
     if args.kernel:
         try:

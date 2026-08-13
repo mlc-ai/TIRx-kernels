@@ -13,9 +13,9 @@
 kernel: recurrent_kda_decode_one_warp
 configs:
   - {config: hv16_b8_tr8_lb, default: true}
-  - {config: hv16_b16_tr16_lb, default: true}
-  - {config: hv16_b32_tr16_lb, default: true}
-  - {config: hv16_b64_tr16_lb, default: true}
+  - {config: hv16_b16_tr16_lb, default: false}
+  - {config: hv16_b32_tr16_lb, default: false}
+  - {config: hv16_b64_tr16_lb, default: false}
   - {config: hv16_b128_tr16_lb, default: true}
-  - {config: hv12_b16_tr16_lb, default: true}
+  - {config: hv12_b16_tr16_lb, default: false}
   - {config: hv12_b64_tr16_lb, default: true}

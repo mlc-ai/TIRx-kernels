@@ -1561,6 +1561,13 @@ def get_kernel(**kwargs: Any):
     return kernel.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(**kwargs: Any) -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA phase1")
@@ -1588,11 +1595,10 @@ def run_bench(
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA phase1 benchmark")
 
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
     from tvm.tirx.bench import bench
 
-    prim_func = get_kernel(**kwargs)
-    ex = compile_kernel(prim_func)
+    ex = compile_kernel_lazy(lambda: get_kernel(**kwargs))
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     case = prepare_data(**kwargs)

@@ -272,11 +272,9 @@ def load_deep_gemm_hc() -> tuple[Any, str]:
 
 
 def _get_num_sms(default: int) -> int:
-    if torch.cuda.is_available():
-        return int(
-            torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        )
-    return default
+    from tirx_kernels.runner import hardware_num_sms
+
+    return hardware_num_sms(default)
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
@@ -1127,6 +1125,18 @@ def _bench_deepgemm_case(case: TF32HCBenchCase) -> tuple[torch.Tensor, torch.Ten
         num_splits=None if case.config.num_splits == 1 else case.config.num_splits,
     )
     return case.d_deepgemm, case.sqr_deepgemm
+
+
+def prepare_bench(**kwargs: Any):
+    """Compile the hardware-profile specialization before GPU assignment."""
+    from tirx_kernels.runner import hardware_num_sms, prepared_cached_run_bench
+
+    config = _make_config(**kwargs)
+    runtime_config = TF32HCPrenormGemmConfig(
+        **{**asdict(config), "num_sms": hardware_num_sms(config.num_sms)}
+    )
+    _compile_tirx_tf32_hc(runtime_config)
+    return prepared_cached_run_bench(__name__, kwargs)
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:

@@ -1,37 +1,37 @@
-# The pinned sweep keeps sixteen of the thirty-two points: the full sequence
-# curve and both mask modes at kv4 (8:1 GQA) and kv32 (MHA), which bracket the
-# KV-head axis.  kv8 and kv16 stay benchable on request.
+# The pinned sweep keeps three reviewed small/medium/large points spanning
+# sequence length, mask mode, and the kv4 GQA to kv32 MHA dispatch regimes.
+# Every other point stays benchable on request.
 kernel: flash_attention4
 configs:
   - {config: s1024_h32kv4, default: true}
-  - {config: s1024_h32kv4_causal, default: true}
+  - {config: s1024_h32kv4_causal, default: false}
   - {config: s1024_h32kv8, default: false}
   - {config: s1024_h32kv8_causal, default: false}
   - {config: s1024_h32kv16, default: false}
   - {config: s1024_h32kv16_causal, default: false}
-  - {config: s1024_h32kv32, default: true}
-  - {config: s1024_h32kv32_causal, default: true}
-  - {config: s2048_h32kv4, default: true}
-  - {config: s2048_h32kv4_causal, default: true}
+  - {config: s1024_h32kv32, default: false}
+  - {config: s1024_h32kv32_causal, default: false}
+  - {config: s2048_h32kv4, default: false}
+  - {config: s2048_h32kv4_causal, default: false}
   - {config: s2048_h32kv8, default: false}
   - {config: s2048_h32kv8_causal, default: false}
   - {config: s2048_h32kv16, default: false}
   - {config: s2048_h32kv16_causal, default: false}
-  - {config: s2048_h32kv32, default: true}
-  - {config: s2048_h32kv32_causal, default: true}
-  - {config: s4096_h32kv4, default: true}
+  - {config: s2048_h32kv32, default: false}
+  - {config: s2048_h32kv32_causal, default: false}
+  - {config: s4096_h32kv4, default: false}
   - {config: s4096_h32kv4_causal, default: true}
   - {config: s4096_h32kv8, default: false}
   - {config: s4096_h32kv8_causal, default: false}
   - {config: s4096_h32kv16, default: false}
   - {config: s4096_h32kv16_causal, default: false}
-  - {config: s4096_h32kv32, default: true}
-  - {config: s4096_h32kv32_causal, default: true}
-  - {config: s8192_h32kv4, default: true}
-  - {config: s8192_h32kv4_causal, default: true}
+  - {config: s4096_h32kv32, default: false}
+  - {config: s4096_h32kv32_causal, default: false}
+  - {config: s8192_h32kv4, default: false}
+  - {config: s8192_h32kv4_causal, default: false}
   - {config: s8192_h32kv8, default: false}
   - {config: s8192_h32kv8_causal, default: false}
   - {config: s8192_h32kv16, default: false}
   - {config: s8192_h32kv16_causal, default: false}
   - {config: s8192_h32kv32, default: true}
-  - {config: s8192_h32kv32_causal, default: true}
+  - {config: s8192_h32kv32_causal, default: false}

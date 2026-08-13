@@ -63,6 +63,59 @@ class DistributedRuntime:
         )
 
 
+@dataclass
+class PreparedDistributedBench:
+    """CPU-compiled benchmark whose ranks start only after GPU assignment."""
+
+    executable: Any
+    library_path: Path
+    temporary_directory: Any
+    world_size: int
+    worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]]
+    worker_kwargs: dict[str, Any]
+    required_timer: str
+
+    @property
+    def required_num_gpus(self) -> int:
+        return self.world_size
+
+    def run_gpu(
+        self,
+        *,
+        warmup: int | None = None,
+        repeat: int | None = None,
+        timer: str | None = None,
+        rounds: int = 1,
+        cooldown_s: float = 1.0,
+    ) -> dict[str, Any]:
+        if timer not in (None, self.required_timer):
+            raise ValueError(
+                f"distributed benchmark supports only timer={self.required_timer!r}"
+            )
+        if warmup is not None or repeat is not None:
+            raise ValueError(
+                f"timer={self.required_timer!r} uses fixed iteration counts and "
+                "rejects warmup/repeat overrides"
+            )
+        require_sm100(self.world_size)
+        worker_kwargs = {
+            **self.worker_kwargs,
+            "timer": self.required_timer,
+            "rounds": rounds,
+            "cooldown_s": cooldown_s,
+        }
+        try:
+            return _run_distributed_library(
+                self.library_path,
+                world_size=self.world_size,
+                worker=self.worker,
+                mode="bench",
+                worker_kwargs=worker_kwargs,
+            )
+        finally:
+            self.temporary_directory.cleanup()
+
+
 def require_sm100(world_size: int) -> None:
     """Reject unsupported hosts before compiling or spawning workers."""
 
@@ -348,10 +401,79 @@ def run_distributed(
     return result
 
 
+def prepare_distributed_bench(
+    ir_module: Any,
+    *,
+    world_size: int,
+    worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]],
+    worker_kwargs: dict[str, Any],
+    required_timer: str,
+) -> PreparedDistributedBench:
+    """Compile/export before assignment and retain the artifact in this process."""
+    if not isinstance(world_size, int) or isinstance(world_size, bool) or world_size <= 0:
+        raise ValueError("world_size must be a positive integer")
+    if not callable(worker):
+        raise TypeError("worker must be callable")
+    temporary_directory = tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-prepared-")
+    library_path = Path(temporary_directory.name) / "kernel.so"
+    try:
+        executable = tvm.compile(
+            ir_module, target=tvm.target.Target("cuda"), tir_pipeline="tirx"
+        )
+        executable.export_library(str(library_path))
+    except BaseException:
+        temporary_directory.cleanup()
+        raise
+    return PreparedDistributedBench(
+        executable=executable,
+        library_path=library_path,
+        temporary_directory=temporary_directory,
+        world_size=world_size,
+        worker=worker,
+        worker_kwargs=dict(worker_kwargs),
+        required_timer=required_timer,
+    )
+
+
+def _run_distributed_library(
+    library_path: Path,
+    *,
+    world_size: int,
+    worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]],
+    mode: str,
+    worker_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Start rank CUDA/NCCL/NVSHMEM state after the complete claim exists."""
+    context = mp.get_context("spawn")
+    result_queue = context.SimpleQueue()
+    with tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-ranks-") as tmpdir:
+        init_method = f"file://{Path(tmpdir) / 'torch-distributed-init'}"
+        with _rank_library_preload(required=mode == "bench"):
+            mp.spawn(
+                _rank_entry,
+                args=(
+                    world_size,
+                    init_method,
+                    str(library_path),
+                    worker,
+                    mode,
+                    worker_kwargs,
+                    result_queue,
+                ),
+                nprocs=world_size,
+                join=True,
+            )
+        result = result_queue.get()
+    if not isinstance(result, dict):
+        raise TypeError("distributed worker must return a result dictionary")
+    return result
+
+
 __all__ = [
     "DistributedRuntime",
     "barrier_on_communication_stream",
     "barrier_on_compute_stream",
+    "prepare_distributed_bench",
     "require_nvls_multicast",
     "require_sm100",
     "run_distributed",

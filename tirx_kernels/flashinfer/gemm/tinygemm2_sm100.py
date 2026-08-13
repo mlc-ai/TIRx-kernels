@@ -593,6 +593,15 @@ def run_test(B: int, O: int, K: int) -> None:
         torch.testing.assert_close(tirx_out.float(), linear_ref.float(), atol=1e-2, rtol=1e-2)
 
 
+def prepare_bench(B: int, O: int, K: int):
+    """Compile the hardware-profile dispatch before CUDA initialization."""
+    from tirx_kernels.runner import hardware_num_sms, prepared_cached_run_bench
+
+    stage = _select_stage(B, O, K, hardware_num_sms())
+    _compile_executable(B, O, stage, False)
+    return prepared_cached_run_bench(__name__, {"B": B, "O": O, "K": K})
+
+
 def run_bench(
     B: int,
     O: int,

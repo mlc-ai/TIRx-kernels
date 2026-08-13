@@ -2,7 +2,7 @@
 # (single long, ragged two-segment, and batched).
 kernel: gdn_prefill_sm100
 configs:
-  - {config: hq2_hv8_s1x65536, default: true}
+  - {config: hq2_hv8_s1x65536, default: false}
   - {config: hq2_hv8_s1x32768, default: false}
   - {config: hq2_hv8_s1x16384, default: false}
   - {config: hq2_hv8_s1x8192, default: false}
@@ -99,7 +99,7 @@ configs:
   - {config: hq16_hv16_s1x4096, default: false}
   - {config: hq16_hv16_s1x2048, default: false}
   - {config: hq16_hv16_s6144+2048, default: false}
-  - {config: hq16_hv16_s4096+4096, default: true}
+  - {config: hq16_hv16_s4096+4096, default: false}
   - {config: hq16_hv16_s2048+6144, default: false}
   - {config: hq16_hv16_s1024+7168, default: false}
   - {config: hq16_hv16_s2048x4, default: false}

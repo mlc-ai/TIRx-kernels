@@ -1,10 +1,108 @@
 kernel: deepgemm_sm100_tf32_hc_prenorm_gemm
 configs:
-  - {config: m64_n24_k28672_s112, default: true}
-  - {config: m128_n24_k16384_s64, default: true}
-  - {config: m8192_n24_k16384_s1, default: true}
-  - {config: m8192_n24_k28672_s1, default: true}
-  - {config: m13_n24_k7168_s1, default: true}
-  - {config: m137_n24_k7680_s16, default: true}
-  - {config: m4096_n24_k7168_s1, default: true}
-  - {config: m4096_n24_k28672_s16, default: true}
+- config: m64_n24_k28672_s112
+  default: false
+- config: m128_n24_k16384_s64
+  default: true
+- config: m128_n24_k28672_s74
+  default: false
+- config: m192_n24_k16384_s49
+  default: false
+- config: m192_n24_k28672_s49
+  default: false
+- config: m256_n24_k16384_s37
+  default: false
+- config: m256_n24_k28672_s37
+  default: false
+- config: m320_n24_k16384_s29
+  default: false
+- config: m320_n24_k28672_s29
+  default: false
+- config: m384_n24_k16384_s24
+  default: false
+- config: m384_n24_k28672_s24
+  default: false
+- config: m448_n24_k16384_s21
+  default: false
+- config: m448_n24_k28672_s21
+  default: false
+- config: m512_n24_k16384_s18
+  default: false
+- config: m512_n24_k28672_s18
+  default: false
+- config: m576_n24_k16384_s16
+  default: false
+- config: m576_n24_k28672_s16
+  default: false
+- config: m640_n24_k16384_s14
+  default: false
+- config: m640_n24_k28672_s14
+  default: false
+- config: m704_n24_k16384_s13
+  default: false
+- config: m704_n24_k28672_s13
+  default: false
+- config: m768_n24_k16384_s12
+  default: false
+- config: m768_n24_k28672_s12
+  default: false
+- config: m832_n24_k16384_s11
+  default: false
+- config: m832_n24_k28672_s11
+  default: false
+- config: m896_n24_k16384_s10
+  default: false
+- config: m896_n24_k28672_s10
+  default: false
+- config: m1024_n24_k16384_s9
+  default: false
+- config: m1024_n24_k28672_s9
+  default: false
+- config: m1152_n24_k16384_s8
+  default: false
+- config: m1152_n24_k28672_s8
+  default: false
+- config: m1344_n24_k16384_s7
+  default: false
+- config: m1344_n24_k28672_s7
+  default: false
+- config: m1536_n24_k16384_s6
+  default: false
+- config: m1536_n24_k28672_s6
+  default: false
+- config: m1856_n24_k16384_s5
+  default: false
+- config: m1856_n24_k28672_s5
+  default: false
+- config: m2048_n24_k16384_s4
+  default: false
+- config: m2048_n24_k28672_s4
+  default: false
+- config: m2368_n24_k16384_s4
+  default: false
+- config: m2368_n24_k28672_s4
+  default: false
+- config: m3136_n24_k16384_s3
+  default: false
+- config: m3136_n24_k28672_s3
+  default: false
+- config: m4096_n24_k16384_s2
+  default: false
+- config: m4096_n24_k28672_s2
+  default: false
+- config: m4736_n24_k16384_s2
+  default: false
+- config: m4736_n24_k28672_s2
+  default: false
+- config: m8192_n24_k16384_s1
+  default: false
+- config: m8192_n24_k28672_s1
+  default: true
+- config: m13_n24_k7168_s1
+  default: false
+- config: m137_n24_k7680_s16
+  default: false
+- config: m4096_n24_k7168_s1
+  default: true
+- config: m4096_n24_k28672_s16
+  default: false

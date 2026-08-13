@@ -9,11 +9,11 @@
 kernel: flash_attention_backward_sm100
 configs:
   - {config: b1_s2048_h16_causal, default: true}
-  - {config: b1_s4096_h16_causal, default: true}
-  - {config: b2_s4096_h16_causal, default: true}
-  - {config: b1_s8192_h16_causal, default: true}
+  - {config: b1_s4096_h16_causal, default: false}
+  - {config: b2_s4096_h16_causal, default: false}
+  - {config: b1_s8192_h16_causal, default: false}
   - {config: b1_s8192_h16_noncausal, default: true}
   # flash-attn's default benchmark_attn.py shape: hd128, s8192, 32k total
   # tokens (batch 4), 16 heads, causal and non-causal.
-  - {config: b4_s8192_h16_causal, default: true}
+  - {config: b4_s8192_h16_causal, default: false}
   - {config: b4_s8192_h16_noncausal, default: true}

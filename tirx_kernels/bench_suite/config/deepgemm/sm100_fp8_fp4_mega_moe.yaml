@@ -1,5 +1,66 @@
 kernel: sm100_fp8_fp4_mega_moe
-defaults: {num_gpus: 1, timer: megamoe}
+defaults:
+  num_gpus: 1
+  timer: megamoe
 configs:
-  - {config: t64_m64_h7168_i3072_e384_k6_g1, default: true}
-  - {config: t8192_m8192_h7168_i3072_e384_k6_g1, default: true}
+- config: p1_tok2_h1024_i512_e2_k1_bm16
+  default: false
+- config: p2_tok2_h1024_i512_e4_k1_bm16
+  default: false
+  num_gpus: 2
+- config: p4_tok2_h1024_i512_e8_k1_bm16
+  default: false
+  num_gpus: 4
+- config: p6_tok2_h1024_i512_e12_k1_bm16
+  default: false
+  num_gpus: 6
+- config: p1_tok16_h1024_i512_e2_k2_bm32
+  default: false
+- config: p1_tok32_h1024_i512_e2_k2_bm64
+  default: false
+- config: p1_tok64_h1024_i512_e2_k2_bm96
+  default: false
+- config: p1_tok96_h1024_i512_e2_k2_bm128
+  default: false
+- config: p1_tok192_h1024_i512_e2_k2_bm192
+  default: false
+- config: t64_m64_h7168_i3072_e384_k6_g1
+  default: true
+- config: t64_m64_h7168_i3072_e384_k6_g2
+  default: false
+  num_gpus: 2
+- config: t8192_m8192_h7168_i3072_e384_k6_g2
+  default: false
+  num_gpus: 2
+- config: t64_m64_h7168_i3072_e384_k6_g4
+  default: false
+  num_gpus: 4
+- config: t8192_m8192_h7168_i3072_e384_k6_g4
+  default: false
+  num_gpus: 4
+- config: t64_m64_h7168_i3072_e384_k6_g6
+  default: false
+  num_gpus: 6
+- config: t8_h1024_i512_e24_k2_g1
+  default: false
+- config: t16_h2048_i1024_e48_k2_g1
+  default: false
+- config: t64_h4096_i1536_e96_k4_g1
+  default: false
+- config: t32_m64_h7168_i3072_e384_k6_g1
+  default: false
+- config: t8192_h7168_i3072_e64_k6_g1
+  default: false
+- config: t8192_h7168_i3072_e192_k6_g1
+  default: false
+- config: t8192_m8192_h7168_i3072_e384_k6_g1
+  default: true
+- config: t256_h7168_i3072_e384_k6_g4
+  default: false
+  num_gpus: 4
+- config: t1024_h7168_i3072_e384_k6_g4
+  default: false
+  num_gpus: 4
+- config: t8192_m8192_h7168_i3072_e384_k6_g6
+  default: false
+  num_gpus: 6

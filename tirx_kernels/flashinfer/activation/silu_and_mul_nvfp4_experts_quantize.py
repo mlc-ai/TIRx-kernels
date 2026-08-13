@@ -16,6 +16,8 @@ and per-expert row masks.  Only the default-environment specialization is in
 scope (fast-math reciprocal, E4M3 scale factors, no 4over6 refinement).
 """
 
+from typing import Any
+
 from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
 from tvm.tirx.bench import bench
@@ -42,9 +44,9 @@ _SM_COUNT_CACHE = None
 def _sm_count() -> int:
     global _SM_COUNT_CACHE
     if _SM_COUNT_CACHE is None:
-        import torch
+        from tirx_kernels.runner import hardware_num_sms
 
-        _SM_COUNT_CACHE = torch.cuda.get_device_properties(0).multi_processor_count
+        _SM_COUNT_CACHE = hardware_num_sms()
     return _SM_COUNT_CACHE
 
 
@@ -453,6 +455,13 @@ def _run_launch(ex, a, global_scale, out, sf, mask, n_experts, m, k):
     )
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand", **kwargs):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
@@ -504,13 +513,20 @@ def run_bench(
     """Benchmark the TIRx port against the source thop (kernel-only)."""
     import torch
 
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
 
     a, mask, global_scale = prepare_data(
         dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode
     )
-    kernel = get_kernel(dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode)
-    ex = compile_kernel(kernel)
+    ex = compile_kernel_lazy(
+        lambda: get_kernel(
+            dtype=dtype,
+            n_experts=n_experts,
+            m=m,
+            k=k,
+            mask_mode=mask_mode,
+        )
+    )
     out_tirx, sf_tirx = _alloc_outputs(dtype, n_experts, m, k)
 
     funcs = {

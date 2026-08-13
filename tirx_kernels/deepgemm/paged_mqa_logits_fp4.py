@@ -2390,6 +2390,14 @@ def run_test(**kwargs: Any) -> None:
         )
 
 
+def prepare_bench(**kwargs: Any):
+    """Compile the paged MQA executable without allocating CUDA data."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    _compile_tirx_paged_mqa(_make_config(**kwargs))
+    return prepared_cached_run_bench(__name__, kwargs)
+
+
 def run_bench(**kwargs: Any) -> dict[str, Any]:
     from tvm.tirx.bench import bench
 

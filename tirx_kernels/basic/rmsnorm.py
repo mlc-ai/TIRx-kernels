@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 import math
+from typing import Any
 
 import numpy as np
 
@@ -822,6 +823,13 @@ def get_kernel(hidden_size, **kwargs):
     return _get_rmsnorm_kernel(hidden_size)
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(hidden_size, batch_size, **kwargs):
     """Compile, run, and verify rmsnorm kernel."""
     import torch
@@ -849,10 +857,9 @@ def run_bench(hidden_size, batch_size, warmup=None, repeat=None, timer=None, **k
 
     import torch
 
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
 
-    kernel = _get_rmsnorm_kernel(hidden_size)
-    ex = compile_kernel(kernel)
+    ex = compile_kernel_lazy(lambda: get_kernel(hidden_size))
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     input_data, weights = prepare_data(batch_size, hidden_size)

@@ -19,6 +19,7 @@ not depend on TIRx tile primitives.
 
 import copy
 import math
+from functools import cache
 
 import torch
 
@@ -1871,6 +1872,18 @@ def build_kernel(
 # ---------------------------------------------------------------------------
 
 
+@cache
+def _compile_pipeline(B: int, H: int, S: int, D: int, causal: bool, attention_scale: float):
+    preprocess_ex = build_preprocess(B, S, H, D)
+    cast_ex = build_cast_f32_to_f16(B, S, H, D, attention_scale)
+    target = tvm.target.Target("cuda")
+    with target:
+        kernel_func = build_kernel(B, H, S, D, causal=causal, attention_scale=attention_scale)
+        kernel_mod = tvm.IRModule({"main": kernel_func})
+        kernel_ex = tvm.compile(kernel_mod, target=target, tir_pipeline="tirx")
+    return preprocess_ex, kernel_ex, cast_ex
+
+
 def setup(data, B, H, S, D):
     """Compile backward kernels, prepare data, run once. Return no-arg kernel_fn."""
     Q = data["Q"]
@@ -1888,15 +1901,9 @@ def setup(data, B, H, S, D):
     dK = data["dK"]
     dV = data["dV"]
     dQ = data["dQ"]
-    target = tvm.target.Target("cuda")
-
-    preprocess_ex = build_preprocess(B, S, H, D)
-    cast_ex = build_cast_f32_to_f16(B, S, H, D, attention_scale)
-
-    with target:
-        kernel_func = build_kernel(B, H, S, D, causal=causal, attention_scale=attention_scale)
-        kernel_mod = tvm.IRModule({"main": kernel_func})
-        kernel_ex = tvm.compile(kernel_mod, target=target, tir_pipeline="tirx")
+    preprocess_ex, kernel_ex, cast_ex = _compile_pipeline(
+        B, H, S, D, causal, attention_scale
+    )
 
     def run_all():
         preprocess_ex(dO, O, LSE, dpsum, LSE_log2, dQ_acc)
@@ -2023,6 +2030,32 @@ def run_test(
         matched = torch.isclose(actual, reference, rtol=0.1, atol=0.1).float().mean()
         if matched.item() < 0.995:
             raise AssertionError(f"{name} matched ratio {matched.item():.6f} is below 0.995")
+
+
+def prepare_bench(
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int = 128,
+    is_causal: bool = False,
+    **kwargs,
+):
+    """Compile the preprocess/core/cast pipeline before CUDA setup."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    scale = 1.0 / math.sqrt(head_dim)
+    _compile_pipeline(batch_size, num_heads, seq_len, head_dim, is_causal, scale)
+    return prepared_cached_run_bench(
+        __name__,
+        {
+            "batch_size": batch_size,
+            "seq_len": seq_len,
+            "num_heads": num_heads,
+            "head_dim": head_dim,
+            "is_causal": is_causal,
+            **kwargs,
+        },
+    )
 
 
 def run_bench(

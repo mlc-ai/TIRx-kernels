@@ -3407,6 +3407,13 @@ def get_kernel(**kwargs: Any):
     return bf16_fused_m128(**kwargs)
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(**kwargs: Any) -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for FlashKDA bf16 fused m128")
@@ -3445,7 +3452,7 @@ def run_bench(
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for FlashKDA bf16 fused m128 benchmark")
 
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
     from tvm.tirx.bench import bench
 
     case = prepare_data(**kwargs)
@@ -3453,7 +3460,7 @@ def run_bench(
     if not case["dispatch_reason"].startswith("m128:"):
         raise SkipTest(case["dispatch_reason"])
     args = _tirx_args(case)
-    ex = compile_kernel(bf16_fused_m128(**kwargs))
+    ex = compile_kernel_lazy(lambda: get_kernel(**kwargs))
     funcs = {"tirx": lambda: ex(*args)}
 
     # Produce the expected buffers once.  The FlashKDA peer builder validates

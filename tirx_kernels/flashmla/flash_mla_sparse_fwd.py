@@ -18,6 +18,7 @@ representative of each dispatch with NVIDIA IKET.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from functools import partial
 from types import ModuleType
 from typing import Any
@@ -128,6 +129,29 @@ def get_kernel(**kwargs: Any):
 def run_test(**kwargs: Any) -> None:
     _name, mod, _reason = _select_impl(**kwargs)
     mod.run_test(**kwargs)
+
+
+@dataclass(frozen=True)
+class _PreparedDispatch:
+    prepared: Any
+    name: str
+    reason: str
+
+    def run_gpu(self, **kwargs: Any) -> dict[str, Any]:
+        result = self.prepared.run_gpu(**kwargs)
+        if isinstance(result, dict):
+            result.setdefault("dispatch_kernel", self.name)
+            result.setdefault("dispatch_reason", self.reason)
+        return result
+
+
+def prepare_bench(**kwargs: Any):
+    """Prepare only the implementation selected by the canonical dispatcher."""
+    name, mod, reason = _select_impl(**kwargs)
+    prepare = getattr(mod, "prepare_bench", None)
+    if prepare is None:
+        raise TypeError(f"dispatch target {mod.__name__!r} has no prepare_bench()")
+    return _PreparedDispatch(prepare(**kwargs), name, reason)
 
 
 def run_bench(

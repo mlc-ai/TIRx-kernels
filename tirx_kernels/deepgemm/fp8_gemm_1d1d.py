@@ -110,9 +110,9 @@ def make_desc(
 ) -> GemmDesc:
     """Build the `GemmDesc` DeepGEMM's host entry would build for this config."""
     if num_sms is None:
-        import torch
+        from tirx_kernels.runner import hardware_num_sms
 
-        num_sms = torch.cuda.get_device_properties(0).multi_processor_count
+        num_sms = hardware_num_sms()
     return GemmDesc(
         gemm_type=GemmType.NORMAL,
         m=M,
@@ -153,6 +153,17 @@ def prepare_data(*, seed: int = 0, **config):
 
     config.pop("label", None)
     return prepare_normal(seed=seed, **config)
+
+
+def prepare_bench(**config):
+    """Compile the exact DeepGEMM specialization without initializing CUDA."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    from ._sm100_fp8_fp4_gemm_1d1d import compile_spec
+
+    config.pop("label", None)
+    compile_spec(_spec_for(config))
+    return prepared_cached_run_bench(__name__, config)
 
 
 def _tirx_launch(data, config):
@@ -228,6 +239,7 @@ __all__ = [
     "KERNEL_META",
     "get_kernel",
     "make_desc",
+    "prepare_bench",
     "prepare_data",
     "run_bench",
     "run_test",

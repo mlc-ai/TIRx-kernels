@@ -23,6 +23,8 @@ The implementation structure follows the reviewer-approved sketch
 ``tirx_kernels/flashinfer/utils/fp_quant.py``.
 """
 
+from typing import Any
+
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_4,
     absmax_8,
@@ -75,9 +77,9 @@ _SM_COUNT_CACHE = None
 def _sm_count() -> int:
     global _SM_COUNT_CACHE
     if _SM_COUNT_CACHE is None:
-        import torch
+        from tirx_kernels.runner import hardware_num_sms
 
-        _SM_COUNT_CACHE = torch.cuda.get_device_properties(0).multi_processor_count
+        _SM_COUNT_CACHE = hardware_num_sms()
     return _SM_COUNT_CACHE
 
 
@@ -430,6 +432,13 @@ def _run_reference(a, sf_layout: str, enable_pdl: bool):
     )
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(
     dtype: str, m: int, k: int, sf_layout: str = "linear", enable_pdl: bool = False, **kwargs
 ):
@@ -469,11 +478,14 @@ def run_bench(
 ):
     """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
 
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel_lazy
 
     (a,) = prepare_data(dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl)
-    kernel = get_kernel(dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl)
-    ex = compile_kernel(kernel)
+    ex = compile_kernel_lazy(
+        lambda: get_kernel(
+            dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl
+        )
+    )
     out_tirx, sf_tirx = _alloc_outputs(m, k, sf_layout)
 
     if sf_layout == "linear":
