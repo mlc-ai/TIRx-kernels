@@ -285,6 +285,7 @@ def _bench_megamoe_mode(
             "paired_profile_session": True,
             "cold_setup_per_implementation": True,
             "rounds": rounds,
+            "round_aggregate": "mean",
             "round_cooldown_s": cooldown_s,
             "round_orders": round_orders,
         },
@@ -502,9 +503,7 @@ def _run_worker(
 
                 from deep_gemm.testing import bench_kineto
 
-                validate_current_cuda_assignment(
-                    "before DeepGEMM MegaMoE timing", restore=True
-                )
+                validate_current_cuda_assignment("before DeepGEMM MegaMoE timing", restore=True)
                 bench_result = _bench_megamoe_mode(
                     {"tirx": tirx_megamoe_step, "deepgemm": deepgemm_megamoe_step},
                     {"tirx": "mega_moe_kernel", "deepgemm": "sm100_fp8_fp4_mega_moe_impl"},
@@ -562,11 +561,7 @@ def _worker_entry(
     result_queue: mp.SimpleQueue | None,
 ) -> None:
     result = _run_worker(
-        local_rank,
-        int(device_indices[local_rank]),
-        str(device_uuids[local_rank]),
-        cfg_dict,
-        mode,
+        local_rank, int(device_indices[local_rank]), str(device_uuids[local_rank]), cfg_dict, mode
     )
     if result_queue is not None:
         result_queue.put((local_rank, result))
@@ -673,11 +668,7 @@ def _run_distributed(
             try:
                 with _distributed_env(port):
                     return _run_worker(
-                        0,
-                        int(device_indices[0]),
-                        str(device_uuids[0]),
-                        cfg_dict,
-                        mode,
+                        0, int(device_indices[0]), str(device_uuids[0]), cfg_dict, mode
                     )
             except Exception as exc:
                 message = str(exc)

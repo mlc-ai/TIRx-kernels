@@ -45,9 +45,7 @@ def _descendant_pids(root_pid: int) -> set[int]:
             continue
         try:
             with open(f"/proc/{entry.name}/status") as status:
-                parent = next(
-                    int(line.split()[1]) for line in status if line.startswith("PPid:")
-                )
+                parent = next(int(line.split()[1]) for line in status if line.startswith("PPid:"))
         except (FileNotFoundError, PermissionError, ProcessLookupError, StopIteration, ValueError):
             continue
         parents[int(entry.name)] = parent
@@ -144,10 +142,7 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             config = _find_bench_config(module, args.config)
             config_resolved = time.time()
             prepared = prepare_kernel_bench(
-                args.kernel,
-                config,
-                module=module,
-                require_cuda_uninitialized=True,
+                args.kernel, config, module=module, require_cuda_uninitialized=True
             )
             if prepared.required_num_gpus != args.prepared_num_gpus:
                 raise ValueError(
@@ -205,9 +200,10 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             )
             gpu_indices = [int(index) for index in normalized_gpu_indices]
             expected_gpu_uuids = command.get("gpu_uuids")
-            if not isinstance(expected_gpu_uuids, list) or len(
-                expected_gpu_uuids
-            ) != args.prepared_num_gpus:
+            if (
+                not isinstance(expected_gpu_uuids, list)
+                or len(expected_gpu_uuids) != args.prepared_num_gpus
+            ):
                 raise ValueError(f"invalid physical GPU UUID assignment: {expected_gpu_uuids!r}")
             if gpu_attempt == 1 and cuda_is_initialized():
                 raise RuntimeError("CUDA was initialized before late GPU assignment")
@@ -401,10 +397,7 @@ def main():
         "--cooldown",
         type=float,
         default=None,
-        help=(
-            "Seconds before every implementation in every round "
-            "(default: runner protocol)"
-        ),
+        help=("Seconds before every implementation in every round (default: runner protocol)"),
     )
     parser.add_argument("--prepared-control-fd", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--prepared-num-gpus", type=int, default=1, help=argparse.SUPPRESS)

@@ -2123,14 +2123,9 @@ def _compile_tirx_paged_mqa_key(config: PagedMQALogitsFP4Config) -> tuple[tuple[
 
 
 def _compile_tirx_paged_mqa(config: PagedMQALogitsFP4Config) -> Any:
-    from tirx_kernels.runner import consume_prepared_cache
 
     compile_kwargs = _compile_tirx_paged_mqa_kwargs(config)
-    return consume_prepared_cache(
-        _COMPILE_CACHE_NAMESPACE,
-        _compile_tirx_paged_mqa_key(config),
-        lambda: _compile_tirx_paged_mqa_for_config(**compile_kwargs),
-    )
+    return _compile_tirx_paged_mqa_for_config(**compile_kwargs)
 
 
 def _run_deepgemm_paged_mqa(data: dict[str, Any], *, clean_logits: bool = False) -> torch.Tensor:
@@ -2408,18 +2403,15 @@ def run_test(**kwargs: Any) -> None:
 
 def prepare_bench(**kwargs: Any):
     """Compile the paged MQA executable without allocating CUDA data."""
-    from tirx_kernels.runner import prepared_cached_run_bench
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _make_config(**kwargs)
     executable = _compile_tirx_paged_mqa(config)
-    return prepared_cached_run_bench(
-        __name__,
-        kwargs,
-        cached=((_COMPILE_CACHE_NAMESPACE, _compile_tirx_paged_mqa_key(config), executable),),
-    )
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
 
 
-def run_bench(**kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench
 
     # Tiny (~8-11µs) paged kernel: event timing is launch-jitter-noisy (sporadic
@@ -2437,7 +2429,7 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     data = prepare_data(**config_kwargs)
-    invocation = _prepare_tirx_invocation(data)
+    invocation = _prepare_tirx_invocation(data, executable=prepared["executable"])
     tirx_logits = _run_tirx_invocation(data, invocation)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
@@ -2459,6 +2451,15 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
     )
     result["max_diff"] = tirx_diff
     return result
+
+
+def run_bench(**kwargs: Any) -> dict[str, Any]:
+    protocol = {
+        name: kwargs.pop(name)
+        for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
+        if name in kwargs
+    }
+    return prepare_bench(**kwargs).run_gpu(**protocol)
 
 
 __all__ = [

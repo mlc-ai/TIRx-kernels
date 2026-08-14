@@ -137,6 +137,10 @@ class _PreparedDispatch:
     name: str
     reason: str
 
+    @property
+    def required_num_gpus(self) -> int:
+        return self.prepared.required_num_gpus
+
     def run_gpu(self, **kwargs: Any) -> dict[str, Any]:
         result = self.prepared.run_gpu(**kwargs)
         if isinstance(result, dict):
@@ -150,24 +154,29 @@ class _PreparedDispatch:
             close()
 
 
+def run_gpu(prepared: _PreparedDispatch, **kwargs: Any) -> dict[str, Any]:
+    """Run only the implementation selected and prepared before assignment."""
+    return prepared.run_gpu(**kwargs)
+
+
 def prepare_bench(**kwargs: Any):
     """Prepare only the implementation selected by the canonical dispatcher."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
     name, mod, reason = _select_impl(**kwargs)
     prepare = getattr(mod, "prepare_bench", None)
     if prepare is None:
         raise TypeError(f"dispatch target {mod.__name__!r} has no prepare_bench()")
-    return _PreparedDispatch(prepare(**kwargs), name, reason)
+    state = _PreparedDispatch(prepare(**kwargs), name, reason)
+    return prepared_gpu_benchmark(
+        run_gpu, state, required_num_gpus=state.required_num_gpus, close=state.close
+    )
 
 
 def run_bench(
     *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
 ) -> dict[str, Any]:
-    name, mod, reason = _select_impl(**kwargs)
-    result = mod.run_bench(warmup=warmup, repeat=repeat, timer=timer, **kwargs)
-    if isinstance(result, dict):
-        result.setdefault("dispatch_kernel", name)
-        result.setdefault("dispatch_reason", reason)
-    return result
+    return prepare_bench(**kwargs).run_gpu(warmup=warmup, repeat=repeat, timer=timer)
 
 
 def _parse_iket_args() -> argparse.Namespace:

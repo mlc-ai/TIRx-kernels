@@ -1035,7 +1035,7 @@ def prepare_k_grouped(
 
     require_sm100()
     deep_gemm = require_deep_gemm()
-    from .k_grouped_fp8_gemm_contiguous import make_ks
+    from ..k_grouped_fp8_gemm_contiguous import make_ks
     from .spec import align_up
 
     torch.manual_seed(seed)

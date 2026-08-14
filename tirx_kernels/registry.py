@@ -191,8 +191,7 @@ def _build_kernel_index(
         previous = records.get(name)
         if previous is not None:
             raise ValueError(
-                f"duplicate kernel registry name {name!r}: "
-                f"{previous.module_name} and {module_name}"
+                f"duplicate kernel registry name {name!r}: {previous.module_name} and {module_name}"
             )
         records[name] = record
     return records, tuple(diagnostics)

@@ -3408,10 +3408,11 @@ def get_kernel(**kwargs: Any):
 
 
 def prepare_bench(**kwargs: Any):
-    """CPU-compile this workload for same-process GPU execution."""
-    from tirx_kernels.runner import prepare_module_bench
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    return prepare_module_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_test(**kwargs: Any) -> None:
@@ -3444,22 +3445,31 @@ def run_test(**kwargs: Any) -> None:
     cfg.validate()
 
 
-def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+def run_gpu(
+    prepared,
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
+    config = dict(prepared["config"])
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
     _rounds = kwargs.pop("rounds", 1)
     _cooldown_s = kwargs.pop("cooldown_s", 1.0)
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for FlashKDA bf16 fused m128 benchmark")
 
-    from tirx_kernels.runner import bench, compile_kernel_lazy
+    from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
     cfg: FlashKDABf16FusedM128Config = case["config"]
     if not case["dispatch_reason"].startswith("m128:"):
         raise SkipTest(case["dispatch_reason"])
     args = _tirx_args(case)
-    ex = compile_kernel_lazy(lambda: get_kernel(**kwargs))
+    ex = executable
     funcs = {"tirx": lambda: ex(*args)}
 
     # Produce the expected buffers once.  The FlashKDA peer builder validates
@@ -3500,6 +3510,15 @@ def run_bench(
         result["flashkda_raw_provenance"] = peer.provenance
         result["flashkda_raw_correctness"] = peer.correctness
     return result
+
+
+def run_bench(
+    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+) -> dict[str, Any]:
+    config = dict(kwargs)
+    protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
+    prepared = prepare_bench(**config)
+    return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 
 __all__ = [

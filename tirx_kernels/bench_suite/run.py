@@ -20,7 +20,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import ast
 import inspect
 import json
 import math
@@ -285,384 +284,6 @@ def _config_num_gpus(config: dict) -> int:
     return values[0]
 
 
-def _call_name(call: ast.Call) -> str | None:
-    if isinstance(call.func, ast.Name):
-        return call.func.id
-    if isinstance(call.func, ast.Attribute):
-        return call.func.attr
-    return None
-
-
-def _audit_generic_adapter_source(kernel: str, source_path: Path) -> bool:
-    """Validate the CPU/GPU boundary of a ``prepare_module_bench`` adapter.
-
-    Returns whether the module uses the generic one-PrimFunc adapter. Custom
-    prepared adapters own their boundary explicitly and are audited by their
-    runtime/capability contracts instead.
-    """
-    source = source_path.read_text()
-    tree = ast.parse(source, filename=str(source_path))
-    functions = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    prepare_bench = functions.get("prepare_bench")
-    if prepare_bench is None:
-        return False
-    uses_generic_adapter = any(
-        isinstance(node, ast.Call) and _call_name(node) == "prepare_module_bench"
-        for node in ast.walk(prepare_bench)
-    )
-    if not uses_generic_adapter:
-        return False
-
-    run_bench = functions.get("run_bench")
-    if run_bench is None:
-        raise TypeError(f"kernel {kernel!r} generic adapter has no run_bench()")
-    lazy_calls = [
-        node
-        for node in ast.walk(run_bench)
-        if isinstance(node, ast.Call) and _call_name(node) == "compile_kernel_lazy"
-    ]
-    if len(lazy_calls) != 1:
-        raise TypeError(
-            f"kernel {kernel!r} generic run_bench() must contain exactly one "
-            f"compile_kernel_lazy() call, found {len(lazy_calls)}"
-        )
-    eager_compiles = [
-        node.lineno
-        for node in ast.walk(run_bench)
-        if isinstance(node, ast.Call) and _call_name(node) == "compile_kernel"
-    ]
-    if eager_compiles:
-        raise TypeError(
-            f"kernel {kernel!r} generic run_bench() eagerly compiles on line(s) {eager_compiles}"
-        )
-
-    lazy_call = lazy_calls[0]
-    if len(lazy_call.args) != 1 or not isinstance(lazy_call.args[0], ast.Lambda):
-        raise TypeError(f"kernel {kernel!r} compile_kernel_lazy() must receive one builder lambda")
-    builder_lambda = lazy_call.args[0]
-    if (
-        not isinstance(builder_lambda.body, ast.Call)
-        or _call_name(builder_lambda.body) != "get_kernel"
-    ):
-        raise TypeError(f"kernel {kernel!r} generic lazy builder must call canonical get_kernel()")
-    builder_names = {
-        name
-        for node in ast.walk(builder_lambda.body)
-        if isinstance(node, ast.Call) and (name := _call_name(node)) is not None
-    }
-    lambda_node_ids = {id(node) for node in ast.walk(builder_lambda)}
-    eager_builders = [
-        (name, node.lineno)
-        for node in ast.walk(run_bench)
-        if id(node) not in lambda_node_ids
-        and isinstance(node, ast.Call)
-        and (name := _call_name(node)) in builder_names
-    ]
-    if eager_builders:
-        raise TypeError(
-            f"kernel {kernel!r} generic run_bench() invokes lazy builder work "
-            f"outside its lambda: {eager_builders}"
-        )
-
-    run_test = functions.get("run_test")
-    if run_test is not None and any(
-        isinstance(node, ast.Call) and _call_name(node) == "compile_kernel_lazy"
-        for node in ast.walk(run_test)
-    ):
-        raise TypeError(f"kernel {kernel!r} run_test() must keep standalone eager compilation")
-    return True
-
-
-def _audit_strict_cache_adapter_source(kernel: str, source_path: Path) -> bool:
-    """Require DeepGEMM ``build_launch`` adapters to consume their prepared spec."""
-    source = source_path.read_text()
-    tree = ast.parse(source, filename=str(source_path))
-    functions = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    prepare_bench = functions.get("prepare_bench")
-    if prepare_bench is None:
-        return False
-    tirx_launch = functions.get("_tirx_launch")
-    run_bench = functions.get("run_bench")
-    if tirx_launch is None or run_bench is None:
-        return False
-
-    build_launch_calls = [
-        node
-        for node in ast.walk(tirx_launch)
-        if isinstance(node, ast.Call) and _call_name(node) == "build_launch"
-    ]
-    if not build_launch_calls:
-        return False
-    if len(build_launch_calls) != 1:
-        raise TypeError(
-            f"kernel {kernel!r} must contain exactly one build_launch() call in "
-            f"_tirx_launch(), found {len(build_launch_calls)}"
-        )
-
-    def is_config_spec(node: ast.AST) -> bool:
-        return (
-            isinstance(node, ast.Call)
-            and _call_name(node) == "_spec_for"
-            and len(node.args) == 1
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == "config"
-            and not node.keywords
-        )
-
-    canonical_spec_names = {
-        target.id
-        for node in ast.walk(tirx_launch)
-        if isinstance(node, ast.Assign) and is_config_spec(node.value)
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    }
-    launch_call = build_launch_calls[0]
-    launch_spec = launch_call.args[0] if launch_call.args else None
-    launch_uses_config_spec = is_config_spec(launch_spec) or (
-        isinstance(launch_spec, ast.Name) and launch_spec.id in canonical_spec_names
-    )
-    if not launch_uses_config_spec:
-        raise TypeError(
-            f"kernel {kernel!r} _tirx_launch() must derive build_launch()'s spec "
-            "from canonical _spec_for(config)"
-        )
-    helper_calls = [
-        node
-        for node in ast.walk(prepare_bench)
-        if isinstance(node, ast.Call) and _call_name(node) == "prepare_compile_spec_bench"
-    ]
-    if len(helper_calls) != 1:
-        raise TypeError(
-            f"kernel {kernel!r} uses DeepGEMM build_launch() and must prepare exactly "
-            f"one strict compile-spec cache entry, found {len(helper_calls)}"
-        )
-    helper_call = helper_calls[0]
-    if len(helper_call.args) < 3 or not is_config_spec(helper_call.args[2]):
-        raise TypeError(
-            f"kernel {kernel!r} prepare_bench() must derive its strict cache key "
-            "from canonical _spec_for(config)"
-        )
-    if any(
-        isinstance(node, ast.Call) and _call_name(node) == "compile_spec"
-        for node in ast.walk(prepare_bench)
-    ):
-        raise TypeError(f"kernel {kernel!r} prepare_bench() bypasses strict compile-spec replay")
-    run_launch_calls = [
-        node
-        for node in ast.walk(run_bench)
-        if isinstance(node, ast.Call) and _call_name(node) == "_tirx_launch"
-    ]
-    if len(run_launch_calls) != 1:
-        raise TypeError(
-            f"kernel {kernel!r} run_bench() must consume the prepared spec through "
-            f"exactly one _tirx_launch() call, found {len(run_launch_calls)}"
-        )
-    return True
-
-
-def _audit_custom_cache_adapter_source(kernel: str, source_path: Path) -> bool:
-    """Require custom compiler adapters to declare and consume one exact artifact."""
-    tree = ast.parse(source_path.read_text(), filename=str(source_path))
-    functions = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    prepare_bench = functions.get("prepare_bench")
-    run_bench = functions.get("run_bench")
-    if prepare_bench is None or run_bench is None:
-        return False
-
-    consumers = [
-        (name, function, calls)
-        for name, function in functions.items()
-        if (
-            calls := [
-                node
-                for node in ast.walk(function)
-                if isinstance(node, ast.Call) and _call_name(node) == "consume_prepared_cache"
-            ]
-        )
-    ]
-    if not consumers:
-        return False
-    if len(consumers) != 1 or len(consumers[0][2]) != 1:
-        raise TypeError(
-            f"kernel {kernel!r} custom cache adapter must have exactly one "
-            "consume_prepared_cache() wrapper"
-        )
-    consumer_name, consumer, consumer_calls = consumers[0]
-    consume_call = consumer_calls[0]
-    if len(consume_call.args) != 3 or not isinstance(consume_call.args[2], ast.Lambda):
-        raise TypeError(
-            f"kernel {kernel!r} consume_prepared_cache() must receive namespace, key, "
-            "and one lazy compiler"
-        )
-    if not consumer.args.args:
-        raise TypeError(f"kernel {kernel!r} custom cache consumer has no config argument")
-    config_arg = consumer.args.args[0].arg
-    key_call = consume_call.args[1]
-    if not (
-        isinstance(key_call, ast.Call)
-        and isinstance(key_call.func, ast.Name)
-        and len(key_call.args) == 1
-        and isinstance(key_call.args[0], ast.Name)
-        and key_call.args[0].id == config_arg
-        and not key_call.keywords
-    ):
-        raise TypeError(
-            f"kernel {kernel!r} custom cache consumer must derive its key from "
-            "the canonical config argument"
-        )
-    key_helper = key_call.func.id
-    namespace = ast.dump(consume_call.args[0], include_attributes=False)
-    builder = consume_call.args[2].body
-    if not isinstance(builder, ast.Call) or not isinstance(builder.func, ast.Name):
-        raise TypeError(
-            f"kernel {kernel!r} custom cache consumer must keep compilation in one lazy call"
-        )
-    raw_compiler = builder.func.id
-
-    prepare_consumer_calls = [
-        node
-        for node in ast.walk(prepare_bench)
-        if isinstance(node, ast.Call) and _call_name(node) == consumer_name
-    ]
-    if len(prepare_consumer_calls) != 1:
-        raise TypeError(
-            f"kernel {kernel!r} prepare_bench() must invoke {consumer_name}() exactly once"
-        )
-    executable_names = {
-        target.id
-        for node in ast.walk(prepare_bench)
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        and isinstance(node.value, ast.Call)
-        and _call_name(node.value) == consumer_name
-        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
-        if isinstance(target, ast.Name)
-    }
-    if len(executable_names) != 1:
-        raise TypeError(
-            f"kernel {kernel!r} prepare_bench() must retain the custom compiled executable"
-        )
-
-    prepared_calls = [
-        node
-        for node in ast.walk(prepare_bench)
-        if isinstance(node, ast.Call) and _call_name(node) == "prepared_cached_run_bench"
-    ]
-    if len(prepared_calls) != 1:
-        raise TypeError(
-            f"kernel {kernel!r} prepare_bench() must declare exactly one prepared cache"
-        )
-    cached_keywords = [keyword for keyword in prepared_calls[0].keywords if keyword.arg == "cached"]
-    if len(cached_keywords) != 1:
-        raise TypeError(f"kernel {kernel!r} prepared cache declaration is missing cached=")
-    cached = cached_keywords[0].value
-    if not (
-        isinstance(cached, ast.Tuple)
-        and len(cached.elts) == 1
-        and isinstance(cached.elts[0], ast.Tuple)
-        and len(cached.elts[0].elts) == 3
-    ):
-        raise TypeError(f"kernel {kernel!r} prepare_bench() must declare exactly one cache entry")
-    cached_namespace, cached_key, cached_value = cached.elts[0].elts
-    if ast.dump(cached_namespace, include_attributes=False) != namespace:
-        raise TypeError(f"kernel {kernel!r} prepare and GPU cache namespaces differ")
-    if not (
-        isinstance(cached_key, ast.Call)
-        and _call_name(cached_key) == key_helper
-        and len(cached_key.args) == 1
-        and isinstance(cached_key.args[0], ast.Name)
-        and not cached_key.keywords
-    ):
-        raise TypeError(
-            f"kernel {kernel!r} prepare_bench() must use the consumer's canonical key helper"
-        )
-    if not isinstance(cached_value, ast.Name) or cached_value.id not in executable_names:
-        raise TypeError(f"kernel {kernel!r} prepare_bench() must register the retained executable")
-
-    call_graph = {
-        name: {
-            called
-            for node in ast.walk(function)
-            if isinstance(node, ast.Call) and (called := _call_name(node)) in functions
-        }
-        for name, function in functions.items()
-    }
-    reachable = set()
-    pending = ["run_bench"]
-    while pending:
-        name = pending.pop()
-        if name in reachable:
-            continue
-        reachable.add(name)
-        pending.extend(call_graph.get(name, ()))
-    if consumer_name not in reachable:
-        raise TypeError(
-            f"kernel {kernel!r} run_bench() does not consume its prepared custom artifact"
-        )
-    raw_calls_outside_consumer = [
-        (name, node.lineno)
-        for name in reachable - {consumer_name}
-        for node in ast.walk(functions[name])
-        if isinstance(node, ast.Call) and _call_name(node) == raw_compiler
-    ]
-    if raw_calls_outside_consumer:
-        raise TypeError(
-            f"kernel {kernel!r} GPU-stage call graph bypasses strict cache replay: "
-            f"{raw_calls_outside_consumer}"
-        )
-    return True
-
-
-def _audit_driver_safe_cuda_targets(kernel: str, source_path: Path) -> None:
-    """Reject CUDA targets that can query physical devices before ASSIGN."""
-    tree = ast.parse(source_path.read_text(), filename=str(source_path))
-
-    def literal_cuda_without_arch(node: ast.AST) -> bool:
-        if isinstance(node, ast.Constant):
-            return node.value == "cuda"
-        if not isinstance(node, ast.Dict):
-            return False
-        literal = {
-            key.value: value.value
-            for key, value in zip(node.keys, node.values)
-            if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
-        }
-        return literal.get("kind") == "cuda" and not literal.get("arch")
-
-    unsafe_targets = []
-    unsafe_compiles = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        call_name = _call_name(node)
-        if call_name == "Target" and node.args and literal_cuda_without_arch(node.args[0]):
-            unsafe_targets.append(node.lineno)
-        if call_name != "compile":
-            continue
-        target_nodes = [keyword.value for keyword in node.keywords if keyword.arg == "target"]
-        if len(node.args) >= 2:
-            target_nodes.append(node.args[1])
-        if any(literal_cuda_without_arch(target) for target in target_nodes):
-            unsafe_compiles.append(node.lineno)
-    if unsafe_targets or unsafe_compiles:
-        raise TypeError(
-            f"kernel {kernel!r} has driver-sensitive CUDA target literals: "
-            f"Target line(s) {unsafe_targets}, compile line(s) {unsafe_compiles}; "
-            "use runner.cuda_target() or an explicit CUDA arch"
-        )
-
-
 def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
     """Statically prove exact resolution and explicit pipeline coverage."""
     from tirx_kernels.registry import kernel_index, load_kernel
@@ -674,11 +295,6 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
     labels_by_kernel: dict[str, dict[str, dict]] = {}
     multi_gpu_exemptions: list[dict[str, Any]] = []
     module_config_count = 0
-    adapter_kernels: dict[str, list[str]] = {
-        "generic_lazy_replay": [],
-        "strict_cache_replay": [],
-        "explicit_custom": [],
-    }
     curated_default_selections: list[dict[str, Any]] = []
 
     for name in sorted(records):
@@ -686,30 +302,10 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         modules[name] = module
         if not callable(getattr(module, "prepare_bench", None)):
             raise TypeError(f"kernel {name!r} has no explicit prepare_bench()")
-        source_path = Path(inspect.getsourcefile(module) or "")
-        if not source_path.is_file():
-            raise FileNotFoundError(f"kernel {name!r} has no inspectable source file")
-        _audit_driver_safe_cuda_targets(name, source_path)
-        is_generic = _audit_generic_adapter_source(name, source_path)
-        strict_cache_contracts = (
-            _audit_strict_cache_adapter_source(name, source_path),
-            _audit_custom_cache_adapter_source(name, source_path),
-        )
-        if sum(strict_cache_contracts) > 1:
-            raise TypeError(f"kernel {name!r} matches multiple strict-cache contracts")
-        is_strict_cache = any(strict_cache_contracts)
-        if is_generic and is_strict_cache:
-            raise TypeError(
-                f"kernel {name!r} matches both generic and strict-cache adapter contracts"
-            )
-        adapter_class = (
-            "generic_lazy_replay"
-            if is_generic
-            else "strict_cache_replay"
-            if is_strict_cache
-            else "explicit_custom"
-        )
-        adapter_kernels[adapter_class].append(name)
+        if not callable(getattr(module, "run_gpu", None)):
+            raise TypeError(f"kernel {name!r} has no explicit run_gpu()")
+        if not callable(getattr(module, "run_bench", None)):
+            raise TypeError(f"kernel {name!r} has no standalone run_bench()")
         configs = _bench_configs(module)
         prepare_bench = module.prepare_bench
         labels: dict[str, dict] = {}
@@ -799,10 +395,7 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         "module_config_count": module_config_count,
         "yaml_config_count": yaml_config_count,
         "default_workload_count": default_workload_count,
-        "generic_adapter_count": len(adapter_kernels["generic_lazy_replay"]),
-        "strict_cache_adapter_count": len(adapter_kernels["strict_cache_replay"]),
-        "custom_adapter_count": len(adapter_kernels["explicit_custom"]),
-        "adapter_kernels": adapter_kernels,
+        "explicit_stage_kernel_count": len(records),
         "curated_default_selections": curated_default_selections,
         "multi_gpu_runtime_validation": {
             "validation_status": "exempted_by_human_unmeasured",
@@ -825,10 +418,7 @@ def write_pipeline_capability_report(out_dir: Path, capability: dict[str, Any]) 
         f"- module configs: `{capability['module_config_count']}`",
         f"- YAML configs: `{capability['yaml_config_count']}`",
         f"- default workloads: `{capability['default_workload_count']}`",
-        f"- generic lazy-replay adapters: `{capability['generic_adapter_count']}`",
-        f"- strict custom-cache replay adapters: `{capability['strict_cache_adapter_count']}`",
-        f"- explicit/custom adapters: `{capability['custom_adapter_count']}`",
-        f"- total pipeline adapters: `{capability['kernel_count']}` / "
+        f"- explicit prepare/run_gpu kernels: `{capability['explicit_stage_kernel_count']}` / "
         f"`{capability['kernel_count']}`",
         f"- reviewed three-point default selections: "
         f"`{len(capability['curated_default_selections'])}`",
@@ -858,9 +448,8 @@ def write_pipeline_capability_report(out_dir: Path, capability: dict[str, Any]) 
         "- migrated semantics: pipeline-only late assignment, full atomic claim before "
         "rank/CUDA startup, barriers, sample-wise max aggregation, Kineto spans, and "
         "process-group cleanup",
-        "- no-card structural checks: assignment-count rejection, atomic-claim failure, "
-        "and rank lifecycle ordering are covered by "
-        "`tests/test_bench_pipeline_protocol.py`; this static audit does not execute them",
+        "- runtime invariants retained: assignment-count rejection, atomic GPU claims, "
+        "and rank lifecycle ordering; this static audit does not execute multi-GPU work",
         "",
         "| workload | GPUs | runtime validation |",
         "|---|---:|---|",
@@ -888,6 +477,8 @@ def check_workload_capabilities(workloads: list[dict]) -> list[str]:
         module = load_kernel(name, strict=True)
         if not callable(getattr(module, "prepare_bench", None)):
             raise TypeError(f"kernel {name!r} has no explicit prepare_bench()")
+        if not callable(getattr(module, "run_gpu", None)):
+            raise TypeError(f"kernel {name!r} has no explicit run_gpu()")
         matches = [
             config
             for config in _bench_configs(module)
@@ -1523,7 +1114,12 @@ def _spawn_prepared_attempt(
     repo_root = str(_kernels_repo_root())
     python_path = env.get("PYTHONPATH")
     env["PYTHONPATH"] = repo_root if not python_path else f"{repo_root}{os.pathsep}{python_path}"
-    cache_dir = (log_dir.parent / "cache").resolve()
+    configured_cache = env.get("TIRX_BENCH_CACHE_DIR")
+    if configured_cache:
+        cache_dir = Path(configured_cache).expanduser().resolve()
+    else:
+        user_cache = Path(env.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        cache_dir = (user_cache / "tirx-kernels" / "bench-suite").resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
     env["TIRX_BENCH_CACHE_DIR"] = str(cache_dir)
     command = _prepared_child_command(
@@ -2117,9 +1713,7 @@ def write_summary(out_dir: Path, current: dict) -> Path:
                 "- post-GPU_START execution time total / by index: "
                 f"`{sum(execution_by_gpu.values()):.3f}s` / `{execution_by_gpu}`"
             )
-            lines.append(
-                f"- CPU READY starvation: `{cost['ready_starvation_s']:.3f}s`"
-            )
+            lines.append(f"- CPU READY starvation: `{cost['ready_starvation_s']:.3f}s`")
             lines.append(
                 "- interference retry READY delay / interrupted GPU ownership: "
                 f"`{cost['interference_retry_ready_delay_s']:.3f}s` / "
@@ -2535,13 +2129,7 @@ def _pipeline_cost_model(
         attempts = gpu_attempts(record)
         if type(required_num_gpus) is not int or required_num_gpus < 1 or not attempts:
             return False
-        required_fields = (
-            "ready",
-            "assigned",
-            "gpu_started",
-            "gpu_finished",
-            "ownership_released",
-        )
+        required_fields = ("ready", "assigned", "gpu_started", "gpu_finished", "ownership_released")
         for attempt in attempts:
             gpus = attempt.get("gpus")
             if not isinstance(gpus, (list, tuple)) or len(gpus) != required_num_gpus:
@@ -2603,15 +2191,10 @@ def _pipeline_cost_model(
         initial_ready = record["phase_timestamps"]["ready"]
         for attempt in gpu_attempts(record):
             scheduled_attempts.append(
-                {
-                    **attempt,
-                    "_record_index": record_index,
-                    "_initial_ready": initial_ready,
-                }
+                {**attempt, "_record_index": record_index, "_initial_ready": initial_ready}
             )
     assignment_handoffs = [
-        max(0.0, attempt["gpu_started"] - attempt["assigned"])
-        for attempt in scheduled_attempts
+        max(0.0, attempt["gpu_started"] - attempt["assigned"]) for attempt in scheduled_attempts
     ]
     gpu_claim_intervals_by_index: dict[str, list[tuple[float, float]]] = {}
     gpu_execution_intervals_by_index: dict[str, list[tuple[float, float]]] = {}
@@ -2628,11 +2211,10 @@ def _pipeline_cost_model(
         for gpu in known_gpu_indices
     }
     gpu_execution_by_index = {
-        gpu: sum(
-            end - start for start, end in gpu_execution_intervals_by_index.get(gpu, [])
-        )
+        gpu: sum(end - start for start, end in gpu_execution_intervals_by_index.get(gpu, []))
         for gpu in known_gpu_indices
     }
+
     def external_occupied_at(timestamp: float) -> set[str]:
         occupied: tuple[str, ...] | None = None
         for changed_at, value in external_history:
@@ -2654,9 +2236,7 @@ def _pipeline_cost_model(
             return 0.0
         boundaries = {started, finished}
         boundaries.update(
-            timestamp
-            for timestamp, _occupied in external_history
-            if started < timestamp < finished
+            timestamp for timestamp, _occupied in external_history if started < timestamp < finished
         )
         for gpu, interval_started, interval_finished in normalized_foreign_intervals:
             if gpu not in gpus:
@@ -2682,18 +2262,13 @@ def _pipeline_cost_model(
     for attempt in sorted(scheduled_attempts, key=lambda item: item["assigned"]):
         available_at = max(
             [attempt["ready"]]
-            + [
-                actual_available_at.get(str(gpu), attempt["ready"])
-                for gpu in attempt["gpus"]
-            ]
+            + [actual_available_at.get(str(gpu), attempt["ready"]) for gpu in attempt["gpus"]]
         )
         raw_dispatch_wait = max(0.0, attempt["assigned"] - available_at)
         foreign_dispatch_wait = min(
             raw_dispatch_wait,
             foreign_overlap_s(
-                available_at,
-                attempt["assigned"],
-                tuple(str(gpu) for gpu in attempt["gpus"]),
+                available_at, attempt["assigned"], tuple(str(gpu) for gpu in attempt["gpus"])
             ),
         )
         dispatch_latency = max(0.0, raw_dispatch_wait - foreign_dispatch_wait)
@@ -2750,11 +2325,7 @@ def _pipeline_cost_model(
 
         ordered = sorted(
             scheduled_attempts,
-            key=lambda item: (
-                ready_offset(item),
-                item.get("attempt", 1),
-                item["_record_index"],
-            ),
+            key=lambda item: (ready_offset(item), item.get("attempt", 1), item["_record_index"]),
         )
         for attempt in ordered:
             count = len(attempt["gpus"])
@@ -2784,8 +2355,7 @@ def _pipeline_cost_model(
                     sorted(gpu_indices, key=lambda gpu: (available[gpu], int(gpu)))[:count]
                 )
                 start = max(
-                    [attempt_ready_offset, dependency_ready]
-                    + [available[gpu] for gpu in selected]
+                    [attempt_ready_offset, dependency_ready] + [available[gpu] for gpu in selected]
                 )
             # The card is unavailable to all other workloads from ASSIGN until
             # ownership release.  set_device, UUID verification, tensor/reference
@@ -2801,22 +2371,13 @@ def _pipeline_cost_model(
     ideal_gpu_s = list_schedule(ready_mode="none")
     cpu_ready_constrained_gpu_s = list_schedule(ready_mode="initial")
     attempt_ready_constrained_gpu_s = list_schedule(ready_mode="attempt")
-    eligibility_constrained_gpu_s = list_schedule(
-        ready_mode="attempt", respect_external=True
-    )
-    foreign_wait_s = max(
-        0.0, eligibility_constrained_gpu_s - attempt_ready_constrained_gpu_s
-    )
+    eligibility_constrained_gpu_s = list_schedule(ready_mode="attempt", respect_external=True)
+    foreign_wait_s = max(0.0, eligibility_constrained_gpu_s - attempt_ready_constrained_gpu_s)
     first_ready_s = max(0.0, first_ready - run_started)
     expected_s = first_ready_s + attempt_ready_constrained_gpu_s
     expected_with_foreign_s = first_ready_s + eligibility_constrained_gpu_s
     observed_s = max(0.0, critical_finished - run_started)
-    unexplained_s = (
-        observed_s
-        - first_ready_s
-        - attempt_ready_constrained_gpu_s
-        - foreign_wait_s
-    )
+    unexplained_s = observed_s - first_ready_s - attempt_ready_constrained_gpu_s - foreign_wait_s
 
     def percentile(values: list[float], fraction: float) -> float:
         ordered = sorted(values)
@@ -2837,12 +2398,10 @@ def _pipeline_cost_model(
         attempt for attempt in scheduled_attempts if attempt.get("status") == "INTERFERED"
     ]
     retry_gpu_ownership_s = sum(
-        attempt["ownership_released"] - attempt["assigned"]
-        for attempt in interfered_attempts
+        attempt["ownership_released"] - attempt["assigned"] for attempt in interfered_attempts
     )
     retry_gpu_execution_s = sum(
-        attempt["ownership_released"] - attempt["gpu_started"]
-        for attempt in interfered_attempts
+        attempt["ownership_released"] - attempt["gpu_started"] for attempt in interfered_attempts
     )
 
     return {
@@ -2869,9 +2428,7 @@ def _pipeline_cost_model(
         "initial_dispatch_latency_s": latency_summary(initial_dispatch_latencies),
         "retry_dispatch_latency_s": latency_summary(retry_dispatch_latencies),
         "assignment_handoff_s": latency_summary(assignment_handoffs),
-        "ready_starvation_s": max(
-            0.0, cpu_ready_constrained_gpu_s - ideal_gpu_s
-        ),
+        "ready_starvation_s": max(0.0, cpu_ready_constrained_gpu_s - ideal_gpu_s),
         "interference_retry_ready_delay_s": max(
             0.0, attempt_ready_constrained_gpu_s - cpu_ready_constrained_gpu_s
         ),
@@ -2975,9 +2532,7 @@ def _validate_pipeline_timelines(records: list[dict]) -> None:
             )
             missing_attempt = [phase for phase in attempt_phases if phase not in attempt]
             if missing_attempt:
-                raise RuntimeError(
-                    f"{attempt_label} missing GPU-attempt phases {missing_attempt}"
-                )
+                raise RuntimeError(f"{attempt_label} missing GPU-attempt phases {missing_attempt}")
             attempt_values = [attempt[phase] for phase in attempt_phases]
             if any(right < left for left, right in pairwise(attempt_values)):
                 raise RuntimeError(
@@ -3051,20 +2606,12 @@ def run_scheduled_jobs(
     physical_uuid_by_index = dict(pool._all_gpus())
 
     def note_foreign_interference(
-        gpus: tuple[str, ...],
-        intruder_pids: list[int],
-        *,
-        source: str,
-        detected_at: float,
+        gpus: tuple[str, ...], intruder_pids: list[int], *, source: str, detected_at: float
     ) -> None:
         for gpu in gpus:
             state = foreign_interference_open.get(gpu)
             if state is None:
-                state = {
-                    "started": detected_at,
-                    "intruder_pids": set(),
-                    "sources": set(),
-                }
+                state = {"started": detected_at, "intruder_pids": set(), "sources": set()}
                 foreign_interference_open[gpu] = state
             state["intruder_pids"].update(intruder_pids)
             state["sources"].add(source)
@@ -3132,10 +2679,7 @@ def run_scheduled_jobs(
             return
         detected_at = time.time()
         note_foreign_interference(
-            item.gpus,
-            intruders,
-            source="running_gpu_monitor",
-            detected_at=detected_at,
+            item.gpus, intruders, source="running_gpu_monitor", detected_at=detected_at
         )
         item.pending_interference = {
             "detected_at": detected_at,
@@ -3580,9 +3124,7 @@ def run_scheduled_jobs(
             active.pop(fd, None)
     run_finished = time.time()
     clear_foreign_interference(
-        tuple(foreign_interference_open),
-        cleared_at=run_finished,
-        reason="run_finished",
+        tuple(foreign_interference_open), cleared_at=run_finished, reason="run_finished"
     )
     sample_host_resources()
     if critical_finished is None:

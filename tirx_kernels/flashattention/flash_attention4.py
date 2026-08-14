@@ -1636,10 +1636,11 @@ def get_kernel(
 
 
 def prepare_bench(**kwargs: Any):
-    """CPU-compile this workload for same-process GPU execution."""
-    from tirx_kernels.runner import prepare_module_bench
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    return prepare_module_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=False, **kwargs):
@@ -1676,13 +1677,9 @@ def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causa
     np.testing.assert_allclose(O_tir.cpu().numpy(), ref.cpu().numpy(), rtol=0.01, atol=0.01)
 
 
-def run_bench(
-    batch_size,
-    seq_len,
-    num_qo_heads,
-    num_kv_heads,
-    head_dim,
-    is_causal=False,
+def run_gpu(
+    prepared,
+    *,
     warmup=None,
     repeat=None,
     timer=None,  # None inherits the global default (proton); the CuTeDSL flashattn
@@ -1691,18 +1688,18 @@ def run_bench(
     **kwargs,
 ):
     """Benchmark flash attention 4."""
-    from tirx_kernels.runner import compile_kernel_lazy
+    config = dict(prepared["config"])
+    batch_size = config.pop("batch_size")
+    seq_len = config.pop("seq_len")
+    num_qo_heads = config.pop("num_qo_heads")
+    num_kv_heads = config.pop("num_kv_heads")
+    head_dim = config.pop("head_dim")
+    is_causal = config.pop("is_causal")
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
 
-    ex = compile_kernel_lazy(
-        lambda: get_kernel(
-            batch_size,
-            seq_len,
-            num_qo_heads,
-            num_kv_heads,
-            head_dim,
-            is_causal,
-        )
-    )
+    ex = executable
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     Q, K, V, _ = prepare_data(batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim)
@@ -1819,6 +1816,34 @@ def run_bench(
         references={"flashattn_sm100": _flashattn_sm100},
         **kwargs,
     )
+
+
+def run_bench(
+    batch_size,
+    seq_len,
+    num_qo_heads,
+    num_kv_heads,
+    head_dim,
+    is_causal=False,
+    warmup=None,
+    repeat=None,
+    timer=None,  # None inherits the global default (proton); the CuTeDSL flashattn
+    # reference cannot be CUDA-graph-captured, so proton (not cudagraph_proton) is what
+    # gives an honest ratio here (verified 0.994 vs event's unstable 0.97-1.38).
+    **kwargs,
+):
+    config = dict(kwargs)
+    protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
+    prepared = prepare_bench(
+        batch_size=batch_size,
+        seq_len=seq_len,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        is_causal=is_causal,
+        **config,
+    )
+    return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 
 def _parse_iket_args() -> argparse.Namespace:

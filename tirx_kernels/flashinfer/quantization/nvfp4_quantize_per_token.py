@@ -295,10 +295,11 @@ def _run_reference(a, gs_inv, sf_layout: str, enable_pdl: bool):
 
 
 def prepare_bench(**kwargs: Any):
-    """CPU-compile this workload for same-process GPU execution."""
-    from tirx_kernels.runner import prepare_module_bench
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    return prepare_module_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_test(
@@ -328,31 +329,21 @@ def run_test(
     torch.testing.assert_close(pts_tirx, ref_pts, rtol=0, atol=0)
 
 
-def run_bench(
-    dtype: str,
-    m: int,
-    k: int,
-    sf_layout: str = "128x4",
-    enable_pdl: bool = False,
-    zero_row: bool = False,
-    *,
-    warmup=None,
-    repeat=None,
-    timer=None,
-    rounds=1,
-    cooldown_s=1.0,
-    **kwargs,
-):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
     """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
-
-    from tirx_kernels.runner import compile_kernel_lazy
+    config = dict(prepared["config"])
+    dtype = config.pop("dtype")
+    m = config.pop("m")
+    k = config.pop("k")
+    sf_layout = config.pop("sf_layout")
+    enable_pdl = config.pop("enable_pdl")
+    zero_row = config.pop("zero_row")
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
 
     a, gs_inv = prepare_data(dtype=dtype, m=m, k=k, sf_layout=sf_layout, zero_row=zero_row)
-    ex = compile_kernel_lazy(
-        lambda: get_kernel(
-            dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl
-        )
-    )
+    ex = executable
     out_tirx, sf_tirx, pts_tirx = _alloc_outputs(m, k, sf_layout)
 
     def tirx_launch():
@@ -390,6 +381,36 @@ def run_bench(
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    dtype: str,
+    m: int,
+    k: int,
+    sf_layout: str = "128x4",
+    enable_pdl: bool = False,
+    zero_row: bool = False,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    **kwargs,
+):
+    config = dict(kwargs)
+    prepared = prepare_bench(
+        dtype=dtype,
+        m=m,
+        k=k,
+        sf_layout=sf_layout,
+        enable_pdl=enable_pdl,
+        zero_row=zero_row,
+        **config,
+    )
+    return prepared.run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

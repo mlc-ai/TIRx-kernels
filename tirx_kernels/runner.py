@@ -17,7 +17,7 @@ import os
 import shlex
 import sys
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -38,6 +38,57 @@ class PreparedBenchmark(Protocol):
     """Opaque CPU-prepared benchmark retained by its preparing process."""
 
     def run_gpu(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class ExplicitPreparedBenchmark:
+    """Process-local bridge from a kernel's explicit prepare to its GPU stage."""
+
+    run_gpu_fn: Callable[..., dict[str, Any]]
+    state: Any
+    required_num_gpus: int = 1
+    close_fn: Callable[[], None] | None = None
+    owner_pid: int = field(default_factory=os.getpid, init=False, repr=False)
+
+    def _assert_process_local(self) -> None:
+        current_pid = os.getpid()
+        if current_pid != self.owner_pid:
+            raise RuntimeError(
+                "prepared benchmark is process-local: "
+                f"created in PID {self.owner_pid}, used in PID {current_pid}"
+            )
+
+    def __reduce_ex__(self, protocol: int):
+        del protocol
+        raise TypeError("prepared benchmarks cannot be serialized across processes")
+
+    def run_gpu(self, **kwargs: Any) -> dict[str, Any]:
+        self._assert_process_local()
+        return self.run_gpu_fn(self.state, **kwargs)
+
+    def close(self) -> None:
+        self._assert_process_local()
+        if self.close_fn is not None:
+            self.close_fn()
+
+
+def prepared_gpu_benchmark(
+    run_gpu: Callable[..., dict[str, Any]],
+    state: Any,
+    *,
+    required_num_gpus: int = 1,
+    close: Callable[[], None] | None = None,
+) -> ExplicitPreparedBenchmark:
+    """Package kernel-owned prepared state without interpreting or serializing it."""
+    if not callable(run_gpu):
+        raise TypeError("run_gpu must be callable")
+    if not isinstance(required_num_gpus, int) or isinstance(required_num_gpus, bool):
+        raise TypeError("required_num_gpus must be an integer")
+    if required_num_gpus < 1:
+        raise ValueError("required_num_gpus must be positive")
+    if close is not None and not callable(close):
+        raise TypeError("close must be callable")
+    return ExplicitPreparedBenchmark(run_gpu, state, required_num_gpus, close)
 
 
 @dataclass(frozen=True)
@@ -71,35 +122,12 @@ class PreparedKernelBenchmark:
 
 
 @dataclass
-class _CompileReplay:
-    prepared: list[tuple[Any, Any]]
-    next_index: int = 0
-
-
-@dataclass(frozen=True)
-class PreparedCacheEntry:
-    """One process-local cached artifact that the GPU stage must consume."""
-
-    namespace: str
-    key: Any
-    value: Any
-
-
-@dataclass
-class _CacheReplay:
-    prepared: list[PreparedCacheEntry]
-    next_index: int = 0
-
-
-@dataclass
 class _CudaAssignment:
     indices: tuple[int, ...]
     uuids: tuple[str, ...]
     previously_assigned: set[int]
 
 
-_COMPILE_REPLAY: ContextVar[_CompileReplay | None] = ContextVar("tirx_compile_replay", default=None)
-_CACHE_REPLAY: ContextVar[_CacheReplay | None] = ContextVar("tirx_cache_replay", default=None)
 _NVML_LOCK = threading.Lock()
 _NVML_MODULE: Any | None = None
 _NVML_UNAVAILABLE = False
@@ -107,30 +135,6 @@ _PREPARE_COMPILE_SCOPE = ContextVar("tirx_prepare_compile_scope", default=False)
 _PREPARE_COMPILE_LOCK = threading.RLock()
 _ORIGINAL_TVM_COMPILE = tvm.compile
 _CUDA_ASSIGNMENT: _CudaAssignment | None = None
-
-
-@dataclass(frozen=True)
-class PreparedRunBench:
-    """Generic adapter that replays CPU-precompiled kernels into ``run_bench``.
-
-    The original GPU-stage implementation remains the single authority for
-    allocation, correctness, reference construction, implementation order and
-    timing. Only its structurally identical ``compile_kernel`` call is replaced
-    by the executable compiled during CPU prepare.
-    """
-
-    module: ModuleType
-    params: dict[str, Any]
-    compiled: tuple[tuple[Any, Any], ...]
-    cached: tuple[PreparedCacheEntry, ...] = ()
-
-    def run_gpu(self, **kwargs: Any) -> dict[str, Any]:
-        run_bench_fn = getattr(self.module, "run_bench", None)
-        if run_bench_fn is None:
-            raise TypeError(f"module {self.module.__name__!r} has no run_bench()")
-        with replay_compiled_kernels(self.compiled):
-            with replay_prepared_cache(self.cached):
-                return run_bench_fn(**self.params, **kwargs)
 
 
 def _current_process_cuda_gpus(*, required: bool = False) -> tuple[int, ...]:
@@ -305,8 +309,7 @@ def validate_current_cuda_assignment(stage: str, *, restore: bool = False) -> tu
     actual = physical_cuda_uuids(_CUDA_ASSIGNMENT.indices)
     if actual != _CUDA_ASSIGNMENT.uuids:
         raise RuntimeError(
-            f"{stage}: assigned CUDA UUIDs changed from {_CUDA_ASSIGNMENT.uuids!r} "
-            f"to {actual!r}"
+            f"{stage}: assigned CUDA UUIDs changed from {_CUDA_ASSIGNMENT.uuids!r} to {actual!r}"
         )
     unexpected = set(_current_process_cuda_gpus(required=True)) - (
         _CUDA_ASSIGNMENT.previously_assigned
@@ -545,109 +548,9 @@ def cuda_initialization_guard(*, require_uninitialized: bool = False):
 
 def compile_kernel(func):
     """Compile a single TIR PrimFunc via the tirx pipeline."""
-    replay = _COMPILE_REPLAY.get()
-    if replay is not None:
-        if replay.next_index >= len(replay.prepared):
-            raise RuntimeError("GPU stage requested more kernel compilations than CPU prepare")
-        expected_func, executable = replay.prepared[replay.next_index]
-        if not tvm.ir.structural_equal(func, expected_func, map_free_vars=True):
-            raise RuntimeError(
-                "GPU-stage compile request does not structurally match the next "
-                "CPU-prepared PrimFunc"
-            )
-        replay.next_index += 1
-        return executable
     target = cuda_target()
     mod = tvm.IRModule({"main": func})
     return tvm.compile(mod, target=target, tir_pipeline="tirx")
-
-
-def compile_kernel_lazy(builder):
-    """Build/compile normally, but skip both operations during prepared replay."""
-    replay = _COMPILE_REPLAY.get()
-    if replay is not None:
-        if replay.next_index >= len(replay.prepared):
-            raise RuntimeError("GPU stage requested more kernel compilations than CPU prepare")
-        _expected_func, executable = replay.prepared[replay.next_index]
-        replay.next_index += 1
-        return executable
-    return compile_kernel(builder())
-
-
-def consume_prepared_cache(namespace: str, key: Any, builder):
-    """Build/cache normally, or consume the exact CPU-prepared artifact on replay."""
-    replay = _CACHE_REPLAY.get()
-    if replay is None:
-        return builder()
-    if replay.next_index >= len(replay.prepared):
-        raise RuntimeError(
-            f"GPU stage requested an unprepared cached artifact {namespace!r} key={key!r}"
-        )
-    expected = replay.prepared[replay.next_index]
-    if namespace != expected.namespace or key != expected.key:
-        raise RuntimeError(
-            "GPU-stage cached artifact request does not match CPU prepare: "
-            f"requested {namespace!r} key={key!r}, expected "
-            f"{expected.namespace!r} key={expected.key!r}"
-        )
-    replay.next_index += 1
-    return expected.value
-
-
-@contextmanager
-def replay_compiled_kernels(compiled: tuple[tuple[Any, Any], ...]):
-    """Make prepared executables available to matching GPU-stage compile calls."""
-    replay = _CompileReplay(list(compiled))
-    token = _COMPILE_REPLAY.set(replay)
-    try:
-        yield
-        if replay.next_index != len(replay.prepared):
-            raise RuntimeError(
-                "GPU stage consumed "
-                f"{replay.next_index} of {len(replay.prepared)} CPU-prepared kernels"
-            )
-    finally:
-        _COMPILE_REPLAY.reset(token)
-
-
-@contextmanager
-def replay_prepared_cache(cached: tuple[PreparedCacheEntry, ...]):
-    """Require the GPU stage to consume every declared custom cached artifact."""
-    replay = _CacheReplay(list(cached))
-    token = _CACHE_REPLAY.set(replay)
-    try:
-        yield
-        if replay.next_index != len(replay.prepared):
-            raise RuntimeError(
-                "GPU stage consumed "
-                f"{replay.next_index} of {len(replay.prepared)} CPU-prepared cached artifacts"
-            )
-    finally:
-        _CACHE_REPLAY.reset(token)
-
-
-def prepare_run_bench(module: ModuleType, params: dict[str, Any]) -> PreparedRunBench:
-    """Prepare the common one-PrimFunc ``get_kernel``/``run_bench`` contract."""
-    get_kernel_fn = getattr(module, "get_kernel", None)
-    if get_kernel_fn is None or getattr(module, "run_bench", None) is None:
-        raise TypeError(f"module {module.__name__!r} needs an explicit prepare_bench() adapter")
-    prim_func = get_kernel_fn(**dict(params))
-    executable = compile_kernel(prim_func)
-    return PreparedRunBench(module=module, params=dict(params), compiled=((prim_func, executable),))
-
-
-def prepare_module_bench(module_name: str, params: dict[str, Any]) -> PreparedRunBench:
-    """Explicit module adapter for the common one-PrimFunc benchmark shape."""
-    return prepare_run_bench(sys.modules[module_name], params)
-
-
-def prepared_cached_run_bench(
-    module_name: str, params: dict[str, Any], *, cached: tuple[tuple[str, Any, Any], ...] = ()
-) -> PreparedRunBench:
-    """Wrap ``run_bench`` after its custom CPU compile cache was populated."""
-    module = sys.modules[module_name]
-    entries = tuple(PreparedCacheEntry(namespace, key, value) for namespace, key, value in cached)
-    return PreparedRunBench(module=module, params=dict(params), compiled=(), cached=entries)
 
 
 def run_kernel_test(kernel_name: str, config: dict[str, Any], *, registry=None):
@@ -696,12 +599,7 @@ def run_kernel_bench(
     )
     try:
         return run_prepared_kernel_bench(
-            prepared,
-            warmup=warmup,
-            repeat=repeat,
-            timer=timer,
-            rounds=rounds,
-            cooldown=cooldown,
+            prepared, warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown=cooldown
         )
     finally:
         close_prepared_kernel_bench(prepared)

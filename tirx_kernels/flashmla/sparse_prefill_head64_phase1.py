@@ -1562,10 +1562,11 @@ def get_kernel(**kwargs: Any):
 
 
 def prepare_bench(**kwargs: Any):
-    """CPU-compile this workload for same-process GPU execution."""
-    from tirx_kernels.runner import prepare_module_bench
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    return prepare_module_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_test(**kwargs: Any) -> None:
@@ -1587,17 +1588,26 @@ def run_test(**kwargs: Any) -> None:
     cfg.validate()
 
 
-def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+def run_gpu(
+    prepared,
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
+    config = dict(prepared["config"])
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
     _rounds = kwargs.pop("rounds", 1)
     _cooldown_s = kwargs.pop("cooldown_s", 1.0)
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA phase1 benchmark")
 
-    from tirx_kernels.runner import bench, compile_kernel_lazy
+    from tirx_kernels.runner import bench
 
-    ex = compile_kernel_lazy(lambda: get_kernel(**kwargs))
+    ex = executable
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     case = prepare_data(**kwargs)
@@ -1624,6 +1634,15 @@ def run_bench(
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
+
+
+def run_bench(
+    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+) -> dict[str, Any]:
+    config = dict(kwargs)
+    protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
+    prepared = prepare_bench(**config)
+    return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 
 __all__ = ["CONFIGS", "KERNEL_META", "get_kernel", "prepare_data", "run_bench", "run_test"]

@@ -1890,8 +1890,8 @@ def _compile_pipeline(B: int, H: int, S: int, D: int, causal: bool, attention_sc
     return preprocess_ex, kernel_ex, cast_ex
 
 
-def setup(data, B, H, S, D):
-    """Compile backward kernels, prepare data, run once. Return no-arg kernel_fn."""
+def setup(data, B, H, S, D, *, executables=None):
+    """Prepare GPU data and return one full backward-pipeline launch."""
     Q = data["Q"]
     K = data["K"]
     V = data["V"]
@@ -1907,9 +1907,9 @@ def setup(data, B, H, S, D):
     dK = data["dK"]
     dV = data["dV"]
     dQ = data["dQ"]
-    preprocess_ex, kernel_ex, cast_ex = _compile_pipeline(
-        B, H, S, D, causal, attention_scale
-    )
+    if executables is None:
+        executables = _compile_pipeline(B, H, S, D, causal, attention_scale)
+    preprocess_ex, kernel_ex, cast_ex = executables
 
     def run_all():
         preprocess_ex(dO, O, LSE, dpsum, LSE_log2, dQ_acc)
@@ -2047,13 +2047,11 @@ def prepare_bench(
     **kwargs,
 ):
     """Compile the preprocess/core/cast pipeline before CUDA setup."""
-    from tirx_kernels.runner import prepared_cached_run_bench
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     scale = 1.0 / math.sqrt(head_dim)
-    _compile_pipeline(batch_size, num_heads, seq_len, head_dim, is_causal, scale)
-    return prepared_cached_run_bench(
-        __name__,
-        {
+    state = {
+        "config": {
             "batch_size": batch_size,
             "seq_len": seq_len,
             "num_heads": num_heads,
@@ -2061,27 +2059,29 @@ def prepare_bench(
             "is_causal": is_causal,
             **kwargs,
         },
-    )
+        "executables": _compile_pipeline(
+            batch_size, num_heads, seq_len, head_dim, is_causal, scale
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
-def run_bench(
-    batch_size: int,
-    seq_len: int,
-    num_heads: int,
-    head_dim: int = 128,
-    is_causal: bool = False,
-    warmup=None,
-    repeat=None,
-    timer=None,
-    **kwargs,
-):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark the full preprocess/core/cast pipeline against current FA4."""
     from flash_attn.cute.interface import _flash_attn_bwd
 
     from tirx_kernels.runner import bench
 
+    config = {**prepared["config"], **kwargs}
+    batch_size = config.pop("batch_size")
+    seq_len = config.pop("seq_len")
+    num_heads = config.pop("num_heads")
+    head_dim = config.pop("head_dim")
+    is_causal = config.pop("is_causal")
     data, _ = _prepare_official_workload(batch_size, seq_len, num_heads, head_dim, is_causal)
-    candidate = setup(data, batch_size, num_heads, seq_len, head_dim)
+    candidate = setup(
+        data, batch_size, num_heads, seq_len, head_dim, executables=prepared["executables"]
+    )
 
     def official_factory():
         def run():
@@ -2104,5 +2104,33 @@ def run_bench(
         repeat=repeat,
         timer=timer,
         references={"flashattn_sm100": official_factory},
-        **kwargs,
+        **config,
     )
+
+
+def run_bench(
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int = 128,
+    is_causal: bool = False,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    **kwargs,
+):
+    rounds = kwargs.pop("rounds", None)
+    cooldown_s = kwargs.pop("cooldown_s", None)
+    protocol = {"warmup": warmup, "repeat": repeat, "timer": timer}
+    if rounds is not None:
+        protocol["rounds"] = rounds
+    if cooldown_s is not None:
+        protocol["cooldown_s"] = cooldown_s
+    return prepare_bench(
+        batch_size=batch_size,
+        seq_len=seq_len,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        is_causal=is_causal,
+        **kwargs,
+    ).run_gpu(**protocol)

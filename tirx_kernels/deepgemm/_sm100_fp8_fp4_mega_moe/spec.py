@@ -636,13 +636,9 @@ def _get_num_sms_for_mega_moe() -> int:
     override = os.environ.get("TIRX_DEEPGEMM_NUM_SMS_OVERRIDE")
     if override is not None:
         return int(override)
-    if torch.cuda.is_available():
-        return int(
-            torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        )
-    raise RuntimeError(
-        "MegaMoE launch requires CUDA to infer kNumSMs; set TIRX_DEEPGEMM_NUM_SMS_OVERRIDE to override"
-    )
+    from tirx_kernels.runner import hardware_num_sms
+
+    return hardware_num_sms()
 
 
 def get_deepgemm_launch_config(config: MegaMoeConfig) -> DeepGemmLaunchConfig:

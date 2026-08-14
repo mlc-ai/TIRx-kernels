@@ -1464,10 +1464,11 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
 
 
 def prepare_bench(**kwargs: Any):
-    """CPU-compile this workload for same-process GPU execution."""
-    from tirx_kernels.runner import prepare_module_bench
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    return prepare_module_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_test(**kwargs: Any) -> None:
@@ -1494,7 +1495,8 @@ def run_test(**kwargs: Any) -> None:
     _simple._assert_case_close(case)
 
 
-def run_bench(
+def run_gpu(
+    prepared,
     *,
     warmup: int | None = None,
     repeat: int | None = None,
@@ -1503,10 +1505,13 @@ def run_bench(
     cooldown_s: float = 1.0,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    from tirx_kernels.runner import bench, compile_kernel_lazy
+    config = dict(prepared["config"])
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
+    from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel_lazy(lambda: get_kernel(**kwargs))
     args = _tirx_args(case)
     executable(*args)
     _run_reference(case)
@@ -1531,6 +1536,20 @@ def run_bench(
         references={"flashinfer_cuda": source_builder},
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    rounds: int = 1,
+    cooldown_s: float = 1.0,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return prepare_bench(**kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

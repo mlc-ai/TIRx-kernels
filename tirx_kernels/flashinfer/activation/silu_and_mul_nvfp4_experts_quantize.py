@@ -456,10 +456,11 @@ def _run_launch(ex, a, global_scale, out, sf, mask, n_experts, m, k):
 
 
 def prepare_bench(**kwargs: Any):
-    """CPU-compile this workload for same-process GPU execution."""
-    from tirx_kernels.runner import prepare_module_bench
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    return prepare_module_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand", **kwargs):
@@ -496,37 +497,23 @@ def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand"
     torch.testing.assert_close(sf_tirx_u8[valid], ref_sf_u8[valid], rtol=0, atol=0)
 
 
-def run_bench(
-    dtype: str,
-    n_experts: int,
-    m: int,
-    k: int,
-    mask_mode: str = "rand",
-    *,
-    warmup=None,
-    repeat=None,
-    timer=None,
-    rounds=1,
-    cooldown_s=1.0,
-    **kwargs,
-):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
     """Benchmark the TIRx port against the source thop (kernel-only)."""
+    config = dict(prepared["config"])
+    dtype = config.pop("dtype")
+    n_experts = config.pop("n_experts")
+    m = config.pop("m")
+    k = config.pop("k")
+    mask_mode = config.pop("mask_mode")
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
     import torch
-
-    from tirx_kernels.runner import compile_kernel_lazy
 
     a, mask, global_scale = prepare_data(
         dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode
     )
-    ex = compile_kernel_lazy(
-        lambda: get_kernel(
-            dtype=dtype,
-            n_experts=n_experts,
-            m=m,
-            k=k,
-            mask_mode=mask_mode,
-        )
-    )
+    ex = executable
     out_tirx, sf_tirx = _alloc_outputs(dtype, n_experts, m, k)
 
     funcs = {
@@ -553,6 +540,29 @@ def run_bench(
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    dtype: str,
+    n_experts: int,
+    m: int,
+    k: int,
+    mask_mode: str = "rand",
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    **kwargs,
+):
+    config = dict(kwargs)
+    prepared = prepare_bench(
+        dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode, **config
+    )
+    return prepared.run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

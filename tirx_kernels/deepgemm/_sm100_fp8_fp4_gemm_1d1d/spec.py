@@ -1103,41 +1103,19 @@ def _compile_spec_cached(spec: GemmSpec):
     tags += ["threadIdx.x", "tirx.use_dyn_shared_memory"]
     func = build_kernel(spec).with_attr("tirx.kernel_launch_params", tags)
     return tvm.compile(
-        tvm.IRModule({"main": func}),
-        target=cuda_target(arch="sm_100a"),
-        tir_pipeline="tirx",
+        tvm.IRModule({"main": func}), target=cuda_target(arch="sm_100a"), tir_pipeline="tirx"
     )
-
-
-COMPILE_SPEC_CACHE_NAMESPACE = "deepgemm.sm100_fp8_fp4_gemm_1d1d.compile_spec"
 
 
 def compile_spec(spec: GemmSpec):
-    """Compile normally or consume the exact artifact declared during CPU prepare."""
-    from tirx_kernels.runner import consume_prepared_cache
-
-    return consume_prepared_cache(
-        COMPILE_SPEC_CACHE_NAMESPACE,
-        spec,
-        lambda: _compile_spec_cached(spec),
-    )
-
-
-def prepare_compile_spec_bench(module_name: str, config: dict, spec: GemmSpec):
-    """Compile one spec and declare its exact GPU-stage cache consumption."""
-    from tirx_kernels.runner import prepared_cached_run_bench
-
-    executable = compile_spec(spec)
-    return prepared_cached_run_bench(
-        module_name,
-        config,
-        cached=((COMPILE_SPEC_CACHE_NAMESPACE, spec, executable),),
-    )
+    """Compile or reuse one immutable specialization."""
+    return _compile_spec_cached(spec)
 
 
 def build_launch(
     spec: GemmSpec,
     *,
+    executable=None,
     a,
     b,
     sfa,
@@ -1159,7 +1137,8 @@ def build_launch(
     """
     import torch
 
-    executable = compile_spec(spec)
+    if executable is None:
+        executable = compile_spec(spec)
     if spec.gemm_type is GemmType.BATCHED:
         # A, B and C/D are rank-3 here and A/D are permuted views, so the
         # descriptors must read their real strides rather than assume packing.
@@ -1229,4 +1208,4 @@ def build_launch(
     return launch
 
 
-__all__ += ["build_launch", "compile_spec", "prepare_compile_spec_bench"]
+__all__ += ["build_launch", "compile_spec"]

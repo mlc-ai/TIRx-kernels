@@ -1097,7 +1097,12 @@ def _make_qkv(
 
 
 def _device_from_config(config: dict[str, Any]) -> torch.device:
-    device = torch.device(config.get("device", "cuda:0"))
+    configured_device = config.get("device")
+    device = (
+        torch.device(configured_device)
+        if configured_device is not None
+        else torch.device("cuda", torch.cuda.current_device())
+    )
     if device.type != "cuda" or not torch.cuda.is_available():
         raise SkipTest("CUDA is required for BF16 wide-vector GDN MTP decode")
     capability = torch.cuda.get_device_capability(device)
@@ -1419,15 +1424,16 @@ def run_test(**kwargs: Any) -> None:
 
 def prepare_bench(**kwargs: Any):
     """Compile the selected wide-vector MTP specialization before CUDA setup."""
-    from tirx_kernels.runner import prepared_cached_run_bench
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = dict(kwargs)
     _require_supported_config(config)
-    _compile_tirx_for_config(config)
-    return prepared_cached_run_bench(__name__, kwargs)
+    executable = _compile_tirx_for_config(config)
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
 
 
-def run_bench(
+def run_gpu(
+    prepared,
     *,
     warmup: int | None = None,
     repeat: int | None = None,
@@ -1436,8 +1442,9 @@ def run_bench(
     cooldown_s: float = 1.0,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = prepared["executable"]
     args = _tirx_args(case)
     executable(*args)
     _run_reference(case)
@@ -1462,6 +1469,20 @@ def run_bench(
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    rounds: int = 1,
+    cooldown_s: float = 1.0,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return prepare_bench(**kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

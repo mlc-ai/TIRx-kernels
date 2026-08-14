@@ -90,9 +90,7 @@ class PreparedDistributedBench:
         cooldown_s: float = 1.0,
     ) -> dict[str, Any]:
         if timer not in (None, self.required_timer):
-            raise ValueError(
-                f"distributed benchmark supports only timer={self.required_timer!r}"
-            )
+            raise ValueError(f"distributed benchmark supports only timer={self.required_timer!r}")
         if warmup is not None or repeat is not None:
             raise ValueError(
                 f"timer={self.required_timer!r} uses fixed iteration counts and "

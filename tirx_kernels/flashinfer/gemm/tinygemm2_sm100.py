@@ -559,10 +559,7 @@ def _flashinfer_tinygemm2_spec():
     return gen_jit_spec(
         "tinygemm2_sm100",
         [source],
-        extra_cuda_cflags=[
-            *sm100a_nvcc_flags,
-            "-gencode=arch=compute_103a,code=sm_103a",
-        ],
+        extra_cuda_cflags=[*sm100a_nvcc_flags, "-gencode=arch=compute_103a,code=sm_103a"],
         extra_include_paths=[source.parent, source.parent.parent / "include"],
     )
 
@@ -621,17 +618,21 @@ def run_test(B: int, O: int, K: int) -> None:
 
 def prepare_bench(B: int, O: int, K: int):
     """Compile the hardware-profile dispatch before CUDA initialization."""
-    from tirx_kernels.runner import hardware_num_sms, prepared_cached_run_bench
+    from tirx_kernels.runner import hardware_num_sms, prepared_gpu_benchmark
 
     stage = _select_stage(B, O, K, hardware_num_sms())
-    _compile_executable(B, O, stage, False)
-    return prepared_cached_run_bench(__name__, {"B": B, "O": O, "K": K})
+    state = {
+        "B": B,
+        "O": O,
+        "K": K,
+        "stage": stage,
+        "executable": _compile_executable(B, O, stage, False),
+    }
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
-def run_bench(
-    B: int,
-    O: int,
-    K: int,
+def run_gpu(
+    prepared,
     *,
     warmup: int | None = None,
     repeat: int | None = None,
@@ -642,10 +643,10 @@ def run_bench(
     _require_sm100()
     from tirx_kernels.runner import bench
 
+    B, O, K = prepared["B"], prepared["O"], prepared["K"]
+    stage = prepared["stage"]
+    executable = prepared["executable"]
     case = prepare_data(B, O, K)
-    num_sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-    stage = _select_stage(B, O, K, num_sms)
-    executable = _compile_executable(B, O, stage, False)
     args = _tirx_args(case)
 
     reference_out = torch.zeros_like(case["out"])
@@ -674,6 +675,22 @@ def run_bench(
         references={"flashinfer_sm100": _flashinfer_builder},
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    B: int,
+    O: int,
+    K: int,
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    rounds: int = 5,
+    cooldown_s: float = 1.0,
+) -> dict[str, Any]:
+    return prepare_bench(B, O, K).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

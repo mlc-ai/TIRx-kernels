@@ -980,14 +980,9 @@ def _compile_tirx_mqa(config: MQALogitsFP8Config, max_seqlen_k: int) -> Any:
     # The kernel is independent of seq_len/seq_len_kv/disable_cp/logits_stride (all
     # runtime): canonical values let the cache dedup to one kernel per structural config.
     del max_seqlen_k
-    from tirx_kernels.runner import consume_prepared_cache
 
     compile_kwargs = _compile_tirx_mqa_kwargs(config)
-    return consume_prepared_cache(
-        _COMPILE_CACHE_NAMESPACE,
-        _compile_tirx_mqa_key(config),
-        lambda: _compile_tirx_mqa_for_config(**compile_kwargs),
-    )
+    return _compile_tirx_mqa_for_config(**compile_kwargs)
 
 
 def _logits_storage_shape(config: MQALogitsFP8Config, max_seqlen_k: int) -> tuple[int, int]:
@@ -1129,18 +1124,15 @@ def run_test(**kwargs: Any) -> None:
 
 def prepare_bench(**kwargs: Any):
     """Compile the TIRx executable without allocating CUDA data."""
-    from tirx_kernels.runner import prepared_cached_run_bench
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
     config = _make_config(**kwargs)
     executable = _compile_tirx_mqa(config, 0)
-    return prepared_cached_run_bench(
-        __name__,
-        kwargs,
-        cached=((_COMPILE_CACHE_NAMESPACE, _compile_tirx_mqa_key(config), executable),),
-    )
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
 
 
-def run_bench(**kwargs: Any) -> dict[str, Any]:
+def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench
 
     warmup = kwargs.pop("warmup", None)
@@ -1149,7 +1141,7 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
     _rounds = kwargs.pop("rounds", 1)
     _cooldown_s = kwargs.pop("cooldown_s", 1.0)
     config_kwargs = dict(kwargs)
-    tirx_executable = _compile_tirx_mqa(_make_config(**config_kwargs), 0)
+    tirx_executable = prepared["executable"]
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     data = prepare_data(**config_kwargs)
@@ -1179,6 +1171,15 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
     )
     result["max_diff"] = max_diff
     return result
+
+
+def run_bench(**kwargs: Any) -> dict[str, Any]:
+    protocol = {
+        name: kwargs.pop(name)
+        for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
+        if name in kwargs
+    }
+    return prepare_bench(**kwargs).run_gpu(**protocol)
 
 
 __all__ = [

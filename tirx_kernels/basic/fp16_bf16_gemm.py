@@ -691,7 +691,7 @@ def run_test(dtype, M, N, K, **kwargs):
 
 @dataclass(frozen=True)
 class PreparedBench:
-    """CPU-prepared GEMM benchmark whose remaining work requires a GPU."""
+    """Kernel-owned state produced before GPU assignment."""
 
     dtype: str
     M: int
@@ -699,49 +699,43 @@ class PreparedBench:
     K: int
     executable: object
 
-    def run_gpu(self, warmup=None, repeat=None, timer=None, **kwargs):
-        """Allocate inputs/references and run the unchanged GPU timing protocol."""
-        A, B, C = prepare_data(self.dtype, self.M, self.N, self.K)
-        C_tir = torch.zeros_like(C, device="cuda")
 
-        funcs = {"tir": lambda: self.executable(A, B, C_tir)}
+def run_gpu(prepared: PreparedBench, *, warmup=None, repeat=None, timer=None, **kwargs):
+    """Allocate inputs/references and run the unchanged GPU timing protocol."""
+    A, B, C = prepare_data(prepared.dtype, prepared.M, prepared.N, prepared.K)
+    C_tir = torch.zeros_like(C, device="cuda")
 
-        def _torch_cublas():
-            C_out = torch.zeros_like(C, device="cuda")
-            return lambda: torch.matmul(A, B.T, out=C_out)
+    funcs = {"tir": lambda: prepared.executable(A, B, C_tir)}
 
-        references = {"torch-cublas": _torch_cublas}
-        if self.dtype == "bf16":
+    def _torch_cublas():
+        C_out = torch.zeros_like(C, device="cuda")
+        return lambda: torch.matmul(A, B.T, out=C_out)
 
-            def _deepgemm_cublaslt():
-                import deep_gemm
+    references = {"torch-cublas": _torch_cublas}
+    if prepared.dtype == "bf16":
 
-                C_out = torch.zeros(self.M, self.N, dtype=torch.bfloat16, device="cuda")
-                return lambda: deep_gemm.cublaslt_gemm_nt(A, B, C_out, None)
+        def _deepgemm_cublaslt():
+            import deep_gemm
 
-            def _deepgemm_bf16():
-                import deep_gemm
+            C_out = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
+            return lambda: deep_gemm.cublaslt_gemm_nt(A, B, C_out, None)
 
-                C_out = torch.zeros(self.M, self.N, dtype=torch.bfloat16, device="cuda")
-                return lambda: deep_gemm.bf16_gemm_nt(A, B, C_out)
+        def _deepgemm_bf16():
+            import deep_gemm
 
-            references.update(
-                {"deepgemm-cublaslt": _deepgemm_cublaslt, "deepgemm-bf16": _deepgemm_bf16}
-            )
+            C_out = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
+            return lambda: deep_gemm.bf16_gemm_nt(A, B, C_out)
 
-        return bench(
-            funcs,
-            warmup=warmup,
-            repeat=repeat,
-            timer=timer,
-            references=references,
-            **kwargs,
+        references.update(
+            {"deepgemm-cublaslt": _deepgemm_cublaslt, "deepgemm-bf16": _deepgemm_bf16}
         )
+
+    return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)
 
 
 def prepare_bench(dtype, M, N, K, **kwargs):
     """Specialize and compile the GEMM without initializing CUDA."""
-    from tirx_kernels.runner import cuda_initialization_guard, cuda_target
+    from tirx_kernels.runner import cuda_initialization_guard, cuda_target, prepared_gpu_benchmark
 
     with cuda_initialization_guard():
         kernel = tir_kernel(dtype, M, N, K)
@@ -749,7 +743,8 @@ def prepare_bench(dtype, M, N, K, **kwargs):
         with target:
             mod = tvm.IRModule({"main": kernel})
             ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
-    return PreparedBench(dtype=dtype, M=M, N=N, K=K, executable=ex)
+    state = PreparedBench(dtype=dtype, M=M, N=N, K=K, executable=ex)
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_bench(dtype, M, N, K, warmup=None, repeat=None, timer=None, **kwargs):

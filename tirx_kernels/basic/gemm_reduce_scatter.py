@@ -1418,19 +1418,13 @@ def run_bench(
     if warmup is not None or repeat is not None:
         raise ValueError("timer='kineto' uses fixed iteration counts and rejects overrides")
     return prepare_bench(
-        M=M,
-        N=N,
-        K=K,
-        world_size=world_size,
-        dtype=dtype,
-        scheduler=scheduler,
-    ).run_gpu(
-        warmup=warmup,
-        repeat=repeat,
-        timer=timer,
-        rounds=rounds,
-        cooldown_s=cooldown_s,
-    )
+        M=M, N=N, K=K, world_size=world_size, dtype=dtype, scheduler=scheduler
+    ).run_gpu(warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s)
+
+
+def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+    """Start distributed ranks only after the complete GPU claim exists."""
+    return prepared.run_gpu(**kwargs)
 
 
 def prepare_bench(
@@ -1444,8 +1438,10 @@ def prepare_bench(
     **_kwargs: Any,
 ):
     """Compile/export before assignment; ranks start CUDA in run_gpu."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
     _config(M, N, K, world_size, dtype, scheduler)
-    return prepare_distributed_bench(
+    state = prepare_distributed_bench(
         _get_benchmark_kernel(M, N, K, world_size, dtype, scheduler=scheduler),
         world_size=world_size,
         worker=_run_worker,
@@ -1459,6 +1455,7 @@ def prepare_bench(
         },
         required_timer="kineto",
     )
+    return prepared_gpu_benchmark(run_gpu, state, required_num_gpus=world_size, close=state.close)
 
 
 __all__ = [

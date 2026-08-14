@@ -98,6 +98,11 @@ class PreparedMegaMoeBench:
         self.temporary_directory.cleanup()
 
 
+def run_gpu(prepared: PreparedMegaMoeBench, **kwargs: Any) -> dict[str, Any]:
+    """Run the prepared distributed MegaMoE stage after GPU assignment."""
+    return prepared.run_gpu(**kwargs)
+
+
 def _case(
     label: str, *, tok: int, h: int, i: int, e: int, k: int, g: int = 1, max_tok: int | None = None
 ) -> dict:
@@ -326,6 +331,8 @@ def prepare_bench(
     fast_math=1,
 ):
     """Compile both legal benchmark specializations before GPU assignment."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
     config = _make_config(
         num_processes=num_processes,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
@@ -356,9 +363,12 @@ def prepare_bench(
     except BaseException:
         temporary_directory.cleanup()
         raise
-    return PreparedMegaMoeBench(
+    state = PreparedMegaMoeBench(
         config=config,
         temporary_directory=temporary_directory,
         executables=tuple(executables),
         library_paths=library_paths,
+    )
+    return prepared_gpu_benchmark(
+        run_gpu, state, required_num_gpus=config.num_processes, close=state.close
     )

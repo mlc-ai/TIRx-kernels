@@ -227,10 +227,11 @@ def prepare_data(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
 
 
 def prepare_bench(**kwargs: Any):
-    """CPU-compile this workload for same-process GPU execution."""
-    from tirx_kernels.runner import prepare_module_bench
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    return prepare_module_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
@@ -253,28 +254,20 @@ def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     torch.testing.assert_close(out_tirx, ref, rtol=1e-3, atol=1e-3)
 
 
-def run_bench(
-    act: str,
-    dtype: str,
-    num_tokens: int,
-    d: int,
-    *,
-    warmup=None,
-    repeat=None,
-    timer=None,
-    rounds=1,
-    cooldown_s=1.0,
-    **kwargs,
-):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
     """Benchmark the TIRx port against the flashinfer source kernel."""
+    config = dict(prepared["config"])
+    act = config.pop("act")
+    dtype = config.pop("dtype")
+    num_tokens = config.pop("num_tokens")
+    d = config.pop("d")
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
     import torch
 
-    from tirx_kernels.runner import compile_kernel_lazy
-
     (input_data,) = prepare_data(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
-    ex = compile_kernel_lazy(
-        lambda: get_kernel(act=act, dtype=dtype, num_tokens=num_tokens, d=d)
-    )
+    ex = executable
     out_tirx = torch.empty((num_tokens, d), dtype=_torch_dtype(dtype), device="cuda")
 
     funcs = {"tirx": lambda: ex(input_data, out_tirx)}
@@ -294,6 +287,26 @@ def run_bench(
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    act: str,
+    dtype: str,
+    num_tokens: int,
+    d: int,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    **kwargs,
+):
+    config = dict(kwargs)
+    prepared = prepare_bench(act=act, dtype=dtype, num_tokens=num_tokens, d=d, **config)
+    return prepared.run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

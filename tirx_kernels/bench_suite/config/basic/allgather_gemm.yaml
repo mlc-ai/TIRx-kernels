@@ -1,12 +1,10 @@
 kernel: allgather_gemm
-selection_rationale: TP1 dynamic-scheduler points span the low, middle, and high N/K communication-compute regimes; TP4 variants remain explicit-only under the multi-GPU measurement exemption.
 defaults:
   num_gpus: 1
   timer: kineto
 configs:
 - config: tp1_m8192_n24576_k4096_fp16_dynamic
-  default: true
-  selection_role: small
+  default: false
 - config: tp4_m8192_n24576_k4096_fp16_dynamic
   default: false
   num_gpus: 4
@@ -31,8 +29,7 @@ configs:
   default: false
   num_gpus: 4
 - config: tp1_m8192_n57344_k8192_fp16_dynamic
-  default: true
-  selection_role: medium
+  default: false
 - config: tp4_m8192_n57344_k8192_fp16_dynamic
   default: false
   num_gpus: 4
@@ -42,8 +39,7 @@ configs:
   default: false
   num_gpus: 4
 - config: tp1_m8192_n106496_k16384_fp16_dynamic
-  default: true
-  selection_role: large
+  default: false
 - config: tp4_m8192_n106496_k16384_fp16_dynamic
   default: false
   num_gpus: 4

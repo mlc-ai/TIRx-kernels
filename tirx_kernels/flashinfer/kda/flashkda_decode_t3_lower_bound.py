@@ -989,10 +989,11 @@ _ORACLE_ATOL = 6.0e-3
 
 
 def prepare_bench(**kwargs: Any):
-    """CPU-compile this workload for same-process GPU execution."""
-    from tirx_kernels.runner import prepare_module_bench
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
-    return prepare_module_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_test(**kwargs: Any) -> None:
@@ -1079,7 +1080,8 @@ def run_test(**kwargs: Any) -> None:
             )
 
 
-def run_bench(
+def run_gpu(
+    prepared,
     *,
     warmup: float | None = None,
     repeat: float | None = None,
@@ -1087,12 +1089,15 @@ def run_bench(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Time the port against the frozen cake export on identical inputs."""
+    config = dict(prepared["config"])
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
     rounds = int(kwargs.pop("rounds", 5))
     cooldown_s = float(kwargs.pop("cooldown_s", 1.0))
-    from tirx_kernels.runner import bench, compile_kernel_lazy
+    from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel_lazy(lambda: get_kernel(**kwargs))
     args = _tirx_args(case)
 
     # Validate once, outside the timed region. Both sides mutate their own state
@@ -1127,6 +1132,19 @@ def run_bench(
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
+
+
+def run_bench(
+    *,
+    warmup: float | None = None,
+    repeat: float | None = None,
+    timer: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    config = dict(kwargs)
+    protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
+    prepared = prepare_bench(**config)
+    return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 
 __all__ = [

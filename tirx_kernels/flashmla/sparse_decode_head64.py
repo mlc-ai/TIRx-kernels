@@ -3292,10 +3292,10 @@ def _compile_decode_kernels(**kwargs: Any):
 
 def prepare_bench(**kwargs: Any):
     """Compile both sparse-decode executables without touching CUDA."""
-    from tirx_kernels.runner import prepared_cached_run_bench
+    from tirx_kernels.runner import prepared_gpu_benchmark
 
-    _compile_decode_kernels(**kwargs)
-    return prepared_cached_run_bench(__name__, kwargs)
+    state = {"config": dict(kwargs), "executables": _compile_decode_kernels(**kwargs)}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def _launch_tirx(case: dict[str, Any], executables: tuple[Any, Any]) -> None:
@@ -3347,9 +3347,15 @@ def run_test(**kwargs: Any) -> None:
     cfg.validate()
 
 
-def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+def run_gpu(
+    prepared,
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
     rounds = kwargs.pop("rounds", 1)
     cooldown_s = kwargs.pop("cooldown_s", 1.0)
     if not torch.cuda.is_available():
@@ -3357,7 +3363,7 @@ def run_bench(
 
     from tirx_kernels.runner import bench
 
-    executables = _compile_decode_kernels(**kwargs)
+    executables = prepared["executables"]
     # Allocate once outside both timed regions; both paths launch the exact
     # split-KV main kernel followed by their separate combine kernel.
     case = prepare_data(**kwargs)
@@ -3375,6 +3381,16 @@ def run_bench(
         references={"flashmla": lambda: flashmla_decode_reference_builder(case)},
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+) -> dict[str, Any]:
+    rounds = kwargs.pop("rounds", 1)
+    cooldown_s = kwargs.pop("cooldown_s", 1.0)
+    return prepare_bench(**kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 
