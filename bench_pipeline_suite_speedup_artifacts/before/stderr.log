@@ -1,0 +1,1 @@
+[bench-suite] stopped after workload failure: gemm_reduce_scatter/tp1_m8192_n16384_k53248_fp16_dynamic

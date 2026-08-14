@@ -317,7 +317,9 @@ child 负责：
   - Current-loop handoff: AC-10 只优化 suite orchestration wall time。
   - Promotion trigger: pipeline 收口后，GPU stage 已成为主导且具体 kernel 仍低效。
 - FUT-3: baseline promotion。完整 112 条 before/after sweep 仅按 2026-08-14
-  的一次性授权作为 AC 外补充测量执行，不改变后续默认“不跑全量”的约束。
+  的一次性授权作为 AC 外补充测量执行；两侧已实际启动但均 fail-fast 未完成，
+  因此补充 evidence 为显式 `missing` 且不发布 speedup。该授权已消费，不改变
+  后续默认“不跑全量”的约束。
   - Current-loop handoff: 只做少量代表性 targeted run。
   - Promotion trigger: 没有其他 session 运行 suite，且全部主要锚点验证完成。
 

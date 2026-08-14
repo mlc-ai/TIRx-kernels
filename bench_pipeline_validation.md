@@ -565,6 +565,44 @@ same-UUID A/B evidence.
 Multi-GPU runtime rows remain the explicit human-directed exemption, not missing
 evidence.
 
+## AC-external full-suite speedup supplement
+
+On 2026-08-14 the human granted one-time permission to run the identical 112
+single-GPU default workloads on `a91a1b7` and the current pipeline, using every
+GPU each scheduler considered eligible. This supplement is not part of AC-10 or
+any other acceptance criterion. Its tracked artifact is
+`bench_pipeline_suite_speedup_evidence.json`; raw sources live under
+`bench_pipeline_suite_speedup_artifacts/`.
+
+Both sides started from independently verified empty cache roots and used the
+same NVSHMEM-enabled TVM runtime built from TIR commit `ea0950ab`, the same locked
+NCCL/cuBLAS/cuBLASMp/NVSHMEM libraries, the same 112-workload file, and the
+unchanged default 5 rounds plus 1.0s cooldown. One-second all-GPU occupancy
+timelines and outer command timers were persisted outside `.bench-suite/`.
+
+No end-to-end speedup is published because neither full sweep completed:
+
+- migration-before ran for 85.088s, produced seven successful terminal records,
+  then `gemm_reduce_scatter/tp1_m8192_n16384_k53248_fp16_dynamic` hit a CUDA
+  illegal instruction; the rank process aborted and the baseline scheduler
+  correctly fail-fast stopped the sweep;
+- pipeline ran for 21.092s and failed during CPU prepare, before any GPU
+  assignment, because MegaMoE's generated PTX used `.scale_vec::1X` with a
+  `sm_100f` target rejected by `ptxas`. Its cost model is therefore explicitly
+  `missing`, not zero.
+
+Those durations are retained only as partial-command diagnostics. The evidence
+JSON deliberately contains no `wall_speedup`, `wall_reduction_percent`, or
+`card_time_ratio`. The baseline artifact also has no equivalent exact GPU card
+time field. The raw availability sets differed and are recorded, so even a future
+successful pair must disclose that limit on raw-wall interpretation.
+
+The intended attribution remains unchanged: a successful quotient would include
+CPU/GPU pipeline overlap, would not attribute pre-existing per-GPU worker
+parallelism to this migration, and would not include or combine the independent
+234-to-112 default-coverage reduction. The one-time full-sweep permission is now
+consumed; the default no-full-sweep machine discipline is restored.
+
 ## Engineering-principles audit
 
 - **Occam's razor:** the implementation uses one one-shot child lifecycle and

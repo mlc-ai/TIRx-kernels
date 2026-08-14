@@ -1,0 +1,46 @@
+/dvs/p4/build/sw/rel/gpgpu/toolkit/r13.0/main_nvshmem/src/modules/transport/ibrc/ibrc.cpp:1661: non-zero status: 7 Unable to dlopen libibverbs. Skipping devx transport.
+[02:37:15] /home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/src/runtime/extra/contrib/nvshmem/init.cc:81: NVSHMEM init finished: mype=0 , npes=1
+/home/hongyij/miniforge3/lib/python3.13/site-packages/torch/profiler/profiler.py:224: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[rank0]:[E814 02:37:29.186344171 ProcessGroupNCCL.cpp:2119] [PG ID 0 PG GUID 0(default_pg) Rank 0] Process group watchdog thread terminated with exception: CUDA error: an illegal instruction was encountered
+Search for `cudaErrorIllegalInstruction' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from query at /pytorch/c10/cuda/CUDAEvent.h:111 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x9d (0x726d9997305d in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0xc114 (0x726d99d73114 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libc10_cuda.so)
+frame #2: c10d::ProcessGroupNCCL::WorkNCCL::finishedGPUExecutionInternal() const + 0x50 (0x726d228f3d10 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #3: c10d::ProcessGroupNCCL::WorkNCCL::isCompleted() + 0x68 (0x726d22902828 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #4: c10d::ProcessGroupNCCL::Watchdog::runLoop() + 0x9c3 (0x726d229071d3 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #5: c10d::ProcessGroupNCCL::Watchdog::run() + 0x157 (0x726d229093b7 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0xef5e4 (0x726dc5aef5e4 in /home/hongyij/miniforge3/bin/../lib/libstdc++.so.6)
+frame #7: <unknown function> + 0x9caa4 (0x726dc5e8aaa4 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #8: __clone + 0x44 (0x726dc5f17a64 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+
+terminate called after throwing an instance of 'c10::DistBackendError'
+  what():  [PG ID 0 PG GUID 0(default_pg) Rank 0] Process group watchdog thread terminated with exception: CUDA error: an illegal instruction was encountered
+Search for `cudaErrorIllegalInstruction' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from query at /pytorch/c10/cuda/CUDAEvent.h:111 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x9d (0x726d9997305d in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0xc114 (0x726d99d73114 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libc10_cuda.so)
+frame #2: c10d::ProcessGroupNCCL::WorkNCCL::finishedGPUExecutionInternal() const + 0x50 (0x726d228f3d10 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #3: c10d::ProcessGroupNCCL::WorkNCCL::isCompleted() + 0x68 (0x726d22902828 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #4: c10d::ProcessGroupNCCL::Watchdog::runLoop() + 0x9c3 (0x726d229071d3 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #5: c10d::ProcessGroupNCCL::Watchdog::run() + 0x157 (0x726d229093b7 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0xef5e4 (0x726dc5aef5e4 in /home/hongyij/miniforge3/bin/../lib/libstdc++.so.6)
+frame #7: <unknown function> + 0x9caa4 (0x726dc5e8aaa4 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #8: __clone + 0x44 (0x726dc5f17a64 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+
+Exception raised from run at /pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:2125 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x9d (0x726d9997305d in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x68ef03 (0x726d2208ef03 in /home/hongyij/miniforge3/lib/python3.13/site-packages/torch/lib/libtorch_cuda.so)
+frame #2: <unknown function> + 0xef5e4 (0x726dc5aef5e4 in /home/hongyij/miniforge3/bin/../lib/libstdc++.so.6)
+frame #3: <unknown function> + 0x9caa4 (0x726dc5e8aaa4 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #4: __clone + 0x44 (0x726dc5f17a64 in /usr/lib/x86_64-linux-gnu/libc.so.6)
+

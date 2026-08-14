@@ -1,0 +1,1 @@
+[bench-suite] stopped after workload failure: deepgemm_fp8_fp4_mega_moe/t64_m64_h7168_i3072_e384_k6_g1
