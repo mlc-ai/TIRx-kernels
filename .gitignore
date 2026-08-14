@@ -15,6 +15,7 @@ tools/cpusim/examples/bench_gen/
 # bench-suite run artifacts (pinned baselines live under tirx_kernels/bench_suite/)
 /.bench-suite/
 /.tir-bench/
+/bench_pipeline_ac10_artifacts/**/suite/cache/
 
 # /file-bug skill backlog — transient per-machine bug folders
 /bugs/

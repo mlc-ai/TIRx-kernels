@@ -325,7 +325,7 @@ child 负责：
 
 - 用户已确认最终结构：CPU prepare 高并发，GPU stage 依可用卡数动态并行，每卡串行，不让解析/生成/编译占用 GPU critical path。
 - 晚绑定使用 ASSIGN 后的 `torch.cuda.set_device(physical_index)`，prepare child 保持全部物理卡可见；live-process `CUDA_VISIBLE_DEVICES` mask 方案已被取代。
-- 干扰重试保留同一 child 的 prepared executable，只重建并重跑 GPU stage；热进程重试必须作为独立证据类别。
+- 干扰重试保留同一 child 的 prepared executable，只重建并重跑 GPU stage；逐 record 标记 `retry_in_place` 以便事后分组分析，但该标签不改变正常测量或 clean AC-10 的证据资格。
 - GEMM 原型证明拆分可行且端到端收益显著，下一步应优化真实 wall-time critical path而不是代理指标。
 - measurement protocol、correctness、reference coverage、fail-fast和干扰隔离不能为速度让步。
 - 所有 benchable workload 必须迁移，包括 exact/alias module resolution 和 distributed rank lifecycle；不接受 fallback。

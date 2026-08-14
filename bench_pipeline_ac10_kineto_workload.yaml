@@ -1,0 +1,8 @@
+# Fixed one-rank Kineto input for the migration-before versus pipeline AC-10 A/B.
+# This is performance-evidence input, not a second default-selection manifest.
+defaults:
+  num_gpus: 1
+  timer: kineto
+workloads:
+  - kernel: allgather_gemm
+    config: tp1_m8192_n24576_k4096_fp16_dynamic
