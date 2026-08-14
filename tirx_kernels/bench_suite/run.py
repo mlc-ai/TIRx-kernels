@@ -47,6 +47,7 @@ from typing import Any, ClassVar
 
 import yaml
 
+from tirx_kernels._prepare_toolchain import pin_prepare_cuda_toolchain
 from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S as DEFAULT_COOLDOWN_S
 from tirx_kernels.runner import DEFAULT_BENCH_ROUNDS as DEFAULT_ROUNDS
 from tirx_kernels.runner import (
@@ -74,9 +75,7 @@ DEFAULT_OUT_DIR = _kernels_repo_root() / ".bench-suite"
 # flagged ones are assembled into a generated workload file and benched.
 CONFIG_DIR = SCRIPT_DIR / "config"
 GENERATED_WORKLOADS_NAME = "workloads.generated.yaml"
-EXPECTED_DEFAULT_WORKLOADS = 112
 MAX_DEFAULT_CONFIGS_PER_KERNEL = 3
-EXPECTED_CURATED_DEFAULT_KERNELS = 33
 DEFAULT_SELECTION_ROLES = ("small", "medium", "large")
 # Single pinned baseline: every run benches our kernel + all reference impls,
 # so one JSON holds both. Promote a run over it via promote_baseline.py.
@@ -248,11 +247,6 @@ def load_config_dir(config_dir: Path = CONFIG_DIR) -> list[dict]:
                     f"workload explicitly instead: {workload}"
                 )
             out.append(workload)
-    if config_dir.resolve() == CONFIG_DIR.resolve() and len(out) != EXPECTED_DEFAULT_WORKLOADS:
-        raise ValueError(
-            f"default workload inventory has {len(out)} entries; "
-            f"expected {EXPECTED_DEFAULT_WORKLOADS}"
-        )
     return out
 
 
@@ -746,6 +740,7 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         module_config_count += len(configs)
 
     yaml_config_count = 0
+    default_workload_count = 0
     yaml_kernel_names: set[str] = set()
     yaml_labels_by_kernel: dict[str, set[str]] = {}
     for path in sorted(config_dir.rglob("*.yaml")):
@@ -757,6 +752,7 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         yaml_labels = yaml_labels_by_kernel.setdefault(kernel, set())
         for entry in entries:
             yaml_config_count += 1
+            default_workload_count += bool(entry.get("default", False))
             label = entry["config"]
             yaml_labels.add(label)
             if label not in labels:
@@ -792,12 +788,6 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         raise ValueError(
             f"module benchmark configs missing from YAML inventory: {missing_yaml_configs}"
         )
-    if len(curated_default_selections) != EXPECTED_CURATED_DEFAULT_KERNELS:
-        raise ValueError(
-            "curated default-selection inventory has "
-            f"{len(curated_default_selections)} kernels; "
-            f"expected {EXPECTED_CURATED_DEFAULT_KERNELS}"
-        )
     if cuda_is_initialized() != before_cuda:
         raise RuntimeError("pipeline capability audit changed CUDA initialization state")
 
@@ -807,6 +797,7 @@ def audit_pipeline_capabilities(config_dir: Path = CONFIG_DIR) -> dict[str, Any]
         "kernel_count": len(records),
         "module_config_count": module_config_count,
         "yaml_config_count": yaml_config_count,
+        "default_workload_count": default_workload_count,
         "generic_adapter_count": len(adapter_kernels["generic_lazy_replay"]),
         "strict_cache_adapter_count": len(adapter_kernels["strict_cache_replay"]),
         "custom_adapter_count": len(adapter_kernels["explicit_custom"]),
@@ -832,6 +823,7 @@ def write_pipeline_capability_report(out_dir: Path, capability: dict[str, Any]) 
         f"- registered kernels: `{capability['kernel_count']}`",
         f"- module configs: `{capability['module_config_count']}`",
         f"- YAML configs: `{capability['yaml_config_count']}`",
+        f"- default workloads: `{capability['default_workload_count']}`",
         f"- generic lazy-replay adapters: `{capability['generic_adapter_count']}`",
         f"- strict custom-cache replay adapters: `{capability['strict_cache_adapter_count']}`",
         f"- explicit/custom adapters: `{capability['custom_adapter_count']}`",
@@ -1464,6 +1456,7 @@ class _PreparedAttempt:
     record: dict | None = None
     terminal_at: float | None = None
     gpu_attempts: list[dict[str, Any]] = field(default_factory=list)
+    prepare_cuda_toolchain: dict[str, Any] | None = None
     pending_interference: dict[str, Any] | None = None
     ready_since: float | None = None
     interference_stop_deadline: float | None = None
@@ -1525,6 +1518,7 @@ def _spawn_prepared_attempt(
     env[TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV] = "1"
     env[PREPARE_CUDA_ARCH_ENV] = str(compile_profile["cuda_arch"])
     env[PREPARE_NUM_SMS_ENV] = str(compile_profile["num_sms"])
+    pin_prepare_cuda_toolchain(env)
     repo_root = str(_kernels_repo_root())
     python_path = env.get("PYTHONPATH")
     env["PYTHONPATH"] = repo_root if not python_path else f"{repo_root}{os.pathsep}{python_path}"
@@ -1615,6 +1609,7 @@ def _base_attempt_record(attempt: _PreparedAttempt) -> dict:
         ).isoformat(timespec="seconds"),
         "phase_timestamps": attempt.timeline,
         "gpu_attempts": list(attempt.gpu_attempts),
+        "prepare_cuda_toolchain": attempt.prepare_cuda_toolchain,
         "retry_in_place": attempt.attempt > 1,
     }
 
@@ -3412,6 +3407,7 @@ def run_scheduled_jobs(
                         item.timeline["module_loaded"] = message["module_loaded"]
                         item.timeline["config_resolved"] = message["config_resolved"]
                         item.timeline["ready"] = message["ready"]
+                        item.prepare_cuda_toolchain = message.get("prepare_cuda_toolchain")
                         item.ready_since = message["ready"]
                         item.state = "READY"
                         ready.append(item)

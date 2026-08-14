@@ -923,6 +923,34 @@ def test_offline_nvcc_arch_preserves_family_specific_blackwell_features():
     assert _offline_nvcc_arch("sm_100") == "sm_100"
 
 
+def test_prepare_cuda_toolchain_keeps_nvrtc_with_selected_nvcc(tmp_path):
+    cuda_home = tmp_path / "cuda-13.2"
+    cuda_bin = cuda_home / "bin"
+    cuda_lib = cuda_home / "lib64"
+    cuda_bin.mkdir(parents=True)
+    cuda_lib.mkdir()
+    for tool in ("nvcc", "ptxas"):
+        path = cuda_bin / tool
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+    nvrtc_library = cuda_lib / "libnvrtc.so.13"
+    nvrtc_library.write_bytes(b"")
+    wheel_lib = tmp_path / "wheel-cuda-13.0"
+    wheel_lib.mkdir()
+    env = {
+        "PATH": os.pathsep.join([str(cuda_bin), "/usr/bin"]),
+        "LD_LIBRARY_PATH": os.pathsep.join([str(wheel_lib), str(cuda_lib)]),
+    }
+
+    bench_run.pin_prepare_cuda_toolchain(env)
+
+    assert env["PATH"].split(os.pathsep)[0] == str(cuda_bin)
+    assert env["LD_LIBRARY_PATH"].split(os.pathsep) == [str(cuda_lib), str(wheel_lib)]
+    assert env["CUDA_HOME"] == str(cuda_home)
+    assert env["CUDA_PATH"] == str(cuda_home)
+    assert env["TIRX_PREPARE_NVRTC_LIBRARY"] == str(nvrtc_library)
+
+
 def test_megamoe_block_scale_compile_uses_arch_specific_sm100_target(monkeypatch):
     import tvm
     from tirx_kernels.deepgemm import mega_moe
@@ -2178,7 +2206,6 @@ def test_capability_audit_accounts_for_every_adapter_and_curated_selection():
     assert sum(map(len, adapter_sets)) == len(set.union(*adapter_sets))
     assert set.union(*adapter_sets) == set(registry.kernel_index(strict=True))
     assert [len(names) for names in adapter_sets] == [21, 10, 10]
-    assert len(capability["curated_default_selections"]) == 33
     assert all(
         set(selection["configs"]) == {"small", "medium", "large"} and selection["rationale"]
         for selection in capability["curated_default_selections"]

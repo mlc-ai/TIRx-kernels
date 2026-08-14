@@ -1,12 +1,10 @@
 kernel: gemm_reduce_scatter
-selection_rationale: TP1 dynamic-scheduler points span low, middle, and high N/K reduce-scatter regimes; TP4 variants remain explicit-only under the multi-GPU measurement exemption.
 defaults:
   num_gpus: 1
   timer: kineto
 configs:
 - config: tp1_m8192_n4096_k12288_fp16_dynamic
-  default: true
-  selection_role: small
+  default: false
 - config: tp4_m8192_n4096_k12288_fp16_dynamic
   default: false
   num_gpus: 4
@@ -31,8 +29,7 @@ configs:
   default: false
   num_gpus: 4
 - config: tp1_m8192_n8192_k28672_fp16_dynamic
-  default: true
-  selection_role: medium
+  default: false
 - config: tp4_m8192_n8192_k28672_fp16_dynamic
   default: false
   num_gpus: 4
@@ -42,8 +39,7 @@ configs:
   default: false
   num_gpus: 4
 - config: tp1_m8192_n16384_k53248_fp16_dynamic
-  default: true
-  selection_role: large
+  default: false
 - config: tp4_m8192_n16384_k53248_fp16_dynamic
   default: false
   num_gpus: 4
