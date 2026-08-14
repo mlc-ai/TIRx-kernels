@@ -17,8 +17,8 @@ from unittest import SkipTest
 
 import torch
 
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {
     "name": "gdn_decode_bf16_wide_vec_mtp",
@@ -1280,8 +1280,7 @@ def _compile_tirx(
     return compile_kernel(get_kernel(**config))
 
 
-def _tirx_executable(case: dict[str, Any]):
-    config = case["config"]
+def _compile_tirx_for_config(config: dict[str, Any]):
     return _compile_tirx(
         int(config["seq_len"]),
         int(config["num_heads"]),
@@ -1298,6 +1297,10 @@ def _tirx_executable(case: dict[str, Any]):
         bool(config.get("per_token_pool_scatter", False)),
         bool(config.get("padded_pool", False)),
     )
+
+
+def _tirx_executable(case: dict[str, Any]):
+    return _compile_tirx_for_config(case["config"])
 
 
 def _storage_span(tensor: torch.Tensor, elements: int) -> torch.Tensor:
@@ -1412,6 +1415,16 @@ def run_test(**kwargs: Any) -> None:
     _run_reference(case)
     torch.cuda.synchronize(case["tirx_state"].device)
     _assert_case_close(case)
+
+
+def prepare_bench(**kwargs: Any):
+    """Compile the selected wide-vector MTP specialization before CUDA setup."""
+    from tirx_kernels.runner import prepared_cached_run_bench
+
+    config = dict(kwargs)
+    _require_supported_config(config)
+    _compile_tirx_for_config(config)
+    return prepared_cached_run_bench(__name__, kwargs)
 
 
 def run_bench(

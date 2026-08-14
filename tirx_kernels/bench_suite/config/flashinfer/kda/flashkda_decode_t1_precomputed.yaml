@@ -13,15 +13,16 @@
 #   hv12h12_*          Kimi K3 TP8 per-rank head count, one row per split side
 #   hv32h16_*          GQA ratio 2, matching FlashInfer's own export bench
 kernel: flashkda_decode_t1_precomputed
+selection_rationale: The selected rows grow from batch 1 through 32 to 128 while covering the split16 low-occupancy path, the GQA split8 path, and the largest non-GQA batch; all other dispatch rows remain explicitly runnable.
 configs:
-  - {config: hv16h16_b1_s16, default: true}
-  - {config: hv16h16_b4_s16, default: true}
-  - {config: hv16h16_b8_s16, default: true}
-  - {config: hv16h16_b16_s16, default: true}
-  - {config: hv16h16_b32_s8, default: true}
-  - {config: hv16h16_b64_s8, default: true}
-  - {config: hv16h16_b128_s8, default: true}
-  - {config: hv12h12_b8_s16, default: true}
-  - {config: hv12h12_b64_s8, default: true}
-  - {config: hv32h16_b8_s16, default: true}
-  - {config: hv32h16_b32_s8, default: true}
+  - {config: hv16h16_b1_s16, default: true, selection_role: small}
+  - {config: hv16h16_b4_s16, default: false}
+  - {config: hv16h16_b8_s16, default: false}
+  - {config: hv16h16_b16_s16, default: false}
+  - {config: hv16h16_b32_s8, default: false}
+  - {config: hv16h16_b64_s8, default: false}
+  - {config: hv16h16_b128_s8, default: true, selection_role: large}
+  - {config: hv12h12_b8_s16, default: false}
+  - {config: hv12h12_b64_s8, default: false}
+  - {config: hv32h16_b8_s16, default: false}
+  - {config: hv32h16_b32_s8, default: true, selection_role: medium}

@@ -20,18 +20,19 @@
 #
 # Split coverage over the 14 rows: split1 x7, split2 x2, split4 x3, split8 x2.
 kernel: flashkda_decode_t5_gram
+selection_rationale: The selected rows grow from W=32 through W=96 to W=4096 and cover split8, the non-monotonic split4 island, and split1; split2 and the remaining production rows stay explicitly runnable.
 configs:
-  - {config: hv32h16_b8_s1, default: true}
-  - {config: hv32h16_b16_s1, default: true}
-  - {config: hv32h16_b32_s1, default: true}
-  - {config: hv32h16_b64_s1, default: true}
-  - {config: hv32h16_b128_s1, default: true}
-  - {config: hv32h16_b1_s8, default: true}
-  - {config: hv32h16_b2_s2, default: true}
-  - {config: hv32h16_b3_s4, default: true}
-  - {config: hv16h16_b2_s8, default: true}
-  - {config: hv16h16_b5_s4, default: true}
-  - {config: hv16h16_b8_s2, default: true}
-  - {config: hv16h16_b64_s1, default: true}
-  - {config: hv12h12_b8_s4, default: true}
-  - {config: hv12h12_b64_s1, default: true}
+  - {config: hv32h16_b8_s1, default: false}
+  - {config: hv32h16_b16_s1, default: false}
+  - {config: hv32h16_b32_s1, default: false}
+  - {config: hv32h16_b64_s1, default: false}
+  - {config: hv32h16_b128_s1, default: true, selection_role: large}
+  - {config: hv32h16_b1_s8, default: true, selection_role: small}
+  - {config: hv32h16_b2_s2, default: false}
+  - {config: hv32h16_b3_s4, default: true, selection_role: medium}
+  - {config: hv16h16_b2_s8, default: false}
+  - {config: hv16h16_b5_s4, default: false}
+  - {config: hv16h16_b8_s2, default: false}
+  - {config: hv16h16_b64_s1, default: false}
+  - {config: hv12h12_b8_s4, default: false}
+  - {config: hv12h12_b64_s1, default: false}

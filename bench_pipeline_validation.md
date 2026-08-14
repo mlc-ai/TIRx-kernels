@@ -165,24 +165,23 @@ evidence that the new design works.
 
 The capability audit reports:
 
-- 41 registered kernels.
-- 992 module-owned benchmark configs.
-- 992 YAML inventory entries, with no module-only or YAML-only config.
-- 21 generic lazy-replay adapters checked at AST level.
-- 10 strict-cache adapters with exact prepared-cache key and consumption
-  validation: five DeepGEMM `compile_spec`/`build_launch` adapters and five
-  direct custom-compiler adapters.
-- 10 explicit/custom adapters covering process-local executables, dispatcher
+- 49 registered kernels.
+- 1180 module-owned benchmark configs.
+- 1180 YAML inventory entries, with no module-only or YAML-only config.
+- 27 generic lazy-replay adapters checked at AST level.
+- 11 strict-cache adapters with exact prepared-cache key and consumption
+  validation.
+- 11 explicit/custom adapters covering process-local executables, dispatcher
   delegation, hardware-profile compile caches, and distributed export/load
-  lifecycles; together the three adapter classes account for 41/41 kernels.
-- 109 single-GPU default workloads, with at most three defaults per kernel.
-- 32 current curated default selections, each exactly three points
+  lifecycles; together the three adapter classes account for 49/49 kernels.
+- 133 single-GPU default workloads, with at most three defaults per kernel.
+- 40 current curated default selections, each exactly three points
   with its rationale stored beside the canonical `default` flags in the same
   kernel YAML and emitted by the capability report.
 - 27 multi-GPU configs, none selected by the default measured sweep.
 
-Final non-GPU verification on 2026-08-14 passed Ruff, Python bytecode
-compilation, `git diff --check`, all 83 protocol/structural tests, and the full
+Final post-rebase non-GPU verification on 2026-08-14 passed Ruff, Python bytecode
+compilation, `git diff --check`, all 106 protocol/evidence tests, and the full
 capability audit above. No benchmark workload or multi-GPU runtime was launched
 for this verification pass.
 
@@ -217,7 +216,7 @@ The protocol suite covers:
 - standalone `run_kernel_bench()` composes the same prepare/run-GPU contract;
 - timeline validation rejects missing transitions, reversed timestamps, and
   overlapping ownership intervals on the same GPU;
-- capability accounting proves 41/41 adapters and 32/32 reviewed three-point
+- capability accounting proves 49/49 adapters and 40/40 reviewed three-point
   selections from canonical sources.
 
 The current additions also exercise physical-UUID lookup without context creation,
@@ -598,9 +597,9 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | AC-6 | satisfied | Bounded process/RSS/FD evidence, cancellation cleanup, immediate internal release, and resource accounting tests |
 | AC-7 | satisfied | Cost-model schema 3 separates initial CPU READY constraints, retry READY delay, ASSIGN-held card time, post-GPU_START execution, transient foreign-PID wait, and internal dispatch latency; complete-timeline/no-data gating remains intact. The clean Proton run measured 0.047s unexplained residual and 42.8ms internal dispatch p95 |
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
-| AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
+| AC-9 | satisfied for migration and structural coverage | 49/49 adapters and 1180/1180 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
 | AC-10 | terminal evidence ledger closed by human scope decision | Proton has a passing persisted same-UUID schema-3 A/B. Event and CUDA-graph retain their honest non-winning measurements. Kineto remains explicitly missing because of the pinned external TVM rank/device coupling and MegaMoE remains unmeasured; the human decision of 2026-08-14 removed all remaining timer-family GPU runs from the required work queue without converting missing evidence into pass |
-| AC-11 | satisfied | 109 defaults, all 992 configs retained, and 32/32 reviewed three-point selections with YAML-owned small/medium/large roles and rationale; all 16 `gemm_reduce_scatter` configs remain explicitly runnable |
+| AC-11 | satisfied | 133 defaults, all 1180 configs retained, and 40/40 reviewed three-point selections with YAML-owned small/medium/large roles and rationale; all 16 `gemm_reduce_scatter` configs remain explicitly runnable |
 
 The set-device and same-child retry implementation is complete at its structural
 anchors and has targeted single-GPU runtime evidence. Proton, Event, and
@@ -616,7 +615,7 @@ current tracked sources and independently executable gates, not on the absence
 of open notes:
 
 - `audit_pipeline_capabilities()` reports `static_pass`, `execution_mode:
-  pipeline`, 41 kernels, 992 module configs, 992 YAML configs, 109 defaults, 32
+  pipeline`, 49 kernels, 1180 module configs, 1180 YAML configs, 133 defaults, 40
   curated three-point selections, and 27 multi-GPU rows explicitly classified
   `exempted_by_human_unmeasured`;
 - all 106 collected protocol/evidence tests pass, including lifecycle,
@@ -624,7 +623,8 @@ of open notes:
   migration, measurement schema, cost-model no-data gating, raw artifact hash
   verification, and suite A/B recomputation;
 - the license-header gate and its self-test pass, and the GDN no-tile structural
-  lint passes for the source plus all 42 pre-dispatch specializations;
+  lints pass for all 42 wide-vector T1 and all 67 ILP4 pre-dispatch
+  specializations;
 - repository searches find no legacy/fallback execution mode, reusable prepare
   pool, process pool, or compilation thread pool. The only
   `ThreadPoolExecutor` probes independent candidate GPUs in short-lived

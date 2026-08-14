@@ -2427,10 +2427,18 @@ def test_timeline_validation_rejects_missing_out_of_order_and_overlapping_record
 def test_capability_audit_accounts_for_every_adapter_and_curated_selection():
     capability = audit_pipeline_capabilities()
 
-    assert capability["kernel_count"] == 41
-    adapter_sets = [set(names) for names in capability["adapter_kernels"].values()]
-    assert sum(map(len, adapter_sets)) == len(set.union(*adapter_sets))
-    assert set.union(*adapter_sets) == set(registry.kernel_index(strict=True))
+    records = set(registry.kernel_index(strict=True))
+    adapter_sets = {
+        adapter_class: set(names)
+        for adapter_class, names in capability["adapter_kernels"].items()
+    }
+    assert capability["kernel_count"] == len(records)
+    assert capability["generic_adapter_count"] == len(adapter_sets["generic_lazy_replay"])
+    assert capability["strict_cache_adapter_count"] == len(adapter_sets["strict_cache_replay"])
+    assert capability["custom_adapter_count"] == len(adapter_sets["explicit_custom"])
+    adapter_values = list(adapter_sets.values())
+    assert sum(map(len, adapter_values)) == len(set.union(*adapter_values))
+    assert set.union(*adapter_values) == records
     assert all(
         set(selection["configs"]) == {"small", "medium", "large"} and selection["rationale"]
         for selection in capability["curated_default_selections"]

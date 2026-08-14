@@ -59,7 +59,7 @@ grep -vE "allgather_gemm|gemm_reduce_scatter" \
 python -m tirx_kernels.bench_suite --workloads /tmp/workloads_no_comm.yaml
 ```
 
-Pipeline capability gate (all 41 registered kernels, all module configs, all
+Pipeline capability gate (all 49 registered kernels, all module configs, all
 YAML labels, and declared GPU counts; no prepare, compile, or GPU use):
 
 ```bash
@@ -70,20 +70,20 @@ The command also writes `.bench-suite/reports/pipeline-capability.md`, including
 the complete multi-GPU exemption inventory and its
 `exempted_by_human_unmeasured` runtime status. This explicit audit costs several
 seconds of CPU import work, so normal timed runs do not repeat it on their
-critical path. The current inventory is 992 module configs and 992 YAML configs.
+critical path. The current inventory is 1180 module configs and 1180 YAML configs.
 The gate requires exact bidirectional inventory coverage and statically enforces
 the generic-adapter boundary: CPU prepare compiles canonical `get_kernel()` output,
 while GPU execution may only consume it through lazy replay and cannot regenerate
-or compile the PrimFunc after assignment. Ten strict-cache adapters use the same
-contract through exact custom-cache replay: five DeepGEMM
-`compile_spec`/`build_launch` adapters and five direct custom-compiler adapters.
+or compile the PrimFunc after assignment. Eleven strict-cache adapters use the same
+contract through exact custom-cache replay.
 GPU execution must request the exact prepared namespace/key and consume every
 prepared artifact. Independently, the runner rejects any in-process
 `tvm.compile` after GPU assignment, so a cache miss cannot silently move
 compilation back onto the measured GPU critical path.
 The remaining explicit/custom adapters retain process-local executables, delegate
 to an already-audited prepared implementation, or export distributed libraries
-before assignment. Capability accounting must total 41/41 adapters.
+before assignment. Capability accounting must total 49/49 adapters: 27 generic
+lazy-replay, 11 strict-cache replay, and 11 explicit/custom adapters.
 
 ### SGLang FP8 paged MQA exploration
 

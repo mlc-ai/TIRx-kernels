@@ -1079,6 +1079,13 @@ _ORACLE_RTOL = 2.0**-5
 _ORACLE_ATOL = 6.0e-3
 
 
+def prepare_bench(**kwargs: Any):
+    """CPU-compile this workload for same-process GPU execution."""
+    from tirx_kernels.runner import prepare_module_bench
+
+    return prepare_module_bench(__name__, kwargs)
+
+
 def run_test(**kwargs: Any) -> None:
     """Validate one config against the frozen export and an independent oracle."""
     from tirx_kernels.runner import compile_kernel
@@ -1173,11 +1180,10 @@ def run_bench(
     """Time the port against the frozen cake export on identical inputs."""
     rounds = int(kwargs.pop("rounds", 5))
     cooldown_s = float(kwargs.pop("cooldown_s", 1.0))
-    from tirx_kernels.runner import compile_kernel
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench, compile_kernel_lazy
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
+    executable = compile_kernel_lazy(lambda: get_kernel(**kwargs))
     args = _tirx_args(case)
 
     # Validate once, outside the timed region. Both sides mutate their own state
