@@ -11,12 +11,12 @@ tree, so a kernel's configs sit at `config/<bucket>/<kernel>.yaml`. With no
 `.bench-suite/workloads.generated.yaml` and that is what runs. The generated
 file is the inspectable source of truth for the current representative sweep,
 including the TP1 AllGather+GEMM profiles. Every kernel has at most three
-default small/medium/large representatives; the current tree assembles 109
+default small/medium/large representatives; the current tree assembles 136
 workloads. Widening or narrowing the sweep is a YAML `default`
 flag flip, not a scheduler rule or a second selection file. Multi-GPU configs
 are deliberately absent from the default measured sweep but remain available
 to explicit workload files.
-For each of the 32 kernels retaining three curated defaults, the same YAML
+For each of the 41 kernels retaining three curated defaults, the same YAML
 also owns a `selection_rationale`; the capability gate requires exactly three
 single-GPU defaults and renders those rationales for review.
 
@@ -59,7 +59,7 @@ grep -vE "allgather_gemm|gemm_reduce_scatter" \
 python -m tirx_kernels.bench_suite --workloads /tmp/workloads_no_comm.yaml
 ```
 
-Pipeline capability gate (all 49 registered kernels, all module configs, all
+Pipeline capability gate (all 50 registered kernels, all module configs, all
 YAML labels, and declared GPU counts; no prepare, compile, or GPU use):
 
 ```bash
@@ -70,7 +70,7 @@ The command also writes `.bench-suite/reports/pipeline-capability.md`, including
 the complete multi-GPU exemption inventory and its
 `exempted_by_human_unmeasured` runtime status. This explicit audit costs several
 seconds of CPU import work, so normal timed runs do not repeat it on their
-critical path. The current inventory is 1180 module configs and 1180 YAML configs.
+critical path. The current inventory is 1277 module configs and 1277 YAML configs.
 The gate requires exact bidirectional inventory coverage and statically enforces
 the generic-adapter boundary: CPU prepare compiles canonical `get_kernel()` output,
 while GPU execution may only consume it through lazy replay and cannot regenerate
@@ -82,8 +82,8 @@ prepared artifact. Independently, the runner rejects any in-process
 compilation back onto the measured GPU critical path.
 The remaining explicit/custom adapters retain process-local executables, delegate
 to an already-audited prepared implementation, or export distributed libraries
-before assignment. Capability accounting must total 49/49 adapters: 27 generic
-lazy-replay, 11 strict-cache replay, and 11 explicit/custom adapters.
+before assignment. Capability accounting must total 50/50 adapters: 27 generic
+lazy-replay, 11 strict-cache replay, and 12 explicit/custom adapters.
 
 ### SGLang FP8 paged MQA exploration
 
