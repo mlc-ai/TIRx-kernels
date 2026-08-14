@@ -107,10 +107,13 @@ was latent rather than an existing correctness bug: device 0 was the masked
 assigned card. It became material when the all-visible
 `set_device(physical_index)` design was adopted.
 
-The currently installed `deep_gemm` package lacks `fp8_fp4_mega_moe`, so
-`load_deep_gemm_mega()` raises `SkipTest` before the code can reach `utils.dist`.
+The base interpreter's `deep_gemm` package lacks `fp8_fp4_mega_moe`, so an
+unpinned local run raises `SkipTest` before the code can reach `utils.dist`.
 This is an earlier API mismatch, not evidence that the intended dependency is
-safe. The MegaMoE YAML has two default single-GPU entries,
+safe. The locked benchmark environment instead resolves `deep_gemm` from
+`venv-bench-sglang96a04cb-nccl4py031-cublasmp010`, where
+`fp8_fp4_mega_moe` and `utils.dist` are both present; that is the environment
+required for runtime evidence. The MegaMoE YAML has two default single-GPU entries,
 `t64_m64_h7168_i3072_e384_k6_g1` and
 `t8192_m8192_h7168_i3072_e384_k6_g1`, so the path participates in the 112-item
 default sweep.
