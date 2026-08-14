@@ -9,7 +9,7 @@
 
 prepared executable 必须从 CPU prepare 到 GPU stage 始终留在同一个 child process 内，避免序列化不可移植的 runtime object。prepare child 启动时保留全部物理 GPU 可见，因此逻辑序号等于物理序号；child 在 READY 后等待父进程通过独立控制通道发送 GPU assignment，确认 CUDA 尚未初始化后调用 `torch.cuda.set_device(<physical_index>)`，再以 UUID handshake 证明当前执行设备与原子 claim 一致后进入 GPU stage。不得再依赖在存活进程中修改 `CUDA_VISIBLE_DEVICES` 完成晚绑定。
 
-每个 workload 使用一个一次性 child process：该进程只为这一条 workload 执行一次 CPU prepare，之后完成一个或多个 GPU attempt，最终 `RESULT → exit`；跑过 GPU stage 后不得回收或复用去准备另一个 workload。若 GPU attempt 检测到外部闯入，child 保留 prepared executable，释放原 claim，等待同卡或另一张卡的新 assignment，重新 `set_device` 并重建全部 GPU tensor、reference、workspace 和 timer state，只重跑 GPU stage，不得重新 import/specialize/generate/compile。这里的 prepare 并发上限只约束同时存在的一次性 workload 子进程数量，不是常驻 worker pool；实现不得引入常驻 prepare worker、worker 复用池、fork 模板，或在 orchestrator 同一解释器中用编译线程池并行执行 workload specialization/编译。
+每个 workload 使用一个一次性 child process：该进程只为这一条 workload 执行一次 CPU prepare，之后完成一个或多个 GPU attempt，最终 `RESULT → exit`；跑过 GPU stage 后不得回收或复用去准备另一个 workload。若 GPU attempt 检测到外部闯入，child 保留 prepared executable，释放原 claim，并等待重新获得首次已验证的同一组原子 GPU claim；重新 `set_device` 并重建全部 GPU tensor、reference、workspace 和 timer state，只重跑 GPU stage，不得重新 import/specialize/generate/compile。首次 assignment 仍按实时空闲卡动态选择，但同一进程进入过 GPU stage 后不得跨物理卡迁移：DeepGEMM 等外部 runtime 会缓存绑定首个 CUDA context 的 module/function/handle，而其公开 API 没有可靠的进程内 reset。这里的 prepare 并发上限只约束同时存在的一次性 workload 子进程数量，不是常驻 worker pool；实现不得引入常驻 prepare worker、worker 复用池、fork 模板，或在 orchestrator 同一解释器中用编译线程池并行执行 workload specialization/编译。
 
 原地重试会在已经执行过 GPU attempt 的进程内重新测量。每个 run artifact 必须显式记录 `retry_in_place`、GPU attempt identity、每次 assignment/UUID 和被放弃卡的 resident-context 状态，便于事后零成本比较重试过与未重试的同 config 数据；该标签不改变结果的证据资格，也不默认排除 clean AC-10 A/B。
 
@@ -77,14 +77,15 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 - AC-5: fail-fast、取消、外部干扰检测和 retry 语义覆盖 PREPARING、READY 和 RUNNING_GPU 三种生命周期状态。
   - Positive Tests (expected to PASS):
     - 一个 workload 确定性失败时，停止启动新的 prepare，取消 PREPARING/READY children，并终止其他 RUNNING_GPU process groups，最终只记录真实 failure。
-    - RUNNING_GPU 检测到 foreign active PID 时，释放 GPU claim、记录 `INTERFERED` 和 intruder PIDs；同一 child 保留 prepared executable，等待新的完整 claim 后重新选择设备、重建 GPU-side state 并只重跑 GPU stage。
+    - RUNNING_GPU 检测到 foreign active PID 时，释放 GPU claim、记录 `INTERFERED` 和 intruder PIDs；同一 child 保留 prepared executable，等待首次 assignment 的同一组完整 claim 再次 eligible 后重新选择该设备、重建 GPU-side state 并只重跑 GPU stage。其他 READY workload 仍可使用其余 eligible GPU。
     - phase timestamps 证明一次或多次干扰重试不会出现第二次 prepare，GPU ownership ledger 证明旧 claim 在新 claim 前已完整释放，且任何时刻一张卡最多由一个 workload 持有。
-    - 从一张卡切换到另一张卡后，测量并报告被放弃卡的 primary-context resident VRAM；该数据只报告，不由实现自行决定是否可接受。
+    - 首次 assignment 建立进程级 GPU affinity；retry 不能因其他卡空闲而降级为跨卡 assignment，完整多卡 claim 也不能部分获取。
     - Ctrl-C 或 suite cancellation 能回收所有 child/process-group、控制 FD、临时目录和 GPU ownership。
   - Negative Tests (expected to FAIL):
     - 被取消的 READY child 后续仍收到 GPU assignment。
     - 干扰后重新执行 CPU prepare，或未重建 GPU tensor/reference/workspace/timer state 就继续计时。
     - child 退出或控制通道断开后 GPU ownership 未释放。
+    - 同一 child 已进入过 GPU stage 后被重新分配到不同的物理 GPU claim。
 
 - AC-6: 流水线具备背压和资源边界，不以无限并发换取表面速度。
   - Positive Tests (expected to PASS):
@@ -266,8 +267,8 @@ child 负责：
 
 6. 恢复完整 failure semantics 和资源治理。
    - Phase A: PREPARING/READY/RUNNING_GPU cancellation 和 fail-fast。
-   - Phase B: interference 原地 GPU retry、旧 claim 释放、GPU-side state 重建、attempt identity、热进程证据分类和 temporary resource cleanup。
-   - Phase C: 换卡重试时测量被放弃卡的 primary-context resident VRAM，并把可接受性留给人裁决。
+   - Phase B: interference 原地 GPU retry、旧 claim 释放、首次 claim 的进程级 affinity、同卡原子重获取、GPU-side state 重建、attempt identity、热进程 provenance 和 temporary resource cleanup。
+   - Phase C: 将此前跨卡 retry 的 abandoned-card primary-context VRAM 测量保留为历史诊断证据；当前实现不再跨卡迁移同一 prepared child。
    - Phase D: backpressure、host RSS/FD/process bounds 和 minimal finalization tail。
 
 7. 分波完成全 kernel 迁移，不在调度器中堆 workload-specific fast path。
@@ -329,7 +330,7 @@ child 负责：
 
 - 用户已确认最终结构：CPU prepare 高并发，GPU stage 依可用卡数动态并行，每卡串行，不让解析/生成/编译占用 GPU critical path。
 - 晚绑定使用 ASSIGN 后的 `torch.cuda.set_device(physical_index)`，prepare child 保持全部物理卡可见；live-process `CUDA_VISIBLE_DEVICES` mask 方案已被取代。
-- 干扰重试保留同一 child 的 prepared executable，只重建并重跑 GPU stage；逐 record 标记 `retry_in_place` 以便事后分组分析，但该标签不改变正常测量或 clean AC-10 的证据资格。
+- 干扰重试保留同一 child 的 prepared executable，只重建并重跑 GPU stage；首次动态 assignment 后固定该 child 的原子 GPU claim，避免外部 runtime 的 context-bound cache 跨卡失效。逐 record 标记 `retry_in_place` 以便事后分组分析，但该标签不改变正常测量或 clean AC-10 的证据资格。
 - GEMM 原型证明拆分可行且端到端收益显著，下一步应优化真实 wall-time critical path而不是代理指标。
 - measurement protocol、correctness、reference coverage、fail-fast和干扰隔离不能为速度让步。
 - 所有 benchable workload 必须迁移，包括 exact/alias module resolution 和 distributed rank lifecycle；不接受 fallback。

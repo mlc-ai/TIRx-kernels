@@ -557,6 +557,47 @@ def test_interference_retry_reuses_prepared_child_and_releases_claim_after_ack(
     assert [path.stem for path in attempt_logs] == ["fake__retry__a1"]
 
 
+def test_interference_retry_waits_for_its_original_gpu_instead_of_switching(
+    monkeypatch, tmp_path: Path
+):
+    calls = []
+    original_claims = []
+    retry_checks = 0
+
+    monkeypatch.setattr(
+        bench_run.random, "sample", lambda population, count: list(population)[:count]
+    )
+    monkeypatch.setattr(bench_run, "MONITOR_INTERVAL", 0.01)
+
+    def active_strangers(gpus, *_args, **_kwargs):
+        nonlocal retry_checks
+        calls.append(tuple(gpus))
+        if len(calls) == 1:
+            original_claims.append(tuple(gpus))
+            return {}
+        if len(calls) == 2:
+            return {4242: 100.0}
+        retry_checks += 1
+        return {4242: 100.0} if retry_checks < 3 else {}
+
+    records, retries, _pipeline = _fake_pipeline(
+        monkeypatch,
+        tmp_path,
+        [{"kernel": "fake", "config": "sticky-retry", "num_gpus": 1, "gpu_s": 0.5}],
+        gpu_indices=("0", "1"),
+        max_prepare_processes=1,
+        ready_backlog=1,
+        active_strangers=active_strangers,
+    )
+
+    assert original_claims == [("0",)]
+    assert len(retries) == 1
+    assert [attempt["gpus"] for attempt in records[0]["gpu_attempts"]] == [["0"], ["0"]]
+    assert all(gpus == ("0",) for gpus in calls)
+    assert records[0]["process_pid"] == retries[0]["process_pid"]
+    assert records[0]["retry_in_place"] is True
+
+
 def test_exact_alias_load_imports_only_the_target_module():
     script = textwrap.dedent(
         """
@@ -1530,6 +1571,12 @@ def test_gpu_pool_never_retains_a_partial_claim():
     assert pool._owned == {"0", "1"}
     assert pool.try_acquire_many(1) is None
     assert pool._owned == {"0", "1"}
+
+    pool.release_many(claim or ())
+    with pool._changed:
+        pool._external_occupied = {"1"}
+    assert pool.try_acquire_exact(("0", "1")) is None
+    assert pool._owned == set()
 
 
 def _megamoe_rank_result(*, tirx, deepgemm):

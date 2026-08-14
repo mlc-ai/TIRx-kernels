@@ -15,6 +15,9 @@ multi-GPU runtime exemption.
 - The lifecycle follows
   `PREPARING → READY → ASSIGNED → RUNNING_GPU → RESULT_READY → RESULT → exit`;
   interference returns the same child from GPU cleanup to READY.
+- The first verified assignment establishes process-level GPU affinity. An
+  in-place retry releases ownership but can only reacquire that exact atomic GPU
+  set; other READY workloads remain free to use the other eligible cards.
 - CPU prepare owns exact module import/parsing, config resolution,
   specialization, IR generation, compilation, and any compile-cache population.
 - GPU assignment is late-bound after READY. The prepared executable remains in
@@ -44,14 +47,24 @@ uninitialized. After each ASSIGN, the child must call
 the existing UUID handshake before allocation or launch. Mutating
 `CUDA_VISIBLE_DEVICES` in a live prepared process is no longer permitted.
 
-For interference handling, a workload owns one one-shot process
-and performs CPU prepare exactly once. After an interfered GPU attempt, the
-orchestrator must release the old atomic claim and may assign the same or another
-card to that same child. The child must select the new card and rebuild all
-GPU-side tensors, references, workspaces, and timer state without repeating
-import, specialization, generation, or compilation. The run artifact must mark
-`retry_in_place: true` and preserve per-attempt assignment, UUID, ownership, and
-phase records.
+For interference handling, a workload owns one one-shot process and performs CPU
+prepare exactly once. After an interfered GPU attempt, the orchestrator releases
+the old atomic claim but retains its exact GPU-set identity as process affinity.
+The child waits until that same complete set becomes eligible, selects it again,
+and rebuilds all GPU-side tensors, references, workspaces, and timer state without
+repeating import, specialization, generation, or compilation. The run artifact
+must mark `retry_in_place: true` and preserve per-attempt assignment, UUID,
+ownership, and phase records.
+
+This affinity is required by reachable external-runtime behavior, not by one
+workload special case. The inspected DeepGEMM runtime has process-global caches:
+`csrc/jit/cache.hpp` keys `KernelRuntime` only by JIT directory, while the cached
+runtime owns a CUDA module/function loaded in the first device context; its
+process-global `DeviceRuntime` also owns a cuBLASLt handle, CUDA workspace, and
+cached device properties. No public reset is available. Moving the same prepared
+process between physical devices can therefore reuse invalid context-bound
+objects. Exact-claim retry turns that external assumption into one scheduler
+invariant while preserving dynamic first assignment.
 
 A retry occurs in a process that has already executed a GPU attempt. The human
 ruled that this does not create a separate evidence class without measured proof
@@ -314,7 +327,7 @@ slightly above the plan's `max(0.5s, 5%)` target for this one-workload run, and
 there is no paired migration-before artifact, so it is not promoted to AC-10
 performance evidence.
 
-The controlled retry run used the same workload. A synthetic monitored intruder
+The historical controlled retry run used the same workload. A synthetic monitored intruder
 forced attempt 1 to stop on physical GPU 2 and attempt 2 to run on physical GPU 1,
 UUID `GPU-e8754e6d-624e-e1d0-595a-f9444588960a`:
 
@@ -326,6 +339,10 @@ UUID `GPU-e8754e6d-624e-e1d0-595a-f9444588960a`:
 - final TIRx was 6.877µs and torch-cuBLAS 6.016µs, with five raw samples each;
 - critical wall was 18.762s, unexplained 0.311s, and outer wall 19.529s;
 - descendant and forced-kill lists were empty for this local GEMM.
+
+This run predates the exact-claim retry invariant. It remains evidence for
+same-child prepare reuse, provenance, cleanup, and the cost of abandoning a
+context, but it is not evidence for the current retry assignment policy.
 
 After attempt-1 cleanup and again after reassignment, the abandoned GPU 2 kept
 645,922,816 bytes (exactly 616 MiB) resident in the still-live workload process.
@@ -650,6 +667,19 @@ supplemental-only matrix without authorizing any TVM change. The fixed
 the 109-workload default sweep remain unchanged. Together with the three
 `gemm_reduce_scatter` rows already removed from defaults, the supplement is
 106/112. Kineto/allgather remain explicitly missing for acceptance purposes.
+
+The first 106-workload pipeline attempt is also incomplete and publishes no
+suite speedup. Its persisted wrapper wall is 50.093591709s, with six terminal
+results and eleven interference retries. One
+`deepgemm_sm100_fp8_gemm_1d1d/m4096_n576_k7168` child was first verified on GPU
+0, interrupted by foreign PID 1708888, then reassigned to GPU 4. The second
+attempt failed in `deep_gemm.transform_sf_into_required_layout` with
+`CUDA_ERROR_INVALID_HANDLE`. Its two recorded attempts and UUIDs prove that this
+was a same-process card switch. Inspection of DeepGEMM's global JIT/runtime
+caches explains the failure as reuse of first-context CUDA resources on the new
+device. The scheduler now preserves the first exact GPU claim across retry; this
+is an in-repository protocol correction and does not modify the external package
+or measurement semantics.
 
 The intended attribution is unchanged: any future complete cold-cache quotient
 is an upper bound that includes CPU/GPU pipeline overlap, excludes pre-existing

@@ -1034,6 +1034,25 @@ class GpuPool:
             self._owned.update(selected)
             return selected
 
+    def try_acquire_exact(self, indices: tuple[str, ...]) -> tuple[str, ...] | None:
+        """Atomically reclaim one exact previously assigned GPU set."""
+        if not indices or len(set(indices)) != len(indices):
+            raise ValueError(f"exact GPU claim must contain unique indices, got {indices!r}")
+        requested = tuple(indices)
+        with self._changed:
+            if self._external_occupied is None:
+                return None
+            if any(
+                idx not in self._known_indices
+                or (self._allowed is not None and idx not in self._allowed)
+                or idx in self._owned
+                or idx in self._external_occupied
+                for idx in requested
+            ):
+                return None
+            self._owned.update(requested)
+            return requested
+
     def refresh_external_occupancy(self) -> set[str]:
         """Poll foreign-visible occupancy and wake dispatch if eligibility changed."""
         rows = self._all_gpus()
@@ -1431,6 +1450,7 @@ class _PreparedAttempt:
     state: str = "PREPARING_CPU"
     buffer: bytearray = field(default_factory=bytearray)
     gpus: tuple[str, ...] = ()
+    gpu_affinity: tuple[str, ...] = ()
     physical_gpu_uuids: tuple[str, ...] = ()
     gpu_ownership_released: bool = False
     timeline: dict[str, float] = field(default_factory=dict)
@@ -3224,7 +3244,16 @@ def run_scheduled_jobs(
         )
         for item in ordered:
             count = item.workload.get("num_gpus", 1)
-            gpus = pool.try_acquire_many(count)
+            # External CUDA runtimes may cache modules, functions, handles, or
+            # allocator state in the first device context used by this process.
+            # Preserve the first verified assignment across in-place retries;
+            # moving a prepared child to another physical GPU can make those
+            # otherwise valid process-local objects unusable.
+            gpus = (
+                pool.try_acquire_exact(item.gpu_affinity)
+                if item.gpu_affinity
+                else pool.try_acquire_many(count)
+            )
             if gpus is None:
                 continue
             strangers = _active_strangers(gpus, _our_pids(), pool.util_threshold)
@@ -3249,6 +3278,8 @@ def run_scheduled_jobs(
                 gpus, cleared_at=checked_at, reason="predispatch_verified_clear"
             )
             remove_ready(item)
+            if not item.gpu_affinity:
+                item.gpu_affinity = gpus
             item.gpus = gpus
             item.gpu_ownership_released = False
             item.state = "ASSIGNED"
