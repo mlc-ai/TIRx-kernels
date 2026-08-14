@@ -1,0 +1,31 @@
+[bench-suite] live log: /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/kineto/after-gpu2/suite/runs/1.log
+[bench-suite]   tail : tail -f /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/kineto/after-gpu2/suite/latest.log
+[bench-suite] run id : 1
+[bench-suite] visible: 1 ['2']; util now [2:25%]; mem now [2:0.0%]
+[bench-suite] gate: util-threshold=0%, mem-threshold=0% — occupied (skip): ['2']; shareable: [] (resident-VRAM cards: none)
+[bench-suite] 1 workloads, 1 probe-OK GPU(s) in pool, one-shot prepared children, compile-profile={'name': 'NVIDIA B200', 'compute_capability': [10, 0], 'cuda_arch': 'sm_100a', 'num_sms': 148}, label=kineto-after-cbd6b01-gpu2-schema3, 5 standard-timer round(s), aggregate=mean, cooldown=1s before every impl/round
+[bench-suite] 2026-08-14T03:25:41+00:00 prepare pid=101795 START allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic (attempt 1)
+[bench-suite] 2026-08-14T03:25:48+00:00 READY allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic prepare=7.562s
+[bench-suite] 2026-08-14T03:25:49+00:00 gpus=2 GPU_START allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic (attempt 1)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic attempt 1
+[bench-suite] ***   intruder PIDs: [500562]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T03:26:01+00:00 gpus=2 GPU_START allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic (attempt 2)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic attempt 2
+[bench-suite] ***   intruder PIDs: [504712]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T03:26:15+00:00 gpus=2 GPU_START allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic (attempt 3)
+[bench-suite] >>> FAIL-FAST allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic attempt 3: gpu: ProcessRaisedException: 
+
+-- Process 0 terminated with the following error:
+Traceback (most recent call last):
+  File "/home/hongyij/workspace/worktrees/20 <<<
+[bench-suite] interference retry summary: 2 attempt(s)
+[bench-suite]   - allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic: attempt 1 → intruders [500562]
+[bench-suite]   - allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic: attempt 2 → intruders [504712]
+[bench-suite] wrote /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/kineto/after-gpu2/suite/runs/1.json
+[bench-suite] wrote /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/kineto/after-gpu2/suite/reports/1/summary.md

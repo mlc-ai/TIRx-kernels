@@ -162,6 +162,14 @@ def _command(repo_root: Path, tmp_path: Path, *, timer_family: str = "proton") -
     ]
 
 
+def _assert_source_matches(repo_root: Path, source: dict) -> None:
+    source_path = Path(source["path"])
+    if not source_path.is_absolute():
+        source_path = repo_root / source_path
+    assert source_path.is_file()
+    assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source["sha256"]
+
+
 def _assert_evidence_sources_match(repo_root: Path, evidence: dict) -> None:
     sources = [evidence["sources"]["workloads"]]
     for side in ("before", "after"):
@@ -173,11 +181,7 @@ def _assert_evidence_sources_match(repo_root: Path, evidence: dict) -> None:
             ]
         )
     for source in sources:
-        source_path = Path(source["path"])
-        if not source_path.is_absolute():
-            source_path = repo_root / source_path
-        assert source_path.is_file()
-        assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source["sha256"]
+        _assert_source_matches(repo_root, source)
 
 
 def test_tracked_ac10_proton_before_artifact_is_complete():
@@ -446,6 +450,80 @@ def test_tracked_ac10_cudagraph_evidence_matches_raw_retry_sources():
     assert cost["ready_starvation_s"] == 0.0
     assert cost["unexplained_s"] == pytest.approx(2.8848648071289062e-05)
     assert cost["dispatch_latency_s"]["p95"] == pytest.approx(0.04016995429992676)
+
+
+def test_tracked_ac10_kineto_evidence_is_explicitly_missing():
+    repo_root = Path(__file__).resolve().parents[1]
+    evidence = json.loads(
+        (repo_root / "bench_pipeline_ac10_artifacts/kineto/evidence-missing.json").read_text()
+    )
+
+    assert evidence["measurement_status"] == "missing"
+    assert evidence["timer_family"] == "kineto"
+    assert evidence["reason_code"] == "external_tvm_nvshmem_rank_device_coupling"
+    assert evidence["fixed_conditions"]["physical_gpu_index"] == 2
+    assert evidence["fixed_conditions"]["rounds"] == 5
+    assert evidence["fixed_conditions"]["cooldown_s"] == 1.0
+    for unavailable_field in (
+        "after",
+        "before",
+        "derived",
+        "dispatch_latency_s",
+        "expected_s",
+        "unexplained_s",
+        "wall_speedup",
+    ):
+        assert unavailable_field not in evidence
+
+    sources = evidence["sources"]
+    _assert_source_matches(repo_root, sources["workloads"])
+    for source in sources["before"].values():
+        _assert_source_matches(repo_root, source)
+    for attempt in sources["after_attempts"]:
+        for key, source in attempt.items():
+            if key != "classification":
+                _assert_source_matches(repo_root, source)
+
+    external = sources["external_dependency"]
+    external_path = Path(external["path"])
+    if external_path.is_file():
+        _assert_source_matches(repo_root, external)
+    else:
+        assert external["availability"] == "host_local_pinned_tir_worktree"
+        assert external_path.is_absolute()
+
+    before_outer = json.loads(
+        (repo_root / sources["before"]["outer_timer"]["path"]).read_text()
+    )
+    before_run = json.loads((repo_root / sources["before"]["run"]["path"]).read_text())
+    assert before_outer["status"] == "completed"
+    assert before_outer["returncode"] == 0
+    assert before_outer["physical_gpu"]["same_uuid_before_after"] is True
+    assert before_run["results"][0]["status"] == "ok"
+    assert before_run["results"][0]["timer"] == "kineto"
+
+    guard_attempt = sources["after_attempts"][1]
+    after_outer = json.loads(
+        (repo_root / guard_attempt["outer_timer"]["path"]).read_text()
+    )
+    after_run = json.loads((repo_root / guard_attempt["run"]["path"]).read_text())
+    assert after_outer["returncode"] == 1
+    assert after_outer["physical_gpu"]["same_uuid_before_after"] is True
+    result = after_run["results"][0]
+    assert result["status"] == "FAIL"
+    assert "never-assigned physical GPU(s) [0]" in result["error"]
+    cost = after_run["pipeline"]["cost_model"]
+    assert cost == {
+        "complete_measurement_count": 0,
+        "complete_timeline_count": 0,
+        "measurement_status": "missing",
+        "missing_reason": (
+            "no workload produced an ok result with a complete timeline and "
+            "valid GPU assignment"
+        ),
+        "record_count": 1,
+        "schema_version": 3,
+    }
 
 
 def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path):

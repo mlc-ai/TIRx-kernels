@@ -1,0 +1,1 @@
+[bench-suite] stopped after workload failure: allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic

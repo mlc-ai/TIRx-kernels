@@ -344,13 +344,18 @@ child 负责：
 
 ### Convergence Status
 
-- Final Status: `implementation_complete_acceptance_incomplete`
+- Final Status: `implementation_blocked_acceptance_incomplete`
 - FlashInfer correction: earlier MegaMoE device-0 matches are function-local CLI/benchmark/debug paths in a subpackage absent from this repository's import/call graph, so they are not blockers under the reachability criterion.
 - The reachable DeepGEMM MegaMoE override was latent under the former mask implementation: logical device 0 was the assigned card. The all-visible implementation now preserves `init_dist()` and its process group, then restores the assigned physical device and revalidates its UUID before allocation and timing.
-- The installed `deep_gemm` package fails earlier because it lacks `fp8_fp4_mega_moe`; `load_deep_gemm_mega()` raises `SkipTest` before `utils.dist` is reached. Evidence for the intended dependency comes from the out-of-tree pinned copy at `/home/hongyij/workspace/tirx-kernels/.porting/deps/deep_gemm-559d79fb/deep_gemm/utils/dist.py:33`, which calls `torch.cuda.set_device(local_rank)`.
+- The base interpreter's `deep_gemm` package fails earlier because it lacks `fp8_fp4_mega_moe`; the locked benchmark environment resolves a compatible package from `venv-bench-sglang96a04cb-nccl4py031-cublasmp010`. Evidence for the intended dependency's device override comes from the out-of-tree pinned copy at `/home/hongyij/workspace/tirx-kernels/.porting/deps/deep_gemm-559d79fb/deep_gemm/utils/dist.py:33`, which calls `torch.cuda.set_device(local_rank)`.
 - Distributed rank and assigned physical device are separate runtime fields. External calls that may change current device are bounded by a restore-and-UUID-validate position invariant; only a fix requiring external-source edits, monkey-patching, or mask fallback is blocking.
 - `config/deepgemm/deepgemm_fp8_fp4_mega_moe.yaml` contributes two default single-card configurations (`t64_m64_h7168_i3072_e384_k6_g1` and `t8192_m8192_h7168_i3072_e384_k6_g1`) to the 112-workload default sweep, so the call-site invariant applies to routine execution as well as explicit runs.
 - `_run_distributed()` still opens a TCP rendezvous and creates a one-rank process group when `num_processes == 1`, including its existing EADDRINUSE retry behavior. This is a known deferred overhead, not part of the current device-binding change.
+- The pinned TIR `ea0950ab` NVSHMEM runtime is a reachable external blocker for GemmComm/Kineto under the all-visible `set_device` design. `/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/src/runtime/extra/contrib/nvshmem/init.cc:64,68` calls `cudaSetDevice(worker_id)` and later `cudaSetDevice(mype_node)`, conflating PE/rank 0 with CUDA device 0. A one-rank workload assigned physical GPU 2 therefore creates an unassigned GPU-0 context; the repository UUID/context guard correctly fails before timing. Preventing that context requires an external TVM change, monkey-patch, or mask fallback, all outside the authorized boundary. Kineto AC-10 evidence is explicitly `missing`, not pass/zero, in `bench_pipeline_ac10_artifacts/kineto/evidence-missing.json`.
+
+## Pending Human Decision
+
+- Decide whether to authorize an external pinned-TVM change that separates NVSHMEM PE/rank from the physical CUDA device ordinal. Until then, do not weaken the UUID/context guard, monkey-patch the TVM function, reintroduce masking, or classify Kineto runtime as passed.
 
 ## Resolved Human Decisions
 

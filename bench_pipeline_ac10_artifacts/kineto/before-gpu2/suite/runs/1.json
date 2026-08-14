@@ -1,0 +1,247 @@
+{
+  "timestamp": "1",
+  "label": "kineto-before-a91a1b7-gpu2-uuid",
+  "git": {
+    "tir": "ea0950ab",
+    "tirx-kernels": "a91a1b76",
+    "tirx-bench-ci": null
+  },
+  "kernel_tree": {
+    "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
+    "tirx-kernels:tirx_kernels": "447c7ad79e5e91066e928a8e0c2e91c5306093d7"
+  },
+  "baselines": {
+    "torch": {
+      "importable": true,
+      "source_dir": "/home/hongyij/miniforge3/lib/python3.13/site-packages/torch",
+      "version": "2.11.0+cu130",
+      "cuda": "13.0",
+      "torch_git_version": "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+      "dist": "torch"
+    },
+    "deep_gemm": {
+      "importable": true,
+      "source_dir": "/home/hongyij/workspace/tirx-kernels/.porting/deps/wheels/deep_gemm-2.6.1-cp313-cp313-linux_x86_64.whl",
+      "git_dir": "/home/hongyij/workspace/tirx-kernels",
+      "git_sha": "1097cce8-dirty",
+      "version": "2.6.1",
+      "dist": "deep_gemm"
+    },
+    "flashinfer": {
+      "importable": true,
+      "source_dir": "/home/hongyij/miniforge3/lib/python3.13/site-packages/flashinfer",
+      "version": "0.6.17",
+      "dist": "flashinfer-python"
+    },
+    "flash_kda": {
+      "importable": true,
+      "source_dir": "/home/hongyij/workspace/kda-backends/FlashKDA",
+      "dist": "flash_kda",
+      "version": "0.0.1+1ce47ea",
+      "git_dir": "/home/hongyij/workspace/kda-backends/FlashKDA",
+      "git_sha": "1ce47ea3"
+    },
+    "flash_attn": {
+      "importable": true,
+      "source_dir": "/home/hongyij/miniforge3/lib/python3.13/site-packages/flash_attn-2.8.4-py3.13-linux-x86_64.egg/flash_attn",
+      "version": "2.8.4",
+      "dist": "flash_attn"
+    },
+    "sglang": {
+      "importable": true,
+      "source_dir": "/home/hongyij/workspace/tirx-kernels/.porting/deps/wheels/sglang-0.0.0.dev0-cp313-cp313-linux_x86_64.whl",
+      "git_dir": "/home/hongyij/workspace/tirx-kernels/.porting/deps/sglang-96a04cb1",
+      "git_sha": "96a04cb1",
+      "version": "0.0.0.dev0",
+      "dist": "sglang"
+    },
+    "cutlass": {
+      "installed": false
+    }
+  },
+  "probe": {
+    "enabled": false,
+    "usable": [
+      "2"
+    ],
+    "failed": {}
+  },
+  "results": [
+    {
+      "kernel": "allgather_gemm",
+      "config": "tp1_m8192_n24576_k4096_fp16_dynamic",
+      "gpu": "2",
+      "gpus": [
+        "2"
+      ],
+      "num_gpus": 1,
+      "started_at": "2026-08-14T03:18:23+00:00",
+      "status": "ok",
+      "impls": {
+        "tirx": 1051.6410999999966,
+        "cublas_nccl_cudagraph": 1009.164300000007,
+        "cublasmp_split_p2p": 1056.453799999997
+      },
+      "round_samples": {
+        "tirx": [
+          1051.1829999999827,
+          1052.5594999999958,
+          1051.2160000000003,
+          1051.104000000003,
+          1052.143000000001
+        ],
+        "cublas_nccl_cudagraph": [
+          1009.0395000000135,
+          1008.5755000000208,
+          1009.7920000000013,
+          1008.734999999986,
+          1009.6795000000129
+        ],
+        "cublasmp_split_p2p": [
+          1057.4554999999964,
+          1055.7110000000066,
+          1056.3194999999905,
+          1055.8714999999938,
+          1056.9114999999983
+        ]
+      },
+      "errors": {},
+      "timer": "kineto",
+      "benchmark_protocol": {
+        "source": "torch.profiler Kineto correlated CUDA activities",
+        "timing_scope": "complete correlated GPU activity span",
+        "span_definition": "latest activity end minus earliest activity start",
+        "timing_stream": 103385864710720,
+        "all_correlated_streams": true,
+        "warmup_iterations": 5,
+        "repeat_iterations": 30,
+        "flush_l2": true,
+        "flush_l2_bytes": 8000000000,
+        "gpu_sleep_cycles": 20000000,
+        "rank_barrier_before_each_launch": true,
+        "cold_start_outside_scope": true,
+        "prepare_outside_scope": true,
+        "rank_aggregate": "sample_wise_max",
+        "sample_aggregate": "median",
+        "round_aggregate": "mean",
+        "world_size": 1,
+        "rounds": 5,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "cublas_nccl_cudagraph",
+          "cublasmp_split_p2p"
+        ],
+        "rank_local_scope_stream_counts": {
+          "tirx": [
+            {
+              "min": 1,
+              "max": 1
+            },
+            {
+              "min": 1,
+              "max": 1
+            },
+            {
+              "min": 1,
+              "max": 1
+            },
+            {
+              "min": 1,
+              "max": 1
+            },
+            {
+              "min": 1,
+              "max": 1
+            }
+          ],
+          "cublas_nccl_cudagraph": [
+            {
+              "min": 1,
+              "max": 1
+            },
+            {
+              "min": 1,
+              "max": 1
+            },
+            {
+              "min": 1,
+              "max": 1
+            },
+            {
+              "min": 1,
+              "max": 1
+            },
+            {
+              "min": 1,
+              "max": 1
+            }
+          ],
+          "cublasmp_split_p2p": [
+            {
+              "min": 2,
+              "max": 2
+            },
+            {
+              "min": 2,
+              "max": 2
+            },
+            {
+              "min": 2,
+              "max": 2
+            },
+            {
+              "min": 2,
+              "max": 2
+            },
+            {
+              "min": 2,
+              "max": 2
+            }
+          ]
+        }
+      },
+      "baseline_metadata": {
+        "cublas_nccl_execution": "cuda_graph_replay",
+        "cublasmp_algorithm": "split_p2p",
+        "libraries": {
+          "nccl": {
+            "path": "/home/hongyij/workspace/tirx-kernels/.porting/deps/venv-bench-sglang96a04cb-nccl4py031-cublasmp010/lib/python3.13/site-packages/nvidia/nccl/lib/libnccl.so.2",
+            "version": "2.30.7",
+            "version_raw": 23007
+          },
+          "cublas": {
+            "path": "/home/hongyij/miniforge3/lib/python3.13/site-packages/nvidia/cu13/lib/libcublas.so.13",
+            "version": "13.1.0",
+            "version_raw": 130100
+          },
+          "cublasmp": {
+            "path": "/home/hongyij/workspace/tirx-kernels/.porting/deps/venv-bench-sglang96a04cb-nccl4py031-cublasmp010/lib/python3.13/site-packages/nvidia/cublasmp/cu13/lib/libcublasmp.so.0",
+            "version": "0.10.0",
+            "version_raw": 1000
+          },
+          "nvshmem": {
+            "path": "/home/hongyij/miniforge3/lib/python3.13/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+            "version": "3.4.5",
+            "api_version": "1.3"
+          }
+        },
+        "cublasmp_version": 1000,
+        "cublasmp_workspace_device_bytes": 167772176,
+        "cublasmp_workspace_host_bytes": 0
+      },
+      "ratio_definition": "baseline_us / tirx_us",
+      "ratios": {
+        "cublas_nccl_cudagraph": 0.9596090339185205,
+        "cublasmp_split_p2p": 1.0045763711593245
+      },
+      "label": "tp1_m8192_n24576_k4096_fp16_dynamic",
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      },
+      "finished_at": "2026-08-14T03:19:09+00:00",
+      "attempt": 1
+    }
+  ]
+}

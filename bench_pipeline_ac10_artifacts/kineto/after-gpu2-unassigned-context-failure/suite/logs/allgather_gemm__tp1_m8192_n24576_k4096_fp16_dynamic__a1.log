@@ -1,0 +1,54 @@
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=105, pipe_handle=107)
+                                                  ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hongyij/miniforge3/lib/python3.13/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+  File "/home/hongyij/miniforge3/lib/python3.13/multiprocessing/spawn.py", line 132, in _main
+    self = reduction.pickle.load(from_parent)
+  File "/home/hongyij/miniforge3/lib/python3.13/site-packages/torch/__init__.py", line 442, in <module>
+    from torch._C import *  # noqa: F403
+    ^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 463, in _lock_unlock_module
+KeyboardInterrupt
+/home/hongyij/miniforge3/lib/python3.13/multiprocessing/resource_tracker.py:170: UserWarning: resource_tracker: process died unexpectedly, relaunching.  Some resources might leak.
+  warnings.warn('resource_tracker: process died unexpectedly, '
+Traceback (most recent call last):
+  File "/home/hongyij/miniforge3/lib/python3.13/multiprocessing/resource_tracker.py", line 378, in main
+    cache[rtype].remove(name)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^
+KeyError: '/mp-akl0p42m'
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=105, pipe_handle=107)
+                                                  ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hongyij/miniforge3/lib/python3.13/multiprocessing/spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+  File "/home/hongyij/miniforge3/lib/python3.13/multiprocessing/spawn.py", line 132, in _main
+    self = reduction.pickle.load(from_parent)
+  File "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/tirx_kernels/basic/utils/_runtime.py", line 25, in <module>
+    import tvm
+  File "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/python/tvm/__init__.py", line 33, in <module>
+    from .runtime import Object
+  File "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/python/tvm/runtime/__init__.py", line 48, in <module>
+    from . import disco
+  File "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/python/tvm/runtime/disco/__init__.py", line 20, in <module>
+    from .session import (
+    ...<7 lines>...
+    )
+  File "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/python/tvm/runtime/disco/session.py", line 37, in <module>
+    @register_object("runtime.disco.DRef")
+     ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hongyij/miniforge3/lib/python3.13/site-packages/tvm_ffi/registry.py", line 96, in _decorator_with_name
+    return _register(cls, type_key)
+  File "/home/hongyij/miniforge3/lib/python3.13/site-packages/tvm_ffi/registry.py", line 81, in _register
+    type_index = core._object_type_key_to_index(object_name)
+KeyboardInterrupt
+Traceback (most recent call last):
+  File "/home/hongyij/miniforge3/lib/python3.13/multiprocessing/resource_tracker.py", line 378, in main
+    cache[rtype].remove(name)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^
+KeyError: '/mp-060ct8z3'
+/dvs/p4/build/sw/rel/gpgpu/toolkit/r13.0/main_nvshmem/src/modules/transport/ibrc/ibrc.cpp:1661: non-zero status: 7 Unable to dlopen libibverbs. Skipping devx transport.
+[03:26:21] /home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/src/runtime/extra/contrib/nvshmem/init.cc:81: NVSHMEM init finished: mype=0 , npes=1
+[rank0]:[W814 03:26:21.782324777 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

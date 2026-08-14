@@ -447,7 +447,9 @@ also has a source-reproducible UUID-verified pair; it is measurement evidence bu
 not a speedup claim because the pipeline side encountered four recorded foreign
 intrusions. CUDA-graph Proton now has the same class of evidence with two
 recorded intrusions and no speedup claim. Kineto and MegaMoE remain unmeasured
-through the new UUID-verified path.
+through the new UUID-verified path. Kineto is now more specifically classified
+as missing because the pinned external TVM NVSHMEM runtime violates the assigned
+device invariant before timing.
 
 The reproducible inputs are tracked as `bench_pipeline_ac10_workloads.yaml`
 (Proton), `bench_pipeline_ac10_event_workload.yaml`,
@@ -466,7 +468,7 @@ is therefore insufficient for the replacement AC-10 evidence.
 | Proton | On physical GPU 2, UUID `GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9`, migration-before completed in 71.602s and schema-3 pipeline in 56.415s: 1.2692× / 21.21% measured wall improvement. Both sides retained 3/3 default-protocol records and all raw samples; implementation means changed by -0.81% to +0.06%. Pipeline critical wall was 46.575s versus 46.528s expected, leaving 0.047s unexplained; dispatch p95 was 42.8ms, CPU READY starvation 0, and retries 0 | measured, reviewable, and passes the Proton AC-10 checks |
 | Event | On physical GPU 2 with the same UUID as Proton, migration-before completed in 24.642s and pipeline in 37.451s (0.6580×). The pipeline result had four explicitly recorded in-place retries caused by foreign PIDs, so no speedup is claimed. Its critical wall was 30.651103s versus 30.651093s expected with foreign wait, leaving 10µs unexplained; dispatch p95 was 59.2ms and CPU READY starvation 0. TIRx changed by -0.34%; FlashInfer's -10.61% mean shift is explained by one 9.800µs first-round baseline outlier while its other four baseline samples were 6.214–6.239µs | measured and source-reviewable; structural cost-model checks pass, but not a reproducible wall-time win |
 | CUDA-graph Proton | On physical GPU 2 with the same UUID, migration-before completed in 33.356s and pipeline in 37.677s (0.8853×). The pipeline result had two explicitly recorded in-place retries, so no speedup is claimed. Its critical wall was 28.963493s versus 28.963464s expected with foreign wait, leaving 28.8µs unexplained; dispatch p95 was 40.2ms and CPU READY starvation 0. TIRx changed by +1.77% and FlashInfer by +0.08%, within the retained raw-sample spread | measured and source-reviewable; structural and implementation-ratio checks pass, but not a reproducible wall-time win |
-| Kineto | Correlated-span, barrier, sample-wise-max, schema, and cleanup behavior pass structurally; the runtime path also requires the locked NCCL/cuBLAS/cuBLASMp/NVSHMEM environment | structural only; runtime A/B unmeasured |
+| Kineto | Migration-before completed on physical GPU 2 in 56.722s with zero retries and five raw Kineto samples for each implementation. Pipeline could not enter timing: pinned TIR `ea0950ab` calls `cudaSetDevice(worker_id)` and `cudaSetDevice(mype_node)` in `src/runtime/extra/contrib/nvshmem/init.cc:64,68`; for one rank both are 0, creating a never-assigned physical GPU-0 context while the scheduler assigned GPU 2. The UUID/context guard correctly failed. An earlier attempt reached `nvshmem_finalize` and aborted with an invalid context, which led to the same root cause. | `missing`, with tracked before and failure artifacts; completing it requires an external TVM change or a prohibited mask/monkey-patch, so no A/B or numeric cost model is published |
 | MegaMoE | Alternating order, per-rank samples, sample-wise max, mismatch rejection, and cleanup pass structurally. The representative default config now also completes both CPU-only stats/no-stats compilations for the architecture-specific `sm_100a` target without initializing CUDA | structural and CPU-prepare evidence only; runtime A/B unmeasured |
 
 The older Event and CUDA-graph runs existed only in gitignored local logs and did
@@ -490,6 +492,11 @@ source-tree fingerprint exactly matches `a5abeca:tirx_kernels`; its `-dirty`
 label likewise reflects untracked run artifacts rather than source drift.
 CUDA-graph follows the same layout under `bench_pipeline_ac10_artifacts/cudagraph/`;
 its after source-tree fingerprint exactly matches `6416bb6:tirx_kernels`.
+Kineto's explicit missing record is
+`bench_pipeline_ac10_artifacts/kineto/evidence-missing.json`. It hashes the
+successful migration-before sources, both pipeline failure attempts, and the
+host-local pinned TVM source that couples rank 0 to CUDA device 0. It contains no
+wall-speedup, residual, latency percentile, or expected-wall value.
 
 The earlier GPU-1 pair remains in `evidence-attempt-1.json` because it exposed two
 cost-model defects rather than passing them silently. It is not the Proton
@@ -563,12 +570,12 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | AC-2 | satisfied for implementation and single-GPU targeted evidence | ASSIGN uses physical indices with `set_device`, exact per-attempt UUID proof, position validation after reachable external calls, and rejection of never-assigned-card contexts. Multi-GPU runtime remains explicitly exempted rather than passed |
 | AC-3 | satisfied | Bounded one-shot concurrency/backlog, condition-driven dispatch, same-GPU serialization, logical multi-GPU concurrency, and dynamic eligibility tests |
 | AC-4 | satisfied | Default 5 rounds/1.0s, finalization, raw samples, timer schemas, correctness/reference work, and evidence eligibility are unchanged. Every terminal record explicitly marks `retry_in_place` |
-| AC-5 | satisfied for implementation and targeted single-GPU retry | Same-child retry preserves prepared CPU state, rebuilds GPU state, releases claims only after cleanup proof/process exit, records exact attempt ownership, and reports 616 MiB abandoned-card resident context. Multi-rank runtime interruption is structurally verified only under the exemption |
+| AC-5 | incomplete for Kineto runtime; satisfied for local retry and structural rank lifecycle | Same-child retry preserves prepared CPU state, rebuilds GPU state, and records exact attempt ownership. The pinned TVM NVSHMEM rank/device coupling creates an unassigned GPU-0 context and prevents the one-rank Kineto path from completing NVSHMEM/process-group cleanup; multi-rank runtime remains separately exempted |
 | AC-6 | satisfied | Bounded process/RSS/FD evidence, cancellation cleanup, immediate internal release, and resource accounting tests |
 | AC-7 | satisfied | Cost-model schema 3 separates initial CPU READY constraints, retry READY delay, ASSIGN-held card time, post-GPU_START execution, transient foreign-PID wait, and internal dispatch latency; complete-timeline/no-data gating remains intact. The clean Proton run measured 0.047s unexplained residual and 42.8ms internal dispatch p95 |
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
 | AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
-| AC-10 | incomplete | Proton has a passing persisted same-UUID schema-3 A/B. Event and CUDA-graph now have persisted same-UUID measurement evidence whose structural checks pass but whose retry-heavy wall times are not speedup claims. Kineto and MegaMoE runtime A/B remain unmeasured |
+| AC-10 | incomplete | Proton has a passing persisted same-UUID schema-3 A/B. Event and CUDA-graph have persisted same-UUID measurement evidence whose structural checks pass but whose retry-heavy wall times are not speedup claims. Kineto is explicitly missing because of the pinned external TVM rank/device coupling; MegaMoE runtime A/B remains unmeasured |
 | AC-11 | satisfied | 112 defaults, all 992 configs retained, and 33/33 reviewed three-point selections with YAML-owned small/medium/large roles and rationale |
 
 The plan as a whole is therefore not marked complete. The set-device and
@@ -576,7 +583,8 @@ same-child retry implementation is complete at its structural anchors and has
 targeted single-GPU runtime evidence. Proton and Event now satisfy the named
 schema-3 structural checks, as does CUDA-graph. Event and CUDA-graph deliberately
 make no wall-time win claims. Kineto and MegaMoE still require same-UUID A/B
-evidence.
+evidence; Kineto cannot proceed inside the currently authorized implementation
+boundary.
 Multi-GPU runtime rows remain the explicit human-directed exemption, not missing
 evidence.
 
@@ -672,8 +680,10 @@ consumed; the default no-full-sweep machine discipline is restored.
   earlier attempt 1 remains explicitly non-passing diagnostic evidence. Event
   has source-reproducible same-UUID evidence with four in-place retries and no
   speedup claim. CUDA-graph has the same evidence class with two in-place retries
-  and no speedup claim. Kineto and MegaMoE still lack valid runtime A/B evidence.
-  AC-10 and the overall plan remain incomplete.
+  and no speedup claim. Kineto has tracked `missing` evidence showing the pinned
+  TVM NVSHMEM helper creates a never-assigned GPU-0 context; MegaMoE still lacks
+  valid runtime A/B evidence. AC-5, AC-10, and the overall plan remain incomplete
+  pending a human decision on the external TVM boundary.
 - The original five DeepGEMM `compile_spec`/`build_launch` adapters have strict
   key/consumption tests and CPU-only READY evidence; their attempted real GPU
   replay is blocked before launch by the installed DeepGEMM reference API
