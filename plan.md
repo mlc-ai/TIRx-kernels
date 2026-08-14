@@ -98,6 +98,24 @@
 
 ## Current Execution and Evidence Ledger
 
+### Final acceptance — Friday, August 14, 2026 (UTC)
+
+最终完整正式 gate 已在 GPU 2 上以原参数执行完毕：195 个 canonical `default: true` 行机械派生为 187 个必测单卡行与 8 个 `user-exempted` 多卡/NVSHMEM 行；单 worker 串行，old/current 各 5 rounds，run 内 `aggregate=mean`，`threshold_pct=-1.0`，config-params SHA256 为 `838b74a31b05c874115b15eb223cef62a84f4a339882882aa9de2d05a65074e3`。NVRTC preflight 为 `[13,2]`，对 old/current 对称生效；baseline/current source SHA256 分别为 `21b31c108bc6b2b97ed26e7a3b1c78b4bd414d236cd3ee4684816fc8f1735f2a` 与 `007aa1046ee2829a2d2a2f9dcb585c348105c096ed2d969675d8570d29352f49`。
+
+正式结果为 `ok=175 / REGRESSION=12 / FAIL=0`，187/187 行完整执行、无 interference retry；22 条 sparse FlashMLA 行全部编译并出数。12 条正式 `REGRESSION` 由正式 JSON 机械派生，各自取得恰好 5 个有效 supplemental run-level `speedup_pct` 后取全部五值中位数，12/12 中位数均严格 `> -1.0`，无第 6 个有效 run。因此用户定义的最终结论是 187/187 必测单卡行通过；8 个豁免行仍记为 `user-exempted`，不计为通过。
+
+最终持久证据目录为：
+
+- `/home/hongyij/workspace/tirx-irbuilder-evidence/2026-08-14-final-formal-gpu2/`
+- 正式 JSON SHA256: `3adc354de3b42e5d265d15466c6701a6eb544dbf1f908f20a05d18f4c7c4664d`
+- 12 行裁决 ledger SHA256: `b0d3573c37a8e950e4fc9eac40ba96485f470c8ec4cd26e465d2de3c39dc0763`
+- 逐行 187-row 报告：`final-report.md`、`final-row-metrics.{json,csv}`；每行包含 formal mean/median speedup、两侧 CV、5x5 LOO 区间和最终裁决
+- 根目录 `SHA256SUMS` 及每次 supplemental attempt 的独立 `SHA256SUMS` 已全部通过校验
+
+固定五-run 裁决确认没有剩余回归，因此 audit commit `a4f478dd51ecb56db1ab84342963c400ac5d559c` 之后未修改任何 kernel。正式通过行通常只有一个 run、只有正式失败候选取得五次补跑，这一用户接受的不对称覆盖限制已在最终报告显式披露。
+
+### Historical restart-2 evidence and superseded diagnostics
+
 `restart-2` 正式单卡 gate 于 `2026-08-13T23:27:17Z` 完成。该轮使用 GPU 2、单 worker、串行执行、5 rounds、`aggregate=mean`、`threshold_pct=-1.0`，scope 为 195 个 canonical 默认行减去 8 个 `user-exempted` 行，即 187 行。NVRTC preflight 为 `version=[13, 2]`，共享施加于 old/current；source SHA256 为 `fcbbf6e14bc8b4e0392a37720d4fabc4fb0c9f4bcbe1fb056a85359fc8317464`，config-params SHA256 前缀为 `838b74a31b05c874`。
 
 唯一可引用的该轮产物已从容器私有 `/tmp` 搬至持久 bind mount：
@@ -119,15 +137,11 @@
 
 当前裁决规则是：一个有效 run 仍是一轮完整 paired 调用，内部 old/current 各 5 rounds、`aggregate=mean`、`threshold_pct=-1.0`，其余 gate 参数不变；每行必须取得恰好 5 个有效 run-level `speedup_pct`，不得剔除任一有效值，也不得追加第 6 个有效 run。5 个值的中位数严格大于 `-1.0` 才通过。启动失败、外部中断、无完整测量的 `FAIL`、空/缺失 JSON 不计入 5 次，必须补一个有效 run 并完整记录无效原因。不存在干净度筛选、CV/LOO 门槛、outlier 剔除、first-clean 提前结案或 exhausted/不可定性状态；`run.py` 不因该外层裁决而修改。
 
-A 组现有历史诊断值按新规则追溯使用。四条 m-grouped 行各有恰好 5 个有效 run，其中位数分别为 `+1.249360%`、`-0.205127%`、`-0.571307%`、`+0.325647%`，全部通过；这不是 kernel 修复所得，不产生优化项。`deepgemm_sm100_fp8_gemm_1d1d/m4096_n32768_k512` 只有 `+0.565504%`、`+0.330618%` 两个有效 run，仍需补 3 个后再裁决。所有 A run 的 current source SHA256 均为 `007aa1046ee2829a2d2a2f9dcb585c348105c096ed2d969675d8570d29352f49`，与正式候选 `fcbbf6e14bc8b4e0...` 不同；ledger 必须标注“改动后测量，与正式判决不可直接比较”。
+A 组最终为 25 个有效 row-run、5/5 行中位数通过；B 组最终为 125 个有效 row-run、25/25 行中位数通过。两组历史 ledger 完整保留了全部有效值、3 次 A 组无效 launcher attempt、B 组 fail-fast/ENOSPC 无效 artifact 及其原因。此前相对 restart-2 candidate `fcbbf6e...` 的 changed-code 标记仍是该历史阶段的正确说明；最终正式 gate 的 current source 已固定为相同的 `007aa104...`，因此被最终 12 行裁决复用的 25 个历史有效 run 与正式 candidate 同源，最终裁决 ledger 中 60 个有效 run 的 `integrity_reasons` 全部为空。
 
-B 组 artifact 1 于 `2026-08-14T03:54:41Z` 因环境占用 fail-fast：25 行中产生 18 个 result（`ok=14 / REGRESSION=3 / FAIL=1`），因此贡献 17 个有效 run；`flash_attention4/s8192_h32kv32` 的 `FAIL` 不计数，7 条未执行行也不计数。此前由 first-clean 提前采纳的两条 FlashAttention 行重新回到固定五-run 范围；B 组全部 25 行都必须各自补满 5 个有效 run 后一次性按中位数裁决。
+最终 12 行裁决 ledger 机械复用了 5 行已有同源五-run 证据，并为其余 7 行执行了恰好 5 个七行 supplemental run，共 `12 * 5 = 60` 个有效 row-run。3 个历史无效 occurrence 明确计零；五个新 attempt 全部有效、无 interference retry。该 ledger 最终为 `complete_rows=12 / pass_rows=12 / regression_rows=0 / pending_rows=0`，生成的 next-workload 为空。
 
-`diagnostics/group-b/attempt-2-gpu3` 在 `current exit 120` 后写 `runs/1.json` 时遇到 `ENOSPC`，留下 0 字节 JSON，整次贡献 0 个有效 run。该事故以 `invalid-attempt.json`、原始日志、NVRTC preflight、provenance 和校验和保留，并由新 controller 作为无效 artifact 读入 ledger，而不是静默删除。当前挂载仍接近满载；后续只使用持久路径并在每次启动前检查可用空间。
-
-每个有效 run 都记录 `paired.old/current.source_sha256`。与正式 old `21b31c108bc6b2...` 或 current `fcbbf6e14bc8b4e0...` 不一致时，同时写入该 run 的 `integrity_reasons` 与顶层 `protocol_anomalies`；用户指令要求追溯使用的历史值仍保留在五值集合内，但明确标为 changed-code、不可与正式判决直接比较。
-
-全部 kernel 修复完成后必须重新运行一次完整 187 行正式 gate，参数、行集合、rounds、run 内 mean 聚合、timeout 和阈值一字不动。正式 gate 的 `ok` 行按该次结果通过；正式 `REGRESSION` 行再取得恰好 5 个有效补跑 run，并以其 run-level speedup 中位数裁决。正式 `FAIL`、缺失行或五-run 中位数 `<= -1.0` 均不得计为通过。
+已按既定纪律完成完整 187 行正式 gate 与正式回归的恰好五-run 中位数裁决；正式 `FAIL` 为零、缺失行为零、五-run 中位数 `<= -1.0` 为零，不存在需要继续修复或列为 blocked 的 kernel。
 
 该裁决是有意不对称的：只对正式失败候选重复测量，正式通过行通常只有一个 run，因此侥幸通过的行不会被对称复查。用户已知悉并接受；全量重复 `speedup<0` 的 90 行约需 10.8 小时，重复 `speedup<+1%` 的 174 行约需 20.9 小时，而失败行范围约需 1.6 小时。最终报告必须显式披露这一限制。
 
