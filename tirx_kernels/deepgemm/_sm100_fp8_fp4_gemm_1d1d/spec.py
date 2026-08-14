@@ -1229,4 +1229,4 @@ def build_launch(
     return launch
 
 
-__all__ += ["build_launch", "compile_spec"]
+__all__ += ["build_launch", "compile_spec", "prepare_compile_spec_bench"]
