@@ -1584,12 +1584,13 @@ def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
         current_device=lambda: current_device,
     )
     fake_torch = SimpleNamespace(cuda=fake_cuda, device=lambda *args: args)
+    def get_global_func(name):
+        if name.endswith("init_nvshmem"):
+            return lambda *_args: events.append("init_nvshmem")
+        return lambda: events.append(("finalize_nvshmem", current_device))
+
     fake_tvm = SimpleNamespace(
-        get_global_func=lambda name: (
-            (lambda *_args: events.append("init_nvshmem"))
-            if name.endswith("init_nvshmem")
-            else (lambda: events.append("finalize_nvshmem"))
-        ),
+        get_global_func=get_global_func,
         runtime=SimpleNamespace(load_module=lambda _path: object()),
     )
 
@@ -1601,9 +1602,12 @@ def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
     monkeypatch.setattr(kernel_runner, "_current_process_cuda_gpus", lambda **_kwargs: (6,))
     monkeypatch.setattr(_runtime, "_broadcast_nvshmem_uid", lambda _rank, _device: object())
     monkeypatch.setattr(_runtime, "_create_runtime", lambda *_args: fake_runtime)
-    monkeypatch.setattr(
-        _runtime, "_cleanup_runtime", lambda runtime: events.append(("cleanup_runtime", runtime))
-    )
+    def cleanup_runtime(runtime):
+        nonlocal current_device
+        events.append(("cleanup_runtime", runtime))
+        current_device = 0
+
+    monkeypatch.setattr(_runtime, "_cleanup_runtime", cleanup_runtime)
 
     def worker(*_args):
         events.append("worker")
@@ -1626,7 +1630,7 @@ def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
     assert ("set_device", 6) in events
     assert "worker" in events
     assert ("cleanup_runtime", fake_runtime) in events
-    assert "finalize_nvshmem" in events
+    assert ("finalize_nvshmem", 6) in events
     assert "destroy_process_group" in events
     assert "put" not in events
 
