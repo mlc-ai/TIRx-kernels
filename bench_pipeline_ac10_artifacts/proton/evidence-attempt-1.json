@@ -1,0 +1,280 @@
+{
+  "acceptance_use": "ac_10_performance_evidence",
+  "after": {
+    "critical_wall_s": 64.3448691368103,
+    "final_reap_tail_s": 0.6010875701904297,
+    "git": {
+      "tir": "ea0950ab",
+      "tirx-bench-ci": null,
+      "tirx-kernels": "b5f63b5b-dirty"
+    },
+    "interference_retry_count": 7,
+    "kernel_tree": {
+      "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
+      "tirx-kernels:tirx_kernels": "32d5d14115c18547e25d21c0aac07bbd0378302e"
+    },
+    "outer_wall_s": 73.12732835,
+    "pipeline_cost_model": {
+      "assignment_handoff_s": {
+        "count": 10,
+        "max": 1.1014130115509033,
+        "p95": 1.1014130115509033
+      },
+      "complete_measurement_count": 3,
+      "complete_timeline_count": 3,
+      "dispatch_latency_s": {
+        "count": 10,
+        "max": 1.8731579780578613,
+        "p95": 1.8731579780578613
+      },
+      "eligibility_constrained_gpu_list_schedule_s": 58.092912912368774,
+      "expected_s": 63.680339097976685,
+      "expected_with_foreign_s": 63.680339097976685,
+      "first_process_started_s": 0.3721027374267578,
+      "first_ready_s": 5.58742618560791,
+      "foreign_wait_s": 0.0,
+      "gpu_busy_s_by_index": {
+        "1": 49.763535022735596
+      },
+      "ideal_gpu_list_schedule_s": 49.763535022735596,
+      "measurement_status": "measured",
+      "observed_critical_s": 64.3448691368103,
+      "prepare_spawn_span_s": 0.002208232879638672,
+      "ready_constrained_gpu_list_schedule_s": 58.092912912368774,
+      "ready_starvation_s": 8.329377889633179,
+      "record_count": 3,
+      "unexplained_s": 0.6645300388336182
+    },
+    "results": [
+      {
+        "attempt": 2,
+        "config": "fp16_1024x1024x1024",
+        "implementation_order": [
+          "tir",
+          "torch-cublas"
+        ],
+        "impls_us": {
+          "tir": 6.8504973725029785,
+          "torch-cublas": 6.031039703164495
+        },
+        "kernel": "fp16_bf16_gemm",
+        "retry_in_place": true,
+        "timer": "proton"
+      },
+      {
+        "attempt": 6,
+        "config": "fp16_2048x2048x2048",
+        "implementation_order": [
+          "tir",
+          "torch-cublas"
+        ],
+        "impls_us": {
+          "tir": 16.408696852299638,
+          "torch-cublas": 15.830303874615153
+        },
+        "kernel": "fp16_bf16_gemm",
+        "retry_in_place": true,
+        "timer": "proton"
+      },
+      {
+        "attempt": 2,
+        "config": "fp16_4096x4096x4096",
+        "implementation_order": [
+          "tir",
+          "torch-cublas"
+        ],
+        "impls_us": {
+          "tir": 95.09244261438451,
+          "torch-cublas": 92.26370890896982
+        },
+        "kernel": "fp16_bf16_gemm",
+        "retry_in_place": true,
+        "timer": "proton"
+      }
+    ]
+  },
+  "before": {
+    "git": {
+      "tir": "ea0950ab",
+      "tirx-bench-ci": null,
+      "tirx-kernels": "a91a1b76"
+    },
+    "kernel_tree": {
+      "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
+      "tirx-kernels:tirx_kernels": "447c7ad79e5e91066e928a8e0c2e91c5306093d7"
+    },
+    "outer_wall_s": 77.206672341,
+    "results": [
+      {
+        "config": "fp16_1024x1024x1024",
+        "implementation_order": [
+          "tir",
+          "torch-cublas"
+        ],
+        "impls_us": {
+          "tir": 6.887337107110684,
+          "torch-cublas": 5.980940645247559
+        },
+        "kernel": "fp16_bf16_gemm",
+        "timer": "proton"
+      },
+      {
+        "config": "fp16_2048x2048x2048",
+        "implementation_order": [
+          "tir",
+          "torch-cublas"
+        ],
+        "impls_us": {
+          "tir": 16.555420971603247,
+          "torch-cublas": 15.835926999197689
+        },
+        "kernel": "fp16_bf16_gemm",
+        "timer": "proton"
+      },
+      {
+        "config": "fp16_4096x4096x4096",
+        "implementation_order": [
+          "tir",
+          "torch-cublas"
+        ],
+        "impls_us": {
+          "tir": 95.39567221296848,
+          "torch-cublas": 92.64062473776754
+        },
+        "kernel": "fp16_bf16_gemm",
+        "timer": "proton"
+      }
+    ]
+  },
+  "derived": {
+    "acceptance_checks": {
+      "dispatch_p95_below_100ms": false,
+      "ready_starvation_absent": false,
+      "unexplained_within_bound": true
+    },
+    "default_coverage_reduction_included": false,
+    "implementation_deltas": [
+      {
+        "after_us": 6.8504973725029785,
+        "before_us": 6.887337107110684,
+        "config": "fp16_1024x1024x1024",
+        "delta_percent": -0.5348908298632771,
+        "implementation": "tir",
+        "kernel": "fp16_bf16_gemm"
+      },
+      {
+        "after_us": 6.031039703164495,
+        "before_us": 5.980940645247559,
+        "config": "fp16_1024x1024x1024",
+        "delta_percent": 0.8376451278904629,
+        "implementation": "torch-cublas",
+        "kernel": "fp16_bf16_gemm"
+      },
+      {
+        "after_us": 16.408696852299638,
+        "before_us": 16.555420971603247,
+        "config": "fp16_2048x2048x2048",
+        "delta_percent": -0.8862602742345183,
+        "implementation": "tir",
+        "kernel": "fp16_bf16_gemm"
+      },
+      {
+        "after_us": 15.830303874615153,
+        "before_us": 15.835926999197689,
+        "config": "fp16_2048x2048x2048",
+        "delta_percent": -0.03550865435804074,
+        "implementation": "torch-cublas",
+        "kernel": "fp16_bf16_gemm"
+      },
+      {
+        "after_us": 95.09244261438451,
+        "before_us": 95.39567221296848,
+        "config": "fp16_4096x4096x4096",
+        "delta_percent": -0.3178651521077547,
+        "implementation": "tir",
+        "kernel": "fp16_bf16_gemm"
+      },
+      {
+        "after_us": 92.26370890896982,
+        "before_us": 92.64062473776754,
+        "config": "fp16_4096x4096x4096",
+        "delta_percent": -0.4068580386462628,
+        "implementation": "torch-cublas",
+        "kernel": "fp16_bf16_gemm"
+      }
+    ],
+    "pipeline_overlap_only": true,
+    "unexplained_bound_s": 3.2172434568405155,
+    "wall_reduction_percent": 5.283667677040526,
+    "wall_speedup": 1.0557841245269561
+  },
+  "fixed_conditions": {
+    "cooldown_s": 1.0,
+    "multi_gpu_runtime_validation": "exempted_by_human_unmeasured",
+    "physical_gpu_index": 1,
+    "physical_gpu_uuid": "GPU-e8754e6d-624e-e1d0-595a-f9444588960a",
+    "rounds": 5
+  },
+  "matrix": [
+    "fp16_bf16_gemm/fp16_1024x1024x1024",
+    "fp16_bf16_gemm/fp16_2048x2048x2048",
+    "fp16_bf16_gemm/fp16_4096x4096x4096"
+  ],
+  "measurement_status": "measured",
+  "schema_version": 1,
+  "sources": {
+    "after": {
+      "logs": [
+        {
+          "declared_path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/after/stdout.log",
+          "kind": "stdout_log",
+          "path": "bench_pipeline_ac10_artifacts/proton/after-attempt-1/stdout.log",
+          "sha256": "5121cecce800523845ad345723dde9997373804d144b78744f0235dcb4d84a3b"
+        },
+        {
+          "declared_path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/after/stderr.log",
+          "kind": "stderr_log",
+          "path": "bench_pipeline_ac10_artifacts/proton/after-attempt-1/stderr.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "outer_timer": {
+        "path": "bench_pipeline_ac10_artifacts/proton/after-attempt-1/outer_timer.json",
+        "sha256": "e5527a002915f33cc6cd23a69a78e848d86615e91c933b56d60ff5bd65f9ecc9"
+      },
+      "run": {
+        "path": "bench_pipeline_ac10_artifacts/proton/after-attempt-1/suite/runs/1.json",
+        "sha256": "a400ca959f5a72db39a488a45fd9bf6cdddb5c15f2e3284ae2946a5bbdd3535a"
+      }
+    },
+    "before": {
+      "logs": [
+        {
+          "declared_path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before/stdout.log",
+          "kind": "stdout_log",
+          "path": "bench_pipeline_ac10_artifacts/proton/before/stdout.log",
+          "sha256": "f863a5860a814dbd439e11961345b50fbafed9018c669264c0f57d02ce1e6ca7"
+        },
+        {
+          "declared_path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before/stderr.log",
+          "kind": "stderr_log",
+          "path": "bench_pipeline_ac10_artifacts/proton/before/stderr.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "outer_timer": {
+        "path": "bench_pipeline_ac10_artifacts/proton/before/outer_timer.json",
+        "sha256": "dd4ddc955993c37b27ce69f39359ba9c3e0ea00e6d687612a3777a874ed0f3be"
+      },
+      "run": {
+        "path": "bench_pipeline_ac10_artifacts/proton/before/suite/runs/1.json",
+        "sha256": "a6fdb2506f0cab81133b45e29810c472072ba73aa40e52493dba1f80ce8f9152"
+      }
+    },
+    "workloads": {
+      "path": "bench_pipeline_ac10_workloads.yaml",
+      "sha256": "53db32104c20006cabc9931779c2361a3bb7be48c2e40ea8ef6eb75b34c6268e"
+    }
+  },
+  "timer_family": "proton"
+}

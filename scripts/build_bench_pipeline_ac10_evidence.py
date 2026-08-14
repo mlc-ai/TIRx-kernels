@@ -258,6 +258,11 @@ def _validate_run(
         cost = pipeline_data.get("cost_model")
         if not isinstance(cost, dict) or cost.get("measurement_status") != "measured":
             raise ValueError(f"pipeline run has no measured cost model: {path}")
+        if cost.get("schema_version") != 2:
+            raise ValueError(
+                f"pipeline run uses an unsupported cost-model schema: {path}: "
+                f"{cost.get('schema_version')!r}"
+            )
         if cost.get("complete_timeline_count") != len(workloads):
             raise ValueError(f"pipeline run has incomplete timelines: {path}")
         complete_measurements = cost.get("complete_measurement_count", len(workloads))
@@ -267,12 +272,16 @@ def _validate_run(
             "observed_critical_s",
             "first_ready_s",
             "ideal_gpu_list_schedule_s",
+            "cpu_ready_constrained_gpu_list_schedule_s",
             "ready_constrained_gpu_list_schedule_s",
             "eligibility_constrained_gpu_list_schedule_s",
             "foreign_wait_s",
             "expected_s",
             "unexplained_s",
             "ready_starvation_s",
+            "interference_retry_ready_delay_s",
+            "interference_retry_count",
+            "interference_retry_gpu_ownership_s",
         )
         if not all(isinstance(cost.get(field), (int, float)) for field in numeric_fields):
             raise ValueError(f"pipeline cost model contains missing numeric evidence: {path}")

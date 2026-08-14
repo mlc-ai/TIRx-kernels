@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tirx_kernels.bench_suite.run import _pipeline_cost_model
+
 
 def _write_outer(path: Path, *, uuid: str, command_wall_ns: int) -> None:
     stdout_log = path.with_name(f"{path.stem}-stdout.log")
@@ -90,18 +92,23 @@ def _write_run(path: Path, *, pipeline: bool) -> None:
                 "validation_status": "exempted_by_human_unmeasured"
             },
             "cost_model": {
+                "schema_version": 2,
                 "measurement_status": "measured",
                 "complete_timeline_count": 1,
                 "complete_measurement_count": 1,
                 "observed_critical_s": 1.0,
                 "first_ready_s": 0.1,
                 "ideal_gpu_list_schedule_s": 0.5,
+                "cpu_ready_constrained_gpu_list_schedule_s": 0.5,
                 "ready_constrained_gpu_list_schedule_s": 0.5,
                 "eligibility_constrained_gpu_list_schedule_s": 0.5,
                 "foreign_wait_s": 0.0,
                 "expected_s": 0.6,
                 "unexplained_s": 0.4,
                 "ready_starvation_s": 0.0,
+                "interference_retry_ready_delay_s": 0.0,
+                "interference_retry_count": 0,
+                "interference_retry_gpu_ownership_s": 0.0,
                 "dispatch_latency_s": {"p95": 0.01},
             },
             "critical_wall_s": 1.0,
@@ -176,6 +183,91 @@ def test_tracked_ac10_proton_before_artifact_is_complete():
             assert row["impls"][implementation] == pytest.approx(
                 statistics.fmean(values), abs=1e-9
             )
+
+
+def test_tracked_ac10_proton_attempt_one_evidence_matches_every_raw_source():
+    repo_root = Path(__file__).resolve().parents[1]
+    evidence = json.loads(
+        (repo_root / "bench_pipeline_ac10_artifacts/proton/evidence-attempt-1.json").read_text()
+    )
+
+    assert evidence["measurement_status"] == "measured"
+    assert evidence["fixed_conditions"]["physical_gpu_uuid"] == (
+        "GPU-e8754e6d-624e-e1d0-595a-f9444588960a"
+    )
+    assert evidence["after"]["interference_retry_count"] == 7
+    assert evidence["derived"]["acceptance_checks"] == {
+        "dispatch_p95_below_100ms": False,
+        "ready_starvation_absent": False,
+        "unexplained_within_bound": True,
+    }
+    assert evidence["derived"]["wall_speedup"] == pytest.approx(
+        evidence["before"]["outer_wall_s"] / evidence["after"]["outer_wall_s"]
+    )
+
+    sources = [evidence["sources"]["workloads"]]
+    for side in ("before", "after"):
+        sources.extend(
+            [
+                evidence["sources"][side]["run"],
+                evidence["sources"][side]["outer_timer"],
+                *evidence["sources"][side]["logs"],
+            ]
+        )
+    for source in sources:
+        source_path = Path(source["path"])
+        if not source_path.is_absolute():
+            source_path = repo_root / source_path
+        assert source_path.is_file()
+        assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source["sha256"]
+
+    before_run = json.loads(
+        (repo_root / evidence["sources"]["before"]["run"]["path"]).read_text()
+    )
+    after_run = json.loads(
+        (repo_root / evidence["sources"]["after"]["run"]["path"]).read_text()
+    )
+    before_results = {row["config"]: row for row in before_run["results"]}
+    after_results = {row["config"]: row for row in after_run["results"]}
+    for delta in evidence["derived"]["implementation_deltas"]:
+        before_us = before_results[delta["config"]]["impls"][delta["implementation"]]
+        after_us = after_results[delta["config"]]["impls"][delta["implementation"]]
+        assert delta["before_us"] == before_us
+        assert delta["after_us"] == after_us
+        assert delta["delta_percent"] == pytest.approx((after_us / before_us - 1.0) * 100.0)
+
+    committed_tree = subprocess.run(
+        ["git", "rev-parse", "b5f63b5:tirx_kernels"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert after_run["kernel_tree"]["tirx-kernels:tirx_kernels"] == committed_tree
+
+    pipeline = after_run["pipeline"]
+    external_history = [
+        (row["timestamp"], tuple(row["occupied_gpu_indices"]))
+        for row in pipeline["external_occupancy_timeline"]
+    ]
+    recomputed_cost = _pipeline_cost_model(
+        after_run["results"],
+        run_started=pipeline["started"],
+        critical_finished=pipeline["critical_finished"],
+        known_gpu_indices=("1",),
+        external_history=external_history,
+    )
+    embedded_cost = pipeline["cost_model"]
+    assert embedded_cost["ready_starvation_s"] == pytest.approx(8.329377889633179)
+    assert recomputed_cost["ready_starvation_s"] == 0.0
+    assert recomputed_cost["interference_retry_ready_delay_s"] == pytest.approx(
+        embedded_cost["ready_starvation_s"]
+    )
+    assert recomputed_cost["interference_retry_count"] == 7
+    assert recomputed_cost["expected_s"] == pytest.approx(embedded_cost["expected_s"])
+    assert recomputed_cost["unexplained_s"] == pytest.approx(
+        embedded_cost["unexplained_s"]
+    )
 
 
 def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path):

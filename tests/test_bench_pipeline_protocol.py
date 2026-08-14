@@ -293,7 +293,7 @@ def test_ready_backpressure_resumes_without_dropping_or_reusing_workloads(
 
 
 def test_pipeline_assigns_a_complete_multigpu_claim_before_gpu_stage(monkeypatch, tmp_path: Path):
-    records, retries, _pipeline = _fake_pipeline(
+    records, retries, pipeline = _fake_pipeline(
         monkeypatch,
         tmp_path,
         [{"kernel": "fake", "config": "tp2", "num_gpus": 2}],
@@ -312,7 +312,7 @@ def test_pipeline_assigns_a_complete_multigpu_claim_before_gpu_stage(monkeypatch
 def test_pipeline_rejects_physical_gpu_identity_mismatch_before_gpu_stage(
     monkeypatch, tmp_path: Path
 ):
-    records, retries, _pipeline = _fake_pipeline(
+    records, retries, pipeline = _fake_pipeline(
         monkeypatch,
         tmp_path,
         [{"kernel": "fake", "config": "wrong-uuid", "num_gpus": 1, "mode": "wrong_gpu_uuid"}],
@@ -496,7 +496,7 @@ def test_interference_retry_reuses_prepared_child_and_releases_claim_after_ack(
 
     monkeypatch.setattr(bench_run, "MONITOR_INTERVAL", 0.01)
 
-    records, retries, _pipeline = _fake_pipeline(
+    records, retries, pipeline = _fake_pipeline(
         monkeypatch,
         tmp_path,
         [{"kernel": "fake", "config": "retry", "num_gpus": 1, "gpu_s": 0.5}],
@@ -519,6 +519,18 @@ def test_interference_retry_reuses_prepared_child_and_releases_claim_after_ack(
     assert first_attempt["status"] == "INTERFERED"
     assert first_attempt["resident_context_bytes_after_cleanup"] == {"0": 4096}
     assert first_attempt["ownership_released"] <= second_attempt["assigned"]
+    intervals = pipeline["foreign_interference_intervals"]
+    assert len(intervals) == 1
+    assert intervals[0]["gpu_index"] == "0"
+    assert intervals[0]["intruder_pids"] == [4242]
+    assert intervals[0]["sources"] == ["running_gpu_monitor"]
+    assert intervals[0]["closed_by"] == "predispatch_verified_clear"
+    assert intervals[0]["started"] <= first_attempt["ownership_released"]
+    assert intervals[0]["finished"] <= second_attempt["assigned"]
+    assert pipeline["cost_model"]["foreign_wait_s"] > 0.0
+    assert pipeline["cost_model"]["raw_dispatch_wait_s"]["p95"] >= pipeline[
+        "cost_model"
+    ]["dispatch_latency_s"]["p95"]
     timeline = records[0]["phase_timestamps"]
     assert set(
         ("prepare_started", "framework_import_started", "framework_loaded", "module_loaded")
@@ -1703,9 +1715,42 @@ def test_cost_model_includes_interrupted_gpu_attempts():
 
     assert model["measurement_status"] == "measured"
     assert model["gpu_busy_s_by_index"] == pytest.approx({"0": 0.9, "1": 2.0})
+    assert model["cpu_ready_constrained_gpu_list_schedule_s"] == pytest.approx(2.9)
     assert model["ready_constrained_gpu_list_schedule_s"] == pytest.approx(3.0)
+    assert model["ready_starvation_s"] == pytest.approx(0.0)
+    assert model["interference_retry_ready_delay_s"] == pytest.approx(0.1)
+    assert model["interference_retry_count"] == 1
+    assert model["interference_retry_gpu_ownership_s"] == pytest.approx(0.9)
+    assert model["initial_dispatch_latency_s"]["p95"] == pytest.approx(0.0)
+    assert model["retry_dispatch_latency_s"]["p95"] == pytest.approx(0.1)
     assert model["expected_s"] == pytest.approx(4.0)
     assert model["unexplained_s"] == pytest.approx(0.1)
+
+    model = _pipeline_cost_model(
+        [record],
+        run_started=0.0,
+        critical_finished=4.1,
+        known_gpu_indices=("0", "1"),
+        external_history=[(0.0, ())],
+        foreign_intervals=[
+            {
+                "gpu_index": "0",
+                "started": 2.0,
+                "finished": 2.1,
+            },
+            {
+                "gpu_index": "1",
+                "started": 2.0,
+                "finished": 2.1,
+            }
+        ],
+    )
+    assert model["foreign_wait_s"] == pytest.approx(0.1)
+    assert model["raw_dispatch_wait_s"]["p95"] == pytest.approx(0.1)
+    assert model["foreign_dispatch_wait_s"]["p95"] == pytest.approx(0.1)
+    assert model["dispatch_latency_s"]["p95"] == pytest.approx(0.0)
+    assert model["expected_with_foreign_s"] == pytest.approx(4.1)
+    assert model["unexplained_s"] == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(
@@ -1728,6 +1773,7 @@ def test_cost_model_never_publishes_zeroes_for_missing_gpu_evidence(records, rea
     )
 
     assert model == {
+        "schema_version": 2,
         "measurement_status": "missing",
         "record_count": len(records),
         "complete_timeline_count": 0,
@@ -1739,8 +1785,16 @@ def test_cost_model_never_publishes_zeroes_for_missing_gpu_evidence(records, rea
         "expected_with_foreign_s",
         "unexplained_s",
         "dispatch_latency_s",
+        "raw_dispatch_wait_s",
+        "foreign_dispatch_wait_s",
+        "initial_dispatch_latency_s",
+        "retry_dispatch_latency_s",
         "assignment_handoff_s",
         "ready_starvation_s",
+        "interference_retry_ready_delay_s",
+        "interference_retry_count",
+        "interference_retry_gpu_ownership_s",
+        "cpu_ready_constrained_gpu_list_schedule_s",
         "foreign_wait_s",
     ):
         assert field not in model

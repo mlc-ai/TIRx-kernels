@@ -2099,14 +2099,25 @@ def write_summary(out_dir: Path, current: dict) -> Path:
                 f"`{cost['ideal_gpu_list_schedule_s']:.3f}s`"
             )
             lines.append(
-                "- READY-constrained GPU list schedule: "
+                "- CPU-READY-constrained GPU list schedule: "
+                f"`{cost['cpu_ready_constrained_gpu_list_schedule_s']:.3f}s`"
+            )
+            lines.append(
+                "- attempt-READY-constrained GPU list schedule: "
                 f"`{cost['ready_constrained_gpu_list_schedule_s']:.3f}s`"
             )
             lines.append(
                 "- eligibility-constrained GPU list schedule: "
                 f"`{cost['eligibility_constrained_gpu_list_schedule_s']:.3f}s`"
             )
-            lines.append(f"- READY starvation: `{cost['ready_starvation_s']:.3f}s`")
+            lines.append(
+                f"- CPU READY starvation: `{cost['ready_starvation_s']:.3f}s`"
+            )
+            lines.append(
+                "- interference retry READY delay / interrupted GPU ownership: "
+                f"`{cost['interference_retry_ready_delay_s']:.3f}s` / "
+                f"`{cost['interference_retry_gpu_ownership_s']:.3f}s`"
+            )
             lines.append(f"- foreign GPU wait: `{cost['foreign_wait_s']:.3f}s`")
             lines.append(f"- expected critical wall: `{cost['expected_s']:.3f}s`")
             lines.append(
@@ -2115,13 +2126,32 @@ def write_summary(out_dir: Path, current: dict) -> Path:
             )
             lines.append(f"- unexplained residual: `{cost['unexplained_s']:.3f}s`")
             dispatch = cost["dispatch_latency_s"]
+            raw_dispatch = cost["raw_dispatch_wait_s"]
+            foreign_dispatch = cost["foreign_dispatch_wait_s"]
+            initial_dispatch = cost["initial_dispatch_latency_s"]
+            retry_dispatch = cost["retry_dispatch_latency_s"]
             handoff = cost["assignment_handoff_s"]
             lines.append(
-                f"- dispatch latency p95/max: `{dispatch['p95']:.3f}s` / `{dispatch['max']:.3f}s`"
+                "- internal dispatch latency p95/max: "
+                f"`{dispatch['p95']:.3f}s` / `{dispatch['max']:.3f}s`"
+            )
+            lines.append(
+                "- raw / foreign-overlap dispatch wait p95: "
+                f"`{raw_dispatch['p95']:.3f}s` / `{foreign_dispatch['p95']:.3f}s`"
             )
             lines.append(
                 f"- ASSIGN-to-GPU-start p95/max: `{handoff['p95']:.3f}s` / `{handoff['max']:.3f}s`"
             )
+            if initial_dispatch["count"]:
+                lines.append(
+                    "- initial-attempt dispatch p95/max: "
+                    f"`{initial_dispatch['p95']:.3f}s` / `{initial_dispatch['max']:.3f}s`"
+                )
+            if retry_dispatch["count"]:
+                lines.append(
+                    "- retry-attempt dispatch p95/max: "
+                    f"`{retry_dispatch['p95']:.3f}s` / `{retry_dispatch['max']:.3f}s`"
+                )
         else:
             lines.append(f"- missing reason: {cost.get('missing_reason', 'unknown')}")
             lines.append(
@@ -2431,7 +2461,9 @@ def _pipeline_cost_model(
     critical_finished: float,
     known_gpu_indices: tuple[str, ...],
     external_history: list[tuple[float, tuple[str, ...]]],
+    foreign_intervals: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    schema_version = 2
     required_timeline_phases = (
         "process_started",
         "child_started",
@@ -2448,6 +2480,19 @@ def _pipeline_cost_model(
         "process_reaped",
     )
     known_gpus = set(known_gpu_indices)
+    normalized_foreign_intervals: list[tuple[str, float, float]] = []
+    for interval in foreign_intervals or ():
+        gpu = str(interval.get("gpu_index"))
+        started = interval.get("started")
+        finished = interval.get("finished")
+        if (
+            gpu not in known_gpus
+            or not isinstance(started, (int, float))
+            or not isinstance(finished, (int, float))
+            or finished < started
+        ):
+            raise ValueError(f"invalid foreign interference interval: {interval}")
+        normalized_foreign_intervals.append((gpu, float(started), float(finished)))
 
     def gpu_attempts(record: dict) -> list[dict[str, Any]]:
         attempts = record.get("gpu_attempts")
@@ -2520,6 +2565,7 @@ def _pipeline_cost_model(
         if has_complete_timeline(record) and has_valid_assignment(record)
     ]
     coverage = {
+        "schema_version": schema_version,
         "measurement_status": "missing",
         "record_count": len(records),
         "complete_timeline_count": len(complete_timelines),
@@ -2545,7 +2591,17 @@ def _pipeline_cost_model(
         }
     process_starts = [timeline["process_started"] for timeline in complete_measurements]
     first_ready = min(timeline["ready"] for timeline in complete_measurements)
-    scheduled_attempts = [attempt for record in records for attempt in gpu_attempts(record)]
+    scheduled_attempts = []
+    for record_index, record in enumerate(records):
+        initial_ready = record["phase_timestamps"]["ready"]
+        for attempt in gpu_attempts(record):
+            scheduled_attempts.append(
+                {
+                    **attempt,
+                    "_record_index": record_index,
+                    "_initial_ready": initial_ready,
+                }
+            )
     assignment_handoffs = [
         max(0.0, attempt["gpu_started"] - attempt["assigned"])
         for attempt in scheduled_attempts
@@ -2568,10 +2624,44 @@ def _pipeline_cost_model(
             occupied = value
         # Before the first complete snapshot, no physical GPU is eligible for
         # assignment. CPU preparation may still proceed in parallel.
-        return set(known_gpu_indices if occupied is None else occupied)
+        result = set(known_gpu_indices if occupied is None else occupied)
+        result.update(
+            gpu
+            for gpu, started, finished in normalized_foreign_intervals
+            if started <= timestamp < finished
+        )
+        return result
+
+    def foreign_overlap_s(started: float, finished: float, gpus: tuple[str, ...]) -> float:
+        if finished <= started:
+            return 0.0
+        boundaries = {started, finished}
+        boundaries.update(
+            timestamp
+            for timestamp, _occupied in external_history
+            if started < timestamp < finished
+        )
+        for gpu, interval_started, interval_finished in normalized_foreign_intervals:
+            if gpu not in gpus:
+                continue
+            if started < interval_started < finished:
+                boundaries.add(interval_started)
+            if started < interval_finished < finished:
+                boundaries.add(interval_finished)
+        ordered = sorted(boundaries)
+        overlap = 0.0
+        for left, right in pairwise(ordered):
+            midpoint = left + (right - left) / 2.0
+            if external_occupied_at(midpoint).intersection(gpus):
+                overlap += right - left
+        return overlap
 
     actual_available_at: dict[str, float] = {}
     dispatch_latencies: list[float] = []
+    raw_dispatch_waits: list[float] = []
+    foreign_dispatch_waits: list[float] = []
+    initial_dispatch_latencies: list[float] = []
+    retry_dispatch_latencies: list[float] = []
     for attempt in sorted(scheduled_attempts, key=lambda item: item["assigned"]):
         available_at = max(
             [attempt["ready"]]
@@ -2580,16 +2670,40 @@ def _pipeline_cost_model(
                 for gpu in attempt["gpus"]
             ]
         )
-        dispatch_latencies.append(max(0.0, attempt["assigned"] - available_at))
+        raw_dispatch_wait = max(0.0, attempt["assigned"] - available_at)
+        foreign_dispatch_wait = min(
+            raw_dispatch_wait,
+            foreign_overlap_s(
+                available_at,
+                attempt["assigned"],
+                tuple(str(gpu) for gpu in attempt["gpus"]),
+            ),
+        )
+        dispatch_latency = max(0.0, raw_dispatch_wait - foreign_dispatch_wait)
+        dispatch_latencies.append(dispatch_latency)
+        raw_dispatch_waits.append(raw_dispatch_wait)
+        foreign_dispatch_waits.append(foreign_dispatch_wait)
+        if attempt.get("attempt", 1) > 1:
+            retry_dispatch_latencies.append(dispatch_latency)
+        else:
+            initial_dispatch_latencies.append(dispatch_latency)
         for gpu in attempt["gpus"]:
             actual_available_at[str(gpu)] = attempt["ownership_released"]
 
     gpu_indices = sorted(known_gpu_indices, key=int)
 
     external_change_offsets = sorted(
-        max(0.0, timestamp - first_ready)
-        for timestamp, _occupied in external_history
-        if timestamp > first_ready
+        {
+            max(0.0, timestamp - first_ready)
+            for timestamp, _occupied in external_history
+            if timestamp > first_ready
+        }
+        | {
+            max(0.0, timestamp - first_ready)
+            for _gpu, started, finished in normalized_foreign_intervals
+            for timestamp in (started, finished)
+            if timestamp > first_ready
+        }
     )
 
     def earliest_eligible_start(selected: tuple[str, ...], earliest: float) -> float:
@@ -2601,27 +2715,44 @@ def _pipeline_cost_model(
             candidate = next_changes[0]
         return candidate
 
-    def list_schedule(*, respect_ready: bool, respect_external: bool = False) -> float:
+    def list_schedule(*, ready_mode: str, respect_external: bool = False) -> float:
         available = {gpu: 0.0 for gpu in gpu_indices}
+        dependency_available: dict[int, float] = {}
         finish = 0.0
+
+        def ready_offset(attempt: dict[str, Any]) -> float:
+            if ready_mode == "none":
+                return 0.0
+            if ready_mode == "initial":
+                ready = attempt["_initial_ready"]
+            elif ready_mode == "attempt":
+                ready = attempt["ready"]
+            else:
+                raise ValueError(f"unknown cost-model ready mode: {ready_mode}")
+            return max(0.0, ready - first_ready)
+
         ordered = sorted(
             scheduled_attempts,
-            key=lambda item: (item["ready"], item.get("attempt", 1)),
+            key=lambda item: (
+                ready_offset(item),
+                item.get("attempt", 1),
+                item["_record_index"],
+            ),
         )
         for attempt in ordered:
             count = len(attempt["gpus"])
             if count > len(gpu_indices):
                 return math.inf
-            ready_offset = (
-                max(0.0, attempt["ready"] - first_ready)
-                if respect_ready
-                else 0.0
+            attempt_ready_offset = ready_offset(attempt)
+            dependency_ready = dependency_available.get(
+                attempt["_record_index"], attempt_ready_offset
             )
             if respect_external:
                 candidates = []
                 for selected in combinations(gpu_indices, count):
                     internally_available = max(
-                        [ready_offset] + [available[gpu] for gpu in selected]
+                        [attempt_ready_offset, dependency_ready]
+                        + [available[gpu] for gpu in selected]
                     )
                     start = earliest_eligible_start(selected, internally_available)
                     candidates.append((start, selected))
@@ -2635,29 +2766,62 @@ def _pipeline_cost_model(
                 selected = tuple(
                     sorted(gpu_indices, key=lambda gpu: (available[gpu], int(gpu)))[:count]
                 )
-                start = max([ready_offset] + [available[gpu] for gpu in selected])
+                start = max(
+                    [attempt_ready_offset, dependency_ready]
+                    + [available[gpu] for gpu in selected]
+                )
             duration = attempt["ownership_released"] - attempt["gpu_started"]
             finish = max(finish, start + duration)
             for gpu in selected:
                 available[gpu] = start + duration
+            dependency_available[attempt["_record_index"]] = start + duration
         return finish
 
-    ideal_gpu_s = list_schedule(respect_ready=False)
-    ready_constrained_gpu_s = list_schedule(respect_ready=True)
-    eligibility_constrained_gpu_s = list_schedule(respect_ready=True, respect_external=True)
-    foreign_wait_s = max(0.0, eligibility_constrained_gpu_s - ready_constrained_gpu_s)
+    ideal_gpu_s = list_schedule(ready_mode="none")
+    cpu_ready_constrained_gpu_s = list_schedule(ready_mode="initial")
+    attempt_ready_constrained_gpu_s = list_schedule(ready_mode="attempt")
+    eligibility_constrained_gpu_s = list_schedule(
+        ready_mode="attempt", respect_external=True
+    )
+    foreign_wait_s = max(
+        0.0, eligibility_constrained_gpu_s - attempt_ready_constrained_gpu_s
+    )
     first_ready_s = max(0.0, first_ready - run_started)
-    expected_s = first_ready_s + ready_constrained_gpu_s
+    expected_s = first_ready_s + attempt_ready_constrained_gpu_s
     expected_with_foreign_s = first_ready_s + eligibility_constrained_gpu_s
     observed_s = max(0.0, critical_finished - run_started)
-    unexplained_s = observed_s - first_ready_s - ready_constrained_gpu_s - foreign_wait_s
+    unexplained_s = (
+        observed_s
+        - first_ready_s
+        - attempt_ready_constrained_gpu_s
+        - foreign_wait_s
+    )
 
     def percentile(values: list[float], fraction: float) -> float:
         ordered = sorted(values)
         index = min(len(ordered) - 1, max(0, math.ceil(len(ordered) * fraction) - 1))
         return ordered[index]
 
+    def latency_summary(values: list[float]) -> dict[str, Any]:
+        if not values:
+            return {"measurement_status": "not_applicable", "count": 0}
+        return {
+            "measurement_status": "measured",
+            "count": len(values),
+            "max": max(values),
+            "p95": percentile(values, 0.95),
+        }
+
+    interfered_attempts = [
+        attempt for attempt in scheduled_attempts if attempt.get("status") == "INTERFERED"
+    ]
+    retry_gpu_ownership_s = sum(
+        attempt["ownership_released"] - attempt["gpu_started"]
+        for attempt in interfered_attempts
+    )
+
     return {
+        "schema_version": schema_version,
         "measurement_status": "measured",
         "record_count": len(records),
         "observed_critical_s": observed_s,
@@ -2665,24 +2829,28 @@ def _pipeline_cost_model(
         "prepare_spawn_span_s": max(process_starts) - min(process_starts),
         "first_ready_s": first_ready_s,
         "ideal_gpu_list_schedule_s": ideal_gpu_s,
-        "ready_constrained_gpu_list_schedule_s": ready_constrained_gpu_s,
+        "cpu_ready_constrained_gpu_list_schedule_s": cpu_ready_constrained_gpu_s,
+        "ready_constrained_gpu_list_schedule_s": attempt_ready_constrained_gpu_s,
         "eligibility_constrained_gpu_list_schedule_s": eligibility_constrained_gpu_s,
         "gpu_busy_s_by_index": gpu_busy_by_index,
         "foreign_wait_s": foreign_wait_s,
         "expected_s": expected_s,
         "expected_with_foreign_s": expected_with_foreign_s,
         "unexplained_s": unexplained_s,
-        "dispatch_latency_s": {
-            "count": len(dispatch_latencies),
-            "max": max(dispatch_latencies),
-            "p95": percentile(dispatch_latencies, 0.95),
-        },
-        "assignment_handoff_s": {
-            "count": len(assignment_handoffs),
-            "max": max(assignment_handoffs),
-            "p95": percentile(assignment_handoffs, 0.95),
-        },
-        "ready_starvation_s": max(0.0, ready_constrained_gpu_s - ideal_gpu_s),
+        "dispatch_latency_s": latency_summary(dispatch_latencies),
+        "raw_dispatch_wait_s": latency_summary(raw_dispatch_waits),
+        "foreign_dispatch_wait_s": latency_summary(foreign_dispatch_waits),
+        "initial_dispatch_latency_s": latency_summary(initial_dispatch_latencies),
+        "retry_dispatch_latency_s": latency_summary(retry_dispatch_latencies),
+        "assignment_handoff_s": latency_summary(assignment_handoffs),
+        "ready_starvation_s": max(
+            0.0, cpu_ready_constrained_gpu_s - ideal_gpu_s
+        ),
+        "interference_retry_ready_delay_s": max(
+            0.0, attempt_ready_constrained_gpu_s - cpu_ready_constrained_gpu_s
+        ),
+        "interference_retry_count": len(interfered_attempts),
+        "interference_retry_gpu_ownership_s": retry_gpu_ownership_s,
         "complete_timeline_count": len(complete_timelines),
         "complete_measurement_count": len(complete_measurements),
     }
@@ -2838,6 +3006,8 @@ def run_scheduled_jobs(
     ready: deque[_PreparedAttempt] = deque()
     records: list[dict] = []
     retry_log: list[dict[str, Any]] = []
+    foreign_interference_open: dict[str, dict[str, Any]] = {}
+    foreign_interference_intervals: list[dict[str, Any]] = []
     completed = 0
     failed = False
     last_interference_poll = 0.0
@@ -2852,6 +3022,46 @@ def run_scheduled_jobs(
     run_started = time.time()
     critical_finished: float | None = None
     physical_uuid_by_index = dict(pool._all_gpus())
+
+    def note_foreign_interference(
+        gpus: tuple[str, ...],
+        intruder_pids: list[int],
+        *,
+        source: str,
+        detected_at: float,
+    ) -> None:
+        for gpu in gpus:
+            state = foreign_interference_open.get(gpu)
+            if state is None:
+                state = {
+                    "started": detected_at,
+                    "intruder_pids": set(),
+                    "sources": set(),
+                }
+                foreign_interference_open[gpu] = state
+            state["intruder_pids"].update(intruder_pids)
+            state["sources"].add(source)
+
+    def clear_foreign_interference(
+        gpus: tuple[str, ...], *, cleared_at: float, reason: str
+    ) -> None:
+        for gpu in gpus:
+            state = foreign_interference_open.pop(gpu, None)
+            if state is None:
+                continue
+            finished = max(cleared_at, state["started"])
+            foreign_interference_intervals.append(
+                {
+                    "gpu_index": gpu,
+                    "gpu_uuid": physical_uuid_by_index[gpu],
+                    "started": state["started"],
+                    "finished": finished,
+                    "duration_s": finished - state["started"],
+                    "intruder_pids": sorted(state["intruder_pids"]),
+                    "sources": sorted(state["sources"]),
+                    "closed_by": reason,
+                }
+            )
 
     def preparing_count() -> int:
         return sum(item.state == "PREPARING_CPU" for item in active.values())
@@ -2893,8 +3103,15 @@ def run_scheduled_jobs(
     ) -> None:
         if item.state not in ("ASSIGNED", "RUNNING_GPU") or item.pending_interference:
             return
+        detected_at = time.time()
+        note_foreign_interference(
+            item.gpus,
+            intruders,
+            source="running_gpu_monitor",
+            detected_at=detected_at,
+        )
         item.pending_interference = {
-            "detected_at": time.time(),
+            "detected_at": detected_at,
             "intruder_pids": intruders,
             "detail": detail[:240],
         }
@@ -3004,12 +3221,26 @@ def run_scheduled_jobs(
             if gpus is None:
                 continue
             strangers = _active_strangers(gpus, _our_pids(), pool.util_threshold)
+            checked_at = time.time()
             if strangers is None or strangers:
+                note_foreign_interference(
+                    gpus,
+                    sorted(strangers or {}),
+                    source=(
+                        "predispatch_sampling_failure"
+                        if strangers is None
+                        else "predispatch_foreign_pid"
+                    ),
+                    detected_at=checked_at,
+                )
                 pool.release_many(gpus)
                 # The claim has not been sent and the child has not touched a
                 # GPU. Keep the prepared workload READY for another eligible
                 # atomic claim; this is occupancy wait, not a GPU retry.
                 continue
+            clear_foreign_interference(
+                gpus, cleared_at=checked_at, reason="predispatch_verified_clear"
+            )
             remove_ready(item)
             item.gpus = gpus
             item.gpu_ownership_released = False
@@ -3309,6 +3540,11 @@ def run_scheduled_jobs(
             _finish_attempt_process(item)
             active.pop(fd, None)
     run_finished = time.time()
+    clear_foreign_interference(
+        tuple(foreign_interference_open),
+        cleared_at=run_finished,
+        reason="run_finished",
+    )
     sample_host_resources()
     if critical_finished is None:
         critical_finished = run_finished
@@ -3348,6 +3584,10 @@ def run_scheduled_jobs(
         ],
         "interference_retry_count": len(retry_log),
         "interference_retries": retry_log,
+        "foreign_interference_intervals": sorted(
+            foreign_interference_intervals,
+            key=lambda interval: (interval["started"], int(interval["gpu_index"])),
+        ),
         "multi_gpu_runtime_validation": {
             "validation_status": "exempted_by_human_unmeasured",
             "runtime_evidence": "not_collected_by_human_direction",
@@ -3361,6 +3601,7 @@ def run_scheduled_jobs(
             critical_finished=critical_finished,
             known_gpu_indices=known_gpu_indices,
             external_history=external_history,
+            foreign_intervals=foreign_interference_intervals,
         ),
     }
     return records, retry_log, pipeline_meta

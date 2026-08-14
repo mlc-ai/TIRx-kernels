@@ -281,6 +281,7 @@ child 负责：
    - Phase B: 少量单卡 workload 和动态外部负载 A/B；迁移前一侧从保留 one-stage scheduler 的 `a91a1b7` 独立 worktree 运行，迁移后一侧从当前 pipeline worktree 运行。两侧必须使用完全相同的显式 workload matrix、物理 GPU、默认 5 rounds/1.0s cooldown、timer/reference/correctness 协议和外层 wall timer；不跑全量、不占多张卡。原始 run JSON、outer timer 和 stdout/stderr 必须由 `scripts/build_bench_pipeline_ac10_evidence.py` 逐文件哈希并交叉校验；缺文件、UUID 不同、协议不完整或 cost model 不可复算时不得生成数值 evidence。
    - Phase C: 对多卡路径只做 assignment mismatch、原子 claim 和 rank lifecycle 等无多卡结构验证，并将 runtime 状态记为 `exempted_by_human_unmeasured`。
    - Phase D: 依据 timeline 检查 `T_unexplained`、ratio、correctness和资源边界；只保留可复现的端到端收益。迁移前/后同 matrix 的 pipeline overlap 加速与 YAML 默认覆盖从 234 降到 112 的独立工作量缩减必须分别归因，不得合并、相乘或汇总成一个加速比。
+   - Supplemental suite measurement（不属于任何 AC）：按 2026-08-14 的一次性授权，在 AC-10 小矩阵之外分别对 `a91a1b7` 与当前 pipeline 各跑一次相同的 112 条单卡默认 workload。两侧保持相同的冷/热编译缓存状态，各自使用当时全部 eligible GPU；原始 outer wall 为主数字，同时持久化可得的 GPU 卡时、foreign wait、external occupancy、retry count 与参与 GPU UUID。两侧可用卡集合不同必须显式披露；多 GPU worker 并行在迁移前已存在，不得归因于本次迁移；该数字不得进入 AC-10、不得与 234→112 覆盖缩减合并。两次 outer timer 与派生 evidence 必须落到可提交路径。完成这一对测量后，恢复默认“不跑全量 sweep”的机器纪律。
 
 ## Feature Map / Capability Map
 
@@ -315,7 +316,8 @@ child 负责：
 - FUT-2: CUDA kernel 本身的 NCU 优化。
   - Current-loop handoff: AC-10 只优化 suite orchestration wall time。
   - Promotion trigger: pipeline 收口后，GPU stage 已成为主导且具体 kernel 仍低效。
-- FUT-3: 全量默认 sweep 和 baseline promotion。
+- FUT-3: baseline promotion。完整 112 条 before/after sweep 仅按 2026-08-14
+  的一次性授权作为 AC 外补充测量执行，不改变后续默认“不跑全量”的约束。
   - Current-loop handoff: 只做少量代表性 targeted run。
   - Promotion trigger: 没有其他 session 运行 suite，且全部主要锚点验证完成。
 
