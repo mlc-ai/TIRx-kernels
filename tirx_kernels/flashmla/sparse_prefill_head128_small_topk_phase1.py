@@ -487,9 +487,6 @@ def _make_low_level_kernel(
                                     T.ptx.cp("async", "bulk", "commit_group", "")
                         else:
                             T.cuda.mbarrier_wait(T.address_of(buffer_2[0]), T.bitwise_xor(wg0_outer_loop_phase, 0))
-                            # Match the steady-state epilogue rendezvous: every WG0 waiter
-                            # must consume this generation before warp 0 can commit the next.
-                            T.ptx.bar(T.uint32(0), T.uint32(128), "", "sync", "")
                         last_valid = 1
                         last_s_q_idx = wg0_s_q_idx
                         last_outer_loop_phase = wg0_outer_loop_phase
