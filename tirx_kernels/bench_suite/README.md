@@ -281,6 +281,15 @@ UUIDs, per-attempt ownership, `retry_in_place`, and the measured 616 MiB residua
 primary context on the abandoned card. These runs validate the implementation;
 they are not a migration-before AC-10 A/B.
 
+Release-quality AC-10 A/B evidence must retain the raw before/after run JSONs,
+independent outer-timer JSONs, and their stdout/stderr logs. Build its derived
+summary with `scripts/build_bench_pipeline_ac10_evidence.py`; the builder hashes
+and opens every source, verifies the same physical UUID, default 5-round/1.0s
+protocol, raw-sample means, retry provenance, and pipeline cost model, and emits
+nothing when evidence is missing or inconsistent. The fixed targeted workload
+files are named `bench_pipeline_ac10_*_workload.yaml`, with the three-GEMM Proton
+matrix in `bench_pipeline_ac10_workloads.yaml`.
+
 MegaMoE entries use `timer: megamoe`, which invokes the dedicated DeepGEMM
 `bench_kineto` protocol. Do not set `warmup` or `repeat` for this timer because
 the protocol fixes its own 30-test schedule. Both compared MegaMoE launches have

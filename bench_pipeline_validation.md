@@ -441,6 +441,18 @@ that can run on one GPU. None currently has admissible same-physical-GPU A/B
 evidence. Completed runs are recorded below but remain unmeasured for AC-10 until
 repeated through the UUID-verified path.
 
+The reproducible inputs are tracked as `bench_pipeline_ac10_workloads.yaml`
+(Proton), `bench_pipeline_ac10_event_workload.yaml`,
+`bench_pipeline_ac10_cudagraph_workload.yaml`,
+`bench_pipeline_ac10_kineto_workload.yaml`, and
+`bench_pipeline_ac10_megamoe_workload.yaml`. After collection,
+`scripts/build_bench_pipeline_ac10_evidence.py` must open and hash both raw run
+JSONs, both independent outer timers, and their stdout/stderr logs. It rejects
+missing sources, cross-side UUID differences, non-default protocols, incomplete
+samples/timelines, non-reproducible means or cost fields, and does not emit an
+evidence file on rejection. A hand-filled but arithmetically consistent summary
+is therefore insufficient for the replacement AC-10 evidence.
+
 | timer family | runtime evidence | status |
 |---|---|---|
 | Proton | The fixed three-GEMM pair retained default 5 rounds/1.0s data, but the old pipeline side did not verify its physical UUID; its 1.884× arithmetic also relies on unpersisted outer timers | invalidated; AC-10 unmeasured pending UUID-verified same-card rerun |
