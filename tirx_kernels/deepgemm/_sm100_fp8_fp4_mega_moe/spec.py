@@ -144,10 +144,6 @@ class DeepGemmLaunchConfig:
         return self.num_threads
 
     @property
-    def num_warps_per_cta(self) -> int:
-        return self.num_total_warps
-
-    @property
     def num_warpgroups_per_cta(self) -> int:
         return self.num_warpgroups
 

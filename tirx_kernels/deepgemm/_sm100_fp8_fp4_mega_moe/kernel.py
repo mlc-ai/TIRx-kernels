@@ -74,8 +74,6 @@ def get_kernel(
     num_warps_per_warpgroup = 4
     num_l1_block_ns = (intermediate_hidden * 2) // kernel_config.block_n
     num_l2_block_ns = hidden // kernel_config.block_n
-    num_l1_block_ks = hidden // kernel_config.block_k
-    num_l2_block_ks = intermediate_hidden // kernel_config.block_k
     # Dynamic task scheduler constants (scheduler/mega_moe.cuh, upstream 559d79f)
     num_l1_clusters = num_l1_block_ns // 2
     num_l2_clusters = num_l2_block_ns // 2
@@ -129,15 +127,6 @@ def get_kernel(
 
     tcgen05_cta_mask = (1 << 2) - 1
 
-    def unpack_ue8m0_scale(packed_word, lane_idx):
-        packed_u32 = T.cast(packed_word, "uint32")
-        lane_u32 = T.cast(lane_idx, "uint32")
-        exp_bits = T.bitwise_and(
-            T.shift_right(packed_u32, T.bitwise_and(lane_u32, T.uint32(3)) * T.uint32(8)),
-            T.uint32(0xFF),
-        )
-        return T.cuda.uint_as_float(T.shift_left(exp_bits, T.uint32(23)))
-
     @T.inline
     def scale_pack_fp8x4_e4m3(out, upper, lower, v0, v1, v2, v3, sf_inv_x, sf_inv_y):
         sf_inv_pair = T.cuda.make_float2(sf_inv_x, sf_inv_y)
@@ -149,9 +138,6 @@ def get_kernel(
             T.cuda.float2_x(lower[0]),
             T.cuda.float2_y(lower[0]),
         )
-
-    def red_or_rel_gpu_u64(address, value):
-        return T.ptx.red.release.gpu.global_.or_.b64(address, value)
 
     def red_add_gpu_s32(address, value):
         return T.ptx.red.gpu.global_.add.s32(address, value)
@@ -263,15 +249,6 @@ def get_kernel(
             T.tvm_warp_shuffle_xor(0xFFFFFFFF, values[atom_idx, dim], 16, 32, 32),
         )
 
-    def get_swizzled_sf_row_idx(row_idx):
-        row_idx_u32 = T.cast(row_idx, "uint32")
-        return T.cast(
-            T.bitwise_and(row_idx_u32, T.uint32(0xFFFFFF80))
-            + T.shift_left(T.bitwise_and(row_idx_u32, T.uint32(31)), T.uint32(2))
-            + T.shift_right(T.bitwise_and(row_idx_u32, T.uint32(127)), T.uint32(5)),
-            "int32",
-        )
-
     def transform_sf_token_idx(token_idx_in_expert):
         token_idx_u32 = T.cast(token_idx_in_expert, "uint32")
         idx = token_idx_u32 % T.uint32(kernel_config.block_m)
@@ -296,9 +273,6 @@ def get_kernel(
 
     def sts128(dst_ptr, r0, r1, r2, r3):
         return T.ptx.st.shared.v4.b32(dst_ptr, r0, r1, r2, r3)
-
-    def mbarrier_arrive_local(barrier_ptr):
-        return T.ptx.mbarrier.arrive.shared.b64(barrier_ptr, T.uint32(1))
 
     def mbarrier_arrive_and_set_tx(barrier_ptr, num_bytes):
         return T.ptx.mbarrier.arrive.expect_tx.shared.b64(barrier_ptr, T.uint32(num_bytes))
@@ -368,9 +342,6 @@ def get_kernel(
                 dst, tensormap_addr, coord0, coord1, mbar_addr, _evict_normal_policy
             )
         )
-
-    def sm100_tma_2sm_load_2d(dst, mbar, tensormap, coord0, coord1):
-        sm100_tma_2sm_load_2d_addr(dst, mbar, T.address_of(tensormap), coord0, coord1)
 
     @T.inline
     def sm100_tma_2sm_load_2d_select(
@@ -778,8 +749,6 @@ def get_kernel(
         raise ValueError("Hidden is too large")
     if num_chunk_bytes % 16 != 0:
         raise ValueError("Combine chunk must be TMA-aligned (16 bytes)")
-    if num_chunk_bytes % 16 != 0:
-        raise ValueError("Combine chunk must be divisible by 16 bytes")
     if num_chunk_uint4 % 32 != 0:
         raise ValueError("Combine chunk must be a multiple of 32 16-byte elements (one per lane)")
     if num_topk > 32:
@@ -1947,10 +1916,6 @@ def get_kernel(
             T.ptx.setmaxnreg.inc.sync.aligned.u32(num_registers)
 
         @T.inline
-        def tma_copy_2d_multicast(dst_ptr, barrier_ptr, tensor_map_ptr, coord0, coord1):
-            sm100_tma_2sm_load_2d(dst_ptr, barrier_ptr, tensor_map_ptr, coord0, coord1)
-
-        @T.inline
         def tma_copy_2d_multicast_select(
             dst_ptr,
             barrier_ptr,
@@ -2042,10 +2007,6 @@ def get_kernel(
         @T.inline
         def sm90_tma_store_2d_copy(src_ptr, tensor_map, coord0, coord1):
             T.evaluate(tma_store_2d(src_ptr, tensor_map, coord0, coord1))
-
-        @T.inline
-        def red_or_rel_gpu(address, value):
-            red_or_rel_gpu_u64(address, value)
 
         @T.inline
         def store_token_src_metadata(pool_token_idx, src_rank_idx, src_token_idx, src_topk_idx):
