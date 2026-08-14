@@ -13,9 +13,24 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+CACHE_ENV_KEYS = (
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "CUDA_CACHE_PATH",
+    "TORCH_HOME",
+    "TORCH_EXTENSIONS_DIR",
+    "TORCHINDUCTOR_CACHE_DIR",
+    "TRITON_CACHE_DIR",
+    "CUTE_DSL_CACHE_DIR",
+    "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR",
+    "FLASHINFER_WORKSPACE_BASE",
+    "TRTLLM_DG_CACHE_DIR",
+)
 
 
 def _utc_now() -> str:
@@ -44,36 +59,94 @@ def _nvidia_smi_rows(arguments: list[str]) -> list[list[str]]:
     ]
 
 
-def _gpu_snapshot(index: str) -> dict:
+def _descendant_pids(root_pid: int | None) -> set[int]:
+    if root_pid is None:
+        return set()
+    children: dict[int, set[int]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            parent_line = next(
+                line
+                for line in (entry / "status").read_text().splitlines()
+                if line.startswith("PPid:")
+            )
+            parent = int(parent_line.split()[1])
+        except (FileNotFoundError, PermissionError, StopIteration, ValueError):
+            continue
+        children.setdefault(parent, set()).add(int(entry.name))
+    descendants = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, ()):
+            if child not in descendants:
+                descendants.add(child)
+                pending.append(child)
+    return descendants
+
+
+def _all_gpu_snapshots(suite_pids: set[int] | None = None) -> list[dict]:
     gpu_rows = _nvidia_smi_rows(
         ["--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total"]
     )
-    matches = [row for row in gpu_rows if row[0] == index]
-    if len(matches) != 1 or len(matches[0]) != 6:
-        raise RuntimeError(f"physical GPU index {index!r} resolved to {matches!r}")
-    row = matches[0]
-    uuid = row[1]
     process_rows = _nvidia_smi_rows(
         ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory"]
     )
-    processes = [
-        {
+    processes_by_uuid: dict[str, list[dict]] = {}
+    for process in process_rows:
+        if len(process) != 4:
+            continue
+        parsed = {
             "gpu_uuid": process[0],
             "pid": int(process[1]),
             "process_name": process[2],
             "used_memory_mib": float(process[3]),
         }
-        for process in process_rows
-        if len(process) == 4 and process[0] == uuid
-    ]
+        if suite_pids is not None:
+            parsed["owner"] = "suite" if parsed["pid"] in suite_pids else "foreign"
+        processes_by_uuid.setdefault(process[0], []).append(parsed)
+    snapshots = []
+    for row in gpu_rows:
+        if len(row) != 6:
+            raise RuntimeError(f"malformed physical GPU row: {row!r}")
+        processes = processes_by_uuid.get(row[1], [])
+        snapshot = {
+            "index": row[0],
+            "uuid": row[1],
+            "name": row[2],
+            "utilization_gpu_percent": float(row[3]),
+            "memory_used_mib": float(row[4]),
+            "memory_total_mib": float(row[5]),
+            "compute_processes": processes,
+        }
+        if suite_pids is not None:
+            snapshot["suite_compute_pids"] = sorted(
+                process["pid"] for process in processes if process["owner"] == "suite"
+            )
+            snapshot["foreign_compute_pids"] = sorted(
+                process["pid"] for process in processes if process["owner"] == "foreign"
+            )
+        snapshots.append(snapshot)
+    return snapshots
+
+
+def _gpu_snapshot(index: str) -> dict:
+    matches = [row for row in _all_gpu_snapshots() if row["index"] == index]
+    if len(matches) != 1:
+        raise RuntimeError(f"physical GPU index {index!r} resolved to {matches!r}")
+    return matches[0]
+
+
+def _all_gpu_timeline_sample(root_pid: int | None) -> dict:
+    sampled_ns = time.monotonic_ns()
+    suite_pids = _descendant_pids(root_pid)
     return {
-        "index": index,
-        "uuid": uuid,
-        "name": row[2],
-        "utilization_gpu_percent": float(row[3]),
-        "memory_used_mib": float(row[4]),
-        "memory_total_mib": float(row[5]),
-        "compute_processes": processes,
+        "sampled_utc": _utc_now(),
+        "sampled_monotonic_ns": sampled_ns,
+        "suite_process_tree_pids": sorted(suite_pids),
+        "gpus": _all_gpu_snapshots(suite_pids),
     }
 
 
@@ -100,6 +173,15 @@ def main() -> int:
         default=512.0,
         help="Reject the command when the selected GPU exceeds this memory use (default: 512)",
     )
+    parser.add_argument(
+        "--monitor-all-gpus-interval",
+        type=float,
+        default=None,
+        help=(
+            "Non-rejecting all-GPU occupancy sampling interval in seconds. Persists "
+            "GPU UUIDs plus suite/foreign compute PIDs for supplemental sweep evidence."
+        ),
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -124,7 +206,10 @@ def main() -> int:
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "cuda_visible_devices_at_wrapper_start": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "cache_environment": {key: os.environ.get(key) for key in CACHE_ENV_KEYS},
     }
+    if args.monitor_all_gpus_interval is not None and args.monitor_all_gpus_interval <= 0:
+        parser.error("--monitor-all-gpus-interval must be positive")
     child_env = os.environ.copy()
     if args.physical_gpu_index is not None:
         if not args.physical_gpu_index.isdigit():
@@ -175,6 +260,27 @@ def main() -> int:
     _write_json(artifact, payload)
 
     child: subprocess.Popen | None = None
+    monitor_stop = threading.Event()
+    monitor_samples: list[dict] = []
+    monitor_errors: list[dict] = []
+    monitor_thread: threading.Thread | None = None
+
+    def sample_all_gpus() -> None:
+        try:
+            monitor_samples.append(
+                _all_gpu_timeline_sample(child.pid if child is not None else None)
+            )
+        except BaseException as error:
+            monitor_errors.append(
+                {
+                    "sampled_utc": _utc_now(),
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
+
+    def monitor_all_gpus() -> None:
+        while not monitor_stop.wait(args.monitor_all_gpus_interval):
+            sample_all_gpus()
 
     def forward(signum: int, _frame: object) -> None:
         if child is not None and child.poll() is None:
@@ -185,6 +291,8 @@ def main() -> int:
         for signum in (signal.SIGINT, signal.SIGTERM)
     }
     try:
+        if args.monitor_all_gpus_interval is not None:
+            sample_all_gpus()
         with stdout_log.open("wb") as stdout, stderr_log.open("wb") as stderr:
             command_started_utc = _utc_now()
             command_started_ns = time.monotonic_ns()
@@ -195,6 +303,14 @@ def main() -> int:
                 stderr=stderr,
                 start_new_session=True,
             )
+            if args.monitor_all_gpus_interval is not None:
+                sample_all_gpus()
+                monitor_thread = threading.Thread(
+                    target=monitor_all_gpus,
+                    name="outer-gpu-monitor",
+                    daemon=True,
+                )
+                monitor_thread.start()
             returncode = child.wait()
             command_finished_ns = time.monotonic_ns()
             command_finished_utc = _utc_now()
@@ -214,6 +330,11 @@ def main() -> int:
         _write_json(artifact, payload)
         raise
     finally:
+        monitor_stop.set()
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=15)
+        if args.monitor_all_gpus_interval is not None:
+            sample_all_gpus()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
@@ -254,6 +375,13 @@ def main() -> int:
             "wrapper_returncode": wrapper_returncode,
         }
     )
+    if args.monitor_all_gpus_interval is not None:
+        payload["all_gpu_monitor"] = {
+            "schema_version": 1,
+            "interval_s": args.monitor_all_gpus_interval,
+            "samples": monitor_samples,
+            "errors": monitor_errors,
+        }
     _write_json(artifact, payload)
     return wrapper_returncode
 

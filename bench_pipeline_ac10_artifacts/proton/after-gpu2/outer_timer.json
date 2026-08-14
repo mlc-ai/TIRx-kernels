@@ -1,0 +1,65 @@
+{
+  "argv": [
+    "python",
+    "-m",
+    "tirx_kernels.bench_suite.run",
+    "--workloads",
+    "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_workloads.yaml",
+    "--out-dir",
+    "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/after-gpu2/suite",
+    "--label",
+    "proton-after-0400e58-gpu2-schema3",
+    "--no-report",
+    "--no-probe",
+    "--util-threshold",
+    "0",
+    "--mem-threshold",
+    "0"
+  ],
+  "command_finished_monotonic_ns": 52388510994111,
+  "command_finished_utc": "2026-08-14T02:18:57.946116+00:00",
+  "command_started_monotonic_ns": 52332096391362,
+  "command_started_utc": "2026-08-14T02:18:01.531497+00:00",
+  "command_wall_ns": 56414602749,
+  "command_wall_s": 56.414602749,
+  "cuda_visible_devices_at_wrapper_start": "2",
+  "cwd": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels",
+  "physical_gpu": {
+    "after": {
+      "compute_processes": [],
+      "index": "2",
+      "memory_total_mib": 183359.0,
+      "memory_used_mib": 110.0,
+      "name": "NVIDIA B200",
+      "utilization_gpu_percent": 0.0,
+      "uuid": "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9"
+    },
+    "before": {
+      "compute_processes": [],
+      "index": "2",
+      "memory_total_mib": 183359.0,
+      "memory_used_mib": 110.0,
+      "name": "NVIDIA B200",
+      "utilization_gpu_percent": 0.0,
+      "uuid": "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9"
+    },
+    "preflight_limits": {
+      "memory_used_mib": 512.0,
+      "utilization_gpu_percent": 0.0
+    },
+    "requested_index": "2",
+    "same_uuid_before_after": true
+  },
+  "returncode": 0,
+  "schema_version": 1,
+  "status": "completed",
+  "stderr_log": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/after-gpu2/stderr.log",
+  "stdout_log": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/after-gpu2/stdout.log",
+  "wrapper_finished_monotonic_ns": 52388809676790,
+  "wrapper_finished_utc": "2026-08-14T02:18:58.244804+00:00",
+  "wrapper_returncode": 0,
+  "wrapper_started_monotonic_ns": 52331835405410,
+  "wrapper_started_utc": "2026-08-14T02:18:01.270508+00:00",
+  "wrapper_wall_ns": 56974271380,
+  "wrapper_wall_s": 56.97427138
+}

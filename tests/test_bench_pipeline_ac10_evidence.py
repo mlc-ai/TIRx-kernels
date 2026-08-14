@@ -285,6 +285,65 @@ def test_tracked_ac10_proton_attempt_one_evidence_matches_every_raw_source():
     )
 
 
+def test_tracked_ac10_proton_schema_three_evidence_passes_from_raw_sources():
+    repo_root = Path(__file__).resolve().parents[1]
+    evidence_path = (
+        repo_root / "bench_pipeline_ac10_artifacts/proton/evidence-gpu2-schema3.json"
+    )
+    evidence = json.loads(evidence_path.read_text())
+
+    assert evidence["measurement_status"] == "measured"
+    assert evidence["fixed_conditions"] == {
+        "cooldown_s": 1.0,
+        "multi_gpu_runtime_validation": "exempted_by_human_unmeasured",
+        "physical_gpu_index": 2,
+        "physical_gpu_uuid": "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+        "rounds": 5,
+    }
+    assert evidence["derived"]["acceptance_checks"] == {
+        "dispatch_p95_below_100ms": True,
+        "ready_starvation_absent": True,
+        "unexplained_within_bound": True,
+    }
+    assert evidence["derived"]["wall_speedup"] == pytest.approx(1.269215059469141)
+
+    sources = [evidence["sources"]["workloads"]]
+    for side in ("before", "after"):
+        sources.extend(
+            [
+                evidence["sources"][side]["run"],
+                evidence["sources"][side]["outer_timer"],
+                *evidence["sources"][side]["logs"],
+            ]
+        )
+    for source in sources:
+        source_path = Path(source["path"])
+        if not source_path.is_absolute():
+            source_path = repo_root / source_path
+        assert source_path.is_file()
+        assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source["sha256"]
+
+    after_run = json.loads(
+        (repo_root / evidence["sources"]["after"]["run"]["path"]).read_text()
+    )
+    committed_tree = subprocess.run(
+        ["git", "rev-parse", "0400e58:tirx_kernels"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert after_run["kernel_tree"]["tirx-kernels:tirx_kernels"] == committed_tree
+    cost = evidence["after"]["pipeline_cost_model"]
+    assert cost["schema_version"] == 3
+    assert cost["ready_starvation_s"] == 0.0
+    assert cost["interference_retry_count"] == 0
+    assert cost["unexplained_s"] == pytest.approx(0.047116994857788086)
+    assert sum(cost["gpu_busy_s_by_index"].values()) > sum(
+        cost["gpu_execution_s_by_index"].values()
+    )
+
+
 def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[1]
     workloads = tmp_path / "workloads.yaml"

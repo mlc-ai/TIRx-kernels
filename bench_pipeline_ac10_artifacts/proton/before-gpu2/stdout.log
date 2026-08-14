@@ -1,0 +1,15 @@
+[bench-suite] live log: /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before-gpu2/suite/runs/1.log
+[bench-suite]   tail : tail -f /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before-gpu2/suite/latest.log
+[bench-suite] run id : 1
+[bench-suite] visible: 1 ['2']; util now [2:0%]; mem now [2:0.0%]
+[bench-suite] gate: util-threshold=0%, mem-threshold=0% — occupied (skip): none; shareable: ['2'] (resident-VRAM cards: none)
+[bench-suite] 3 workloads, 1 probe-OK GPU(s) in pool, 1 worker(s), label=proton-before-a91a1b7-gpu2-uuid, 5 standard-timer round(s), aggregate=mean, cooldown=1s before every impl/round
+[bench-suite] 2026-08-14T02:11:27+00:00 bench_0 gpus=2 START fp16_bf16_gemm/fp16_1024x1024x1024 (attempt 1)
+[bench-suite] 2026-08-14T02:11:49+00:00 bench_0 gpus=2 ok   fp16_bf16_gemm/fp16_1024x1024x1024 tir=6.917µs, torch-cublas=6.018µs
+[bench-suite] 2026-08-14T02:11:49+00:00 bench_0 gpus=2 START fp16_bf16_gemm/fp16_2048x2048x2048 (attempt 1)
+[bench-suite] 2026-08-14T02:12:10+00:00 bench_0 gpus=2 ok   fp16_bf16_gemm/fp16_2048x2048x2048 tir=16.544µs, torch-cublas=15.850µs
+[bench-suite] 2026-08-14T02:12:11+00:00 bench_0 gpus=2 START fp16_bf16_gemm/fp16_4096x4096x4096 (attempt 1)
+[bench-suite] 2026-08-14T02:12:32+00:00 bench_0 gpus=2 ok   fp16_bf16_gemm/fp16_4096x4096x4096 tir=95.696µs, torch-cublas=92.710µs
+[bench-suite] interference retry summary: none
+[bench-suite] wrote /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before-gpu2/suite/runs/1.json
+[bench-suite] wrote /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before-gpu2/suite/reports/1/summary.md
