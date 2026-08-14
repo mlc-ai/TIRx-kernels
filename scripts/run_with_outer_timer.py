@@ -44,6 +44,27 @@ def _write_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def _directory_snapshot(path: Path) -> dict:
+    resolved = path.resolve()
+    if not resolved.exists():
+        return {
+            "path": str(resolved),
+            "exists": False,
+            "entry_count": 0,
+            "file_count": 0,
+            "total_file_bytes": 0,
+        }
+    entries = list(resolved.rglob("*")) if resolved.is_dir() else [resolved]
+    files = [entry for entry in entries if entry.is_file()]
+    return {
+        "path": str(resolved),
+        "exists": True,
+        "entry_count": len(entries),
+        "file_count": len(files),
+        "total_file_bytes": sum(entry.stat().st_size for entry in files),
+    }
+
+
 def _nvidia_smi_rows(arguments: list[str]) -> list[list[str]]:
     completed = subprocess.run(
         ["nvidia-smi", *arguments, "--format=csv,noheader,nounits"],
@@ -182,6 +203,16 @@ def main() -> int:
             "GPU UUIDs plus suite/foreign compute PIDs for supplemental sweep evidence."
         ),
     )
+    parser.add_argument(
+        "--require-cold-cache-root",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Require this path to be absent or empty before launching, then persist "
+            "before/after directory inventories. May be repeated."
+        ),
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -211,6 +242,20 @@ def main() -> int:
     if args.monitor_all_gpus_interval is not None and args.monitor_all_gpus_interval <= 0:
         parser.error("--monitor-all-gpus-interval must be positive")
     child_env = os.environ.copy()
+    cold_cache_before = [_directory_snapshot(path) for path in args.require_cold_cache_root]
+    payload["cold_cache_roots"] = {"before": cold_cache_before}
+    nonempty_cache_roots = [
+        snapshot for snapshot in cold_cache_before if snapshot["entry_count"] != 0
+    ]
+    if nonempty_cache_roots:
+        payload.update(
+            {
+                "status": "cache_preflight_rejected",
+                "error": f"cold cache root is not empty: {nonempty_cache_roots}",
+            }
+        )
+        _write_json(artifact, payload)
+        return 77
     if args.physical_gpu_index is not None:
         if not args.physical_gpu_index.isdigit():
             parser.error("--physical-gpu-index must be a non-negative integer")
@@ -382,6 +427,9 @@ def main() -> int:
             "samples": monitor_samples,
             "errors": monitor_errors,
         }
+    payload["cold_cache_roots"]["after"] = [
+        _directory_snapshot(path) for path in args.require_cold_cache_root
+    ]
     _write_json(artifact, payload)
     return wrapper_returncode
 
