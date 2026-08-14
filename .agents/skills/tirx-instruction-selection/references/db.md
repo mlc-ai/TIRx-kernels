@@ -30,6 +30,11 @@ When the reference pins an instruction, use the exact PTX operation: non-FTZ
 `.approx.ftz` only where the reference uses it. Plain TIRx remains appropriate
 for integer and index math.
 
+Global fast-math off-switches exist for both TVM CUDA compile paths
+(`TVM_CUDA_NVCC_NO_FAST_MATH=1` for nvcc, `--ftz=false` via
+`TVM_CUDA_NVRTC_EXTRA_OPTS` for NVRTC), but prefer per-op pinning: it holds
+regardless of compile defaults and documents intent at the use site.
+
 Confirm with denormal inputs and an instruction-by-instruction PTX comparison.
 
 ## E3: Match launch bounds
