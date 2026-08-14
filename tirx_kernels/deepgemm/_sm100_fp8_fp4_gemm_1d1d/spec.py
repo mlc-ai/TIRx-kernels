@@ -1093,6 +1093,7 @@ __all__ += [
 def _compile_spec_cached(spec: GemmSpec):
     """Compile one specialization.  `GemmSpec` is frozen, so it keys the cache."""
     import tvm
+    from tirx_kernels.runner import cuda_target
 
     from .kernel import build_kernel
 
@@ -1103,7 +1104,7 @@ def _compile_spec_cached(spec: GemmSpec):
     func = build_kernel(spec).with_attr("tirx.kernel_launch_params", tags)
     return tvm.compile(
         tvm.IRModule({"main": func}),
-        target=tvm.target.Target({"kind": "cuda", "arch": "sm_100f"}),
+        target=cuda_target(arch="sm_100a"),
         tir_pipeline="tirx",
     )
 
