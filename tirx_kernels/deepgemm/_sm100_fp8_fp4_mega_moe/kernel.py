@@ -355,6 +355,7 @@ def get_kernel(
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
     from tvm.tirx.layout import S, TCol, TileLayout, TLane
 
+    # ---- compile-time constants (all Python ints; nothing below is emitted) ----
     runtime_config = MegaMoeConfig(
         num_processes=num_processes,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
@@ -396,8 +397,8 @@ def get_kernel(
     if num_ring_tokens % kernel_config.block_m != 0:
         raise ValueError("MegaMoE ring capacity must be divisible by BLOCK_M")
     num_ring_blocks = num_ring_tokens // kernel_config.block_m
-    l1_out_block_n = kernel_config.block_n // 2
-    sf_block_m = _align_up(kernel_config.block_m, 128)
+    l1_out_block_n = kernel_config.l1_out_block_n
+    sf_block_m = kernel_config.sf_block_m
     umma_m = 256
     umma_n = kernel_config.block_m
     umma_block_k = 128
@@ -611,13 +612,14 @@ def get_kernel(
                 dst, smem_symm_rank_bases.ptr_to([T.cast(mapped_rank_idx, "int32")])
             )
 
+    # ---- shared-memory budget, barrier numbering, and epilogue chunking ----
     sm100_smem_capacity = 232448
     shared_alignment = 1024
     f32_bytes = 4
     f128_bytes = 16
-    num_epilogue_wgs = kernel_config.num_epilogue_warps // 4
-    wg_block_m = kernel_config.block_m // num_epilogue_wgs
-    atom_m = 8
+    num_epilogue_wgs = kernel_config.num_epilogue_wgs
+    wg_block_m = kernel_config.wg_block_m
+    atom_m = kernel_config.atom_m
     num_atoms_per_store = kernel_config.store_block_m // atom_m
     num_rows_per_warp = kernel_config.store_block_m // 8
     num_bank_group_bytes = 16
@@ -780,6 +782,7 @@ def get_kernel(
     if num_topk > 32:
         raise ValueError("Top-k must fit in a single warp")
 
+    # ---- the kernel body ----
     @T.prim_func
     def mega_moe(
         y_ptr: T.handle,

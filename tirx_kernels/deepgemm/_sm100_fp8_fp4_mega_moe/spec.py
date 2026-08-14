@@ -128,6 +128,30 @@ class DeepGemmLaunchConfig:
         return self.num_epilogue_threads // 32
 
     @property
+    def num_epilogue_wgs(self) -> int:
+        return self.num_epilogue_warps // 4
+
+    @property
+    def wg_block_m(self) -> int:
+        """Rows one epilogue warpgroup stores (`WG_BLOCK_M`)."""
+        return self.block_m // self.num_epilogue_wgs
+
+    @property
+    def atom_m(self) -> int:
+        """Rows per `stmatrix` atom in the epilogue store (`ATOM_M`)."""
+        return 8
+
+    @property
+    def l1_out_block_n(self) -> int:
+        """Linear-1 emits gate and up halves per block, so half of `BLOCK_N`."""
+        return self.block_n // 2
+
+    @property
+    def sf_block_m(self) -> int:
+        """Scale factors are UTCCP-copied in 128-row chunks."""
+        return _align_up(self.block_m, 128)
+
+    @property
     def num_total_warps(self) -> int:
         return self.num_dispatch_warps + self.num_non_epilogue_warps + self.num_epilogue_warps
 
@@ -655,21 +679,19 @@ def get_deepgemm_launch_config(config: MegaMoeConfig) -> DeepGemmLaunchConfig:
         hidden=config.hidden,
         intermediate_hidden=config.intermediate_hidden,
     )
-    wg_block_m = launch.block_m // num_epilogue_wgs
-    atom_m = 8
     if launch.num_epilogue_warps != num_epilogue_wgs * 4:
         raise ValueError("MegaMoE launch num_epilogue_warps must equal kNumEpilogueWarpgroups * 4")
     if launch.epilogue_warp_start_idx % 4 != 0 or launch.num_epilogue_warps % 4 != 0:
         raise ValueError("MegaMoE launch must satisfy DeepGEMM epilogue warpgroup alignment")
     if launch.block_m % num_epilogue_wgs != 0:
         raise ValueError("MegaMoE launch must satisfy BLOCK_M % kNumEpilogueWarpgroups == 0")
-    if wg_block_m % launch.store_block_m != 0:
+    if launch.wg_block_m % launch.store_block_m != 0:
         raise ValueError("MegaMoE launch must satisfy WG_BLOCK_M % STORE_BLOCK_M == 0")
-    if launch.store_block_m % atom_m != 0:
+    if launch.store_block_m % launch.atom_m != 0:
         raise ValueError("MegaMoE launch must satisfy STORE_BLOCK_M % ATOM_M == 0")
     # Upstream relaxed `WG_BLOCK_M % 32 == 0` to a runtime lane-bound guard in the
     # SF weight-cache load (see kernel body). Keep only the `atom_m | 32` part here.
-    if 32 % atom_m != 0:
+    if 32 % launch.atom_m != 0:
         raise ValueError("MegaMoE launch must satisfy 32 % ATOM_M == 0")
     if launch.block_n != 128:
         raise ValueError("MegaMoE launch must satisfy BLOCK_N == 128")
