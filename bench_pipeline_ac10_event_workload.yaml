@@ -1,7 +1,0 @@
-# Fixed Event-timer input for the migration-before versus pipeline AC-10 A/B.
-# This is performance-evidence input, not a second default-selection manifest.
-defaults:
-  timer: event
-workloads:
-  - kernel: act_and_mul
-    config: silu_fp16_d4096_t1

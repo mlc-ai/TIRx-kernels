@@ -1,9 +1,0 @@
-# Fixed targeted matrix for the migration-before versus pipeline AC-10 A/B.
-# This is performance-evidence input, not a second default-selection manifest.
-workloads:
-  - kernel: fp16_bf16_gemm
-    config: fp16_1024x1024x1024
-  - kernel: fp16_bf16_gemm
-    config: fp16_2048x2048x2048
-  - kernel: fp16_bf16_gemm
-    config: fp16_4096x4096x4096

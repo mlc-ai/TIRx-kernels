@@ -1,8 +1,0 @@
-# Fixed one-rank MegaMoE input for the migration-before versus pipeline AC-10 A/B.
-# This is performance-evidence input, not a second default-selection manifest.
-defaults:
-  num_gpus: 1
-  timer: megamoe
-workloads:
-  - kernel: deepgemm_fp8_fp4_mega_moe
-    config: t64_m64_h7168_i3072_e384_k6_g1
