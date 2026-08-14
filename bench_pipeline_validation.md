@@ -183,10 +183,9 @@ The capability audit reports:
 Final post-rebase non-GPU verification on 2026-08-14 passed Ruff, Python bytecode
 compilation, all 106 protocol/evidence tests, the full capability audit above,
 and `git diff --check origin/main...HEAD` over source/document paths. The diff
-check excludes byte-preserved raw artifact trees: several captured failure logs
-contain upstream/runtime trailing whitespace that must remain unchanged as
-evidence. No benchmark workload or multi-GPU runtime was launched for this
-verification pass.
+check excludes historical machine-captured logs whose upstream/runtime output
+contains trailing whitespace that must remain unchanged as evidence. No
+benchmark workload or multi-GPU runtime was launched for this verification pass.
 
 The protocol suite covers:
 
@@ -229,6 +228,39 @@ RESULT_READY acceptance/retry, and per-record `retry_in_place` provenance. The
 targeted runtime evidence below validates one real single-GPU set-device path and
 one controlled same-child card-switch retry. It does not validate every kernel or
 replace the still-missing migration-before AC-10 A/B.
+
+## External raw-artifact retention boundary
+
+The 110 tracked paths formerly under `bench_pipeline_ac10_artifacts/` and
+`bench_pipeline_suite_speedup_106_artifacts/` are intentionally absent from the
+pull-request diff. Before their removal, commit
+`494c32a38edbfa56a854376134ae8860ba3dfba5` was exported directly from Git blobs
+to this persistent host ext4 path:
+
+`/home/hongyij/workspace/bench_pipeline_raw_artifacts/tirx-kernels-pr39-20260814/`
+
+The symlink-aware manifest is:
+
+`/home/hongyij/workspace/bench_pipeline_raw_artifacts/tirx-kernels-pr39-20260814/SHA256SUMS.tsv`
+
+Its SHA-256 is
+`e909099bf3a814c1b724f475d6bcacd954cac9c0cf4e76f4f9e053db4b317862`.
+An independent verification compared all 92 regular files and 18 symlink-target
+byte strings (4,862,370 Git blob bytes total) with the archived copies and found
+them byte-identical. `PROVENANCE.txt` beside the manifest records the source
+commit and these counts.
+
+The root `bench_pipeline_*_evidence.json` files and
+`bench_pipeline_suite_breakdown_106.md` remain in the repository. Their embedded
+round samples, timeline values, cost-model fields, source sizes, and derived
+arithmetic remain internally self-consistent and independently recomputable.
+However, `source_sha256` entries that name either removed tree now point to raw
+artifacts retained outside the repository. A repository-only checkout therefore
+cannot reopen and rehash that layer. Tests explicitly skip only that external
+cross-check when the archive is unavailable; setting
+`TIRX_BENCH_PIPELINE_RAW_ARCHIVE` to the archive root above re-enables it. This
+boundary is deliberate and must not be represented as in-repository raw-source
+verification.
 
 ## CPU prepare evidence without GPU assignment
 
@@ -485,31 +517,33 @@ is therefore insufficient for the replacement AC-10 evidence.
 | Proton | On physical GPU 2, UUID `GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9`, migration-before completed in 71.602s and schema-3 pipeline in 56.415s: 1.2692× / 21.21% measured wall improvement. Both sides retained 3/3 default-protocol records and all raw samples; implementation means changed by -0.81% to +0.06%. Pipeline critical wall was 46.575s versus 46.528s expected, leaving 0.047s unexplained; dispatch p95 was 42.8ms, CPU READY starvation 0, and retries 0 | measured, reviewable, and passes the Proton AC-10 checks |
 | Event | On physical GPU 2 with the same UUID as Proton, migration-before completed in 24.642s and pipeline in 37.451s (0.6580×). The pipeline result had four explicitly recorded in-place retries caused by foreign PIDs, so no speedup is claimed. Its critical wall was 30.651103s versus 30.651093s expected with foreign wait, leaving 10µs unexplained; dispatch p95 was 59.2ms and CPU READY starvation 0. TIRx changed by -0.34%; FlashInfer's -10.61% mean shift is explained by one 9.800µs first-round baseline outlier while its other four baseline samples were 6.214–6.239µs | measured and source-reviewable; structural cost-model checks pass, but not a reproducible wall-time win |
 | CUDA-graph Proton | On physical GPU 2 with the same UUID, migration-before completed in 33.356s and pipeline in 37.677s (0.8853×). The pipeline result had two explicitly recorded in-place retries, so no speedup is claimed. Its critical wall was 28.963493s versus 28.963464s expected with foreign wait, leaving 28.8µs unexplained; dispatch p95 was 40.2ms and CPU READY starvation 0. TIRx changed by +1.77% and FlashInfer by +0.08%, within the retained raw-sample spread | measured and source-reviewable; structural and implementation-ratio checks pass, but not a reproducible wall-time win |
-| Kineto | Migration-before completed on physical GPU 2 in 56.722s with zero retries and five raw Kineto samples for each implementation. Pipeline could not enter timing: pinned TIR `ea0950ab` calls `cudaSetDevice(worker_id)` and `cudaSetDevice(mype_node)` in `src/runtime/extra/contrib/nvshmem/init.cc:64,68`; for one rank both are 0, creating a never-assigned physical GPU-0 context while the scheduler assigned GPU 2. The UUID/context guard correctly failed. An earlier attempt reached `nvshmem_finalize` and aborted with an invalid context, which led to the same root cause. | `missing`, with tracked before and failure artifacts; completing it requires an external TVM change or a prohibited mask/monkey-patch, so no A/B or numeric cost model is published |
+| Kineto | Migration-before completed on physical GPU 2 in 56.722s with zero retries and five raw Kineto samples for each implementation. Pipeline could not enter timing: pinned TIR `ea0950ab` calls `cudaSetDevice(worker_id)` and `cudaSetDevice(mype_node)` in `src/runtime/extra/contrib/nvshmem/init.cc:64,68`; for one rank both are 0, creating a never-assigned physical GPU-0 context while the scheduler assigned GPU 2. The UUID/context guard correctly failed. An earlier attempt reached `nvshmem_finalize` and aborted with an invalid context, which led to the same root cause. | `missing`, with externally retained before and failure artifacts; completing it requires an external TVM change or a prohibited mask/monkey-patch, so no A/B or numeric cost model is published |
 | MegaMoE | Alternating order, per-rank samples, sample-wise max, mismatch rejection, and cleanup pass structurally. The representative default config now also completes both CPU-only stats/no-stats compilations for the architecture-specific `sm_100a` target without initializing CUDA | structural and CPU-prepare evidence only; runtime A/B unmeasured |
 
 The older Event and CUDA-graph runs existed only in gitignored local logs and did
-not prove physical identity. The new tracked pairs supersede both old results.
+not prove physical identity. The newer captured pairs supersede both old results;
+their raw sources are retained in the external archive described above.
 No reduced rounds, cooldown, timer budget, reference coverage, or correctness
 work was used to manufacture a result.
 
-The tracked passing Proton pair lives under
-`bench_pipeline_ac10_artifacts/proton/{before-gpu2,after-gpu2}/`, with its derived
-record in `evidence-gpu2-schema3.json`. The builder hashes and reopens both raw run
-JSONs, both outer timers, and all four outer logs. Each outer snapshot records
-110 MiB, zero utilization, no compute process, and the same UUID before and after
-the command. The after run's source-tree fingerprint exactly matches
+The passing Proton pair lives under the external archive's
+`bench_pipeline_ac10_artifacts/proton/{before-gpu2,after-gpu2}/` subtree, with its
+derived record in `evidence-gpu2-schema3.json`. The builder hashed and reopened
+both raw run JSONs, both outer timers, and all four outer logs. Each outer
+snapshot records 110 MiB, zero utilization, no compute process, and the same UUID
+before and after the command. The after run's source-tree fingerprint exactly matches
 `0400e58:tirx_kernels`; its `-dirty` label comes from untracked run artifacts, not
 source drift.
 
-The corresponding Event sources live under
-`bench_pipeline_ac10_artifacts/event/{before-gpu2,after-gpu2}/`, with the same
-derived evidence filename and independently hashed raw sources. Its after
+The corresponding Event sources live under the external archive's
+`bench_pipeline_ac10_artifacts/event/{before-gpu2,after-gpu2}/` subtree, with the
+same derived evidence filename and independently hashed raw sources. Its after
 source-tree fingerprint exactly matches `a5abeca:tirx_kernels`; its `-dirty`
 label likewise reflects untracked run artifacts rather than source drift.
-CUDA-graph follows the same layout under `bench_pipeline_ac10_artifacts/cudagraph/`;
+CUDA-graph follows the same external layout under
+`bench_pipeline_ac10_artifacts/cudagraph/`;
 its after source-tree fingerprint exactly matches `6416bb6:tirx_kernels`.
-Kineto's explicit missing record is
+Kineto's explicit missing record is retained externally at
 `bench_pipeline_ac10_artifacts/kineto/evidence-missing.json`. It hashes the
 successful migration-before sources, both pipeline failure attempts, and the
 host-local pinned TVM source that couples rank 0 to CUDA device 0. It contains no
@@ -621,10 +655,11 @@ of open notes:
   pipeline`, 49 kernels, 1180 module configs, 1180 YAML configs, 133 defaults, 40
   curated three-point selections, and 27 multi-GPU rows explicitly classified
   `exempted_by_human_unmeasured`;
-- all 106 collected protocol/evidence tests pass, including lifecycle,
+- all collected protocol/evidence tests pass, including lifecycle,
   assignment/UUID, no-CUDA prepare, strict cache consumption, all-config
-  migration, measurement schema, cost-model no-data gating, raw artifact hash
-  verification, and suite A/B recomputation;
+  migration, measurement schema, cost-model no-data gating, suite A/B internal
+  recomputation, and optional external raw-artifact hash verification when
+  `TIRX_BENCH_PIPELINE_RAW_ARCHIVE` is available;
 - the license-header gate and its self-test pass, and the GDN no-tile structural
   lints pass for all 42 wide-vector T1 and all 67 ILP4 pre-dispatch
   specializations;

@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -12,6 +13,34 @@ import pytest
 import yaml
 
 from tirx_kernels.bench_suite.run import _pipeline_cost_model
+
+RAW_ARCHIVE_ENV = "TIRX_BENCH_PIPELINE_RAW_ARCHIVE"
+
+
+def _resolve_artifact_path(repo_root: Path, path: str | Path) -> Path:
+    artifact_path = Path(path)
+    if artifact_path.is_absolute():
+        return artifact_path
+    local_path = repo_root / artifact_path
+    if local_path.is_file():
+        return local_path
+    archive_root = os.environ.get(RAW_ARCHIVE_ENV)
+    if archive_root:
+        archived_path = Path(archive_root) / artifact_path
+        if archived_path.is_file():
+            return archived_path
+    return local_path
+
+
+def _require_artifact_path(repo_root: Path, path: str | Path) -> Path:
+    artifact_path = _resolve_artifact_path(repo_root, path)
+    if not artifact_path.is_file():
+        pytest.skip(
+            "raw benchmark artifact is stored outside the repository; set "
+            f"{RAW_ARCHIVE_ENV} to its archive root to re-enable hash verification: "
+            f"{path}"
+        )
+    return artifact_path
 
 
 def _write_outer(path: Path, *, uuid: str, command_wall_ns: int) -> None:
@@ -50,10 +79,7 @@ def _write_outer(path: Path, *, uuid: str, command_wall_ns: int) -> None:
 
 def _record(*, pipeline: bool, timer: str = "proton") -> dict:
     if timer == "megamoe":
-        samples = {
-            "tirx": [1.0, 2.0, 3.0, 4.0, 5.0],
-            "deepgemm": [2.0, 3.0, 4.0, 5.0, 6.0],
-        }
+        samples = {"tirx": [1.0, 2.0, 3.0, 4.0, 5.0], "deepgemm": [2.0, 3.0, 4.0, 5.0, 6.0]}
         protocol = {
             "rounds": 5,
             "round_cooldown_s": 1.0,
@@ -65,12 +91,7 @@ def _record(*, pipeline: bool, timer: str = "proton") -> dict:
         }
     else:
         samples = {"tir": [1.0, 2.0, 3.0, 4.0, 5.0]}
-        protocol = {
-            "rounds": 5,
-            "cooldown_s": 1.0,
-            "round_aggregate": "mean",
-            "order": ["tir"],
-        }
+        protocol = {"rounds": 5, "cooldown_s": 1.0, "round_aggregate": "mean", "order": ["tir"]}
     record = {
         "kernel": "kernel",
         "config": "config",
@@ -84,16 +105,13 @@ def _record(*, pipeline: bool, timer: str = "proton") -> dict:
         "benchmark_protocol": protocol,
         "aggregated": {"rounds": 5, "method": "mean"},
         "impls": {
-            implementation: statistics.fmean(values)
-            for implementation, values in samples.items()
+            implementation: statistics.fmean(values) for implementation, values in samples.items()
         },
         "round_samples": samples,
     }
     if pipeline:
         record.update(
-            execution_mode="pipeline",
-            physical_gpu_uuids=["GPU-test"],
-            retry_in_place=False,
+            execution_mode="pipeline", physical_gpu_uuids=["GPU-test"], retry_in_place=False
         )
     return record
 
@@ -108,9 +126,7 @@ def _write_run(path: Path, *, pipeline: bool, timer: str = "proton") -> None:
     if pipeline:
         run["pipeline"] = {
             "measurement_protocol": {"is_default": True},
-            "multi_gpu_runtime_validation": {
-                "validation_status": "exempted_by_human_unmeasured"
-            },
+            "multi_gpu_runtime_validation": {"validation_status": "exempted_by_human_unmeasured"},
             "cost_model": {
                 "schema_version": 3,
                 "measurement_status": "measured",
@@ -163,10 +179,7 @@ def _command(repo_root: Path, tmp_path: Path, *, timer_family: str = "proton") -
 
 
 def _assert_source_matches(repo_root: Path, source: dict) -> None:
-    source_path = Path(source["path"])
-    if not source_path.is_absolute():
-        source_path = repo_root / source_path
-    assert source_path.is_file()
+    source_path = _require_artifact_path(repo_root, source["path"])
     assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source["sha256"]
 
 
@@ -184,11 +197,18 @@ def _assert_evidence_sources_match(repo_root: Path, evidence: dict) -> None:
         _assert_source_matches(repo_root, source)
 
 
-def test_tracked_ac10_proton_before_artifact_is_complete():
+def test_retained_ac10_proton_before_artifact_is_complete():
     repo_root = Path(__file__).resolve().parents[1]
-    artifact_root = repo_root / "bench_pipeline_ac10_artifacts/proton/before"
-    outer = json.loads((artifact_root / "outer_timer.json").read_text())
-    run = json.loads((artifact_root / "suite/runs/1.json").read_text())
+    outer = json.loads(
+        _require_artifact_path(
+            repo_root, "bench_pipeline_ac10_artifacts/proton/before/outer_timer.json"
+        ).read_text()
+    )
+    run = json.loads(
+        _require_artifact_path(
+            repo_root, "bench_pipeline_ac10_artifacts/proton/before/suite/runs/1.json"
+        ).read_text()
+    )
     matrix_data = yaml.safe_load((repo_root / "bench_pipeline_ac10_workloads.yaml").read_text())
     matrix = [(row["kernel"], row["config"]) for row in matrix_data["workloads"]]
 
@@ -197,9 +217,7 @@ def test_tracked_ac10_proton_before_artifact_is_complete():
     assert outer["command_wall_ns"] == (
         outer["command_finished_monotonic_ns"] - outer["command_started_monotonic_ns"]
     )
-    assert outer["command_wall_s"] == pytest.approx(
-        outer["command_wall_ns"] / 1_000_000_000
-    )
+    assert outer["command_wall_s"] == pytest.approx(outer["command_wall_ns"] / 1_000_000_000)
     physical = outer["physical_gpu"]
     assert physical["requested_index"] == "1"
     assert physical["same_uuid_before_after"] is True
@@ -225,15 +243,15 @@ def test_tracked_ac10_proton_before_artifact_is_complete():
         assert row["aggregated"] == {"rounds": 5, "method": "mean"}
         for implementation, values in row["round_samples"].items():
             assert len(values) == 5
-            assert row["impls"][implementation] == pytest.approx(
-                statistics.fmean(values), abs=1e-9
-            )
+            assert row["impls"][implementation] == pytest.approx(statistics.fmean(values), abs=1e-9)
 
 
-def test_tracked_ac10_proton_attempt_one_evidence_matches_every_raw_source():
+def test_retained_ac10_proton_attempt_one_evidence_matches_every_raw_source():
     repo_root = Path(__file__).resolve().parents[1]
     evidence = json.loads(
-        (repo_root / "bench_pipeline_ac10_artifacts/proton/evidence-attempt-1.json").read_text()
+        _require_artifact_path(
+            repo_root, "bench_pipeline_ac10_artifacts/proton/evidence-attempt-1.json"
+        ).read_text()
     )
 
     assert evidence["measurement_status"] == "measured"
@@ -253,10 +271,10 @@ def test_tracked_ac10_proton_attempt_one_evidence_matches_every_raw_source():
     _assert_evidence_sources_match(repo_root, evidence)
 
     before_run = json.loads(
-        (repo_root / evidence["sources"]["before"]["run"]["path"]).read_text()
+        _require_artifact_path(repo_root, evidence["sources"]["before"]["run"]["path"]).read_text()
     )
     after_run = json.loads(
-        (repo_root / evidence["sources"]["after"]["run"]["path"]).read_text()
+        _require_artifact_path(repo_root, evidence["sources"]["after"]["run"]["path"]).read_text()
     )
     before_results = {row["config"]: row for row in before_run["results"]}
     after_results = {row["config"]: row for row in after_run["results"]}
@@ -291,9 +309,7 @@ def test_tracked_ac10_proton_attempt_one_evidence_matches_every_raw_source():
     embedded_cost = pipeline["cost_model"]
     assert embedded_cost["ready_starvation_s"] == pytest.approx(8.329377889633179)
     assert recomputed_cost["ready_starvation_s"] == 0.0
-    assert recomputed_cost["interference_retry_ready_delay_s"] == pytest.approx(
-        4.888591766357422
-    )
+    assert recomputed_cost["interference_retry_ready_delay_s"] == pytest.approx(4.888591766357422)
     assert sum(recomputed_cost["gpu_busy_s_by_index"].values()) == pytest.approx(
         sum(embedded_cost["gpu_busy_s_by_index"].values())
         + sum(
@@ -313,10 +329,10 @@ def test_tracked_ac10_proton_attempt_one_evidence_matches_every_raw_source():
     )
 
 
-def test_tracked_ac10_proton_schema_three_evidence_passes_from_raw_sources():
+def test_retained_ac10_proton_schema_three_evidence_passes_from_raw_sources():
     repo_root = Path(__file__).resolve().parents[1]
-    evidence_path = (
-        repo_root / "bench_pipeline_ac10_artifacts/proton/evidence-gpu2-schema3.json"
+    evidence_path = _require_artifact_path(
+        repo_root, "bench_pipeline_ac10_artifacts/proton/evidence-gpu2-schema3.json"
     )
     evidence = json.loads(evidence_path.read_text())
 
@@ -338,7 +354,7 @@ def test_tracked_ac10_proton_schema_three_evidence_passes_from_raw_sources():
     _assert_evidence_sources_match(repo_root, evidence)
 
     after_run = json.loads(
-        (repo_root / evidence["sources"]["after"]["run"]["path"]).read_text()
+        _require_artifact_path(repo_root, evidence["sources"]["after"]["run"]["path"]).read_text()
     )
     committed_tree = subprocess.run(
         ["git", "rev-parse", "0400e58:tirx_kernels"],
@@ -358,12 +374,11 @@ def test_tracked_ac10_proton_schema_three_evidence_passes_from_raw_sources():
     )
 
 
-def test_tracked_ac10_event_evidence_matches_raw_retry_sources():
+def test_retained_ac10_event_evidence_matches_raw_retry_sources():
     repo_root = Path(__file__).resolve().parents[1]
     evidence = json.loads(
-        (
-            repo_root
-            / "bench_pipeline_ac10_artifacts/event/evidence-gpu2-schema3.json"
+        _require_artifact_path(
+            repo_root, "bench_pipeline_ac10_artifacts/event/evidence-gpu2-schema3.json"
         ).read_text()
     )
 
@@ -387,7 +402,7 @@ def test_tracked_ac10_event_evidence_matches_raw_retry_sources():
     _assert_evidence_sources_match(repo_root, evidence)
 
     after_run = json.loads(
-        (repo_root / evidence["sources"]["after"]["run"]["path"]).read_text()
+        _require_artifact_path(repo_root, evidence["sources"]["after"]["run"]["path"]).read_text()
     )
     committed_tree = subprocess.run(
         ["git", "rev-parse", "a5abeca:tirx_kernels"],
@@ -405,12 +420,11 @@ def test_tracked_ac10_event_evidence_matches_raw_retry_sources():
     assert cost["dispatch_latency_s"]["p95"] == pytest.approx(0.059206485748291016)
 
 
-def test_tracked_ac10_cudagraph_evidence_matches_raw_retry_sources():
+def test_retained_ac10_cudagraph_evidence_matches_raw_retry_sources():
     repo_root = Path(__file__).resolve().parents[1]
     evidence = json.loads(
-        (
-            repo_root
-            / "bench_pipeline_ac10_artifacts/cudagraph/evidence-gpu2-schema3.json"
+        _require_artifact_path(
+            repo_root, "bench_pipeline_ac10_artifacts/cudagraph/evidence-gpu2-schema3.json"
         ).read_text()
     )
 
@@ -434,7 +448,7 @@ def test_tracked_ac10_cudagraph_evidence_matches_raw_retry_sources():
     _assert_evidence_sources_match(repo_root, evidence)
 
     after_run = json.loads(
-        (repo_root / evidence["sources"]["after"]["run"]["path"]).read_text()
+        _require_artifact_path(repo_root, evidence["sources"]["after"]["run"]["path"]).read_text()
     )
     committed_tree = subprocess.run(
         ["git", "rev-parse", "6416bb6:tirx_kernels"],
@@ -452,10 +466,12 @@ def test_tracked_ac10_cudagraph_evidence_matches_raw_retry_sources():
     assert cost["dispatch_latency_s"]["p95"] == pytest.approx(0.04016995429992676)
 
 
-def test_tracked_ac10_kineto_evidence_is_explicitly_missing():
+def test_retained_ac10_kineto_evidence_is_explicitly_missing():
     repo_root = Path(__file__).resolve().parents[1]
     evidence = json.loads(
-        (repo_root / "bench_pipeline_ac10_artifacts/kineto/evidence-missing.json").read_text()
+        _require_artifact_path(
+            repo_root, "bench_pipeline_ac10_artifacts/kineto/evidence-missing.json"
+        ).read_text()
     )
 
     assert evidence["measurement_status"] == "missing"
@@ -515,9 +531,11 @@ def test_tracked_ac10_kineto_evidence_is_explicitly_missing():
     assert "no already-built" in dependency_audit["conclusion"]
 
     before_outer = json.loads(
-        (repo_root / sources["before"]["outer_timer"]["path"]).read_text()
+        _require_artifact_path(repo_root, sources["before"]["outer_timer"]["path"]).read_text()
     )
-    before_run = json.loads((repo_root / sources["before"]["run"]["path"]).read_text())
+    before_run = json.loads(
+        _require_artifact_path(repo_root, sources["before"]["run"]["path"]).read_text()
+    )
     assert before_outer["status"] == "completed"
     assert before_outer["returncode"] == 0
     assert before_outer["physical_gpu"]["same_uuid_before_after"] is True
@@ -526,9 +544,11 @@ def test_tracked_ac10_kineto_evidence_is_explicitly_missing():
 
     guard_attempt = sources["after_attempts"][1]
     after_outer = json.loads(
-        (repo_root / guard_attempt["outer_timer"]["path"]).read_text()
+        _require_artifact_path(repo_root, guard_attempt["outer_timer"]["path"]).read_text()
     )
-    after_run = json.loads((repo_root / guard_attempt["run"]["path"]).read_text())
+    after_run = json.loads(
+        _require_artifact_path(repo_root, guard_attempt["run"]["path"]).read_text()
+    )
     assert after_outer["returncode"] == 1
     assert after_outer["physical_gpu"]["same_uuid_before_after"] is True
     result = after_run["results"][0]
@@ -540,8 +560,7 @@ def test_tracked_ac10_kineto_evidence_is_explicitly_missing():
         "complete_timeline_count": 0,
         "measurement_status": "missing",
         "missing_reason": (
-            "no workload produced an ok result with a complete timeline and "
-            "valid GPU assignment"
+            "no workload produced an ok result with a complete timeline and valid GPU assignment"
         ),
         "record_count": 1,
         "schema_version": 3,
@@ -579,13 +598,12 @@ def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path)
     }
     assert evidence["after"]["pipeline_cost_model"]["unexplained_s"] == 0.4
     run_source = evidence["sources"]["after"]["run"]
-    assert run_source["sha256"] == hashlib.sha256(
-        (tmp_path / "after-run.json").read_bytes()
-    ).hexdigest()
+    assert (
+        run_source["sha256"]
+        == hashlib.sha256((tmp_path / "after-run.json").read_bytes()).hexdigest()
+    )
     stdout_source = next(
-        source
-        for source in evidence["sources"]["before"]["logs"]
-        if source["kind"] == "stdout_log"
+        source for source in evidence["sources"]["before"]["logs"] if source["kind"] == "stdout_log"
     )
     assert stdout_source["declared_path"].startswith("/unavailable/original/")
     assert Path(stdout_source["path"]).name == "before-outer-stdout.log"
@@ -594,8 +612,7 @@ def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path)
 def test_ac10_evidence_builder_accepts_megamoe_alternating_round_protocol(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[1]
     (tmp_path / "workloads.yaml").write_text(
-        "defaults:\n  timer: megamoe\n"
-        "workloads:\n  - kernel: kernel\n    config: config\n"
+        "defaults:\n  timer: megamoe\nworkloads:\n  - kernel: kernel\n    config: config\n"
     )
     _write_outer(tmp_path / "before-outer.json", uuid="GPU-test", command_wall_ns=2_000_000_000)
     _write_outer(tmp_path / "after-outer.json", uuid="GPU-test", command_wall_ns=1_500_000_000)
@@ -603,25 +620,18 @@ def test_ac10_evidence_builder_accepts_megamoe_alternating_round_protocol(tmp_pa
     _write_run(tmp_path / "after-run.json", pipeline=True, timer="megamoe")
 
     completed = subprocess.run(
-        _command(repo_root, tmp_path, timer_family="megamoe"),
-        check=False,
-        capture_output=True,
+        _command(repo_root, tmp_path, timer_family="megamoe"), check=False, capture_output=True
     )
 
     assert completed.returncode == 0, completed.stderr.decode()
     evidence = json.loads((tmp_path / "evidence.json").read_text())
     assert evidence["timer_family"] == "megamoe"
-    assert evidence["before"]["results"][0]["implementation_order"] == [
-        "tirx",
-        "deepgemm",
-    ]
+    assert evidence["before"]["results"][0]["implementation_order"] == ["tirx", "deepgemm"]
 
 
 def test_ac10_evidence_builder_preserves_measured_acceptance_failures(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[1]
-    (tmp_path / "workloads.yaml").write_text(
-        "workloads:\n  - kernel: kernel\n    config: config\n"
-    )
+    (tmp_path / "workloads.yaml").write_text("workloads:\n  - kernel: kernel\n    config: config\n")
     _write_outer(tmp_path / "before-outer.json", uuid="GPU-test", command_wall_ns=2_000_000_000)
     _write_outer(tmp_path / "after-outer.json", uuid="GPU-test", command_wall_ns=1_500_000_000)
     _write_run(tmp_path / "before-run.json", pipeline=False)
@@ -654,9 +664,7 @@ def test_ac10_evidence_builder_rejects_incomplete_or_mismatched_sources(
     tmp_path: Path, failure: str
 ):
     repo_root = Path(__file__).resolve().parents[1]
-    (tmp_path / "workloads.yaml").write_text(
-        "workloads:\n  - kernel: kernel\n    config: config\n"
-    )
+    (tmp_path / "workloads.yaml").write_text("workloads:\n  - kernel: kernel\n    config: config\n")
     _write_outer(tmp_path / "before-outer.json", uuid="GPU-test", command_wall_ns=2_000_000_000)
     _write_outer(
         tmp_path / "after-outer.json",
