@@ -1558,6 +1558,51 @@ def test_megamoe_timer_schema_retains_barriers_spans_and_round_orders(monkeypatc
     assert protocol["round_orders"][1] == ["deepgemm", "tirx"]
 
 
+def test_tinygemm2_resolves_frozen_source_from_an_exact_checkout(monkeypatch, tmp_path: Path):
+    from tirx_kernels.flashinfer.gemm import tinygemm2_sm100
+
+    package_dir = tmp_path / "flashinfer"
+    source = tmp_path / "csrc" / "tinygemm2_sm100.cu"
+    package_dir.mkdir()
+    source.parent.mkdir()
+    source.write_bytes(b"frozen tinygemm source")
+    captured = {}
+
+    def gen_jit_spec(name, sources, **kwargs):
+        captured.update(name=name, sources=sources, kwargs=kwargs)
+        return object()
+
+    fake_env = SimpleNamespace(FLASHINFER_CSRC_DIR=tmp_path / "missing-package-data")
+    fake_jit = SimpleNamespace(
+        env=fake_env,
+        gen_jit_spec=gen_jit_spec,
+        sm100a_nvcc_flags=["--sm100a"],
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "flashinfer",
+        SimpleNamespace(__file__=package_dir / "__init__.py"),
+    )
+    monkeypatch.setitem(sys.modules, "flashinfer.jit", fake_jit)
+    monkeypatch.setattr(
+        tinygemm2_sm100, "SOURCE_SHA256", hashlib.sha256(source.read_bytes()).hexdigest()
+    )
+    tinygemm2_sm100._flashinfer_tinygemm2_spec.cache_clear()
+
+    result = tinygemm2_sm100._flashinfer_tinygemm2_spec()
+
+    assert result is not None
+    assert captured == {
+        "name": "tinygemm2_sm100",
+        "sources": [source],
+        "kwargs": {
+            "extra_cuda_cflags": ["--sm100a", "-gencode=arch=compute_103a,code=sm_103a"],
+            "extra_include_paths": [source.parent, tmp_path / "include"],
+        },
+    }
+    tinygemm2_sm100._flashinfer_tinygemm2_spec.cache_clear()
+
+
 def test_gpu_pool_never_retains_a_partial_claim():
     pool = GpuPool(allowed={"0", "1"})
     with pool._changed:

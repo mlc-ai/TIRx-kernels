@@ -14,6 +14,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 from functools import cache, lru_cache
+from pathlib import Path
 from typing import Any
 from unittest import SkipTest
 
@@ -533,17 +534,42 @@ def _tirx_args(case: dict[str, Any], output: torch.Tensor | None = None) -> tupl
 
 
 @lru_cache(maxsize=1)
-def _load_flashinfer_module():
-    from flashinfer.jit import gen_tinygemm2_sm100_module
+def _flashinfer_tinygemm2_spec():
+    import flashinfer
+    from flashinfer.jit import env as jit_env
+    from flashinfer.jit import gen_jit_spec, sm100a_nvcc_flags
 
-    spec = gen_tinygemm2_sm100_module()
-    source_hash = hashlib.sha256(spec.sources[0].read_bytes()).hexdigest()
+    filename = "tinygemm2_sm100.cu"
+    candidates = (
+        Path(flashinfer.__file__).resolve().parents[1] / "csrc" / filename,
+        jit_env.FLASHINFER_CSRC_DIR / filename,
+    )
+    source = next((path for path in candidates if path.is_file()), None)
+    if source is None:
+        raise RuntimeError(
+            "FlashInfer TinyGEMM2 frozen source is unavailable; checked "
+            + ", ".join(map(str, candidates))
+        )
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
     if source_hash != SOURCE_SHA256:
         raise RuntimeError(
             "FlashInfer TinyGEMM2 source does not match the frozen oracle: "
-            f"{spec.sources[0]} sha256={source_hash}"
+            f"{source} sha256={source_hash}"
         )
-    return spec.build_and_load()
+    return gen_jit_spec(
+        "tinygemm2_sm100",
+        [source],
+        extra_cuda_cflags=[
+            *sm100a_nvcc_flags,
+            "-gencode=arch=compute_103a,code=sm_103a",
+        ],
+        extra_include_paths=[source.parent, source.parent.parent / "include"],
+    )
+
+
+@lru_cache(maxsize=1)
+def _load_flashinfer_module():
+    return _flashinfer_tinygemm2_spec().build_and_load()
 
 
 def _flashinfer_variant(stage: int, use_pdl: bool):
