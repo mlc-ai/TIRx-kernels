@@ -114,6 +114,27 @@
 
 固定五-run 裁决确认没有剩余回归，因此 audit commit `a4f478dd51ecb56db1ab84342963c400ac5d559c` 之后未修改任何 kernel。正式通过行通常只有一个 run、只有正式失败候选取得五次补跑，这一用户接受的不对称覆盖限制已在最终报告显式披露。
 
+### Post-acceptance rebase closeout — Friday, August 14, 2026 (UTC)
+
+验收范围与结论锁定在 `1097cce839f89a94` 时点的 195 个 canonical
+`default:true` 行（187 required + 8 user-exempted），以及 rebase 前 current
+source SHA256
+`007aa1046ee2829a2d2a2f9dcb585c348105c096ed2d969675d8570d29352f49`。
+分支 `ir-builder-migration-1097cce-scope` 随后 rebase 到
+`origin/main=a66a96286f371c5437a2aad1119297087154bbb9`。该 upstream 范围的
+canonical defaults 已机械增长到 519；新增的 324 行（GDN decode、FlashKDA
+cake T1–T6、recurrent KDA 等）不在本 goal 中，保持 upstream 写法，未迁移、
+未验收。
+
+rebase 的唯一 kernel 冲突位于 `flash_attention4.py`。冲突解决保留
+IR-builder 实现，并将 upstream #27 的单个 `T.cuda.cta_sync()` 放在 persistent
+tile loop 之后、warp-0 TMEM deallocation 之前，使所有 CTA warp 的 TMEM 使用
+先于释放完成。用户明确决定不重跑 23 个 FlashAttention forward/backward 行；
+因此验收结论不扩展到 rebase 后 source SHA256
+`713180b422528e45ccc9c419e82d39e976baf4526a34883f43b2ecb3d467cd41`。
+upstream #27 在两个短 s1024 B200 形状上报告该 barrier 为 `0.23–0.32 us`
+（`0.73–1.14%`），所以这里不宣称 post-rebase 性能等价或零开销。
+
 ### Historical restart-2 evidence and superseded diagnostics
 
 `restart-2` 正式单卡 gate 于 `2026-08-13T23:27:17Z` 完成。该轮使用 GPU 2、单 worker、串行执行、5 rounds、`aggregate=mean`、`threshold_pct=-1.0`，scope 为 195 个 canonical 默认行减去 8 个 `user-exempted` 行，即 187 行。NVRTC preflight 为 `version=[13, 2]`，共享施加于 old/current；source SHA256 为 `fcbbf6e14bc8b4e0392a37720d4fabc4fb0c9f4bcbe1fb056a85359fc8317464`，config-params SHA256 前缀为 `838b74a31b05c874`。

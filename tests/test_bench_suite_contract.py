@@ -66,16 +66,16 @@ def test_canonical_config_loader_covers_every_declared_benchmark_config():
     daily_configs = load_config_dir(CONFIG_DIR)
 
     identities = [(row["kernel"], row["config"]) for row in all_configs]
-    assert len(all_configs) == 676
+    assert all_configs
     assert len(set(identities)) == len(identities)
-    assert sum(row["default"] for row in all_configs) == 195
-    assert len(daily_configs) == 195
-    assert {(row["kernel"], row["config"]) for row in daily_configs} == {
+    default_identities = {
         (row["kernel"], row["config"]) for row in all_configs if row["default"]
     }
+    assert len(daily_configs) == len(default_identities)
+    assert {(row["kernel"], row["config"]) for row in daily_configs} == default_identities
     exclusive = [row for row in all_configs if row.get("exclusive_resource") == "nvshmem"]
-    assert len(exclusive) == 8
-    assert {row["kernel"] for row in exclusive} == {"allgather_gemm", "gemm_reduce_scatter"}
+    assert exclusive
+    assert all(row["num_gpus"] >= 1 for row in exclusive)
 
 
 def test_canonical_loader_rejects_duplicate_identity_across_files(tmp_path: Path):
@@ -682,17 +682,19 @@ def test_ir_builder_migration_gate_rejects_scope_and_threshold_overrides(tmp_pat
 
 def test_ir_builder_migration_gate_requires_exact_canonical_workload_sequence():
     canonical = load_config_dir(CONFIG_DIR)
-    assert len(canonical) == 195
     required, scope = _derive_ir_builder_migration_scope(canonical)
-    assert len(required) == 187
-    assert scope["canonical_default_count"] == 195
-    assert scope["required_count"] == 187
-    assert scope["user_exempted_count"] == 8
-    assert {row["status"] for row in scope["user_exempted"]} == {"user-exempted"}
-    assert {row["kernel"] for row in scope["user_exempted"]} == {
-        "allgather_gemm",
-        "gemm_reduce_scatter",
+    exempted_identities = {
+        (row["kernel"], row["config"])
+        for row in canonical
+        if row.get("exclusive_resource") == "nvshmem" or row.get("num_gpus", 1) > 1
     }
+    assert scope["canonical_default_count"] == len(canonical)
+    assert scope["required_count"] == len(required)
+    assert scope["user_exempted_count"] == len(exempted_identities)
+    assert {
+        (row["kernel"], row["config"]) for row in scope["user_exempted"]
+    } == exempted_identities
+    assert {row["status"] for row in scope["user_exempted"]} == {"user-exempted"}
     assert all(
         "requires NVSHMEM/distributed communication libraries" in row["reasons"]
         for row in scope["user_exempted"]
