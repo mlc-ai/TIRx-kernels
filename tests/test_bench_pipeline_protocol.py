@@ -923,6 +923,44 @@ def test_offline_nvcc_arch_preserves_family_specific_blackwell_features():
     assert _offline_nvcc_arch("sm_100") == "sm_100"
 
 
+def test_megamoe_block_scale_compile_uses_arch_specific_sm100_target(monkeypatch):
+    import tvm
+    from tirx_kernels.deepgemm import mega_moe
+
+    compiled = object()
+    captured = {}
+    monkeypatch.setattr(mega_moe, "get_kernel", lambda **_kwargs: object())
+    monkeypatch.setattr(tvm, "IRModule", lambda functions: functions)
+
+    def fake_compile(module, *, target, tir_pipeline):
+        captured.update(module=module, target=target, tir_pipeline=tir_pipeline)
+        return compiled
+
+    monkeypatch.setattr(tvm, "compile", fake_compile)
+    monkeypatch.setattr(mega_moe, "_cuda_compile_mode", lambda _mode: nullcontext())
+    mega_moe._compile_tirx_mega_moe_for_config.cache_clear()
+    try:
+        result = mega_moe._compile_tirx_mega_moe_for_config(
+            num_processes=1,
+            num_max_tokens_per_rank=64,
+            num_tokens=64,
+            hidden=7168,
+            intermediate_hidden=3072,
+            num_experts=384,
+            num_topk=6,
+            activation_clamp=10.0,
+            fast_math=1,
+            collect_stats=False,
+            cuda_compile_mode="nvcc",
+        )
+    finally:
+        mega_moe._compile_tirx_mega_moe_for_config.cache_clear()
+
+    assert result is compiled
+    assert captured["target"].arch == "sm_100a"
+    assert captured["tir_pipeline"] == "tirx"
+
+
 def test_run_prepared_benchmark_applies_gpu_stage_compile_guard(monkeypatch):
     module = SimpleNamespace(run_gpu=lambda **_kwargs: kernel_runner.tvm.compile(object()))
     prepared = PreparedKernelBenchmark(kernel="fake", label="shape", benchmark=module)

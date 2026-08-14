@@ -460,7 +460,7 @@ is therefore insufficient for the replacement AC-10 evidence.
 | Event | Clean zero-retry default-protocol runs exist locally on both sides; the pipeline result is TIRx 6.180µs and requested index 6, but the old pipeline path did not verify physical UUID | completed local runs, but physical identity invalidates the A/B; no claim |
 | CUDA-graph Proton | Clean default-protocol runs exist locally on both sides; before TIRx is 1.675µs and pipeline TIRx is 1.931µs. This discrepancy helped expose the binding defect; the old pipeline path did not verify physical UUID | completed local runs, but physical identity invalidates the A/B; no claim |
 | Kineto | Correlated-span, barrier, sample-wise-max, schema, and cleanup behavior pass structurally; the runtime path also requires the locked NCCL/cuBLAS/cuBLASMp/NVSHMEM environment | structural only; runtime A/B unmeasured |
-| MegaMoE | Alternating order, per-rank samples, sample-wise max, mismatch rejection, and cleanup pass structurally | structural only; runtime A/B unmeasured due shared-machine interference |
+| MegaMoE | Alternating order, per-rank samples, sample-wise max, mismatch rejection, and cleanup pass structurally. The representative default config now also completes both CPU-only stats/no-stats compilations for the architecture-specific `sm_100a` target without initializing CUDA | structural and CPU-prepare evidence only; runtime A/B unmeasured |
 
 The Event and CUDA-graph runs exist only in gitignored local run logs, so they are
 not persistent review evidence. Their clean completion corrects the earlier
@@ -591,6 +591,15 @@ No end-to-end speedup is published because neither full sweep completed:
   `sm_100f` target rejected by `ptxas`. Its cost model is therefore explicitly
   `missing`, not zero.
 
+That pipeline failure exposed a repository bug rather than a runtime or GPU
+occupancy result. MegaMoE now uses the suite's architecture-specific `sm_100a`
+compile target for this block-scale instruction. A subsequent CPU-only prepare
+of `t64_m64_h7168_i3072_e384_k6_g1` compiled and exported both stats and
+no-stats executables in 5.935s while `torch.cuda.is_initialized()` remained
+false before and after. This fixes the discovered compile prerequisite; it does
+not retroactively complete the historical sweep, and the one-time authorization
+was not reused for a rerun.
+
 Those durations are retained only as partial-command diagnostics. The evidence
 JSON deliberately contains no `wall_speedup`, `wall_reduction_percent`, or
 `card_time_ratio`. The baseline artifact also has no equivalent exact GPU card
@@ -622,9 +631,9 @@ consumed; the default no-full-sweep machine discipline is restored.
   artifacts preserve CPU resource evidence and explicitly delimit the historical
   A/B's provenance gaps instead of presenting it as independently verified.
 - **Optimize the real objective:** complete-command wall time on a fixed
-  UUID-verified workload/GPU/protocol matrix remains the oracle. The new Proton
-  pair measures 1.0558× wall improvement but is retained as a non-passing result
-  because its structural dispatch/starvation checks are false.
+  UUID-verified workload/GPU/protocol matrix remains the oracle. The passing
+  Proton pair measures 1.2692× wall improvement, while the incomplete full-suite
+  commands remain diagnostics and publish no speedup.
 - **Cost model and falsifiability:** incomplete timelines still publish no numeric
   performance fields. The first persisted retry-heavy pair falsified schema 1's
   `ready_starvation_s` interpretation. Schema 3 now gives CPU READY constraints,
@@ -662,5 +671,6 @@ consumed; the default no-full-sweep machine discipline is restored.
   reachable prerequisite for the new binding design, with an approved
   repository-owned restore-and-validate fix; it is neither a runtime pass/fail
   placeholder nor an implicit exemption. No external workaround is permitted.
-- The full 112-workload measured sweep and baseline promotion remain deferred
-  until the shared machine is available; they were not required or run here.
+- The one authorized full 112-workload pair was run but both commands failed
+  before completion, so the supplemental result is explicitly missing. The
+  authorization is consumed; no rerun is permitted without a new human grant.
