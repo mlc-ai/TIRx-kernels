@@ -291,7 +291,41 @@ def _bench_megamoe_mode(
     }
 
 
-def _run_worker(local_rank: int, cfg_dict: dict[str, Any], mode: str) -> dict[str, Any]:
+def _init_dist_on_assigned_device(
+    local_rank: int, num_local_ranks: int, physical_device_index: int
+) -> tuple[int, int, Any]:
+    """Initialize the process-group shape without conflating rank and device."""
+    import torch.distributed as dist
+
+    ip = os.getenv("MASTER_ADDR", "127.0.0.1")
+    port = int(os.getenv("MASTER_PORT", "8361"))
+    num_nodes = int(os.getenv("WORLD_SIZE", 1))
+    node_rank = int(os.getenv("RANK", 0))
+    world_size = num_nodes * num_local_ranks
+    rank = node_rank * num_local_ranks + local_rank
+
+    torch.cuda.set_device(physical_device_index)
+    params: dict[str, Any] = {
+        "backend": "nccl",
+        "init_method": f"tcp://{ip}:{port}",
+        "world_size": world_size,
+        "rank": rank,
+    }
+    if "device_id" in inspect.signature(dist.init_process_group).parameters:
+        params["device_id"] = torch.device("cuda", physical_device_index)
+    dist.init_process_group(**params)
+    torch.set_default_device("cuda")
+    torch.cuda.set_device(physical_device_index)
+    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(world_size)))
+
+
+def _run_worker(
+    local_rank: int,
+    physical_device_index: int,
+    physical_device_uuid: str,
+    cfg_dict: dict[str, Any],
+    mode: str,
+) -> dict[str, Any]:
     worker_kwargs = dict(cfg_dict)
     warmup = worker_kwargs.pop("warmup", None)
     repeat = worker_kwargs.pop("repeat", None)
@@ -310,6 +344,9 @@ def _run_worker(local_rank: int, cfg_dict: dict[str, Any], mode: str) -> dict[st
             f"{torch.cuda.device_count()} CUDA devices are visible"
         )
 
+    from tirx_kernels.runner import bind_cuda_assignment, validate_current_cuda_assignment
+
+    bind_cuda_assignment((physical_device_index,), (physical_device_uuid,))
     deep_gemm, source = load_deep_gemm_mega()
     case = None
     dg_case = None
@@ -326,9 +363,10 @@ def _run_worker(local_rank: int, cfg_dict: dict[str, Any], mode: str) -> dict[st
             and torch.distributed.is_initialized()
         ):
             _destroy_process_group()
-        rank_idx, num_ranks, group = deep_gemm.utils.dist.init_dist(
-            local_rank, config.num_processes
+        rank_idx, num_ranks, group = _init_dist_on_assigned_device(
+            local_rank, config.num_processes, physical_device_index
         )
+        validate_current_cuda_assignment("after DeepGEMM distributed init")
 
         if mode == "test":
             case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
@@ -370,7 +408,7 @@ def _run_worker(local_rank: int, cfg_dict: dict[str, Any], mode: str) -> dict[st
             }
 
         if mode == "bench":
-            from tvm.tirx.bench import bench
+            from tirx_kernels.runner import bench
 
             # bench()'s proton/event/cudagraph_proton timers are single-process:
             # each rank derives n_warmup/n_repeat from its own per-call estimate
@@ -464,6 +502,9 @@ def _run_worker(local_rank: int, cfg_dict: dict[str, Any], mode: str) -> dict[st
 
                 from deep_gemm.testing import bench_kineto
 
+                validate_current_cuda_assignment(
+                    "before DeepGEMM MegaMoE timing", restore=True
+                )
                 bench_result = _bench_megamoe_mode(
                     {"tirx": tirx_megamoe_step, "deepgemm": deepgemm_megamoe_step},
                     {"tirx": "mega_moe_kernel", "deepgemm": "sm100_fp8_fp4_mega_moe_impl"},
@@ -474,6 +515,7 @@ def _run_worker(local_rank: int, cfg_dict: dict[str, Any], mode: str) -> dict[st
                     cooldown_s=cooldown_s,
                 )
             else:
+                validate_current_cuda_assignment("before TIRx MegaMoE timing", restore=True)
                 bench_result = bench(
                     {"tirx": tirx_step},
                     warmup=warmup,
@@ -512,9 +554,20 @@ def _run_worker(local_rank: int, cfg_dict: dict[str, Any], mode: str) -> dict[st
 
 
 def _worker_entry(
-    local_rank: int, cfg_dict: dict[str, Any], mode: str, result_queue: mp.SimpleQueue | None
+    local_rank: int,
+    device_indices: tuple[int, ...],
+    device_uuids: tuple[str, ...],
+    cfg_dict: dict[str, Any],
+    mode: str,
+    result_queue: mp.SimpleQueue | None,
 ) -> None:
-    result = _run_worker(local_rank, cfg_dict, mode)
+    result = _run_worker(
+        local_rank,
+        int(device_indices[local_rank]),
+        str(device_uuids[local_rank]),
+        cfg_dict,
+        mode,
+    )
     if result_queue is not None:
         result_queue.put((local_rank, result))
 
@@ -588,8 +641,26 @@ def _aggregate_rank_results(rank_results: list[tuple[int, dict[str, Any]]]) -> d
     }
 
 
-def _run_distributed(config: MegaMoeConfig, mode: str, **kwargs) -> dict[str, Any]:
+def _run_distributed(
+    config: MegaMoeConfig,
+    mode: str,
+    *,
+    device_indices: tuple[int, ...] | None = None,
+    device_uuids: tuple[str, ...] | None = None,
+    **kwargs,
+) -> dict[str, Any]:
     cfg_dict = {**asdict(config), **kwargs}
+    if device_indices is None:
+        device_indices = tuple(range(config.num_processes))
+    if device_uuids is None:
+        from tirx_kernels.runner import physical_cuda_uuids
+
+        device_uuids = physical_cuda_uuids(device_indices)
+    if len(device_indices) != config.num_processes or len(device_uuids) != config.num_processes:
+        raise ValueError(
+            f"MegaMoE assignment must contain {config.num_processes} devices, got "
+            f"indices={device_indices!r}, uuids={device_uuids!r}"
+        )
     if config.num_processes > torch.cuda.device_count():
         raise SkipTest(
             f"Requested {config.num_processes} processes, but only "
@@ -601,7 +672,13 @@ def _run_distributed(config: MegaMoeConfig, mode: str, **kwargs) -> dict[str, An
             port = _find_free_port()
             try:
                 with _distributed_env(port):
-                    return _run_worker(0, cfg_dict, mode)
+                    return _run_worker(
+                        0,
+                        int(device_indices[0]),
+                        str(device_uuids[0]),
+                        cfg_dict,
+                        mode,
+                    )
             except Exception as exc:
                 message = str(exc)
                 if "EADDRINUSE" not in message and "address already in use" not in message:
@@ -619,7 +696,7 @@ def _run_distributed(config: MegaMoeConfig, mode: str, **kwargs) -> dict[str, An
         result_queue = ctx.SimpleQueue()
         mp.spawn(
             _worker_entry,
-            args=(cfg_dict, mode, result_queue),
+            args=(tuple(device_indices), tuple(device_uuids), cfg_dict, mode, result_queue),
             nprocs=config.num_processes,
             join=True,
         )

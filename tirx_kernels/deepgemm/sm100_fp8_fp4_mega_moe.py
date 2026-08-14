@@ -15,12 +15,21 @@ csrc/jit_kernels/heuristics/mega_moe.h.
 
 from __future__ import annotations
 
+import os
+import tempfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 from unittest import SkipTest
 
 from ._sm100_fp8_fp4_mega_moe.data import _run_distributed
 from ._sm100_fp8_fp4_mega_moe.kernel import get_kernel as get_kernel
-from ._sm100_fp8_fp4_mega_moe.spec import MegaMoeConfig
+from ._sm100_fp8_fp4_mega_moe.spec import (
+    _PREPARED_LIBRARY_ENV,
+    MegaMoeConfig,
+    _compile_tirx_mega_moe_for_config,
+    _get_mega_moe_cuda_compile_mode,
+)
 from ._sm100_fp8_fp4_mega_moe.spec import fp8_fp4_mega_moe as fp8_fp4_mega_moe
 from ._sm100_fp8_fp4_mega_moe.spec import (
     launch_prepared_tirx_fp8_fp4_mega_moe as launch_prepared_tirx_fp8_fp4_mega_moe,
@@ -30,6 +39,63 @@ from ._sm100_fp8_fp4_mega_moe.spec import (
 )
 
 KERNEL_META = {"name": "sm100_fp8_fp4_mega_moe", "category": "deepgemm", "compute_capability": 10}
+
+
+@dataclass
+class PreparedMegaMoeBench:
+    config: MegaMoeConfig
+    temporary_directory: Any
+    executables: tuple[Any, Any]
+    library_paths: dict[bool, Path]
+
+    @property
+    def required_num_gpus(self) -> int:
+        return self.config.num_processes
+
+    def run_gpu(
+        self,
+        *,
+        warmup: int | None = None,
+        repeat: int | None = None,
+        timer: str | None = None,
+        rounds: int = 1,
+        cooldown_s: float = 1.0,
+    ) -> dict[str, Any]:
+        from tirx_kernels.runner import current_cuda_assignment
+
+        device_indices, device_uuids = current_cuda_assignment()
+        if len(device_indices) != self.config.num_processes:
+            raise RuntimeError(
+                f"MegaMoE requires {self.config.num_processes} GPUs, "
+                f"assignment has {len(device_indices)}"
+            )
+        assignments = {
+            _PREPARED_LIBRARY_ENV[collect_stats]: str(path)
+            for collect_stats, path in self.library_paths.items()
+        }
+        previous = {name: os.environ.get(name) for name in assignments}
+        os.environ.update(assignments)
+        try:
+            return _run_distributed(
+                self.config,
+                "bench",
+                warmup=warmup,
+                repeat=repeat,
+                timer=timer,
+                rounds=rounds,
+                cooldown_s=cooldown_s,
+                device_indices=device_indices,
+                device_uuids=device_uuids,
+            )
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    def close(self) -> None:
+        self.temporary_directory.cleanup()
 
 
 def _case(
@@ -239,4 +305,60 @@ def run_bench(
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )
-    return _run_distributed(config, "bench", warmup=warmup, repeat=repeat, timer=timer, **kwargs)
+    return prepare_bench(**asdict(config)).run_gpu(
+        warmup=warmup,
+        repeat=repeat,
+        timer=timer,
+        rounds=int(kwargs.pop("rounds", 1)),
+        cooldown_s=float(kwargs.pop("cooldown_s", 1.0)),
+    )
+
+
+def prepare_bench(
+    num_processes=1,
+    num_max_tokens_per_rank=128,
+    num_tokens=96,
+    hidden=1024,
+    intermediate_hidden=512,
+    num_experts=8,
+    num_topk=2,
+    activation_clamp=10.0,
+    fast_math=1,
+):
+    """Compile both legal benchmark specializations before GPU assignment."""
+    config = _make_config(
+        num_processes=num_processes,
+        num_max_tokens_per_rank=num_max_tokens_per_rank,
+        num_tokens=num_tokens,
+        hidden=hidden,
+        intermediate_hidden=intermediate_hidden,
+        num_experts=num_experts,
+        num_topk=num_topk,
+        activation_clamp=activation_clamp,
+        fast_math=fast_math,
+    )
+    temporary_directory = tempfile.TemporaryDirectory(prefix="tirx-megamoe-prepared-")
+    library_paths: dict[bool, Path] = {}
+    executables = []
+    try:
+        for collect_stats in (False, True):
+            executable = _compile_tirx_mega_moe_for_config(
+                **asdict(config),
+                collect_stats=collect_stats,
+                cuda_compile_mode=_get_mega_moe_cuda_compile_mode(),
+            )
+            library_path = Path(temporary_directory.name) / (
+                "mega_moe_stats.so" if collect_stats else "mega_moe_no_stats.so"
+            )
+            executable.export_library(str(library_path))
+            executables.append(executable)
+            library_paths[collect_stats] = library_path
+    except BaseException:
+        temporary_directory.cleanup()
+        raise
+    return PreparedMegaMoeBench(
+        config=config,
+        temporary_directory=temporary_directory,
+        executables=tuple(executables),
+        library_paths=library_paths,
+    )
