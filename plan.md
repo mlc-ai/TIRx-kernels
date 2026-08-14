@@ -282,7 +282,9 @@ child 负责：
    - Phase B: 少量单卡 workload 和动态外部负载 A/B；迁移前一侧从保留 one-stage scheduler 的 `a91a1b7` 独立 worktree 运行，迁移后一侧从当前 pipeline worktree 运行。两侧必须使用完全相同的显式 workload matrix、物理 GPU、默认 5 rounds/1.0s cooldown、timer/reference/correctness 协议和外层 wall timer；不跑全量、不占多张卡。原始 run JSON、outer timer 和 stdout/stderr 必须由 `scripts/build_bench_pipeline_ac10_evidence.py` 逐文件哈希并交叉校验；缺文件、UUID 不同、协议不完整或 cost model 不可复算时不得生成数值 evidence。
    - Phase C: 对多卡路径只做 assignment mismatch、原子 claim 和 rank lifecycle 等无多卡结构验证，并将 runtime 状态记为 `exempted_by_human_unmeasured`。
    - Phase D: 依据 timeline 检查 `T_unexplained`、ratio、correctness和资源边界；只保留可复现的端到端收益。迁移前/后同 matrix 的 pipeline overlap 加速与 YAML 默认覆盖从 234 降到 109 的独立工作量缩减必须分别归因，不得合并、相乘或汇总成一个加速比。
-   - Supplemental suite measurement（不属于任何 AC）：按 2026-08-14T07:25Z 转达的人类裁决，固定使用从 109 条默认清单派生的 106 条补充矩阵：`gemm_reduce_scatter` 的 3 条已按既有决定退出默认 sweep，`allgather_gemm` 的 3 条仅为本次补充测量临时排除，默认 YAML 保持不变。分别对 `a91a1b7` 与当前 pipeline 各跑一次相同矩阵；两侧保持冷编译缓存且缓存根彼此隔离，各自使用当时全部 eligible GPU。原始 outer wall 为主数字，同时持久化可得的 GPU 卡时、foreign wait、external occupancy、retry count 与参与 GPU UUID。after 的设备级显存门槛与 before 的 compute-app 显存策略差异必须披露；多 GPU worker 并行在迁移前已存在，不得归因于本次迁移；该数字不得进入 AC-10、不得与 234→112/109 覆盖缩减合并。两次 outer timer 与派生 evidence 必须落到可提交路径。pinned TVM 修复仍未获授权，Kineto/allgather 继续保持 missing，不因补充矩阵排除而视为解决。
+   - Supplemental suite measurement（不属于任何 AC）：按 2026-08-14T07:25Z 转达的人类裁决，固定使用从 109 条默认清单派生的 106 条补充矩阵：`gemm_reduce_scatter` 的 3 条已按既有决定退出默认 sweep，`allgather_gemm` 的 3 条仅为本次补充测量临时排除，默认 YAML 保持不变。两侧已在相互隔离的冷缓存下完成 106/106：`a91a1b7` 为 476.645473386s（7.9441 分钟），pipeline commit `5429283` 为 363.171956028s（6.0529 分钟），即 1.312451× / 23.8067% wall 改善。两侧均实际使用 8 张卡；after 记录 11 次原地 retry，before 无等价 retry/card-time 成本模型。该冷缓存倍数是日常热缓存的上限，包含流水线重叠但不包含迁移前已存在的多 GPU worker 并行，不得与 234→112/109/106 覆盖变化合并。after 的 resident-VRAM 门槛与 before 的 compute-process-only 准入差异已披露；outer timer、occupancy、raw run、逐 config phase 与 per-impl 样本均落到可提交 evidence。后续 NVFP4 build-only 前移不在这次 full-suite wall 内，不对 363.171956028s 做推算修正。
+   - GPU-stage residual follow-up：从同一 106 条 pipeline timeline 导出完整 phase 表，并按 `GPU stage - n_impls * 5 * 1.0s` 排序；该残差只是 cooldown 下界之外的 triage 信号。p90 为 20.208s。逐组审计后，仅 NVFP4 cuBLASLt PyTorch extension 编译同时满足“设备无关、量级足够、prepare guard 不初始化 CUDA”，已前移到 READY 前；两条无干扰 targeted 对照分别减少 GPU stage 1.394s 与 16.488s。FlashInfer FP4、selective-state 和 TRT-LLM decode 的 reachable import 均被 guard 证明会初始化 CUDA，因此保留在 ASSIGN 后；FlashKDA/DeepGEMM 的 prepare-safe import 只有约 24ms/0.2s，不值得引入额外生命周期状态。
+   - AC-10 scope closure：2026-08-14 的最新人类裁决取消剩余 Event/CUDA-graph/Kineto/MegaMoE GPU 补测要求。Proton 通过、其余 measured-without-win 或 missing/unmeasured 状态原样保留；pinned TVM 修改授权请求作废，不再作为待完成项，也不得把 missing 改写为 pass。
 
 ## Feature Map / Capability Map
 
@@ -317,12 +319,11 @@ child 负责：
 - FUT-2: CUDA kernel 本身的 NCU 优化。
   - Current-loop handoff: AC-10 只优化 suite orchestration wall time。
   - Promotion trigger: pipeline 收口后，GPU stage 已成为主导且具体 kernel 仍低效。
-- FUT-3: baseline promotion。历史 112 条与 109 条尝试均 fail-fast 未完成；
-  2026-08-14T07:25Z 的人类裁决授权本次补充测量使用固定 106 条矩阵，临时排除
-  `allgather_gemm` 三条而不改默认 YAML。该补充测量可继续；pinned TVM 修改仍
-  未授权，Kineto/allgather 的 acceptance 状态保持 missing。
-  - Current-loop handoff: 只做少量代表性 targeted run。
-  - Promotion trigger: 没有其他 session 运行 suite，且全部主要锚点验证完成。
+- FUT-3: warm-cache suite characterization。固定 106 条冷缓存补充 A/B 已完成并测得
+  1.312451×；它有意放大 prepare 占比，因此只是日常热缓存收益的上限。
+  Kineto/allgather 的 acceptance 状态保持 missing，且不再等待 pinned TVM 授权。
+  - Current-loop handoff: 不再消耗 GPU 时间；保留现有 raw artifact 和 caveats。
+  - Promotion trigger: 人明确要求独立量化热缓存端到端收益，并再次授权完整 sweep。
 
 ## Claude-Codex Deliberation
 

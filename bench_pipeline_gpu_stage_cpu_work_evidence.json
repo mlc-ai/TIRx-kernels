@@ -1,0 +1,303 @@
+{
+  "all_nvfp4_probe_rounds_present": true,
+  "impl_mean_change_percent_abs_max_for_clean_nvfp4_comparisons": 1.5387618820345228,
+  "measurement_status": "measured",
+  "moved_work": [
+    {
+      "clean_gpu_stage_saved_s": {
+        "comparisons": 2,
+        "max": 16.488112688064575,
+        "min": 1.3942956924438477
+      },
+      "comparisons": [
+        {
+          "attempt": 19,
+          "attribution_status": "not_attributable_due_to_in_place_retries",
+          "baseline_cpu_prepare_s": 5.305382251739502,
+          "baseline_gpu_stage_s": 156.1124815940857,
+          "config": "1024x1024x1024",
+          "cpu_prepare_added_s": 12.659965991973877,
+          "gpu_stage_saved_s": 82.75331902503967,
+          "impl_mean_change_percent": {
+            "cublaslt_nvfp4": -0.2348082343708091,
+            "flashinfer": 0.2623665012947418,
+            "tir": 3.1410532488456377
+          },
+          "interference_retry_count": 18,
+          "kernel": "nvfp4_gemm",
+          "optimized_cpu_prepare_s": 17.96534824371338,
+          "optimized_gpu_stage_s": 73.35916256904602,
+          "retry_in_place": true,
+          "round_sample_counts": {
+            "cublaslt_nvfp4": 5,
+            "flashinfer": 5,
+            "tir": 5
+          }
+        },
+        {
+          "attempt": 1,
+          "attribution_status": "clean_targeted_comparison",
+          "baseline_cpu_prepare_s": 5.482609748840332,
+          "baseline_gpu_stage_s": 143.4876790046692,
+          "config": "16384x16384x16384",
+          "cpu_prepare_added_s": 12.582122802734375,
+          "gpu_stage_saved_s": 1.3942956924438477,
+          "impl_mean_change_percent": {
+            "cublaslt_nvfp4": 1.5387618820345228,
+            "flashinfer": 0.39128832954402615,
+            "tir": 0.11948363621261393
+          },
+          "interference_retry_count": 0,
+          "kernel": "nvfp4_gemm",
+          "optimized_cpu_prepare_s": 18.064732551574707,
+          "optimized_gpu_stage_s": 142.09338331222534,
+          "retry_in_place": false,
+          "round_sample_counts": {
+            "cublaslt_nvfp4": 5,
+            "flashinfer": 5,
+            "tir": 5
+          }
+        },
+        {
+          "attempt": 1,
+          "attribution_status": "clean_targeted_comparison",
+          "baseline_cpu_prepare_s": 5.479146480560303,
+          "baseline_gpu_stage_s": 157.01054453849792,
+          "config": "4096x4096x4096",
+          "cpu_prepare_added_s": 12.584219694137573,
+          "gpu_stage_saved_s": 16.488112688064575,
+          "impl_mean_change_percent": {
+            "cublaslt_nvfp4": -0.6902810863797737,
+            "flashinfer": -1.4659194605080472,
+            "tir": -0.7208832651790842
+          },
+          "interference_retry_count": 0,
+          "kernel": "nvfp4_gemm",
+          "optimized_cpu_prepare_s": 18.063366174697876,
+          "optimized_gpu_stage_s": 140.52243185043335,
+          "retry_in_place": false,
+          "round_sample_counts": {
+            "cublaslt_nvfp4": 5,
+            "flashinfer": 5,
+            "tir": 5
+          }
+        }
+      ],
+      "cuda_prepare_guard": "passed in the cold targeted probe",
+      "from": "GPU stage reference builder",
+      "gpu_stage_action_after_move": "load the exact prepared shared library",
+      "to": "CPU prepare before READY",
+      "work_class": "nvfp4_cublaslt_pytorch_extension_build"
+    }
+  ],
+  "not_moved": [
+    {
+      "reason": "the reachable FlashInfer FP4 import changes CUDA initialization state; tensor-dependent autotuning also requires the assigned device",
+      "work_class": "flashinfer_fp4_jit_and_autotune"
+    },
+    {
+      "reason": "the reachable reference import changes CUDA initialization state; case allocation and reference warmup/correctness are device work",
+      "work_class": "flashinfer_selective_state_reference"
+    },
+    {
+      "reason": "the reachable TRT-LLM decode import changes CUDA initialization state; the 128 MiB workspace, KV tensors and tactic probe are device work",
+      "work_class": "flashinfer_trtllm_sparse_mla_reference"
+    },
+    {
+      "reason": "prepare-safe but measured at only 24 ms, below the stopping threshold; the material residual is device allocation, TMA setup and reference work",
+      "work_class": "flashkda_peer_import_and_provenance"
+    },
+    {
+      "reason": "prepare-safe but approximately 0.2s and not process-portable to spawned rank workers; process-group, case allocation and barriers remain after claim",
+      "work_class": "deepgemm_mega_import"
+    }
+  ],
+  "prepare_import_guard": {
+    "environment": {
+      "FLASHINFER_CUDA_ARCH_LIST": "10.0a",
+      "LD_LIBRARY_PATH": "/usr/local/cuda-13.2/targets/x86_64-linux/lib:/tmp/tvm-nvshmem-ea0950ab-20260814/lib:/tmp/tirx-nvshmem-layout.DlC1C7/lib:/home/hongyij/workspace/tirx-kernels/.porting/deps/venv-bench-sglang96a04cb-nccl4py031-cublasmp010/lib/python3.13/site-packages/nvidia/nccl/lib:/home/hongyij/miniforge3/lib/python3.13/site-packages/nvidia/nvshmem/lib:/home/hongyij/miniforge3/lib/python3.13/site-packages/nvidia/cu13/lib:/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/build/lib:/usr/local/cuda/lib64",
+      "PYTHONPATH": "/home/hongyij/workspace/tirx-kernels/.porting/deps/fa4-runtime-00756db9-cutlass460dev0-quack053/nvidia_cutlass_dsl/python_packages:/home/hongyij/workspace/tirx-kernels/.porting/deps/fa4-runtime-00756db9-cutlass460dev0-quack053:/home/hongyij/workspace/tirx-kernels/.porting/deps/flash-attention-00756db9:/home/hongyij/workspace/tirx-kernels/.porting/deps/flashinfer-f2e04400-runtime:/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels:/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/python:/home/hongyij/workspace/tirx-kernels/.porting/deps/sglang-96a04cb1/python:/home/hongyij/workspace/tirx-kernels/.porting/deps/venv-bench-sglang96a04cb-nccl4py031-cublasmp010/lib/python3.13/site-packages"
+    },
+    "measurement_kind": "cpu_prepare_cuda_initialization_guard",
+    "results": [
+      {
+        "cuda_initialized_after": true,
+        "cuda_initialized_before": false,
+        "details": {
+          "jit_spec": "fp4_gemm_cutlass",
+          "library_path": "/home/hongyij/.cache/flashinfer/0.0.0+unknown/100a/cached_ops/fp4_gemm_cutlass/fp4_gemm_cutlass.so"
+        },
+        "elapsed_s": 0.4967233740026131,
+        "error": "RuntimeError: CPU prepare changed CUDA initialization state from False to True",
+        "guard_result": "rejected",
+        "probe": "flashinfer_fp4_jit"
+      },
+      {
+        "cuda_initialized_after": true,
+        "cuda_initialized_before": false,
+        "details": {
+          "callable": "selective_state_update"
+        },
+        "elapsed_s": 0.4905962030024966,
+        "error": "RuntimeError: CPU prepare changed CUDA initialization state from False to True",
+        "guard_result": "rejected",
+        "probe": "flashinfer_selective_state"
+      },
+      {
+        "cuda_initialized_after": true,
+        "cuda_initialized_before": false,
+        "details": {
+          "callable": "trtllm_batch_decode_with_kv_cache_mla"
+        },
+        "elapsed_s": 0.5359801189915743,
+        "error": "RuntimeError: CPU prepare changed CUDA initialization state from False to True",
+        "guard_result": "rejected",
+        "probe": "flashinfer_trtllm_decode"
+      },
+      {
+        "cuda_initialized_after": false,
+        "cuda_initialized_before": false,
+        "details": {
+          "cutlass_commit": "5c149f52a436782210263fb2f19b354443a61c6a",
+          "package_version": "0.0.1+1ce47ea",
+          "source_commit": "1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b"
+        },
+        "elapsed_s": 0.024258288001874462,
+        "error": null,
+        "guard_result": "passed",
+        "probe": "flashkda_peer"
+      },
+      {
+        "cuda_initialized_after": false,
+        "cuda_initialized_before": false,
+        "details": {
+          "source": "installed"
+        },
+        "elapsed_s": 0.20379432100162376,
+        "error": null,
+        "guard_result": "passed",
+        "probe": "deepgemm_mega"
+      }
+    ],
+    "schema_version": 1,
+    "uses_gpu_measurement": false
+  },
+  "residual_definition": "measured GPU-stage wall - implementation_count * rounds * cooldown_s; the residual also contains timer setup, correctness, allocation, loading, warmup/repeat and real GPU execution",
+  "schema_version": 1,
+  "significant_threshold": {
+    "p90_s": 20.207683324813843,
+    "rule": "at_or_above_suite_p90",
+    "workload_count": 11
+  },
+  "significant_workloads": [
+    {
+      "config": "4096x4096x4096",
+      "gpu_stage_minus_protocol_floor_s": 142.01054453849792,
+      "gpu_stage_s": 157.01054453849792,
+      "kernel": "nvfp4_gemm",
+      "protocol_cooldown_floor_s": 15.0
+    },
+    {
+      "config": "1024x1024x1024",
+      "gpu_stage_minus_protocol_floor_s": 141.1124815940857,
+      "gpu_stage_s": 156.1124815940857,
+      "kernel": "nvfp4_gemm",
+      "protocol_cooldown_floor_s": 15.0
+    },
+    {
+      "config": "16384x16384x16384",
+      "gpu_stage_minus_protocol_floor_s": 128.4876790046692,
+      "gpu_stage_s": 143.4876790046692,
+      "kernel": "nvfp4_gemm",
+      "protocol_cooldown_floor_s": 15.0
+    },
+    {
+      "config": "bench_regular_dqk576_hq128_s4096_kv32768_topk2048",
+      "gpu_stage_minus_protocol_floor_s": 32.4938600063324,
+      "gpu_stage_s": 47.4938600063324,
+      "kernel": "sparse_flashmla_prefill_head128_phase1",
+      "protocol_cooldown_floor_s": 15.0
+    },
+    {
+      "config": "bench_dqk576_hq64_s4096_kv32768_topk512",
+      "gpu_stage_minus_protocol_floor_s": 25.940016984939575,
+      "gpu_stage_s": 40.940016984939575,
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "protocol_cooldown_floor_s": 15.0
+    },
+    {
+      "config": "t8192_m8192_h7168_i3072_e384_k6_g1",
+      "gpu_stage_minus_protocol_floor_s": 24.697217226028442,
+      "gpu_stage_s": 34.69721722602844,
+      "kernel": "deepgemm_fp8_fp4_mega_moe",
+      "protocol_cooldown_floor_s": 10.0
+    },
+    {
+      "config": "b64_h64_d64_s256_r8",
+      "gpu_stage_minus_protocol_floor_s": 24.176869869232178,
+      "gpu_stage_s": 34.17686986923218,
+      "kernel": "selective_state_update_stp_horizontal",
+      "protocol_cooldown_floor_s": 10.0
+    },
+    {
+      "config": "b64_h64_d64_s256_r8",
+      "gpu_stage_minus_protocol_floor_s": 22.029080390930176,
+      "gpu_stage_s": 32.029080390930176,
+      "kernel": "selective_state_update_stp_simple",
+      "protocol_cooldown_floor_s": 10.0
+    },
+    {
+      "config": "b512_h64_d64_s128_t6_r8_statebf16_official",
+      "gpu_stage_minus_protocol_floor_s": 21.448641300201416,
+      "gpu_stage_s": 31.448641300201416,
+      "kernel": "selective_state_update_mtp_horizontal",
+      "protocol_cooldown_floor_s": 10.0
+    },
+    {
+      "config": "b64_h64_d64_s128_r8_base",
+      "gpu_stage_minus_protocol_floor_s": 21.32637047767639,
+      "gpu_stage_s": 31.32637047767639,
+      "kernel": "selective_state_update_stp_horizontal",
+      "protocol_cooldown_floor_s": 10.0
+    },
+    {
+      "config": "b2048_h64_d64_s128_t6_r8_statebf16_official",
+      "gpu_stage_minus_protocol_floor_s": 20.221290111541748,
+      "gpu_stage_s": 30.221290111541748,
+      "kernel": "selective_state_update_mtp_horizontal",
+      "protocol_cooldown_floor_s": 10.0
+    }
+  ],
+  "sources": {
+    "nvfp4_probe_outer": {
+      "path": "bench_pipeline_suite_speedup_106_artifacts/nvfp4-build-only-probe-2/outer_timer.json",
+      "sha256": "b164c5448a9dbf9f4e066189624bd3a3c6f61602cea17c5b2f10f20e5d6b7ab9",
+      "size_bytes": 603839
+    },
+    "nvfp4_probe_run": {
+      "path": "bench_pipeline_suite_speedup_106_artifacts/nvfp4-build-only-probe-2/suite/runs/1.json",
+      "sha256": "9898d4944d54264435c1fc538ff8df2cdac2e89d3318ec5b67cc4a164032cc27",
+      "size_bytes": 51719
+    },
+    "nvfp4_probe_stderr": {
+      "path": "bench_pipeline_suite_speedup_106_artifacts/nvfp4-build-only-probe-2/stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    "nvfp4_probe_stdout": {
+      "path": "bench_pipeline_suite_speedup_106_artifacts/nvfp4-build-only-probe-2/stdout.log",
+      "sha256": "7e77c05e1290f2c196148d8a27dc4888aafef9f3888cb426c604add5e5b13167",
+      "size_bytes": 12349
+    },
+    "prepare_import_probe": {
+      "path": "bench_pipeline_prepare_cuda_import_evidence.json",
+      "sha256": "7f99d26041f1e306c2fc21daadf31aae40b3f66a91907b823a9adadd82095946",
+      "size_bytes": 3439
+    },
+    "suite_run": {
+      "path": "bench_pipeline_suite_speedup_106_artifacts/after-10/suite/runs/1.json",
+      "sha256": "089874f16e5e611ea46d8a2090ac5c103d95b386bd8e00f0ae5de66bd5cad14a",
+      "size_bytes": 358673
+    }
+  }
+}

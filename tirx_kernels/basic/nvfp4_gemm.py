@@ -11,6 +11,7 @@ from functools import cache
 from pathlib import Path
 
 import tvm
+from tirx_kernels._prepare_toolchain import PREPARE_CUDA_ARCH_ENV
 from tirx_kernels.runner import bench
 from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
@@ -67,15 +68,17 @@ def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
 
 
 _CUBLASLT_EXT = None
+_CUBLASLT_EXT_CACHE_NAMESPACE = "basic.nvfp4_gemm.cublaslt_extension"
 
 
-def _load_cublaslt_nvfp4_ext():
-    """Load the cuBLASLt NVFP4 baseline as a PyTorch inline extension."""
-    global _CUBLASLT_EXT
-    if _CUBLASLT_EXT is not None:
-        return _CUBLASLT_EXT
+def _cublaslt_ext_key(config: tuple[int, int, int]) -> str:
+    del config
+    return "nvfp4_cublaslt_baseline_ext"
 
-    from torch.utils.cpp_extension import CUDA_HOME, load_inline
+
+def _build_cublaslt_nvfp4_ext():
+    """Build the shape-independent extension without loading it into this process."""
+    from torch.utils import cpp_extension
 
     source = r"""
 #include <torch/extension.h>
@@ -238,22 +241,97 @@ void nvfp4_cublaslt(torch::Tensor A, torch::Tensor B, torch::Tensor A_scale,
       stream));
 }
 """
+    source += r"""
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("nvfp4_cublaslt", torch::wrap_pybind_function(nvfp4_cublaslt), "nvfp4_cublaslt");
+}
+"""
     extra_include_paths = []
     extra_ldflags = ["-lcublas", "-lcublasLt"]
-    if CUDA_HOME:
-        extra_include_paths.append(f"{CUDA_HOME}/include")
-        extra_ldflags.insert(0, f"-L{CUDA_HOME}/lib64")
-    _CUBLASLT_EXT = load_inline(
-        name="nvfp4_cublaslt_baseline_ext",
-        cpp_sources=[source],
-        functions=["nvfp4_cublaslt"],
+    if cpp_extension.CUDA_HOME:
+        extra_include_paths.append(f"{cpp_extension.CUDA_HOME}/include")
+        extra_ldflags.insert(0, f"-L{cpp_extension.CUDA_HOME}/lib64")
+
+    name = "nvfp4_cublaslt_baseline_ext"
+    build_directory = cpp_extension._get_build_directory(name, verbose=False)
+    source_path = os.path.join(build_directory, "main.cpp")
+    cpp_extension._maybe_write(source_path, source)
+    sources = [source_path]
+    extra_cflags = ["-O3"]
+    extra_cuda_cflags = []
+    if prepare_arch := os.environ.get(PREPARE_CUDA_ARCH_ENV):
+        arch_suffix = prepare_arch.removeprefix("sm_")
+        extra_cuda_cflags.append(f"-gencode=arch=compute_{arch_suffix},code=sm_{arch_suffix}")
+    old_version = cpp_extension.JIT_EXTENSION_VERSIONER.get_version(name)
+    version = cpp_extension.JIT_EXTENSION_VERSIONER.bump_version_if_changed(
+        name,
+        sources,
+        build_arguments=[extra_cflags, extra_cuda_cflags, extra_ldflags, extra_include_paths],
+        build_directory=build_directory,
         with_cuda=True,
-        extra_include_paths=extra_include_paths,
-        extra_cflags=["-O3"],
-        extra_ldflags=extra_ldflags,
-        verbose=False,
+        with_sycl=False,
+        is_python_module=True,
+        is_standalone=False,
     )
+    module_name = name if version == 0 else f"{name}_v{version}"
+    baton = cpp_extension.FileBaton(os.path.join(build_directory, "lock"))
+    if baton.try_acquire():
+        try:
+            if version != old_version:
+                cpp_extension._write_ninja_file_and_build_library(
+                    name=module_name,
+                    sources=sources,
+                    extra_cflags=extra_cflags,
+                    extra_cuda_cflags=extra_cuda_cflags,
+                    extra_sycl_cflags=[],
+                    extra_ldflags=extra_ldflags,
+                    extra_include_paths=extra_include_paths,
+                    build_directory=build_directory,
+                    verbose=False,
+                    with_cuda=True,
+                    with_sycl=False,
+                    is_standalone=False,
+                )
+        finally:
+            baton.release()
+    else:
+        baton.wait()
+    return module_name, build_directory
+
+
+def _cublaslt_ext_artifact(config: tuple[int, int, int]):
+    """Build normally, or consume the exact build artifact retained before READY."""
+    from tirx_kernels.runner import consume_prepared_cache
+
+    return consume_prepared_cache(
+        _CUBLASLT_EXT_CACHE_NAMESPACE,
+        _cublaslt_ext_key(config),
+        lambda: _build_cublaslt_nvfp4_ext(),
+    )
+
+
+def _load_cublaslt_nvfp4_ext(config: tuple[int, int, int]):
+    """Load the READY-time build artifact after the process owns its GPU."""
+    global _CUBLASLT_EXT
+    if _CUBLASLT_EXT is None:
+        from torch.utils import cpp_extension
+
+        module_name, build_directory = _cublaslt_ext_artifact(config)
+        _CUBLASLT_EXT = cpp_extension._import_module_from_library(
+            module_name, build_directory, is_python_module=True
+        )
     return _CUBLASLT_EXT
+
+
+def _cublaslt_reference(
+    config: tuple[int, int, int], A_fp4, B_fp4, A_sf, B_sf, alpha_value: float, out_tir
+):
+    import torch
+
+    M, N, K = config
+    ext = _load_cublaslt_nvfp4_ext(config)
+    out_cublaslt = torch.empty_like(out_tir)
+    return lambda: ext.nvfp4_cublaslt(A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K)
 
 
 def _mapa_u64(ptr, rank):
@@ -1095,11 +1173,17 @@ def _flashinfer_tuned_choice(
 # event wall-clock is host-starved and over-credits us ~4x. Proton measures pure GPU
 # kernel time -> honest ~parity (verified 0.996 vs event 4.11).
 def prepare_bench(M=1024, N=1024, K=1024, **kwargs):
-    """Compile the TIRx GEMM before CUDA allocation and reference autotuning."""
+    """Compile TIRx and the device-independent cuBLASLt extension before READY."""
     from tirx_kernels.runner import prepared_cached_run_bench
 
+    config = (M, N, K)
     _compile_executable(M, N, K)
-    return prepared_cached_run_bench(__name__, {"M": M, "N": N, "K": K, **kwargs})
+    cublaslt_extension = _cublaslt_ext_artifact(config)
+    return prepared_cached_run_bench(
+        __name__,
+        {"M": M, "N": N, "K": K, **kwargs},
+        cached=((_CUBLASLT_EXT_CACHE_NAMESPACE, _cublaslt_ext_key(config), cublaslt_extension),),
+    )
 
 
 def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, **kwargs):
@@ -1199,13 +1283,6 @@ def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, *
         )
         return run
 
-    def _cublaslt():
-        ext = _load_cublaslt_nvfp4_ext()
-        out_cublaslt = torch.empty_like(out_tir)
-        return lambda: ext.nvfp4_cublaslt(
-            A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K
-        )
-
     # FlashInfer is a required reference for this benchmark. Prepare and
     # validate its tuned launch before entering bench() so a bad/missing cache
     # fails the workload instead of being downgraded to an optional baseline
@@ -1220,7 +1297,12 @@ def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, *
             warmup=warmup,
             repeat=repeat,
             timer=timer,
-            references={"flashinfer": lambda: flashinfer_run, "cublaslt_nvfp4": _cublaslt},
+            references={
+                "flashinfer": lambda: flashinfer_run,
+                "cublaslt_nvfp4": lambda: _cublaslt_reference(
+                    (M, N, K), A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_tir
+                ),
+            },
             **kwargs,
         )
     result["metadata"] = {**result.get("metadata", {}), **metadata}

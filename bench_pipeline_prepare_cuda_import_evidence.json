@@ -1,0 +1,70 @@
+{
+  "environment": {
+    "FLASHINFER_CUDA_ARCH_LIST": "10.0a",
+    "LD_LIBRARY_PATH": "/usr/local/cuda-13.2/targets/x86_64-linux/lib:/tmp/tvm-nvshmem-ea0950ab-20260814/lib:/tmp/tirx-nvshmem-layout.DlC1C7/lib:/home/hongyij/workspace/tirx-kernels/.porting/deps/venv-bench-sglang96a04cb-nccl4py031-cublasmp010/lib/python3.13/site-packages/nvidia/nccl/lib:/home/hongyij/miniforge3/lib/python3.13/site-packages/nvidia/nvshmem/lib:/home/hongyij/miniforge3/lib/python3.13/site-packages/nvidia/cu13/lib:/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/build/lib:/usr/local/cuda/lib64",
+    "PYTHONPATH": "/home/hongyij/workspace/tirx-kernels/.porting/deps/fa4-runtime-00756db9-cutlass460dev0-quack053/nvidia_cutlass_dsl/python_packages:/home/hongyij/workspace/tirx-kernels/.porting/deps/fa4-runtime-00756db9-cutlass460dev0-quack053:/home/hongyij/workspace/tirx-kernels/.porting/deps/flash-attention-00756db9:/home/hongyij/workspace/tirx-kernels/.porting/deps/flashinfer-f2e04400-runtime:/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels:/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/python:/home/hongyij/workspace/tirx-kernels/.porting/deps/sglang-96a04cb1/python:/home/hongyij/workspace/tirx-kernels/.porting/deps/venv-bench-sglang96a04cb-nccl4py031-cublasmp010/lib/python3.13/site-packages"
+  },
+  "measurement_kind": "cpu_prepare_cuda_initialization_guard",
+  "results": [
+    {
+      "cuda_initialized_after": true,
+      "cuda_initialized_before": false,
+      "details": {
+        "jit_spec": "fp4_gemm_cutlass",
+        "library_path": "/home/hongyij/.cache/flashinfer/0.0.0+unknown/100a/cached_ops/fp4_gemm_cutlass/fp4_gemm_cutlass.so"
+      },
+      "elapsed_s": 0.4967233740026131,
+      "error": "RuntimeError: CPU prepare changed CUDA initialization state from False to True",
+      "guard_result": "rejected",
+      "probe": "flashinfer_fp4_jit"
+    },
+    {
+      "cuda_initialized_after": true,
+      "cuda_initialized_before": false,
+      "details": {
+        "callable": "selective_state_update"
+      },
+      "elapsed_s": 0.4905962030024966,
+      "error": "RuntimeError: CPU prepare changed CUDA initialization state from False to True",
+      "guard_result": "rejected",
+      "probe": "flashinfer_selective_state"
+    },
+    {
+      "cuda_initialized_after": true,
+      "cuda_initialized_before": false,
+      "details": {
+        "callable": "trtllm_batch_decode_with_kv_cache_mla"
+      },
+      "elapsed_s": 0.5359801189915743,
+      "error": "RuntimeError: CPU prepare changed CUDA initialization state from False to True",
+      "guard_result": "rejected",
+      "probe": "flashinfer_trtllm_decode"
+    },
+    {
+      "cuda_initialized_after": false,
+      "cuda_initialized_before": false,
+      "details": {
+        "cutlass_commit": "5c149f52a436782210263fb2f19b354443a61c6a",
+        "package_version": "0.0.1+1ce47ea",
+        "source_commit": "1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b"
+      },
+      "elapsed_s": 0.024258288001874462,
+      "error": null,
+      "guard_result": "passed",
+      "probe": "flashkda_peer"
+    },
+    {
+      "cuda_initialized_after": false,
+      "cuda_initialized_before": false,
+      "details": {
+        "source": "installed"
+      },
+      "elapsed_s": 0.20379432100162376,
+      "error": null,
+      "guard_result": "passed",
+      "probe": "deepgemm_mega"
+    }
+  ],
+  "schema_version": 1,
+  "uses_gpu_measurement": false
+}

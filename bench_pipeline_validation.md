@@ -456,17 +456,15 @@ or merged with any future UUID-verified pipeline result.
 
 ### Single-GPU timer-family evidence ledger
 
-The plan requires a migration-before versus pipeline A/B for every timer family
-that can run on one GPU. Proton now has a persisted same-physical-GPU schema-3
-pair satisfying every structural AC-10 check. Its earlier retry-heavy attempt is
-retained as diagnostic evidence, not substituted for the passing pair. Event now
-also has a source-reproducible UUID-verified pair; it is measurement evidence but
-not a speedup claim because the pipeline side encountered four recorded foreign
-intrusions. CUDA-graph Proton now has the same class of evidence with two
-recorded intrusions and no speedup claim. Kineto and MegaMoE remain unmeasured
-through the new UUID-verified path. Kineto is now more specifically classified
-as missing because the pinned external TVM NVSHMEM runtime violates the assigned
-device invariant before timing.
+Proton has a persisted same-physical-GPU schema-3 pair satisfying every named
+structural AC-10 check. Its earlier retry-heavy attempt is retained as diagnostic
+evidence, not substituted for the passing pair. Event and CUDA-graph Proton have
+source-reproducible UUID-verified pairs but no speedup claim. Kineto and MegaMoE
+remain missing/unmeasured through the new UUID-verified path. Kineto is more
+specifically classified as missing because the pinned external TVM NVSHMEM
+runtime violates the assigned-device invariant before timing. By the human scope
+decision of 2026-08-14, no additional timer-family GPU collection is required;
+the ledger states remain unchanged rather than being promoted to pass.
 
 The reproducible inputs are tracked as `bench_pipeline_ac10_workloads.yaml`
 (Proton), `bench_pipeline_ac10_event_workload.yaml`,
@@ -542,9 +540,8 @@ ASSIGN ordering). Schema 3
 also records transient foreign-PID
 intervals and subtracts their overlap from internal dispatch latency; attempt 1
 predates that telemetry, so its 1.873s dispatch p95 cannot be retroactively
-reclassified. The implementation and behavioral tests are corrected; a new
-runtime artifact is still required before AC-7/AC-10 can use the corrected fields
-as measured evidence.
+reclassified. The implementation and behavioral tests are corrected; the later
+passing Proton schema-3 artifact supplies the required measured evidence.
 
 ### DeepGEMM strict-cache runtime evidence boundary
 
@@ -602,18 +599,15 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | AC-7 | satisfied | Cost-model schema 3 separates initial CPU READY constraints, retry READY delay, ASSIGN-held card time, post-GPU_START execution, transient foreign-PID wait, and internal dispatch latency; complete-timeline/no-data gating remains intact. The clean Proton run measured 0.047s unexplained residual and 42.8ms internal dispatch p95 |
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
 | AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
-| AC-10 | incomplete | Proton has a passing persisted same-UUID schema-3 A/B. Event and CUDA-graph have persisted same-UUID measurement evidence whose structural checks pass but whose retry-heavy wall times are not speedup claims. Kineto is explicitly missing because of the pinned external TVM rank/device coupling; MegaMoE runtime A/B remains unmeasured |
+| AC-10 | incomplete, terminal by human scope decision | Proton has a passing persisted same-UUID schema-3 A/B. Event and CUDA-graph retain their honest non-winning measurements. Kineto remains explicitly missing because of the pinned external TVM rank/device coupling and MegaMoE remains unmeasured; the human decision of 2026-08-14 removed all remaining timer-family GPU runs from the required work queue without converting missing evidence into pass |
 | AC-11 | satisfied | 109 defaults, all 992 configs retained, and 32/32 reviewed three-point selections with YAML-owned small/medium/large roles and rationale; all 16 `gemm_reduce_scatter` configs remain explicitly runnable |
 
-The plan as a whole is therefore not marked complete. The set-device and
-same-child retry implementation is complete at its structural anchors and has
-targeted single-GPU runtime evidence. Proton and Event now satisfy the named
-schema-3 structural checks, as does CUDA-graph. Event and CUDA-graph deliberately
-make no wall-time win claims. Kineto and MegaMoE still require same-UUID A/B
-evidence; Kineto cannot proceed inside the currently authorized implementation
-boundary.
-Multi-GPU runtime rows remain the explicit human-directed exemption, not missing
-evidence.
+The set-device and same-child retry implementation is complete at its structural
+anchors and has targeted single-GPU runtime evidence. Proton, Event, and
+CUDA-graph retain the statuses stated above; no remaining timer family is a
+required completion item. Kineto and MegaMoE stay missing/unmeasured rather than
+being rewritten as pass, and multi-GPU runtime rows remain the explicit
+human-directed exemption.
 
 ## AC-external full-suite speedup supplement
 
@@ -623,69 +617,119 @@ historical 112-workload attempt remains in
 correctly publishes no speedup. Its recorded 234-to-112 coverage context remains
 historical evidence and is not rewritten.
 
-After `gemm_reduce_scatter` left the default sweep for its migration-before NCCL
-illegal-instruction failure, the human granted a new one-time run of the current
-109-workload matrix. The canonical file is
-`bench_pipeline_suite_workloads_109.yaml` (SHA-256
-`243bb2b52ca20ec4b33417aa4fc85924e86c1a79eaf09cc2ea12c31a96ce4f14`).
-The commands retain default 5 rounds plus 1.0s cooldown, isolated cold cache
-roots, exact outer timers, and one-second all-GPU occupancy monitoring.
+The completed supplemental matrix is
+`bench_pipeline_suite_workloads_106.yaml` (SHA-256
+`4c3ad6acf86a89ef38aa6f10acee98452089fec5f38f5fffb89b397c2081177d`).
+Its metadata is the single authority for all six exclusions:
 
-No 109-workload end-to-end speedup is published. The pipeline side cannot finish
-the unchanged matrix within the authorized dependency boundary:
+- the three `gemm_reduce_scatter` TP1 configs
+  (`tp1_m8192_n4096_k12288_fp16_dynamic`,
+  `tp1_m8192_n8192_k28672_fp16_dynamic`, and
+  `tp1_m8192_n16384_k53248_fp16_dynamic`) left the canonical default sweep after
+  the migration-before runner hit the known NCCL illegal-instruction failure;
+  this was not introduced by the pipeline migration;
+- the three `allgather_gemm` TP1 configs
+  (`tp1_m8192_n24576_k4096_fp16_dynamic`,
+  `tp1_m8192_n57344_k8192_fp16_dynamic`, and
+  `tp1_m8192_n106496_k16384_fp16_dynamic`) are excluded only from this
+  supplement because pinned TVM couples NVSHMEM PE rank to physical CUDA device.
+  The default YAML remains unchanged and the missing Kineto status is not
+  promoted.
 
-- `after-9` ran for 58.904447942s, completed seven measurements, and assigned
-  `allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic` to physical GPU 6
-  (`GPU-e56ad157-72b3-2e86-4cd9-5769dc1f229c`). Pinned TVM initialized the
-  one-rank NVSHMEM runtime on rank/device 0, the repository restored GPU 6, and
-  `nvshmem_finalize` aborted with `Invalid context pointer`. The run is incomplete
-  and its cost model is `missing`.
-- A focused cold-cache default-protocol retry put three `allgather_gemm`
-  workloads on physical GPUs 7, 5, and 4. An attempted repository-local bootstrap
-  through nvmath still failed on GPU 5 after 30.456443833s because it initialized
-  the exported host binding rather than TVM's statically linked private NVSHMEM
-  runtime. The half-implementation was reverted and is diagnostic only.
-- The migration-before 109-workload command was not launched: publishing a ratio
-  requires both sides to complete the identical list, and the pipeline blocker is
-  already deterministic on nonzero physical ordinals.
+Both sides completed all 106 workloads with status `ok`, default 5 rounds and
+1.0s cooldown, isolated cold caches, persisted outer timers, and one-second
+all-GPU monitoring:
 
-The external boundary is structural. `libtvm_runtime_extra.so` statically links
-the full NVSHMEM implementation; its registered init function uses one integer as
-both `cudaSetDevice(worker_id)` and NVSHMEM PE rank. For `nranks=1`, a nonzero
-physical device therefore cannot be represented while preserving `rank=0`.
-The public full initializer is header-inline over a LOCAL symbol, while the
-exported hostlib initializer is a different runtime state and cannot initialize
-TVM's private allocator/kernel runtime. Completing the 109-workload pair therefore
-requires the already-pending human authorization to change pinned TVM. Excluding
-`allgather_gemm`, weakening UUID/context guards, reintroducing the live-process
-mask, or publishing partial walls as a speedup remains prohibited.
+| side | outer wall | minutes | participating GPUs | retries |
+|---|---:|---:|---:|---:|
+| migration-before `a91a1b7` | 476.645473386s | 7.9441 | 8 / 8 | unavailable in the old artifact |
+| pipeline | 363.171956028s | 6.0529 | 8 / 8 | 11 in-place retries |
 
-At 2026-08-14T07:25Z, the human-directed continuation authorized a narrower
-supplemental-only matrix without authorizing any TVM change. The fixed
-`bench_pipeline_suite_workloads_106.yaml` matrix removes the three
-`allgather_gemm` rows only for this timing comparison; canonical default YAML and
-the 109-workload default sweep remain unchanged. Together with the three
-`gemm_reduce_scatter` rows already removed from defaults, the supplement is
-106/112. Kineto/allgather remain explicitly missing for acceptance purposes.
+The measured quotient is **1.312451x**, saving 113.473517358s or 23.8067% wall
+time. `bench_pipeline_suite_speedup_106_evidence.json` hashes and reopens the
+matrix, both raw run JSONs, both outer timers, and both stdout/stderr logs; it
+requires all 106 rows to be `ok`, validates the default protocol, and recomputes
+every implementation mean from five raw round samples. The raw before/after run
+hashes are respectively
+`0e60d794907a13649340d4a811e103007916fe9a298e179cc442b31f30d0de06`
+and `089874f16e5e611ea46d8a2090ac5c103d95b386bd8e00f0ae5de66bd5cad14a`;
+the outer-timer hashes are
+`069fe3a680740edda8353ef3244b2eff9abdca57e7cb4113327369f3198d52c4`
+and `ef44658404e1fc3ee8f1d98ab23f465170ba848d74c80c740a47a48d599016ea`.
+The pipeline run reports `5429283d-dirty` because its source probe also sees
+untracked measurement directories; tracked source had no diff when the command
+started. This full-suite number therefore measures commit `5429283` before the
+later NVFP4 cuBLASLt build-only move described below. No synthetic adjustment is
+added to the 363.171956028s wall from the targeted follow-up.
 
-The first 106-workload pipeline attempt is also incomplete and publishes no
-suite speedup. Its persisted wrapper wall is 50.093591709s, with six terminal
-results and eleven interference retries. One
-`deepgemm_sm100_fp8_gemm_1d1d/m4096_n576_k7168` child was first verified on GPU
-0, interrupted by foreign PID 1708888, then reassigned to GPU 4. The second
-attempt failed in `deep_gemm.transform_sf_into_required_layout` with
-`CUDA_ERROR_INVALID_HANDLE`. Its two recorded attempts and UUIDs prove that this
-was a same-process card switch. Inspection of DeepGEMM's global JIT/runtime
-caches explains the failure as reuse of first-context CUDA resources on the new
-device. The scheduler now preserves the first exact GPU claim across retry; this
-is an in-repository protocol correction and does not modify the external package
-or measurement semantics.
+The number requires four explicit caveats:
 
-The intended attribution is unchanged: any future complete cold-cache quotient
-is an upper bound that includes CPU/GPU pipeline overlap, excludes pre-existing
-per-GPU worker parallelism as a migration gain, and must not be combined with the
-independent 234-to-109 coverage reduction. Until both commands finish, absolute
-suite walls, wall-speedup, and card-time ratio remain `missing`, never zero.
+1. Both sides are cold-cache runs. Cold compilation increases the prepare share,
+   which is exactly what the pipeline overlaps, so 1.312451x is an upper bound;
+   normal warm-cache speedup should be lower.
+2. It includes CPU/GPU pipeline overlap, but not multi-GPU worker parallelism.
+   The migration-before scheduler already ran one worker per available card.
+3. It is not combined, multiplied, or summarized with the independent
+   234-to-112/109/106 coverage changes.
+4. GPU eligibility differs even though both commands eventually used all eight
+   physical UUIDs. The pipeline rejects unattributed resident VRAM above a
+   512 MiB allowance; `a91a1b7` only considered utilization/compute-process
+   evidence and could accept a card with resident memory but no listed compute
+   process. Therefore the raw wall quotient is approximate real-machine evidence,
+   not a fixed-runner microbenchmark.
+
+The migration-before artifact has no equivalent phase timeline or card-time
+cost model, so no card-time ratio is published. That evidence is unavailable,
+not zero. This result remains supplemental and does not enter the AC ledger.
+
+## Per-config phase and GPU-stage residual evidence
+
+`bench_pipeline_suite_breakdown_106.md` and the schema-2 JSON evidence publish
+all 106 pipeline phase rows: startup, CLI bootstrap, framework import, exact
+import, config resolution, specialize/generate/compile, total CPU prepare,
+READY wait, ASSIGN handoff, GPU stage, result handoff, and reap tail. They also
+publish migration-before and pipeline per-implementation microseconds plus all
+five raw round samples. The old runner cannot supply an equivalent phase split,
+which is stated explicitly.
+
+For triage, each row computes
+`GPU stage - implementation_count * 5 * 1.0s`. This is only a cooldown lower-bound
+residual: it still includes timer setup, correctness, allocation, loading,
+warmup/repeat, and real GPU execution. Across the 106 rows, p50 is 6.258s, p90 is
+20.208s, and the maximum is 142.011s. The eleven rows at or above p90 fall into
+four source-identical groups:
+
+- all three `nvfp4_gemm` configs: device tensors, quantization, FlashInfer
+  backend loading/autotune, and a cuBLASLt PyTorch extension build were inside
+  the claimed GPU window;
+- the two `d_qk=576` sparse FlashMLA configs: the third TRT-LLM reference creates
+  device KV storage, a 128 MiB workspace, block tables, and a tactic probe;
+- the large single-rank MegaMoE config: a TCP rendezvous and one-rank process
+  group are established after claim, followed by two device cases, barriers,
+  correctness, and the fixed MegaMoE timer protocol;
+- five selective-state configs: device cases plus first-use FlashInfer reference
+  import/JIT, correctness execution, and reference warmup dominate the residual.
+
+Only the NVFP4 cuBLASLt extension build is both device-independent and material.
+It now builds before READY under `cuda_initialization_guard()` with explicit
+`sm_100a` code generation; ASSIGN-time code consumes the exact keyed artifact and
+only loads the shared library. A cold default-protocol targeted comparison added
+12.582-12.584s to CPU prepare and saved 1.394s and 16.488s of GPU-stage wall on
+the two clean configs. The 1024 config showed an apparent 82.753s reduction but
+had 18 in-place retries, so that number is explicitly non-attributable. All
+three configs retained five samples per implementation; clean per-implementation
+mean changes stayed within 1.54%.
+
+The no-GPU structural probe in
+`bench_pipeline_prepare_cuda_import_evidence.json` explains why the remaining
+large setup was not moved. Even with `FLASHINFER_CUDA_ARCH_LIST=10.0a`, importing
+the reachable FlashInfer FP4 JIT, selective-state reference, or TRT-LLM decode
+path changed CUDA initialization from false to true and was rejected by the
+guard. FlashKDA peer import/provenance passed the guard but took only 24ms;
+DeepGEMM MegaMoE import also passed at about 0.2s but is not portable to spawned
+rank workers. Both are below the stopping threshold and the material remainder
+is device/rank work. Full derivation and source hashes are in
+`bench_pipeline_gpu_stage_cpu_work_evidence.json`.
 
 ## Engineering-principles audit
 
@@ -706,15 +750,15 @@ suite walls, wall-speedup, and card-time ratio remain `missing`, never zero.
   artifacts preserve CPU resource evidence and explicitly delimit the historical
   A/B's provenance gaps instead of presenting it as independently verified.
 - **Optimize the real objective:** complete-command wall time on a fixed
-  UUID-verified workload/GPU/protocol matrix remains the oracle. The passing
-  Proton pair measures 1.2692× wall improvement, while the incomplete full-suite
-  commands remain diagnostics and publish no speedup.
+  workload/protocol matrix remains the oracle. The passing Proton pair measures
+  1.2692× on one UUID, and the completed 106-workload cold-cache supplement
+  measures 1.312451× across the machine while stating its eligibility-policy and
+  cache-state caveats.
 - **Cost model and falsifiability:** incomplete timelines still publish no numeric
   performance fields. The first persisted retry-heavy pair falsified schema 1's
   `ready_starvation_s` interpretation. Schema 3 now gives CPU READY constraints,
   retry READY delay, ASSIGN-held card time, post-GPU_START execution, transient
-  foreign-PID wait, and internal dispatch latency separate canonical fields;
-  runtime revalidation remains pending.
+  foreign-PID wait, and internal dispatch latency separate canonical fields.
 - **Stop low-quality experiments:** invalid runs remain unmeasured instead of
   weakening the protocol or claiming success. In-place retries retain the UUID
   handshake and explicit per-record provenance, while remaining ordinary
@@ -734,8 +778,8 @@ suite walls, wall-speedup, and card-time ratio remain `missing`, never zero.
   speedup claim. CUDA-graph has the same evidence class with two in-place retries
   and no speedup claim. Kineto has tracked `missing` evidence showing the pinned
   TVM NVSHMEM helper creates a never-assigned GPU-0 context; MegaMoE still lacks
-  valid runtime A/B evidence. AC-5, AC-10, and the overall plan remain incomplete
-  pending a human decision on the external TVM boundary.
+  valid runtime A/B evidence. These are terminal missing/unmeasured ledger states
+  under the 2026-08-14 human scope decision, not pending GPU work.
 - The original five DeepGEMM `compile_spec`/`build_launch` adapters have strict
   key/consumption tests and CPU-only READY evidence; their attempted real GPU
   replay is blocked before launch by the installed DeepGEMM reference API
@@ -750,7 +794,7 @@ suite walls, wall-speedup, and card-time ratio remain `missing`, never zero.
   repository-owned restore-and-validate fix; it is neither a runtime pass/fail
   placeholder nor an implicit exemption. No external workaround is permitted.
 - The historical 112-workload pair and 109-workload pipeline attempt both failed
-  before completion. A human-authorized 106-workload supplemental rerun is now
-  pending; no before/after wall or relative speedup may be published until both
-  sides finish that identical fixed matrix. The external TVM authorization
-  remains separately pending and does not change Kineto/allgather status.
+  before completion and remain missing evidence. The authorized 106-workload
+  supplemental pair completed and publishes the separately scoped 1.312451×
+  cold-cache result. The former pinned-TVM authorization request was withdrawn;
+  Kineto/allgather status remains missing rather than pass.

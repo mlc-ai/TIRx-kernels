@@ -2192,7 +2192,7 @@ def write_summary(out_dir: Path, current: dict) -> Path:
 
         phase_rows = []
         for record in current.get("results") or []:
-            breakdown = _workload_phase_breakdown(record)
+            breakdown = workload_phase_breakdown(record)
             if breakdown is not None:
                 phase_rows.append((record, breakdown))
         phase_rows.sort(key=lambda pair: pair[0]["phase_timestamps"]["gpu_started"])
@@ -2883,7 +2883,7 @@ def _pipeline_cost_model(
     }
 
 
-def _workload_phase_breakdown(record: dict) -> dict[str, float] | None:
+def workload_phase_breakdown(record: dict) -> dict[str, float] | None:
     """Derive workload phase durations from the canonical transition timestamps."""
     timeline = record.get("phase_timestamps") or {}
     required = (

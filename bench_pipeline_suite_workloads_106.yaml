@@ -2,6 +2,35 @@
 # Excludes allgather_gemm only for the authorized full-suite timing comparison;
 # canonical default flags and the 109-workload default sweep remain unchanged.
 defaults: {}
+supplement:
+  acceptance_use: supplemental_outside_all_acceptance_criteria
+  canonical_default_workload_count: 109
+  historical_pre_exclusion_workload_count: 112
+  excluded_workloads:
+  - kernel: gemm_reduce_scatter
+    config: tp1_m8192_n4096_k12288_fp16_dynamic
+    scope: canonical_default_sweep
+    reason: migration-before NCCL illegal-instruction failure; not introduced by the pipeline migration
+  - kernel: gemm_reduce_scatter
+    config: tp1_m8192_n8192_k28672_fp16_dynamic
+    scope: canonical_default_sweep
+    reason: migration-before NCCL illegal-instruction failure; not introduced by the pipeline migration
+  - kernel: gemm_reduce_scatter
+    config: tp1_m8192_n16384_k53248_fp16_dynamic
+    scope: canonical_default_sweep
+    reason: migration-before NCCL illegal-instruction failure; not introduced by the pipeline migration
+  - kernel: allgather_gemm
+    config: tp1_m8192_n24576_k4096_fp16_dynamic
+    scope: this_supplement_only
+    reason: pinned TVM NVSHMEM PE rank is coupled to physical CUDA device; external fix was not authorized
+  - kernel: allgather_gemm
+    config: tp1_m8192_n57344_k8192_fp16_dynamic
+    scope: this_supplement_only
+    reason: pinned TVM NVSHMEM PE rank is coupled to physical CUDA device; external fix was not authorized
+  - kernel: allgather_gemm
+    config: tp1_m8192_n106496_k16384_fp16_dynamic
+    scope: this_supplement_only
+    reason: pinned TVM NVSHMEM PE rank is coupled to physical CUDA device; external fix was not authorized
 workloads:
 - kernel: fp16_bf16_gemm
   config: fp16_1024x1024x1024

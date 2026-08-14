@@ -10,13 +10,13 @@ tree, so a kernel's configs sit at `config/<bucket>/<kernel>.yaml`. With no
 `--workloads`, the flagged configs across all files are assembled into
 `.bench-suite/workloads.generated.yaml` and that is what runs. The generated
 file is the inspectable source of truth for the current representative sweep,
-including the TP1 AllGather+GEMM and GEMM+ReduceScatter profiles. Every kernel
-has at most three default small/medium/large representatives; the current tree
-assembles 112 workloads. Widening or narrowing the sweep is a YAML `default`
+including the TP1 AllGather+GEMM profiles. Every kernel has at most three
+default small/medium/large representatives; the current tree assembles 109
+workloads. Widening or narrowing the sweep is a YAML `default`
 flag flip, not a scheduler rule or a second selection file. Multi-GPU configs
 are deliberately absent from the default measured sweep but remain available
 to explicit workload files.
-For each of the 33 kernels reduced from more than three defaults, the same YAML
+For each of the 32 kernels retaining three curated defaults, the same YAML
 also owns a `selection_rationale`; the capability gate requires exactly three
 single-GPU defaults and renders those rationales for review.
 
@@ -269,7 +269,7 @@ restores the assigned physical device and revalidates its UUID before case
 construction and timing. This is one instance of the general position invariant:
 after any reachable external call that may change current device, restore and
 prove the assigned device before allocation or launch. The two default single-GPU
-MegaMoE configs are therefore covered by the ordinary 112-workload path. External
+MegaMoE configs are therefore covered by the ordinary 109-workload path. External
 source edits, monkey-patches, and fallback to masking remain prohibited. The
 one-rank MegaMoE path also retains its TCP rendezvous/process-group setup and
 32-attempt EADDRINUSE handling as a known deferred overhead.

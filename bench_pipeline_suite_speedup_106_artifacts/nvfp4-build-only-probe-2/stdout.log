@@ -1,0 +1,147 @@
+[bench-suite] live log: /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_suite_speedup_106_artifacts/nvfp4-build-only-probe-2/suite/runs/1.log
+[bench-suite]   tail : tail -f /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_suite_speedup_106_artifacts/nvfp4-build-only-probe-2/suite/latest.log
+[bench-suite] run id : 1
+[bench-suite] visible: 8 ['0', '1', '2', '3', '4', '5', '6', '7']; util now [0:0% 1:0% 2:0% 3:0% 4:0% 5:0% 6:0% 7:0%]; mem now [0:0.0% 1:0.0% 2:0.0% 3:0.0% 4:24.7% 5:24.8% 6:22.0% 7:0.0%]
+[bench-suite] gate: util-threshold=0%, mem-threshold=85% — occupied (skip): none; shareable: ['0', '1', '2', '3', '4', '5', '6', '7'] (resident-VRAM cards: ['4', '5', '6'])
+[bench-suite] 3 workloads, 8 probe-OK GPU(s) in pool, one-shot prepared children, compile-profile={'name': 'NVIDIA B200', 'compute_capability': [10, 0], 'cuda_arch': 'sm_100a', 'num_sms': 148}, label=probe-nvfp4-build-only-explicit-sm100a-cold-default, 5 standard-timer round(s), aggregate=mean, cooldown=1s before every impl/round
+[bench-suite] 2026-08-14T07:12:57+00:00 prepare pid=249461 START nvfp4_gemm/1024x1024x1024 (attempt 1)
+[bench-suite] 2026-08-14T07:12:57+00:00 prepare pid=249462 START nvfp4_gemm/4096x4096x4096 (attempt 1)
+[bench-suite] 2026-08-14T07:12:57+00:00 prepare pid=249463 START nvfp4_gemm/16384x16384x16384 (attempt 1)
+[bench-suite] 2026-08-14T07:13:15+00:00 READY nvfp4_gemm/1024x1024x1024 prepare=17.965s
+[bench-suite] 2026-08-14T07:13:15+00:00 READY nvfp4_gemm/4096x4096x4096 prepare=18.063s
+[bench-suite] 2026-08-14T07:13:15+00:00 READY nvfp4_gemm/16384x16384x16384 prepare=18.065s
+[bench-suite] 2026-08-14T07:13:16+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 1)
+[bench-suite] 2026-08-14T07:13:16+00:00 gpus=4 GPU_START nvfp4_gemm/16384x16384x16384 (attempt 1)
+[bench-suite] 2026-08-14T07:13:16+00:00 gpus=7 GPU_START nvfp4_gemm/4096x4096x4096 (attempt 1)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 1
+[bench-suite] ***   intruder PIDs: [2833701]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:18+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 2)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 2
+[bench-suite] ***   intruder PIDs: [2833701]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:19+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 3)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 3
+[bench-suite] ***   intruder PIDs: [2834975]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:25+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 4)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 4
+[bench-suite] ***   intruder PIDs: [2834975]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:26+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 5)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 5
+[bench-suite] ***   intruder PIDs: [2835822]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:33+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 6)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 6
+[bench-suite] ***   intruder PIDs: [2835822]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:35+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 7)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 7
+[bench-suite] ***   intruder PIDs: [2836763]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:42+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 8)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 8
+[bench-suite] ***   intruder PIDs: [2836763]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:44+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 9)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 9
+[bench-suite] ***   intruder PIDs: [2837576]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:49+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 10)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 10
+[bench-suite] ***   intruder PIDs: [2837576]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:51+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 11)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 11
+[bench-suite] ***   intruder PIDs: [2838347]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:13:58+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 12)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 12
+[bench-suite] ***   intruder PIDs: [2838347]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:14:00+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 13)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 13
+[bench-suite] ***   intruder PIDs: [2839769]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:14:05+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 14)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 14
+[bench-suite] ***   intruder PIDs: [2839769]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:14:07+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 15)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 15
+[bench-suite] ***   intruder PIDs: [2840511]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:14:12+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 16)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 16
+[bench-suite] ***   intruder PIDs: [2840511]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:14:14+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 17)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 17
+[bench-suite] ***   intruder PIDs: [2841504]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:14:21+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 18)
+[bench-suite] **********************************************************************
+[bench-suite] *** INTERFERED *** nvfp4_gemm/1024x1024x1024 attempt 18
+[bench-suite] ***   intruder PIDs: [2841504]
+[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child
+[bench-suite] **********************************************************************
+[bench-suite] 2026-08-14T07:14:23+00:00 gpus=0 GPU_START nvfp4_gemm/1024x1024x1024 (attempt 19)
+[bench-suite] 2026-08-14T07:15:36+00:00 gpus=0 ok   nvfp4_gemm/1024x1024x1024 tir=5.390µs, flashinfer=4.470µs, cublaslt_nvfp4=4.516µs
+[bench-suite] 2026-08-14T07:15:36+00:00 gpus=7 ok   nvfp4_gemm/4096x4096x4096 tir=29.432µs, flashinfer=30.588µs, cublaslt_nvfp4=28.670µs
+[bench-suite] 2026-08-14T07:15:38+00:00 gpus=4 ok   nvfp4_gemm/16384x16384x16384 tir=1518.682µs, flashinfer=1447.259µs, cublaslt_nvfp4=1456.011µs
+[bench-suite] interference retry summary: 18 attempt(s)
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 1 → intruders [2833701]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 2 → intruders [2833701]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 3 → intruders [2834975]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 4 → intruders [2834975]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 5 → intruders [2835822]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 6 → intruders [2835822]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 7 → intruders [2836763]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 8 → intruders [2836763]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 9 → intruders [2837576]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 10 → intruders [2837576]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 11 → intruders [2838347]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 12 → intruders [2838347]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 13 → intruders [2839769]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 14 → intruders [2839769]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 15 → intruders [2840511]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 16 → intruders [2840511]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 17 → intruders [2841504]
+[bench-suite]   - nvfp4_gemm/1024x1024x1024: attempt 18 → intruders [2841504]
+[bench-suite] wrote /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_suite_speedup_106_artifacts/nvfp4-build-only-probe-2/suite/runs/1.json
+[bench-suite] wrote /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_suite_speedup_106_artifacts/nvfp4-build-only-probe-2/suite/reports/1/summary.md

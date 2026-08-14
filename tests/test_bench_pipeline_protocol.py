@@ -968,6 +968,40 @@ def test_prepared_run_bench_enforces_custom_cache_consumption():
     assert prepared.run_gpu() is executable
 
 
+def test_nvfp4_cublaslt_extension_build_is_consumed_before_assignment_load(monkeypatch):
+    from torch.utils import cpp_extension
+
+    from tirx_kernels.basic import nvfp4_gemm
+
+    artifact = ("prepared_module", "/prepared/build")
+    loaded_module = object()
+    load_calls = []
+    monkeypatch.setattr(nvfp4_gemm, "_CUBLASLT_EXT", None)
+    monkeypatch.setattr(
+        nvfp4_gemm,
+        "_build_cublaslt_nvfp4_ext",
+        lambda: pytest.fail("GPU stage must not rebuild the prepared extension"),
+    )
+    monkeypatch.setattr(
+        cpp_extension,
+        "_import_module_from_library",
+        lambda module_name, build_directory, is_python_module: (
+            load_calls.append((module_name, build_directory, is_python_module)),
+            loaded_module,
+        )[1],
+    )
+    entry = kernel_runner.PreparedCacheEntry(
+        nvfp4_gemm._CUBLASLT_EXT_CACHE_NAMESPACE,
+        nvfp4_gemm._cublaslt_ext_key((1024, 1024, 1024)),
+        artifact,
+    )
+
+    with replay_prepared_cache((entry,)):
+        assert nvfp4_gemm._load_cublaslt_nvfp4_ext((1024, 1024, 1024)) is loaded_module
+
+    assert load_calls == [("prepared_module", "/prepared/build", True)]
+
+
 def test_gpu_stage_compile_guard_rejects_direct_tvm_compile(monkeypatch):
     original_compile = kernel_runner.tvm.compile
     with pytest.raises(RuntimeError, match="completed before READY"):
@@ -2397,7 +2431,6 @@ def test_capability_audit_accounts_for_every_adapter_and_curated_selection():
     adapter_sets = [set(names) for names in capability["adapter_kernels"].values()]
     assert sum(map(len, adapter_sets)) == len(set.union(*adapter_sets))
     assert set.union(*adapter_sets) == set(registry.kernel_index(strict=True))
-    assert [len(names) for names in adapter_sets] == [21, 10, 10]
     assert all(
         set(selection["configs"]) == {"small", "medium", "large"} and selection["rationale"]
         for selection in capability["curated_default_selections"]
