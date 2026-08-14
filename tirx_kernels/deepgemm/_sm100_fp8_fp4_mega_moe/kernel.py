@@ -21,6 +21,7 @@ import math
 import os
 
 from tvm.ir.type import PointerType, PrimType
+from tvm.script import tirx as T
 
 from .spec import (
     MegaMoeConfig,
@@ -33,6 +34,307 @@ from .spec import (
 )
 
 __all__ = ["get_kernel"]
+
+# ---------------------------------------------------------------------------
+# PTX wrappers
+#
+# Pure functions of their arguments: each names one instruction (or one small
+# instruction pair) so the kernel body below reads as the upstream CUDA does.
+# Nothing here depends on the launch configuration, so none of it belongs in
+# the builder's closure.
+# ---------------------------------------------------------------------------
+
+
+def load_global_s64(dst, address):
+    return T.ptx.ld.global_.s64(dst, address)
+
+
+def load_global_u64(dst, address):
+    return T.ptx.ld.global_.u64(dst, address)
+
+
+def load_global_u32(dst, address):
+    return T.ptx.ld.global_.u32(dst, address)
+
+
+def store_global_u64(address, value):
+    return T.ptx.st.global_.u64(address, value)
+
+
+def store_global_u32(address, value):
+    return T.ptx.st.global_.u32(address, value)
+
+
+def store_global_u8(address, value):
+    return T.ptx.st.global_.u8(address, value)
+
+
+# Destination-first, mirroring the PTX these wrap: the caller declares the
+# register and passes it in.
+def load_acq_sys_s32(dst, address):
+    return T.ptx.ld.acquire.sys.global_.s32(dst, address)
+
+
+def atomic_add_rel_u32(dst, address, value):
+    return T.ptx.atom.release.gpu.global_.add.u32(dst, address, value)
+
+
+def load_acq_u32(dst, address):
+    return T.ptx.ld.acquire.gpu.global_.b32(dst, address)
+
+
+def grid_sync_done_u32(new_value, old_value):
+    return T.cast(
+        T.bitwise_and(T.bitwise_xor(new_value, old_value), T.uint32(0x80000000)) != T.uint32(0),
+        "uint32",
+    )
+
+
+def load_f32(dst, address):
+    # ptx destinations are declared registers, so the helper writes into
+    # one the caller owns rather than returning a value.
+    return T.ptx.ld.global_.f32(dst, address)
+
+
+def load_shared_u32(dst, address):
+    return T.ptx.ld.shared.u32(dst, address)
+
+
+def uint32_bits_to_float(bits):
+    return T.cuda.uint_as_float(bits)
+
+
+def float_bits(x):
+    return T.cuda.float_as_uint(x)
+
+
+def sync_unaligned(barrier_idx, num_threads):
+    return T.ptx.barrier.sync(T.uint32(barrier_idx), T.uint32(num_threads))
+
+
+def prefetch_tensormap(tensor_map):
+    return T.ptx.prefetch.tensormap(T.address_of(tensor_map))
+
+
+def lds128(src_ptr, dst, base=0):
+    return T.ptx.ld.shared.v4.u32(dst[base], dst[base + 1], dst[base + 2], dst[base + 3], src_ptr)
+
+
+def mbarrier_arrive_and_set_tx(barrier_ptr, num_bytes):
+    return T.ptx.mbarrier.arrive.expect_tx.shared.b64(barrier_ptr, T.uint32(num_bytes))
+
+
+def mbarrier_wait_phase(barrier_ptr, phase):
+    return T.cuda.mbarrier_wait(barrier_ptr, phase)
+
+
+def replace_smem_desc_addr(desc, smem_ptr):
+    start_addr = T.cast(
+        T.bitwise_and(
+            T.shift_right(T.cuda.cvta_generic_to_shared(smem_ptr), T.uint32(4)), T.uint32(0x3FFF)
+        ),
+        "uint64",
+    )
+    return T.bitwise_or(T.bitwise_and(desc, T.bitwise_not(T.uint64(0x3FFF))), start_addr)
+
+
+#: Bulk global -> shared copy, completion signalled on an mbarrier.
+_bulk_g2s_chain = "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
+
+#: Bulk shared -> global copy, retired through the bulk commit group.
+_bulk_s2g_chain = "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint"
+
+#: `cute::TMA::CacheHintSm90::EVICT_FIRST`. Ring-buffer traffic is streamed
+#: through L2 once, so it should be the first thing evicted.
+_evict_first_policy = T.uint64(0x12F0000000000000)
+
+
+def tma_load_1d(dst_ptr, src_ptr, barrier_ptr, num_bytes):
+    return T.ptx[_bulk_g2s_chain](
+        dst_ptr, src_ptr, T.cast(num_bytes, "uint32"), barrier_ptr, _evict_first_policy
+    )
+
+
+def tma_store_1d(dst_ptr, src_ptr, num_bytes):
+    return T.ptx[_bulk_s2g_chain](
+        dst_ptr, src_ptr, T.cast(num_bytes, "uint32"), _evict_normal_policy
+    )
+
+
+def tma_store_fence():
+    return T.ptx.fence.proxy.async_.shared__cta()
+
+
+def fence_barrier_init():
+    return T.ptx.fence.mbarrier_init.release.cluster()
+
+
+def tma_store_arrive():
+    return T.ptx.cp.async_.bulk.commit_group()
+
+
+def tma_store_wait(num_prior_groups):
+    if num_prior_groups == 0:
+        return T.ptx.cp.async_.bulk.wait_group(0)
+    if num_prior_groups == 1:
+        return T.ptx.cp.async_.bulk.wait_group(1)
+    raise ValueError("Unsupported TMA store wait distance")
+
+
+def tma_store_2d(src, tensormap, coord0, coord1):
+    return T.ptx["cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group"](
+        T.address_of(tensormap), coord0, coord1, src
+    )
+
+
+#: Unicast (cta_mask=1) at cta_group::2 scope with the evict-normal L2 policy;
+#: the mbarrier arrives as a precomputed leader-CTA shared address.
+_sm100_2sm_load_chain = (
+    "cp.async.bulk.tensor.2d.shared::cluster.global"
+    ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
+)
+
+#: `cute::TMA::CacheHintSm100::EVICT_NORMAL`. Weights and activations are
+#: re-read across blocks, so they keep the default L2 residency.
+_evict_normal_policy = T.uint64(1152921504606846976)
+
+
+def sm100_tma_2sm_load_2d_addr(dst, mbar, tensormap_addr, coord0, coord1):
+    mbar_addr = T.cuda.sm100_2sm_leader_smem_addr(mbar)
+    T.evaluate(
+        T.ptx[_sm100_2sm_load_chain](
+            dst, tensormap_addr, coord0, coord1, mbar_addr, _evict_normal_policy
+        )
+    )
+
+
+def stg128_symm(peer_base, byte_offset, r0, r1, r2, r3):
+    return T.ptx.st.global_.v4.b32(peer_ptr(peer_base, byte_offset), r0, r1, r2, r3)
+
+
+def ptr_to_u64(ptr):
+    return T.reinterpret("uint64", ptr)
+
+
+def peer_ptr(peer_base, byte_offset):
+    return T.reinterpret("handle", peer_base + byte_offset)
+
+
+def peer_store_u32(peer_base, byte_offset, value):
+    return T.ptx.st.global_.u32(peer_ptr(peer_base, byte_offset), value)
+
+
+def peer_store_u64(peer_base, byte_offset, value):
+    return T.ptx.st.global_.u64(peer_ptr(peer_base, byte_offset), value)
+
+
+def st_shared_bulk(ptr, num_bytes):
+    return T.ptx.st_bulk.weak.shared__cta(ptr, T.cast(num_bytes, "uint64"))
+
+
+def peer_atomic_add_u64(dst, peer_base, byte_offset, value):
+    return T.ptx.atom.sys.global_.add.u64(dst, peer_ptr(peer_base, byte_offset), value)
+
+
+def peer_red_add_rel_sys_s32(peer_base, byte_offset, value):
+    return T.ptx.red.release.sys.global_.add.s32(peer_ptr(peer_base, byte_offset), value)
+
+
+def peer_load_u32(dst, peer_base, byte_offset):
+    return T.ptx.ld.global_.u32(dst, peer_ptr(peer_base, byte_offset))
+
+
+def peer_load_f32(dst, peer_base, byte_offset):
+    return T.ptx.ld.global_.f32(dst, peer_ptr(peer_base, byte_offset))
+
+
+def tma_load_1d_symm(dst_ptr, peer_base, byte_offset, barrier_ptr, num_bytes):
+    return T.ptx[_bulk_g2s_chain](
+        dst_ptr,
+        peer_ptr(peer_base, byte_offset),
+        T.cast(num_bytes, "uint32"),
+        barrier_ptr,
+        _evict_first_policy,
+    )
+
+
+def ballot_sync(mask, pred):
+    return T.cuda.ballot_sync(mask, pred)
+
+
+def ffs_u32(value):
+    return T.cuda.ffs_u32(value)
+
+
+def reduce_add_sync_u32(mask, value):
+    return T.cuda.reduce_add_sync_u32(mask, value)
+
+
+def red_add_gpu_u32(address, value):
+    return T.ptx.red.gpu.global_.add.u32(address, value)
+
+
+def cuda_clock64():
+    return T.cuda.clock64()
+
+
+def bf16x2_lo(packed):
+    return T.cast(T.bitwise_and(packed, T.uint32(0xFFFF)), "uint16")
+
+
+def bf16x2_hi(packed):
+    return T.cast(T.bitwise_and(T.shift_right(packed, T.uint32(16)), T.uint32(0xFFFF)), "uint16")
+
+
+def cast_into_bf16_and_pack(v0, v1):
+    return T.cuda.float22bfloat162_rn(v0, v1)
+
+
+def make_runtime_instr_desc_with_sf_id(desc, sfa_id, sfb_id):
+    runtime_desc = T.bitwise_and(desc, T.uint32(0x9FFFFFCF))
+    runtime_desc = T.bitwise_or(runtime_desc, T.shift_left(T.cast(sfa_id, "uint32"), T.uint32(29)))
+    runtime_desc = T.bitwise_or(runtime_desc, T.shift_left(T.cast(sfb_id, "uint32"), T.uint32(4)))
+    return runtime_desc
+
+
+def st_async_cluster_task_info(dst_ptr, bar_ptr, dst_cta_idx, task_info_regs):
+    mapped_bar = T.alloc_local((1,), "uint32")
+    mapped_dst = T.alloc_local((1,), "uint32")
+    mapped_dst_hi = T.alloc_local((1,), "uint32")
+    cta = T.cast(dst_cta_idx, "uint32")
+    T.evaluate(
+        T.ptx.mapa.shared__cluster.u32(mapped_bar[0], T.cuda.cvta_generic_to_shared(bar_ptr), cta)
+    )
+    T.evaluate(
+        T.ptx.mapa.shared__cluster.u32(mapped_dst[0], T.cuda.cvta_generic_to_shared(dst_ptr), cta)
+    )
+    T.evaluate(
+        T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
+            mapped_dst[0],
+            task_info_regs[0],
+            task_info_regs[1],
+            task_info_regs[2],
+            task_info_regs[3],
+            mapped_bar[0],
+        )
+    )
+    T.evaluate(T.ptx.add.u32(mapped_dst_hi[0], mapped_dst[0], T.uint32(16)))
+    return T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
+        mapped_dst_hi[0],
+        task_info_regs[4],
+        task_info_regs[5],
+        task_info_regs[6],
+        task_info_regs[7],
+        mapped_bar[0],
+    )
+
+
+def atomic_add_u32(dst, address, value):
+    return T.ptx.atom.global_.add.u32(dst, address, value)
+
+
+def load_volatile_u32(dst, address):
+    return T.ptx.ld.volatile.global_.u32(dst, address)
 
 
 def get_kernel(
@@ -51,7 +353,6 @@ def get_kernel(
 ):
     from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_tmem_layout
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
-    from tvm.script import tirx as T
     from tvm.tirx.layout import S, TCol, TileLayout, TLane
 
     runtime_config = MegaMoeConfig(
@@ -139,67 +440,6 @@ def get_kernel(
             T.cuda.float2_y(lower[0]),
         )
 
-    def red_add_gpu_s32(address, value):
-        return T.ptx.red.gpu.global_.add.s32(address, value)
-
-    def load_volatile_u64(dst, address):
-        return T.ptx.ld.volatile.global_.u64(dst, address)
-
-    def load_global_s64(dst, address):
-        return T.ptx.ld.global_.s64(dst, address)
-
-    def load_global_u64(dst, address):
-        return T.ptx.ld.global_.u64(dst, address)
-
-    def load_global_u32(dst, address):
-        return T.ptx.ld.global_.u32(dst, address)
-
-    def store_global_u64(address, value):
-        return T.ptx.st.global_.u64(address, value)
-
-    def store_global_u32(address, value):
-        return T.ptx.st.global_.u32(address, value)
-
-    def store_global_u8(address, value):
-        return T.ptx.st.global_.u8(address, value)
-
-    def store_global_f32(address, value):
-        return T.ptx.st.global_.f32(address, value)
-
-    # Destination-first, mirroring the PTX these wrap: the caller declares the
-    # register and passes it in.
-    def load_acq_sys_s32(dst, address):
-        return T.ptx.ld.acquire.sys.global_.s32(dst, address)
-
-    def atomic_add_rel_u32(dst, address, value):
-        return T.ptx.atom.release.gpu.global_.add.u32(dst, address, value)
-
-    def load_acq_u32(dst, address):
-        return T.ptx.ld.acquire.gpu.global_.b32(dst, address)
-
-    def grid_sync_done_u32(new_value, old_value):
-        return T.cast(
-            T.bitwise_and(T.bitwise_xor(new_value, old_value), T.uint32(0x80000000)) != T.uint32(0),
-            "uint32",
-        )
-
-    def load_f32(dst, address):
-        # ptx destinations are declared registers, so the helper writes into
-        # one the caller owns rather than returning a value.
-        return T.ptx.ld.global_.f32(dst, address)
-
-    def load_shared_u64(dst, address):
-        return T.ptx.ld.shared.u64(dst, address)
-
-    def load_shared_u32(dst, address):
-        return T.ptx.ld.shared.u32(dst, address)
-
-    def uint32_bits_to_float(bits):
-        return T.cuda.uint_as_float(bits)
-
-    def float_bits(x):
-        return T.cuda.float_as_uint(x)
-
     @T.inline
     def get_e4m3_sf_and_sf_inv(
         sf, sf_inv, scaled_pair, scaled_values, scaled_bits, scale_exponents, amax_x, amax_y
@@ -260,89 +500,6 @@ def get_kernel(
             "int32",
         )
 
-    def sync_unaligned(barrier_idx, num_threads):
-        return T.ptx.barrier.sync(T.uint32(barrier_idx), T.uint32(num_threads))
-
-    def prefetch_tensormap(tensor_map):
-        return T.ptx.prefetch.tensormap(T.address_of(tensor_map))
-
-    def lds128(src_ptr, dst, base=0):
-        return T.ptx.ld.shared.v4.u32(
-            dst[base], dst[base + 1], dst[base + 2], dst[base + 3], src_ptr
-        )
-
-    def sts128(dst_ptr, r0, r1, r2, r3):
-        return T.ptx.st.shared.v4.b32(dst_ptr, r0, r1, r2, r3)
-
-    def mbarrier_arrive_and_set_tx(barrier_ptr, num_bytes):
-        return T.ptx.mbarrier.arrive.expect_tx.shared.b64(barrier_ptr, T.uint32(num_bytes))
-
-    def mbarrier_wait_phase(barrier_ptr, phase):
-        return T.cuda.mbarrier_wait(barrier_ptr, phase)
-
-    def shared_addr_u32(ptr):
-        return T.cuda.cvta_generic_to_shared(ptr)
-
-    def replace_smem_desc_addr(desc, smem_ptr):
-        start_addr = T.cast(
-            T.bitwise_and(T.shift_right(shared_addr_u32(smem_ptr), T.uint32(4)), T.uint32(0x3FFF)),
-            "uint64",
-        )
-        return T.bitwise_or(T.bitwise_and(desc, T.bitwise_not(T.uint64(0x3FFF))), start_addr)
-
-    _bulk_g2s_chain = (
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
-    )
-    _bulk_s2g_chain = "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint"
-    _evict_first_policy = T.uint64(0x12F0000000000000)
-
-    def tma_load_1d(dst_ptr, src_ptr, barrier_ptr, num_bytes):
-        return T.ptx[_bulk_g2s_chain](
-            dst_ptr, src_ptr, T.cast(num_bytes, "uint32"), barrier_ptr, _evict_first_policy
-        )
-
-    def tma_store_1d(dst_ptr, src_ptr, num_bytes):
-        return T.ptx[_bulk_s2g_chain](
-            dst_ptr, src_ptr, T.cast(num_bytes, "uint32"), _evict_normal_policy
-        )
-
-    def tma_store_fence():
-        return T.ptx.fence.proxy.async_.shared__cta()
-
-    def fence_barrier_init():
-        return T.ptx.fence.mbarrier_init.release.cluster()
-
-    def tma_store_arrive():
-        return T.ptx.cp.async_.bulk.commit_group()
-
-    def tma_store_wait(num_prior_groups):
-        if num_prior_groups == 0:
-            return T.ptx.cp.async_.bulk.wait_group(0)
-        if num_prior_groups == 1:
-            return T.ptx.cp.async_.bulk.wait_group(1)
-        raise ValueError("Unsupported TMA store wait distance")
-
-    def tma_store_2d(src, tensormap, coord0, coord1):
-        return T.ptx["cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group"](
-            T.address_of(tensormap), coord0, coord1, src
-        )
-
-    # Unicast (cta_mask=1) at cta_group::2 scope with the evict-normal L2
-    # policy; the mbarrier arrives as a precomputed leader-CTA shared address.
-    _sm100_2sm_load_chain = (
-        "cp.async.bulk.tensor.2d.shared::cluster.global"
-        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
-    )
-    _evict_normal_policy = T.uint64(1152921504606846976)
-
-    def sm100_tma_2sm_load_2d_addr(dst, mbar, tensormap_addr, coord0, coord1):
-        mbar_addr = T.cuda.sm100_2sm_leader_smem_addr(mbar)
-        T.evaluate(
-            T.ptx[_sm100_2sm_load_chain](
-                dst, tensormap_addr, coord0, coord1, mbar_addr, _evict_normal_policy
-            )
-        )
-
     @T.inline
     def sm100_tma_2sm_load_2d_select(
         dst, mbar, tensor_map_l1, tensor_map_l2, block_phase_value, coord0, coord1
@@ -356,86 +513,6 @@ def get_kernel(
             coord0,
             coord1,
         )
-
-    def stg128_symm(peer_base, byte_offset, r0, r1, r2, r3):
-        return T.ptx.st.global_.v4.b32(peer_ptr(peer_base, byte_offset), r0, r1, r2, r3)
-
-    def ptr_to_u64(ptr):
-        return T.reinterpret("uint64", ptr)
-
-    def peer_ptr(peer_base, byte_offset):
-        return T.reinterpret("handle", peer_base + byte_offset)
-
-    def peer_store_u32(peer_base, byte_offset, value):
-        return T.ptx.st.global_.u32(peer_ptr(peer_base, byte_offset), value)
-
-    def peer_store_u64(peer_base, byte_offset, value):
-        return T.ptx.st.global_.u64(peer_ptr(peer_base, byte_offset), value)
-
-    def st_shared_u32(ptr, value):
-        return T.ptx.st.shared.u32(ptr, value)
-
-    def st_shared_u64(ptr, value):
-        return T.ptx.st.shared.u64(ptr, value)
-
-    def st_shared_bulk(ptr, num_bytes):
-        return T.ptx.st_bulk.weak.shared__cta(ptr, T.cast(num_bytes, "uint64"))
-
-    def peer_atomic_add_u64(dst, peer_base, byte_offset, value):
-        return T.ptx.atom.sys.global_.add.u64(dst, peer_ptr(peer_base, byte_offset), value)
-
-    def peer_red_add_rel_sys_s32(peer_base, byte_offset, value):
-        return T.ptx.red.release.sys.global_.add.s32(peer_ptr(peer_base, byte_offset), value)
-
-    def peer_load_u32(dst, peer_base, byte_offset):
-        return T.ptx.ld.global_.u32(dst, peer_ptr(peer_base, byte_offset))
-
-    def peer_load_f32(dst, peer_base, byte_offset):
-        return T.ptx.ld.global_.f32(dst, peer_ptr(peer_base, byte_offset))
-
-    def tma_load_1d_symm(dst_ptr, peer_base, byte_offset, barrier_ptr, num_bytes):
-        return T.ptx[_bulk_g2s_chain](
-            dst_ptr,
-            peer_ptr(peer_base, byte_offset),
-            T.cast(num_bytes, "uint32"),
-            barrier_ptr,
-            _evict_first_policy,
-        )
-
-    def ballot_sync(mask, pred):
-        return T.cuda.ballot_sync(mask, pred)
-
-    def ffs_u32(value):
-        return T.cuda.ffs_u32(value)
-
-    def reduce_add_sync_u32(mask, value):
-        return T.cuda.reduce_add_sync_u32(mask, value)
-
-    def reduce_min_sync_u32(mask, value):
-        return T.cuda.reduce_min_sync_u32(mask, value)
-
-    def fns_b32(dst, mask, base, offset):
-        return T.ptx.fns.b32(dst, mask, base, offset)
-
-    def red_add_gpu_u32(address, value):
-        return T.ptx.red.gpu.global_.add.u32(address, value)
-
-    def cuda_clock64():
-        return T.cuda.clock64()
-
-    def bf16x2_lo(packed):
-        return T.cast(T.bitwise_and(packed, T.uint32(0xFFFF)), "uint16")
-
-    def bf16x2_hi(packed):
-        return T.cast(
-            T.bitwise_and(T.shift_right(packed, T.uint32(16)), T.uint32(0xFFFF)), "uint16"
-        )
-
-    def stmatrix_fp8x4_trans(smem_ptr, word):
-        return T.ptx.stmatrix.sync.aligned.m16n8.x1.trans.shared.b8(smem_ptr, word)
-
-    def cast_into_bf16_and_pack(v0, v1):
-        return T.cuda.float22bfloat162_rn(v0, v1)
 
     @T.inline
     def activation_pair_store(out, atom_idx, pair_idx, gate0, gate1, up0, up1, weight0, weight1):
@@ -471,16 +548,6 @@ def get_kernel(
         result = T.cuda.fmul2_rn(T.cuda.fmul2_rn(gate, up), weights)
         out[atom_idx, pair_idx, 0] = T.cuda.float2_x(result)
         out[atom_idx, pair_idx, 1] = T.cuda.float2_y(result)
-
-    def make_runtime_instr_desc_with_sf_id(desc, sfa_id, sfb_id):
-        runtime_desc = T.bitwise_and(desc, T.uint32(0x9FFFFFCF))
-        runtime_desc = T.bitwise_or(
-            runtime_desc, T.shift_left(T.cast(sfa_id, "uint32"), T.uint32(29))
-        )
-        runtime_desc = T.bitwise_or(
-            runtime_desc, T.shift_left(T.cast(sfb_id, "uint32"), T.uint32(4))
-        )
-        return runtime_desc
 
     def advance_umma_desc_lo(desc, base_lo, mn_offset, k_offset):
         return T.bitwise_or(
@@ -527,47 +594,6 @@ def get_kernel(
             "int32",
         )
 
-    def st_async_cluster_task_info(dst_ptr, bar_ptr, dst_cta_idx, task_info_regs):
-        mapped_bar = T.alloc_local((1,), "uint32")
-        mapped_dst = T.alloc_local((1,), "uint32")
-        mapped_dst_hi = T.alloc_local((1,), "uint32")
-        cta = T.cast(dst_cta_idx, "uint32")
-        T.evaluate(
-            T.ptx.mapa.shared__cluster.u32(
-                mapped_bar[0], T.cuda.cvta_generic_to_shared(bar_ptr), cta
-            )
-        )
-        T.evaluate(
-            T.ptx.mapa.shared__cluster.u32(
-                mapped_dst[0], T.cuda.cvta_generic_to_shared(dst_ptr), cta
-            )
-        )
-        T.evaluate(
-            T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
-                mapped_dst[0],
-                task_info_regs[0],
-                task_info_regs[1],
-                task_info_regs[2],
-                task_info_regs[3],
-                mapped_bar[0],
-            )
-        )
-        T.evaluate(T.ptx.add.u32(mapped_dst_hi[0], mapped_dst[0], T.uint32(16)))
-        return T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
-            mapped_dst_hi[0],
-            task_info_regs[4],
-            task_info_regs[5],
-            task_info_regs[6],
-            task_info_regs[7],
-            mapped_bar[0],
-        )
-
-    def atomic_add_u32(dst, address, value):
-        return T.ptx.atom.global_.add.u32(dst, address, value)
-
-    def load_volatile_u32(dst, address):
-        return T.ptx.ld.volatile.global_.u32(dst, address)
-
     def symm_rank_offset_arg_expr(symm_rank_offsets, mapped_rank_idx):
         if num_processes == 1:
             return symm_rank_offsets[0]
@@ -581,7 +607,7 @@ def get_kernel(
 
     def load_symm_rank_base(dst, smem_symm_rank_bases, mapped_rank_idx):
         if num_processes > 1:
-            return load_shared_u64(
+            return T.ptx.ld.shared.u64(
                 dst, smem_symm_rank_bases.ptr_to([T.cast(mapped_rank_idx, "int32")])
             )
 
@@ -1631,7 +1657,7 @@ def get_kernel(
                         T.cast(T.shift_right(scheduler_cached_status, 32), "int32")
                         != kernel_config.num_sms * num_processes
                     ):
-                        load_volatile_u64(
+                        T.ptx.ld.volatile.global_.u64(
                             scheduler_cached_status,
                             workspace_expert_recv_count_sum.ptr_to([dispatch_expert_idx]),
                         )
@@ -1992,7 +2018,7 @@ def get_kernel(
 
         @T.inline
         def sm100_u8x4_stsm_t_copy(fp8x4_word, smem_ptr):
-            stmatrix_fp8x4_trans(smem_ptr, fp8x4_word)
+            T.ptx.stmatrix.sync.aligned.m16n8.x1.trans.shared.b8(smem_ptr, fp8x4_word)
 
         @T.inline
         def sm90_u32x4_stsm_t_copy(packed_values_buf, smem_ptr):
@@ -2035,7 +2061,7 @@ def get_kernel(
         if flat_warp_idx == 0:
             if num_processes > 1:
                 if lane_idx < num_processes:
-                    st_shared_u64(
+                    T.ptx.st.shared.u64(
                         smem_symm_rank_bases.ptr_to([lane_idx]),
                         sym_buffer_base
                         + T.cast(symm_rank_offset_arg_expr(symm_rank_offsets, lane_idx), "uint64"),
@@ -2150,7 +2176,7 @@ def get_kernel(
                     workspace_expert_send_count.ptr_to([dispatch_expert_idx]),
                     send_value,
                 )
-                st_shared_u32(
+                T.ptx.st.shared.u32(
                     smem_expert_count.ptr_to([dispatch_expert_idx]),
                     T.cast(prev_send_count, "uint32"),
                 )
@@ -2338,7 +2364,7 @@ def get_kernel(
                         "int32",
                     )
                     min_active_count = T.cast(
-                        reduce_min_sync_u32(T.uint32(0xFFFFFFFF), min_in_lane), "int32"
+                        T.cuda.reduce_min_sync_u32(T.uint32(0xFFFFFFFF), min_in_lane), "int32"
                     )
                     round_token_count = min_active_count * num_active_ranks
                     if T.cast(dispatch_dst_slot_idx, "uint32") < T.cast(
@@ -2363,7 +2389,7 @@ def get_kernel(
                                 num_seen_ranks + active_lane_count, "uint32"
                             ):
                                 rank_slot_bit: T.uint32
-                                fns_b32(
+                                T.ptx.fns.b32(
                                     rank_slot_bit,
                                     rank_count_mask,
                                     T.uint32(0),
@@ -2493,7 +2519,9 @@ def get_kernel(
                             + pull_src_token_topk_idx * 4
                         ),
                     )
-                    store_global_f32(l1_topk_weights.ptr_to([pull_ring_token_idx]), pulled_weight)
+                    T.ptx.st.global_.f32(
+                        l1_topk_weights.ptr_to([pull_ring_token_idx]), pulled_weight
+                    )
                     store_token_src_metadata(
                         pull_pool_token_idx,
                         current_rank_in_expert_idx,
@@ -2600,7 +2628,7 @@ def get_kernel(
                         )
                     if kernel_collect_stats and flat_warp_idx == 1 and lane_idx == 0:
                         T.evaluate(
-                            red_add_gpu_s32(
+                            T.ptx.red.gpu.global_.add.s32(
                                 cumulative_local_expert_recv_stats.ptr_to([pull_local_expert_idx]),
                                 pull_num_tokens,
                             )
@@ -3619,7 +3647,7 @@ def get_kernel(
                         combine_store_ptr = combine_chunks.ptr_to(
                             [2, epilogue_warp_idx, j * 32 + lane_idx, 0]
                         )
-                        sts128(
+                        T.ptx.st.shared.v4.b32(
                             combine_store_ptr,
                             epilogue_bf16_packed[0],
                             epilogue_bf16_packed[1],
