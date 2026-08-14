@@ -27,7 +27,7 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 
 现有 GEMM 原型提供了方向性证据：三个 workload 串行执行为 29.70 秒，并行 CPU prepare 加单卡串行 GPU stage 为 19.17 秒，端到端 1.55x；CPU prepare 每条约 3.9–4.2 秒，GPU stage 约 3.3–4.5 秒。该数据是成本模型证据，不是跨 workload、跨机器的固定秒数要求。
 
-同时从配置源缩减日常 measured sweep：当前默认 sweep 为 234 条 workload，其中 33 个 kernel 的 `default: true` config 超过 3 条。每个受影响 kernel 只保留生产相关的小/中/大 3 个代表点后，当前树的默认 sweep 预计为 112 条，减少 122 条（52.1%）。其余 config 只改为 `default: false`，仍须全部支持显式运行并完成 pipeline 迁移。
+同时从配置源缩减日常 measured sweep：原默认 sweep 为 234 条 workload，其中 33 个 kernel 的 `default: true` config 超过 3 条。逐 kernel 保留生产相关的小/中/大代表点后得到 112 条；随后因迁移前即存在的 NCCL illegal-instruction 崩溃，将 `gemm_reduce_scatter` 的 3 条默认 config 全部退出日常 sweep。当前树因此为 109 条默认 workload、32 组 curated 三点选择，共减少 125 条（53.4%）。全部 992 个 config 仍须支持显式运行并完成 pipeline 迁移。
 
 ## Acceptance Criteria
 
@@ -142,8 +142,8 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 
 - AC-11: 默认 measured sweep 对每个 kernel 最多保留小/中/大 3 个代表 config，同时完整保留显式 benchmark 能力。
   - Positive Tests (expected to PASS):
-    - `bench_suite/config/**/*.yaml` 中每个 kernel 的 `default: true` 数量不超过 3；当前配置树生成的默认 workload 数量从 234 变为 112。
-    - 当前 33 个受影响 kernel 各保留 exactly 3 个 default config，经逐 kernel 审查分别代表低、中、高语义工作量，并尽可能覆盖不同生产 dispatch regime。
+    - `bench_suite/config/**/*.yaml` 中每个 kernel 的 `default: true` 数量不超过 3；当前配置树从 234 条生成 109 条默认 workload，实际数量由 capability report 派生而非硬编码门槛。
+    - 当前 32 个 curated kernel 各保留 exactly 3 个 default config，经逐 kernel 审查分别代表低、中、高语义工作量，并尽可能覆盖不同生产 dispatch regime；`gemm_reduce_scatter` 因迁移前即存在的 NCCL 崩溃保留 16 个显式 config、默认数为 0。
     - `load_config_dir()` 生成的默认 sweep 只包含选定代表点；`load_kernel_configs()` 和显式 `--workloads` 仍可解析并执行所有未选 config。
     - 所有 `default: false` config 仍通过 AC-9 的 all-config pipeline capability gate，不因退出日常 sweep 而失去 benchmark 支持。
     - 选择结果只由各 kernel YAML 中现有 `default` flags 拥有；同一 YAML 的 `selection_rationale` 记录该三点选择的语义依据，报告或校验工具从二者派生，不维护第二份 selection manifest。
@@ -157,7 +157,7 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 
 ### Upper Bound (Maximum Acceptable Scope)
 
-完成一个通用、可观测、可取消的 prepared-child protocol；所有 benchable kernel、所有 config、所有 timer/reference 组合以及单卡/多卡/distributed workload 全部迁移；调度器根据实时 GPU eligibility 在多卡上 work-conserving dispatch；内部 release 为事件驱动；外部 occupancy 轮询；完整保留当前 measurement、failure、rank lifecycle 和 interference contracts；不存在 one-stage execution path。日常默认 measured sweep 在 YAML 源头对每个 kernel 最多保留 3 个经审查的小/中/大代表点，当前树从 234 条降至 112 条；其余 config 全部保留并可显式运行。
+完成一个通用、可观测、可取消的 prepared-child protocol；所有 benchable kernel、所有 config、所有 timer/reference 组合以及单卡/多卡/distributed workload 全部迁移；调度器根据实时 GPU eligibility 在多卡上 work-conserving dispatch；内部 release 为事件驱动；外部 occupancy 轮询；完整保留当前 measurement、failure、rank lifecycle 和 interference contracts；不存在 one-stage execution path。日常默认 measured sweep 在 YAML 源头对每个 kernel 最多保留 3 个经审查的小/中/大代表点，当前树从 234 条降至 109 条；其余 config 全部保留并可显式运行。
 
 ### Lower Bound (Minimum Acceptable Scope)
 
@@ -247,8 +247,8 @@ child 负责：
 
 2. 审查并缩减默认 measured config 集合，不改变完整 benchmark 能力。
    - Phase A: 枚举每个 kernel 的全部 config、当前 default 集合、规模轴、production dispatch regime 和已有 baseline GPU time。
-   - Phase B: 对 33 个 default config 超过 3 条的 kernel，逐个确定小/中/大代表点，并在 canonical kernel YAML 的 `selection_rationale` 记录选择理由；不能用统一的首/中/尾机械规则替代语义判断。
-   - Phase C: 只修改 YAML `default` flags，加入每 kernel `default <= 3`、当前 generated count = 112、未选 config 仍可解析的静态 gate。
+   - Phase B: 对原 33 个 default config 超过 3 条的 kernel 逐个确定小/中/大代表点；`gemm_reduce_scatter` 后续整体退出默认 sweep，因此当前 curated 三点集合为 32 组。canonical kernel YAML 的 `selection_rationale` 记录选择理由；不能用统一的首/中/尾机械规则替代语义判断。
+   - Phase C: 只修改 YAML `default` flags，保留每 kernel `default <= 3`、角色/rationale schema 和未选 config 仍可解析的规则 gate；capability report 如实派生当前 109 条默认 workload，不用硬编码库存数量强制。
 
 3. 固化通用两阶段合同：从 GEMM 原型提炼 runner primitive，保持 standalone API 兼容。
    - Phase A: 定义 prepared object/protocol，而不是让 scheduler理解各 kernel 内部细节。
@@ -280,8 +280,8 @@ child 负责：
    - Phase A: protocol/state-machine/metadata行为测试。
    - Phase B: 少量单卡 workload 和动态外部负载 A/B；迁移前一侧从保留 one-stage scheduler 的 `a91a1b7` 独立 worktree 运行，迁移后一侧从当前 pipeline worktree 运行。两侧必须使用完全相同的显式 workload matrix、物理 GPU、默认 5 rounds/1.0s cooldown、timer/reference/correctness 协议和外层 wall timer；不跑全量、不占多张卡。原始 run JSON、outer timer 和 stdout/stderr 必须由 `scripts/build_bench_pipeline_ac10_evidence.py` 逐文件哈希并交叉校验；缺文件、UUID 不同、协议不完整或 cost model 不可复算时不得生成数值 evidence。
    - Phase C: 对多卡路径只做 assignment mismatch、原子 claim 和 rank lifecycle 等无多卡结构验证，并将 runtime 状态记为 `exempted_by_human_unmeasured`。
-   - Phase D: 依据 timeline 检查 `T_unexplained`、ratio、correctness和资源边界；只保留可复现的端到端收益。迁移前/后同 matrix 的 pipeline overlap 加速与 YAML 默认覆盖从 234 降到 112 的独立工作量缩减必须分别归因，不得合并、相乘或汇总成一个加速比。
-   - Supplemental suite measurement（不属于任何 AC）：按 2026-08-14 的一次性授权，在 AC-10 小矩阵之外分别对 `a91a1b7` 与当前 pipeline 各跑一次相同的 112 条单卡默认 workload。两侧保持相同的冷/热编译缓存状态，各自使用当时全部 eligible GPU；原始 outer wall 为主数字，同时持久化可得的 GPU 卡时、foreign wait、external occupancy、retry count 与参与 GPU UUID。两侧可用卡集合不同必须显式披露；多 GPU worker 并行在迁移前已存在，不得归因于本次迁移；该数字不得进入 AC-10、不得与 234→112 覆盖缩减合并。两次 outer timer 与派生 evidence 必须落到可提交路径。完成这一对测量后，恢复默认“不跑全量 sweep”的机器纪律。
+   - Phase D: 依据 timeline 检查 `T_unexplained`、ratio、correctness和资源边界；只保留可复现的端到端收益。迁移前/后同 matrix 的 pipeline overlap 加速与 YAML 默认覆盖从 234 降到 109 的独立工作量缩减必须分别归因，不得合并、相乘或汇总成一个加速比。
+   - Supplemental suite measurement（不属于任何 AC）：按 2026-08-14T07:25Z 转达的人类裁决，固定使用从 109 条默认清单派生的 106 条补充矩阵：`gemm_reduce_scatter` 的 3 条已按既有决定退出默认 sweep，`allgather_gemm` 的 3 条仅为本次补充测量临时排除，默认 YAML 保持不变。分别对 `a91a1b7` 与当前 pipeline 各跑一次相同矩阵；两侧保持冷编译缓存且缓存根彼此隔离，各自使用当时全部 eligible GPU。原始 outer wall 为主数字，同时持久化可得的 GPU 卡时、foreign wait、external occupancy、retry count 与参与 GPU UUID。after 的设备级显存门槛与 before 的 compute-app 显存策略差异必须披露；多 GPU worker 并行在迁移前已存在，不得归因于本次迁移；该数字不得进入 AC-10、不得与 234→112/109 覆盖缩减合并。两次 outer timer 与派生 evidence 必须落到可提交路径。pinned TVM 修复仍未获授权，Kineto/allgather 继续保持 missing，不因补充矩阵排除而视为解决。
 
 ## Feature Map / Capability Map
 
@@ -301,7 +301,7 @@ child 负责：
 | Task ID | Description | Target AC | Tag (`coding`/`analyze`) | Depends On |
 |---------|-------------|-----------|----------------------------|------------|
 | task1 | 建立旧路径 phase timeline 和 targeted cost model；结合全部 config 的规模轴、dispatch regime 与 baseline GPU time，确定逐 kernel 小/中/大默认选择 | AC-7, AC-10, AC-11 | analyze | - |
-| task2 | 落实 YAML `default` flags 和静态 coverage gates，确保当前默认 sweep 为 112 条且所有未选 config 仍可显式运行 | AC-11 | coding | task1 |
+| task2 | 落实 YAML `default` flags 和规则型 coverage gates，确保当前默认 sweep 派生为 109 条且所有未选 config 仍可显式运行 | AC-11 | coding | task1 |
 | task3 | 一次性实现通用 prepared benchmark contract、canonical exact module index、prepared-child IPC、late GPU binding 和 standalone API 兼容 | AC-1, AC-2, AC-4, AC-8 | coding | task1 |
 | task4 | 将调度器完整改造成有界 CPU prepare/READY/GPU pipeline，并整合动态 GPU eligibility、背压、phase telemetry、fail-fast、取消、干扰 retry 和资源回收 | AC-3, AC-5, AC-6, AC-7 | coding | task3 |
 | task5 | 按通用 contract 迁移全部 local single-GPU kernel/config，修正共性缺口并由 all-config capability gate 证明无遗漏 | AC-1, AC-4, AC-8, AC-9, AC-11 | coding | task2, task4 |
@@ -316,10 +316,10 @@ child 负责：
 - FUT-2: CUDA kernel 本身的 NCU 优化。
   - Current-loop handoff: AC-10 只优化 suite orchestration wall time。
   - Promotion trigger: pipeline 收口后，GPU stage 已成为主导且具体 kernel 仍低效。
-- FUT-3: baseline promotion。完整 112 条 before/after sweep 仅按 2026-08-14
-  的一次性授权作为 AC 外补充测量执行；两侧已实际启动但均 fail-fast 未完成，
-  因此补充 evidence 为显式 `missing` 且不发布 speedup。该授权已消费，不改变
-  后续默认“不跑全量”的约束。
+- FUT-3: baseline promotion。历史 112 条与 109 条尝试均 fail-fast 未完成；
+  2026-08-14T07:25Z 的人类裁决授权本次补充测量使用固定 106 条矩阵，临时排除
+  `allgather_gemm` 三条而不改默认 YAML。该补充测量可继续；pinned TVM 修改仍
+  未授权，Kineto/allgather 的 acceptance 状态保持 missing。
   - Current-loop handoff: 只做少量代表性 targeted run。
   - Promotion trigger: 没有其他 session 运行 suite，且全部主要锚点验证完成。
 
@@ -333,13 +333,13 @@ child 负责：
 - GEMM 原型证明拆分可行且端到端收益显著，下一步应优化真实 wall-time critical path而不是代理指标。
 - measurement protocol、correctness、reference coverage、fail-fast和干扰隔离不能为速度让步。
 - 所有 benchable workload 必须迁移，包括 exact/alias module resolution 和 distributed rank lifecycle；不接受 fallback。
-- 日常默认 measured sweep 对每个 kernel 最多保留 3 个小/中/大代表 config；当前树从 234 条降至 112 条，其余 config 保留并继续支持显式 pipeline benchmark。
+- 日常默认 measured sweep 对每个 kernel 最多保留 3 个小/中/大代表 config；当前树从 234 条降至 109 条，其余 config 保留并继续支持显式 pipeline benchmark。
 
 ### Resolved Disagreements
 
 - “没有额外开销”的定义：不使用不可验证的绝对零开销表述；采用 `T_unexplained <= max(0.5s, 5%)`、p95 dispatch <100ms、无 recurring CPU-starvation gap 的可观测合同。
 - 配置路径是否可直接映射 module：仓库中存在多处 public name/filename alias，不能直接假设；由于用户要求全迁移，选择从 canonical `KERNEL_META` 派生完整索引并 runtime复核，不新增手写 manifest。
-- “小/中/大”的选择方式：不采用数组首/中/尾或 label 排序的机械规则；逐 kernel 依据语义工作量、production dispatch regime 和已有 GPU time 选择，YAML `default` flags 是唯一权威。112 是当前库存下的派生结果，长期不变量是每 kernel `default <= 3`。
+- “小/中/大”的选择方式：不采用数组首/中/尾或 label 排序的机械规则；逐 kernel 依据语义工作量、production dispatch regime 和已有 GPU time 选择，YAML `default` flags 是唯一权威。109 是当前库存下的派生结果，长期不变量是每 kernel `default <= 3`，不是某个硬编码总数。
 - 测试方法：skill模板提到 TDD，但仓库工程原则明确禁止以 TDD/测试配额代替系统理解；计划改为实现后在主要功能锚点提交必要的行为测试，并将性能实验作为独立一次性证据。
 
 ### Convergence Status
@@ -349,7 +349,7 @@ child 负责：
 - The reachable DeepGEMM MegaMoE override was latent under the former mask implementation: logical device 0 was the assigned card. The all-visible implementation now preserves `init_dist()` and its process group, then restores the assigned physical device and revalidates its UUID before allocation and timing.
 - The base interpreter's `deep_gemm` package fails earlier because it lacks `fp8_fp4_mega_moe`; the locked benchmark environment resolves a compatible package from `venv-bench-sglang96a04cb-nccl4py031-cublasmp010`. Evidence for the intended dependency's device override comes from the out-of-tree pinned copy at `/home/hongyij/workspace/tirx-kernels/.porting/deps/deep_gemm-559d79fb/deep_gemm/utils/dist.py:33`, which calls `torch.cuda.set_device(local_rank)`.
 - Distributed rank and assigned physical device are separate runtime fields. External calls that may change current device are bounded by a restore-and-UUID-validate position invariant; only a fix requiring external-source edits, monkey-patching, or mask fallback is blocking.
-- `config/deepgemm/deepgemm_fp8_fp4_mega_moe.yaml` contributes two default single-card configurations (`t64_m64_h7168_i3072_e384_k6_g1` and `t8192_m8192_h7168_i3072_e384_k6_g1`) to the 112-workload default sweep, so the call-site invariant applies to routine execution as well as explicit runs.
+- `config/deepgemm/deepgemm_fp8_fp4_mega_moe.yaml` contributes two default single-card configurations (`t64_m64_h7168_i3072_e384_k6_g1` and `t8192_m8192_h7168_i3072_e384_k6_g1`) to the 109-workload default sweep, so the call-site invariant applies to routine execution as well as explicit runs.
 - `_run_distributed()` still opens a TCP rendezvous and creates a one-rank process group when `num_processes == 1`, including its existing EADDRINUSE retry behavior. This is a known deferred overhead, not part of the current device-binding change.
 - The pinned TIR `ea0950ab` NVSHMEM runtime is a reachable external blocker for GemmComm/Kineto under the all-visible `set_device` design. `/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/src/runtime/extra/contrib/nvshmem/init.cc:64,68` calls `cudaSetDevice(worker_id)` and later `cudaSetDevice(mype_node)`, conflating PE/rank 0 with CUDA device 0. A one-rank workload assigned physical GPU 2 therefore creates an unassigned GPU-0 context; the repository UUID/context guard correctly fails before timing. Preventing that context requires an external TVM change, monkey-patch, or mask fallback, all outside the authorized boundary. Kineto AC-10 evidence is explicitly `missing`, not pass/zero, in `bench_pipeline_ac10_artifacts/kineto/evidence-missing.json`.
 - A second call-site audit found no existing repository-usable full-init alternative: `worker_id_start` is also the NVSHMEM PE rank and cannot carry physical index 2 for `nranks=1`; `mype_node` resets the device to 0 after init; Disco `default_device` is checked only after both device selections; and the official `nvshmemx_init_attr` full init is header-inline over a LOCAL/non-`dlsym` `nvshmemi_init_thread`, while the exported `nvshmemx_hostlib_init_attr` is not full device initialization. Reimplementing or binary-wrapping that ABI would be a new external workaround, not correct use of an existing API.

@@ -115,7 +115,7 @@ safe. The locked benchmark environment instead resolves `deep_gemm` from
 `fp8_fp4_mega_moe` and `utils.dist` are both present; that is the environment
 required for runtime evidence. The MegaMoE YAML has two default single-GPU entries,
 `t64_m64_h7168_i3072_e384_k6_g1` and
-`t8192_m8192_h7168_i3072_e384_k6_g1`, so the path participates in the 112-item
+`t8192_m8192_h7168_i3072_e384_k6_g1`, so the path participates in the 109-item
 default sweep.
 
 The human approved a repository-owned call-site fix. The target keeps
@@ -162,8 +162,8 @@ The capability audit reports:
 - 10 explicit/custom adapters covering process-local executables, dispatcher
   delegation, hardware-profile compile caches, and distributed export/load
   lifecycles; together the three adapter classes account for 41/41 kernels.
-- 112 single-GPU default workloads, with at most three defaults per kernel.
-- 33 historically over-broad default selections, each now exactly three points
+- 109 single-GPU default workloads, with at most three defaults per kernel.
+- 32 current curated default selections, each exactly three points
   with its rationale stored beside the canonical `default` flags in the same
   kernel YAML and emitted by the capability report.
 - 27 multi-GPU configs, none selected by the default measured sweep.
@@ -204,7 +204,7 @@ The protocol suite covers:
 - standalone `run_kernel_bench()` composes the same prepare/run-GPU contract;
 - timeline validation rejects missing transitions, reversed timestamps, and
   overlapping ownership intervals on the same GPU;
-- capability accounting proves 41/41 adapters and 33/33 reviewed three-point
+- capability accounting proves 41/41 adapters and 32/32 reviewed three-point
   selections from canonical sources.
 
 The current additions also exercise physical-UUID lookup without context creation,
@@ -586,7 +586,7 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
 | AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
 | AC-10 | incomplete | Proton has a passing persisted same-UUID schema-3 A/B. Event and CUDA-graph have persisted same-UUID measurement evidence whose structural checks pass but whose retry-heavy wall times are not speedup claims. Kineto is explicitly missing because of the pinned external TVM rank/device coupling; MegaMoE runtime A/B remains unmeasured |
-| AC-11 | satisfied | 112 defaults, all 992 configs retained, and 33/33 reviewed three-point selections with YAML-owned small/medium/large roles and rationale |
+| AC-11 | satisfied | 109 defaults, all 992 configs retained, and 32/32 reviewed three-point selections with YAML-owned small/medium/large roles and rationale; all 16 `gemm_reduce_scatter` configs remain explicitly runnable |
 
 The plan as a whole is therefore not marked complete. The set-device and
 same-child retry implementation is complete at its structural anchors and has
@@ -600,50 +600,62 @@ evidence.
 
 ## AC-external full-suite speedup supplement
 
-On 2026-08-14 the human granted one-time permission to run the identical 112
-single-GPU default workloads on `a91a1b7` and the current pipeline, using every
-GPU each scheduler considered eligible. This supplement is not part of AC-10 or
-any other acceptance criterion. Its tracked artifact is
-`bench_pipeline_suite_speedup_evidence.json`; raw sources live under
-`bench_pipeline_suite_speedup_artifacts/`.
+This supplement is outside AC-10 and every other acceptance criterion. The
+historical 112-workload attempt remains in
+`bench_pipeline_suite_speedup_evidence.json`: both sides fail-fast stopped, so it
+correctly publishes no speedup. Its recorded 234-to-112 coverage context remains
+historical evidence and is not rewritten.
 
-Both sides started from independently verified empty cache roots and used the
-same NVSHMEM-enabled TVM runtime built from TIR commit `ea0950ab`, the same locked
-NCCL/cuBLAS/cuBLASMp/NVSHMEM libraries, the same 112-workload file, and the
-unchanged default 5 rounds plus 1.0s cooldown. One-second all-GPU occupancy
-timelines and outer command timers were persisted outside `.bench-suite/`.
+After `gemm_reduce_scatter` left the default sweep for its migration-before NCCL
+illegal-instruction failure, the human granted a new one-time run of the current
+109-workload matrix. The canonical file is
+`bench_pipeline_suite_workloads_109.yaml` (SHA-256
+`243bb2b52ca20ec4b33417aa4fc85924e86c1a79eaf09cc2ea12c31a96ce4f14`).
+The commands retain default 5 rounds plus 1.0s cooldown, isolated cold cache
+roots, exact outer timers, and one-second all-GPU occupancy monitoring.
 
-No end-to-end speedup is published because neither full sweep completed:
+No 109-workload end-to-end speedup is published. The pipeline side cannot finish
+the unchanged matrix within the authorized dependency boundary:
 
-- migration-before ran for 85.088s, produced seven successful terminal records,
-  then `gemm_reduce_scatter/tp1_m8192_n16384_k53248_fp16_dynamic` hit a CUDA
-  illegal instruction; the rank process aborted and the baseline scheduler
-  correctly fail-fast stopped the sweep;
-- pipeline ran for 21.092s and failed during CPU prepare, before any GPU
-  assignment, because MegaMoE's generated PTX used `.scale_vec::1X` with a
-  `sm_100f` target rejected by `ptxas`. Its cost model is therefore explicitly
-  `missing`, not zero.
+- `after-9` ran for 58.904447942s, completed seven measurements, and assigned
+  `allgather_gemm/tp1_m8192_n24576_k4096_fp16_dynamic` to physical GPU 6
+  (`GPU-e56ad157-72b3-2e86-4cd9-5769dc1f229c`). Pinned TVM initialized the
+  one-rank NVSHMEM runtime on rank/device 0, the repository restored GPU 6, and
+  `nvshmem_finalize` aborted with `Invalid context pointer`. The run is incomplete
+  and its cost model is `missing`.
+- A focused cold-cache default-protocol retry put three `allgather_gemm`
+  workloads on physical GPUs 7, 5, and 4. An attempted repository-local bootstrap
+  through nvmath still failed on GPU 5 after 30.456443833s because it initialized
+  the exported host binding rather than TVM's statically linked private NVSHMEM
+  runtime. The half-implementation was reverted and is diagnostic only.
+- The migration-before 109-workload command was not launched: publishing a ratio
+  requires both sides to complete the identical list, and the pipeline blocker is
+  already deterministic on nonzero physical ordinals.
 
-That pipeline failure exposed a repository bug rather than a runtime or GPU
-occupancy result. MegaMoE now uses the suite's architecture-specific `sm_100a`
-compile target for this block-scale instruction. A subsequent CPU-only prepare
-of `t64_m64_h7168_i3072_e384_k6_g1` compiled and exported both stats and
-no-stats executables in 5.935s while `torch.cuda.is_initialized()` remained
-false before and after. This fixes the discovered compile prerequisite; it does
-not retroactively complete the historical sweep, and the one-time authorization
-was not reused for a rerun.
+The external boundary is structural. `libtvm_runtime_extra.so` statically links
+the full NVSHMEM implementation; its registered init function uses one integer as
+both `cudaSetDevice(worker_id)` and NVSHMEM PE rank. For `nranks=1`, a nonzero
+physical device therefore cannot be represented while preserving `rank=0`.
+The public full initializer is header-inline over a LOCAL symbol, while the
+exported hostlib initializer is a different runtime state and cannot initialize
+TVM's private allocator/kernel runtime. Completing the 109-workload pair therefore
+requires the already-pending human authorization to change pinned TVM. Excluding
+`allgather_gemm`, weakening UUID/context guards, reintroducing the live-process
+mask, or publishing partial walls as a speedup remains prohibited.
 
-Those durations are retained only as partial-command diagnostics. The evidence
-JSON deliberately contains no `wall_speedup`, `wall_reduction_percent`, or
-`card_time_ratio`. The baseline artifact also has no equivalent exact GPU card
-time field. The raw availability sets differed and are recorded, so even a future
-successful pair must disclose that limit on raw-wall interpretation.
+At 2026-08-14T07:25Z, the human-directed continuation authorized a narrower
+supplemental-only matrix without authorizing any TVM change. The fixed
+`bench_pipeline_suite_workloads_106.yaml` matrix removes the three
+`allgather_gemm` rows only for this timing comparison; canonical default YAML and
+the 109-workload default sweep remain unchanged. Together with the three
+`gemm_reduce_scatter` rows already removed from defaults, the supplement is
+106/112. Kineto/allgather remain explicitly missing for acceptance purposes.
 
-The intended attribution remains unchanged: a successful quotient would include
-CPU/GPU pipeline overlap, would not attribute pre-existing per-GPU worker
-parallelism to this migration, and would not include or combine the independent
-234-to-112 default-coverage reduction. The one-time full-sweep permission is now
-consumed; the default no-full-sweep machine discipline is restored.
+The intended attribution is unchanged: any future complete cold-cache quotient
+is an upper bound that includes CPU/GPU pipeline overlap, excludes pre-existing
+per-GPU worker parallelism as a migration gain, and must not be combined with the
+independent 234-to-109 coverage reduction. Until both commands finish, absolute
+suite walls, wall-speedup, and card-time ratio remain `missing`, never zero.
 
 ## Engineering-principles audit
 
@@ -707,6 +719,8 @@ consumed; the default no-full-sweep machine discipline is restored.
   reachable prerequisite for the new binding design, with an approved
   repository-owned restore-and-validate fix; it is neither a runtime pass/fail
   placeholder nor an implicit exemption. No external workaround is permitted.
-- The one authorized full 112-workload pair was run but both commands failed
-  before completion, so the supplemental result is explicitly missing. The
-  authorization is consumed; no rerun is permitted without a new human grant.
+- The historical 112-workload pair and 109-workload pipeline attempt both failed
+  before completion. A human-authorized 106-workload supplemental rerun is now
+  pending; no before/after wall or relative speedup may be published until both
+  sides finish that identical fixed matrix. The external TVM authorization
+  remains separately pending and does not change Kineto/allgather status.
