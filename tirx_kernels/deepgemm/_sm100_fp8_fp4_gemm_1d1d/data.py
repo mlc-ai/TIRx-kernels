@@ -18,7 +18,7 @@ Upstream sources: deep_gemm/utils/math.py, csrc/apis/layout.hpp, deep_gemm/testi
 
 from __future__ import annotations
 
-from ._sm100_fp8_fp4_gemm_1d1d import Major, ceil_div, gran_k_for
+from .spec import Major, ceil_div, gran_k_for
 
 __all__ = [
     "assert_within_threshold",
@@ -328,7 +328,7 @@ def prepare_m_grouped_contiguous(
     import torch
 
     require_sm100()
-    from ._sm100_fp8_fp4_gemm_1d1d import align_up, get_theoretical_mk_alignment, make_actual_ms
+    from .spec import align_up, get_theoretical_mk_alignment, make_actual_ms
 
     torch.manual_seed(seed)
     alignment = get_theoretical_mk_alignment()
@@ -457,7 +457,7 @@ def prepare_m_grouped_masked(
     import torch
 
     require_sm100()
-    from ._sm100_fp8_fp4_gemm_1d1d import get_theoretical_mk_alignment, make_actual_ms
+    from .spec import get_theoretical_mk_alignment, make_actual_ms
 
     torch.manual_seed(seed)
     expected_m = int(expected_m_per_group * 1.2)
@@ -697,7 +697,7 @@ def psum_slice_diff(actual, expected, grouped_layout, alignment, *, zero_padding
     `zero_padding` the kernel promises to write zeros there, so that is asserted
     here rather than left to a caller.
     """
-    from ._sm100_fp8_fp4_gemm_1d1d import align_up
+    from .spec import align_up
 
     ends = [int(v) for v in grouped_layout.tolist()]
     worst = 0.0
@@ -1035,8 +1035,8 @@ def prepare_k_grouped(
 
     require_sm100()
     deep_gemm = require_deep_gemm()
-    from ._sm100_fp8_fp4_gemm_1d1d import align_up
     from .k_grouped_fp8_gemm_contiguous import make_ks
+    from .spec import align_up
 
     torch.manual_seed(seed)
     real_ks, aligned_ks = make_ks(
