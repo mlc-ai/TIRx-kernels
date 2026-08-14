@@ -181,9 +181,12 @@ The capability audit reports:
 - 27 multi-GPU configs, none selected by the default measured sweep.
 
 Final post-rebase non-GPU verification on 2026-08-14 passed Ruff, Python bytecode
-compilation, `git diff --check`, all 106 protocol/evidence tests, and the full
-capability audit above. No benchmark workload or multi-GPU runtime was launched
-for this verification pass.
+compilation, all 106 protocol/evidence tests, the full capability audit above,
+and `git diff --check origin/main...HEAD` over source/document paths. The diff
+check excludes byte-preserved raw artifact trees: several captured failure logs
+contain upstream/runtime trailing whitespace that must remain unchanged as
+evidence. No benchmark workload or multi-GPU runtime was launched for this
+verification pass.
 
 The protocol suite covers:
 
