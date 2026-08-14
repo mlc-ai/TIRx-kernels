@@ -1,0 +1,403 @@
+{
+  "timestamp": "1",
+  "label": "cudagraph-after-6416bb6-gpu2-schema3",
+  "git": {
+    "tir": "ea0950ab",
+    "tirx-kernels": "6416bb61-dirty",
+    "tirx-bench-ci": null
+  },
+  "kernel_tree": {
+    "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
+    "tirx-kernels:tirx_kernels": "186e994787dfe249fba7b9b3ef82f13c7ba05609"
+  },
+  "baselines": {
+    "torch": {
+      "importable": true,
+      "source_dir": "/home/hongyij/miniforge3/lib/python3.13/site-packages/torch",
+      "version": "2.11.0+cu130",
+      "cuda": "13.0",
+      "torch_git_version": "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+      "dist": "torch"
+    },
+    "deep_gemm": {
+      "importable": true,
+      "source_dir": "/home/hongyij/workspace/DeepGEMM/dist/deep_gemm-2.3.0%2B35c4bc8-cp313-cp313-linux_x86_64.whl",
+      "version": "2.3.0",
+      "dist": "deep_gemm"
+    },
+    "flashinfer": {
+      "importable": true,
+      "source_dir": "/home/hongyij/miniforge3/lib/python3.13/site-packages/flashinfer",
+      "version": "0.6.17",
+      "dist": "flashinfer-python"
+    },
+    "flash_kda": {
+      "importable": true,
+      "source_dir": "/home/hongyij/workspace/kda-backends/FlashKDA",
+      "dist": "flash_kda",
+      "version": "0.0.1+1ce47ea",
+      "git_dir": "/home/hongyij/workspace/kda-backends/FlashKDA",
+      "git_sha": "1ce47ea3"
+    },
+    "flash_attn": {
+      "importable": true,
+      "source_dir": "/home/hongyij/miniforge3/lib/python3.13/site-packages/flash_attn-2.8.4-py3.13-linux-x86_64.egg/flash_attn",
+      "version": "2.8.4",
+      "dist": "flash_attn"
+    },
+    "sglang": {
+      "installed": false
+    },
+    "cutlass": {
+      "importable": true,
+      "source_dir": "/home/hongyij/miniforge3/lib/python3.13/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass",
+      "version": "4.7.0"
+    }
+  },
+  "probe": {
+    "enabled": false,
+    "usable": [
+      "2"
+    ],
+    "failed": {}
+  },
+  "pipeline": {
+    "execution_mode": "pipeline",
+    "process_model": "one_shot_child_per_workload",
+    "measurement_protocol": {
+      "rounds": 5,
+      "cooldown_s": 1.0,
+      "default_rounds": 5,
+      "default_cooldown_s": 1.0,
+      "is_default": true
+    },
+    "compile_profile": {
+      "name": "NVIDIA B200",
+      "compute_capability": [
+        10,
+        0
+      ],
+      "cuda_arch": "sm_100a",
+      "num_sms": 148
+    },
+    "max_prepare_processes": 1,
+    "ready_backlog": 2,
+    "max_observed_preparing": 1,
+    "max_observed_ready": 1,
+    "max_observed_buffered": 1,
+    "max_observed_active_children": 1,
+    "max_observed_process_tree": 5,
+    "max_observed_rss_bytes": 2141347840,
+    "max_observed_open_fds": 191,
+    "started": 1786677247.5669339,
+    "critical_finished": 1786677276.5304272,
+    "processes_reaped": 1786677277.548772,
+    "critical_wall_s": 28.96349334716797,
+    "final_reap_tail_s": 1.0183448791503906,
+    "external_occupancy_timeline": [
+      {
+        "timestamp": 1786677248.5425074,
+        "occupied_gpu_indices": []
+      }
+    ],
+    "interference_retry_count": 2,
+    "interference_retries": [
+      {
+        "status": "INTERFERED",
+        "kernel": "act_and_mul",
+        "config": "silu_fp16_d4096_t1",
+        "attempt": 1,
+        "process_pid": 99009,
+        "intruder_pids": [
+          134349
+        ],
+        "detail": "intruders [134349]",
+        "detected_at": 1786677253.3869681,
+        "acknowledged_at": 1786677253.5153112,
+        "resident_context_bytes_after_cleanup": {
+          "2": 650117120
+        },
+        "descendant_cleanup": {
+          "descendant_pids": [],
+          "forced_kill_pids": []
+        },
+        "retry_attempt": 2,
+        "retry_in_place": true
+      },
+      {
+        "status": "INTERFERED",
+        "kernel": "act_and_mul",
+        "config": "silu_fp16_d4096_t1",
+        "attempt": 2,
+        "process_pid": 99009,
+        "intruder_pids": [
+          134349
+        ],
+        "detail": "intruders [134349]",
+        "detected_at": 1786677255.9431317,
+        "acknowledged_at": 1786677256.1882417,
+        "resident_context_bytes_after_cleanup": {
+          "2": 1107296256
+        },
+        "descendant_cleanup": {
+          "descendant_pids": [],
+          "forced_kill_pids": []
+        },
+        "retry_attempt": 3,
+        "retry_in_place": true
+      }
+    ],
+    "foreign_interference_intervals": [
+      {
+        "gpu_index": "2",
+        "gpu_uuid": "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+        "started": 1786677253.3869681,
+        "finished": 1786677254.3161628,
+        "duration_s": 0.9291946887969971,
+        "intruder_pids": [
+          134349
+        ],
+        "sources": [
+          "predispatch_foreign_pid",
+          "running_gpu_monitor"
+        ],
+        "closed_by": "predispatch_verified_clear"
+      },
+      {
+        "gpu_index": "2",
+        "gpu_uuid": "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+        "started": 1786677255.9431317,
+        "finished": 1786677256.7123415,
+        "duration_s": 0.7692098617553711,
+        "intruder_pids": [
+          134349
+        ],
+        "sources": [
+          "predispatch_foreign_pid",
+          "running_gpu_monitor"
+        ],
+        "closed_by": "predispatch_verified_clear"
+      }
+    ],
+    "multi_gpu_runtime_validation": {
+      "validation_status": "exempted_by_human_unmeasured",
+      "runtime_evidence": "not_collected_by_human_direction",
+      "structural_evidence": "assignment_count_rejection_atomic_claim_and_rank_lifecycle_ordering"
+    },
+    "cost_model": {
+      "schema_version": 3,
+      "measurement_status": "measured",
+      "record_count": 1,
+      "observed_critical_s": 28.96349334716797,
+      "first_process_started_s": 0.13217616081237793,
+      "prepare_spawn_span_s": 0.0,
+      "first_ready_s": 3.620558500289917,
+      "ideal_gpu_list_schedule_s": 23.977768182754517,
+      "cpu_ready_constrained_gpu_list_schedule_s": 23.977768182754517,
+      "ready_constrained_gpu_list_schedule_s": 24.818806171417236,
+      "eligibility_constrained_gpu_list_schedule_s": 25.34290599822998,
+      "gpu_busy_s_by_index": {
+        "2": 23.977768182754517
+      },
+      "gpu_execution_s_by_index": {
+        "2": 23.076583862304688
+      },
+      "foreign_wait_s": 0.5240998268127441,
+      "expected_s": 28.439364671707153,
+      "expected_with_foreign_s": 28.963464498519897,
+      "unexplained_s": 2.8848648071289062e-05,
+      "dispatch_latency_s": {
+        "measurement_status": "measured",
+        "count": 3,
+        "max": 0.04016995429992676,
+        "p95": 0.04016995429992676
+      },
+      "raw_dispatch_wait_s": {
+        "measurement_status": "measured",
+        "count": 3,
+        "max": 0.800868034362793,
+        "p95": 0.800868034362793
+      },
+      "foreign_dispatch_wait_s": {
+        "measurement_status": "measured",
+        "count": 3,
+        "max": 0.800851583480835,
+        "p95": 0.800851583480835
+      },
+      "initial_dispatch_latency_s": {
+        "measurement_status": "measured",
+        "count": 1,
+        "max": 0.04016995429992676,
+        "p95": 0.04016995429992676
+      },
+      "retry_dispatch_latency_s": {
+        "measurement_status": "measured",
+        "count": 2,
+        "max": 2.8848648071289062e-05,
+        "p95": 2.8848648071289062e-05
+      },
+      "assignment_handoff_s": {
+        "measurement_status": "measured",
+        "count": 3,
+        "max": 0.8406965732574463,
+        "p95": 0.8406965732574463
+      },
+      "ready_starvation_s": 0.0,
+      "interference_retry_ready_delay_s": 0.8410379886627197,
+      "interference_retry_count": 2,
+      "interference_retry_gpu_ownership_s": 4.1597113609313965,
+      "interference_retry_gpu_execution_s": 3.310436487197876,
+      "complete_timeline_count": 1,
+      "complete_measurement_count": 1
+    }
+  },
+  "results": [
+    {
+      "kernel": "act_and_mul",
+      "config": "silu_fp16_d4096_t1",
+      "label": "silu_fp16_d4096_t1",
+      "gpu": "2",
+      "gpus": [
+        "2"
+      ],
+      "num_gpus": 1,
+      "attempt": 3,
+      "process_pid": 99009,
+      "execution_mode": "pipeline",
+      "process_model": "one_shot_child_per_workload",
+      "started_at": "2026-08-14T03:14:07+00:00",
+      "phase_timestamps": {
+        "process_started": 1786677247.69911,
+        "child_started": 1786677247.7342317,
+        "prepare_started": 1786677247.7342317,
+        "framework_import_started": 1786677247.7371736,
+        "framework_loaded": 1786677250.1442373,
+        "module_loaded": 1786677250.5649474,
+        "config_resolved": 1786677250.5649529,
+        "ready": 1786677251.1874924,
+        "assigned": 1786677256.7123704,
+        "gpu_started": 1786677256.7642798,
+        "gpu_finished": 1786677276.5298605,
+        "result_received": 1786677276.5304272,
+        "process_reaped": 1786677277.548385
+      },
+      "gpu_attempts": [
+        {
+          "attempt": 1,
+          "ready": 1786677251.1874924,
+          "assigned": 1786677251.2276623,
+          "gpu_started": 1786677252.068359,
+          "gpus": [
+            "2"
+          ],
+          "physical_gpu_uuids": [
+            "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9"
+          ],
+          "abandoned_gpu_resident_bytes_after_reassignment": {},
+          "gpu_finished": 1786677253.514975,
+          "status": "INTERFERED",
+          "intruder_pids": [
+            134349
+          ],
+          "resident_context_bytes_after_cleanup": {
+            "2": 650117120
+          },
+          "descendant_cleanup": {
+            "descendant_pids": [],
+            "forced_kill_pids": []
+          },
+          "ownership_released": 1786677253.5153112
+        },
+        {
+          "attempt": 2,
+          "ready": 1786677253.5153112,
+          "assigned": 1786677254.3161793,
+          "gpu_started": 1786677254.3247576,
+          "gpus": [
+            "2"
+          ],
+          "physical_gpu_uuids": [
+            "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9"
+          ],
+          "abandoned_gpu_resident_bytes_after_reassignment": {
+            "2": 650117120
+          },
+          "gpu_finished": 1786677256.1878808,
+          "status": "INTERFERED",
+          "intruder_pids": [
+            134349
+          ],
+          "resident_context_bytes_after_cleanup": {
+            "2": 1107296256
+          },
+          "descendant_cleanup": {
+            "descendant_pids": [],
+            "forced_kill_pids": []
+          },
+          "ownership_released": 1786677256.1882417
+        },
+        {
+          "attempt": 3,
+          "ready": 1786677256.1882417,
+          "assigned": 1786677256.7123704,
+          "gpu_started": 1786677256.7642798,
+          "gpus": [
+            "2"
+          ],
+          "physical_gpu_uuids": [
+            "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9"
+          ],
+          "abandoned_gpu_resident_bytes_after_reassignment": {
+            "2": 1107296256
+          },
+          "gpu_finished": 1786677276.5298605,
+          "result_received": 1786677276.5304272,
+          "status": "RESULT",
+          "ownership_released": 1786677276.5304272
+        }
+      ],
+      "retry_in_place": true,
+      "physical_gpu_uuids": [
+        "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9"
+      ],
+      "impls": {
+        "tirx": 2.0013121976576875,
+        "flashinfer": 2.21120032956057
+      },
+      "round_samples": {
+        "tirx": [
+          2.0873106041923553,
+          1.938885255648038,
+          2.09727976273552,
+          1.9424281763826605,
+          1.9406571893298634
+        ],
+        "flashinfer": [
+          2.2107620039037084,
+          2.2119240506329114,
+          2.211235948051948,
+          2.211603318250377,
+          2.210476326963907
+        ]
+      },
+      "errors": {},
+      "timer": "cudagraph_proton",
+      "benchmark_protocol": {
+        "cudagraph_rep": 20,
+        "cooldown_s": 1.0,
+        "rounds": 5,
+        "round_aggregate": "mean",
+        "order": [
+          "tirx",
+          "flashinfer"
+        ]
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      },
+      "status": "ok",
+      "finished_at": "2026-08-14T03:14:36+00:00"
+    }
+  ]
+}

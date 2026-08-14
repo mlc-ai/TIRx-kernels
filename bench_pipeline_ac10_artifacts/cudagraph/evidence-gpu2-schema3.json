@@ -1,0 +1,225 @@
+{
+  "acceptance_use": "ac_10_performance_evidence",
+  "after": {
+    "critical_wall_s": 28.96349334716797,
+    "final_reap_tail_s": 1.0183448791503906,
+    "git": {
+      "tir": "ea0950ab",
+      "tirx-bench-ci": null,
+      "tirx-kernels": "6416bb61-dirty"
+    },
+    "interference_retry_count": 2,
+    "kernel_tree": {
+      "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
+      "tirx-kernels:tirx_kernels": "186e994787dfe249fba7b9b3ef82f13c7ba05609"
+    },
+    "outer_wall_s": 37.676796359,
+    "pipeline_cost_model": {
+      "assignment_handoff_s": {
+        "count": 3,
+        "max": 0.8406965732574463,
+        "measurement_status": "measured",
+        "p95": 0.8406965732574463
+      },
+      "complete_measurement_count": 1,
+      "complete_timeline_count": 1,
+      "cpu_ready_constrained_gpu_list_schedule_s": 23.977768182754517,
+      "dispatch_latency_s": {
+        "count": 3,
+        "max": 0.04016995429992676,
+        "measurement_status": "measured",
+        "p95": 0.04016995429992676
+      },
+      "eligibility_constrained_gpu_list_schedule_s": 25.34290599822998,
+      "expected_s": 28.439364671707153,
+      "expected_with_foreign_s": 28.963464498519897,
+      "first_process_started_s": 0.13217616081237793,
+      "first_ready_s": 3.620558500289917,
+      "foreign_dispatch_wait_s": {
+        "count": 3,
+        "max": 0.800851583480835,
+        "measurement_status": "measured",
+        "p95": 0.800851583480835
+      },
+      "foreign_wait_s": 0.5240998268127441,
+      "gpu_busy_s_by_index": {
+        "2": 23.977768182754517
+      },
+      "gpu_execution_s_by_index": {
+        "2": 23.076583862304688
+      },
+      "ideal_gpu_list_schedule_s": 23.977768182754517,
+      "initial_dispatch_latency_s": {
+        "count": 1,
+        "max": 0.04016995429992676,
+        "measurement_status": "measured",
+        "p95": 0.04016995429992676
+      },
+      "interference_retry_count": 2,
+      "interference_retry_gpu_execution_s": 3.310436487197876,
+      "interference_retry_gpu_ownership_s": 4.1597113609313965,
+      "interference_retry_ready_delay_s": 0.8410379886627197,
+      "measurement_status": "measured",
+      "observed_critical_s": 28.96349334716797,
+      "prepare_spawn_span_s": 0.0,
+      "raw_dispatch_wait_s": {
+        "count": 3,
+        "max": 0.800868034362793,
+        "measurement_status": "measured",
+        "p95": 0.800868034362793
+      },
+      "ready_constrained_gpu_list_schedule_s": 24.818806171417236,
+      "ready_starvation_s": 0.0,
+      "record_count": 1,
+      "retry_dispatch_latency_s": {
+        "count": 2,
+        "max": 2.8848648071289062e-05,
+        "measurement_status": "measured",
+        "p95": 2.8848648071289062e-05
+      },
+      "schema_version": 3,
+      "unexplained_s": 2.8848648071289062e-05
+    },
+    "results": [
+      {
+        "attempt": 3,
+        "config": "silu_fp16_d4096_t1",
+        "implementation_order": [
+          "tirx",
+          "flashinfer"
+        ],
+        "impls_us": {
+          "flashinfer": 2.21120032956057,
+          "tirx": 2.0013121976576875
+        },
+        "kernel": "act_and_mul",
+        "retry_in_place": true,
+        "timer": "cudagraph_proton"
+      }
+    ]
+  },
+  "before": {
+    "git": {
+      "tir": "ea0950ab",
+      "tirx-bench-ci": null,
+      "tirx-kernels": "a91a1b76"
+    },
+    "kernel_tree": {
+      "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
+      "tirx-kernels:tirx_kernels": "447c7ad79e5e91066e928a8e0c2e91c5306093d7"
+    },
+    "outer_wall_s": 33.355808375,
+    "results": [
+      {
+        "config": "silu_fp16_d4096_t1",
+        "implementation_order": [
+          "tirx",
+          "flashinfer"
+        ],
+        "impls_us": {
+          "flashinfer": 2.2095294995713957,
+          "tirx": 1.9664492188106424
+        },
+        "kernel": "act_and_mul",
+        "timer": "cudagraph_proton"
+      }
+    ]
+  },
+  "derived": {
+    "acceptance_checks": {
+      "dispatch_p95_below_100ms": true,
+      "ready_starvation_absent": true,
+      "unexplained_within_bound": true
+    },
+    "default_coverage_reduction_included": false,
+    "implementation_deltas": [
+      {
+        "after_us": 2.0013121976576875,
+        "before_us": 1.9664492188106424,
+        "config": "silu_fp16_d4096_t1",
+        "delta_percent": 1.7728898622732414,
+        "implementation": "tirx",
+        "kernel": "act_and_mul"
+      },
+      {
+        "after_us": 2.21120032956057,
+        "before_us": 2.2095294995713957,
+        "config": "silu_fp16_d4096_t1",
+        "delta_percent": 0.07561926597940971,
+        "implementation": "flashinfer",
+        "kernel": "act_and_mul"
+      }
+    ],
+    "pipeline_overlap_only": true,
+    "unexplained_bound_s": 1.4481746673583986,
+    "wall_reduction_percent": -12.954229546535444,
+    "wall_speedup": 0.885314347248958
+  },
+  "fixed_conditions": {
+    "cooldown_s": 1.0,
+    "multi_gpu_runtime_validation": "exempted_by_human_unmeasured",
+    "physical_gpu_index": 2,
+    "physical_gpu_uuid": "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+    "rounds": 5
+  },
+  "matrix": [
+    "act_and_mul/silu_fp16_d4096_t1"
+  ],
+  "measurement_status": "measured",
+  "schema_version": 1,
+  "sources": {
+    "after": {
+      "logs": [
+        {
+          "declared_path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/cudagraph/after-gpu2/stdout.log",
+          "kind": "stdout_log",
+          "path": "bench_pipeline_ac10_artifacts/cudagraph/after-gpu2/stdout.log",
+          "sha256": "4274e81e38e0fc54ee1f760b4bef80db5f6afb9d17b55814a98899ae4644c3a1"
+        },
+        {
+          "declared_path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/cudagraph/after-gpu2/stderr.log",
+          "kind": "stderr_log",
+          "path": "bench_pipeline_ac10_artifacts/cudagraph/after-gpu2/stderr.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "outer_timer": {
+        "path": "bench_pipeline_ac10_artifacts/cudagraph/after-gpu2/outer_timer.json",
+        "sha256": "967e4ff4aa3ecf1e38628fb0da6753d4e1e6ae5b5dc92f394c47f78576d2832b"
+      },
+      "run": {
+        "path": "bench_pipeline_ac10_artifacts/cudagraph/after-gpu2/suite/runs/1.json",
+        "sha256": "6b5e9934f812169d93ae758b956da4348542082f2f3e3aad6e6e464b5c051889"
+      }
+    },
+    "before": {
+      "logs": [
+        {
+          "declared_path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/cudagraph/before-gpu2/stdout.log",
+          "kind": "stdout_log",
+          "path": "bench_pipeline_ac10_artifacts/cudagraph/before-gpu2/stdout.log",
+          "sha256": "fa07c17ed923d19faa86813a08b3bfc34a03ea962a96251f5f25bcb92506cc6a"
+        },
+        {
+          "declared_path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/cudagraph/before-gpu2/stderr.log",
+          "kind": "stderr_log",
+          "path": "bench_pipeline_ac10_artifacts/cudagraph/before-gpu2/stderr.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "outer_timer": {
+        "path": "bench_pipeline_ac10_artifacts/cudagraph/before-gpu2/outer_timer.json",
+        "sha256": "1c0e8446b15ee49116c27fe59f30a03cca589cceb423e0053fbd7982bbe449b6"
+      },
+      "run": {
+        "path": "bench_pipeline_ac10_artifacts/cudagraph/before-gpu2/suite/runs/1.json",
+        "sha256": "39b3739c2e2c7211d23bb7d2622e4afce9f60d0101a2c43d59257be7d6c2ee15"
+      }
+    },
+    "workloads": {
+      "path": "bench_pipeline_ac10_cudagraph_workload.yaml",
+      "sha256": "a4131c78503091c2162231c56c5a6c51331ed406c26de0d0f48e05c75bca20c7"
+    }
+  },
+  "timer_family": "cudagraph_proton"
+}
