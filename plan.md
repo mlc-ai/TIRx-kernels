@@ -120,20 +120,30 @@
 `default:true` 行（187 required + 8 user-exempted），以及 rebase 前 current
 source SHA256
 `007aa1046ee2829a2d2a2f9dcb585c348105c096ed2d969675d8570d29352f49`。
-分支 `ir-builder-migration-1097cce-scope` 随后 rebase 到
-`origin/main=a66a96286f371c5437a2aad1119297087154bbb9`。该 upstream 范围的
+分支 `ir-builder-migration-1097cce-scope` 最终 rebase 到
+`origin/main=2b9e112fe8f3bb895d5a160638d9b3a89fb2d05c`。该 upstream 范围的
 canonical defaults 已机械增长到 519；新增的 324 行（GDN decode、FlashKDA
 cake T1–T6、recurrent KDA 等）不在本 goal 中，保持 upstream 写法，未迁移、
 未验收。
 
-rebase 的唯一 kernel 冲突位于 `flash_attention4.py`。冲突解决保留
+首次 rebase 的 kernel 冲突位于 `flash_attention4.py`。冲突解决保留
 IR-builder 实现，并将 upstream #27 的单个 `T.cuda.cta_sync()` 放在 persistent
 tile loop 之后、warp-0 TMEM deallocation 之前，使所有 CTA warp 的 TMEM 使用
 先于释放完成。用户明确决定不重跑 23 个 FlashAttention forward/backward 行；
-因此验收结论不扩展到 rebase 后 source SHA256
-`713180b422528e45ccc9c419e82d39e976baf4526a34883f43b2ecb3d467cd41`。
 upstream #27 在两个短 s1024 B200 形状上报告该 barrier 为 `0.23–0.32 us`
 （`0.73–1.14%`），所以这里不宣称 post-rebase 性能等价或零开销。
+
+随后 rebase #41 时，MegaMoE 被 upstream 从 monolith 重构为
+`data/spec/kernel` 子包。冲突解决采用 upstream 的模块边界、host/data/spec 和
+模块级 PTX wrappers，并将已验收的 builder `get_kernel` 放入新 `kernel.py`；
+builder-contract 检查器同时支持显式 re-export 的 canonical entrypoint。最小、
+最大 block-M、生产 g1、4-rank，以及 `fast_math=0 + collect_stats=True` 五个
+代表性变体的 pre/post `tvm.ir.save_json()` SHA256 均逐项相等。最终 CPU 验证为
+39 tests passed、519-row/48-kernel import check passed、registry strict passed。
+
+这些结构等价证据不改变性能 oracle：验收仍只针对 rebase 前指纹成立，不扩展到
+最终 rebase 后 source SHA256
+`6003d7c46eda7cbcaca5e8f1b6dd6780420eddd63db2272868304f5fb7e49808`。
 
 ### Historical restart-2 evidence and superseded diagnostics
 
