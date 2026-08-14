@@ -2085,6 +2085,7 @@ def write_summary(out_dir: Path, current: dict) -> Path:
         )
         lines.append("")
         lines.append(f"- process model: `{pipeline.get('process_model', '?')}`")
+        lines.append(f"- cost-model schema: `{cost.get('schema_version', 'missing')}`")
         lines.append(f"- cost-model evidence: `{cost.get('measurement_status', 'missing')}`")
         if cost.get("measurement_status") == "measured":
             lines.append(f"- observed critical wall: `{cost['observed_critical_s']:.3f}s`")
@@ -2109,6 +2110,16 @@ def write_summary(out_dir: Path, current: dict) -> Path:
             lines.append(
                 "- eligibility-constrained GPU list schedule: "
                 f"`{cost['eligibility_constrained_gpu_list_schedule_s']:.3f}s`"
+            )
+            claim_by_gpu = cost["gpu_busy_s_by_index"]
+            execution_by_gpu = cost["gpu_execution_s_by_index"]
+            lines.append(
+                "- GPU claim card-time total / by index: "
+                f"`{sum(claim_by_gpu.values()):.3f}s` / `{claim_by_gpu}`"
+            )
+            lines.append(
+                "- post-GPU_START execution time total / by index: "
+                f"`{sum(execution_by_gpu.values()):.3f}s` / `{execution_by_gpu}`"
             )
             lines.append(
                 f"- CPU READY starvation: `{cost['ready_starvation_s']:.3f}s`"
@@ -2463,7 +2474,7 @@ def _pipeline_cost_model(
     external_history: list[tuple[float, tuple[str, ...]]],
     foreign_intervals: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    schema_version = 2
+    schema_version = 3
     required_timeline_phases = (
         "process_started",
         "child_started",
@@ -2606,14 +2617,24 @@ def _pipeline_cost_model(
         max(0.0, attempt["gpu_started"] - attempt["assigned"])
         for attempt in scheduled_attempts
     ]
-    gpu_intervals_by_index: dict[str, list[tuple[float, float]]] = {}
+    gpu_claim_intervals_by_index: dict[str, list[tuple[float, float]]] = {}
+    gpu_execution_intervals_by_index: dict[str, list[tuple[float, float]]] = {}
     for attempt in scheduled_attempts:
         for gpu in attempt["gpus"]:
-            gpu_intervals_by_index.setdefault(str(gpu), []).append(
+            gpu_claim_intervals_by_index.setdefault(str(gpu), []).append(
+                (attempt["assigned"], attempt["ownership_released"])
+            )
+            gpu_execution_intervals_by_index.setdefault(str(gpu), []).append(
                 (attempt["gpu_started"], attempt["ownership_released"])
             )
     gpu_busy_by_index = {
-        gpu: sum(end - start for start, end in gpu_intervals_by_index.get(gpu, []))
+        gpu: sum(end - start for start, end in gpu_claim_intervals_by_index.get(gpu, []))
+        for gpu in known_gpu_indices
+    }
+    gpu_execution_by_index = {
+        gpu: sum(
+            end - start for start, end in gpu_execution_intervals_by_index.get(gpu, [])
+        )
         for gpu in known_gpu_indices
     }
     def external_occupied_at(timestamp: float) -> set[str]:
@@ -2770,7 +2791,11 @@ def _pipeline_cost_model(
                     [attempt_ready_offset, dependency_ready]
                     + [available[gpu] for gpu in selected]
                 )
-            duration = attempt["ownership_released"] - attempt["gpu_started"]
+            # The card is unavailable to all other workloads from ASSIGN until
+            # ownership release.  set_device, UUID verification, tensor/reference
+            # construction, and launch setup therefore belong to the serialized
+            # GPU stage even though timed kernel execution starts later.
+            duration = attempt["ownership_released"] - attempt["assigned"]
             finish = max(finish, start + duration)
             for gpu in selected:
                 available[gpu] = start + duration
@@ -2816,6 +2841,10 @@ def _pipeline_cost_model(
         attempt for attempt in scheduled_attempts if attempt.get("status") == "INTERFERED"
     ]
     retry_gpu_ownership_s = sum(
+        attempt["ownership_released"] - attempt["assigned"]
+        for attempt in interfered_attempts
+    )
+    retry_gpu_execution_s = sum(
         attempt["ownership_released"] - attempt["gpu_started"]
         for attempt in interfered_attempts
     )
@@ -2833,6 +2862,7 @@ def _pipeline_cost_model(
         "ready_constrained_gpu_list_schedule_s": attempt_ready_constrained_gpu_s,
         "eligibility_constrained_gpu_list_schedule_s": eligibility_constrained_gpu_s,
         "gpu_busy_s_by_index": gpu_busy_by_index,
+        "gpu_execution_s_by_index": gpu_execution_by_index,
         "foreign_wait_s": foreign_wait_s,
         "expected_s": expected_s,
         "expected_with_foreign_s": expected_with_foreign_s,
@@ -2851,6 +2881,7 @@ def _pipeline_cost_model(
         ),
         "interference_retry_count": len(interfered_attempts),
         "interference_retry_gpu_ownership_s": retry_gpu_ownership_s,
+        "interference_retry_gpu_execution_s": retry_gpu_execution_s,
         "complete_timeline_count": len(complete_timelines),
         "complete_measurement_count": len(complete_measurements),
     }

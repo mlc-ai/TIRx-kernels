@@ -258,7 +258,7 @@ def _validate_run(
         cost = pipeline_data.get("cost_model")
         if not isinstance(cost, dict) or cost.get("measurement_status") != "measured":
             raise ValueError(f"pipeline run has no measured cost model: {path}")
-        if cost.get("schema_version") != 2:
+        if cost.get("schema_version") != 3:
             raise ValueError(
                 f"pipeline run uses an unsupported cost-model schema: {path}: "
                 f"{cost.get('schema_version')!r}"
@@ -282,9 +282,18 @@ def _validate_run(
             "interference_retry_ready_delay_s",
             "interference_retry_count",
             "interference_retry_gpu_ownership_s",
+            "interference_retry_gpu_execution_s",
         )
         if not all(isinstance(cost.get(field), (int, float)) for field in numeric_fields):
             raise ValueError(f"pipeline cost model contains missing numeric evidence: {path}")
+        for mapping_field in ("gpu_busy_s_by_index", "gpu_execution_s_by_index"):
+            mapping = cost.get(mapping_field)
+            if not isinstance(mapping, dict) or not all(
+                isinstance(value, (int, float)) for value in mapping.values()
+            ):
+                raise ValueError(
+                    f"pipeline cost model contains missing {mapping_field}: {path}"
+                )
         if not math.isclose(
             cost["unexplained_s"],
             cost["observed_critical_s"] - cost["expected_s"] - cost["foreign_wait_s"],

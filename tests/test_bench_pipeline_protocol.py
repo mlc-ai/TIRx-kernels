@@ -1714,13 +1714,15 @@ def test_cost_model_includes_interrupted_gpu_attempts():
     )
 
     assert model["measurement_status"] == "measured"
-    assert model["gpu_busy_s_by_index"] == pytest.approx({"0": 0.9, "1": 2.0})
-    assert model["cpu_ready_constrained_gpu_list_schedule_s"] == pytest.approx(2.9)
+    assert model["gpu_busy_s_by_index"] == pytest.approx({"0": 1.0, "1": 2.0})
+    assert model["gpu_execution_s_by_index"] == pytest.approx({"0": 0.9, "1": 2.0})
+    assert model["cpu_ready_constrained_gpu_list_schedule_s"] == pytest.approx(3.0)
     assert model["ready_constrained_gpu_list_schedule_s"] == pytest.approx(3.0)
     assert model["ready_starvation_s"] == pytest.approx(0.0)
-    assert model["interference_retry_ready_delay_s"] == pytest.approx(0.1)
+    assert model["interference_retry_ready_delay_s"] == pytest.approx(0.0)
     assert model["interference_retry_count"] == 1
-    assert model["interference_retry_gpu_ownership_s"] == pytest.approx(0.9)
+    assert model["interference_retry_gpu_ownership_s"] == pytest.approx(1.0)
+    assert model["interference_retry_gpu_execution_s"] == pytest.approx(0.9)
     assert model["initial_dispatch_latency_s"]["p95"] == pytest.approx(0.0)
     assert model["retry_dispatch_latency_s"]["p95"] == pytest.approx(0.1)
     assert model["expected_s"] == pytest.approx(4.0)
@@ -1773,7 +1775,7 @@ def test_cost_model_never_publishes_zeroes_for_missing_gpu_evidence(records, rea
     )
 
     assert model == {
-        "schema_version": 2,
+        "schema_version": 3,
         "measurement_status": "missing",
         "record_count": len(records),
         "complete_timeline_count": 0,
@@ -1794,7 +1796,10 @@ def test_cost_model_never_publishes_zeroes_for_missing_gpu_evidence(records, rea
         "interference_retry_ready_delay_s",
         "interference_retry_count",
         "interference_retry_gpu_ownership_s",
+        "interference_retry_gpu_execution_s",
         "cpu_ready_constrained_gpu_list_schedule_s",
+        "gpu_busy_s_by_index",
+        "gpu_execution_s_by_index",
         "foreign_wait_s",
     ):
         assert field not in model

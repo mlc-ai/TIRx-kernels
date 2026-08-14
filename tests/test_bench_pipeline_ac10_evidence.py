@@ -92,7 +92,7 @@ def _write_run(path: Path, *, pipeline: bool) -> None:
                 "validation_status": "exempted_by_human_unmeasured"
             },
             "cost_model": {
-                "schema_version": 2,
+                "schema_version": 3,
                 "measurement_status": "measured",
                 "complete_timeline_count": 1,
                 "complete_measurement_count": 1,
@@ -102,6 +102,8 @@ def _write_run(path: Path, *, pipeline: bool) -> None:
                 "cpu_ready_constrained_gpu_list_schedule_s": 0.5,
                 "ready_constrained_gpu_list_schedule_s": 0.5,
                 "eligibility_constrained_gpu_list_schedule_s": 0.5,
+                "gpu_busy_s_by_index": {"1": 0.5},
+                "gpu_execution_s_by_index": {"1": 0.4},
                 "foreign_wait_s": 0.0,
                 "expected_s": 0.6,
                 "unexplained_s": 0.4,
@@ -109,6 +111,7 @@ def _write_run(path: Path, *, pipeline: bool) -> None:
                 "interference_retry_ready_delay_s": 0.0,
                 "interference_retry_count": 0,
                 "interference_retry_gpu_ownership_s": 0.0,
+                "interference_retry_gpu_execution_s": 0.0,
                 "dispatch_latency_s": {"p95": 0.01},
             },
             "critical_wall_s": 1.0,
@@ -261,12 +264,24 @@ def test_tracked_ac10_proton_attempt_one_evidence_matches_every_raw_source():
     assert embedded_cost["ready_starvation_s"] == pytest.approx(8.329377889633179)
     assert recomputed_cost["ready_starvation_s"] == 0.0
     assert recomputed_cost["interference_retry_ready_delay_s"] == pytest.approx(
-        embedded_cost["ready_starvation_s"]
+        4.888591766357422
+    )
+    assert sum(recomputed_cost["gpu_busy_s_by_index"].values()) == pytest.approx(
+        sum(embedded_cost["gpu_busy_s_by_index"].values())
+        + sum(
+            attempt["gpu_started"] - attempt["assigned"]
+            for record in after_run["results"]
+            for attempt in record["gpu_attempts"]
+        )
     )
     assert recomputed_cost["interference_retry_count"] == 7
-    assert recomputed_cost["expected_s"] == pytest.approx(embedded_cost["expected_s"])
+    assert recomputed_cost["schema_version"] == 3
+    assert recomputed_cost["expected_s"] == pytest.approx(63.68443465232849)
+    assert recomputed_cost["unexplained_s"] == pytest.approx(0.6604344844818115)
     assert recomputed_cost["unexplained_s"] == pytest.approx(
-        embedded_cost["unexplained_s"]
+        recomputed_cost["observed_critical_s"]
+        - recomputed_cost["expected_s"]
+        - recomputed_cost["foreign_wait_s"]
     )
 
 

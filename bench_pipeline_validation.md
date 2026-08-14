@@ -479,10 +479,14 @@ source drift.
 This pair is deliberately retained even though it is not an acceptance pass.
 All three workloads initially reached READY within 33ms, yet the persisted
 schema-1 cost model reports 8.329s of `ready_starvation_s`. Inspection shows that
-delay comes from retry readiness after seven interrupted GPU attempts, not
-repeated CPU prepare. Recomputing the same raw attempts with schema 2 reports
-`ready_starvation_s = 0`, `interference_retry_ready_delay_s = 8.329s`, and the
-same expected/unexplained totals. Schema 2 also records transient foreign-PID
+delay comes from retry readiness and ASSIGN-to-GPU_START ownership after seven
+interrupted GPU attempts, not repeated CPU prepare. Recomputing the same raw
+attempts with schema 3 reports `ready_starvation_s = 0`,
+`interference_retry_ready_delay_s = 4.889s`, 53.208s of claim card-time versus
+49.764s after `GPU_START`, and a 0.660s unexplained residual (4ms below the
+schema-1 result because the claim-based list schedule preserves the exact
+ASSIGN ordering). Schema 3
+also records transient foreign-PID
 intervals and subtracts their overlap from internal dispatch latency; attempt 1
 predates that telemetry, so its 1.873s dispatch p95 cannot be retroactively
 reclassified. The implementation and behavioral tests are corrected; a new
@@ -542,7 +546,7 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | AC-4 | satisfied | Default 5 rounds/1.0s, finalization, raw samples, timer schemas, correctness/reference work, and evidence eligibility are unchanged. Every terminal record explicitly marks `retry_in_place` |
 | AC-5 | satisfied for implementation and targeted single-GPU retry | Same-child retry preserves prepared CPU state, rebuilds GPU state, releases claims only after cleanup proof/process exit, records exact attempt ownership, and reports 616 MiB abandoned-card resident context. Multi-rank runtime interruption is structurally verified only under the exemption |
 | AC-6 | satisfied | Bounded process/RSS/FD evidence, cancellation cleanup, immediate internal release, and resource accounting tests |
-| AC-7 | implementation corrected; runtime revalidation pending | Cost-model schema 2 separates initial CPU READY constraints, retry READY delay, transient foreign-PID wait, and internal dispatch latency; complete-timeline/no-data gating remains intact. The retained schema-1 Proton attempt can prove the retry reclassification but predates the new foreign-interval telemetry |
+| AC-7 | implementation corrected; runtime revalidation pending | Cost-model schema 3 separates initial CPU READY constraints, retry READY delay, ASSIGN-held card time, post-GPU_START execution, transient foreign-PID wait, and internal dispatch latency; complete-timeline/no-data gating remains intact. The retained schema-1 Proton attempt can prove most reclassification arithmetic but predates the new foreign-interval telemetry |
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
 | AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
 | AC-10 | incomplete | A persisted same-UUID Proton A/B now exists and preserves seven ordinary in-place retries, but its schema-1 dispatch evidence cannot satisfy the current checks. Proton needs a schema-2 rerun; Event/CUDA-graph retain the old identity defect, and Kineto/MegaMoE runtime A/B is unmeasured |
@@ -551,7 +555,7 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 The plan as a whole is therefore not marked complete. The set-device and
 same-child retry implementation is complete at its structural anchors and has
 targeted single-GPU runtime evidence. The retry-aware cost classification is now
-implemented under schema 2, but Proton must be remeasured with the new transient
+implemented under schema 3, but Proton must be remeasured with the new transient
 foreign-interference telemetry and satisfy the named structural checks. The
 remaining single-GPU timer families still require same-UUID A/B evidence.
 Multi-GPU runtime rows remain the explicit human-directed exemption, not missing
@@ -581,9 +585,10 @@ evidence.
   because its structural dispatch/starvation checks are false.
 - **Cost model and falsifiability:** incomplete timelines still publish no numeric
   performance fields. The first persisted retry-heavy pair falsified schema 1's
-  `ready_starvation_s` interpretation. Schema 2 now gives CPU READY constraints,
-  retry READY delay, transient foreign-PID wait, and internal dispatch latency
-  separate canonical fields; runtime revalidation remains pending.
+  `ready_starvation_s` interpretation. Schema 3 now gives CPU READY constraints,
+  retry READY delay, ASSIGN-held card time, post-GPU_START execution, transient
+  foreign-PID wait, and internal dispatch latency separate canonical fields;
+  runtime revalidation remains pending.
 - **Stop low-quality experiments:** invalid runs remain unmeasured instead of
   weakening the protocol or claiming success. In-place retries retain the UUID
   handshake and explicit per-record provenance, while remaining ordinary
