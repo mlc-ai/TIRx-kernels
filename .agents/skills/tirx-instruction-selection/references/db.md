@@ -18,9 +18,12 @@ Confirm by counting instructions in the corresponding PTX/SASS basic block. A
 
 **Symptoms:** `bitwise_mismatch`, `denormal_mismatch`, `unexpected_ftz`, `select_lowered_as_branch`
 
-Fast-math defaults can add `.ftz`, approximate division, or change a compare and
-select into different control flow. This causes bitwise mismatches on denormals
-and may perturb scheduling even when normal values agree.
+Two independent mechanisms share one fix. Fast-math defaults (e.g. nvcc
+`--use_fast_math`) add `.ftz` to float arithmetic and make division
+approximate, causing bitwise mismatches on denormals. Independently, a float
+compare/select whose PTX form is unpinned lets the codegen choose whether
+`setp` carries `.ftz` and lets ptxas choose between `selp` and a branch; that
+perturbs instruction shape and scheduling even when normal values agree.
 
 When the reference pins an instruction, use the exact PTX operation: non-FTZ
 `mul.f32`/`add.f32`, `div.rn.f32`, or explicit `setp` plus `selp`. Retain
@@ -34,9 +37,13 @@ Confirm with denormal inputs and an instruction-by-instruction PTX comparison.
 **Symptoms:** `register_spill`, `register_budget_mismatch`, `local_memory_traffic`, `low_occupancy`
 
 `tirx.launch_bounds_min_blocks_per_sm` becomes the second CUDA
-`__launch_bounds__` argument and imposes a hard ptxas register budget. A value
-chosen from theoretical occupancy can starve a kernel whose reference uses more
-registers, producing STL/LDL or global rescheduling.
+`__launch_bounds__` argument and imposes a hard ptxas register budget: roughly
+65536 registers divided by (threads per CTA times the bound), rounded down to
+the allocation granularity. A value chosen from theoretical occupancy can
+starve a kernel whose reference uses more registers, producing STL/LDL or
+global rescheduling. One measured 512-thread quantization kernel was capped at
+32 registers with a bound of 4 while its reference ran at about 50; a bound of
+2 restored parity.
 
 Set the bound from the reference kernel's realized occupancy target. Compare
 resource usage, achieved occupancy, and dynamic local-memory traffic on both
