@@ -148,8 +148,8 @@ def _spec_for(config: dict):
 
 
 def prepare_data(*, seed: int = 0, **config):
-    """Build one dense-GEMM case; see `_sm100_fp8_fp4_gemm_1d1d_data.prepare_normal`."""
-    from ._sm100_fp8_fp4_gemm_1d1d_data import prepare_normal
+    """Build one dense-GEMM case; see `_sm100_fp8_fp4_gemm_1d1d.data.prepare_normal`."""
+    from ._sm100_fp8_fp4_gemm_1d1d.data import prepare_normal
 
     config.pop("label", None)
     return prepare_normal(seed=seed, **config)
@@ -176,7 +176,7 @@ def run_test(**config):
     """Compile, launch and compare against the dequantized-matmul oracle."""
     import torch
 
-    from ._sm100_fp8_fp4_gemm_1d1d_data import assert_within_threshold, calc_diff
+    from ._sm100_fp8_fp4_gemm_1d1d.data import assert_within_threshold, calc_diff
 
     config.pop("label", None)
     data = prepare_data(seed=17, **config)
@@ -203,7 +203,7 @@ def run_test(**config):
 
 def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
     """Time our launch against `deep_gemm.fp8_fp4_gemm_nt`."""
-    from ._sm100_fp8_fp4_gemm_1d1d_data import bench_against_deepgemm, deepgemm_launch_normal
+    from ._sm100_fp8_fp4_gemm_1d1d.data import bench_against_deepgemm, deepgemm_launch_normal
 
     config.pop("label", None)
     data = prepare_data(seed=17, **config)

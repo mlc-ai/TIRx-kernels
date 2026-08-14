@@ -2152,7 +2152,7 @@ def _encode_fp4_packed_smem_tma_2d_desc(
     gmem_outer_stride: int,
     swizzle_mode: int,
 ) -> Any:
-    from tirx_kernels.deepgemm import mega_moe
+    from tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe import spec as mega_moe
 
     desc = mega_moe._AlignedTensorMap()
     global_shape = (ctypes.c_uint64 * 2)(int(gmem_inner_dim), int(gmem_outer_dim))
@@ -2191,7 +2191,7 @@ def _encode_fp4_packed_smem_tma_3d_desc(
     gmem_outer_stride: int,
     swizzle_mode: int,
 ) -> Any:
-    from tirx_kernels.deepgemm import mega_moe
+    from tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe import spec as mega_moe
 
     desc = mega_moe._AlignedTensorMap()
     elem_size = int(tensor.element_size())
@@ -2226,7 +2226,7 @@ def _encode_fp4_packed_smem_tma_3d_desc(
 
 def _build_tirx_tensor_maps(data: dict[str, Any]) -> dict[str, Any]:
     import tvm
-    from tirx_kernels.deepgemm.mega_moe import _encode_tma_2d_desc
+    from tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe.spec import _encode_tma_2d_desc
 
     config: PagedMQALogitsFP4Config = data["config"]
     q_fp4, sf_q = data["q_in"]

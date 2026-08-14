@@ -3,7 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""TIRx port of DeepGEMM's MegaMoE kernel.
+"""The MegaMoE kernel body: the dispatch, GEMM, and combine megakernel.
+
+Configuration and layout derivation live in :mod:`.spec`; nothing here reaches
+back into :mod:`.data`.
+
+GUARD: the ``@T.prim_func def mega_moe`` name and the ``"main"`` global var are
+part of the emitted CUDA symbol -- never rename them.
 
 Upstream sources: deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh, csrc/apis/mega.h,
 csrc/jit_kernels/heuristics/mega_moe.h.
@@ -11,1499 +17,324 @@ csrc/jit_kernels/heuristics/mega_moe.h.
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
-import inspect
 import math
 import os
-import random
-import socket
-import threading
-import time
-from contextlib import contextmanager
-from dataclasses import asdict, dataclass
-from functools import cache
-from typing import Any
-from unittest import SkipTest
-
-import torch
-import torch.multiprocessing as mp
 
 from tvm.ir.type import PointerType, PrimType
+from tvm.script import tirx as T
 
-_DEEP_GEMM_MODULE_NAME = "deep_gemm"
-DEEPGEMM_SYM_BUFFER_MAX_RANKS = 72
-_CUDA_COMPILE_MODE_LOCK = threading.RLock()
+from .spec import (
+    MegaMoeConfig,
+    _align_up,
+    _ceil_div,
+    get_deepgemm_launch_config,
+    get_deepgemm_symm_buffer_layout,
+    get_deepgemm_workspace_layout,
+    get_tirx_launch_param_tags,
+)
 
+__all__ = ["get_kernel"]
 
-@dataclass(frozen=True)
-class MegaMoeConfig:
-    num_processes: int = 1
-    num_max_tokens_per_rank: int = 128
-    num_tokens: int = 96
-    hidden: int = 1024
-    intermediate_hidden: int = 512
-    num_experts: int = 8
-    num_topk: int = 2
-    activation_clamp: float = 10.0
-    fast_math: int = 1
-
-    def validate(self) -> None:
-        if self.num_processes <= 0:
-            raise ValueError("num_processes must be positive")
-        if self.num_tokens < 0:
-            raise ValueError("num_tokens must be non-negative")
-        if self.num_tokens > self.num_max_tokens_per_rank:
-            raise ValueError("num_tokens must not exceed num_max_tokens_per_rank")
-        if self.hidden % 128 != 0 or self.intermediate_hidden % 128 != 0:
-            raise ValueError("hidden and intermediate_hidden must be multiples of 128")
-        if self.intermediate_hidden > 4096:
-            raise ValueError(
-                "intermediate_hidden must satisfy DeepGEMM L2_SHAPE_K <= 64 * L1_OUT_BLOCK_N"
-            )
-        if self.num_experts % self.num_processes != 0:
-            raise ValueError("num_experts must be divisible by num_processes")
-        if self.num_topk <= 0 or self.num_topk > self.num_experts:
-            raise ValueError("num_topk must be in [1, num_experts]")
-
-    @property
-    def num_experts_per_rank(self) -> int:
-        return self.num_experts // self.num_processes
+# ---------------------------------------------------------------------------
+# PTX wrappers
+#
+# Pure functions of their arguments: each names one instruction (or one small
+# instruction pair) so the kernel body below reads as the upstream CUDA does.
+# Nothing here depends on the launch configuration, so none of it belongs in
+# the builder's closure.
+# ---------------------------------------------------------------------------
 
 
-@dataclass
-class MegaMoeCase:
-    config: MegaMoeConfig
-    rank_idx: int
-    num_ranks: int
-    group: Any
-    deep_gemm: Any
-    symm_buffer: Any
-    x_fp8: tuple[torch.Tensor, torch.Tensor]
-    topk_idx: torch.Tensor
-    topk_weights: torch.Tensor
-    transformed_l1_weights: tuple[torch.Tensor, torch.Tensor]
-    transformed_l2_weights: tuple[torch.Tensor, torch.Tensor]
-    workspace_layout: DeepGemmWorkspaceLayout
-    symm_buffer_layout: DeepGemmSymmBufferLayout
-    dispatch_reference: DispatchReference
-    pull_reference: PullReference | None
-    scheduler_reference: SchedulerReference | None
-    cumulative_local_expert_recv_stats: torch.Tensor | None = None
+def load_global_s64(dst, address):
+    return T.ptx.ld.global_.s64(dst, address)
 
 
-@dataclass
-class TirxMegaMoeLaunchContext:
-    config: MegaMoeConfig
-    rank_idx: int
-    num_ranks: int
-    symm_buffer: Any
-    transformed_l1_weights: tuple[torch.Tensor, torch.Tensor]
-    transformed_l2_weights: tuple[torch.Tensor, torch.Tensor]
-    cumulative_local_expert_recv_stats: torch.Tensor | None
-    workspace_layout: DeepGemmWorkspaceLayout
-    symm_buffer_layout: DeepGemmSymmBufferLayout
+def load_global_u64(dst, address):
+    return T.ptx.ld.global_.u64(dst, address)
 
 
-@dataclass(frozen=True)
-class DeepGemmLaunchConfig:
-    num_sms: int
-    num_ctas_per_cluster: int
-    block_m: int
-    block_n: int
-    block_k: int
-    load_block_m: int
-    load_block_n: int
-    store_block_m: int
-    num_dispatch_threads: int
-    num_non_epilogue_threads: int
-    num_epilogue_threads: int
-    num_bytes_per_pull: int
-    num_topk: int
-    hidden: int
-    intermediate_hidden: int
-
-    @property
-    def num_dispatch_warps(self) -> int:
-        return self.num_dispatch_threads // 32
-
-    @property
-    def num_non_epilogue_warps(self) -> int:
-        return self.num_non_epilogue_threads // 32
-
-    @property
-    def num_epilogue_warps(self) -> int:
-        return self.num_epilogue_threads // 32
-
-    @property
-    def num_total_warps(self) -> int:
-        return self.num_dispatch_warps + self.num_non_epilogue_warps + self.num_epilogue_warps
-
-    @property
-    def num_threads(self) -> int:
-        return self.num_total_warps * 32
-
-    @property
-    def num_warpgroups(self) -> int:
-        return self.num_total_warps // 4
-
-    @property
-    def num_threads_per_cta(self) -> int:
-        return self.num_threads
-
-    @property
-    def num_warps_per_cta(self) -> int:
-        return self.num_total_warps
-
-    @property
-    def num_warpgroups_per_cta(self) -> int:
-        return self.num_warpgroups
-
-    @property
-    def num_tokens_per_warp(self) -> int:
-        return 32 // self.num_topk
-
-    @property
-    def num_activate_lanes(self) -> int:
-        return self.num_tokens_per_warp * self.num_topk
-
-    @property
-    def load_a_warp_idx(self) -> int:
-        return self.num_dispatch_warps
-
-    @property
-    def load_b_warp_idx(self) -> int:
-        return self.num_dispatch_warps + 1
-
-    @property
-    def mma_issue_warp_idx(self) -> int:
-        return self.num_dispatch_warps + 2
-
-    @property
-    def reserved_non_epilogue_warp_idx(self) -> int:
-        return self.num_dispatch_warps + 3
-
-    @property
-    def epilogue_warp_start_idx(self) -> int:
-        return self.num_dispatch_warps + self.num_non_epilogue_warps
+def load_global_u32(dst, address):
+    return T.ptx.ld.global_.u32(dst, address)
 
 
-@dataclass(frozen=True)
-class DeepGemmWorkspaceLayout:
-    num_ranks: int
-    num_experts: int
-    num_experts_per_rank: int
-    num_max_tokens_per_rank: int
-    num_topk: int
-    block_m: int
-    num_max_recv_tokens_per_expert: int
-    num_ring_tokens: int
-    num_ring_blocks: int
-    num_sf_ring_tokens: int
-    num_max_pool_tokens: int
-    num_shared_l2_pool_blocks: int
-    token_src_metadata_bytes: int
-    barrier_offset: int
-    l1_task_count_offset: int
-    l2_task_count_offset: int
-    shared_l1_task_count_offset: int
-    shared_l2_task_count_offset: int
-    expert_send_count_offset: int
-    expert_recv_count_offset: int
-    expert_recv_count_sum_offset: int
-    l1_full_count_offset: int
-    l1_empty_count_offset: int
-    l2_full_count_offset: int
-    l2_empty_count_offset: int
-    shared_l2_full_count_offset: int
-    src_token_topk_idx_offset: int
-    token_src_metadata_offset: int
-    total_bytes: int
+def store_global_u64(address, value):
+    return T.ptx.st.global_.u64(address, value)
 
 
-@dataclass(frozen=True)
-class DispatchReference:
-    expert_send_count: torch.Tensor
-    expert_recv_count: torch.Tensor
-    expert_recv_count_sum: torch.Tensor
-    src_token_topk_idx: torch.Tensor
+def store_global_u32(address, value):
+    return T.ptx.st.global_.u32(address, value)
 
 
-@dataclass(frozen=True)
-class DeepGemmSymmBufferLayout:
-    workspace_bytes: int
-    input_token_offset: int
-    input_sf_offset: int
-    input_topk_idx_offset: int
-    input_topk_weights_offset: int
-    l1_token_offset: int
-    l1_sf_offset: int
-    l1_topk_weights_offset: int
-    l2_token_offset: int
-    l2_sf_offset: int
-    combine_token_offset: int
-    total_bytes: int
+def store_global_u8(address, value):
+    return T.ptx.st.global_.u8(address, value)
 
 
-@dataclass(frozen=True)
-class PullReference:
-    expert_pool_block_offset: torch.Tensor
-    pool_src_rank_idx: torch.Tensor
-    pool_src_token_idx: torch.Tensor
-    pool_src_topk_idx: torch.Tensor
-    pool_src_token_topk_idx: torch.Tensor
-    l1_full_count: torch.Tensor
+# Destination-first, mirroring the PTX these wrap: the caller declares the
+# register and passes it in.
+def load_acq_sys_s32(dst, address):
+    return T.ptx.ld.acquire.sys.global_.s32(dst, address)
 
 
-@dataclass(frozen=True)
-class SchedulerBlockReference:
-    block_idx_seed: int
-    phase: str
-    local_expert_idx: int
-    num_k_blocks: int
-    m_block_idx: int
-    n_block_idx: int
-    pool_block_offset: int
-    valid_m: int
+def atomic_add_rel_u32(dst, address, value):
+    return T.ptx.atom.release.gpu.global_.add.u32(dst, address, value)
 
 
-@dataclass(frozen=True)
-class SchedulerReference:
-    expert_num_tokens: torch.Tensor
-    expert_pool_block_offset: torch.Tensor
-    blocks: tuple[SchedulerBlockReference, ...]
-    num_linear1_blocks: int
-    num_linear2_blocks: int
+def load_acq_u32(dst, address):
+    return T.ptx.ld.acquire.gpu.global_.b32(dst, address)
 
 
-@dataclass
-class TirxMegaMoeInvocation:
-    executable: Any
-    y: torch.Tensor
-    cumulative_local_expert_recv_stats: torch.Tensor
-    symm_buffer_offsets: tuple[int, ...]
-    tensor_maps: dict[str, _AlignedTensorMap]
-
-
-@dataclass
-class TirxMegaMoePrepared:
-    context: TirxMegaMoeLaunchContext
-    invocation: TirxMegaMoeInvocation
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return ((value + alignment - 1) // alignment) * alignment
-
-
-def _align_down(value: int, alignment: int) -> int:
-    return (value // alignment) * alignment
-
-
-# Mirror of deep_gemm::layout constants from
-# deep_gemm/include/deep_gemm/layout/mega_moe.cuh. The shared symm buffer is
-# allocated by deep_gemm host code; the upstream layout is block_m-agnostic
-# (uses LCM of the candidate set for token alignment and Min for the barrier-
-# array sizing) so the same buffer is reusable across all candidate block_m's.
-_K_CANDIDATE_BLOCK_M: tuple[int, ...] = (8, 16, 32, 64, 96, 128, 192)
-_K_MIN_CANDIDATE_BLOCK_M = 8
-_K_MAX_CANDIDATE_BLOCK_M = 192
-_K_LCM_CANDIDATE_BLOCK_M = 384
-
-
-def _get_num_max_pool_tokens(
-    *, num_ranks: int, num_max_tokens_per_rank: int, num_topk: int, num_experts_per_rank: int
-) -> int:
-    num_max_recv_tokens = num_ranks * num_max_tokens_per_rank
-    num_max_experts_per_token = min(num_topk, num_experts_per_rank)
-    return _align_up(
-        num_max_recv_tokens * num_max_experts_per_token
-        + num_experts_per_rank * (_K_MAX_CANDIDATE_BLOCK_M - 1),
-        _K_LCM_CANDIDATE_BLOCK_M,
+def grid_sync_done_u32(new_value, old_value):
+    return T.cast(
+        T.bitwise_and(T.bitwise_xor(new_value, old_value), T.uint32(0x80000000)) != T.uint32(0),
+        "uint32",
     )
 
 
-def _get_aligned_num_max_tokens_per_rank(config: MegaMoeConfig) -> int:
-    return _align_up(config.num_max_tokens_per_rank, _K_LCM_CANDIDATE_BLOCK_M)
+def load_f32(dst, address):
+    # ptx destinations are declared registers, so the helper writes into
+    # one the caller owns rather than returning a value.
+    return T.ptx.ld.global_.f32(dst, address)
 
 
-def _get_num_sf_ring_tokens(num_ring_tokens: int) -> int:
-    return max(
-        (num_ring_tokens // block_m) * _align_up(block_m, 128) for block_m in _K_CANDIDATE_BLOCK_M
-    )
+def load_shared_u32(dst, address):
+    return T.ptx.ld.shared.u32(dst, address)
 
 
-def _get_num_l1_warmup_waves(
-    *, num_total_m_blocks: int, num_clusters: int, num_l1_n_clusters: int, num_l2_n_clusters: int
-) -> int:
-    """Mirror of `sched::get_num_l1_warmup_waves` in
-    `deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh`: minimal L1 warmup waves
-    so the interleaved L1/L2 schedule cannot deadlock on the ring buffer."""
-    num_first_l2_wave_m_blocks = _ceil_div(num_clusters, num_l2_n_clusters)
-    num_l1_warmup_clusters_for_first_l2_wave = _ceil_div(
-        num_first_l2_wave_m_blocks * num_l1_n_clusters, num_clusters
-    )
-    num_interleave_cluster_diff_per_m_block = (
-        num_l1_n_clusters - num_l2_n_clusters if num_l1_n_clusters > num_l2_n_clusters else 0
-    )
-    num_warmup_waves_for_interleave_schedule = (
-        _ceil_div(
-            num_l1_n_clusters + (num_total_m_blocks - 1) * num_interleave_cluster_diff_per_m_block,
-            num_clusters,
-        )
-        + 1
-    )
-    return max(num_l1_warmup_clusters_for_first_l2_wave, num_warmup_waves_for_interleave_schedule)
+def uint32_bits_to_float(bits):
+    return T.cuda.uint_as_float(bits)
 
 
-def _get_num_max_live_pool_blocks(
-    *, num_total_m_blocks: int, num_sms: int, hidden: int, intermediate_hidden: int
-) -> int:
-    """Mirror of `sched::get_num_max_live_pool_blocks` in
-    `deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh`."""
-    mega_moe_block_n = 128
-    num_ctas_per_cluster = 2
-    if (intermediate_hidden * 2) % (num_ctas_per_cluster * mega_moe_block_n) != 0:
-        raise ValueError("MegaMoE requires (intermediate_hidden * 2) % 256 == 0")
-    if hidden % (num_ctas_per_cluster * mega_moe_block_n) != 0:
-        raise ValueError("MegaMoE requires hidden % 256 == 0")
-    num_clusters = num_sms // num_ctas_per_cluster
-    num_l1_n_clusters = intermediate_hidden * 2 // (num_ctas_per_cluster * mega_moe_block_n)
-    num_l2_n_clusters = hidden // (num_ctas_per_cluster * mega_moe_block_n)
-    num_l1_clusters = num_total_m_blocks * num_l1_n_clusters
-    num_l1_waves = _ceil_div(num_l1_clusters, num_clusters)
-    num_min_l1_warmup_waves = _get_num_l1_warmup_waves(
-        num_total_m_blocks=num_total_m_blocks,
-        num_clusters=num_clusters,
-        num_l1_n_clusters=num_l1_n_clusters,
-        num_l2_n_clusters=num_l2_n_clusters,
-    )
-    num_l1_warmup_waves = min(num_min_l1_warmup_waves, num_l1_waves)
-    num_l1_warmup_clusters = min(num_l1_warmup_waves * num_clusters, num_l1_clusters)
-    num_live_blocks_after_warmup = _ceil_div(num_l1_warmup_clusters, num_l1_n_clusters)
-    frontier_growth = (
-        _ceil_div(num_total_m_blocks * (num_l2_n_clusters - num_l1_n_clusters), num_l2_n_clusters)
-        if num_l2_n_clusters > num_l1_n_clusters
-        else 0
-    )
-    wave_margin = _ceil_div(num_clusters, min(num_l1_n_clusters, num_l2_n_clusters))
-    return min(num_total_m_blocks, num_live_blocks_after_warmup + frontier_growth + wave_margin)
+def float_bits(x):
+    return T.cuda.float_as_uint(x)
 
 
-def _get_num_ring_tokens_for_mega_moe(config: MegaMoeConfig) -> int:
-    """Mirror of the ring sizing loop in `csrc/apis/mega.hpp`
-    `get_symm_buffer_size_for_mega_moe`: the worst-case live pool blocks over
-    all candidate block sizes bounds the ring."""
-    num_sms = _get_num_sms_for_mega_moe()
-    num_max_tokens_per_rank = _get_aligned_num_max_tokens_per_rank(config)
-    num_active_topk = min(config.num_topk, config.num_experts_per_rank)
-    num_max_routed_tokens = num_max_tokens_per_rank * config.num_processes * num_active_topk
-    num_ring_tokens = 0
-    for block_m in _K_CANDIDATE_BLOCK_M:
-        num_pool_blocks = _ceil_div(num_max_routed_tokens, block_m) + config.num_experts_per_rank
-        num_live_pool_blocks = _get_num_max_live_pool_blocks(
-            num_total_m_blocks=num_pool_blocks,
-            num_sms=num_sms,
-            hidden=config.hidden,
-            intermediate_hidden=config.intermediate_hidden,
-        )
-        num_ring_tokens = max(num_ring_tokens, num_live_pool_blocks * block_m)
-    return _align_up(num_ring_tokens, _K_LCM_CANDIDATE_BLOCK_M)
+def sync_unaligned(barrier_idx, num_threads):
+    return T.ptx.barrier.sync(T.uint32(barrier_idx), T.uint32(num_threads))
 
 
-def get_deepgemm_workspace_layout(config: MegaMoeConfig) -> DeepGemmWorkspaceLayout:
-    launch = get_deepgemm_launch_config(config)
-    num_ranks = config.num_processes
-    num_experts = config.num_experts
-    num_experts_per_rank = config.num_experts_per_rank
-    aligned_num_max_tokens_per_rank = _get_aligned_num_max_tokens_per_rank(config)
-    num_max_recv_tokens_per_expert = num_ranks * aligned_num_max_tokens_per_rank
-    num_max_pool_tokens = _get_num_max_pool_tokens(
-        num_ranks=num_ranks,
-        num_max_tokens_per_rank=aligned_num_max_tokens_per_rank,
-        num_topk=config.num_topk,
-        num_experts_per_rank=num_experts_per_rank,
-    )
-    num_ring_tokens = _get_num_ring_tokens_for_mega_moe(config)
-    num_ring_blocks = num_ring_tokens // _K_MIN_CANDIDATE_BLOCK_M
-    num_sf_ring_tokens = _get_num_sf_ring_tokens(num_ring_tokens)
-    num_shared_l2_pool_blocks = _ceil_div(aligned_num_max_tokens_per_rank, _K_MIN_CANDIDATE_BLOCK_M)
-
-    # `Workspace::kNumBarrierSignalBytes` = 128: [0..15] grid sync counters,
-    # [16..19] NVLink barrier counter, [20..27] NVLink barrier signals,
-    # [28..31] L1 / [32..35] L2 / [36..39] shared-L1 / [40..43] shared-L2
-    # schedule task counters, [44..127] padding isolating the hot atomics.
-    barrier_offset = 0
-    l1_task_count_offset = 28
-    l2_task_count_offset = 32
-    shared_l1_task_count_offset = 36
-    shared_l2_task_count_offset = 40
-    cursor = 128
-
-    expert_send_count_offset = cursor
-    cursor += num_experts * 8
-
-    expert_recv_count_offset = cursor
-    cursor += num_experts * 8
-
-    expert_recv_count_sum_offset = cursor
-    cursor += num_experts_per_rank * 8
-
-    l1_full_count_offset = cursor
-    cursor += num_ring_blocks * 4
-
-    l1_empty_count_offset = cursor
-    cursor += num_ring_blocks * 4
-
-    l2_full_count_offset = cursor
-    cursor += num_ring_blocks * 4
-
-    l2_empty_count_offset = cursor
-    cursor += num_ring_blocks * 4
-
-    shared_l2_full_count_offset = cursor
-    cursor += num_shared_l2_pool_blocks * 4
-
-    src_token_topk_idx_offset = cursor
-    cursor += num_experts_per_rank * num_ranks * num_max_recv_tokens_per_expert * 4
-
-    token_src_metadata_offset = cursor
-    token_src_metadata_bytes = num_max_pool_tokens * 12
-    cursor += token_src_metadata_bytes
-
-    total_bytes = _align_up(cursor, 16)
-    return DeepGemmWorkspaceLayout(
-        num_ranks=num_ranks,
-        num_experts=num_experts,
-        num_experts_per_rank=num_experts_per_rank,
-        num_max_tokens_per_rank=aligned_num_max_tokens_per_rank,
-        num_topk=config.num_topk,
-        block_m=launch.block_m,
-        num_max_recv_tokens_per_expert=num_max_recv_tokens_per_expert,
-        num_ring_tokens=num_ring_tokens,
-        num_ring_blocks=num_ring_blocks,
-        num_sf_ring_tokens=num_sf_ring_tokens,
-        num_max_pool_tokens=num_max_pool_tokens,
-        num_shared_l2_pool_blocks=num_shared_l2_pool_blocks,
-        token_src_metadata_bytes=token_src_metadata_bytes,
-        barrier_offset=barrier_offset,
-        l1_task_count_offset=l1_task_count_offset,
-        l2_task_count_offset=l2_task_count_offset,
-        shared_l1_task_count_offset=shared_l1_task_count_offset,
-        shared_l2_task_count_offset=shared_l2_task_count_offset,
-        expert_send_count_offset=expert_send_count_offset,
-        expert_recv_count_offset=expert_recv_count_offset,
-        expert_recv_count_sum_offset=expert_recv_count_sum_offset,
-        l1_full_count_offset=l1_full_count_offset,
-        l1_empty_count_offset=l1_empty_count_offset,
-        l2_full_count_offset=l2_full_count_offset,
-        l2_empty_count_offset=l2_empty_count_offset,
-        shared_l2_full_count_offset=shared_l2_full_count_offset,
-        src_token_topk_idx_offset=src_token_topk_idx_offset,
-        token_src_metadata_offset=token_src_metadata_offset,
-        total_bytes=total_bytes,
-    )
+def prefetch_tensormap(tensor_map):
+    return T.ptx.prefetch.tensormap(T.address_of(tensor_map))
 
 
-def get_deepgemm_symm_buffer_layout(config: MegaMoeConfig) -> DeepGemmSymmBufferLayout:
-    workspace = get_deepgemm_workspace_layout(config)
-    aligned_num_max_tokens_per_rank = workspace.num_max_tokens_per_rank
-    cursor = workspace.total_bytes
-
-    input_token_offset = cursor
-    cursor += aligned_num_max_tokens_per_rank * config.hidden
-
-    input_sf_offset = cursor
-    cursor += aligned_num_max_tokens_per_rank * (config.hidden // 32)
-
-    input_topk_idx_offset = cursor
-    cursor += aligned_num_max_tokens_per_rank * config.num_topk * 8
-
-    input_topk_weights_offset = cursor
-    cursor += aligned_num_max_tokens_per_rank * config.num_topk * 4
-
-    l1_token_offset = cursor
-    cursor += workspace.num_ring_tokens * config.hidden
-
-    l1_sf_offset = cursor
-    cursor += workspace.num_sf_ring_tokens * (config.hidden // 32)
-
-    l1_topk_weights_offset = cursor
-    cursor += workspace.num_ring_tokens * 4
-
-    l2_token_offset = cursor
-    cursor += workspace.num_ring_tokens * config.intermediate_hidden
-
-    l2_sf_offset = cursor
-    cursor += workspace.num_sf_ring_tokens * (config.intermediate_hidden // 32)
-
-    combine_token_offset = cursor
-    cursor += config.num_topk * aligned_num_max_tokens_per_rank * config.hidden * 2
-
-    return DeepGemmSymmBufferLayout(
-        workspace_bytes=workspace.total_bytes,
-        input_token_offset=input_token_offset,
-        input_sf_offset=input_sf_offset,
-        input_topk_idx_offset=input_topk_idx_offset,
-        input_topk_weights_offset=input_topk_weights_offset,
-        l1_token_offset=l1_token_offset,
-        l1_sf_offset=l1_sf_offset,
-        l1_topk_weights_offset=l1_topk_weights_offset,
-        l2_token_offset=l2_token_offset,
-        l2_sf_offset=l2_sf_offset,
-        combine_token_offset=combine_token_offset,
-        total_bytes=cursor,
-    )
+def lds128(src_ptr, dst, base=0):
+    return T.ptx.ld.shared.v4.u32(dst[base], dst[base + 1], dst[base + 2], dst[base + 3], src_ptr)
 
 
-def _tensor_offset_bytes(base: torch.Tensor, view: torch.Tensor) -> int:
-    return int(view.data_ptr()) - int(base.data_ptr())
+def mbarrier_arrive_and_set_tx(barrier_ptr, num_bytes):
+    return T.ptx.mbarrier.arrive.expect_tx.shared.b64(barrier_ptr, T.uint32(num_bytes))
 
 
-def validate_runtime_symm_buffer_layout(
-    *, symm_buffer: Any, layout: DeepGemmSymmBufferLayout, config: MegaMoeConfig
-) -> None:
-    workspace = get_deepgemm_workspace_layout(config)
-    actual_offsets = {
-        "input_token_offset": _tensor_offset_bytes(symm_buffer.buffer, symm_buffer.x),
-        "input_sf_offset": _tensor_offset_bytes(symm_buffer.buffer, symm_buffer.x_sf),
-        "input_topk_idx_offset": _tensor_offset_bytes(symm_buffer.buffer, symm_buffer.topk_idx),
-        "input_topk_weights_offset": _tensor_offset_bytes(
-            symm_buffer.buffer, symm_buffer.topk_weights
+def mbarrier_wait_phase(barrier_ptr, phase):
+    return T.cuda.mbarrier_wait(barrier_ptr, phase)
+
+
+def replace_smem_desc_addr(desc, smem_ptr):
+    start_addr = T.cast(
+        T.bitwise_and(
+            T.shift_right(T.cuda.cvta_generic_to_shared(smem_ptr), T.uint32(4)), T.uint32(0x3FFF)
         ),
-        "l1_token_offset": _tensor_offset_bytes(symm_buffer.buffer, symm_buffer.l1_acts),
-        "l1_sf_offset": _tensor_offset_bytes(symm_buffer.buffer, symm_buffer.l1_acts_sf),
-        "l2_token_offset": _tensor_offset_bytes(symm_buffer.buffer, symm_buffer.l2_acts),
-        "l2_sf_offset": _tensor_offset_bytes(symm_buffer.buffer, symm_buffer.l2_acts_sf),
-    }
-    expected_offsets = {
-        "input_token_offset": layout.input_token_offset,
-        "input_sf_offset": layout.input_sf_offset,
-        "input_topk_idx_offset": layout.input_topk_idx_offset,
-        "input_topk_weights_offset": layout.input_topk_weights_offset,
-        "l1_token_offset": layout.l1_token_offset,
-        "l1_sf_offset": layout.l1_sf_offset,
-        "l2_token_offset": layout.l2_token_offset,
-        "l2_sf_offset": layout.l2_sf_offset,
-    }
-    for key, expected in expected_offsets.items():
-        actual = actual_offsets[key]
-        if actual != expected:
-            raise ValueError(
-                f"DeepGEMM symm buffer offset mismatch for {key}: expected {expected}, got {actual}"
-            )
-
-    expected_shapes = {
-        "x": (workspace.num_max_tokens_per_rank, config.hidden),
-        "x_sf": (workspace.num_max_tokens_per_rank, config.hidden // 128),
-        "topk_idx": (workspace.num_max_tokens_per_rank, config.num_topk),
-        "topk_weights": (workspace.num_max_tokens_per_rank, config.num_topk),
-        "l1_acts": (workspace.num_ring_tokens, config.hidden),
-        "l1_acts_sf": (workspace.num_sf_ring_tokens, config.hidden // 128),
-        "l2_acts": (workspace.num_ring_tokens, config.intermediate_hidden),
-        "l2_acts_sf": (workspace.num_sf_ring_tokens, config.intermediate_hidden // 128),
-    }
-    for name, expected_shape in expected_shapes.items():
-        actual_shape = tuple(getattr(symm_buffer, name).shape)
-        if actual_shape != expected_shape:
-            raise ValueError(
-                f"DeepGEMM symm buffer shape mismatch for {name}: "
-                f"expected {expected_shape}, got {actual_shape}"
-            )
-
-    # Upstream 559d79f removed `SymmBuffer.num_ring_tokens`; the ring capacity is
-    # implied by the `l1_acts` view shape checked above.
-    actual_num_ring_tokens = int(symm_buffer.l1_acts.shape[0])
-    if actual_num_ring_tokens != workspace.num_ring_tokens:
-        raise ValueError(
-            "DeepGEMM ring capacity mismatch: "
-            f"expected {workspace.num_ring_tokens}, got {actual_num_ring_tokens}"
-        )
-
-    if int(symm_buffer.buffer.nbytes) != layout.total_bytes:
-        raise ValueError(
-            f"DeepGEMM symm buffer total size mismatch: "
-            f"expected {layout.total_bytes}, got {int(symm_buffer.buffer.nbytes)}"
-        )
-
-
-def build_dispatch_reference(
-    *, topk_idx: torch.Tensor, rank_idx: int, layout: DeepGemmWorkspaceLayout
-) -> DispatchReference:
-    num_tokens, num_topk = topk_idx.shape
-    if num_topk != layout.num_topk:
-        raise ValueError("topk shape does not match workspace layout")
-
-    expert_send_count = torch.zeros(layout.num_experts, dtype=torch.int64, device=topk_idx.device)
-    expert_recv_count = torch.zeros(
-        (layout.num_ranks, layout.num_experts_per_rank), dtype=torch.int64, device=topk_idx.device
+        "uint64",
     )
-    expert_recv_count_sum = torch.zeros(
-        layout.num_experts_per_rank, dtype=torch.int64, device=topk_idx.device
-    )
-    src_token_topk_idx = torch.full(
-        (layout.num_experts_per_rank, layout.num_ranks, layout.num_max_recv_tokens_per_expert),
-        -1,
-        dtype=torch.int32,
-        device=topk_idx.device,
-    )
+    return T.bitwise_or(T.bitwise_and(desc, T.bitwise_not(T.uint64(0x3FFF))), start_addr)
 
-    for token_idx in range(num_tokens):
-        for topk_slot in range(layout.num_topk):
-            expert_idx = int(topk_idx[token_idx, topk_slot].item())
-            if expert_idx < 0:
-                continue
-            dst_rank_idx = expert_idx // layout.num_experts_per_rank
-            dst_local_expert_idx = expert_idx % layout.num_experts_per_rank
-            dst_slot_idx = int(expert_send_count[expert_idx].item())
-            if dst_slot_idx >= layout.num_max_recv_tokens_per_expert:
-                raise ValueError("dispatch reference overflowed expert recv capacity")
-            token_topk_idx = token_idx * layout.num_topk + topk_slot
-            src_token_topk_idx[dst_local_expert_idx, rank_idx, dst_slot_idx] = token_topk_idx
-            expert_send_count[expert_idx] += 1
-            expert_recv_count[rank_idx, dst_local_expert_idx] += 1
-            expert_recv_count_sum[dst_local_expert_idx] += 1
 
-    return DispatchReference(
-        expert_send_count=expert_send_count,
-        expert_recv_count=expert_recv_count,
-        expert_recv_count_sum=expert_recv_count_sum,
-        src_token_topk_idx=src_token_topk_idx,
+#: Bulk global -> shared copy, completion signalled on an mbarrier.
+_bulk_g2s_chain = "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
+
+#: Bulk shared -> global copy, retired through the bulk commit group.
+_bulk_s2g_chain = "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint"
+
+#: `cute::TMA::CacheHintSm90::EVICT_FIRST`. Ring-buffer traffic is streamed
+#: through L2 once, so it should be the first thing evicted.
+_evict_first_policy = T.uint64(0x12F0000000000000)
+
+
+def tma_load_1d(dst_ptr, src_ptr, barrier_ptr, num_bytes):
+    return T.ptx[_bulk_g2s_chain](
+        dst_ptr, src_ptr, T.cast(num_bytes, "uint32"), barrier_ptr, _evict_first_policy
     )
 
 
-def _select_round_robin_rank(rank_counts: list[int], token_idx_in_expert: int) -> tuple[int, int]:
-    remaining = list(rank_counts)
-    offset = 0
-    slot_idx = token_idx_in_expert
-    while True:
-        active_ranks = [rank_idx for rank_idx, value in enumerate(remaining) if value > 0]
-        if not active_ranks:
-            raise ValueError("round-robin pull encountered no active ranks")
-        length = min(remaining[rank_idx] for rank_idx in active_ranks)
-        num_round_tokens = length * len(active_ranks)
-        if slot_idx < num_round_tokens:
-            slot_idx_in_round = slot_idx % len(active_ranks)
-            return active_ranks[slot_idx_in_round], offset + (slot_idx // len(active_ranks))
-        slot_idx -= num_round_tokens
-        offset += length
-        for rank_idx in active_ranks:
-            remaining[rank_idx] -= length
-
-
-def build_pull_reference(
-    *, dispatch_reference: DispatchReference, layout: DeepGemmWorkspaceLayout
-) -> PullReference:
-    device = dispatch_reference.expert_recv_count.device
-    expert_pool_block_offset = torch.zeros(
-        layout.num_experts_per_rank, dtype=torch.int32, device=device
-    )
-    pool_src_rank_idx = torch.full(
-        (layout.num_max_pool_tokens,), -1, dtype=torch.int32, device=device
-    )
-    pool_src_token_idx = torch.full(
-        (layout.num_max_pool_tokens,), -1, dtype=torch.int32, device=device
-    )
-    pool_src_topk_idx = torch.full(
-        (layout.num_max_pool_tokens,), -1, dtype=torch.int32, device=device
-    )
-    pool_src_token_topk_idx = torch.full(
-        (layout.num_max_pool_tokens,), -1, dtype=torch.int32, device=device
-    )
-    l1_full_count = torch.zeros(layout.num_ring_blocks, dtype=torch.int32, device=device)
-    num_runtime_ring_blocks = layout.num_ring_tokens // layout.block_m
-
-    running_pool_block_offset = 0
-    expert_recv_count = dispatch_reference.expert_recv_count.cpu()
-    expert_recv_count_sum = dispatch_reference.expert_recv_count_sum.cpu()
-    src_token_topk_idx = dispatch_reference.src_token_topk_idx.cpu()
-
-    for local_expert_idx in range(layout.num_experts_per_rank):
-        expert_pool_block_offset[local_expert_idx] = running_pool_block_offset
-        num_tokens = int(expert_recv_count_sum[local_expert_idx].item())
-        rank_counts = [
-            int(expert_recv_count[rank_idx, local_expert_idx].item())
-            for rank_idx in range(layout.num_ranks)
-        ]
-        for token_idx_in_expert in range(num_tokens):
-            src_rank_idx, token_idx_in_rank = _select_round_robin_rank(
-                rank_counts, token_idx_in_expert
-            )
-            token_topk_linear_idx = int(
-                src_token_topk_idx[local_expert_idx, src_rank_idx, token_idx_in_rank].item()
-            )
-            if token_topk_linear_idx < 0:
-                raise ValueError("dispatch pull reference encountered an uninitialized source slot")
-            pool_token_idx = running_pool_block_offset * layout.block_m + token_idx_in_expert
-            pool_src_rank_idx[pool_token_idx] = src_rank_idx
-            pool_src_token_idx[pool_token_idx] = token_topk_linear_idx // layout.num_topk
-            pool_src_topk_idx[pool_token_idx] = token_topk_linear_idx % layout.num_topk
-            pool_src_token_topk_idx[pool_token_idx] = token_topk_linear_idx
-            pool_block_idx = running_pool_block_offset + token_idx_in_expert // layout.block_m
-            increment = 1
-            if token_idx_in_expert == num_tokens - 1:
-                increment = layout.block_m - (token_idx_in_expert % layout.block_m)
-            l1_full_count[pool_block_idx % num_runtime_ring_blocks] += increment
-        running_pool_block_offset += _align_up(num_tokens, layout.block_m) // layout.block_m
-
-    return PullReference(
-        expert_pool_block_offset=expert_pool_block_offset,
-        pool_src_rank_idx=pool_src_rank_idx,
-        pool_src_token_idx=pool_src_token_idx,
-        pool_src_topk_idx=pool_src_topk_idx,
-        pool_src_token_topk_idx=pool_src_token_topk_idx,
-        l1_full_count=l1_full_count,
+def tma_store_1d(dst_ptr, src_ptr, num_bytes):
+    return T.ptx[_bulk_s2g_chain](
+        dst_ptr, src_ptr, T.cast(num_bytes, "uint32"), _evict_normal_policy
     )
 
 
-def build_scheduler_reference(
-    *,
-    config: MegaMoeConfig,
-    launch: DeepGemmLaunchConfig,
-    dispatch_reference: DispatchReference,
-    pull_reference: PullReference,
-) -> SchedulerReference:
-    """CPU mirror of the dynamic `MegaMoEScheduler` task enumeration (upstream
-    559d79f). Which CTA pair executes a task is decided at runtime by global
-    atomic counters, but the task set itself is deterministic: L1 task indices
-    map to `(pool m block, n cluster)` in counter order, likewise for L2."""
-    expert_num_tokens = dispatch_reference.expert_recv_count_sum.to(torch.int32).cpu()
-    expert_pool_block_offset = pull_reference.expert_pool_block_offset.to(torch.int32).cpu()
-    num_l1_clusters = (config.intermediate_hidden * 2) // launch.block_n // 2
-    num_l2_clusters = config.hidden // launch.block_n // 2
-    num_l1_block_ks = config.hidden // launch.block_k
-    num_l2_block_ks = config.intermediate_hidden // launch.block_k
+def tma_store_fence():
+    return T.ptx.fence.proxy.async_.shared__cta()
 
-    def get_num_tokens(expert_idx: int) -> int:
-        if expert_idx >= config.num_experts_per_rank:
-            return 0
-        return int(expert_num_tokens[expert_idx].item())
 
-    num_total_m_blocks = 0
-    expert_of_pool_block: list[int] = []
-    m_block_of_pool_block: list[int] = []
-    for expert_idx in range(config.num_experts_per_rank):
-        num_m_blocks = _ceil_div(get_num_tokens(expert_idx), launch.block_m)
-        for m_block_idx in range(num_m_blocks):
-            expert_of_pool_block.append(expert_idx)
-            m_block_of_pool_block.append(m_block_idx)
-        num_total_m_blocks += num_m_blocks
+def fence_barrier_init():
+    return T.ptx.fence.mbarrier_init.release.cluster()
 
-    blocks: list[SchedulerBlockReference] = []
-    num_linear1_blocks = 0
-    num_linear2_blocks = 0
-    for phase, num_clusters, num_k_blocks in (
-        ("Linear1", num_l1_clusters, num_l1_block_ks),
-        ("Linear2", num_l2_clusters, num_l2_block_ks),
-    ):
-        for task_idx in range(num_total_m_blocks * num_clusters):
-            pool_block_idx = task_idx // num_clusters
-            n_cluster_idx = task_idx % num_clusters
-            local_expert_idx = expert_of_pool_block[pool_block_idx]
-            m_block_idx = m_block_of_pool_block[pool_block_idx]
-            num_tokens = get_num_tokens(local_expert_idx)
-            valid_m = min(num_tokens - m_block_idx * launch.block_m, launch.block_m)
-            blocks.append(
-                SchedulerBlockReference(
-                    block_idx_seed=task_idx,
-                    phase=phase,
-                    local_expert_idx=local_expert_idx,
-                    num_k_blocks=num_k_blocks,
-                    m_block_idx=m_block_idx,
-                    n_block_idx=n_cluster_idx,
-                    pool_block_offset=pool_block_idx - m_block_idx,
-                    valid_m=max(valid_m, 0),
-                )
-            )
-            if phase == "Linear1":
-                num_linear1_blocks += 1
-            else:
-                num_linear2_blocks += 1
 
-    return SchedulerReference(
-        expert_num_tokens=expert_num_tokens.to(dispatch_reference.expert_recv_count_sum.device),
-        expert_pool_block_offset=expert_pool_block_offset.to(
-            dispatch_reference.expert_recv_count_sum.device
-        ),
-        blocks=tuple(blocks),
-        num_linear1_blocks=num_linear1_blocks,
-        num_linear2_blocks=num_linear2_blocks,
+def tma_store_arrive():
+    return T.ptx.cp.async_.bulk.commit_group()
+
+
+def tma_store_wait(num_prior_groups):
+    if num_prior_groups == 0:
+        return T.ptx.cp.async_.bulk.wait_group(0)
+    if num_prior_groups == 1:
+        return T.ptx.cp.async_.bulk.wait_group(1)
+    raise ValueError("Unsupported TMA store wait distance")
+
+
+def tma_store_2d(src, tensormap, coord0, coord1):
+    return T.ptx["cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group"](
+        T.address_of(tensormap), coord0, coord1, src
     )
 
 
-def _get_block_config_for_mega_moe(
-    *, num_ranks: int, num_experts: int, num_tokens: int, num_topk: int
-) -> tuple[int, int, int, int, int]:
-    """Pick ``(cluster, block_m, store_m, block_k, epilogue_wgs)`` by
-    expected tokens-per-expert. Mirrors `get_block_config_for_mega_moe` in
-    `csrc/jit_kernels/heuristics/mega_moe.hpp` so the schedule tracks upstream's
-    per-batch-size tuning instead of always picking the prefill-sized 192."""
-    expected = float(num_tokens) * num_ranks * num_topk / num_experts
-    if expected <= 8.5:
-        cfg = (2, 16, 8, 256, 2)
-    elif expected <= 16.5:
-        cfg = (2, 32, 16, 128, 2)
-    elif expected <= 32.5:
-        cfg = (2, 64, 32, 128, 1)
-    elif expected <= 64.5:
-        cfg = (2, 96, 16, 128, 2)
-    elif expected <= 96.5:
-        cfg = (2, 128, 32, 128, 2)
-    else:
-        cfg = (2, 192, 32, 128, 2)
-    assert cfg[1] in _K_CANDIDATE_BLOCK_M
-    return cfg
+#: Unicast (cta_mask=1) at cta_group::2 scope with the evict-normal L2 policy;
+#: the mbarrier arrives as a precomputed leader-CTA shared address.
+_sm100_2sm_load_chain = (
+    "cp.async.bulk.tensor.2d.shared::cluster.global"
+    ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
+)
+
+#: `cute::TMA::CacheHintSm100::EVICT_NORMAL`. Weights and activations are
+#: re-read across blocks, so they keep the default L2 residency.
+_evict_normal_policy = T.uint64(1152921504606846976)
 
 
-def _get_num_bytes_per_pull(hidden: int) -> int:
-    num_bytes_per_pull = hidden
-    while num_bytes_per_pull > 4096:
-        if num_bytes_per_pull % 2 != 0:
-            raise ValueError("MegaMoE dispatch pull bytes must remain divisible by 2")
-        num_bytes_per_pull //= 2
-    return num_bytes_per_pull
-
-
-def _get_num_sms_for_mega_moe() -> int:
-    override = os.environ.get("TIRX_DEEPGEMM_NUM_SMS_OVERRIDE")
-    if override is not None:
-        return int(override)
-    if torch.cuda.is_available():
-        return int(
-            torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        )
-    raise RuntimeError(
-        "MegaMoE launch requires CUDA to infer kNumSMs; set TIRX_DEEPGEMM_NUM_SMS_OVERRIDE to override"
-    )
-
-
-def get_deepgemm_launch_config(config: MegaMoeConfig) -> DeepGemmLaunchConfig:
-    block_n = 128
-    num_sms = _get_num_sms_for_mega_moe()
-    if num_sms <= 1:
-        raise ValueError("MegaMoE launch must satisfy DeepGEMM kNumSMs > 1")
-    if num_sms % 2 != 0:
-        raise ValueError("MegaMoE launch must satisfy DeepGEMM kNumSMs % 2 == 0")
-    num_ctas_per_cluster_env = os.environ.get("TIRX_DEEPGEMM_NUM_CTAS_PER_CLUSTER_OVERRIDE")
-    cluster_size, block_m, store_block_m, block_k, num_epilogue_wgs = (
-        _get_block_config_for_mega_moe(
-            num_ranks=config.num_processes,
-            num_experts=config.num_experts,
-            num_tokens=config.num_tokens,
-            num_topk=config.num_topk,
+def sm100_tma_2sm_load_2d_addr(dst, mbar, tensormap_addr, coord0, coord1):
+    mbar_addr = T.cuda.sm100_2sm_leader_smem_addr(mbar)
+    T.evaluate(
+        T.ptx[_sm100_2sm_load_chain](
+            dst, tensormap_addr, coord0, coord1, mbar_addr, _evict_normal_policy
         )
     )
-    if num_ctas_per_cluster_env is not None and int(num_ctas_per_cluster_env) != cluster_size:
-        raise ValueError(
-            f"MegaMoE must use DeepGEMM-equivalent num_ctas_per_cluster={cluster_size}"
+
+
+def stg128_symm(peer_base, byte_offset, r0, r1, r2, r3):
+    return T.ptx.st.global_.v4.b32(peer_ptr(peer_base, byte_offset), r0, r1, r2, r3)
+
+
+def ptr_to_u64(ptr):
+    return T.reinterpret("uint64", ptr)
+
+
+def peer_ptr(peer_base, byte_offset):
+    return T.reinterpret("handle", peer_base + byte_offset)
+
+
+def peer_store_u32(peer_base, byte_offset, value):
+    return T.ptx.st.global_.u32(peer_ptr(peer_base, byte_offset), value)
+
+
+def peer_store_u64(peer_base, byte_offset, value):
+    return T.ptx.st.global_.u64(peer_ptr(peer_base, byte_offset), value)
+
+
+def st_shared_bulk(ptr, num_bytes):
+    return T.ptx.st_bulk.weak.shared__cta(ptr, T.cast(num_bytes, "uint64"))
+
+
+def peer_atomic_add_u64(dst, peer_base, byte_offset, value):
+    return T.ptx.atom.sys.global_.add.u64(dst, peer_ptr(peer_base, byte_offset), value)
+
+
+def peer_red_add_rel_sys_s32(peer_base, byte_offset, value):
+    return T.ptx.red.release.sys.global_.add.s32(peer_ptr(peer_base, byte_offset), value)
+
+
+def peer_load_u32(dst, peer_base, byte_offset):
+    return T.ptx.ld.global_.u32(dst, peer_ptr(peer_base, byte_offset))
+
+
+def peer_load_f32(dst, peer_base, byte_offset):
+    return T.ptx.ld.global_.f32(dst, peer_ptr(peer_base, byte_offset))
+
+
+def tma_load_1d_symm(dst_ptr, peer_base, byte_offset, barrier_ptr, num_bytes):
+    return T.ptx[_bulk_g2s_chain](
+        dst_ptr,
+        peer_ptr(peer_base, byte_offset),
+        T.cast(num_bytes, "uint32"),
+        barrier_ptr,
+        _evict_first_policy,
+    )
+
+
+def ballot_sync(mask, pred):
+    return T.cuda.ballot_sync(mask, pred)
+
+
+def ffs_u32(value):
+    return T.cuda.ffs_u32(value)
+
+
+def reduce_add_sync_u32(mask, value):
+    return T.cuda.reduce_add_sync_u32(mask, value)
+
+
+def red_add_gpu_u32(address, value):
+    return T.ptx.red.gpu.global_.add.u32(address, value)
+
+
+def cuda_clock64():
+    return T.cuda.clock64()
+
+
+def bf16x2_lo(packed):
+    return T.cast(T.bitwise_and(packed, T.uint32(0xFFFF)), "uint16")
+
+
+def bf16x2_hi(packed):
+    return T.cast(T.bitwise_and(T.shift_right(packed, T.uint32(16)), T.uint32(0xFFFF)), "uint16")
+
+
+def cast_into_bf16_and_pack(v0, v1):
+    return T.cuda.float22bfloat162_rn(v0, v1)
+
+
+def make_runtime_instr_desc_with_sf_id(desc, sfa_id, sfb_id):
+    runtime_desc = T.bitwise_and(desc, T.uint32(0x9FFFFFCF))
+    runtime_desc = T.bitwise_or(runtime_desc, T.shift_left(T.cast(sfa_id, "uint32"), T.uint32(29)))
+    runtime_desc = T.bitwise_or(runtime_desc, T.shift_left(T.cast(sfb_id, "uint32"), T.uint32(4)))
+    return runtime_desc
+
+
+def st_async_cluster_task_info(dst_ptr, bar_ptr, dst_cta_idx, task_info_regs):
+    mapped_bar = T.alloc_local((1,), "uint32")
+    mapped_dst = T.alloc_local((1,), "uint32")
+    mapped_dst_hi = T.alloc_local((1,), "uint32")
+    cta = T.cast(dst_cta_idx, "uint32")
+    T.evaluate(
+        T.ptx.mapa.shared__cluster.u32(mapped_bar[0], T.cuda.cvta_generic_to_shared(bar_ptr), cta)
+    )
+    T.evaluate(
+        T.ptx.mapa.shared__cluster.u32(mapped_dst[0], T.cuda.cvta_generic_to_shared(dst_ptr), cta)
+    )
+    T.evaluate(
+        T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
+            mapped_dst[0],
+            task_info_regs[0],
+            task_info_regs[1],
+            task_info_regs[2],
+            task_info_regs[3],
+            mapped_bar[0],
         )
-    load_block_m = block_m // 2
-    launch = DeepGemmLaunchConfig(
-        num_sms=num_sms,
-        num_ctas_per_cluster=cluster_size,
-        block_m=block_m,
-        block_n=block_n,
-        block_k=block_k,
-        load_block_m=load_block_m,
-        load_block_n=block_n,
-        store_block_m=store_block_m,
-        num_dispatch_threads=128,
-        num_non_epilogue_threads=128,
-        num_epilogue_threads=num_epilogue_wgs * 128,
-        num_bytes_per_pull=_get_num_bytes_per_pull(config.hidden),
-        num_topk=config.num_topk,
-        hidden=config.hidden,
-        intermediate_hidden=config.intermediate_hidden,
     )
-    wg_block_m = launch.block_m // num_epilogue_wgs
-    atom_m = 8
-    if launch.num_epilogue_warps != num_epilogue_wgs * 4:
-        raise ValueError("MegaMoE launch num_epilogue_warps must equal kNumEpilogueWarpgroups * 4")
-    if launch.epilogue_warp_start_idx % 4 != 0 or launch.num_epilogue_warps % 4 != 0:
-        raise ValueError("MegaMoE launch must satisfy DeepGEMM epilogue warpgroup alignment")
-    if launch.block_m % num_epilogue_wgs != 0:
-        raise ValueError("MegaMoE launch must satisfy BLOCK_M % kNumEpilogueWarpgroups == 0")
-    if wg_block_m % launch.store_block_m != 0:
-        raise ValueError("MegaMoE launch must satisfy WG_BLOCK_M % STORE_BLOCK_M == 0")
-    if launch.store_block_m % atom_m != 0:
-        raise ValueError("MegaMoE launch must satisfy STORE_BLOCK_M % ATOM_M == 0")
-    # Upstream relaxed `WG_BLOCK_M % 32 == 0` to a runtime lane-bound guard in the
-    # SF weight-cache load (see kernel body). Keep only the `atom_m | 32` part here.
-    if 32 % atom_m != 0:
-        raise ValueError("MegaMoE launch must satisfy 32 % ATOM_M == 0")
-    if launch.block_n != 128:
-        raise ValueError("MegaMoE launch must satisfy BLOCK_N == 128")
-    if launch.block_k % launch.block_n != 0:
-        raise ValueError("MegaMoE launch must satisfy BLOCK_K % BLOCK_N == 0")
-    if (config.intermediate_hidden * 2 // launch.block_n) % 2 != 0:
-        raise ValueError("MegaMoE launch must satisfy kNumL1BlockNs % 2 == 0")
-    if (config.hidden // launch.block_n) % 2 != 0:
-        raise ValueError("MegaMoE launch must satisfy kNumL2BlockNs % 2 == 0")
-    return launch
-
-
-def get_tirx_launch_param_tags() -> list[str]:
-    return ["blockIdx.x", "clusterCtaIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory"]
-
-
-def get_tirx_dynamic_shared_memory_bytes(config: MegaMoeConfig) -> int:
-    launch = get_deepgemm_launch_config(config)
-    num_experts = config.num_experts
-    hidden = config.hidden
-    intermediate_hidden = config.intermediate_hidden
-    l1_out_block_n = launch.block_n // 2
-    sf_block_m = _align_up(launch.block_m, 128)
-    num_epilogue_stages = 2
-    sm100_smem_capacity = 232448
-    shared_alignment = 1024
-    num_epilogue_wgs = launch.num_epilogue_warps // 4
-    smem_expert_count_size = _align_up(num_experts * 4, shared_alignment)
-    smem_send_buffer_size = _align_up(
-        launch.num_bytes_per_pull * launch.num_dispatch_warps, shared_alignment
-    )
-    smem_dispatch_size = smem_expert_count_size + smem_send_buffer_size
-    smem_cd_l1_size = num_epilogue_wgs * launch.store_block_m * l1_out_block_n * 2
-    smem_cd_l2_size = num_epilogue_wgs * launch.store_block_m * launch.block_n * 2
-    smem_cd_size = _align_up(max(smem_cd_l1_size, smem_cd_l2_size), shared_alignment)
-    smem_a_size_per_stage = launch.load_block_m * launch.block_k
-    smem_b_size_per_stage = launch.load_block_n * launch.block_k
-    smem_sfa_size_per_stage = sf_block_m * (launch.block_k // 32)
-    smem_sfb_size_per_stage = launch.block_n * (launch.block_k // 32)
-    smem_amax_reduction_size = launch.store_block_m * launch.num_epilogue_warps * 4
-    smem_tmem_ptr_size = 4
-    num_schedule_stages = 2
-    smem_task_info_size = num_schedule_stages * 32
-    smem_per_stage = (
-        smem_a_size_per_stage
-        + smem_b_size_per_stage
-        + smem_sfa_size_per_stage
-        + smem_sfb_size_per_stage
-        + 16
-    )
-    smem_fixed = (
-        smem_dispatch_size
-        + smem_cd_size
-        + smem_amax_reduction_size
-        + (
-            launch.num_dispatch_warps
-            + num_epilogue_stages * 2
-            + launch.num_epilogue_warps * 2
-            + num_schedule_stages * 2
-        )
-        * 8
-        + smem_task_info_size
-        + smem_tmem_ptr_size
-    )
-    num_stages = (sm100_smem_capacity - smem_fixed) // smem_per_stage
-    if num_stages < 2:
-        raise ValueError("MegaMoE requires at least two pipeline stages")
-    num_total_barriers = (
-        launch.num_dispatch_warps
-        + num_stages * 2
-        + num_epilogue_stages * 2
-        + launch.num_epilogue_warps * 2
-        + num_schedule_stages * 2
-    )
-    smem_expert_count_offset = 0
-    smem_send_buffer_offset = smem_expert_count_offset + smem_expert_count_size
-    smem_gemm_base_offset = smem_send_buffer_offset + smem_send_buffer_size
-    smem_cd_offset = smem_gemm_base_offset
-    smem_a_offset = smem_cd_offset + smem_cd_size
-    smem_b_offset = smem_a_offset + num_stages * smem_a_size_per_stage
-    smem_sfa_offset = smem_b_offset + num_stages * smem_b_size_per_stage
-    smem_sfb_offset = smem_sfa_offset + num_stages * smem_sfa_size_per_stage
-    smem_amax_reduction_offset = smem_sfb_offset + num_stages * smem_sfb_size_per_stage
-    smem_task_info_offset = _align_up(smem_amax_reduction_offset + smem_amax_reduction_size, 16)
-    smem_barrier_offset = smem_task_info_offset + smem_task_info_size
-    smem_tmem_ptr_offset = smem_barrier_offset + num_total_barriers * 8
-    smem_symm_rank_bases_offset = _align_up(smem_tmem_ptr_offset + smem_tmem_ptr_size, 8)
-    smem_symm_rank_bases_size = config.num_processes * 8 if config.num_processes > 1 else 0
-    return (
-        smem_symm_rank_bases_offset + smem_symm_rank_bases_size
-        if config.num_processes > 1
-        else smem_tmem_ptr_offset + smem_tmem_ptr_size
+    T.evaluate(T.ptx.add.u32(mapped_dst_hi[0], mapped_dst[0], T.uint32(16)))
+    return T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
+        mapped_dst_hi[0],
+        task_info_regs[4],
+        task_info_regs[5],
+        task_info_regs[6],
+        task_info_regs[7],
+        mapped_bar[0],
     )
 
 
-def _ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
+def atomic_add_u32(dst, address, value):
+    return T.ptx.atom.global_.add.u32(dst, address, value)
 
 
-def _get_tma_aligned_size(x: int, element_size: int) -> int:
-    return _align_up(x * element_size, 16) // element_size
-
-
-def _tensor_map_swizzle_from_mode(mode: int, base: int = 0) -> int:
-    if base != 0:
-        if base == 32 and mode == 128:
-            return 4
-        raise ValueError(f"Unsupported tensor map swizzle base={base}, mode={mode}")
-    if mode in (0, 16):
-        return 0
-    if mode == 32:
-        return 1
-    if mode == 64:
-        return 2
-    if mode == 128:
-        return 3
-    raise ValueError(f"Unsupported tensor map swizzle mode={mode}")
-
-
-def _torch_dtype_to_tvm_dtype(t: torch.Tensor) -> str:
-    if t.dtype == torch.int8:
-        return "int8"
-    if t.dtype == torch.uint8:
-        return "uint8"
-    if t.dtype == torch.int32:
-        return "int32"
-    if t.dtype == torch.uint32:
-        return "uint32"
-    if t.dtype == torch.float32:
-        return "float32"
-    if t.dtype == torch.bfloat16:
-        return "bfloat16"
-    if t.dtype == torch.float8_e4m3fn:
-        return "float8_e4m3fn"
-    raise TypeError(f"Unsupported tensor dtype for TMA descriptor: {t.dtype}")
-
-
-class _AlignedTensorMap:
-    def __init__(self) -> None:
-        self._storage = ctypes.create_string_buffer(128 + 64)
-        base = ctypes.addressof(self._storage)
-        self.ptr = ctypes.c_void_p((base + 63) & ~63)
-
-
-_CUDA_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B = 14
-_CUDA_TENSOR_MAP_INTERLEAVE_NONE = 0
-_CUDA_TENSOR_MAP_L2_PROMOTION_L2_256B = 3
-_CUDA_TENSOR_MAP_FLOAT_OOB_FILL_NONE = 0
-_CUDA_DRIVER = None
-
-
-def _get_cuda_driver() -> ctypes.CDLL:
-    global _CUDA_DRIVER
-    if _CUDA_DRIVER is None:
-        libcuda_path = ctypes.util.find_library("cuda") or "libcuda.so.1"
-        driver = ctypes.CDLL(libcuda_path)
-        driver.cuInit.argtypes = [ctypes.c_uint]
-        driver.cuInit.restype = ctypes.c_int
-        result = driver.cuInit(0)
-        if result != 0:
-            raise RuntimeError(f"cuInit failed with CUresult={result}")
-        driver.cuTensorMapEncodeTiled.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_uint32,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_uint64),
-            ctypes.POINTER(ctypes.c_uint64),
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-        ]
-        driver.cuTensorMapEncodeTiled.restype = ctypes.c_int
-        _CUDA_DRIVER = driver
-    return _CUDA_DRIVER
-
-
-def _encode_fp4_align16_tma_2d_desc(
-    *,
-    desc: _AlignedTensorMap,
-    tensor: torch.Tensor,
-    gmem_inner_dim: int,
-    gmem_outer_dim: int,
-    smem_inner_dim: int,
-    smem_outer_dim: int,
-    gmem_outer_stride_bytes: int,
-    swizzle: int,
-) -> None:
-    global_shape = (ctypes.c_uint64 * 2)(int(gmem_inner_dim), int(gmem_outer_dim))
-    global_strides = (ctypes.c_uint64 * 1)(int(gmem_outer_stride_bytes))
-    box_dim = (ctypes.c_uint32 * 2)(int(smem_inner_dim), int(smem_outer_dim))
-    element_strides = (ctypes.c_uint32 * 2)(1, 1)
-    result = _get_cuda_driver().cuTensorMapEncodeTiled(
-        desc.ptr,
-        _CUDA_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B,
-        ctypes.c_uint32(2),
-        ctypes.c_void_p(int(tensor.data_ptr())),
-        global_shape,
-        global_strides,
-        box_dim,
-        element_strides,
-        _CUDA_TENSOR_MAP_INTERLEAVE_NONE,
-        int(swizzle),
-        _CUDA_TENSOR_MAP_L2_PROMOTION_L2_256B,
-        _CUDA_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
-    )
-    if result != 0:
-        raise RuntimeError(f"cuTensorMapEncodeTiled failed for FP4 align16 with CUresult={result}")
-
-
-def _encode_tma_2d_desc(
-    *,
-    encode_tensormap: Any,
-    tensor: torch.Tensor,
-    gmem_inner_dim: int,
-    gmem_outer_dim: int,
-    smem_inner_dim: int,
-    smem_outer_dim: int,
-    gmem_outer_stride: int,
-    swizzle_mode: int,
-    swizzle_base: int = 0,
-    tensor_dtype: Any | None = None,
-) -> _AlignedTensorMap:
-    elem_size = int(tensor.element_size())
-    if swizzle_mode != 0:
-        smem_inner_dim = swizzle_mode // elem_size
-    desc = _AlignedTensorMap()
-    swizzle = _tensor_map_swizzle_from_mode(swizzle_mode, swizzle_base)
-    if tensor_dtype == "float4_e2m1fn":
-        _encode_fp4_align16_tma_2d_desc(
-            desc=desc,
-            tensor=tensor,
-            gmem_inner_dim=gmem_inner_dim,
-            gmem_outer_dim=gmem_outer_dim,
-            smem_inner_dim=smem_inner_dim,
-            smem_outer_dim=smem_outer_dim,
-            gmem_outer_stride_bytes=int(gmem_outer_stride * elem_size),
-            swizzle=swizzle,
-        )
-    else:
-        encode_tensormap(
-            desc.ptr,
-            _torch_dtype_to_tvm_dtype(tensor) if tensor_dtype is None else tensor_dtype,
-            2,
-            ctypes.c_void_p(int(tensor.data_ptr())),
-            int(gmem_inner_dim),
-            int(gmem_outer_dim),
-            int(gmem_outer_stride * elem_size),
-            int(smem_inner_dim),
-            int(smem_outer_dim),
-            1,
-            1,
-            0,
-            swizzle,
-            3,
-            0,
-        )
-    return desc
-
-
-def _encode_tma_sf_desc(
-    *,
-    encode_tensormap: Any,
-    tensor: torch.Tensor,
-    shape_mn: int,
-    shape_k: int,
-    block_mn: int,
-    gran_k: int,
-    num_groups: int,
-    smem_outer_dim: int = 1,
-) -> _AlignedTensorMap:
-    aligned_shape_mn = _get_tma_aligned_size(shape_mn, int(tensor.element_size()))
-    packed_shape_k = _ceil_div(shape_k, gran_k * (1 if tensor.dtype == torch.float32 else 4))
-    return _encode_tma_2d_desc(
-        encode_tensormap=encode_tensormap,
-        tensor=tensor,
-        gmem_inner_dim=aligned_shape_mn,
-        gmem_outer_dim=packed_shape_k * num_groups,
-        smem_inner_dim=block_mn,
-        smem_outer_dim=smem_outer_dim,
-        gmem_outer_stride=aligned_shape_mn,
-        swizzle_mode=0,
-    )
-
-
-def _build_tirx_tensor_maps(
-    *,
-    case: MegaMoeCase,
-    l1_acts: torch.Tensor,
-    l2_acts: torch.Tensor,
-    l1_weights: torch.Tensor,
-    l1_weights_sf: torch.Tensor,
-    l2_weights: torch.Tensor,
-    l2_weights_sf: torch.Tensor,
-) -> dict[str, _AlignedTensorMap]:
-    import tvm
-
-    encode_tensormap = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
-    launch = get_deepgemm_launch_config(case.config)
-    workspace = case.workspace_layout
-    gran_k = 32
-    swizzle_acts_mode = 128
-    swizzle_weights_mode = 128
-    num_experts_per_rank = case.config.num_experts_per_rank
-    sf_block_m = _align_up(launch.block_m, 128)
-
-    return {
-        "tensor_map_l1_acts": _encode_tma_2d_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=l1_acts,
-            gmem_inner_dim=case.config.hidden,
-            gmem_outer_dim=workspace.num_ring_tokens,
-            smem_inner_dim=launch.block_k,
-            smem_outer_dim=launch.load_block_m,
-            gmem_outer_stride=int(l1_acts.stride(-2)),
-            swizzle_mode=swizzle_acts_mode,
-            tensor_dtype="float8_e4m3fn",
-        ),
-        "tensor_map_l1_acts_sf": _encode_tma_sf_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=case.symm_buffer.l1_acts_sf,
-            shape_mn=workspace.num_sf_ring_tokens,
-            shape_k=case.config.hidden,
-            block_mn=sf_block_m,
-            gran_k=gran_k,
-            num_groups=1,
-            smem_outer_dim=launch.block_k // 128,
-        ),
-        "tensor_map_l1_weights": _encode_tma_2d_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=l1_weights,
-            gmem_inner_dim=case.config.hidden,
-            gmem_outer_dim=num_experts_per_rank * case.config.intermediate_hidden * 2,
-            smem_inner_dim=launch.block_k,
-            smem_outer_dim=launch.load_block_n,
-            gmem_outer_stride=int(l1_weights.stride(-2)),
-            swizzle_mode=swizzle_weights_mode,
-            tensor_dtype="float4_e2m1fn",
-        ),
-        "tensor_map_l1_weights_sf": _encode_tma_sf_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=l1_weights_sf,
-            shape_mn=case.config.intermediate_hidden * 2,
-            shape_k=case.config.hidden,
-            block_mn=launch.block_n,
-            gran_k=gran_k,
-            num_groups=num_experts_per_rank,
-            smem_outer_dim=launch.block_k // 128,
-        ),
-        "tensor_map_l1_output": _encode_tma_2d_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=l2_acts,
-            gmem_inner_dim=case.config.intermediate_hidden,
-            gmem_outer_dim=workspace.num_ring_tokens,
-            smem_inner_dim=launch.block_n // 2,
-            smem_outer_dim=launch.store_block_m,
-            gmem_outer_stride=int(l2_acts.stride(-2)),
-            swizzle_mode=swizzle_acts_mode // 2,
-            tensor_dtype="float8_e4m3fn",
-        ),
-        "tensor_map_l2_acts": _encode_tma_2d_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=l2_acts,
-            gmem_inner_dim=case.config.intermediate_hidden,
-            gmem_outer_dim=workspace.num_ring_tokens,
-            smem_inner_dim=launch.block_k,
-            smem_outer_dim=launch.load_block_m,
-            gmem_outer_stride=int(l2_acts.stride(-2)),
-            swizzle_mode=swizzle_acts_mode,
-            tensor_dtype="float8_e4m3fn",
-        ),
-        "tensor_map_l2_acts_sf": _encode_tma_sf_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=case.symm_buffer.l2_acts_sf,
-            shape_mn=workspace.num_sf_ring_tokens,
-            shape_k=case.config.intermediate_hidden,
-            block_mn=sf_block_m,
-            gran_k=gran_k,
-            num_groups=1,
-            smem_outer_dim=launch.block_k // 128,
-        ),
-        "tensor_map_l2_weights": _encode_tma_2d_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=l2_weights,
-            gmem_inner_dim=case.config.intermediate_hidden,
-            gmem_outer_dim=num_experts_per_rank * case.config.hidden,
-            smem_inner_dim=launch.block_k,
-            smem_outer_dim=launch.load_block_n,
-            gmem_outer_stride=int(l2_weights.stride(-2)),
-            swizzle_mode=swizzle_weights_mode,
-            tensor_dtype="float4_e2m1fn",
-        ),
-        "tensor_map_l2_weights_sf": _encode_tma_sf_desc(
-            encode_tensormap=encode_tensormap,
-            tensor=l2_weights_sf,
-            shape_mn=case.config.hidden,
-            shape_k=case.config.intermediate_hidden,
-            block_mn=launch.block_n,
-            gran_k=gran_k,
-            num_groups=num_experts_per_rank,
-            smem_outer_dim=launch.block_k // 128,
-        ),
-    }
-
-
-def load_deep_gemm_mega() -> tuple[Any, str]:
-    try:
-        import deep_gemm as module
-    except Exception as exc:
-        raise SkipTest(
-            f"DeepGEMM mega_moe runtime unavailable: {_DEEP_GEMM_MODULE_NAME}: {exc}"
-        ) from exc
-    if not hasattr(module, "fp8_fp4_mega_moe"):
-        raise SkipTest("DeepGEMM mega_moe runtime unavailable: missing fp8_fp4_mega_moe")
-    return module, "installed"
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-@contextmanager
-def _distributed_env(port: int):
-    old_master_addr = os.environ.get("MASTER_ADDR")
-    old_master_port = os.environ.get("MASTER_PORT")
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
-    try:
-        yield
-    finally:
-        if old_master_addr is None:
-            os.environ.pop("MASTER_ADDR", None)
-        else:
-            os.environ["MASTER_ADDR"] = old_master_addr
-        if old_master_port is None:
-            os.environ.pop("MASTER_PORT", None)
-        else:
-            os.environ["MASTER_PORT"] = old_master_port
-
-
-def _cast_grouped_weights_to_fp4(
-    deep_gemm: Any, bf16_weights: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_groups, n, k = bf16_weights.shape
-    weights = []
-    scales = []
-    for group_idx in range(num_groups):
-        weight, scale = deep_gemm.utils.per_token_cast_to_fp4(
-            bf16_weights[group_idx], use_ue8m0=True, gran_k=32
-        )
-        weights.append(weight)
-        scales.append(scale)
-    packed_weights = torch.stack(weights, dim=0).contiguous()
-    raw_scales = torch.stack(scales, dim=0).contiguous()
-    transformed_scales = deep_gemm.transform_sf_into_required_layout(
-        raw_scales, n, k, (1, 32), num_groups
-    )
-    return packed_weights, transformed_scales
-
-
-def create_case(
-    deep_gemm: Any, config: MegaMoeConfig, group: Any, rank_idx: int, num_ranks: int
-) -> MegaMoeCase:
-    torch.manual_seed(rank_idx)
-    random.seed(rank_idx)
-
-    symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
-        group,
-        config.num_experts,
-        config.num_max_tokens_per_rank,
-        config.num_topk,
-        config.hidden,
-        config.intermediate_hidden,
-    )
-    num_tokens = config.num_tokens
-    num_experts_per_rank = config.num_experts // num_ranks
-
-    x = torch.randn((num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda")
-    l1_weights = torch.randn(
-        (num_experts_per_rank, config.intermediate_hidden * 2, config.hidden),
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    l2_weights = torch.randn(
-        (num_experts_per_rank, config.hidden, config.intermediate_hidden),
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    scores = torch.randn((num_tokens, config.num_experts), dtype=torch.float32, device="cuda")
-    topk_weights, topk_idx = torch.topk(scores, config.num_topk, dim=-1, largest=True, sorted=False)
-
-    x_fp8 = deep_gemm.utils.per_token_cast_to_fp8(
-        x, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-    )
-    transformed_l1_input = _cast_grouped_weights_to_fp4(deep_gemm, l1_weights)
-    transformed_l2_input = _cast_grouped_weights_to_fp4(deep_gemm, l2_weights)
-    transformed_l1_weights, transformed_l2_weights = deep_gemm.transform_weights_for_mega_moe(
-        transformed_l1_input, transformed_l2_input
-    )
-    workspace_layout = get_deepgemm_workspace_layout(config)
-    symm_buffer_layout = get_deepgemm_symm_buffer_layout(config)
-    validate_runtime_symm_buffer_layout(
-        symm_buffer=symm_buffer, layout=symm_buffer_layout, config=config
-    )
-    dispatch_reference = build_dispatch_reference(
-        topk_idx=topk_idx, rank_idx=rank_idx, layout=workspace_layout
-    )
-    pull_reference = None
-    scheduler_reference = None
-    if num_ranks == 1:
-        pull_reference = build_pull_reference(
-            dispatch_reference=dispatch_reference, layout=workspace_layout
-        )
-        scheduler_reference = build_scheduler_reference(
-            config=config,
-            launch=get_deepgemm_launch_config(config),
-            dispatch_reference=dispatch_reference,
-            pull_reference=pull_reference,
-        )
-
-    return MegaMoeCase(
-        config=config,
-        rank_idx=rank_idx,
-        num_ranks=num_ranks,
-        group=group,
-        deep_gemm=deep_gemm,
-        symm_buffer=symm_buffer,
-        x_fp8=x_fp8,
-        topk_idx=topk_idx,
-        topk_weights=topk_weights,
-        transformed_l1_weights=transformed_l1_weights,
-        transformed_l2_weights=transformed_l2_weights,
-        workspace_layout=workspace_layout,
-        symm_buffer_layout=symm_buffer_layout,
-        dispatch_reference=dispatch_reference,
-        pull_reference=pull_reference,
-        scheduler_reference=scheduler_reference,
-    )
-
-
-def _copy_inputs_into_symm_buffer(case: MegaMoeCase) -> None:
-    num_tokens = case.config.num_tokens
-    case.symm_buffer.x[:num_tokens].copy_(case.x_fp8[0])
-    case.symm_buffer.x_sf[:num_tokens].copy_(case.x_fp8[1])
-    case.symm_buffer.topk_idx[:num_tokens].copy_(case.topk_idx)
-    case.symm_buffer.topk_weights[:num_tokens].copy_(case.topk_weights)
-
-
-def run_deepgemm_reference(
-    case: MegaMoeCase, cumulative_local_expert_recv_stats: torch.Tensor | None = None
-) -> torch.Tensor:
-    _copy_inputs_into_symm_buffer(case)
-    y = torch.empty(
-        (case.config.num_tokens, case.config.hidden), dtype=torch.bfloat16, device="cuda"
-    )
-    case.deep_gemm.fp8_fp4_mega_moe(
-        y,
-        case.transformed_l1_weights,
-        case.transformed_l2_weights,
-        case.symm_buffer,
-        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-        activation_clamp=case.config.activation_clamp,
-        fast_math=bool(case.config.fast_math),
-    )
-    return y
-
-
-def _max_abs_diff(lhs: torch.Tensor, rhs: torch.Tensor) -> float:
-    abs_diff = (lhs.float() - rhs.float()).abs()
-    return 0.0 if abs_diff.numel() == 0 else float(abs_diff.max().item())
+def load_volatile_u32(dst, address):
+    return T.ptx.ld.volatile.global_.u32(dst, address)
 
 
 def get_kernel(
@@ -1522,9 +353,9 @@ def get_kernel(
 ):
     from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_tmem_layout
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
-    from tvm.script import tirx as T
     from tvm.tirx.layout import S, TCol, TileLayout, TLane
 
+    # ---- compile-time constants (all Python ints; nothing below is emitted) ----
     runtime_config = MegaMoeConfig(
         num_processes=num_processes,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
@@ -1545,8 +376,6 @@ def get_kernel(
     num_warps_per_warpgroup = 4
     num_l1_block_ns = (intermediate_hidden * 2) // kernel_config.block_n
     num_l2_block_ns = hidden // kernel_config.block_n
-    num_l1_block_ks = hidden // kernel_config.block_k
-    num_l2_block_ks = intermediate_hidden // kernel_config.block_k
     # Dynamic task scheduler constants (scheduler/mega_moe.cuh, upstream 559d79f)
     num_l1_clusters = num_l1_block_ns // 2
     num_l2_clusters = num_l2_block_ns // 2
@@ -1568,8 +397,8 @@ def get_kernel(
     if num_ring_tokens % kernel_config.block_m != 0:
         raise ValueError("MegaMoE ring capacity must be divisible by BLOCK_M")
     num_ring_blocks = num_ring_tokens // kernel_config.block_m
-    l1_out_block_n = kernel_config.block_n // 2
-    sf_block_m = _align_up(kernel_config.block_m, 128)
+    l1_out_block_n = kernel_config.l1_out_block_n
+    sf_block_m = kernel_config.sf_block_m
     umma_m = 256
     umma_n = kernel_config.block_m
     umma_block_k = 128
@@ -1600,15 +429,6 @@ def get_kernel(
 
     tcgen05_cta_mask = (1 << 2) - 1
 
-    def unpack_ue8m0_scale(packed_word, lane_idx):
-        packed_u32 = T.cast(packed_word, "uint32")
-        lane_u32 = T.cast(lane_idx, "uint32")
-        exp_bits = T.bitwise_and(
-            T.shift_right(packed_u32, T.bitwise_and(lane_u32, T.uint32(3)) * T.uint32(8)),
-            T.uint32(0xFF),
-        )
-        return T.cuda.uint_as_float(T.shift_left(exp_bits, T.uint32(23)))
-
     @T.inline
     def scale_pack_fp8x4_e4m3(out, upper, lower, v0, v1, v2, v3, sf_inv_x, sf_inv_y):
         sf_inv_pair = T.cuda.make_float2(sf_inv_x, sf_inv_y)
@@ -1620,70 +440,6 @@ def get_kernel(
             T.cuda.float2_x(lower[0]),
             T.cuda.float2_y(lower[0]),
         )
-
-    def red_or_rel_gpu_u64(address, value):
-        return T.ptx.red.release.gpu.global_.or_.b64(address, value)
-
-    def red_add_gpu_s32(address, value):
-        return T.ptx.red.gpu.global_.add.s32(address, value)
-
-    def load_volatile_u64(dst, address):
-        return T.ptx.ld.volatile.global_.u64(dst, address)
-
-    def load_global_s64(dst, address):
-        return T.ptx.ld.global_.s64(dst, address)
-
-    def load_global_u64(dst, address):
-        return T.ptx.ld.global_.u64(dst, address)
-
-    def load_global_u32(dst, address):
-        return T.ptx.ld.global_.u32(dst, address)
-
-    def store_global_u64(address, value):
-        return T.ptx.st.global_.u64(address, value)
-
-    def store_global_u32(address, value):
-        return T.ptx.st.global_.u32(address, value)
-
-    def store_global_u8(address, value):
-        return T.ptx.st.global_.u8(address, value)
-
-    def store_global_f32(address, value):
-        return T.ptx.st.global_.f32(address, value)
-
-    # Destination-first, mirroring the PTX these wrap: the caller declares the
-    # register and passes it in.
-    def load_acq_sys_s32(dst, address):
-        return T.ptx.ld.acquire.sys.global_.s32(dst, address)
-
-    def atomic_add_rel_u32(dst, address, value):
-        return T.ptx.atom.release.gpu.global_.add.u32(dst, address, value)
-
-    def load_acq_u32(dst, address):
-        return T.ptx.ld.acquire.gpu.global_.b32(dst, address)
-
-    def grid_sync_done_u32(new_value, old_value):
-        return T.cast(
-            T.bitwise_and(T.bitwise_xor(new_value, old_value), T.uint32(0x80000000)) != T.uint32(0),
-            "uint32",
-        )
-
-    def load_f32(dst, address):
-        # ptx destinations are declared registers, so the helper writes into
-        # one the caller owns rather than returning a value.
-        return T.ptx.ld.global_.f32(dst, address)
-
-    def load_shared_u64(dst, address):
-        return T.ptx.ld.shared.u64(dst, address)
-
-    def load_shared_u32(dst, address):
-        return T.ptx.ld.shared.u32(dst, address)
-
-    def uint32_bits_to_float(bits):
-        return T.cuda.uint_as_float(bits)
-
-    def float_bits(x):
-        return T.cuda.float_as_uint(x)
 
     @T.inline
     def get_e4m3_sf_and_sf_inv(
@@ -1734,15 +490,6 @@ def get_kernel(
             T.tvm_warp_shuffle_xor(0xFFFFFFFF, values[atom_idx, dim], 16, 32, 32),
         )
 
-    def get_swizzled_sf_row_idx(row_idx):
-        row_idx_u32 = T.cast(row_idx, "uint32")
-        return T.cast(
-            T.bitwise_and(row_idx_u32, T.uint32(0xFFFFFF80))
-            + T.shift_left(T.bitwise_and(row_idx_u32, T.uint32(31)), T.uint32(2))
-            + T.shift_right(T.bitwise_and(row_idx_u32, T.uint32(127)), T.uint32(5)),
-            "int32",
-        )
-
     def transform_sf_token_idx(token_idx_in_expert):
         token_idx_u32 = T.cast(token_idx_in_expert, "uint32")
         idx = token_idx_u32 % T.uint32(kernel_config.block_m)
@@ -1753,95 +500,6 @@ def get_kernel(
             + T.bitwise_and(T.shift_right(idx, T.uint32(5)), T.uint32(3)),
             "int32",
         )
-
-    def sync_unaligned(barrier_idx, num_threads):
-        return T.ptx.barrier.sync(T.uint32(barrier_idx), T.uint32(num_threads))
-
-    def prefetch_tensormap(tensor_map):
-        return T.ptx.prefetch.tensormap(T.address_of(tensor_map))
-
-    def lds128(src_ptr, dst, base=0):
-        return T.ptx.ld.shared.v4.u32(
-            dst[base], dst[base + 1], dst[base + 2], dst[base + 3], src_ptr
-        )
-
-    def sts128(dst_ptr, r0, r1, r2, r3):
-        return T.ptx.st.shared.v4.b32(dst_ptr, r0, r1, r2, r3)
-
-    def mbarrier_arrive_local(barrier_ptr):
-        return T.ptx.mbarrier.arrive.shared.b64(barrier_ptr, T.uint32(1))
-
-    def mbarrier_arrive_and_set_tx(barrier_ptr, num_bytes):
-        return T.ptx.mbarrier.arrive.expect_tx.shared.b64(barrier_ptr, T.uint32(num_bytes))
-
-    def mbarrier_wait_phase(barrier_ptr, phase):
-        return T.cuda.mbarrier_wait(barrier_ptr, phase)
-
-    def shared_addr_u32(ptr):
-        return T.cuda.cvta_generic_to_shared(ptr)
-
-    def replace_smem_desc_addr(desc, smem_ptr):
-        start_addr = T.cast(
-            T.bitwise_and(T.shift_right(shared_addr_u32(smem_ptr), T.uint32(4)), T.uint32(0x3FFF)),
-            "uint64",
-        )
-        return T.bitwise_or(T.bitwise_and(desc, T.bitwise_not(T.uint64(0x3FFF))), start_addr)
-
-    _bulk_g2s_chain = (
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
-    )
-    _bulk_s2g_chain = "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint"
-    _evict_first_policy = T.uint64(0x12F0000000000000)
-
-    def tma_load_1d(dst_ptr, src_ptr, barrier_ptr, num_bytes):
-        return T.ptx[_bulk_g2s_chain](
-            dst_ptr, src_ptr, T.cast(num_bytes, "uint32"), barrier_ptr, _evict_first_policy
-        )
-
-    def tma_store_1d(dst_ptr, src_ptr, num_bytes):
-        return T.ptx[_bulk_s2g_chain](
-            dst_ptr, src_ptr, T.cast(num_bytes, "uint32"), _evict_normal_policy
-        )
-
-    def tma_store_fence():
-        return T.ptx.fence.proxy.async_.shared__cta()
-
-    def fence_barrier_init():
-        return T.ptx.fence.mbarrier_init.release.cluster()
-
-    def tma_store_arrive():
-        return T.ptx.cp.async_.bulk.commit_group()
-
-    def tma_store_wait(num_prior_groups):
-        if num_prior_groups == 0:
-            return T.ptx.cp.async_.bulk.wait_group(0)
-        if num_prior_groups == 1:
-            return T.ptx.cp.async_.bulk.wait_group(1)
-        raise ValueError("Unsupported TMA store wait distance")
-
-    def tma_store_2d(src, tensormap, coord0, coord1):
-        return T.ptx["cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group"](
-            T.address_of(tensormap), coord0, coord1, src
-        )
-
-    # Unicast (cta_mask=1) at cta_group::2 scope with the evict-normal L2
-    # policy; the mbarrier arrives as a precomputed leader-CTA shared address.
-    _sm100_2sm_load_chain = (
-        "cp.async.bulk.tensor.2d.shared::cluster.global"
-        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
-    )
-    _evict_normal_policy = T.uint64(1152921504606846976)
-
-    def sm100_tma_2sm_load_2d_addr(dst, mbar, tensormap_addr, coord0, coord1):
-        mbar_addr = T.cuda.sm100_2sm_leader_smem_addr(mbar)
-        T.evaluate(
-            T.ptx[_sm100_2sm_load_chain](
-                dst, tensormap_addr, coord0, coord1, mbar_addr, _evict_normal_policy
-            )
-        )
-
-    def sm100_tma_2sm_load_2d(dst, mbar, tensormap, coord0, coord1):
-        sm100_tma_2sm_load_2d_addr(dst, mbar, T.address_of(tensormap), coord0, coord1)
 
     @T.inline
     def sm100_tma_2sm_load_2d_select(
@@ -1856,86 +514,6 @@ def get_kernel(
             coord0,
             coord1,
         )
-
-    def stg128_symm(peer_base, byte_offset, r0, r1, r2, r3):
-        return T.ptx.st.global_.v4.b32(peer_ptr(peer_base, byte_offset), r0, r1, r2, r3)
-
-    def ptr_to_u64(ptr):
-        return T.reinterpret("uint64", ptr)
-
-    def peer_ptr(peer_base, byte_offset):
-        return T.reinterpret("handle", peer_base + byte_offset)
-
-    def peer_store_u32(peer_base, byte_offset, value):
-        return T.ptx.st.global_.u32(peer_ptr(peer_base, byte_offset), value)
-
-    def peer_store_u64(peer_base, byte_offset, value):
-        return T.ptx.st.global_.u64(peer_ptr(peer_base, byte_offset), value)
-
-    def st_shared_u32(ptr, value):
-        return T.ptx.st.shared.u32(ptr, value)
-
-    def st_shared_u64(ptr, value):
-        return T.ptx.st.shared.u64(ptr, value)
-
-    def st_shared_bulk(ptr, num_bytes):
-        return T.ptx.st_bulk.weak.shared__cta(ptr, T.cast(num_bytes, "uint64"))
-
-    def peer_atomic_add_u64(dst, peer_base, byte_offset, value):
-        return T.ptx.atom.sys.global_.add.u64(dst, peer_ptr(peer_base, byte_offset), value)
-
-    def peer_red_add_rel_sys_s32(peer_base, byte_offset, value):
-        return T.ptx.red.release.sys.global_.add.s32(peer_ptr(peer_base, byte_offset), value)
-
-    def peer_load_u32(dst, peer_base, byte_offset):
-        return T.ptx.ld.global_.u32(dst, peer_ptr(peer_base, byte_offset))
-
-    def peer_load_f32(dst, peer_base, byte_offset):
-        return T.ptx.ld.global_.f32(dst, peer_ptr(peer_base, byte_offset))
-
-    def tma_load_1d_symm(dst_ptr, peer_base, byte_offset, barrier_ptr, num_bytes):
-        return T.ptx[_bulk_g2s_chain](
-            dst_ptr,
-            peer_ptr(peer_base, byte_offset),
-            T.cast(num_bytes, "uint32"),
-            barrier_ptr,
-            _evict_first_policy,
-        )
-
-    def ballot_sync(mask, pred):
-        return T.cuda.ballot_sync(mask, pred)
-
-    def ffs_u32(value):
-        return T.cuda.ffs_u32(value)
-
-    def reduce_add_sync_u32(mask, value):
-        return T.cuda.reduce_add_sync_u32(mask, value)
-
-    def reduce_min_sync_u32(mask, value):
-        return T.cuda.reduce_min_sync_u32(mask, value)
-
-    def fns_b32(dst, mask, base, offset):
-        return T.ptx.fns.b32(dst, mask, base, offset)
-
-    def red_add_gpu_u32(address, value):
-        return T.ptx.red.gpu.global_.add.u32(address, value)
-
-    def cuda_clock64():
-        return T.cuda.clock64()
-
-    def bf16x2_lo(packed):
-        return T.cast(T.bitwise_and(packed, T.uint32(0xFFFF)), "uint16")
-
-    def bf16x2_hi(packed):
-        return T.cast(
-            T.bitwise_and(T.shift_right(packed, T.uint32(16)), T.uint32(0xFFFF)), "uint16"
-        )
-
-    def stmatrix_fp8x4_trans(smem_ptr, word):
-        return T.ptx.stmatrix.sync.aligned.m16n8.x1.trans.shared.b8(smem_ptr, word)
-
-    def cast_into_bf16_and_pack(v0, v1):
-        return T.cuda.float22bfloat162_rn(v0, v1)
 
     @T.inline
     def activation_pair_store(out, atom_idx, pair_idx, gate0, gate1, up0, up1, weight0, weight1):
@@ -1971,16 +549,6 @@ def get_kernel(
         result = T.cuda.fmul2_rn(T.cuda.fmul2_rn(gate, up), weights)
         out[atom_idx, pair_idx, 0] = T.cuda.float2_x(result)
         out[atom_idx, pair_idx, 1] = T.cuda.float2_y(result)
-
-    def make_runtime_instr_desc_with_sf_id(desc, sfa_id, sfb_id):
-        runtime_desc = T.bitwise_and(desc, T.uint32(0x9FFFFFCF))
-        runtime_desc = T.bitwise_or(
-            runtime_desc, T.shift_left(T.cast(sfa_id, "uint32"), T.uint32(29))
-        )
-        runtime_desc = T.bitwise_or(
-            runtime_desc, T.shift_left(T.cast(sfb_id, "uint32"), T.uint32(4))
-        )
-        return runtime_desc
 
     def advance_umma_desc_lo(desc, base_lo, mn_offset, k_offset):
         return T.bitwise_or(
@@ -2027,47 +595,6 @@ def get_kernel(
             "int32",
         )
 
-    def st_async_cluster_task_info(dst_ptr, bar_ptr, dst_cta_idx, task_info_regs):
-        mapped_bar = T.alloc_local((1,), "uint32")
-        mapped_dst = T.alloc_local((1,), "uint32")
-        mapped_dst_hi = T.alloc_local((1,), "uint32")
-        cta = T.cast(dst_cta_idx, "uint32")
-        T.evaluate(
-            T.ptx.mapa.shared__cluster.u32(
-                mapped_bar[0], T.cuda.cvta_generic_to_shared(bar_ptr), cta
-            )
-        )
-        T.evaluate(
-            T.ptx.mapa.shared__cluster.u32(
-                mapped_dst[0], T.cuda.cvta_generic_to_shared(dst_ptr), cta
-            )
-        )
-        T.evaluate(
-            T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
-                mapped_dst[0],
-                task_info_regs[0],
-                task_info_regs[1],
-                task_info_regs[2],
-                task_info_regs[3],
-                mapped_bar[0],
-            )
-        )
-        T.evaluate(T.ptx.add.u32(mapped_dst_hi[0], mapped_dst[0], T.uint32(16)))
-        return T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
-            mapped_dst_hi[0],
-            task_info_regs[4],
-            task_info_regs[5],
-            task_info_regs[6],
-            task_info_regs[7],
-            mapped_bar[0],
-        )
-
-    def atomic_add_u32(dst, address, value):
-        return T.ptx.atom.global_.add.u32(dst, address, value)
-
-    def load_volatile_u32(dst, address):
-        return T.ptx.ld.volatile.global_.u32(dst, address)
-
     def symm_rank_offset_arg_expr(symm_rank_offsets, mapped_rank_idx):
         if num_processes == 1:
             return symm_rank_offsets[0]
@@ -2081,17 +608,18 @@ def get_kernel(
 
     def load_symm_rank_base(dst, smem_symm_rank_bases, mapped_rank_idx):
         if num_processes > 1:
-            return load_shared_u64(
+            return T.ptx.ld.shared.u64(
                 dst, smem_symm_rank_bases.ptr_to([T.cast(mapped_rank_idx, "int32")])
             )
 
+    # ---- shared-memory budget, barrier numbering, and epilogue chunking ----
     sm100_smem_capacity = 232448
     shared_alignment = 1024
     f32_bytes = 4
     f128_bytes = 16
-    num_epilogue_wgs = kernel_config.num_epilogue_warps // 4
-    wg_block_m = kernel_config.block_m // num_epilogue_wgs
-    atom_m = 8
+    num_epilogue_wgs = kernel_config.num_epilogue_wgs
+    wg_block_m = kernel_config.wg_block_m
+    atom_m = kernel_config.atom_m
     num_atoms_per_store = kernel_config.store_block_m // atom_m
     num_rows_per_warp = kernel_config.store_block_m // 8
     num_bank_group_bytes = 16
@@ -2249,13 +777,12 @@ def get_kernel(
         raise ValueError("Hidden is too large")
     if num_chunk_bytes % 16 != 0:
         raise ValueError("Combine chunk must be TMA-aligned (16 bytes)")
-    if num_chunk_bytes % 16 != 0:
-        raise ValueError("Combine chunk must be divisible by 16 bytes")
     if num_chunk_uint4 % 32 != 0:
         raise ValueError("Combine chunk must be a multiple of 32 16-byte elements (one per lane)")
     if num_topk > 32:
         raise ValueError("Top-k must fit in a single warp")
 
+    # ---- the kernel body ----
     @T.prim_func
     def mega_moe(
         y_ptr: T.handle,
@@ -3133,7 +1660,7 @@ def get_kernel(
                         T.cast(T.shift_right(scheduler_cached_status, 32), "int32")
                         != kernel_config.num_sms * num_processes
                     ):
-                        load_volatile_u64(
+                        T.ptx.ld.volatile.global_.u64(
                             scheduler_cached_status,
                             workspace_expert_recv_count_sum.ptr_to([dispatch_expert_idx]),
                         )
@@ -3418,10 +1945,6 @@ def get_kernel(
             T.ptx.setmaxnreg.inc.sync.aligned.u32(num_registers)
 
         @T.inline
-        def tma_copy_2d_multicast(dst_ptr, barrier_ptr, tensor_map_ptr, coord0, coord1):
-            sm100_tma_2sm_load_2d(dst_ptr, barrier_ptr, tensor_map_ptr, coord0, coord1)
-
-        @T.inline
         def tma_copy_2d_multicast_select(
             dst_ptr,
             barrier_ptr,
@@ -3498,7 +2021,7 @@ def get_kernel(
 
         @T.inline
         def sm100_u8x4_stsm_t_copy(fp8x4_word, smem_ptr):
-            stmatrix_fp8x4_trans(smem_ptr, fp8x4_word)
+            T.ptx.stmatrix.sync.aligned.m16n8.x1.trans.shared.b8(smem_ptr, fp8x4_word)
 
         @T.inline
         def sm90_u32x4_stsm_t_copy(packed_values_buf, smem_ptr):
@@ -3513,10 +2036,6 @@ def get_kernel(
         @T.inline
         def sm90_tma_store_2d_copy(src_ptr, tensor_map, coord0, coord1):
             T.evaluate(tma_store_2d(src_ptr, tensor_map, coord0, coord1))
-
-        @T.inline
-        def red_or_rel_gpu(address, value):
-            red_or_rel_gpu_u64(address, value)
 
         @T.inline
         def store_token_src_metadata(pool_token_idx, src_rank_idx, src_token_idx, src_topk_idx):
@@ -3545,7 +2064,7 @@ def get_kernel(
         if flat_warp_idx == 0:
             if num_processes > 1:
                 if lane_idx < num_processes:
-                    st_shared_u64(
+                    T.ptx.st.shared.u64(
                         smem_symm_rank_bases.ptr_to([lane_idx]),
                         sym_buffer_base
                         + T.cast(symm_rank_offset_arg_expr(symm_rank_offsets, lane_idx), "uint64"),
@@ -3660,7 +2179,7 @@ def get_kernel(
                     workspace_expert_send_count.ptr_to([dispatch_expert_idx]),
                     send_value,
                 )
-                st_shared_u32(
+                T.ptx.st.shared.u32(
                     smem_expert_count.ptr_to([dispatch_expert_idx]),
                     T.cast(prev_send_count, "uint32"),
                 )
@@ -3848,7 +2367,7 @@ def get_kernel(
                         "int32",
                     )
                     min_active_count = T.cast(
-                        reduce_min_sync_u32(T.uint32(0xFFFFFFFF), min_in_lane), "int32"
+                        T.cuda.reduce_min_sync_u32(T.uint32(0xFFFFFFFF), min_in_lane), "int32"
                     )
                     round_token_count = min_active_count * num_active_ranks
                     if T.cast(dispatch_dst_slot_idx, "uint32") < T.cast(
@@ -3873,7 +2392,7 @@ def get_kernel(
                                 num_seen_ranks + active_lane_count, "uint32"
                             ):
                                 rank_slot_bit: T.uint32
-                                fns_b32(
+                                T.ptx.fns.b32(
                                     rank_slot_bit,
                                     rank_count_mask,
                                     T.uint32(0),
@@ -4003,7 +2522,9 @@ def get_kernel(
                             + pull_src_token_topk_idx * 4
                         ),
                     )
-                    store_global_f32(l1_topk_weights.ptr_to([pull_ring_token_idx]), pulled_weight)
+                    T.ptx.st.global_.f32(
+                        l1_topk_weights.ptr_to([pull_ring_token_idx]), pulled_weight
+                    )
                     store_token_src_metadata(
                         pull_pool_token_idx,
                         current_rank_in_expert_idx,
@@ -4110,7 +2631,7 @@ def get_kernel(
                         )
                     if kernel_collect_stats and flat_warp_idx == 1 and lane_idx == 0:
                         T.evaluate(
-                            red_add_gpu_s32(
+                            T.ptx.red.gpu.global_.add.s32(
                                 cumulative_local_expert_recv_stats.ptr_to([pull_local_expert_idx]),
                                 pull_num_tokens,
                             )
@@ -5129,7 +3650,7 @@ def get_kernel(
                         combine_store_ptr = combine_chunks.ptr_to(
                             [2, epilogue_warp_idx, j * 32 + lane_idx, 0]
                         )
-                        sts128(
+                        T.ptx.st.shared.v4.b32(
                             combine_store_ptr,
                             epilogue_bf16_packed[0],
                             epilogue_bf16_packed[1],
@@ -5147,1248 +3668,3 @@ def get_kernel(
                 token_idx = token_idx + kernel_config.num_sms * kernel_config.num_epilogue_warps
 
     return mega_moe.with_attr("tirx.kernel_launch_params", get_tirx_launch_param_tags())
-
-
-def _get_tirx_kernel_for_context(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> Any:
-    return get_kernel(
-        num_processes=case.config.num_processes,
-        num_max_tokens_per_rank=case.config.num_max_tokens_per_rank,
-        num_tokens=case.config.num_tokens,
-        hidden=case.config.hidden,
-        intermediate_hidden=case.config.intermediate_hidden,
-        num_experts=case.config.num_experts,
-        num_topk=case.config.num_topk,
-        activation_clamp=case.config.activation_clamp,
-        fast_math=case.config.fast_math,
-        collect_stats=getattr(case, "cumulative_local_expert_recv_stats", None) is not None,
-    )
-
-
-def _get_tirx_kernel_for_case(case: MegaMoeCase) -> Any:
-    return _get_tirx_kernel_for_context(case)
-
-
-def _view_symm_matrix(
-    case: MegaMoeCase | TirxMegaMoeLaunchContext, offset: int, rows: int, cols: int
-) -> torch.Tensor:
-    return case.symm_buffer.buffer.narrow(0, offset, rows * cols).view(rows, cols)
-
-
-def _get_mega_moe_cuda_compile_mode() -> str:
-    mode = os.environ.get(
-        "TIRX_MEGAMOE_CUDA_COMPILE_MODE", os.environ.get("TVM_CUDA_COMPILE_MODE", "nvcc")
-    ).lower()
-    if mode not in ("nvcc", "nvrtc"):
-        raise ValueError(f"TIRX_MEGAMOE_CUDA_COMPILE_MODE must be 'nvcc' or 'nvrtc', got {mode!r}")
-    return mode
-
-
-@contextmanager
-def _cuda_compile_mode(mode: str):
-    """Select the synchronous TVM CUDA callback backend without leaking it."""
-    with _CUDA_COMPILE_MODE_LOCK:
-        previous = os.environ.get("TVM_CUDA_COMPILE_MODE")
-        os.environ["TVM_CUDA_COMPILE_MODE"] = mode
-        try:
-            yield
-        finally:
-            if previous is None:
-                os.environ.pop("TVM_CUDA_COMPILE_MODE", None)
-            else:
-                os.environ["TVM_CUDA_COMPILE_MODE"] = previous
-
-
-@cache
-def _compile_tirx_mega_moe_for_config(
-    *,
-    num_processes: int,
-    num_max_tokens_per_rank: int,
-    num_tokens: int,
-    hidden: int,
-    intermediate_hidden: int,
-    num_experts: int,
-    num_topk: int,
-    activation_clamp: float,
-    fast_math: int,
-    collect_stats: bool,
-    cuda_compile_mode: str,
-    emit_nvl_barrier_timeout_printf: bool = True,
-) -> Any:
-    import tvm
-
-    kernel = get_kernel(
-        num_processes=num_processes,
-        num_max_tokens_per_rank=num_max_tokens_per_rank,
-        num_tokens=num_tokens,
-        hidden=hidden,
-        intermediate_hidden=intermediate_hidden,
-        num_experts=num_experts,
-        num_topk=num_topk,
-        activation_clamp=activation_clamp,
-        fast_math=fast_math,
-        collect_stats=collect_stats,
-        emit_nvl_barrier_timeout_printf=emit_nvl_barrier_timeout_printf,
-    )
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
-    mod = tvm.IRModule({"main": kernel})
-    with _cuda_compile_mode(cuda_compile_mode):
-        return tvm.compile(mod, target=target, tir_pipeline="tirx")
-
-
-def _compile_tirx_mega_moe(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> Any:
-    config = case.config
-    return _compile_tirx_mega_moe_for_config(
-        num_processes=config.num_processes,
-        num_max_tokens_per_rank=config.num_max_tokens_per_rank,
-        num_tokens=config.num_tokens,
-        hidden=config.hidden,
-        intermediate_hidden=config.intermediate_hidden,
-        num_experts=config.num_experts,
-        num_topk=config.num_topk,
-        activation_clamp=config.activation_clamp,
-        fast_math=config.fast_math,
-        collect_stats=getattr(case, "cumulative_local_expert_recv_stats", None) is not None,
-        cuda_compile_mode=_get_mega_moe_cuda_compile_mode(),
-    )
-
-
-def _require_mega_moe_tuple(name: str, value: Any) -> tuple[torch.Tensor, torch.Tensor]:
-    if not isinstance(value, tuple) or len(value) != 2:
-        raise TypeError(f"{name} must be a 2-tuple of tensors")
-    first, second = value
-    if not isinstance(first, torch.Tensor) or not isinstance(second, torch.Tensor):
-        raise TypeError(f"{name} must contain tensors")
-    return first, second
-
-
-def _make_symm_buffer_offsets(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> tuple[int, ...]:
-    buffer_ptrs = tuple(int(ptr) for ptr in case.symm_buffer.handle.buffer_ptrs)
-    if len(buffer_ptrs) > DEEPGEMM_SYM_BUFFER_MAX_RANKS:
-        raise ValueError(
-            "TIRx MegaMoE supports at most "
-            f"{DEEPGEMM_SYM_BUFFER_MAX_RANKS} symmetric-buffer ranks, got {len(buffer_ptrs)}"
-        )
-    local_base = int(case.symm_buffer.buffer.data_ptr())
-    expected_local_base = buffer_ptrs[case.rank_idx]
-    if local_base != expected_local_base:
-        raise ValueError(
-            "sym_buffer.buffer data_ptr does not match handle.buffer_ptrs[rank_idx]: "
-            f"{local_base} != {expected_local_base}"
-        )
-    offsets = tuple(ptr - local_base for ptr in buffer_ptrs)
-    return offsets + (0,) * (DEEPGEMM_SYM_BUFFER_MAX_RANKS - len(offsets))
-
-
-def _make_tirx_mega_moe_launch_context(
-    *,
-    y: torch.Tensor,
-    l1_weights: tuple[torch.Tensor, torch.Tensor],
-    l2_weights: tuple[torch.Tensor, torch.Tensor],
-    sym_buffer: Any,
-    cumulative_local_expert_recv_stats: torch.Tensor | None,
-    recipe: tuple[int, int, int],
-    activation: str,
-    activation_clamp: float | None,
-    fast_math: bool,
-) -> TirxMegaMoeLaunchContext:
-    if tuple(recipe) != (1, 1, 32):
-        raise NotImplementedError("TIRx MegaMoE currently supports recipe=(1, 1, 32) only")
-    if activation != "swiglu":
-        raise NotImplementedError("TIRx MegaMoE currently supports activation='swiglu' only")
-    if y.dtype != torch.bfloat16:
-        raise TypeError(f"y must have dtype torch.bfloat16, got {y.dtype}")
-    if not y.is_cuda:
-        raise ValueError("y must be a CUDA tensor")
-    if not y.is_contiguous():
-        raise ValueError("y must be contiguous")
-    if y.dim() != 2:
-        raise ValueError(f"y must be 2D, got shape {tuple(y.shape)}")
-
-    l1_weights = _require_mega_moe_tuple("l1_weights", l1_weights)
-    l2_weights = _require_mega_moe_tuple("l2_weights", l2_weights)
-    for tensor_name, tensor in (
-        ("l1_weights[0]", l1_weights[0]),
-        ("l1_weights[1]", l1_weights[1]),
-        ("l2_weights[0]", l2_weights[0]),
-        ("l2_weights[1]", l2_weights[1]),
-    ):
-        if not tensor.is_cuda:
-            raise ValueError(f"{tensor_name} must be a CUDA tensor")
-    num_ranks = int(sym_buffer.group.size())
-    rank_idx = int(sym_buffer.group.rank())
-    config = MegaMoeConfig(
-        num_processes=num_ranks,
-        num_max_tokens_per_rank=int(sym_buffer.num_max_tokens_per_rank),
-        num_tokens=int(y.shape[0]),
-        hidden=int(y.shape[1]),
-        intermediate_hidden=int(sym_buffer.intermediate_hidden),
-        num_experts=int(sym_buffer.num_experts),
-        num_topk=int(sym_buffer.num_topk),
-        activation_clamp=math.inf if activation_clamp is None else float(activation_clamp),
-        fast_math=int(bool(fast_math)),
-    )
-    config.validate()
-    if int(sym_buffer.hidden) != config.hidden:
-        raise ValueError(
-            f"y hidden dimension {config.hidden} does not match sym_buffer.hidden {sym_buffer.hidden}"
-        )
-    if cumulative_local_expert_recv_stats is not None:
-        if cumulative_local_expert_recv_stats.dtype != torch.int32:
-            raise TypeError(
-                "cumulative_local_expert_recv_stats must have dtype torch.int32, "
-                f"got {cumulative_local_expert_recv_stats.dtype}"
-            )
-        if cumulative_local_expert_recv_stats.numel() != config.num_experts_per_rank:
-            raise ValueError(
-                "cumulative_local_expert_recv_stats must have one element per local expert, "
-                f"expected {config.num_experts_per_rank}, got "
-                f"{cumulative_local_expert_recv_stats.numel()}"
-            )
-        if not cumulative_local_expert_recv_stats.is_contiguous():
-            raise ValueError("cumulative_local_expert_recv_stats must be contiguous")
-        if not cumulative_local_expert_recv_stats.is_cuda:
-            raise ValueError("cumulative_local_expert_recv_stats must be a CUDA tensor")
-        if cumulative_local_expert_recv_stats.device != y.device:
-            raise ValueError("cumulative_local_expert_recv_stats must be on the same device as y")
-
-    workspace_layout = get_deepgemm_workspace_layout(config)
-    symm_buffer_layout = get_deepgemm_symm_buffer_layout(config)
-    validate_runtime_symm_buffer_layout(
-        symm_buffer=sym_buffer, layout=symm_buffer_layout, config=config
-    )
-    return TirxMegaMoeLaunchContext(
-        config=config,
-        rank_idx=rank_idx,
-        num_ranks=num_ranks,
-        symm_buffer=sym_buffer,
-        transformed_l1_weights=l1_weights,
-        transformed_l2_weights=l2_weights,
-        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-        workspace_layout=workspace_layout,
-        symm_buffer_layout=symm_buffer_layout,
-    )
-
-
-def _prepare_tirx_invocation(
-    case: MegaMoeCase | TirxMegaMoeLaunchContext, y: torch.Tensor | None = None
-) -> TirxMegaMoeInvocation:
-    l1_weights = case.transformed_l1_weights[0]
-    l1_weights_sf = case.transformed_l1_weights[1].permute(0, 2, 1)
-    l2_weights = case.transformed_l2_weights[0]
-    l2_weights_sf = case.transformed_l2_weights[1].permute(0, 2, 1)
-    symm_layout = case.symm_buffer_layout
-    l1_acts = _view_symm_matrix(
-        case, symm_layout.l1_token_offset, case.workspace_layout.num_ring_tokens, case.config.hidden
-    )
-    l1_acts_sf = case.symm_buffer.l1_acts_sf.transpose(0, 1)
-    l2_acts = _view_symm_matrix(
-        case,
-        symm_layout.l2_token_offset,
-        case.workspace_layout.num_ring_tokens,
-        case.config.intermediate_hidden,
-    )
-    l2_acts_sf = case.symm_buffer.l2_acts_sf.transpose(0, 1)
-    tensor_maps = _build_tirx_tensor_maps(
-        case=case,
-        l1_acts=l1_acts,
-        l2_acts=l2_acts,
-        l1_weights=l1_weights,
-        l1_weights_sf=l1_weights_sf,
-        l2_weights=l2_weights,
-        l2_weights_sf=l2_weights_sf,
-    )
-    if y is None:
-        y = torch.empty(
-            (case.config.num_tokens, case.config.hidden), dtype=torch.bfloat16, device="cuda"
-        )
-    cumulative_local_expert_recv_stats = getattr(case, "cumulative_local_expert_recv_stats", None)
-    if cumulative_local_expert_recv_stats is None:
-        # TVM buffer parameters require a tensor even when the no-stats kernel
-        # specialization compiles all accesses away.
-        cumulative_local_expert_recv_stats = torch.empty(
-            case.config.num_experts_per_rank, dtype=torch.int32, device=y.device
-        )
-    return TirxMegaMoeInvocation(
-        executable=_compile_tirx_mega_moe(case),
-        y=y,
-        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-        symm_buffer_offsets=_make_symm_buffer_offsets(case),
-        tensor_maps=tensor_maps,
-    )
-
-
-def _prepare_global_barrier(executable: Any) -> None:
-    try:
-        prepare_global_barrier = executable.mod.get_function("__tvm_prepare_global_barrier")
-    except AttributeError:
-        prepare_global_barrier = None
-    if prepare_global_barrier is not None:
-        prepare_global_barrier()
-
-
-def _launch_tirx_mega_moe(
-    case: MegaMoeCase | TirxMegaMoeLaunchContext, invocation: TirxMegaMoeInvocation
-) -> None:
-    tensor_maps = invocation.tensor_maps
-    _prepare_global_barrier(invocation.executable)
-    invocation.executable.mod(
-        invocation.y,
-        invocation.cumulative_local_expert_recv_stats,
-        case.symm_buffer.buffer,
-        *invocation.symm_buffer_offsets,
-        tensor_maps["tensor_map_l1_acts"].ptr,
-        tensor_maps["tensor_map_l1_acts_sf"].ptr,
-        tensor_maps["tensor_map_l1_weights"].ptr,
-        tensor_maps["tensor_map_l1_weights_sf"].ptr,
-        tensor_maps["tensor_map_l1_output"].ptr,
-        tensor_maps["tensor_map_l2_acts"].ptr,
-        tensor_maps["tensor_map_l2_acts_sf"].ptr,
-        tensor_maps["tensor_map_l2_weights"].ptr,
-        tensor_maps["tensor_map_l2_weights_sf"].ptr,
-        case.config.num_tokens,
-        case.rank_idx,
-    )
-
-
-def run_tirx_mega_moe(
-    case: MegaMoeCase, cumulative_local_expert_recv_stats: torch.Tensor | None = None
-) -> torch.Tensor:
-    _copy_inputs_into_symm_buffer(case)
-    y = torch.empty(
-        (case.config.num_tokens, case.config.hidden), dtype=torch.bfloat16, device="cuda"
-    )
-    fp8_fp4_mega_moe(
-        y,
-        case.transformed_l1_weights,
-        case.transformed_l2_weights,
-        case.symm_buffer,
-        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-        activation_clamp=case.config.activation_clamp,
-        fast_math=bool(case.config.fast_math),
-    )
-    return y
-
-
-def prepare_tirx_fp8_fp4_mega_moe(
-    y: torch.Tensor,
-    l1_weights: tuple[torch.Tensor, torch.Tensor],
-    l2_weights: tuple[torch.Tensor, torch.Tensor],
-    sym_buffer: Any,
-    cumulative_local_expert_recv_stats: torch.Tensor | None = None,
-    recipe: tuple[int, int, int] = (1, 1, 32),
-    activation: str = "swiglu",
-    activation_clamp: float | None = None,
-    fast_math: bool = True,
-) -> TirxMegaMoePrepared:
-    context = _make_tirx_mega_moe_launch_context(
-        y=y,
-        l1_weights=l1_weights,
-        l2_weights=l2_weights,
-        sym_buffer=sym_buffer,
-        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-        recipe=recipe,
-        activation=activation,
-        activation_clamp=activation_clamp,
-        fast_math=fast_math,
-    )
-    return TirxMegaMoePrepared(context=context, invocation=_prepare_tirx_invocation(context, y=y))
-
-
-def launch_prepared_tirx_fp8_fp4_mega_moe(prepared: TirxMegaMoePrepared) -> None:
-    _launch_tirx_mega_moe(prepared.context, prepared.invocation)
-
-
-def fp8_fp4_mega_moe(
-    y: torch.Tensor,
-    l1_weights: tuple[torch.Tensor, torch.Tensor],
-    l2_weights: tuple[torch.Tensor, torch.Tensor],
-    sym_buffer: Any,
-    cumulative_local_expert_recv_stats: torch.Tensor | None = None,
-    recipe: tuple[int, int, int] = (1, 1, 32),
-    activation: str = "swiglu",
-    activation_clamp: float | None = None,
-    fast_math: bool = True,
-) -> None:
-    prepared = prepare_tirx_fp8_fp4_mega_moe(
-        y,
-        l1_weights,
-        l2_weights,
-        sym_buffer,
-        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-        recipe=recipe,
-        activation=activation,
-        activation_clamp=activation_clamp,
-        fast_math=fast_math,
-    )
-    launch_prepared_tirx_fp8_fp4_mega_moe(prepared)
-
-
-fp8_fp4_mega_moe_tirx = fp8_fp4_mega_moe
-
-
-def _cleanup_case(case: MegaMoeCase | None) -> None:
-    if case is not None:
-        case.symm_buffer.destroy()
-
-
-def _cleanup_distinct_cases(*cases: MegaMoeCase | None) -> None:
-    destroyed: set[int] = set()
-    for case in cases:
-        if case is None:
-            continue
-        key = id(case.symm_buffer)
-        if key in destroyed:
-            continue
-        case.symm_buffer.destroy()
-        destroyed.add(key)
-
-
-def _destroy_process_group() -> None:
-    import torch.distributed as dist
-
-    if dist.is_available() and dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def _bench_megamoe_mode(
-    funcs: dict[str, Any],
-    kernel_names: dict[str, str],
-    bench_kineto: Any,
-    barrier: Any,
-    between_impls: Any,
-    *,
-    rounds: int,
-    cooldown_s: float,
-) -> dict[str, Any]:
-    """Run the exact benchmark protocol used by latest DeepGEMM MegaMoE."""
-    if funcs.keys() != kernel_names.keys():
-        raise ValueError("MegaMoE benchmark funcs and kernel_names must have identical keys")
-    num_tests = int(inspect.signature(bench_kineto).parameters["num_tests"].default)
-    round_samples: dict[str, list[float]] = {name: [] for name in funcs}
-    round_orders: list[list[str]] = []
-    items = list(funcs.items())
-    for round_idx in range(rounds):
-        if round_idx > 0:
-            time.sleep(cooldown_s)
-        round_items = items if round_idx % 2 == 0 else list(reversed(items))
-        round_orders.append([name for name, _ in round_items])
-
-        def run_pair() -> None:
-            for impl_idx, (_, fn) in enumerate(round_items):
-                if impl_idx > 0:
-                    between_impls()
-                fn()
-
-        round_kernel_names = tuple(kernel_names[name] for name, _ in round_items)
-        round_times = bench_kineto(run_pair, round_kernel_names, barrier=barrier)
-        for (name, _), seconds in zip(round_items, round_times):
-            seconds = float(seconds)
-            if not math.isfinite(seconds) or seconds <= 0:
-                raise RuntimeError(
-                    f"DeepGEMM bench_kineto returned invalid time for {name}: {seconds}"
-                )
-            round_samples[name].append(seconds * 1e6)
-
-    return {
-        "impls": {name: sum(samples) / len(samples) for name, samples in round_samples.items()},
-        "round_samples": round_samples,
-        "errors": {},
-        "timer": "megamoe",
-        "benchmark_protocol": {
-            "source": "deep_gemm.testing.bench_kineto",
-            "kernel_names": kernel_names,
-            "num_tests": num_tests,
-            "flush_l2": True,
-            "flush_l2_bytes": int(8e9),
-            "gpu_sleep_cycles": int(2e7),
-            "rank_barrier_outside_kernel_timing": True,
-            "paired_profile_session": True,
-            "cold_setup_per_implementation": True,
-            "rounds": rounds,
-            "round_cooldown_s": cooldown_s,
-            "round_orders": round_orders,
-        },
-    }
-
-
-def _run_worker(local_rank: int, cfg_dict: dict[str, Any], mode: str) -> dict[str, Any]:
-    worker_kwargs = dict(cfg_dict)
-    warmup = worker_kwargs.pop("warmup", None)
-    repeat = worker_kwargs.pop("repeat", None)
-    warmup = None if warmup is None else int(warmup)
-    repeat = None if repeat is None else int(repeat)
-    timer = worker_kwargs.pop("timer", None)
-    timer = None if timer is None else str(timer)
-    rounds = int(worker_kwargs.pop("rounds", 1))
-    cooldown_s = float(worker_kwargs.pop("cooldown_s", 1.0))
-    config = MegaMoeConfig(**worker_kwargs)
-    config.validate()
-
-    if config.num_processes > torch.cuda.device_count():
-        raise SkipTest(
-            f"Requested {config.num_processes} processes, but only "
-            f"{torch.cuda.device_count()} CUDA devices are visible"
-        )
-
-    deep_gemm, source = load_deep_gemm_mega()
-    case = None
-    dg_case = None
-    tirx_case = None
-    default_device_before = torch.get_default_device()
-    cuda_device_before = (
-        torch.cuda.current_device()
-        if torch.cuda.is_available() and torch.cuda.is_initialized()
-        else None
-    )
-    try:
-        if (
-            hasattr(torch.distributed, "destroy_process_group")
-            and torch.distributed.is_initialized()
-        ):
-            _destroy_process_group()
-        rank_idx, num_ranks, group = deep_gemm.utils.dist.init_dist(
-            local_rank, config.num_processes
-        )
-
-        if mode == "test":
-            case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
-            initial_stats = torch.arange(
-                config.num_experts_per_rank, dtype=torch.int32, device="cuda"
-            )
-            deepgemm_stats = initial_stats.clone()
-            tirx_stats = initial_stats.clone()
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            y_ref = run_deepgemm_reference(case, deepgemm_stats)
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            checksum = float(y_ref.float().sum().item())
-            try:
-                if torch.distributed.is_initialized():
-                    torch.distributed.barrier()
-                y_tir = run_tirx_mega_moe(case, tirx_stats)
-                if torch.distributed.is_initialized():
-                    torch.distributed.barrier()
-            except NotImplementedError as exc:
-                return {
-                    "status": "SKIP",
-                    "reason": str(exc),
-                    "reference_source": source,
-                    "reference_checksum": checksum,
-                    "num_tokens": config.num_tokens,
-                }
-            deepgemm_max_abs_diff = _max_abs_diff(y_tir, y_ref)
-            stats_max_abs_diff = int(
-                (tirx_stats.to(torch.int64) - deepgemm_stats.to(torch.int64)).abs().max().item()
-            )
-            return {
-                "status": "OK",
-                "reference_source": source,
-                "reference_checksum": checksum,
-                "deepgemm_max_abs_diff": deepgemm_max_abs_diff,
-                "stats_max_abs_diff": stats_max_abs_diff,
-            }
-
-        if mode == "bench":
-            from tvm.tirx.bench import bench
-
-            # bench()'s proton/event/cudagraph_proton timers are single-process:
-            # each rank derives n_warmup/n_repeat from its own per-call estimate
-            # with no cross-rank sync, so a cross-rank mega_moe kernel (in-kernel
-            # collectives per launch) deadlocks when ranks run different iteration
-            # counts. Multi-process bench must use the purpose-built megamoe
-            # harness (DeepGEMM bench_kineto + barrier reset); default to it and
-            # reject an explicit single-process timer.
-            if config.num_processes > 1:
-                if timer is None:
-                    timer = "megamoe"
-                elif timer != "megamoe":
-                    raise ValueError(
-                        "multi-process mega_moe bench requires timer='megamoe' (or omit "
-                        f"--timer); {timer!r} is a single-process timer and would "
-                        "deadlock the cross-rank kernel collectives"
-                    )
-
-            dg_case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
-            tirx_case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
-            deepgemm_stats = None
-            tirx_stats = None
-            if timer == "megamoe":
-                initial_stats = torch.zeros(
-                    config.num_experts_per_rank, dtype=torch.int32, device="cuda"
-                )
-                deepgemm_stats = initial_stats.clone()
-                tirx_stats = initial_stats.clone()
-                tirx_case.cumulative_local_expert_recv_stats = tirx_stats
-            _copy_inputs_into_symm_buffer(dg_case)
-            _copy_inputs_into_symm_buffer(tirx_case)
-            y_deepgemm = torch.empty(
-                (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
-            )
-            tirx_invocation = _prepare_tirx_invocation(tirx_case)
-
-            def deepgemm_step() -> None:
-                dg_case.deep_gemm.fp8_fp4_mega_moe(
-                    y_deepgemm,
-                    dg_case.transformed_l1_weights,
-                    dg_case.transformed_l2_weights,
-                    dg_case.symm_buffer,
-                    cumulative_local_expert_recv_stats=deepgemm_stats,
-                    activation_clamp=dg_case.config.activation_clamp,
-                    fast_math=bool(dg_case.config.fast_math),
-                )
-
-            def tirx_step() -> None:
-                _launch_tirx_mega_moe(tirx_case, tirx_invocation)
-
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            deepgemm_step()
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            tirx_step()
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            deepgemm_max_abs_diff = _max_abs_diff(tirx_invocation.y, y_deepgemm)
-            if deepgemm_max_abs_diff != 0.0:
-                raise AssertionError(f"TIRx diff={deepgemm_max_abs_diff}")
-            if timer == "megamoe" and not torch.equal(tirx_stats, deepgemm_stats):
-                raise AssertionError("TIRx cumulative expert stats differ from DeepGEMM")
-
-            if timer == "megamoe":
-                if warmup is not None or repeat is not None:
-                    raise ValueError(
-                        "timer='megamoe' uses DeepGEMM's fixed bench_kineto protocol; "
-                        "do not pass warmup/repeat overrides"
-                    )
-
-                def deepgemm_megamoe_step() -> None:
-                    nonlocal y_deepgemm
-                    _copy_inputs_into_symm_buffer(dg_case)
-                    y_deepgemm = torch.empty(
-                        (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
-                    )
-                    deepgemm_step()
-
-                def tirx_megamoe_step() -> None:
-                    _copy_inputs_into_symm_buffer(tirx_case)
-                    tirx_invocation.y = torch.empty(
-                        (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
-                    )
-                    tirx_step()
-
-                def reset_between_implementations() -> None:
-                    torch.empty(int(8e9 // 4), dtype=torch.int, device="cuda").zero_()
-                    torch.cuda._sleep(int(2e7))
-                    torch.distributed.barrier()
-
-                from deep_gemm.testing import bench_kineto
-
-                bench_result = _bench_megamoe_mode(
-                    {"tirx": tirx_megamoe_step, "deepgemm": deepgemm_megamoe_step},
-                    {"tirx": "mega_moe_kernel", "deepgemm": "sm100_fp8_fp4_mega_moe_impl"},
-                    bench_kineto,
-                    torch.distributed.barrier,
-                    reset_between_implementations,
-                    rounds=rounds,
-                    cooldown_s=cooldown_s,
-                )
-            else:
-                bench_result = bench(
-                    {"tirx": tirx_step},
-                    warmup=warmup,
-                    repeat=repeat,
-                    timer=timer,
-                    references={"deepgemm": lambda: deepgemm_step},
-                    rounds=rounds,
-                    cooldown_s=cooldown_s,
-                )
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            impls = bench_result["impls"]
-            missing = {"deepgemm", "tirx"} - set(impls)
-            if missing:
-                raise RuntimeError(f"Benchmark did not report timings for: {sorted(missing)}")
-            return {
-                "status": "OK",
-                "reference_source": source,
-                "deepgemm_max_abs_diff": deepgemm_max_abs_diff,
-                "impls": {"deepgemm": float(impls["deepgemm"]), "tirx": float(impls["tirx"])},
-                "round_samples": bench_result.get("round_samples", {}),
-                "errors": bench_result["errors"],
-                "timer": bench_result.get("timer"),
-                "benchmark_protocol": bench_result.get("benchmark_protocol", {}),
-            }
-
-        raise ValueError(f"Unsupported mode: {mode}")
-    finally:
-        try:
-            _cleanup_distinct_cases(case, dg_case, tirx_case)
-            _destroy_process_group()
-        finally:
-            torch.set_default_device(default_device_before)
-            if cuda_device_before is not None:
-                torch.cuda.set_device(cuda_device_before)
-
-
-def _worker_entry(
-    local_rank: int, cfg_dict: dict[str, Any], mode: str, result_queue: mp.SimpleQueue | None
-) -> None:
-    result = _run_worker(local_rank, cfg_dict, mode)
-    if result_queue is not None:
-        result_queue.put((local_rank, result))
-
-
-def _aggregate_rank_results(rank_results: list[tuple[int, dict[str, Any]]]) -> dict[str, Any]:
-    rank_results = sorted(rank_results, key=lambda item: item[0])
-    results = [result for _, result in rank_results]
-    for result in results:
-        if result["status"] == "SKIP":
-            return result
-    first = results[0]
-    if "impls" in first:
-        impl_names = sorted({name for result in results for name in result.get("impls", {})})
-        round_samples: dict[str, list[float]] = {}
-        for name in impl_names:
-            per_rank_samples = []
-            for result in results:
-                samples = result.get("round_samples", {}).get(name)
-                if samples is None:
-                    raise RuntimeError(f"Rank result is missing round samples for {name!r}")
-                per_rank_samples.append([float(value) for value in samples])
-            sample_counts = {len(samples) for samples in per_rank_samples}
-            if len(sample_counts) != 1:
-                raise RuntimeError(
-                    f"Ranks reported different round counts for {name!r}: {sorted(sample_counts)}"
-                )
-            num_rounds = sample_counts.pop()
-            round_samples[name] = [
-                max(samples[round_idx] for samples in per_rank_samples)
-                for round_idx in range(num_rounds)
-            ]
-        impls = {
-            name: sum(samples) / len(samples) for name, samples in round_samples.items() if samples
-        }
-        errors = {}
-        for result in results:
-            errors.update(result.get("errors", {}))
-        return {
-            **first,
-            "impls": impls,
-            "round_samples": round_samples,
-            "errors": errors,
-            "deepgemm_max_abs_diff": max(
-                float(result.get("deepgemm_max_abs_diff", 0.0)) for result in results
-            ),
-            "rank_results": [
-                {
-                    "rank": rank,
-                    "impls": result.get("impls", {}),
-                    "round_samples": result.get("round_samples", {}),
-                    "deepgemm_max_abs_diff": float(result.get("deepgemm_max_abs_diff", 0.0)),
-                }
-                for rank, result in rank_results
-            ],
-        }
-    if "deepgemm_max_abs_diff" not in first:
-        return first
-    return {
-        **first,
-        "deepgemm_max_abs_diff": max(float(result["deepgemm_max_abs_diff"]) for result in results),
-        "stats_max_abs_diff": max(int(result["stats_max_abs_diff"]) for result in results),
-        "rank_results": [
-            {
-                "rank": rank,
-                "deepgemm_max_abs_diff": float(result["deepgemm_max_abs_diff"]),
-                "stats_max_abs_diff": int(result["stats_max_abs_diff"]),
-                "reference_checksum": float(result["reference_checksum"]),
-            }
-            for rank, result in rank_results
-        ],
-    }
-
-
-def _run_distributed(config: MegaMoeConfig, mode: str, **kwargs) -> dict[str, Any]:
-    cfg_dict = {**asdict(config), **kwargs}
-    if config.num_processes > torch.cuda.device_count():
-        raise SkipTest(
-            f"Requested {config.num_processes} processes, but only "
-            f"{torch.cuda.device_count()} CUDA devices are visible"
-        )
-    if config.num_processes == 1:
-        last_error = None
-        for _ in range(32):
-            port = _find_free_port()
-            try:
-                with _distributed_env(port):
-                    return _run_worker(0, cfg_dict, mode)
-            except Exception as exc:
-                message = str(exc)
-                if "EADDRINUSE" not in message and "address already in use" not in message:
-                    raise
-                last_error = exc
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError(
-            "Unable to allocate a free TCP port for single-process distributed init."
-        )
-
-    port = _find_free_port()
-    with _distributed_env(port):
-        ctx = mp.get_context("spawn")
-        result_queue = ctx.SimpleQueue()
-        mp.spawn(
-            _worker_entry,
-            args=(cfg_dict, mode, result_queue),
-            nprocs=config.num_processes,
-            join=True,
-        )
-        rank_results = [result_queue.get() for _ in range(config.num_processes)]
-        return _aggregate_rank_results(rank_results)
-
-
-KERNEL_META = {
-    "name": "deepgemm_fp8_fp4_mega_moe",
-    "category": "deepgemm",
-    "compute_capability": 10,
-}
-
-# One case per block_m bucket in `_get_block_config_for_mega_moe` so a per-PR
-# sm100a run covers all heuristic-selected block_m paths (16, 32, 64, 96, 128, 192).
-# Each tpe (= tokens * ranks * topk / experts) is set just below the bucket boundary.
-CONFIGS = [
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 4,
-        "num_tokens": 2,
-        "hidden": 1024,
-        "intermediate_hidden": 512,
-        "num_experts": 2,
-        "num_topk": 1,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "p1_tok2_h1024_i512_e2_k1_bm16",
-    },
-    *[
-        {
-            "num_processes": num_processes,
-            "num_max_tokens_per_rank": 4,
-            "num_tokens": 2,
-            "hidden": 1024,
-            "intermediate_hidden": 512,
-            "num_experts": num_processes * 2,
-            "num_topk": 1,
-            "activation_clamp": 10.0,
-            "fast_math": 1,
-            "label": f"p{num_processes}_tok2_h1024_i512_e{num_processes * 2}_k1_bm16",
-        }
-        for num_processes in (2, 4, 6)
-    ],
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 16,
-        "num_tokens": 16,
-        "hidden": 1024,
-        "intermediate_hidden": 512,
-        "num_experts": 2,
-        "num_topk": 2,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "p1_tok16_h1024_i512_e2_k2_bm32",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 32,
-        "num_tokens": 32,
-        "hidden": 1024,
-        "intermediate_hidden": 512,
-        "num_experts": 2,
-        "num_topk": 2,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "p1_tok32_h1024_i512_e2_k2_bm64",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 64,
-        "num_tokens": 64,
-        "hidden": 1024,
-        "intermediate_hidden": 512,
-        "num_experts": 2,
-        "num_topk": 2,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "p1_tok64_h1024_i512_e2_k2_bm96",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 96,
-        "num_tokens": 96,
-        "hidden": 1024,
-        "intermediate_hidden": 512,
-        "num_experts": 2,
-        "num_topk": 2,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "p1_tok96_h1024_i512_e2_k2_bm128",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 192,
-        "num_tokens": 192,
-        "hidden": 1024,
-        "intermediate_hidden": 512,
-        "num_experts": 2,
-        "num_topk": 2,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "p1_tok192_h1024_i512_e2_k2_bm192",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 64,
-        "num_tokens": 64,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t64_m64_h7168_i3072_e384_k6_g1",
-    },
-    {
-        "num_processes": 2,
-        "num_max_tokens_per_rank": 64,
-        "num_tokens": 64,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t64_m64_h7168_i3072_e384_k6_g2",
-    },
-    {
-        "num_processes": 2,
-        "num_max_tokens_per_rank": 8192,
-        "num_tokens": 8192,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t8192_m8192_h7168_i3072_e384_k6_g2",
-    },
-    {
-        "num_processes": 4,
-        "num_max_tokens_per_rank": 64,
-        "num_tokens": 64,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t64_m64_h7168_i3072_e384_k6_g4",
-    },
-    {
-        "num_processes": 4,
-        "num_max_tokens_per_rank": 8192,
-        "num_tokens": 8192,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t8192_m8192_h7168_i3072_e384_k6_g4",
-    },
-    {
-        "num_processes": 6,
-        "num_max_tokens_per_rank": 64,
-        "num_tokens": 64,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t64_m64_h7168_i3072_e384_k6_g6",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 8,
-        "num_tokens": 8,
-        "hidden": 1024,
-        "intermediate_hidden": 512,
-        "num_experts": 24,
-        "num_topk": 2,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t8_h1024_i512_e24_k2_g1",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 16,
-        "num_tokens": 16,
-        "hidden": 2048,
-        "intermediate_hidden": 1024,
-        "num_experts": 48,
-        "num_topk": 2,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t16_h2048_i1024_e48_k2_g1",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 64,
-        "num_tokens": 64,
-        "hidden": 4096,
-        "intermediate_hidden": 1536,
-        "num_experts": 96,
-        "num_topk": 4,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t64_h4096_i1536_e96_k4_g1",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 64,
-        "num_tokens": 32,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t32_m64_h7168_i3072_e384_k6_g1",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 8192,
-        "num_tokens": 8192,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 64,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t8192_h7168_i3072_e64_k6_g1",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 8192,
-        "num_tokens": 8192,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 192,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t8192_h7168_i3072_e192_k6_g1",
-    },
-    {
-        "num_processes": 1,
-        "num_max_tokens_per_rank": 8192,
-        "num_tokens": 8192,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t8192_m8192_h7168_i3072_e384_k6_g1",
-    },
-    {
-        "num_processes": 4,
-        "num_max_tokens_per_rank": 256,
-        "num_tokens": 256,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t256_h7168_i3072_e384_k6_g4",
-    },
-    {
-        "num_processes": 4,
-        "num_max_tokens_per_rank": 1024,
-        "num_tokens": 1024,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t1024_h7168_i3072_e384_k6_g4",
-    },
-    {
-        "num_processes": 6,
-        "num_max_tokens_per_rank": 8192,
-        "num_tokens": 8192,
-        "hidden": 7168,
-        "intermediate_hidden": 3072,
-        "num_experts": 384,
-        "num_topk": 6,
-        "activation_clamp": 10.0,
-        "fast_math": 1,
-        "label": "t8192_m8192_h7168_i3072_e384_k6_g6",
-    },
-]
-
-
-def _make_config(
-    num_processes=1,
-    num_max_tokens_per_rank=4,
-    num_tokens=2,
-    hidden=1024,
-    intermediate_hidden=512,
-    num_experts=2,
-    num_topk=1,
-    activation_clamp=10.0,
-    fast_math=1,
-) -> MegaMoeConfig:
-    config = MegaMoeConfig(
-        num_processes=num_processes,
-        num_max_tokens_per_rank=num_max_tokens_per_rank,
-        num_tokens=num_tokens,
-        hidden=hidden,
-        intermediate_hidden=intermediate_hidden,
-        num_experts=num_experts,
-        num_topk=num_topk,
-        activation_clamp=activation_clamp,
-        fast_math=fast_math,
-    )
-    config.validate()
-    return config
-
-
-def prepare_data(
-    num_processes=1,
-    num_max_tokens_per_rank=4,
-    num_tokens=2,
-    hidden=1024,
-    intermediate_hidden=512,
-    num_experts=2,
-    num_topk=1,
-    activation_clamp=10.0,
-    fast_math=1,
-) -> dict[str, Any]:
-    return {
-        "config": _make_config(
-            num_processes=num_processes,
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-            num_tokens=num_tokens,
-            hidden=hidden,
-            intermediate_hidden=intermediate_hidden,
-            num_experts=num_experts,
-            num_topk=num_topk,
-            activation_clamp=activation_clamp,
-            fast_math=fast_math,
-        )
-    }
-
-
-def _assert_correctness_result(result: dict[str, Any]) -> None:
-    if result["status"] == "SKIP":
-        raise SkipTest(
-            f"{result['reason']} DeepGEMM reference source={result['reference_source']} "
-            f"checksum={result['reference_checksum']:.4f}"
-        )
-    assert result["deepgemm_max_abs_diff"] == 0.0, (
-        f"Expected bitwise parity with DeepGEMM reference, got deepgemm_max_abs_diff="
-        f"{result['deepgemm_max_abs_diff']}"
-    )
-    assert result["stats_max_abs_diff"] == 0, (
-        "Expected cumulative_local_expert_recv_stats parity with DeepGEMM, got "
-        f"stats_max_abs_diff={result['stats_max_abs_diff']}"
-    )
-
-
-def check_correctness(
-    outputs: dict[str, Any],
-    num_processes=1,
-    num_max_tokens_per_rank=4,
-    num_tokens=2,
-    hidden=1024,
-    intermediate_hidden=512,
-    num_experts=2,
-    num_topk=1,
-    activation_clamp=10.0,
-    fast_math=1,
-) -> None:
-    result = outputs.get("result")
-    if result is None:
-        result = _run_distributed(
-            _make_config(
-                num_processes=num_processes,
-                num_max_tokens_per_rank=num_max_tokens_per_rank,
-                num_tokens=num_tokens,
-                hidden=hidden,
-                intermediate_hidden=intermediate_hidden,
-                num_experts=num_experts,
-                num_topk=num_topk,
-                activation_clamp=activation_clamp,
-                fast_math=fast_math,
-            ),
-            "test",
-        )
-    _assert_correctness_result(result)
-
-
-def run_test(
-    num_processes=1,
-    num_max_tokens_per_rank=4,
-    num_tokens=2,
-    hidden=1024,
-    intermediate_hidden=512,
-    num_experts=2,
-    num_topk=1,
-    activation_clamp=10.0,
-    fast_math=1,
-):
-    config = _make_config(
-        num_processes=num_processes,
-        num_max_tokens_per_rank=num_max_tokens_per_rank,
-        num_tokens=num_tokens,
-        hidden=hidden,
-        intermediate_hidden=intermediate_hidden,
-        num_experts=num_experts,
-        num_topk=num_topk,
-        activation_clamp=activation_clamp,
-        fast_math=fast_math,
-    )
-    result = _run_distributed(config, "test")
-    _assert_correctness_result(result)
-
-
-def run_bench(
-    num_processes=1,
-    num_max_tokens_per_rank=128,
-    num_tokens=96,
-    hidden=1024,
-    intermediate_hidden=512,
-    num_experts=8,
-    num_topk=2,
-    activation_clamp=10.0,
-    fast_math=1,
-    *,
-    warmup=None,
-    repeat=None,
-    timer=None,
-    **kwargs,
-):
-    config = _make_config(
-        num_processes=num_processes,
-        num_max_tokens_per_rank=num_max_tokens_per_rank,
-        num_tokens=num_tokens,
-        hidden=hidden,
-        intermediate_hidden=intermediate_hidden,
-        num_experts=num_experts,
-        num_topk=num_topk,
-        activation_clamp=activation_clamp,
-        fast_math=fast_math,
-    )
-    return _run_distributed(config, "bench", warmup=warmup, repeat=repeat, timer=timer, **kwargs)

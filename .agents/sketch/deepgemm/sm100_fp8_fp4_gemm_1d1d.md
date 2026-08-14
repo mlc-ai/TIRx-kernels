@@ -38,7 +38,7 @@ show the TIRx kernel as:
   and schedule have been stated.
 
 The implementation represented by this sketch is maintained in
-[`tirx_kernels/deepgemm/_sm100_fp8_fp4_gemm_1d1d.py`](../../tirx_kernels/deepgemm/_sm100_fp8_fp4_gemm_1d1d.py),
+[`tirx_kernels/deepgemm/_sm100_fp8_fp4_gemm_1d1d/`](../../tirx_kernels/deepgemm/_sm100_fp8_fp4_gemm_1d1d/__init__.py),
 with five thin entry modules (`fp8_gemm_1d1d.py`,
 `m_grouped_fp8_gemm_contiguous.py`, `m_grouped_fp8_gemm_masked.py`,
 `k_grouped_fp8_gemm_contiguous.py`, `fp8_bmm.py`) that pin one descriptor each.

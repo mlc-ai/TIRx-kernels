@@ -111,7 +111,7 @@ def _spec_for(config: dict):
 
 
 def prepare_data(**config):
-    from ._sm100_fp8_fp4_gemm_1d1d_data import prepare_bmm
+    from ._sm100_fp8_fp4_gemm_1d1d.data import prepare_bmm
 
     config.pop("label", None)
     return prepare_bmm(**config)
@@ -140,7 +140,7 @@ def run_test(**config):
     """Compile, launch and compare against the dequantized-einsum oracle."""
     import torch
 
-    from ._sm100_fp8_fp4_gemm_1d1d_data import assert_within_threshold, calc_diff
+    from ._sm100_fp8_fp4_gemm_1d1d.data import assert_within_threshold, calc_diff
 
     config.pop("label", None)
     data = prepare_data(**config)
@@ -163,7 +163,7 @@ def run_test(**config):
 
 
 def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    from ._sm100_fp8_fp4_gemm_1d1d_data import bench_against_deepgemm, deepgemm_launch_bmm
+    from ._sm100_fp8_fp4_gemm_1d1d.data import bench_against_deepgemm, deepgemm_launch_bmm
 
     config.pop("label", None)
     data = prepare_data(**config)

@@ -2062,7 +2062,7 @@ def _encode_tma_3d_desc(
     swizzle_mode: int,
     tensor_dtype: Any | None = None,
 ) -> Any:
-    from tirx_kernels.deepgemm import mega_moe
+    from tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe import spec as mega_moe
 
     elem_size = int(tensor.element_size())
     if swizzle_mode != 0:
@@ -2094,7 +2094,7 @@ def _encode_tma_3d_desc(
 
 def _build_tirx_tensor_maps(data: dict[str, Any]) -> dict[str, Any]:
     import tvm
-    from tirx_kernels.deepgemm.mega_moe import _encode_tma_2d_desc
+    from tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe.spec import _encode_tma_2d_desc
 
     config: PagedMQALogitsFP8Config = data["config"]
     q_fp8 = data["q"]

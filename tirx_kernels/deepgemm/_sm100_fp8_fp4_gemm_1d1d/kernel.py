@@ -33,7 +33,7 @@ from tvm.backend.cuda.cpp.descriptors import (
 )
 from tvm.script import tirx as T
 
-from ._sm100_fp8_fp4_gemm_1d1d import (
+from .spec import (
     BLOCK_K,
     LAYOUT_AD_M,
     NUM_EPILOGUE_STAGES,
@@ -98,7 +98,7 @@ def _validate(spec: GemmSpec) -> None:
         raise ValueError("invalid tensor memory columns")
     # `UMMA_A_SIZE_PER_STAGE` may read past one A slab into the A/B tail; the
     # source asserts that stays in bounds rather than shortening the read.
-    from ._sm100_fp8_fp4_gemm_1d1d import align_up
+    from .spec import align_up
 
     umma_a = align_up(spec.load_block_m, LAYOUT_AD_M) * spec.block_k
     if umma_a > spec.smem_a_size_per_stage + spec.smem_b_size_per_stage * spec.num_stages:

@@ -37,8 +37,12 @@ __all__ = [
     "GemmSpec",
     "GemmType",
     "Major",
+    "align_up",
     "build_kernel",
+    "ceil_div",
     "get_best_config",
+    "get_theoretical_mk_alignment",
+    "gran_k_for",
 ]
 
 
@@ -676,10 +680,10 @@ def make_spec(
 def build_kernel(spec: GemmSpec):
     """Build the TIRx `PrimFunc` for one `sm100_fp8_fp4_gemm_1d1d_impl` instantiation.
 
-    The body lives in the sibling `_sm100_fp8_fp4_gemm_1d1d_kernel` module; the
-    import is deferred because that module imports this one for its constants.
+    The body lives in the `kernel` submodule; the import is deferred because
+    that module imports this one for its constants.
     """
-    from ._sm100_fp8_fp4_gemm_1d1d_kernel import build_kernel as _build
+    from .kernel import build_kernel as _build
 
     return _build(spec)
 
@@ -1090,7 +1094,7 @@ def compile_spec(spec: GemmSpec):
     """Compile one specialization.  `GemmSpec` is frozen, so it keys the cache."""
     import tvm
 
-    from ._sm100_fp8_fp4_gemm_1d1d_kernel import build_kernel
+    from .kernel import build_kernel
 
     tags = ["blockIdx.x"]
     if spec.num_multicast > 1:

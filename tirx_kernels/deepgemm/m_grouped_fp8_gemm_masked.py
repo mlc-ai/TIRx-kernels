@@ -138,7 +138,7 @@ def _spec_for(config: dict):
 
 
 def prepare_data(**config):
-    from ._sm100_fp8_fp4_gemm_1d1d_data import prepare_m_grouped_masked
+    from ._sm100_fp8_fp4_gemm_1d1d.data import prepare_m_grouped_masked
 
     config.pop("label", None)
     return prepare_m_grouped_masked(max_m=MAX_M, **config)
@@ -168,7 +168,7 @@ def run_test(**config):
     """Compare only the valid rows of each group against the oracle."""
     import torch
 
-    from ._sm100_fp8_fp4_gemm_1d1d_data import assert_within_threshold, masked_slice_diff
+    from ._sm100_fp8_fp4_gemm_1d1d.data import assert_within_threshold, masked_slice_diff
 
     config.pop("label", None)
     data = prepare_data(**config)
@@ -186,7 +186,7 @@ def run_test(**config):
 
 
 def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    from ._sm100_fp8_fp4_gemm_1d1d_data import (
+    from ._sm100_fp8_fp4_gemm_1d1d.data import (
         bench_against_deepgemm,
         deepgemm_launch_m_grouped_masked,
     )
