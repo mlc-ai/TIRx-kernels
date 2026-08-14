@@ -503,6 +503,16 @@ def test_tracked_ac10_kineto_evidence_is_explicitly_missing():
     assert "myrank=2,nranks=1" in alternative_audit["worker_id_start"]
     assert "LOCAL" in alternative_audit["direct_nvshmem_full_init"]
     assert "No existing full-device-init API" in alternative_audit["conclusion"]
+    dependency_audit = evidence["existing_dependency_audit"]
+    assert dependency_audit["tvm_worktrees"] == [
+        {
+            "commit": "ea0950abfe49031720171a931fc244c0fb2033e2",
+            "detached": True,
+            "path": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm",
+        }
+    ]
+    assert "no revision" in dependency_audit["all_ref_history"]
+    assert "no already-built" in dependency_audit["conclusion"]
 
     before_outer = json.loads(
         (repo_root / sources["before"]["outer_timer"]["path"]).read_text()

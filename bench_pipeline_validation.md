@@ -502,6 +502,11 @@ entry point separates PE rank from device ordinal; `worker_id_start` is also
 `myrank`; `mype_node` restores device 0; and NVSHMEM's public full-init wrapper is
 header-inline over a non-exported implementation symbol. The exported hostlib
 initializer is not the complete device initialization required by these kernels.
+A third audit inspected every local TVM ref and worktree plus alternative
+workspace/TIR checkouts. The only TVM worktree is detached at `ea0950ab`, and no
+available revision or second implementation separates PE rank from physical
+device ordinal. There is therefore no existing dependency version to select as
+a repository-local resolution.
 
 The earlier GPU-1 pair remains in `evidence-attempt-1.json` because it exposed two
 cost-model defects rather than passing them silently. It is not the Proton
