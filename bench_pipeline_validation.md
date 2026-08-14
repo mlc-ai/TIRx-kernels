@@ -442,8 +442,11 @@ or merged with any future UUID-verified pipeline result.
 The plan requires a migration-before versus pipeline A/B for every timer family
 that can run on one GPU. Proton now has a persisted same-physical-GPU schema-3
 pair satisfying every structural AC-10 check. Its earlier retry-heavy attempt is
-retained as diagnostic evidence, not substituted for the passing pair. The other
-timer families remain unmeasured until repeated through the UUID-verified path.
+retained as diagnostic evidence, not substituted for the passing pair. Event now
+also has a source-reproducible UUID-verified pair; it is measurement evidence but
+not a speedup claim because the pipeline side encountered four recorded foreign
+intrusions. CUDA-graph Proton, Kineto, and MegaMoE remain unmeasured through the
+new UUID-verified path.
 
 The reproducible inputs are tracked as `bench_pipeline_ac10_workloads.yaml`
 (Proton), `bench_pipeline_ac10_event_workload.yaml`,
@@ -460,16 +463,16 @@ is therefore insufficient for the replacement AC-10 evidence.
 | timer family | runtime evidence | status |
 |---|---|---|
 | Proton | On physical GPU 2, UUID `GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9`, migration-before completed in 71.602s and schema-3 pipeline in 56.415s: 1.2692× / 21.21% measured wall improvement. Both sides retained 3/3 default-protocol records and all raw samples; implementation means changed by -0.81% to +0.06%. Pipeline critical wall was 46.575s versus 46.528s expected, leaving 0.047s unexplained; dispatch p95 was 42.8ms, CPU READY starvation 0, and retries 0 | measured, reviewable, and passes the Proton AC-10 checks |
-| Event | Clean zero-retry default-protocol runs exist locally on both sides; the pipeline result is TIRx 6.180µs and requested index 6, but the old pipeline path did not verify physical UUID | completed local runs, but physical identity invalidates the A/B; no claim |
+| Event | On physical GPU 2 with the same UUID as Proton, migration-before completed in 24.642s and pipeline in 37.451s (0.6580×). The pipeline result had four explicitly recorded in-place retries caused by foreign PIDs, so no speedup is claimed. Its critical wall was 30.651103s versus 30.651093s expected with foreign wait, leaving 10µs unexplained; dispatch p95 was 59.2ms and CPU READY starvation 0. TIRx changed by -0.34%; FlashInfer's -10.61% mean shift is explained by one 9.800µs first-round baseline outlier while its other four baseline samples were 6.214–6.239µs | measured and source-reviewable; structural cost-model checks pass, but not a reproducible wall-time win |
 | CUDA-graph Proton | Clean default-protocol runs exist locally on both sides; before TIRx is 1.675µs and pipeline TIRx is 1.931µs. This discrepancy helped expose the binding defect; the old pipeline path did not verify physical UUID | completed local runs, but physical identity invalidates the A/B; no claim |
 | Kineto | Correlated-span, barrier, sample-wise-max, schema, and cleanup behavior pass structurally; the runtime path also requires the locked NCCL/cuBLAS/cuBLASMp/NVSHMEM environment | structural only; runtime A/B unmeasured |
 | MegaMoE | Alternating order, per-rank samples, sample-wise max, mismatch rejection, and cleanup pass structurally. The representative default config now also completes both CPU-only stats/no-stats compilations for the architecture-specific `sm_100a` target without initializing CUDA | structural and CPU-prepare evidence only; runtime A/B unmeasured |
 
-The Event and CUDA-graph runs exist only in gitignored local run logs, so they are
-not persistent review evidence. Their clean completion corrects the earlier
-ledger rationale, but does not cure the unverified physical identity. No reduced
-rounds, cooldown, timer budget, reference coverage, or correctness work was used
-to manufacture a result.
+The older Event and CUDA-graph runs existed only in gitignored local logs and did
+not prove physical identity. The new tracked Event pair supersedes that Event
+result; CUDA-graph still requires replacement. No reduced rounds, cooldown,
+timer budget, reference coverage, or correctness work was used to manufacture a
+result.
 
 The tracked passing Proton pair lives under
 `bench_pipeline_ac10_artifacts/proton/{before-gpu2,after-gpu2}/`, with its derived
@@ -479,6 +482,12 @@ JSONs, both outer timers, and all four outer logs. Each outer snapshot records
 the command. The after run's source-tree fingerprint exactly matches
 `0400e58:tirx_kernels`; its `-dirty` label comes from untracked run artifacts, not
 source drift.
+
+The corresponding Event sources live under
+`bench_pipeline_ac10_artifacts/event/{before-gpu2,after-gpu2}/`, with the same
+derived evidence filename and independently hashed raw sources. Its after
+source-tree fingerprint exactly matches `a5abeca:tirx_kernels`; its `-dirty`
+label likewise reflects untracked run artifacts rather than source drift.
 
 The earlier GPU-1 pair remains in `evidence-attempt-1.json` because it exposed two
 cost-model defects rather than passing them silently. It is not the Proton
@@ -557,14 +566,14 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | AC-7 | satisfied | Cost-model schema 3 separates initial CPU READY constraints, retry READY delay, ASSIGN-held card time, post-GPU_START execution, transient foreign-PID wait, and internal dispatch latency; complete-timeline/no-data gating remains intact. The clean Proton run measured 0.047s unexplained residual and 42.8ms internal dispatch p95 |
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
 | AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
-| AC-10 | incomplete | Proton now has a passing persisted same-UUID schema-3 A/B. Event/CUDA-graph retain the old identity defect, and Kineto/MegaMoE runtime A/B is unmeasured |
+| AC-10 | incomplete | Proton has a passing persisted same-UUID schema-3 A/B. Event now has persisted same-UUID measurement evidence whose structural checks pass but whose retry-heavy wall time is not a speedup claim. CUDA-graph, Kineto, and MegaMoE runtime A/B remain unmeasured |
 | AC-11 | satisfied | 112 defaults, all 992 configs retained, and 33/33 reviewed three-point selections with YAML-owned small/medium/large roles and rationale |
 
 The plan as a whole is therefore not marked complete. The set-device and
 same-child retry implementation is complete at its structural anchors and has
-targeted single-GPU runtime evidence. Proton now satisfies the named schema-3
-structural checks. The remaining single-GPU timer families still require
-same-UUID A/B evidence.
+targeted single-GPU runtime evidence. Proton and Event now satisfy the named
+schema-3 structural checks, while Event deliberately makes no wall-time win
+claim. CUDA-graph, Kineto, and MegaMoE still require same-UUID A/B evidence.
 Multi-GPU runtime rows remain the explicit human-directed exemption, not missing
 evidence.
 
@@ -657,10 +666,10 @@ consumed; the default no-full-sweep machine discipline is restored.
   lazy-replay GPU runs predate the UUID handshake and are not runtime acceptance
   evidence; the tracked A/B is explicitly invalidated.
 - Proton has a passing, source-reproducible same-UUID schema-3 targeted A/B. Its
-  earlier attempt 1 remains explicitly non-passing diagnostic evidence. Event and
-  CUDA-graph Proton still lack admissible UUID-verified A/B; Kineto and MegaMoE
-  also lack valid runtime A/B evidence. AC-10 and the overall plan remain
-  incomplete.
+  earlier attempt 1 remains explicitly non-passing diagnostic evidence. Event
+  has source-reproducible same-UUID evidence with four in-place retries and no
+  speedup claim. CUDA-graph Proton, Kineto, and MegaMoE still lack valid runtime
+  A/B evidence. AC-10 and the overall plan remain incomplete.
 - The original five DeepGEMM `compile_spec`/`build_launch` adapters have strict
   key/consumption tests and CPU-only READY evidence; their attempted real GPU
   replay is blocked before launch by the installed DeepGEMM reference API

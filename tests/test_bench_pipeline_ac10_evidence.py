@@ -162,6 +162,24 @@ def _command(repo_root: Path, tmp_path: Path, *, timer_family: str = "proton") -
     ]
 
 
+def _assert_evidence_sources_match(repo_root: Path, evidence: dict) -> None:
+    sources = [evidence["sources"]["workloads"]]
+    for side in ("before", "after"):
+        sources.extend(
+            [
+                evidence["sources"][side]["run"],
+                evidence["sources"][side]["outer_timer"],
+                *evidence["sources"][side]["logs"],
+            ]
+        )
+    for source in sources:
+        source_path = Path(source["path"])
+        if not source_path.is_absolute():
+            source_path = repo_root / source_path
+        assert source_path.is_file()
+        assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source["sha256"]
+
+
 def test_tracked_ac10_proton_before_artifact_is_complete():
     repo_root = Path(__file__).resolve().parents[1]
     artifact_root = repo_root / "bench_pipeline_ac10_artifacts/proton/before"
@@ -228,21 +246,7 @@ def test_tracked_ac10_proton_attempt_one_evidence_matches_every_raw_source():
         evidence["before"]["outer_wall_s"] / evidence["after"]["outer_wall_s"]
     )
 
-    sources = [evidence["sources"]["workloads"]]
-    for side in ("before", "after"):
-        sources.extend(
-            [
-                evidence["sources"][side]["run"],
-                evidence["sources"][side]["outer_timer"],
-                *evidence["sources"][side]["logs"],
-            ]
-        )
-    for source in sources:
-        source_path = Path(source["path"])
-        if not source_path.is_absolute():
-            source_path = repo_root / source_path
-        assert source_path.is_file()
-        assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source["sha256"]
+    _assert_evidence_sources_match(repo_root, evidence)
 
     before_run = json.loads(
         (repo_root / evidence["sources"]["before"]["run"]["path"]).read_text()
@@ -327,21 +331,7 @@ def test_tracked_ac10_proton_schema_three_evidence_passes_from_raw_sources():
     }
     assert evidence["derived"]["wall_speedup"] == pytest.approx(1.269215059469141)
 
-    sources = [evidence["sources"]["workloads"]]
-    for side in ("before", "after"):
-        sources.extend(
-            [
-                evidence["sources"][side]["run"],
-                evidence["sources"][side]["outer_timer"],
-                *evidence["sources"][side]["logs"],
-            ]
-        )
-    for source in sources:
-        source_path = Path(source["path"])
-        if not source_path.is_absolute():
-            source_path = repo_root / source_path
-        assert source_path.is_file()
-        assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source["sha256"]
+    _assert_evidence_sources_match(repo_root, evidence)
 
     after_run = json.loads(
         (repo_root / evidence["sources"]["after"]["run"]["path"]).read_text()
@@ -362,6 +352,53 @@ def test_tracked_ac10_proton_schema_three_evidence_passes_from_raw_sources():
     assert sum(cost["gpu_busy_s_by_index"].values()) > sum(
         cost["gpu_execution_s_by_index"].values()
     )
+
+
+def test_tracked_ac10_event_evidence_matches_raw_retry_sources():
+    repo_root = Path(__file__).resolve().parents[1]
+    evidence = json.loads(
+        (
+            repo_root
+            / "bench_pipeline_ac10_artifacts/event/evidence-gpu2-schema3.json"
+        ).read_text()
+    )
+
+    assert evidence["measurement_status"] == "measured"
+    assert evidence["timer_family"] == "event"
+    assert evidence["fixed_conditions"] == {
+        "cooldown_s": 1.0,
+        "multi_gpu_runtime_validation": "exempted_by_human_unmeasured",
+        "physical_gpu_index": 2,
+        "physical_gpu_uuid": "GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+        "rounds": 5,
+    }
+    assert evidence["after"]["interference_retry_count"] == 4
+    assert evidence["after"]["results"][0]["retry_in_place"] is True
+    assert evidence["derived"]["acceptance_checks"] == {
+        "dispatch_p95_below_100ms": True,
+        "ready_starvation_absent": True,
+        "unexplained_within_bound": True,
+    }
+    assert evidence["derived"]["wall_speedup"] == pytest.approx(0.6579646427908292)
+    _assert_evidence_sources_match(repo_root, evidence)
+
+    after_run = json.loads(
+        (repo_root / evidence["sources"]["after"]["run"]["path"]).read_text()
+    )
+    committed_tree = subprocess.run(
+        ["git", "rev-parse", "a5abeca:tirx_kernels"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert after_run["kernel_tree"]["tirx-kernels:tirx_kernels"] == committed_tree
+    cost = evidence["after"]["pipeline_cost_model"]
+    assert cost["schema_version"] == 3
+    assert cost["interference_retry_count"] == 4
+    assert cost["ready_starvation_s"] == 0.0
+    assert cost["unexplained_s"] == pytest.approx(1.0013580322265625e-05)
+    assert cost["dispatch_latency_s"]["p95"] == pytest.approx(0.059206485748291016)
 
 
 def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path):
