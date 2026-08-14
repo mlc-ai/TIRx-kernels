@@ -3,11 +3,13 @@
 
 import hashlib
 import json
+import statistics
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 def _write_outer(path: Path, *, uuid: str, command_wall_ns: int) -> None:
@@ -130,12 +132,64 @@ def _command(repo_root: Path, tmp_path: Path) -> list[str]:
     ]
 
 
+def test_tracked_ac10_proton_before_artifact_is_complete():
+    repo_root = Path(__file__).resolve().parents[1]
+    artifact_root = repo_root / "bench_pipeline_ac10_artifacts/proton/before"
+    outer = json.loads((artifact_root / "outer_timer.json").read_text())
+    run = json.loads((artifact_root / "suite/runs/1.json").read_text())
+    matrix_data = yaml.safe_load((repo_root / "bench_pipeline_ac10_workloads.yaml").read_text())
+    matrix = [(row["kernel"], row["config"]) for row in matrix_data["workloads"]]
+
+    assert outer["status"] == "completed"
+    assert outer["returncode"] == outer["wrapper_returncode"] == 0
+    assert outer["command_wall_ns"] == (
+        outer["command_finished_monotonic_ns"] - outer["command_started_monotonic_ns"]
+    )
+    assert outer["command_wall_s"] == pytest.approx(
+        outer["command_wall_ns"] / 1_000_000_000
+    )
+    physical = outer["physical_gpu"]
+    assert physical["requested_index"] == "1"
+    assert physical["same_uuid_before_after"] is True
+    assert physical["before"]["uuid"] == physical["after"]["uuid"]
+    assert physical["before"]["compute_processes"] == []
+    assert physical["after"]["compute_processes"] == []
+    assert physical["before"]["memory_used_mib"] <= 512
+    assert physical["after"]["memory_used_mib"] <= 512
+
+    assert run["git"]["tirx-kernels"] == "a91a1b76"
+    assert [(row["kernel"], row["config"]) for row in run["results"]] == matrix
+    sample_count = sum(
+        len(values) for row in run["results"] for values in row["round_samples"].values()
+    )
+    assert sample_count == 30
+    for row in run["results"]:
+        assert row["status"] == "ok"
+        assert row["errors"] == {}
+        assert row["gpus"] == ["1"]
+        assert row["timer"] == "proton"
+        assert row["benchmark_protocol"]["rounds"] == 5
+        assert row["benchmark_protocol"]["cooldown_s"] == 1.0
+        assert row["aggregated"] == {"rounds": 5, "method": "mean"}
+        for implementation, values in row["round_samples"].items():
+            assert len(values) == 5
+            assert row["impls"][implementation] == pytest.approx(
+                statistics.fmean(values), abs=1e-9
+            )
+
+
 def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[1]
     workloads = tmp_path / "workloads.yaml"
     workloads.write_text("workloads:\n  - kernel: kernel\n    config: config\n")
     _write_outer(tmp_path / "before-outer.json", uuid="GPU-test", command_wall_ns=2_000_000_000)
     _write_outer(tmp_path / "after-outer.json", uuid="GPU-test", command_wall_ns=1_500_000_000)
+    for name in ("before-outer.json", "after-outer.json"):
+        outer_path = tmp_path / name
+        outer = json.loads(outer_path.read_text())
+        outer["stdout_log"] = f"/unavailable/original/{Path(outer['stdout_log']).name}"
+        outer["stderr_log"] = f"/unavailable/original/{Path(outer['stderr_log']).name}"
+        outer_path.write_text(json.dumps(outer))
     _write_run(tmp_path / "before-run.json", pipeline=False)
     _write_run(tmp_path / "after-run.json", pipeline=True)
 
@@ -158,6 +212,13 @@ def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path)
     assert run_source["sha256"] == hashlib.sha256(
         (tmp_path / "after-run.json").read_bytes()
     ).hexdigest()
+    stdout_source = next(
+        source
+        for source in evidence["sources"]["before"]["logs"]
+        if source["kind"] == "stdout_log"
+    )
+    assert stdout_source["declared_path"].startswith("/unavailable/original/")
+    assert Path(stdout_source["path"]).name == "before-outer-stdout.log"
 
 
 def test_ac10_evidence_builder_preserves_measured_acceptance_failures(tmp_path: Path):

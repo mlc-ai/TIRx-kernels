@@ -126,12 +126,20 @@ def _validate_outer(path: Path) -> tuple[dict, str, str, list[dict]]:
 
     log_sources = []
     for key in ("stdout_log", "stderr_log"):
-        log_path = Path(outer.get(key, ""))
-        if not log_path.is_absolute():
-            log_path = path.parent / log_path
-        if not log_path.is_file():
-            raise FileNotFoundError(f"outer timer references a missing {key}: {log_path}")
-        log_sources.append({"kind": key, "path": log_path})
+        declared_path = Path(outer.get(key, ""))
+        candidates = [
+            declared_path if declared_path.is_absolute() else path.parent / declared_path,
+            path.parent / declared_path.name,
+        ]
+        log_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if log_path is None:
+            raise FileNotFoundError(
+                f"outer timer references a missing {key}: {declared_path}; "
+                f"relocated sibling also missing: {path.parent / declared_path.name}"
+            )
+        log_sources.append(
+            {"kind": key, "path": log_path, "declared_path": str(declared_path)}
+        )
     return outer, requested_index, before_uuid, log_sources
 
 
@@ -375,14 +383,24 @@ def main() -> int:
                 "run": _source(args.before_run.resolve(), root),
                 "outer_timer": _source(args.before_outer.resolve(), root),
                 "logs": [
-                    {"kind": log["kind"], **_source(log["path"], root)} for log in before_logs
+                    {
+                        "kind": log["kind"],
+                        "declared_path": log["declared_path"],
+                        **_source(log["path"], root),
+                    }
+                    for log in before_logs
                 ],
             },
             "after": {
                 "run": _source(args.after_run.resolve(), root),
                 "outer_timer": _source(args.after_outer.resolve(), root),
                 "logs": [
-                    {"kind": log["kind"], **_source(log["path"], root)} for log in after_logs
+                    {
+                        "kind": log["kind"],
+                        "declared_path": log["declared_path"],
+                        **_source(log["path"], root),
+                    }
+                    for log in after_logs
                 ],
             },
         }

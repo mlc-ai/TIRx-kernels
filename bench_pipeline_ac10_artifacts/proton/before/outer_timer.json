@@ -1,0 +1,53 @@
+{
+  "argv": [
+    "bash",
+    "-lc",
+    "export PYTHONPATH=/home/hongyij/workspace/worktrees/tirx-kernels-a91a1b7-before:/home/hongyij/workspace/worktrees/20260812-160102-3370505/tvm/python:/home/hongyij/tir/python:/home/hongyij/mlc-llm/python; cd /home/hongyij/workspace/worktrees/tirx-kernels-a91a1b7-before && exec python -m tirx_kernels.bench_suite.run --workloads /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_workloads.yaml --out-dir /home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before/suite --label proton-before-a91a1b7-gpu1-uuid --no-report --no-probe --util-threshold 0 --mem-threshold 0"
+  ],
+  "command_finished_monotonic_ns": 50006385655583,
+  "command_finished_utc": "2026-08-14T01:39:15.820777+00:00",
+  "command_started_monotonic_ns": 49929178983242,
+  "command_started_utc": "2026-08-14T01:37:58.614086+00:00",
+  "command_wall_ns": 77206672341,
+  "command_wall_s": 77.206672341,
+  "cuda_visible_devices_at_wrapper_start": "1",
+  "cwd": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels",
+  "physical_gpu": {
+    "after": {
+      "compute_processes": [],
+      "index": "1",
+      "memory_total_mib": 183359.0,
+      "memory_used_mib": 126.0,
+      "name": "NVIDIA B200",
+      "utilization_gpu_percent": 0.0,
+      "uuid": "GPU-e8754e6d-624e-e1d0-595a-f9444588960a"
+    },
+    "before": {
+      "compute_processes": [],
+      "index": "1",
+      "memory_total_mib": 183359.0,
+      "memory_used_mib": 126.0,
+      "name": "NVIDIA B200",
+      "utilization_gpu_percent": 0.0,
+      "uuid": "GPU-e8754e6d-624e-e1d0-595a-f9444588960a"
+    },
+    "preflight_limits": {
+      "memory_used_mib": 512.0,
+      "utilization_gpu_percent": 0.0
+    },
+    "requested_index": "1",
+    "same_uuid_before_after": true
+  },
+  "returncode": 0,
+  "schema_version": 1,
+  "status": "completed",
+  "stderr_log": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before/stderr.log",
+  "stdout_log": "/home/hongyij/workspace/worktrees/20260812-160102-3370505/tirx-kernels/bench_pipeline_ac10_artifacts/proton/before/stdout.log",
+  "wrapper_finished_monotonic_ns": 50006583892279,
+  "wrapper_finished_utc": "2026-08-14T01:39:16.019016+00:00",
+  "wrapper_returncode": 0,
+  "wrapper_started_monotonic_ns": 49928895759595,
+  "wrapper_started_utc": "2026-08-14T01:37:58.330861+00:00",
+  "wrapper_wall_ns": 77688132684,
+  "wrapper_wall_s": 77.688132684
+}

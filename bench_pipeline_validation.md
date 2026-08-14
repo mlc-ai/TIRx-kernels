@@ -455,7 +455,7 @@ is therefore insufficient for the replacement AC-10 evidence.
 
 | timer family | runtime evidence | status |
 |---|---|---|
-| Proton | The fixed three-GEMM pair retained default 5 rounds/1.0s data, but the old pipeline side did not verify its physical UUID; its 1.884× arithmetic also relies on unpersisted outer timers | invalidated; AC-10 unmeasured pending UUID-verified same-card rerun |
+| Proton | A fresh migration-before side completed on physical GPU 1, UUID `GPU-e8754e6d-624e-e1d0-595a-f9444588960a`, with an independently persisted 77.207s command wall and 3/3 default-protocol records. Raw sources are tracked under `bench_pipeline_ac10_artifacts/proton/before/`. The pipeline side was not launched after that card ceased satisfying preflight eligibility | partial: before measured and reviewable; after missing; no A/B or speedup claim |
 | Event | Clean zero-retry default-protocol runs exist locally on both sides; the pipeline result is TIRx 6.180µs and requested index 6, but the old pipeline path did not verify physical UUID | completed local runs, but physical identity invalidates the A/B; no claim |
 | CUDA-graph Proton | Clean default-protocol runs exist locally on both sides; before TIRx is 1.675µs and pipeline TIRx is 1.931µs. This discrepancy helped expose the binding defect; the old pipeline path did not verify physical UUID | completed local runs, but physical identity invalidates the A/B; no claim |
 | Kineto | Correlated-span, barrier, sample-wise-max, schema, and cleanup behavior pass structurally; the runtime path also requires the locked NCCL/cuBLAS/cuBLASMp/NVSHMEM environment | structural only; runtime A/B unmeasured |
@@ -466,6 +466,12 @@ not persistent review evidence. Their clean completion corrects the earlier
 ledger rationale, but does not cure the unverified physical identity. No reduced
 rounds, cooldown, timer budget, reference coverage, or correctness work was used
 to manufacture a result.
+
+The tracked Proton before outer artifact records 126 MiB, zero utilization, no
+compute process, and the same UUID both before and after the command. Its run JSON
+retains all 30 raw samples and source/dependency provenance. It is deliberately
+not copied into a derived evidence summary: the after source is absent, so the
+builder must reject the incomplete pair and no wall-speedup field may exist yet.
 
 ### DeepGEMM strict-cache runtime evidence boundary
 
