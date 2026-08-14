@@ -989,6 +989,56 @@ def test_megamoe_block_scale_compile_uses_arch_specific_sm100_target(monkeypatch
     assert captured["tir_pipeline"] == "tirx"
 
 
+def test_megamoe_distributed_rank_is_independent_of_physical_device(monkeypatch):
+    from tirx_kernels.deepgemm import mega_moe
+
+    calls = {}
+    set_devices = []
+    monkeypatch.setenv("MASTER_ADDR", "127.0.0.9")
+    monkeypatch.setenv("MASTER_PORT", "9123")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setattr(mega_moe.torch.cuda, "set_device", set_devices.append)
+    monkeypatch.setattr(
+        mega_moe.torch,
+        "set_default_device",
+        lambda device: calls.update(default_device=device),
+    )
+
+    def fake_init_process_group(*, backend, init_method, world_size, rank, device_id=None):
+        calls.update(
+            backend=backend,
+            init_method=init_method,
+            world_size=world_size,
+            rank=rank,
+            device_id=device_id,
+        )
+
+    monkeypatch.setattr(
+        mega_moe.torch.distributed, "init_process_group", fake_init_process_group
+    )
+    monkeypatch.setattr(mega_moe.torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(mega_moe.torch.distributed, "get_world_size", lambda: 1)
+    monkeypatch.setattr(
+        mega_moe.torch.distributed,
+        "new_group",
+        lambda ranks: ("group", tuple(ranks)),
+    )
+
+    rank, world_size, group = mega_moe._init_dist_on_assigned_device(0, 1, 5)
+
+    assert (rank, world_size, group) == (0, 1, ("group", (0,)))
+    assert calls == {
+        "backend": "nccl",
+        "init_method": "tcp://127.0.0.9:9123",
+        "world_size": 1,
+        "rank": 0,
+        "device_id": mega_moe.torch.device("cuda", 5),
+        "default_device": "cuda",
+    }
+    assert set_devices == [5, 5]
+
+
 def test_run_prepared_benchmark_applies_gpu_stage_compile_guard(monkeypatch):
     module = SimpleNamespace(run_gpu=lambda **_kwargs: kernel_runner.tvm.compile(object()))
     prepared = PreparedKernelBenchmark(kernel="fake", label="shape", benchmark=module)
