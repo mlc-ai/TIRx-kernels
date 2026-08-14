@@ -26,8 +26,8 @@ import torch
 
 import tvm
 import tvm.testing
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
 from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState, TCGen05Bar

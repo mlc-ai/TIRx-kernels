@@ -144,6 +144,11 @@ class _PreparedDispatch:
             result.setdefault("dispatch_reason", self.reason)
         return result
 
+    def close(self) -> None:
+        close = getattr(self.prepared, "close", None)
+        if close is not None:
+            close()
+
 
 def prepare_bench(**kwargs: Any):
     """Prepare only the implementation selected by the canonical dispatcher."""

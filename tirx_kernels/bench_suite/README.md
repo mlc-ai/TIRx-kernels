@@ -141,15 +141,11 @@ are outside both timed closures. For this port, only the results emitted by
 
 Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and are not committed.
 
-## Target strategy (TL;DR)
-
-The set-device/in-place-retry portions below are the superseding target, not a
-claim about the current implementation snapshot. Their migration is paused at
-the reachable DeepGEMM MegaMoE dependency issue documented under Workload fields.
+## Execution strategy (TL;DR)
 
 1. **Pinned baseline lives in git** (`baseline.json`, `baseline.md`).
 2. **One fresh process per workload.** Each child performs CPU prepare exactly
-   once, then one or more GPU attempts before `RESULT → exit`. Import/parsing,
+   once, then one or more GPU attempts before `RESULT_READY → accepted RESULT → exit`. Import/parsing,
    config resolution, specialization, IR generation, and compilation happen in
    CPU prepare without initializing CUDA or owning a GPU. The compiled executable
    remains in that process; children and runtime objects are never recycled across
@@ -162,9 +158,10 @@ the reachable DeepGEMM MegaMoE dependency issue documented under Workload fields
    handshake. GPU stages run concurrently across currently eligible cards and
    serially per card. Live-process `CUDA_VISIBLE_DEVICES` mutation is not a valid
    late-binding mechanism.
-   Internal RESULT releases dispatch immediately; polling is only for foreign GPU
-   occupancy changes. The initial occupancy snapshot starts alongside the first
-   CPU prepares; assignment remains blocked until that snapshot is complete.
+   An accepted `RESULT_READY` releases dispatch immediately; an interfered
+   `RESULT_READY` returns the same child to READY instead. Polling is only for
+   foreign GPU occupancy changes. The initial occupancy snapshot starts alongside
+   the first CPU prepares; assignment remains blocked until that snapshot is complete.
 4. **Measurement semantics stay in the GPU stage.** Each child benches our kernel
    and every reference implementation, retaining the original implementation
    order, correctness/reference setup, timer, warmup/repeat, five rounds, 1.0s
@@ -177,8 +174,9 @@ the reachable DeepGEMM MegaMoE dependency issue documented under Workload fields
    rebuilds all GPU tensors, references, workspaces, and timer state on the newly
    assigned card. Every interference retry is retained as a structured ledger
    entry with the PID, intruder PIDs, assignments, UUIDs, and attempt identities.
-   Artifacts mark `retry_in_place: true`; these hot-process measurements are a
-   separate evidence class and are not clean first-attempt A/B samples.
+   Artifacts mark `retry_in_place: true` so retried and first-attempt results can
+   be compared later. The marker does not change evidence eligibility; retried
+   results otherwise follow the ordinary measurement and AC-10 path.
 6. **Ratio regression report** compares current ref/ours ratio vs the pinned
    `baseline.json` ratio (computed from its ours + ref impls). Promote a run over
    the baseline with `promote_baseline.py`.
@@ -255,17 +253,33 @@ benchmark host, multi-GPU runtime validation is intentionally recorded as
 never be represented by zero, null, or an empty cell. Explicit multi-GPU workload
 files remain supported, but the default sweep and routine acceptance do not run them.
 
-Implementation note (2026-08-13): the set-device/in-place-retry target above
-supersedes the current implementation snapshot's live-mask/fresh-prepare retry
-behavior. External-device audits use runtime reachability, not grep presence:
+Implementation note (2026-08-14): the set-device/in-place-retry implementation
+supersedes the former live-mask/fresh-prepare retry behavior. External-device
+audits use runtime reachability, not grep presence:
 FlashInfer MegaMoE's device-0 CLI/benchmark/debug functions are not imported by
-this project and are non-blocking. Migration is currently paused on a reachable
-path instead: this project's MegaMoE worker calls pinned DeepGEMM
-`utils.dist.init_dist`, which executes `torch.cuda.set_device(local_rank)` and can
-override a nonzero physical assignment. The installed package lacks that API and
-fails earlier, which does not validate the intended dependency. This requires a
-human dependency/scope decision; no external monkey-patch, replacement init, or
-automatic fallback to masking is permitted.
+this project and are non-blocking. This project's MegaMoE worker does call the
+out-of-tree pinned DeepGEMM `utils.dist.init_dist`, which executes
+`torch.cuda.set_device(local_rank)` and can override a nonzero physical assignment
+once all devices remain visible. Under the former mask path that override was
+latent because logical device 0 was the assigned card. The installed package
+fails still earlier because it lacks `fp8_fp4_mega_moe`.
+
+The approved implementation preserves `init_dist()` and its process group, then
+restores the assigned physical device and revalidates its UUID before case
+construction and timing. This is one instance of the general position invariant:
+after any reachable external call that may change current device, restore and
+prove the assigned device before allocation or launch. The two default single-GPU
+MegaMoE configs are therefore covered by the ordinary 112-workload path. External
+source edits, monkey-patches, and fallback to masking remain prohibited. The
+one-rank MegaMoE path also retains its TCP rendezvous/process-group setup and
+32-attempt EADDRINUSE handling as a known deferred overhead.
+
+Targeted set-device evidence is tracked in
+`bench_pipeline_set_device_evidence.json`. It contains one fresh default-protocol
+single-GPU run and one controlled same-child card-switch retry, including exact
+UUIDs, per-attempt ownership, `retry_in_place`, and the measured 616 MiB residual
+primary context on the abandoned card. These runs validate the implementation;
+they are not a migration-before AC-10 A/B.
 
 MegaMoE entries use `timer: megamoe`, which invokes the dedicated DeepGEMM
 `bench_kineto` protocol. Do not set `warmup` or `repeat` for this timer because

@@ -11,10 +11,10 @@ from functools import cache
 from pathlib import Path
 
 import tvm
+from tirx_kernels.runner import bench
 from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState, TMABar
 from tvm.tirx.lang.smem_desc import SmemDescriptor
 from tvm.tirx.lang.tile_scheduler import ClusterPersistentScheduler2D

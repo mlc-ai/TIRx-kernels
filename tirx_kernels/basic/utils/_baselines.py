@@ -188,7 +188,7 @@ class _CublasNcclLaunch:
         self.problem = problem
         self.input = input_tensor
         self.weight = weight
-        device = torch.device("cuda", runtime.rank)
+        device = torch.device("cuda", runtime.device_index)
         if problem.workload == "allgather_gemm":
             self.collective_buffer = torch.empty(
                 (problem.M, problem.K), dtype=torch.float16, device=device
@@ -283,7 +283,7 @@ def _load_cublasmp_bindings():
 
 
 def _all_ranks_available(runtime: DistributedRuntime, available: bool) -> bool:
-    flag = torch.tensor(int(available), dtype=torch.int32, device=f"cuda:{runtime.rank}")
+    flag = torch.tensor(int(available), dtype=torch.int32, device=f"cuda:{runtime.device_index}")
     dist.all_reduce(flag, op=dist.ReduceOp.MIN)
     return bool(flag.item())
 
@@ -293,12 +293,14 @@ def _broadcast_nccl_unique_id(runtime: DistributedRuntime, nccl):
         values = list(nccl.get_unique_id().as_bytes)
     else:
         values = []
-    size = torch.tensor([len(values)], dtype=torch.int64, device=f"cuda:{runtime.rank}")
+    size = torch.tensor([len(values)], dtype=torch.int64, device=f"cuda:{runtime.device_index}")
     dist.broadcast(size, src=0)
     if runtime.rank == 0:
-        encoded = torch.tensor(values, dtype=torch.uint8, device=f"cuda:{runtime.rank}")
+        encoded = torch.tensor(values, dtype=torch.uint8, device=f"cuda:{runtime.device_index}")
     else:
-        encoded = torch.empty(int(size.item()), dtype=torch.uint8, device=f"cuda:{runtime.rank}")
+        encoded = torch.empty(
+            int(size.item()), dtype=torch.uint8, device=f"cuda:{runtime.device_index}"
+        )
     dist.broadcast(encoded, src=0)
     return nccl.UniqueId.from_bytes(bytes(encoded.cpu().tolist()))
 

@@ -2326,7 +2326,7 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     # Tiny (~8-11µs) paged kernel: event timing is launch-jitter-noisy (sporadic
     # 10-13% ratio spread) and ~2x inflated by launch overhead. timer=None inherits the

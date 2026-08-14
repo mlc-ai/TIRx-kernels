@@ -1247,7 +1247,7 @@ def _allocate_case(
     config: AllGatherGemmConfig,
 ) -> _Case:
     task_types, task_idxs, heads, tails = _queue_state(config)
-    device = torch.device("cuda", runtime.rank)
+    device = torch.device("cuda", runtime.device_index)
     ag_out = symmetric_empty(runtime, (config.M, config.K), a_type)
     semaphore = symmetric_empty(runtime, (config.world_size,), "uint64")
     initial_task_types = torch.from_numpy(task_types[runtime.rank].copy()).to(device)
@@ -1275,7 +1275,7 @@ def _allocate_case(
     )
     with torch.cuda.stream(runtime.timing_stream):
         case.reset()
-    torch.cuda.synchronize(runtime.rank)
+    torch.cuda.synchronize(runtime.device_index)
     runtime.barrier()
     return case
 
@@ -1315,7 +1315,7 @@ def _run_worker(
     if mode != "bench":
         raise ValueError(f"unsupported distributed worker mode {mode!r}")
 
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     def prepare() -> None:
         case.reset()

@@ -41,8 +41,8 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     st_global_u64,
     ue8m0_to_inv_scale,
 )
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {"name": "mxfp8_quantize", "category": "flashinfer", "compute_capability": 10}
 

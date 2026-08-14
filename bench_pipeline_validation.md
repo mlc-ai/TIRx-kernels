@@ -1,24 +1,28 @@
 # Bench Suite Pipeline Validation
 
-Validation date: 2026-08-13.
+Validation date: 2026-08-14.
 
 This report records implementation and acceptance evidence for the one-shot
 benchmark pipeline. It deliberately distinguishes static migration, structural
 tests, invalidated or missing single-GPU evidence, and the human-directed
 multi-GPU runtime exemption.
 
-## Current implementation status before the superseding binding decision
+## Current implementation status
 
-- The current implementation snapshot uses the earlier design: every workload
-  attempt uses one fresh process, late binding mutates `CUDA_VISIBLE_DEVICES`,
-  and interference starts a fresh child that repeats CPU prepare. Those details
-  are now obsolete and are not accepted as the target implementation.
-- Its lifecycle follows
-  `PREPARING → READY → ASSIGNED → RUNNING_GPU → RESULT → exit`.
+- Every workload owns one fresh process. It performs CPU prepare exactly once,
+  then one or more GPU attempts in that same process before terminal result and
+  exit. Processes that have run a GPU stage are never reused for another workload.
+- The lifecycle follows
+  `PREPARING → READY → ASSIGNED → RUNNING_GPU → RESULT_READY → RESULT → exit`;
+  interference returns the same child from GPU cleanup to READY.
 - CPU prepare owns exact module import/parsing, config resolution,
   specialization, IR generation, compilation, and any compile-cache population.
 - GPU assignment is late-bound after READY. The prepared executable remains in
   its creating process and cannot be serialized or executed from another PID.
+- Prepare children keep all physical GPUs visible. ASSIGN selects the physical
+  ordinal with `torch.cuda.set_device()`, verifies exact UUID identity, and
+  rejects CUDA contexts on cards never assigned to the process. Live-process
+  `CUDA_VISIBLE_DEVICES` mutation is not used for assignment.
 - Generic adapters compile canonical `get_kernel()` output during prepare and
   consume the executable through `compile_kernel_lazy()` after assignment. The
   capability audit rejects eager GPU-stage generation/compilation.
@@ -31,16 +35,16 @@ multi-GPU runtime exemption.
   timer budgets, reference construction, correctness work, raw samples, and
   arithmetic-mean aggregation.
 
-## Superseding set-device decision and reachability audit
+## Set-device decision and reachability audit
 
-The human-directed target keeps all physical GPUs visible in the prepare child,
+The implemented design keeps all physical GPUs visible in the prepare child,
 so logical and physical ordinals are identical. CPU prepare must still leave CUDA
 uninitialized. After each ASSIGN, the child must call
 `torch.cuda.set_device(physical_index)` and prove the current physical device with
 the existing UUID handshake before allocation or launch. Mutating
 `CUDA_VISIBLE_DEVICES` in a live prepared process is no longer permitted.
 
-Interference handling is also superseded. A workload owns one one-shot process
+For interference handling, a workload owns one one-shot process
 and performs CPU prepare exactly once. After an interfered GPU attempt, the
 orchestrator must release the old atomic claim and may assign the same or another
 card to that same child. The child must select the new card and rebuild all
@@ -49,11 +53,12 @@ import, specialization, generation, or compilation. The run artifact must mark
 `retry_in_place: true` and preserve per-attempt assignment, UUID, ownership, and
 phase records.
 
-This changes the measurement condition: a retry occurs in a process that has
-already executed a GPU attempt. It is therefore a distinct hot-process evidence
-class, not a clean fresh-process/first-attempt sample. Unless the human explicitly
-approves that semantic change, in-place retries cannot be mixed into clean AC-10
-A/B evidence. No such approval has been recorded.
+A retry occurs in a process that has already executed a GPU attempt. The human
+ruled that this does not create a separate evidence class without measured proof
+of a distinguishable hot-process effect. In-place retry results remain ordinary
+measurement evidence and may enter clean AC-10 A/B. Each record must still mark
+`retry_in_place: true` so accumulated same-config data can later compare retried
+and first-attempt measurements without running a dedicated experiment.
 
 The first external-library audit found these device-0 source matches in the
 installed FlashInfer package:
@@ -80,7 +85,7 @@ function on a bench workload's real call graph does qualify; once confirmed, it
 must be reported without modifying the external library, adding a workaround,
 or reverting to masking.
 
-The continued audit found such a reachable path in the intended DeepGEMM
+The continued audit found a reachable prerequisite for the intended DeepGEMM
 MegaMoE dependency:
 
 ```text
@@ -91,16 +96,37 @@ PreparedMegaMoeBench.run_gpu
   -> torch.cuda.set_device(local_rank)
 ```
 
-The repository identifies this port against DeepGEMM `559d79fb`; that pinned
-source calls `torch.cuda.set_device(local_rank)` in `deep_gemm/utils/dist.py:33`.
+The repository identifies this port against DeepGEMM `559d79fb`; the evidence is
+from the out-of-tree pinned dependency copy at
+`/home/hongyij/workspace/tirx-kernels/.porting/deps/deep_gemm-559d79fb/deep_gemm/utils/dist.py:33`,
+which calls `torch.cuda.set_device(local_rank)`.
 For a one-rank workload assigned physical GPU 6, `local_rank` remains 0 and the
 dependency switches execution to GPU 0. This is a real call edge from the bench
-workload, not a grep-only finding. The currently installed `deep_gemm` package
-lacks `utils.dist`, so this machine fails the path earlier with an API mismatch;
-that absence is not positive evidence for the intended dependency. Work on the
-binding/retry migration is paused pending a human decision for this reachable
-dependency. No external-library modification, monkey-patch, replacement
-initializer, or mask fallback has been added.
+workload, not a grep-only finding. Under the superseded mask implementation this
+was latent rather than an existing correctness bug: device 0 was the masked
+assigned card. It became material when the all-visible
+`set_device(physical_index)` design was adopted.
+
+The currently installed `deep_gemm` package lacks `fp8_fp4_mega_moe`, so
+`load_deep_gemm_mega()` raises `SkipTest` before the code can reach `utils.dist`.
+This is an earlier API mismatch, not evidence that the intended dependency is
+safe. The MegaMoE YAML has two default single-GPU entries,
+`t64_m64_h7168_i3072_e384_k6_g1` and
+`t8192_m8192_h7168_i3072_e384_k6_g1`, so the path participates in the 112-item
+default sweep.
+
+The human approved a repository-owned call-site fix. The target keeps
+`init_dist()` and its returned group, separates logical distributed rank from the
+assigned physical device, restores the assigned device immediately after the
+external call, and validates its UUID before case construction and timing. More
+generally, every external call that can change current device is followed by the
+same position invariant. A reachable override is blocking only if correction
+requires modifying external source, monkey-patching, or reverting to masking.
+None of those prohibited mechanisms is used.
+
+Separately, `_run_distributed()` still acquires a TCP rendezvous port and creates
+a one-rank process group when `num_processes == 1`, with the existing 32-attempt
+EADDRINUSE retry. This is a known deferred overhead and is not changed here.
 
 The remaining external audit found no runtime AST hard-coded device-0 calls in
 the imported `deep_gemm`, `flash_attn`, CUTLASS DSL, or `flash_kda` Python trees.
@@ -139,12 +165,15 @@ The capability audit reports:
   kernel YAML and emitted by the capability report.
 - 27 multi-GPU configs, none selected by the default measured sweep.
 
-Before the superseding set-device decision,
-`tests/test_bench_pipeline_protocol.py` had 73 passing behavior tests covering:
+Final non-GPU verification on 2026-08-14 passed Ruff, Python bytecode
+compilation, `git diff --check`, all 83 protocol/structural tests, and the full
+capability audit above. No benchmark workload or multi-GPU runtime was launched
+for this verification pass.
+
+The protocol suite covers:
 
 - one-shot process/IPC behavior, log isolation, cancellation, fail-fast, dynamic
-  external eligibility, the now-obsolete fresh-process interference retry,
-  bounded-backlog
+  external eligibility, same-child GPU retry without repeated prepare, bounded-backlog
   drain/refill without dropped or reused attempts, and resource bounds;
 - same-GPU serialization, concurrent logical-GPU execution, complete atomic
   claims, assignment-count/duplicate/index rejection, and no partial ownership;
@@ -175,10 +204,13 @@ Before the superseding set-device decision,
 - capability accounting proves 41/41 adapters and 33/33 reviewed three-point
   selections from canonical sources.
 
-Those historical tests remain evidence for the contracts they actually exercise,
-but they do not prove the new `set_device` binding, non-assigned-card
-allocation/launch rejection, one-prepare in-place retry, hot-process evidence
-classification, or abandoned-card primary-context VRAM accounting.
+The current additions also exercise physical-UUID lookup without context creation,
+UUID mismatch rejection, restoration after an external device override, rejection
+of contexts on never-assigned cards, exact per-attempt ownership ordering,
+RESULT_READY acceptance/retry, and per-record `retry_in_place` provenance. The
+targeted runtime evidence below validates one real single-GPU set-device path and
+one controlled same-child card-switch retry. It does not validate every kernel or
+replace the still-missing migration-before AC-10 A/B.
 
 ## CPU prepare evidence without GPU assignment
 
@@ -255,6 +287,56 @@ the protocol test suite.
 
 No full sweep was run. All targeted measurements retained 5 rounds and a 1.0
 second cooldown.
+
+### Current set-device and in-place-retry evidence
+
+`bench_pipeline_set_device_evidence.json` tracks the acceptance-relevant raw
+fields and exact SHA-256 hashes for two local, gitignored run JSONs. These are
+implementation/runtime checks for the new path, not a migration-before A/B.
+
+The fresh run used
+`fp16_bf16_gemm/fp16_1024x1024x1024` on physical GPU 2, UUID
+`GPU-f8a4f1df-8b46-4cbf-3244-a33b90e06aa9`:
+
+- `retry_in_place: false`, one GPU attempt, status `ok`;
+- TIRx 6.899µs and torch-cuBLAS 6.010µs, with all five raw samples retained;
+- first READY 5.203s, dispatch latency 0.040s, ASSIGN-to-GPU-start 0.925s;
+- GPU ownership/list-schedule interval 12.645s;
+- critical wall 18.814s, unexplained 0.965s, and final reap tail 0.616s;
+- complete outer scheduler/process wall 19.430s.
+
+This proves real all-visible `set_device` binding, UUID verification, canonical
+measurement, and the RESULT_READY/ACCEPT_RESULT handoff. The unexplained value is
+slightly above the plan's `max(0.5s, 5%)` target for this one-workload run, and
+there is no paired migration-before artifact, so it is not promoted to AC-10
+performance evidence.
+
+The controlled retry run used the same workload. A synthetic monitored intruder
+forced attempt 1 to stop on physical GPU 2 and attempt 2 to run on physical GPU 1,
+UUID `GPU-e8754e6d-624e-e1d0-595a-f9444588960a`:
+
+- both attempts used child PID 54244, with only one prepare timeline and one log;
+- the old claim was released before the second assignment, and the process never
+  held both cards simultaneously;
+- the record has `attempt: 2` and `retry_in_place: true`; retried results remain
+  ordinary measurement evidence under the human ruling;
+- final TIRx was 6.877µs and torch-cuBLAS 6.016µs, with five raw samples each;
+- critical wall was 18.762s, unexplained 0.311s, and outer wall 19.529s;
+- descendant and forced-kill lists were empty for this local GEMM.
+
+After attempt-1 cleanup and again after reassignment, the abandoned GPU 2 kept
+645,922,816 bytes (exactly 616 MiB) resident in the still-live workload process.
+This is the requested primary-context cost of an in-process card switch. Its
+acceptability is intentionally left to the human. After the child exited, a
+read-only query at 2026-08-14T00:34:37Z showed GPU 2 at 124 MiB, 0% utilization,
+and no listed compute PID, so the measured 616 MiB context was no longer resident.
+GPU 1 showed unattributed host memory with no compute PID; it is recorded only as
+a host observation and is not attributed to this run.
+
+The fresh and retry measurements finish on different GPUs, so their kernel times
+must not be used as a controlled hot-versus-fresh comparison. The provenance flag
+exists so future same-config accumulated data can make that comparison without a
+dedicated experiment.
 
 The historical three-small-GEMM pipeline run produced the following internal
 timeline. It predates physical-UUID verification, so its requested GPU index is
@@ -421,22 +503,22 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | criterion | status | evidence boundary |
 |---|---|---|
 | AC-1 | satisfied | Unified process-local prepare/run-GPU contract, CUDA prepare guards, serialization rejection, and standalone composition tests |
-| AC-2 | incomplete under superseding design | The earlier mask-based protocol has assignment validation and CUDA guards, but live-process masking is obsolete. `set_device(physical_index)`, per-attempt UUID proof, and non-assigned-card allocation/launch rejection are not complete; the reachable DeepGEMM MegaMoE `init_dist -> set_device(local_rank)` path requires a human decision |
+| AC-2 | satisfied for implementation and single-GPU targeted evidence | ASSIGN uses physical indices with `set_device`, exact per-attempt UUID proof, position validation after reachable external calls, and rejection of never-assigned-card contexts. Multi-GPU runtime remains explicitly exempted rather than passed |
 | AC-3 | satisfied | Bounded one-shot concurrency/backlog, condition-driven dispatch, same-GPU serialization, logical multi-GPU concurrency, and dynamic eligibility tests |
-| AC-4 | satisfied for first attempts; unresolved for in-place retry | Default 5 rounds/1.0s, finalization, raw samples, and timer schemas are unchanged. A retry in an already-used GPU process is a distinct hot-process condition and cannot enter clean AC-10 evidence without human approval |
-| AC-5 | incomplete under superseding design | Existing fail-fast and cleanup evidence remains valid, but the fresh-child retry is obsolete. One-prepare in-place GPU retry, exact ownership transfer, GPU-state rebuild, and abandoned-card primary-context VRAM reporting are not implemented |
+| AC-4 | satisfied | Default 5 rounds/1.0s, finalization, raw samples, timer schemas, correctness/reference work, and evidence eligibility are unchanged. Every terminal record explicitly marks `retry_in_place` |
+| AC-5 | satisfied for implementation and targeted single-GPU retry | Same-child retry preserves prepared CPU state, rebuilds GPU state, releases claims only after cleanup proof/process exit, records exact attempt ownership, and reports 616 MiB abandoned-card resident context. Multi-rank runtime interruption is structurally verified only under the exemption |
 | AC-6 | satisfied | Bounded process/RSS/FD evidence, cancellation cleanup, immediate internal release, and resource accounting tests |
 | AC-7 | satisfied | Complete timeline validation, no-data cost-model gating, diagnostic-protocol watermarking, and tracked internal cost-model arithmetic; source-artifact verification is conditional on gitignored artifacts being present |
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
 | AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
-| AC-10 | incomplete | The former Proton claim is invalidated by unverified physical identity and unpersisted outer timers; Event and CUDA-graph runs have the same identity defect, while Kineto and MegaMoE runtime A/B evidence remains unmeasured |
+| AC-10 | incomplete | The new path has one fresh and one controlled-retry default-protocol runtime check, but no persisted migration-before comparison on the same UUID. The former Proton claim remains invalidated; Event/CUDA-graph have the same old identity defect, and Kineto/MegaMoE runtime A/B is unmeasured |
 | AC-11 | satisfied | 112 defaults, all 992 configs retained, and 33/33 reviewed three-point selections with YAML-owned small/medium/large roles and rationale |
 
-The plan as a whole is therefore not marked complete. The immediate blocker is
-the human decision required by the reachable DeepGEMM MegaMoE device override; after that is
-resolved, AC-2 and AC-5 require the superseding implementation and structural
-evidence. AC-10 still requires admissible single-GPU timer-family runtime
-evidence on a suitable machine. Multi-GPU runtime rows remain the explicit
+The plan as a whole is therefore not marked complete. The set-device and
+same-child retry implementation is complete at its structural anchors and has
+targeted single-GPU runtime evidence. AC-10 still requires admissible
+migration-before versus pipeline evidence on the same UUID for the required
+single-GPU timer families. Multi-GPU runtime rows remain the explicit
 human-directed exemption, not missing evidence.
 
 ## Engineering-principles audit
@@ -444,7 +526,7 @@ human-directed exemption, not missing evidence.
 - **Occam's razor:** the implementation uses one one-shot child lifecycle and
   two explicit replay mechanisms (generic lazy replay and strict keyed replay);
   it introduces no resident workers, reusable pools, fork templates, or compile
-  thread pools. The superseding target preserves one process per workload and
+  thread pools. The current design preserves one process per workload and
   removes repeated CPU prepare rather than adding a reusable worker system.
 - **Single source of truth:** kernel identity comes from `KERNEL_META`, complete
   config/default/selection metadata comes from the kernel YAML, and measurement
@@ -458,23 +540,24 @@ human-directed exemption, not missing evidence.
   artifacts preserve CPU resource evidence and explicitly delimit the historical
   A/B's provenance gaps instead of presenting it as independently verified.
 - **Optimize the real objective:** complete-command wall time on a fixed
-  UUID-verified workload/GPU/protocol matrix remains the oracle; no current
-  performance result meets that evidence boundary.
+  UUID-verified workload/GPU/protocol matrix remains the oracle. The new targeted
+  runs validate implementation behavior, but no current before/after pair meets
+  the AC-10 evidence boundary.
 - **Cost model and falsifiability:** expected critical time is reconstructed
   from first READY plus GPU scheduling, with foreign wait and residual separate;
   incomplete timelines publish no numeric performance fields. The historical
   Proton quotient is retained only as invalidated ledger arithmetic.
 - **Stop low-quality experiments:** invalid runs remain unmeasured instead of
-  weakening the protocol or claiming success. Future in-place retries must retain
-  the UUID handshake and be labeled as hot-process evidence, not silently folded
-  into a clean first-attempt A/B.
+  weakening the protocol or claiming success. In-place retries retain the UUID
+  handshake and explicit per-record provenance, while remaining ordinary
+  measurement evidence under the human ruling.
 
 ## Remaining evidence boundary
 
 - The implementation, static all-config migration gate, no-card structural
-  tests, and CPU-only prepare evidence for the earlier pipeline are complete.
-  The superseding device-binding and retry lifecycle are not implemented.
-  Historical generic
+  tests, CPU-only prepare evidence, set-device binding, and same-child retry
+  lifecycle are complete. One fresh and one controlled-retry single-GPU run are
+  tracked as targeted implementation evidence. Historical generic
   lazy-replay GPU runs predate the UUID handshake and are not runtime acceptance
   evidence; the tracked A/B is explicitly invalidated.
 - Proton, Event, and CUDA-graph Proton have no admissible UUID-verified targeted
@@ -489,8 +572,9 @@ human-directed exemption, not missing evidence.
   UUID-verified GPU runtime evidence and no runtime pass claim.
 - Multi-GPU runtime behavior remains intentionally unmeasured.
 - The former FlashInfer device-0 finding is explicitly reclassified as
-  unreachable and non-blocking. The DeepGEMM MegaMoE call chain above is the
-  current feasibility blocker; it is neither a runtime pass/fail placeholder nor
-  an implicit exemption. No external workaround or GPU validation was attempted.
+  unreachable and non-blocking. The DeepGEMM MegaMoE call chain above is a
+  reachable prerequisite for the new binding design, with an approved
+  repository-owned restore-and-validate fix; it is neither a runtime pass/fail
+  placeholder nor an implicit exemption. No external workaround is permitted.
 - The full 112-workload measured sweep and baseline promotion remain deferred
   until the shared machine is available; they were not required or run here.

@@ -1620,8 +1620,7 @@ def run_bench(
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA head128 phase1 benchmark")
 
-    from tirx_kernels.runner import compile_kernel_lazy
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench, compile_kernel_lazy
 
     case = prepare_data(**kwargs)
     if not case["dispatch_reason"].startswith("regular:"):

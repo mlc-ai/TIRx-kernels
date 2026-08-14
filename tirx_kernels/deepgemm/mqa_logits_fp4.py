@@ -1325,7 +1325,7 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     warmup = kwargs.pop("warmup", None)
     repeat = kwargs.pop("repeat", None)

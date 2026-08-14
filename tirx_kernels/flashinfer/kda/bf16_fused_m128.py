@@ -3452,8 +3452,7 @@ def run_bench(
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for FlashKDA bf16 fused m128 benchmark")
 
-    from tirx_kernels.runner import compile_kernel_lazy
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench, compile_kernel_lazy
 
     case = prepare_data(**kwargs)
     cfg: FlashKDABf16FusedM128Config = case["config"]

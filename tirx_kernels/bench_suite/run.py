@@ -1446,7 +1446,7 @@ def _terminate_subprocess(proc: subprocess.Popen) -> None:
 
 @dataclass
 class _PreparedAttempt:
-    """One process-local prepare/GPU attempt and its owned resources."""
+    """One process-local workload prepare and its GPU-attempt resources."""
 
     workload: dict
     attempt: int
@@ -1463,6 +1463,10 @@ class _PreparedAttempt:
     timeline: dict[str, float] = field(default_factory=dict)
     record: dict | None = None
     terminal_at: float | None = None
+    gpu_attempts: list[dict[str, Any]] = field(default_factory=list)
+    pending_interference: dict[str, Any] | None = None
+    ready_since: float | None = None
+    interference_stop_deadline: float | None = None
 
     @property
     def label(self) -> str:
@@ -1605,11 +1609,13 @@ def _base_attempt_record(attempt: _PreparedAttempt) -> dict:
         "attempt": attempt.attempt,
         "process_pid": attempt.process.pid,
         "execution_mode": "pipeline",
-        "process_model": "one_shot_child_per_workload_attempt",
+        "process_model": "one_shot_child_per_workload",
         "started_at": datetime.fromtimestamp(
             attempt.timeline["process_started"], timezone.utc
         ).isoformat(timespec="seconds"),
         "phase_timestamps": attempt.timeline,
+        "gpu_attempts": list(attempt.gpu_attempts),
+        "retry_in_place": attempt.attempt > 1,
     }
 
 
@@ -2443,6 +2449,29 @@ def _pipeline_cost_model(
     )
     known_gpus = set(known_gpu_indices)
 
+    def gpu_attempts(record: dict) -> list[dict[str, Any]]:
+        attempts = record.get("gpu_attempts")
+        if attempts:
+            return list(attempts)
+        timeline = record.get("phase_timestamps") or {}
+        if not all(
+            name in timeline
+            for name in ("ready", "assigned", "gpu_started", "gpu_finished", "result_received")
+        ):
+            return []
+        return [
+            {
+                "attempt": record.get("attempt", 1),
+                "ready": timeline["ready"],
+                "assigned": timeline["assigned"],
+                "gpu_started": timeline["gpu_started"],
+                "gpu_finished": timeline["gpu_finished"],
+                "ownership_released": timeline["result_received"],
+                "gpus": list(record.get("gpus") or ()),
+                "status": "RESULT",
+            }
+        ]
+
     def has_complete_timeline(record: dict) -> bool:
         timeline = record.get("phase_timestamps") or {}
         return record.get("status") == "ok" and all(
@@ -2450,17 +2479,34 @@ def _pipeline_cost_model(
         )
 
     def has_valid_assignment(record: dict) -> bool:
-        gpus = record.get("gpus")
-        if not isinstance(gpus, (list, tuple)) or not gpus:
+        required_num_gpus = record.get("num_gpus", 1)
+        attempts = gpu_attempts(record)
+        if type(required_num_gpus) is not int or required_num_gpus < 1 or not attempts:
             return False
-        assigned_gpus = tuple(str(gpu) for gpu in gpus)
-        required_num_gpus = record.get("num_gpus", len(assigned_gpus))
-        return (
-            type(required_num_gpus) is int
-            and required_num_gpus == len(assigned_gpus)
-            and len(set(assigned_gpus)) == len(assigned_gpus)
-            and set(assigned_gpus).issubset(known_gpus)
+        required_fields = (
+            "ready",
+            "assigned",
+            "gpu_started",
+            "gpu_finished",
+            "ownership_released",
         )
+        for attempt in attempts:
+            gpus = attempt.get("gpus")
+            if not isinstance(gpus, (list, tuple)) or len(gpus) != required_num_gpus:
+                return False
+            assigned_gpus = tuple(str(gpu) for gpu in gpus)
+            if (
+                len(set(assigned_gpus)) != len(assigned_gpus)
+                or not set(assigned_gpus).issubset(known_gpus)
+                or any(name not in attempt for name in required_fields)
+            ):
+                return False
+            values = [attempt[name] for name in required_fields]
+            if any(not isinstance(value, (int, float)) for value in values):
+                return False
+            if any(right < left for left, right in pairwise(values)):
+                return False
+        return True
 
     timelines = [record.get("phase_timestamps") or {} for record in records]
     complete_timelines = [
@@ -2499,25 +2545,21 @@ def _pipeline_cost_model(
         }
     process_starts = [timeline["process_started"] for timeline in complete_measurements]
     first_ready = min(timeline["ready"] for timeline in complete_measurements)
+    scheduled_attempts = [attempt for record in records for attempt in gpu_attempts(record)]
     assignment_handoffs = [
-        max(0.0, timeline["gpu_started"] - timeline["assigned"])
-        for timeline in complete_measurements
+        max(0.0, attempt["gpu_started"] - attempt["assigned"])
+        for attempt in scheduled_attempts
     ]
     gpu_intervals_by_index: dict[str, list[tuple[float, float]]] = {}
-    for record in records:
-        timeline = record.get("phase_timestamps") or {}
-        if "gpu_started" not in timeline or "gpu_finished" not in timeline:
-            continue
-        for gpu in record.get("gpus") or []:
+    for attempt in scheduled_attempts:
+        for gpu in attempt["gpus"]:
             gpu_intervals_by_index.setdefault(str(gpu), []).append(
-                (timeline["gpu_started"], timeline["gpu_finished"])
+                (attempt["gpu_started"], attempt["ownership_released"])
             )
     gpu_busy_by_index = {
         gpu: sum(end - start for start, end in gpu_intervals_by_index.get(gpu, []))
         for gpu in known_gpu_indices
     }
-    scheduled_records = records
-
     def external_occupied_at(timestamp: float) -> set[str]:
         occupied: tuple[str, ...] | None = None
         for changed_at, value in external_history:
@@ -2530,15 +2572,17 @@ def _pipeline_cost_model(
 
     actual_available_at: dict[str, float] = {}
     dispatch_latencies: list[float] = []
-    for record in sorted(scheduled_records, key=lambda item: item["phase_timestamps"]["assigned"]):
-        timeline = record["phase_timestamps"]
+    for attempt in sorted(scheduled_attempts, key=lambda item: item["assigned"]):
         available_at = max(
-            [timeline["ready"]]
-            + [actual_available_at.get(str(gpu), timeline["ready"]) for gpu in record["gpus"]]
+            [attempt["ready"]]
+            + [
+                actual_available_at.get(str(gpu), attempt["ready"])
+                for gpu in attempt["gpus"]
+            ]
         )
-        dispatch_latencies.append(max(0.0, timeline["assigned"] - available_at))
-        for gpu in record["gpus"]:
-            actual_available_at[str(gpu)] = timeline["result_received"]
+        dispatch_latencies.append(max(0.0, attempt["assigned"] - available_at))
+        for gpu in attempt["gpus"]:
+            actual_available_at[str(gpu)] = attempt["ownership_released"]
 
     gpu_indices = sorted(known_gpu_indices, key=int)
 
@@ -2561,15 +2605,15 @@ def _pipeline_cost_model(
         available = {gpu: 0.0 for gpu in gpu_indices}
         finish = 0.0
         ordered = sorted(
-            scheduled_records,
-            key=lambda item: (item["phase_timestamps"]["ready"], -len(item.get("gpus") or ())),
+            scheduled_attempts,
+            key=lambda item: (item["ready"], item.get("attempt", 1)),
         )
-        for record in ordered:
-            count = len(record["gpus"])
+        for attempt in ordered:
+            count = len(attempt["gpus"])
             if count > len(gpu_indices):
                 return math.inf
             ready_offset = (
-                max(0.0, record["phase_timestamps"]["ready"] - first_ready)
+                max(0.0, attempt["ready"] - first_ready)
                 if respect_ready
                 else 0.0
             )
@@ -2592,10 +2636,7 @@ def _pipeline_cost_model(
                     sorted(gpu_indices, key=lambda gpu: (available[gpu], int(gpu)))[:count]
                 )
                 start = max([ready_offset] + [available[gpu] for gpu in selected])
-            duration = (
-                record["phase_timestamps"]["result_received"]
-                - record["phase_timestamps"]["gpu_started"]
-            )
+            duration = attempt["ownership_released"] - attempt["gpu_started"]
             finish = max(finish, start + duration)
             for gpu in selected:
                 available[gpu] = start + duration
@@ -2716,10 +2757,48 @@ def _validate_pipeline_timelines(records: list[dict]) -> None:
                 f"{timeline}"
             )
         label = f"{record.get('kernel')}/{record.get('config')}"
-        for gpu in record.get("gpus") or []:
-            ownership_by_gpu.setdefault(str(gpu), []).append(
-                (timeline["assigned"], timeline["result_received"], label)
+        attempts = record.get("gpu_attempts") or [
+            {
+                "attempt": record.get("attempt", 1),
+                "ready": timeline["ready"],
+                "assigned": timeline["assigned"],
+                "gpu_started": timeline["gpu_started"],
+                "gpu_finished": timeline["gpu_finished"],
+                "ownership_released": timeline["result_received"],
+                "gpus": list(record.get("gpus") or ()),
+            }
+        ]
+        expected_num_gpus = record.get("num_gpus", len(record.get("gpus") or ()))
+        for attempt in attempts:
+            attempt_label = f"{label}#attempt-{attempt.get('attempt', '?')}"
+            attempt_phases = (
+                "ready",
+                "assigned",
+                "gpu_started",
+                "gpu_finished",
+                "ownership_released",
             )
+            missing_attempt = [phase for phase in attempt_phases if phase not in attempt]
+            if missing_attempt:
+                raise RuntimeError(
+                    f"{attempt_label} missing GPU-attempt phases {missing_attempt}"
+                )
+            attempt_values = [attempt[phase] for phase in attempt_phases]
+            if any(right < left for left, right in pairwise(attempt_values)):
+                raise RuntimeError(
+                    f"{attempt_label} has out-of-order GPU-attempt timeline {attempt}"
+                )
+            gpus = attempt.get("gpus")
+            if (
+                not isinstance(gpus, list)
+                or len(gpus) != expected_num_gpus
+                or len(set(map(str, gpus))) != len(gpus)
+            ):
+                raise RuntimeError(f"{attempt_label} has invalid atomic GPU claim {gpus!r}")
+            for gpu in gpus:
+                ownership_by_gpu.setdefault(str(gpu), []).append(
+                    (attempt["assigned"], attempt["ownership_released"], attempt_label)
+                )
     for gpu, intervals in ownership_by_gpu.items():
         intervals.sort()
         for previous, current in pairwise(intervals):
@@ -2799,20 +2878,9 @@ def run_scheduled_jobs(
             pool.release_many(item.gpus)
             item.gpu_ownership_released = True
 
-    def terminate_and_cleanup(item: _PreparedAttempt) -> None:
-        fd = item.control.fileno()
-        remove_ready(item)
-        release_gpus(item)
-        if item.process.poll() is None:
-            _terminate_subprocess(item.process)
-        item.timeline.setdefault("process_reaped", time.time())
-        _finish_attempt_process(item)
-        active.pop(fd, None)
-
     def fail(item: _PreparedAttempt, message: dict | None = None) -> None:
         nonlocal completed, failed
         item.state = "FAILED"
-        release_gpus(item)
         item.record = _record_child_failure(item, message)
         records.append(item.record)
         completed += 1
@@ -2820,7 +2888,44 @@ def run_scheduled_jobs(
         detail = item.record.get("error") or "unknown workload failure"
         log(f"[bench-suite] >>> FAIL-FAST {item.label} attempt {item.attempt}: {detail[:160]} <<<")
 
-    def requeue_interfered(item: _PreparedAttempt, intruders: list[int], detail: str) -> None:
+    def request_interference_stop(
+        item: _PreparedAttempt, intruders: list[int], detail: str
+    ) -> None:
+        if item.state not in ("ASSIGNED", "RUNNING_GPU") or item.pending_interference:
+            return
+        item.pending_interference = {
+            "detected_at": time.time(),
+            "intruder_pids": intruders,
+            "detail": detail[:240],
+        }
+        item.interference_stop_deadline = time.monotonic() + 30.0
+        item.state = "STOPPING_INTERFERED_GPU"
+        log("[bench-suite] " + "*" * 70)
+        log(f"[bench-suite] *** INTERFERED *** {item.label} attempt {item.attempt}")
+        log(f"[bench-suite] ***   intruder PIDs: {intruders}")
+        log("[bench-suite] ***   stopping GPU attempt; CPU prepare remains in child")
+        log("[bench-suite] " + "*" * 70)
+        try:
+            os.kill(item.process.pid, signal.SIGUSR1)
+        except ProcessLookupError:
+            fail(item, {"phase": "interference", "error": "child exited before stop signal"})
+
+    def acknowledge_interference(item: _PreparedAttempt, message: dict) -> None:
+        pending_interference = item.pending_interference or {}
+        acknowledged_at = time.time()
+        if item.gpu_attempts and item.gpu_attempts[-1]["attempt"] == item.attempt:
+            item.gpu_attempts[-1].update(
+                {
+                    "gpu_finished": message.get("gpu_finished", acknowledged_at),
+                    "status": "INTERFERED",
+                    "intruder_pids": pending_interference.get("intruder_pids", []),
+                    "resident_context_bytes_after_cleanup": message.get(
+                        "resident_context_bytes_after_cleanup", {}
+                    ),
+                    "descendant_cleanup": message.get("descendant_cleanup", {}),
+                    "ownership_released": acknowledged_at,
+                }
+            )
         retry_log.append(
             {
                 "status": "INTERFERED",
@@ -2828,18 +2933,31 @@ def run_scheduled_jobs(
                 "config": item.workload["config"],
                 "attempt": item.attempt,
                 "process_pid": item.process.pid,
-                "intruder_pids": intruders,
-                "detail": detail[:240],
+                "intruder_pids": pending_interference.get("intruder_pids", []),
+                "detail": pending_interference.get("detail", "")[:240],
+                "detected_at": pending_interference.get("detected_at"),
+                "acknowledged_at": acknowledged_at,
+                "resident_context_bytes_after_cleanup": message.get(
+                    "resident_context_bytes_after_cleanup", {}
+                ),
+                "descendant_cleanup": message.get("descendant_cleanup", {}),
                 "retry_attempt": item.attempt + 1,
+                "retry_in_place": True,
             }
         )
-        log("[bench-suite] " + "*" * 70)
-        log(f"[bench-suite] *** INTERFERED *** {item.label} attempt {item.attempt}")
-        log(f"[bench-suite] ***   intruder PIDs: {intruders}")
-        log("[bench-suite] ***   child killed; retry starts from CPU prepare")
-        log("[bench-suite] " + "*" * 70)
-        pending.append((item.workload, item.attempt + 1))
-        terminate_and_cleanup(item)
+        # INTERFERED and RESULT_READY both prove that the child synchronized
+        # and released GPU-side state. Only that proof permits ownership release.
+        release_gpus(item)
+        item.gpus = ()
+        item.physical_gpu_uuids = ()
+        item.pending_interference = None
+        item.interference_stop_deadline = None
+        item.attempt += 1
+        item.state = "READY"
+        item.ready_since = acknowledged_at
+        for phase in ("assigned", "gpu_started", "gpu_finished"):
+            item.timeline.pop(phase, None)
+        ready.append(item)
 
     def spawn_available() -> None:
         while (
@@ -2875,7 +2993,10 @@ def run_scheduled_jobs(
         # Larger atomic claims first, preserving READY order within equal sizes.
         ordered = sorted(
             list(ready),
-            key=lambda item: (-item.workload.get("num_gpus", 1), item.timeline["ready"]),
+            key=lambda item: (
+                -item.workload.get("num_gpus", 1),
+                item.ready_since if item.ready_since is not None else item.timeline["ready"],
+            ),
         )
         for item in ordered:
             count = item.workload.get("num_gpus", 1)
@@ -2885,12 +3006,9 @@ def run_scheduled_jobs(
             strangers = _active_strangers(gpus, _our_pids(), pool.util_threshold)
             if strangers is None or strangers:
                 pool.release_many(gpus)
-                detail = (
-                    "could not sample assigned GPU utilization"
-                    if strangers is None
-                    else f"intruders {sorted(strangers)}"
-                )
-                requeue_interfered(item, sorted(strangers or {}), detail)
+                # The claim has not been sent and the child has not touched a
+                # GPU. Keep the prepared workload READY for another eligible
+                # atomic claim; this is occupancy wait, not a GPU retry.
                 continue
             remove_ready(item)
             item.gpus = gpus
@@ -2951,7 +3069,7 @@ def run_scheduled_jobs(
             if now - last_interference_poll >= MONITOR_INTERVAL:
                 last_interference_poll = now
                 for item in list(active.values()):
-                    if item.state not in ("ASSIGNED", "RUNNING_GPU") or not item.gpus:
+                    if item.state != "RUNNING_GPU" or not item.gpus:
                         continue
                     strangers = _active_strangers(item.gpus, _our_pids(), pool.util_threshold)
                     if strangers is None or strangers:
@@ -2960,7 +3078,23 @@ def run_scheduled_jobs(
                             if strangers is None
                             else f"intruders {sorted(strangers)}"
                         )
-                        requeue_interfered(item, sorted(strangers or {}), detail)
+                        request_interference_stop(item, sorted(strangers or {}), detail)
+            for item in list(active.values()):
+                if (
+                    item.state == "STOPPING_INTERFERED_GPU"
+                    and item.interference_stop_deadline is not None
+                    and time.monotonic() >= item.interference_stop_deadline
+                ):
+                    fail(
+                        item,
+                        {
+                            "phase": "interference",
+                            "error": "GPU attempt did not acknowledge interruption within 30s",
+                        },
+                    )
+                    break
+            if failed:
+                break
 
             sockets = [
                 dispatch_reader,
@@ -3016,6 +3150,7 @@ def run_scheduled_jobs(
                         item.timeline["module_loaded"] = message["module_loaded"]
                         item.timeline["config_resolved"] = message["config_resolved"]
                         item.timeline["ready"] = message["ready"]
+                        item.ready_since = message["ready"]
                         item.state = "READY"
                         ready.append(item)
                         log(
@@ -3039,14 +3174,46 @@ def run_scheduled_jobs(
                             break
                         item.physical_gpu_uuids = tuple(physical_gpu_uuids)
                         item.timeline["gpu_started"] = message["gpu_started"]
+                        item.gpu_attempts.append(
+                            {
+                                "attempt": item.attempt,
+                                "ready": item.ready_since,
+                                "assigned": item.timeline["assigned"],
+                                "gpu_started": message["gpu_started"],
+                                "gpus": list(item.gpus),
+                                "physical_gpu_uuids": list(physical_gpu_uuids),
+                                "abandoned_gpu_resident_bytes_after_reassignment": message.get(
+                                    "abandoned_gpu_resident_bytes_after_reassignment", {}
+                                ),
+                            }
+                        )
                         item.state = "RUNNING_GPU"
                         log(
                             f"[bench-suite] {now_iso()} gpus={','.join(item.gpus)} GPU_START "
                             f"{item.label} (attempt {item.attempt})"
                         )
-                    elif message_type == "RESULT" and item.state == "RUNNING_GPU":
+                    elif message_type == "INTERFERED" and item.state == "STOPPING_INTERFERED_GPU":
+                        acknowledge_interference(item, message)
+                    elif message_type == "RESULT_READY" and item.state in (
+                        "RUNNING_GPU",
+                        "STOPPING_INTERFERED_GPU",
+                    ):
+                        if item.state == "STOPPING_INTERFERED_GPU":
+                            acknowledge_interference(item, message)
+                            _send_child(item, {"type": "RETRY_GPU"})
+                            continue
+                        _send_child(item, {"type": "ACCEPT_RESULT"})
                         item.timeline["gpu_finished"] = message["gpu_finished"]
                         item.timeline["result_received"] = time.time()
+                        if item.gpu_attempts and item.gpu_attempts[-1]["attempt"] == item.attempt:
+                            item.gpu_attempts[-1].update(
+                                {
+                                    "gpu_finished": message["gpu_finished"],
+                                    "result_received": item.timeline["result_received"],
+                                    "status": "RESULT",
+                                    "ownership_released": item.timeline["result_received"],
+                                }
+                            )
                         release_gpus(item)
                         record = _base_attempt_record(item)
                         record["physical_gpu_uuids"] = list(item.physical_gpu_uuids)
@@ -3149,7 +3316,7 @@ def run_scheduled_jobs(
     known_gpu_indices, external_history = pool.external_timeline()
     pipeline_meta = {
         "execution_mode": "pipeline",
-        "process_model": "one_shot_child_per_workload_attempt",
+        "process_model": "one_shot_child_per_workload",
         "measurement_protocol": {
             "rounds": rounds,
             "cooldown_s": cooldown,

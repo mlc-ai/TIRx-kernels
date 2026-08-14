@@ -4,8 +4,10 @@
 """CLI entry point: python -m tirx_kernels.bench [--kernel <name>] [--config <label>]"""
 
 import argparse
+import gc
 import json
 import os
+import signal
 import socket
 import sys
 import time
@@ -31,6 +33,62 @@ def _send_control(control: socket.socket, message: dict) -> None:
     control.sendall(json.dumps(message, separators=(",", ":")).encode() + b"\n")
 
 
+def _descendant_pids(root_pid: int) -> set[int]:
+    """Return the live descendant process IDs owned by one prepared child."""
+    parents: dict[int, int] = {}
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry.name}/status") as status:
+                parent = next(
+                    int(line.split()[1]) for line in status if line.startswith("PPid:")
+                )
+        except (FileNotFoundError, PermissionError, ProcessLookupError, StopIteration, ValueError):
+            continue
+        parents[int(entry.name)] = parent
+    descendants: set[int] = set()
+    frontier = {root_pid}
+    while frontier:
+        children = {pid for pid, parent in parents.items() if parent in frontier}
+        children -= descendants
+        if not children:
+            break
+        descendants.update(children)
+        frontier = children
+    return descendants
+
+
+def _stop_descendants_for_retry(timeout_s: float = 10.0) -> dict[str, object]:
+    """Interrupt rank children and wait for their cleanup before GPU handoff."""
+    root_pid = os.getpid()
+    observed = _descendant_pids(root_pid)
+    if not observed:
+        return {"descendant_pids": [], "forced_kill_pids": []}
+    for pid in sorted(observed, reverse=True):
+        try:
+            os.kill(pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + timeout_s
+    live = set(observed)
+    while live and time.monotonic() < deadline:
+        live = _descendant_pids(root_pid) & observed
+        if live:
+            time.sleep(0.05)
+    forced = sorted(live)
+    for pid in forced:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if forced:
+        kill_deadline = time.monotonic() + 2.0
+        while _descendant_pids(root_pid) & set(forced) and time.monotonic() < kill_deadline:
+            time.sleep(0.02)
+    return {"descendant_pids": sorted(observed), "forced_kill_pids": forced}
+
+
 def _validated_gpu_assignment(gpu_indices: object, required_num_gpus: int) -> list[str]:
     if not isinstance(gpu_indices, list) or len(gpu_indices) != required_num_gpus:
         raise ValueError(f"invalid GPU assignment: {gpu_indices!r}")
@@ -42,27 +100,12 @@ def _validated_gpu_assignment(gpu_indices: object, required_num_gpus: int) -> li
     return normalized
 
 
-def _validated_physical_gpu_uuids(
-    expected_gpu_uuids: object,
-    actual_gpu_uuids: tuple[str, ...],
-    required_num_gpus: int,
-) -> list[str]:
-    if not isinstance(expected_gpu_uuids, list) or len(expected_gpu_uuids) != required_num_gpus:
-        raise ValueError(f"invalid physical GPU UUID assignment: {expected_gpu_uuids!r}")
-    actual = list(actual_gpu_uuids)
-    if actual != expected_gpu_uuids:
-        raise RuntimeError(
-            "late GPU assignment identity mismatch: "
-            f"requested {expected_gpu_uuids}, visible {actual}"
-        )
-    return actual
-
-
 def _prepared_child_main(args, *, child_started: float) -> int:
     """CPU-prepare in this process, then wait for a late GPU assignment."""
     control = socket.socket(fileno=args.prepared_control_fd)
     reader = control.makefile("r", encoding="utf-8")
     prepare_started = child_started
+    prepared = None
     try:
         try:
             framework_import_started = time.time()
@@ -70,8 +113,10 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             from tirx_kernels.runner import (
                 DEFAULT_BENCH_COOLDOWN_S,
                 DEFAULT_BENCH_ROUNDS,
+                bind_cuda_assignment,
+                close_prepared_kernel_bench,
                 cuda_is_initialized,
-                physical_cuda_uuids,
+                current_process_cuda_memory_bytes,
                 prepare_kernel_bench,
                 run_prepared_kernel_bench,
             )
@@ -131,86 +176,156 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             )
             return 1
 
-        line = reader.readline()
-        if not line:
-            return 1
-        command = json.loads(line)
-        if command.get("type") == "CANCEL":
-            return 0
-        if command.get("type") != "ASSIGN":
-            raise ValueError(f"expected ASSIGN or CANCEL, got {command!r}")
+        class _GpuAttemptInterrupted(BaseException):
+            pass
 
-        normalized_gpu_indices = _validated_gpu_assignment(
-            command.get("gpu_indices"), args.prepared_num_gpus
-        )
-        if cuda_is_initialized():
-            raise RuntimeError("CUDA was initialized before late GPU assignment")
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(normalized_gpu_indices)
-        if cuda_is_initialized():
-            raise RuntimeError("setting CUDA_VISIBLE_DEVICES initialized CUDA")
-        actual_gpu_uuids = _validated_physical_gpu_uuids(
-            command.get("gpu_uuids"),
-            physical_cuda_uuids(args.prepared_num_gpus),
-            args.prepared_num_gpus,
-        )
-        if cuda_is_initialized():
-            raise RuntimeError("physical GPU identity validation initialized a CUDA context")
+        def interrupt_gpu_attempt(_signum, _frame):
+            raise _GpuAttemptInterrupted()
 
-        gpu_started = time.time()
-        _send_control(
-            control,
-            {
-                "type": "RUNNING_GPU",
-                "gpu_started": gpu_started,
-                "physical_gpu_uuids": actual_gpu_uuids,
-            },
-        )
-        try:
-            result = run_prepared_kernel_bench(
-                prepared,
-                warmup=args.warmup,
-                repeat=args.repeat,
-                timer=args.timer,
-                rounds=args.rounds,
-                cooldown=args.cooldown,
+        gpu_attempt = 1
+        abandoned_gpu_indices: list[int] = []
+        while True:
+            line = reader.readline()
+            if not line:
+                return 1
+            command = json.loads(line)
+            if command.get("type") == "CANCEL":
+                return 0
+            if command.get("type") != "ASSIGN":
+                raise ValueError(f"expected ASSIGN or CANCEL, got {command!r}")
+
+            normalized_gpu_indices = _validated_gpu_assignment(
+                command.get("gpu_indices"), args.prepared_num_gpus
             )
-            # RESULT is the GPU-ownership handoff. Complete all device work and
-            # return cached allocations before telling the scheduler to reuse
-            # the physical card; subsequent process teardown is host-only.
-            torch = sys.modules.get("torch")
-            if torch is not None and torch.cuda.is_initialized():
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-        except SkipTest as error:
-            result = {
-                "kernel": args.kernel,
-                "label": args.config,
-                "status": "SKIP",
-                "reason": str(error),
-            }
-        except BaseException as error:
-            _send_control(
-                control,
-                {
-                    "type": "FAIL",
-                    "phase": "gpu",
-                    "gpu_started": gpu_started,
-                    "gpu_finished": time.time(),
-                    "error": f"{type(error).__name__}: {error}",
-                    "traceback": traceback.format_exc(),
-                },
-            )
-            return 1
+            gpu_indices = [int(index) for index in normalized_gpu_indices]
+            expected_gpu_uuids = command.get("gpu_uuids")
+            if not isinstance(expected_gpu_uuids, list) or len(
+                expected_gpu_uuids
+            ) != args.prepared_num_gpus:
+                raise ValueError(f"invalid physical GPU UUID assignment: {expected_gpu_uuids!r}")
+            if gpu_attempt == 1 and cuda_is_initialized():
+                raise RuntimeError("CUDA was initialized before late GPU assignment")
 
-        _send_control(
-            control,
-            {
-                "type": "RESULT",
-                "gpu_finished": time.time(),
-                "result": result,
-            },
-        )
-        return 0
+            previous_handler = signal.signal(signal.SIGUSR1, interrupt_gpu_attempt)
+            gpu_started = None
+            try:
+                actual_gpu_uuids = list(bind_cuda_assignment(gpu_indices, expected_gpu_uuids))
+                reassigned_memory = current_process_cuda_memory_bytes(abandoned_gpu_indices)
+                gpu_started = time.time()
+                _send_control(
+                    control,
+                    {
+                        "type": "RUNNING_GPU",
+                        "gpu_attempt": gpu_attempt,
+                        "gpu_started": gpu_started,
+                        "physical_gpu_uuids": actual_gpu_uuids,
+                        "abandoned_gpu_resident_bytes_after_reassignment": {
+                            str(index): value for index, value in reassigned_memory.items()
+                        },
+                    },
+                )
+                try:
+                    result = run_prepared_kernel_bench(
+                        prepared,
+                        warmup=args.warmup,
+                        repeat=args.repeat,
+                        timer=args.timer,
+                        rounds=args.rounds,
+                        cooldown=args.cooldown,
+                    )
+                except SkipTest as error:
+                    result = {
+                        "kernel": args.kernel,
+                        "label": args.config,
+                        "status": "SKIP",
+                        "reason": str(error),
+                    }
+
+                # RESULT_READY proposes a terminal result only after all device
+                # work and cached allocations are released. The scheduler may
+                # still reject it when interference was observed concurrently.
+                torch = sys.modules.get("torch")
+                if torch is not None and torch.cuda.is_initialized():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                resident_memory = current_process_cuda_memory_bytes(gpu_indices)
+                result["retry_in_place"] = gpu_attempt > 1
+                signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+                _send_control(
+                    control,
+                    {
+                        "type": "RESULT_READY",
+                        "gpu_attempt": gpu_attempt,
+                        "gpu_finished": time.time(),
+                        "resident_context_bytes_after_cleanup": {
+                            str(index): value for index, value in resident_memory.items()
+                        },
+                        "result": result,
+                    },
+                )
+                decision_line = reader.readline()
+                if not decision_line:
+                    return 1
+                decision = json.loads(decision_line)
+                if decision.get("type") == "ACCEPT_RESULT":
+                    return 0
+                if decision.get("type") == "CANCEL":
+                    return 0
+                if decision.get("type") != "RETRY_GPU":
+                    raise ValueError(
+                        f"expected ACCEPT_RESULT, RETRY_GPU, or CANCEL, got {decision!r}"
+                    )
+                abandoned_gpu_indices.extend(
+                    index for index in gpu_indices if index not in abandoned_gpu_indices
+                )
+                gpu_attempt += 1
+                continue
+            except _GpuAttemptInterrupted:
+                descendant_cleanup = _stop_descendants_for_retry()
+                torch = sys.modules.get("torch")
+                if torch is not None and torch.cuda.is_initialized():
+                    try:
+                        torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                resident_memory = current_process_cuda_memory_bytes(gpu_indices)
+                _send_control(
+                    control,
+                    {
+                        "type": "INTERFERED",
+                        "gpu_attempt": gpu_attempt,
+                        "gpu_started": gpu_started,
+                        "gpu_finished": time.time(),
+                        "physical_gpu_uuids": list(expected_gpu_uuids),
+                        "resident_context_bytes_after_cleanup": {
+                            str(index): value for index, value in resident_memory.items()
+                        },
+                        "descendant_cleanup": descendant_cleanup,
+                    },
+                )
+                abandoned_gpu_indices.extend(
+                    index for index in gpu_indices if index not in abandoned_gpu_indices
+                )
+                gpu_attempt += 1
+                continue
+            except BaseException as error:
+                _send_control(
+                    control,
+                    {
+                        "type": "FAIL",
+                        "phase": "gpu",
+                        "gpu_attempt": gpu_attempt,
+                        "gpu_started": gpu_started,
+                        "gpu_finished": time.time(),
+                        "error": f"{type(error).__name__}: {error}",
+                        "traceback": traceback.format_exc(),
+                    },
+                )
+                return 1
+            finally:
+                signal.signal(signal.SIGUSR1, previous_handler)
     except BaseException as error:
         try:
             _send_control(
@@ -226,6 +341,11 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             pass
         return 1
     finally:
+        if prepared is not None:
+            try:
+                close_prepared_kernel_bench(prepared)
+            except Exception:
+                pass
         reader.close()
         control.close()
 

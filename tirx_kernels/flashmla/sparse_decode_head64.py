@@ -3355,7 +3355,7 @@ def run_bench(
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA decode benchmark")
 
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     executables = _compile_decode_kernels(**kwargs)
     # Allocate once outside both timed regions; both paths launch the exact

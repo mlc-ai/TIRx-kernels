@@ -17,6 +17,7 @@ import os
 import shlex
 import sys
 import threading
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -91,6 +92,13 @@ class _CacheReplay:
     next_index: int = 0
 
 
+@dataclass
+class _CudaAssignment:
+    indices: tuple[int, ...]
+    uuids: tuple[str, ...]
+    previously_assigned: set[int]
+
+
 _COMPILE_REPLAY: ContextVar[_CompileReplay | None] = ContextVar("tirx_compile_replay", default=None)
 _CACHE_REPLAY: ContextVar[_CacheReplay | None] = ContextVar("tirx_cache_replay", default=None)
 _NVML_LOCK = threading.Lock()
@@ -99,6 +107,7 @@ _NVML_UNAVAILABLE = False
 _PREPARE_COMPILE_SCOPE = ContextVar("tirx_prepare_compile_scope", default=False)
 _PREPARE_COMPILE_LOCK = threading.RLock()
 _ORIGINAL_TVM_COMPILE = tvm.compile
+_CUDA_ASSIGNMENT: _CudaAssignment | None = None
 
 
 @dataclass(frozen=True)
@@ -125,10 +134,12 @@ class PreparedRunBench:
                 return run_bench_fn(**self.params, **kwargs)
 
 
-def _current_process_cuda_gpus() -> tuple[int, ...]:
+def _current_process_cuda_gpus(*, required: bool = False) -> tuple[int, ...]:
     """Return physical GPUs on which this PID owns a CUDA compute context."""
     global _NVML_MODULE, _NVML_UNAVAILABLE
     if _NVML_UNAVAILABLE:
+        if required:
+            raise RuntimeError("NVML is unavailable for CUDA assignment validation")
         return ()
     with _NVML_LOCK:
         if _NVML_MODULE is None:
@@ -138,6 +149,10 @@ def _current_process_cuda_gpus() -> tuple[int, ...]:
                 pynvml.nvmlInit()
             except (ImportError, OSError):
                 _NVML_UNAVAILABLE = True
+                if required:
+                    raise RuntimeError(
+                        "NVML is unavailable for CUDA assignment validation"
+                    ) from None
                 return ()
             _NVML_MODULE = pynvml
         pynvml = _NVML_MODULE
@@ -159,9 +174,11 @@ def _current_process_cuda_gpus() -> tuple[int, ...]:
             handle = pynvml.nvmlDeviceGetHandleByIndex(index)
             if any(int(process.pid) == pid for process in process_query(handle)):
                 owned.append(index)
-    except Exception:
+    except Exception as error:
         # Torch remains an independent oracle. NVML sampling failures must not
         # make ordinary standalone CPU tooling unusable.
+        if required:
+            raise RuntimeError("NVML failed while validating CUDA assignment") from error
         return ()
     return tuple(owned)
 
@@ -200,30 +217,34 @@ def cuda_target(*, arch: str | None = None) -> tvm.target.Target:
     return tvm.target.Target("cuda")
 
 
-def physical_cuda_uuids(required_num_gpus: int) -> tuple[str, ...]:
-    """Resolve visible logical CUDA devices to canonical physical UUIDs."""
-    if required_num_gpus < 1:
-        raise ValueError("required_num_gpus must be positive")
+def physical_cuda_uuids(device_indices: Sequence[int]) -> tuple[str, ...]:
+    """Resolve exact all-visible CUDA ordinals to canonical physical UUIDs."""
+    indices = tuple(int(index) for index in device_indices)
+    if not indices:
+        raise ValueError("device_indices must not be empty")
+    if len(set(indices)) != len(indices) or any(index < 0 for index in indices):
+        raise ValueError(f"invalid CUDA device indices: {device_indices!r}")
     from cuda.bindings import driver as driver_api
 
     (result,) = driver_api.cuInit(0)
     if result != driver_api.CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"cuInit failed while validating GPU assignment: {result}")
     result, count = driver_api.cuDeviceGetCount()
-    if result != driver_api.CUresult.CUDA_SUCCESS or count != required_num_gpus:
+    if result != driver_api.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuDeviceGetCount failed while validating GPU assignment: {result}")
+    invalid = [index for index in indices if index >= count]
+    if invalid:
         raise RuntimeError(
-            "late GPU assignment exposed "
-            f"{count if result == driver_api.CUresult.CUDA_SUCCESS else 'unknown'} device(s), "
-            f"expected {required_num_gpus}"
+            f"late GPU assignment requested device(s) {invalid}, but only {count} are visible"
         )
     uuids = []
-    for logical_index in range(required_num_gpus):
-        result, device = driver_api.cuDeviceGet(logical_index)
+    for physical_index in indices:
+        result, device = driver_api.cuDeviceGet(physical_index)
         if result != driver_api.CUresult.CUDA_SUCCESS:
-            raise RuntimeError(f"cuDeviceGet({logical_index}) failed: {result}")
+            raise RuntimeError(f"cuDeviceGet({physical_index}) failed: {result}")
         result, uuid = driver_api.cuDeviceGetUuid(device)
         if result != driver_api.CUresult.CUDA_SUCCESS:
-            raise RuntimeError(f"cuDeviceGetUuid({logical_index}) failed: {result}")
+            raise RuntimeError(f"cuDeviceGetUuid({physical_index}) failed: {result}")
         hex_uuid = uuid.bytes.hex()
         uuids.append(
             "GPU-"
@@ -231,6 +252,140 @@ def physical_cuda_uuids(required_num_gpus: int) -> tuple[str, ...]:
             f"{hex_uuid[16:20]}-{hex_uuid[20:32]}"
         )
     return tuple(uuids)
+
+
+def bind_cuda_assignment(
+    device_indices: Sequence[int], expected_uuids: Sequence[str]
+) -> tuple[str, ...]:
+    """Select a late-bound physical device and install the process assignment."""
+    global _CUDA_ASSIGNMENT
+    indices = tuple(int(index) for index in device_indices)
+    expected = tuple(str(uuid) for uuid in expected_uuids)
+    if not indices or len(indices) != len(expected) or len(set(indices)) != len(indices):
+        raise ValueError(
+            f"invalid CUDA assignment indices={device_indices!r}, uuids={expected_uuids!r}"
+        )
+    import torch
+
+    torch.cuda.set_device(indices[0])
+    actual = physical_cuda_uuids(indices)
+    if actual != expected:
+        raise RuntimeError(
+            f"late GPU assignment identity mismatch: requested {list(expected)}, "
+            f"physical {list(actual)}"
+        )
+    previously_assigned = set(indices)
+    if _CUDA_ASSIGNMENT is not None:
+        previously_assigned.update(_CUDA_ASSIGNMENT.previously_assigned)
+    _CUDA_ASSIGNMENT = _CudaAssignment(indices, actual, previously_assigned)
+    validate_current_cuda_assignment("after ASSIGN")
+    return actual
+
+
+def current_cuda_assignment() -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """Return the process-local physical claim installed after ASSIGN."""
+    if _CUDA_ASSIGNMENT is None:
+        raise RuntimeError("no CUDA assignment is active in this process")
+    return _CUDA_ASSIGNMENT.indices, _CUDA_ASSIGNMENT.uuids
+
+
+def validate_current_cuda_assignment(stage: str, *, restore: bool = False) -> tuple[str, ...]:
+    """Prove the current device and all observed contexts belong to assigned cards."""
+    if _CUDA_ASSIGNMENT is None:
+        raise RuntimeError(f"{stage}: no CUDA assignment is active")
+    import torch
+
+    primary = _CUDA_ASSIGNMENT.indices[0]
+    if restore:
+        torch.cuda.set_device(primary)
+    current = int(torch.cuda.current_device())
+    if current != primary:
+        raise RuntimeError(
+            f"{stage}: current CUDA device {current} differs from assigned device {primary}"
+        )
+    actual = physical_cuda_uuids(_CUDA_ASSIGNMENT.indices)
+    if actual != _CUDA_ASSIGNMENT.uuids:
+        raise RuntimeError(
+            f"{stage}: assigned CUDA UUIDs changed from {_CUDA_ASSIGNMENT.uuids!r} "
+            f"to {actual!r}"
+        )
+    unexpected = set(_current_process_cuda_gpus(required=True)) - (
+        _CUDA_ASSIGNMENT.previously_assigned
+    )
+    if unexpected:
+        raise RuntimeError(
+            f"{stage}: process owns CUDA context(s) on never-assigned physical GPU(s) "
+            f"{sorted(unexpected)}"
+        )
+    return actual
+
+
+def bench(*args: Any, references: Mapping[str, Any] | None = None, **kwargs: Any):
+    """Run the canonical timer with assignment checks around external setup."""
+    from tvm.tirx.bench import bench as canonical_bench
+
+    if _CUDA_ASSIGNMENT is not None:
+        validate_current_cuda_assignment("before benchmark setup", restore=True)
+
+    checked_references = None
+    if references is not None:
+        checked_references = {}
+        for name, builder in references.items():
+
+            def checked_builder(builder=builder, name=name):
+                try:
+                    return builder()
+                finally:
+                    if _CUDA_ASSIGNMENT is not None:
+                        validate_current_cuda_assignment(
+                            f"after external reference builder {name!r}", restore=True
+                        )
+
+            checked_references[name] = checked_builder
+
+    result = canonical_bench(*args, references=checked_references, **kwargs)
+    if _CUDA_ASSIGNMENT is not None:
+        validate_current_cuda_assignment("after benchmark timing", restore=True)
+    return result
+
+
+def current_process_cuda_memory_bytes(device_indices: Sequence[int]) -> dict[int, int | None]:
+    """Sample this PID's resident compute memory on exact physical GPUs."""
+    indices = tuple(int(index) for index in device_indices)
+    result: dict[int, int | None] = {index: None for index in indices}
+    global _NVML_MODULE, _NVML_UNAVAILABLE
+    if _NVML_UNAVAILABLE:
+        return result
+    with _NVML_LOCK:
+        if _NVML_MODULE is None:
+            try:
+                import pynvml
+
+                pynvml.nvmlInit()
+            except (ImportError, OSError):
+                _NVML_UNAVAILABLE = True
+                return result
+            _NVML_MODULE = pynvml
+        pynvml = _NVML_MODULE
+    try:
+        process_query = next(
+            getattr(pynvml, name)
+            for name in (
+                "nvmlDeviceGetComputeRunningProcesses_v3",
+                "nvmlDeviceGetComputeRunningProcesses_v2",
+                "nvmlDeviceGetComputeRunningProcesses",
+            )
+            if hasattr(pynvml, name)
+        )
+        pid = os.getpid()
+        for index in indices:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            processes = process_query(handle)
+            matches = [process for process in processes if int(process.pid) == pid]
+            result[index] = sum(int(process.usedGpuMemory) for process in matches)
+    except Exception:
+        return {index: None for index in indices}
+    return result
 
 
 def _restore_environment(name: str, previous: str | None) -> None:
@@ -540,9 +695,17 @@ def run_kernel_bench(
     prepared = prepare_kernel_bench(
         kernel_name, config, module=mod, require_cuda_uninitialized=False
     )
-    return run_prepared_kernel_bench(
-        prepared, warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown=cooldown
-    )
+    try:
+        return run_prepared_kernel_bench(
+            prepared,
+            warmup=warmup,
+            repeat=repeat,
+            timer=timer,
+            rounds=rounds,
+            cooldown=cooldown,
+        )
+    finally:
+        close_prepared_kernel_bench(prepared)
 
 
 def prepare_kernel_bench(
@@ -600,10 +763,22 @@ def run_prepared_kernel_bench(
     if cooldown is not None:
         bench_kwargs["cooldown_s"] = cooldown
 
+    if _CUDA_ASSIGNMENT is not None:
+        validate_current_cuda_assignment("before GPU stage")
     with gpu_stage_compile_guard():
         result = prepared.benchmark.run_gpu(**bench_kwargs)
+    if _CUDA_ASSIGNMENT is not None:
+        validate_current_cuda_assignment("after GPU stage")
     if not isinstance(result, dict):
         result = {}
     result.setdefault("kernel", prepared.kernel)
     result.setdefault("label", prepared.label)
     return result
+
+
+def close_prepared_kernel_bench(prepared: PreparedKernelBenchmark) -> None:
+    """Release process-local CPU-prepared resources after the workload exits."""
+    prepared.assert_process_local()
+    close = getattr(prepared.benchmark, "close", None)
+    if close is not None:
+        close()

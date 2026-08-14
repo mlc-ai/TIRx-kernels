@@ -1184,8 +1184,7 @@ def run_bench(
 ) -> dict[str, Any]:
     rounds = int(kwargs.pop("rounds", 5))
     cooldown_s = float(kwargs.pop("cooldown_s", 1.0))
-    from tirx_kernels.runner import compile_kernel_lazy
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench, compile_kernel_lazy
 
     case = prepare_data(**kwargs)
     executable = compile_kernel_lazy(lambda: get_kernel(**kwargs))

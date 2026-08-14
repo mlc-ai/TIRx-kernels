@@ -1156,7 +1156,7 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     timer = kwargs.pop("timer", None)  # None inherits the global default (proton)
     warmup = kwargs.pop("warmup", None)

@@ -7,10 +7,10 @@ from typing import Any
 import numpy as np
 
 import tvm
+from tirx_kernels.runner import bench
 from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
-from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import MBarrier, TMABar
 
 

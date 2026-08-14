@@ -8,8 +8,8 @@ from dataclasses import dataclass
 import torch
 
 import tvm
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import Pipeline, PipelineState
 from tvm.tirx.lang.smem_desc import SmemDescriptor
 from tvm.tirx.lang.tile_scheduler import ClusterLaunchControlScheduler

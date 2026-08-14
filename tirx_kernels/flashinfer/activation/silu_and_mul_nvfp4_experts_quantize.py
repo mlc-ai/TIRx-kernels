@@ -18,9 +18,9 @@ scope (fast-math reciprocal, E4M3 scale factors, no 4over6 refinement).
 
 from typing import Any
 
+from tirx_kernels.runner import bench
 from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {
     "name": "silu_and_mul_nvfp4_experts_quantize",

@@ -40,16 +40,17 @@ class DistributedRuntime:
 
     rank: int
     world_size: int
+    device_index: int
     device: Any
     communication_stream: int
     compute_stream: int
     timing_stream: torch.cuda.ExternalStream
 
     def barrier(self) -> None:
-        dist.barrier(device_ids=[self.rank])
+        dist.barrier(device_ids=[self.device_index])
 
     def max_reduce(self, value: float) -> float:
-        reduced = torch.tensor(value, dtype=torch.float64, device=f"cuda:{self.rank}")
+        reduced = torch.tensor(value, dtype=torch.float64, device=f"cuda:{self.device_index}")
         dist.all_reduce(reduced, op=dist.ReduceOp.MAX)
         return float(reduced.item())
 
@@ -97,34 +98,45 @@ class PreparedDistributedBench:
                 f"timer={self.required_timer!r} uses fixed iteration counts and "
                 "rejects warmup/repeat overrides"
             )
-        require_sm100(self.world_size)
+        from tirx_kernels.runner import current_cuda_assignment
+
+        device_indices, device_uuids = current_cuda_assignment()
+        if len(device_indices) != self.world_size:
+            raise RuntimeError(
+                f"distributed benchmark requires {self.world_size} GPUs, "
+                f"assignment has {len(device_indices)}"
+            )
+        require_sm100(device_indices)
         worker_kwargs = {
             **self.worker_kwargs,
             "timer": self.required_timer,
             "rounds": rounds,
             "cooldown_s": cooldown_s,
         }
-        try:
-            return _run_distributed_library(
-                self.library_path,
-                world_size=self.world_size,
-                worker=self.worker,
-                mode="bench",
-                worker_kwargs=worker_kwargs,
-            )
-        finally:
-            self.temporary_directory.cleanup()
+        return _run_distributed_library(
+            self.library_path,
+            world_size=self.world_size,
+            worker=self.worker,
+            mode="bench",
+            worker_kwargs=worker_kwargs,
+            device_indices=device_indices,
+            device_uuids=device_uuids,
+        )
+
+    def close(self) -> None:
+        self.temporary_directory.cleanup()
 
 
-def require_sm100(world_size: int) -> None:
+def require_sm100(device_indices: Sequence[int]) -> None:
     """Reject unsupported hosts before compiling or spawning workers."""
 
-    if not isinstance(world_size, int) or isinstance(world_size, bool) or world_size <= 0:
-        raise ValueError("world_size must be a positive integer")
+    indices = tuple(int(index) for index in device_indices)
+    if not indices or len(set(indices)) != len(indices):
+        raise ValueError("device_indices must be a non-empty set of physical ordinals")
     device_count = torch.cuda.device_count()
-    if device_count < world_size:
-        raise SkipTest(f"requires {world_size} CUDA devices, found {device_count}")
-    for device_id in range(world_size):
+    if any(device_id < 0 or device_id >= device_count for device_id in indices):
+        raise SkipTest(f"assigned CUDA devices {indices} are outside visible count {device_count}")
+    for device_id in indices:
         major, _minor = torch.cuda.get_device_capability(device_id)
         if major != 10:
             raise SkipTest(f"device {device_id} has compute capability {major}, expected SM100")
@@ -177,7 +189,7 @@ def require_nvls_multicast(runtime: DistributedRuntime, tensor: torch.Tensor) ->
     mc_ptr.restype = ctypes.c_void_p
     mapped = mc_ptr(ctypes.c_int32(0), ctypes.c_void_p(int(tensor.data_ptr())))
     local_available = torch.tensor(
-        1 if mapped else 0, dtype=torch.int32, device=f"cuda:{runtime.rank}"
+        1 if mapped else 0, dtype=torch.int32, device=f"cuda:{runtime.device_index}"
     )
     dist.all_reduce(local_available, op=dist.ReduceOp.MIN)
     all_available = bool(local_available.item())
@@ -259,33 +271,34 @@ def _locked_library_paths(*, required: bool) -> dict[str, Path]:
     return result
 
 
-def _broadcast_nvshmem_uid(rank: int) -> Shape:
+def _broadcast_nvshmem_uid(rank: int, device_index: int) -> Shape:
     if rank == 0:
         uid = tvm.get_global_func("runtime.disco.nvshmem.init_nvshmem_uid")()
         values = [int(value) for value in uid]
     else:
         values = []
 
-    size = torch.tensor([len(values)], dtype=torch.int64, device=f"cuda:{rank}")
+    size = torch.tensor([len(values)], dtype=torch.int64, device=f"cuda:{device_index}")
     dist.broadcast(size, src=0)
     if rank == 0:
-        encoded = torch.tensor(values, dtype=torch.int64, device=f"cuda:{rank}")
+        encoded = torch.tensor(values, dtype=torch.int64, device=f"cuda:{device_index}")
     else:
-        encoded = torch.empty(int(size.item()), dtype=torch.int64, device=f"cuda:{rank}")
+        encoded = torch.empty(int(size.item()), dtype=torch.int64, device=f"cuda:{device_index}")
     dist.broadcast(encoded, src=0)
     return Shape(tuple(int(value) for value in encoded.cpu().tolist()))
 
 
-def _create_runtime(rank: int, world_size: int) -> DistributedRuntime:
-    torch.cuda.set_device(rank)
-    device = tvm.cuda(rank)
+def _create_runtime(rank: int, world_size: int, device_index: int) -> DistributedRuntime:
+    torch.cuda.set_device(device_index)
+    device = tvm.cuda(device_index)
     communication_stream = int(device.create_raw_stream())
     compute_stream = int(device.create_raw_stream())
     device.set_raw_stream(compute_stream)
-    timing_stream = torch.cuda.ExternalStream(compute_stream, device=rank)
+    timing_stream = torch.cuda.ExternalStream(compute_stream, device=device_index)
     return DistributedRuntime(
         rank=rank,
         world_size=world_size,
+        device_index=device_index,
         device=device,
         communication_stream=communication_stream,
         compute_stream=compute_stream,
@@ -315,6 +328,8 @@ def _rank_entry(
     mode: str,
     worker_kwargs: dict[str, Any],
     result_queue: Any,
+    device_indices: Sequence[int],
+    device_uuids: Sequence[str],
 ) -> None:
     runtime = None
     module = None
@@ -322,22 +337,28 @@ def _rank_entry(
     succeeded = False
     result = None
     try:
-        torch.cuda.set_device(rank)
+        from tirx_kernels.runner import bind_cuda_assignment, validate_current_cuda_assignment
+
+        device_index = int(device_indices[rank])
+        bind_cuda_assignment((device_index,), (str(device_uuids[rank]),))
         dist.init_process_group(
             backend="nccl",
             init_method=init_method,
             world_size=world_size,
             rank=rank,
-            device_id=torch.device("cuda", rank),
+            device_id=torch.device("cuda", device_index),
             timeout=_PROCESS_GROUP_TIMEOUT,
         )
-        uid = _broadcast_nvshmem_uid(rank)
+        validate_current_cuda_assignment("after distributed process-group init", restore=True)
+        uid = _broadcast_nvshmem_uid(rank, device_index)
         tvm.get_global_func("runtime.disco.nvshmem.init_nvshmem")(uid, world_size, rank)
         nvshmem_initialized = True
 
-        runtime = _create_runtime(rank, world_size)
+        runtime = _create_runtime(rank, world_size, device_index)
         module = tvm.runtime.load_module(library_path)
+        validate_current_cuda_assignment("before distributed worker", restore=True)
         result = worker(runtime, module, mode, worker_kwargs)
+        validate_current_cuda_assignment("after distributed worker", restore=True)
         runtime.barrier()
         succeeded = True
     finally:
@@ -363,9 +384,11 @@ def run_distributed(
     worker_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Compile once in the parent, then execute one rank-local worker per GPU."""
-    from tirx_kernels.runner import cuda_target
+    from tirx_kernels.runner import cuda_target, physical_cuda_uuids
 
-    require_sm100(world_size)
+    device_indices = tuple(range(world_size))
+    device_uuids = physical_cuda_uuids(device_indices)
+    require_sm100(device_indices)
     if not callable(worker):
         raise TypeError("worker must be callable")
 
@@ -391,6 +414,8 @@ def run_distributed(
                     mode,
                     worker_kwargs,
                     result_queue,
+                    device_indices,
+                    device_uuids,
                 ),
                 nprocs=world_size,
                 join=True,
@@ -443,6 +468,8 @@ def _run_distributed_library(
     worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]],
     mode: str,
     worker_kwargs: dict[str, Any],
+    device_indices: Sequence[int],
+    device_uuids: Sequence[str],
 ) -> dict[str, Any]:
     """Start rank CUDA/NCCL/NVSHMEM state after the complete claim exists."""
     context = mp.get_context("spawn")
@@ -460,6 +487,8 @@ def _run_distributed_library(
                     mode,
                     worker_kwargs,
                     result_queue,
+                    tuple(device_indices),
+                    tuple(device_uuids),
                 ),
                 nprocs=world_size,
                 join=True,

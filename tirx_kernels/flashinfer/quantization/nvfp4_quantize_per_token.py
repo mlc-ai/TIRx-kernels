@@ -47,8 +47,8 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     st_global_u64,
     warp_reduce_max,
 )
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 FLOAT32_MAX = 3.4028234663852886e38
 

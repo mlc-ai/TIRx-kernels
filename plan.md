@@ -11,7 +11,7 @@ prepared executable 必须从 CPU prepare 到 GPU stage 始终留在同一个 ch
 
 每个 workload 使用一个一次性 child process：该进程只为这一条 workload 执行一次 CPU prepare，之后完成一个或多个 GPU attempt，最终 `RESULT → exit`；跑过 GPU stage 后不得回收或复用去准备另一个 workload。若 GPU attempt 检测到外部闯入，child 保留 prepared executable，释放原 claim，等待同卡或另一张卡的新 assignment，重新 `set_device` 并重建全部 GPU tensor、reference、workspace 和 timer state，只重跑 GPU stage，不得重新 import/specialize/generate/compile。这里的 prepare 并发上限只约束同时存在的一次性 workload 子进程数量，不是常驻 worker pool；实现不得引入常驻 prepare worker、worker 复用池、fork 模板，或在 orchestrator 同一解释器中用编译线程池并行执行 workload specialization/编译。
 
-原地重试会在已经执行过 GPU attempt 的热进程内重新测量，和 fresh process 的测量条件不同。每个 run artifact 必须显式记录 `retry_in_place`、GPU attempt identity、每次 assignment/UUID 和被放弃卡的 resident-context 状态；此类结果必须作为独立证据类别，未经人的明确批准不得与 fresh-process/first-attempt 数据合并，也不得用于 clean AC-10 A/B。
+原地重试会在已经执行过 GPU attempt 的进程内重新测量。每个 run artifact 必须显式记录 `retry_in_place`、GPU attempt identity、每次 assignment/UUID 和被放弃卡的 resident-context 状态，便于事后零成本比较重试过与未重试的同 config 数据；该标签不改变结果的证据资格，也不默认排除 clean AC-10 A/B。
 
 稳态目标时间模型为：
 
@@ -69,7 +69,7 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
     - 相同 workload 在迁移前基线与 pipeline 路径下使用相同实现集合、实现顺序、timer、warmup/repeat、rounds、cooldown、reference builder、round aggregation 和结果 schema。
     - targeted A/B 中每个实现均保留规定数量的 raw round samples，且 `_finalize_bench_record` 的验证和算术平均逻辑不变。
     - 默认 `5 rounds + 1.0s cooldown` 保持不变；此前用于诊断的 `0.1s cooldown` 不进入默认协议。
-    - first-attempt/fresh-process 与 `retry_in_place: true` 的热进程测量必须分属不同证据类别，汇总和 A/B 不得静默混合。
+    - 每条 record 必须显式记录 `retry_in_place`，使 first-attempt 与重试后结果可事后分组比较；该字段不得被用作无证据排除正常测量结果的门槛。
   - Negative Tests (expected to FAIL):
     - 为获得 wall-time 提升而减少 rounds、timer budget、cooldown、reference coverage 或 correctness preparation。
     - pipeline 路径缺少 reference error、protocol metadata 或 raw samples 时仍被标为 `ok`。
@@ -340,15 +340,19 @@ child 负责：
 
 ### Convergence Status
 
-- Final Status: `blocked_pending_human_decision`
+- Final Status: `implementation_complete_acceptance_incomplete`
 - FlashInfer correction: earlier MegaMoE device-0 matches are function-local CLI/benchmark/debug paths in a subpackage absent from this repository's import/call graph, so they are not blockers under the reachability criterion.
-- Current blocking evidence: `tirx_kernels/deepgemm/mega_moe.py::_run_worker()` directly calls `deep_gemm.utils.dist.init_dist(local_rank, num_processes)`. The pinned DeepGEMM `559d79fb` implementation then calls `torch.cuda.set_device(local_rank)`, so a single-rank workload assigned physical GPU 6 is switched to GPU 0. The currently installed DeepGEMM lacks `utils.dist` and fails earlier; that mismatch does not make the intended runtime path safe. Per the retained stop condition, this requires a human decision before implementation continues.
+- The reachable DeepGEMM MegaMoE override was latent under the former mask implementation: logical device 0 was the assigned card. The all-visible implementation now preserves `init_dist()` and its process group, then restores the assigned physical device and revalidates its UUID before allocation and timing.
+- The installed `deep_gemm` package fails earlier because it lacks `fp8_fp4_mega_moe`; `load_deep_gemm_mega()` raises `SkipTest` before `utils.dist` is reached. Evidence for the intended dependency comes from the out-of-tree pinned copy at `/home/hongyij/workspace/tirx-kernels/.porting/deps/deep_gemm-559d79fb/deep_gemm/utils/dist.py:33`, which calls `torch.cuda.set_device(local_rank)`.
+- Distributed rank and assigned physical device are separate runtime fields. External calls that may change current device are bounded by a restore-and-UUID-validate position invariant; only a fix requiring external-source edits, monkey-patching, or mask fallback is blocking.
+- `config/deepgemm/deepgemm_fp8_fp4_mega_moe.yaml` contributes two default single-card configurations (`t64_m64_h7168_i3072_e384_k6_g1` and `t8192_m8192_h7168_i3072_e384_k6_g1`) to the 112-workload default sweep, so the call-site invariant applies to routine execution as well as explicit runs.
+- `_run_distributed()` still opens a TCP rendezvous and creates a one-rank process group when `num_processes == 1`, including its existing EADDRINUSE retry behavior. This is a known deferred overhead, not part of the current device-binding change.
 
-## Pending User Decisions
+## Resolved Human Decisions
 
-- FlashInfer MegaMoE 的 device-0 grep 命中已经按人的可达性裁决重新分类为非阻塞：命中全部位于本项目未 import 的 CLI/benchmark/debug 子树，没有从 bench workload 到这些函数的调用链。
-- DeepGEMM MegaMoE 存在不同的可达阻塞：本项目 `_run_worker()` 直接调用 pinned DeepGEMM `utils.dist.init_dist`，后者固定 `set_device(local_rank)`。请决定由上游/依赖修复、明确排除该 workload，或另行调整架构；实现不得自行复制替换外部初始化函数、monkey-patch 或回退 mask。
-- 原地 retry 是已经运行过 GPU attempt 的热进程测量。计划将其作为独立 evidence class，默认不进入 clean AC-10；若要让它和 fresh-process 数据同类使用，需要人的明确批准。
+- FlashInfer 的不可达命中不构成阻塞；DeepGEMM 的可达设备覆盖在本仓库调用点恢复并验证 assigned physical device。
+- 原地 retry 与普通测量同类使用，可进入 clean AC-10，不需要逐次批准；artifact 必须逐 record 标记 `retry_in_place`，用于未来按同 config 事后验证冷热进程差异假设。
+- 多卡代码完成统一生命周期迁移，但 runtime 实测保持 `exempted_by_human_unmeasured`；只保留不占多卡的结构性证据。
 
 ## Implementation Notes
 

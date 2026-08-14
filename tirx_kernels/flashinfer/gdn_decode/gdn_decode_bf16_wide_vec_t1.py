@@ -17,8 +17,8 @@ from unittest import SkipTest
 
 import torch
 
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {
     "name": "gdn_decode_bf16_wide_vec_t1",

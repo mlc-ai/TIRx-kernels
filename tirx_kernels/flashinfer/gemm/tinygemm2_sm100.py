@@ -614,7 +614,7 @@ def run_bench(
     cooldown_s: float = 1.0,
 ) -> dict[str, Any]:
     _require_sm100()
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     case = prepare_data(B, O, K)
     num_sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count

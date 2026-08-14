@@ -17,8 +17,8 @@ remainder loop, and ``griddepcontrol`` PDL intrinsics.
 
 from typing import Any
 
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {"name": "act_and_mul", "category": "flashinfer", "compute_capability": 10}
 

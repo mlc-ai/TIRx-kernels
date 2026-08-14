@@ -2078,7 +2078,7 @@ def run_bench(
     """Benchmark the full preprocess/core/cast pipeline against current FA4."""
     from flash_attn.cute.interface import _flash_attn_bwd
 
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     data, _ = _prepare_official_workload(batch_size, seq_len, num_heads, head_dim, is_causal)
     candidate = setup(data, batch_size, num_heads, seq_len, head_dim)

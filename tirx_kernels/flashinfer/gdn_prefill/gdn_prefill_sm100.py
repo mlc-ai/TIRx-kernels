@@ -2988,8 +2988,7 @@ def run_bench(
     if capability[0] != 10:
         raise SkipTest(f"GDN prefill SM100 requires compute capability 10.x, got {capability}")
 
-    from tirx_kernels.runner import compile_kernel_lazy
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench, compile_kernel_lazy
 
     case = prepare_data(**kwargs)
     executable = compile_kernel_lazy(lambda: get_kernel(**kwargs))

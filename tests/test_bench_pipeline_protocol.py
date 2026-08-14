@@ -22,7 +22,7 @@ import pytest
 from tirx_kernels import registry
 from tirx_kernels import runner as kernel_runner
 from tirx_kernels.basic.utils import _runtime
-from tirx_kernels.bench.__main__ import _validated_gpu_assignment, _validated_physical_gpu_uuids
+from tirx_kernels.bench.__main__ import _validated_gpu_assignment
 from tirx_kernels.bench_suite import run as bench_run
 from tirx_kernels.bench_suite.run import (
     GpuPool,
@@ -41,20 +41,24 @@ from tirx_kernels.runner import (
     PreparedKernelBenchmark,
     PreparedRunBench,
     _offline_nvcc_arch,
+    bind_cuda_assignment,
     compile_kernel_lazy,
     consume_prepared_cache,
     cuda_initialization_guard,
+    current_cuda_assignment,
     gpu_stage_compile_guard,
     physical_cuda_uuids,
     replay_compiled_kernels,
     replay_prepared_cache,
     run_kernel_bench,
     run_prepared_kernel_bench,
+    validate_current_cuda_assignment,
 )
 
 _FAKE_PREPARED_CHILD = textwrap.dedent(
     r"""
     import json
+    import signal
     import socket
     import sys
     import time
@@ -87,60 +91,91 @@ _FAKE_PREPARED_CHILD = textwrap.dedent(
             "required_num_gpus": int(workload.get("num_gpus", 1)),
         }
     )
-    command = json.loads(reader.readline())
-    if command.get("type") == "CANCEL":
-        raise SystemExit(0)
-    if command.get("type") != "ASSIGN":
-        raise RuntimeError(f"unexpected command: {command}")
-    gpu_uuids = command.get("gpu_uuids")
-    if not isinstance(gpu_uuids, list) or len(gpu_uuids) != int(
-        workload.get("num_gpus", 1)
-    ):
-        raise RuntimeError(f"invalid test GPU UUID assignment: {gpu_uuids}")
+    class Interrupted(BaseException):
+        pass
 
-    gpu_started = time.time()
-    if workload.get("mode") == "wrong_gpu_uuid":
-        gpu_uuids = ["GPU-wrong"] * len(gpu_uuids)
-    send(
-        {
-            "type": "RUNNING_GPU",
-            "gpu_started": gpu_started,
-            "physical_gpu_uuids": gpu_uuids,
-        }
-    )
-    time.sleep(float(workload.get("gpu_s", 0.05)))
-    if workload.get("mode") == "fail_gpu":
+    signal.signal(signal.SIGUSR1, lambda *_args: (_ for _ in ()).throw(Interrupted()))
+    gpu_attempt = 1
+    while True:
+        command = json.loads(reader.readline())
+        if command.get("type") == "CANCEL":
+            raise SystemExit(0)
+        if command.get("type") != "ASSIGN":
+            raise RuntimeError(f"unexpected command: {command}")
+        gpu_uuids = command.get("gpu_uuids")
+        if not isinstance(gpu_uuids, list) or len(gpu_uuids) != int(
+            workload.get("num_gpus", 1)
+        ):
+            raise RuntimeError(f"invalid test GPU UUID assignment: {gpu_uuids}")
+
+        gpu_started = time.time()
+        if workload.get("mode") == "wrong_gpu_uuid":
+            gpu_uuids = ["GPU-wrong"] * len(gpu_uuids)
         send(
             {
-                "type": "FAIL",
-                "phase": "gpu",
+                "type": "RUNNING_GPU",
+                "gpu_attempt": gpu_attempt,
                 "gpu_started": gpu_started,
-                "gpu_finished": time.time(),
-                "error": "synthetic GPU failure",
+                "physical_gpu_uuids": gpu_uuids,
             }
         )
-        raise SystemExit(1)
+        try:
+            time.sleep(float(workload.get("gpu_s", 0.05)))
+        except Interrupted:
+            send(
+                {
+                    "type": "INTERFERED",
+                    "gpu_attempt": gpu_attempt,
+                    "gpu_started": gpu_started,
+                    "gpu_finished": time.time(),
+                    "physical_gpu_uuids": gpu_uuids,
+                    "resident_context_bytes_after_cleanup": {
+                        str(index): 4096 for index in command["gpu_indices"]
+                    },
+                }
+            )
+            gpu_attempt += 1
+            continue
+        if workload.get("mode") == "fail_gpu":
+            send(
+                {
+                    "type": "FAIL",
+                    "phase": "gpu",
+                    "gpu_started": gpu_started,
+                    "gpu_finished": time.time(),
+                    "error": "synthetic GPU failure",
+                }
+            )
+            raise SystemExit(1)
 
-    gpu_finished = time.time()
-    rounds = int(workload["_rounds"])
-    print("compiler/reference log after assignment", flush=True)
-    send(
-        {
-            "type": "RESULT",
-            "gpu_finished": gpu_finished,
-            "result": {
-                "round_samples": {"tir": [1.0] * rounds},
-                "errors": {},
-                "timer": "proton",
-                "benchmark_protocol": {
-                    "rounds": rounds,
-                    "round_aggregate": "mean",
-                    "order": ["tir"],
-                    "cooldown_s": float(workload["_cooldown"]),
+        gpu_finished = time.time()
+        rounds = int(workload["_rounds"])
+        print("compiler/reference log after assignment", flush=True)
+        send(
+            {
+                "type": "RESULT_READY",
+                "gpu_attempt": gpu_attempt,
+                "gpu_finished": gpu_finished,
+                "result": {
+                    "retry_in_place": gpu_attempt > 1,
+                    "round_samples": {"tir": [1.0] * rounds},
+                    "errors": {},
+                    "timer": "proton",
+                    "benchmark_protocol": {
+                        "rounds": rounds,
+                        "round_aggregate": "mean",
+                        "order": ["tir"],
+                        "cooldown_s": float(workload["_cooldown"]),
+                    },
                 },
-            },
-        }
-    )
+            }
+        )
+        decision = json.loads(reader.readline())
+        if decision.get("type") == "ACCEPT_RESULT":
+            break
+        if decision.get("type") != "RETRY_GPU":
+            raise RuntimeError(f"unexpected result decision: {decision}")
+        gpu_attempt += 1
     """
 )
 
@@ -312,6 +347,20 @@ def test_pipeline_fail_fast_cancels_nonterminal_children(monkeypatch, tmp_path: 
 
 
 def test_pipeline_fail_fast_cancels_ready_and_running_children(monkeypatch, tmp_path: Path):
+    cleanup_events = []
+    original_terminate = bench_run._terminate_subprocess
+    original_release_many = GpuPool.release_many
+
+    def terminate(proc):
+        cleanup_events.append(("terminate", proc.pid))
+        original_terminate(proc)
+
+    def release_many(pool, indices):
+        cleanup_events.append(("release", tuple(indices)))
+        original_release_many(pool, indices)
+
+    monkeypatch.setattr(bench_run, "_terminate_subprocess", terminate)
+    monkeypatch.setattr(GpuPool, "release_many", release_many)
     workloads = [
         {"kernel": "fake", "config": "running", "num_gpus": 1, "gpu_s": 5.0},
         {
@@ -334,6 +383,8 @@ def test_pipeline_fail_fast_cancels_ready_and_running_children(monkeypatch, tmp_
     assert retries == []
     assert len(records) == 1
     assert records[0]["config"] == "fail"
+    release_index = cleanup_events.index(("release", ("0",)))
+    assert any(kind == "terminate" for kind, _value in cleanup_events[:release_index])
     assert bench_run._BenchPidRegistry._roots == set()
 
 
@@ -433,18 +484,22 @@ def test_external_busy_to_eligible_poll_dispatches_ready_child(monkeypatch, tmp_
     assert bench_run._BenchPidRegistry._roots == set()
 
 
-def test_interference_retry_uses_a_fresh_child(monkeypatch, tmp_path: Path):
+def test_interference_retry_reuses_prepared_child_and_releases_claim_after_ack(
+    monkeypatch, tmp_path: Path
+):
     samples = 0
 
     def active_strangers(*_args, **_kwargs):
         nonlocal samples
         samples += 1
-        return {4242: 100.0} if samples == 1 else {}
+        return {4242: 100.0} if samples == 2 else {}
+
+    monkeypatch.setattr(bench_run, "MONITOR_INTERVAL", 0.01)
 
     records, retries, _pipeline = _fake_pipeline(
         monkeypatch,
         tmp_path,
-        [{"kernel": "fake", "config": "retry", "num_gpus": 1}],
+        [{"kernel": "fake", "config": "retry", "num_gpus": 1, "gpu_s": 0.5}],
         max_prepare_processes=1,
         ready_backlog=1,
         active_strangers=active_strangers,
@@ -457,9 +512,19 @@ def test_interference_retry_uses_a_fresh_child(monkeypatch, tmp_path: Path):
     assert len(records) == 1
     assert records[0]["status"] == "ok"
     assert records[0]["attempt"] == 2
-    assert records[0]["process_pid"] != retries[0]["process_pid"]
+    assert records[0]["retry_in_place"] is True
+    assert records[0]["process_pid"] == retries[0]["process_pid"]
+    assert len(records[0]["gpu_attempts"]) == 2
+    first_attempt, second_attempt = records[0]["gpu_attempts"]
+    assert first_attempt["status"] == "INTERFERED"
+    assert first_attempt["resident_context_bytes_after_cleanup"] == {"0": 4096}
+    assert first_attempt["ownership_released"] <= second_attempt["assigned"]
+    timeline = records[0]["phase_timestamps"]
+    assert set(
+        ("prepare_started", "framework_import_started", "framework_loaded", "module_loaded")
+    ) <= timeline.keys()
     attempt_logs = sorted((tmp_path / "logs").glob("fake__retry__a*.log"))
-    assert [path.stem for path in attempt_logs] == ["fake__retry__a1", "fake__retry__a2"]
+    assert [path.stem for path in attempt_logs] == ["fake__retry__a1"]
 
 
 def test_exact_alias_load_imports_only_the_target_module():
@@ -563,11 +628,6 @@ def test_assignment_rejects_partial_duplicate_and_invalid_claims():
     assert _validated_gpu_assignment([3, "7"], 2) == ["3", "7"]
 
 
-def test_child_rejects_index_match_when_physical_gpu_uuid_differs():
-    with pytest.raises(RuntimeError, match="late GPU assignment identity mismatch"):
-        _validated_physical_gpu_uuids(["GPU-expected"], ("GPU-visible",), 1)
-
-
 def test_physical_cuda_uuids_uses_driver_identity_without_creating_a_context(monkeypatch):
     from cuda.bindings import driver
 
@@ -595,28 +655,116 @@ def test_physical_cuda_uuids_uses_driver_identity_without_creating_a_context(mon
         ),
     )
 
-    assert physical_cuda_uuids(2) == (
-        "GPU-ef5a8300-1234-3456-7890-abcdefabcdef",
+    assert physical_cuda_uuids((1, 0)) == (
         "GPU-e56ad157-aaaa-bbbb-cccc-dddd11112222",
+        "GPU-ef5a8300-1234-3456-7890-abcdefabcdef",
     )
     assert calls == [
         ("init", 0),
         ("count",),
-        ("device", 0),
-        ("uuid", 10),
         ("device", 1),
         ("uuid", 11),
+        ("device", 0),
+        ("uuid", 10),
     ]
 
 
-def test_physical_cuda_uuids_rejects_partial_visibility(monkeypatch):
+def test_physical_cuda_uuids_rejects_out_of_range_assignment(monkeypatch):
     from cuda.bindings import driver
 
     success = driver.CUresult.CUDA_SUCCESS
     monkeypatch.setattr(driver, "cuInit", lambda _flags: (success,))
     monkeypatch.setattr(driver, "cuDeviceGetCount", lambda: (success, 1))
-    with pytest.raises(RuntimeError, match=r"exposed 1 device\(s\), expected 2"):
-        physical_cuda_uuids(2)
+    with pytest.raises(RuntimeError, match=r"requested device\(s\) \[2\].*only 1"):
+        physical_cuda_uuids((2,))
+
+
+def test_bind_assignment_happens_after_selection_and_rejects_uuid_mismatch(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "_CUDA_ASSIGNMENT", None)
+    events = []
+    fake_cuda = SimpleNamespace(
+        set_device=lambda index: events.append(("set", index)),
+        current_device=lambda: 3,
+    )
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=fake_cuda))
+    monkeypatch.setattr(kernel_runner, "physical_cuda_uuids", lambda indices: ("GPU-actual",))
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        bind_cuda_assignment((3,), ("GPU-expected",))
+
+    assert events == [("set", 3)]
+
+
+def test_external_device_override_is_restored_and_revalidated(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "_CUDA_ASSIGNMENT", None)
+    current = 5
+
+    def set_device(index):
+        nonlocal current
+        current = int(index)
+
+    fake_cuda = SimpleNamespace(set_device=set_device, current_device=lambda: current)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=fake_cuda))
+    monkeypatch.setattr(kernel_runner, "physical_cuda_uuids", lambda indices: ("GPU-5",))
+    monkeypatch.setattr(kernel_runner, "_current_process_cuda_gpus", lambda **_kwargs: (5,))
+
+    assert bind_cuda_assignment((5,), ("GPU-5",)) == ("GPU-5",)
+    current = 0
+    assert validate_current_cuda_assignment("after external call", restore=True) == ("GPU-5",)
+    assert current == 5
+    assert current_cuda_assignment() == ((5,), ("GPU-5",))
+
+
+def test_bench_restores_external_reference_device_before_timing(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "_CUDA_ASSIGNMENT", None)
+    current = 5
+    events = []
+
+    def set_device(index):
+        nonlocal current
+        current = int(index)
+        events.append(("set", current))
+
+    fake_cuda = SimpleNamespace(set_device=set_device, current_device=lambda: current)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=fake_cuda))
+    monkeypatch.setattr(kernel_runner, "physical_cuda_uuids", lambda indices: ("GPU-5",))
+    monkeypatch.setattr(kernel_runner, "_current_process_cuda_gpus", lambda **_kwargs: (5,))
+    bind_cuda_assignment((5,), ("GPU-5",))
+
+    def canonical_bench(*_args, references=None, **_kwargs):
+        reference = references["external"]()
+        events.append(("before_timing", current))
+        reference()
+        return {"impls": {"tir": 1.0, "external": 2.0}}
+
+    canonical_module = importlib.import_module("tvm.tirx.bench")
+    monkeypatch.setattr(canonical_module, "bench", canonical_bench)
+
+    def build_external():
+        set_device(0)
+        return lambda: None
+
+    result = kernel_runner.bench(
+        {"tir": lambda: None}, references={"external": build_external}
+    )
+
+    assert result["impls"]["external"] == 2.0
+    assert ("before_timing", 5) in events
+
+
+def test_assignment_rejects_context_on_never_assigned_card(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "_CUDA_ASSIGNMENT", None)
+    current = 4
+    fake_cuda = SimpleNamespace(
+        set_device=lambda index: None,
+        current_device=lambda: current,
+    )
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=fake_cuda))
+    monkeypatch.setattr(kernel_runner, "physical_cuda_uuids", lambda indices: ("GPU-4",))
+    monkeypatch.setattr(kernel_runner, "_current_process_cuda_gpus", lambda **_kwargs: (4, 1))
+
+    with pytest.raises(RuntimeError, match=r"never-assigned physical GPU.*1"):
+        bind_cuda_assignment((4,), ("GPU-4",))
 
 
 def test_prepared_benchmark_is_process_local_and_not_serializable(monkeypatch):
@@ -642,7 +790,8 @@ def test_standalone_runner_composes_prepare_and_gpu_stage(monkeypatch):
             run_gpu=lambda **kwargs: (
                 events.append(("gpu", value, kwargs))
                 or {"round_samples": {"tir": [1.0] * kwargs["rounds"]}}
-            )
+            ),
+            close=lambda: events.append("close"),
         ),
     )
 
@@ -656,7 +805,10 @@ def test_standalone_runner_composes_prepare_and_gpu_stage(monkeypatch):
         cooldown=1.0,
     )
 
-    assert events == [("gpu", 7, {"timer": "proton", "rounds": 5, "cooldown_s": 1.0})]
+    assert events == [
+        ("gpu", 7, {"timer": "proton", "rounds": 5, "cooldown_s": 1.0}),
+        "close",
+    ]
     assert result["kernel"] == "fake"
     assert result["label"] == "shape"
 
@@ -1293,6 +1445,25 @@ def test_explicit_workload_gpu_count_must_match_module_config():
 
 
 def test_distributed_ranks_start_after_visibility_validation(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(kernel_runner, "_CUDA_ASSIGNMENT", None)
+    monkeypatch.setattr(kernel_runner, "physical_cuda_uuids", lambda indices: tuple(
+        f"GPU-{index}" for index in indices
+    ))
+    current_device = 6
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            cuda=SimpleNamespace(
+                set_device=lambda index: None,
+                current_device=lambda: current_device,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        kernel_runner, "_current_process_cuda_gpus", lambda **_kwargs: (6, 4, 2, 0)
+    )
+    bind_cuda_assignment((6, 4, 2, 0), ("GPU-6", "GPU-4", "GPU-2", "GPU-0"))
     events = []
     temporary_directory = SimpleNamespace(cleanup=lambda: events.append("cleanup"))
     prepared = _runtime.PreparedDistributedBench(
@@ -1308,25 +1479,41 @@ def test_distributed_ranks_start_after_visibility_validation(monkeypatch, tmp_pa
     monkeypatch.setattr(
         _runtime,
         "require_sm100",
-        lambda world_size: events.append(("validate_visible", world_size)),
+        lambda device_indices: events.append(("validate_visible", device_indices)),
     )
 
-    def launch(library_path, *, world_size, worker, mode, worker_kwargs):
-        events.append(("launch_ranks", library_path, world_size, mode, worker_kwargs))
+    def launch(
+        library_path, *, world_size, worker, mode, worker_kwargs, device_indices, device_uuids
+    ):
+        events.append(
+            (
+                "launch_ranks",
+                library_path,
+                world_size,
+                mode,
+                worker_kwargs,
+                device_indices,
+                device_uuids,
+            )
+        )
         return {"status": "OK"}
 
     monkeypatch.setattr(_runtime, "_run_distributed_library", launch)
     result = prepared.run_gpu(timer="kineto", rounds=5, cooldown_s=1.0)
 
     assert result == {"status": "OK"}
-    assert events[0] == ("validate_visible", 4)
+    assert events[0] == ("validate_visible", (6, 4, 2, 0))
     assert events[1][0] == "launch_ranks"
     assert events[1][4]["rounds"] == 5
     assert events[1][4]["cooldown_s"] == 1.0
+    assert events[1][5:] == ((6, 4, 2, 0), ("GPU-6", "GPU-4", "GPU-2", "GPU-0"))
+    assert "cleanup" not in events
+    prepared.close()
     assert events[-1] == "cleanup"
 
 
 def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
+    monkeypatch.setattr(kernel_runner, "_CUDA_ASSIGNMENT", None)
     events = []
     fake_runtime = SimpleNamespace(barrier=lambda: events.append("barrier"))
     fake_dist = SimpleNamespace(
@@ -1335,7 +1522,17 @@ def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
         is_initialized=lambda: True,
         destroy_process_group=lambda: events.append("destroy_process_group"),
     )
-    fake_cuda = SimpleNamespace(set_device=lambda rank: events.append(("set_device", rank)))
+    current_device = 6
+
+    def set_device(index):
+        nonlocal current_device
+        current_device = int(index)
+        events.append(("set_device", index))
+
+    fake_cuda = SimpleNamespace(
+        set_device=set_device,
+        current_device=lambda: current_device,
+    )
     fake_torch = SimpleNamespace(cuda=fake_cuda, device=lambda *args: args)
     fake_tvm = SimpleNamespace(
         get_global_func=lambda name: (
@@ -1347,9 +1544,12 @@ def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
     )
 
     monkeypatch.setattr(_runtime, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setattr(_runtime, "dist", fake_dist)
     monkeypatch.setattr(_runtime, "tvm", fake_tvm)
-    monkeypatch.setattr(_runtime, "_broadcast_nvshmem_uid", lambda _rank: object())
+    monkeypatch.setattr(kernel_runner, "physical_cuda_uuids", lambda indices: ("GPU-6",))
+    monkeypatch.setattr(kernel_runner, "_current_process_cuda_gpus", lambda **_kwargs: (6,))
+    monkeypatch.setattr(_runtime, "_broadcast_nvshmem_uid", lambda _rank, _device: object())
     monkeypatch.setattr(_runtime, "_create_runtime", lambda *_args: fake_runtime)
     monkeypatch.setattr(
         _runtime, "_cleanup_runtime", lambda runtime: events.append(("cleanup_runtime", runtime))
@@ -1369,8 +1569,11 @@ def test_distributed_rank_cleanup_runs_when_worker_fails(monkeypatch):
             "bench",
             {},
             SimpleNamespace(put=lambda _result: events.append("put")),
+            (6,),
+            ("GPU-6",),
         )
 
+    assert ("set_device", 6) in events
     assert "worker" in events
     assert ("cleanup_runtime", fake_runtime) in events
     assert "finalize_nvshmem" in events
@@ -1444,6 +1647,65 @@ def test_cost_model_charges_ready_starvation_and_result_handoff():
         external_history=[(0.0, ())],
     )
     assert model["dispatch_latency_s"]["max"] == pytest.approx(0.0)
+
+
+def test_cost_model_includes_interrupted_gpu_attempts():
+    record = {
+        "status": "ok",
+        "num_gpus": 1,
+        "gpus": ["1"],
+        "phase_timestamps": {
+            "process_started": 0.0,
+            "child_started": 0.1,
+            "prepare_started": 0.1,
+            "framework_import_started": 0.12,
+            "framework_loaded": 0.15,
+            "module_loaded": 0.2,
+            "config_resolved": 0.3,
+            "ready": 1.0,
+            "assigned": 2.1,
+            "gpu_started": 2.1,
+            "gpu_finished": 4.1,
+            "result_received": 4.1,
+            "process_reaped": 4.2,
+        },
+        "gpu_attempts": [
+            {
+                "attempt": 1,
+                "ready": 1.0,
+                "assigned": 1.0,
+                "gpu_started": 1.1,
+                "gpu_finished": 2.0,
+                "ownership_released": 2.0,
+                "gpus": ["0"],
+                "status": "INTERFERED",
+            },
+            {
+                "attempt": 2,
+                "ready": 2.0,
+                "assigned": 2.1,
+                "gpu_started": 2.1,
+                "gpu_finished": 4.1,
+                "ownership_released": 4.1,
+                "gpus": ["1"],
+                "status": "RESULT",
+            },
+        ],
+    }
+
+    model = _pipeline_cost_model(
+        [record],
+        run_started=0.0,
+        critical_finished=4.1,
+        known_gpu_indices=("0", "1"),
+        external_history=[(0.0, ())],
+    )
+
+    assert model["measurement_status"] == "measured"
+    assert model["gpu_busy_s_by_index"] == pytest.approx({"0": 0.9, "1": 2.0})
+    assert model["ready_constrained_gpu_list_schedule_s"] == pytest.approx(3.0)
+    assert model["expected_s"] == pytest.approx(4.0)
+    assert model["unexplained_s"] == pytest.approx(0.1)
 
 
 @pytest.mark.parametrize(
@@ -1784,6 +2046,32 @@ def test_timeline_validation_rejects_missing_out_of_order_and_overlapping_record
     with pytest.raises(RuntimeError, match="ownership intervals overlap"):
         _validate_pipeline_timelines([first, second])
 
+    retried = _complete_timeline_record(label="retried", gpu="0", assigned=3.0, received=4.0)
+    retried["gpu_attempts"] = [
+        {
+            "attempt": 1,
+            "ready": 1.0,
+            "assigned": 1.0,
+            "gpu_started": 1.1,
+            "gpu_finished": 2.0,
+            "ownership_released": 2.1,
+            "gpus": ["0"],
+        },
+        {
+            "attempt": 2,
+            "ready": 2.1,
+            "assigned": 2.2,
+            "gpu_started": 2.3,
+            "gpu_finished": 4.0,
+            "ownership_released": 4.0,
+            "gpus": ["0"],
+        },
+    ]
+    _validate_pipeline_timelines([retried])
+    retried["gpu_attempts"][1].update(ready=2.0, assigned=2.0)
+    with pytest.raises(RuntimeError, match="ownership intervals overlap"):
+        _validate_pipeline_timelines([retried])
+
 
 def test_capability_audit_accounts_for_every_adapter_and_curated_selection():
     capability = audit_pipeline_capabilities()
@@ -1955,6 +2243,82 @@ def test_tracked_default_protocol_ab_evidence_matches_local_source_artifact_when
         assert tracked_cost["assignment_handoff_p95_s"] == pytest.approx(
             artifact_cost["assignment_handoff_s"]["p95"], abs=1e-9
         )
+
+
+def test_tracked_set_device_evidence_preserves_retry_provenance():
+    evidence_path = Path(__file__).resolve().parents[1] / "bench_pipeline_set_device_evidence.json"
+    evidence = json.loads(evidence_path.read_text())
+
+    assert evidence["acceptance_use"] == {
+        "implementation_validation": True,
+        "ac_10_migration_before_ab": False,
+        "reason": (
+            "These are pipeline-only targeted runs; no persisted migration-before run "
+            "on the same verified physical GPU is paired with them."
+        ),
+    }
+    fresh = evidence["artifacts"]["fresh"]
+    retry = evidence["artifacts"]["retry"]
+    assert fresh["protocol"]["is_default"] is True
+    assert retry["protocol"]["is_default"] is True
+    assert fresh["record"]["retry_in_place"] is False
+    assert retry["record"]["retry_in_place"] is True
+    assert fresh["record"]["attempt"] == 1
+    assert retry["record"]["attempt"] == 2
+    assert len(fresh["record"]["gpu_attempts"]) == 1
+    assert [attempt["status"] for attempt in retry["record"]["gpu_attempts"]] == [
+        "INTERFERED",
+        "RESULT",
+    ]
+    first_attempt, second_attempt = retry["record"]["gpu_attempts"]
+    assert first_attempt["ownership_released"] <= second_attempt["assigned"]
+    assert first_attempt["resident_context_bytes_after_cleanup"] == {"2": 645_922_816}
+    assert second_attempt["abandoned_gpu_resident_bytes_after_reassignment"] == {
+        "2": 645_922_816
+    }
+    assert retry["interference_retries"][0]["process_pid"] == retry["record"]["process_pid"]
+    assert retry["interference_retries"][0]["retry_in_place"] is True
+    assert evidence["post_exit_observation"]["abandoned_gpu"]["memory_used_mib"] == 124
+    assert evidence["post_exit_observation"]["abandoned_gpu"]["listed_compute_pid"] is False
+
+
+@pytest.mark.parametrize("name", ["fresh", "retry"])
+def test_tracked_set_device_evidence_matches_local_artifact_when_present(name: str):
+    repo_root = Path(__file__).resolve().parents[1]
+    evidence = json.loads((repo_root / "bench_pipeline_set_device_evidence.json").read_text())
+    tracked = evidence["artifacts"][name]
+    artifact_path = repo_root / tracked["local_path"]
+    if not artifact_path.is_file():
+        pytest.skip(f"set-device source artifact is gitignored local state: {artifact_path}")
+
+    artifact_bytes = artifact_path.read_bytes()
+    assert hashlib.sha256(artifact_bytes).hexdigest() == tracked["sha256"]
+    artifact = json.loads(artifact_bytes)
+    assert artifact["pipeline"]["measurement_protocol"] == tracked["protocol"]
+    assert artifact["pipeline"]["cost_model"] == tracked["cost_model"]
+    assert artifact["pipeline"]["interference_retries"] == tracked.get(
+        "interference_retries", []
+    )
+    artifact_record = artifact["records"][0]
+    for field in (
+        "kernel",
+        "config",
+        "status",
+        "process_pid",
+        "attempt",
+        "retry_in_place",
+        "physical_gpu_uuids",
+        "impls",
+        "round_samples",
+        "benchmark_protocol",
+        "phase_timestamps",
+        "gpu_attempts",
+    ):
+        assert artifact_record[field] == tracked["record"][field]
+    assert tracked["outer_wall_s"] == pytest.approx(
+        artifact["pipeline"]["processes_reaped"] - artifact["pipeline"]["started"],
+        abs=1e-9,
+    )
 
 
 def test_tracked_large_prepare_evidence_respects_resource_bounds():

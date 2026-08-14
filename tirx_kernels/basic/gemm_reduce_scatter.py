@@ -1225,7 +1225,7 @@ def _allocate_case(
     runtime: DistributedRuntime, module: Any, data: dict[str, torch.Tensor], config: GemmRSConfig
 ) -> _Case:
     queue_state = _queue_state(config)
-    device = torch.device("cuda", runtime.rank)
+    device = torch.device("cuda", runtime.device_index)
     gemm_out = symmetric_empty(runtime, (config.M, config.N), config.dtype)
     semaphore = symmetric_empty(runtime, (config.rs_m_clusters, config.rs_n_clusters), "uint64")
     gemm_task_types = torch.empty((CAPACITY,), dtype=torch.int32, device=device)
@@ -1280,10 +1280,10 @@ def _reference_outputs(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     partial = torch.mm(data["A"], data["B"].T)
     expected = torch.empty(
-        (config.local_m, config.N), dtype=torch.float16, device=f"cuda:{runtime.rank}"
+        (config.local_m, config.N), dtype=torch.float16, device=f"cuda:{runtime.device_index}"
     )
     dist.reduce_scatter_tensor(expected, partial, op=dist.ReduceOp.SUM)
-    torch.cuda.synchronize(runtime.rank)
+    torch.cuda.synchronize(runtime.device_index)
     return partial, expected
 
 
@@ -1326,7 +1326,7 @@ def _run_worker(
     if mode != "bench":
         raise ValueError(f"unsupported distributed worker mode {mode!r}")
 
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     def prepare() -> None:
         case.reset()
