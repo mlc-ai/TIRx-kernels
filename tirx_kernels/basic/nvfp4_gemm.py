@@ -14,10 +14,22 @@ import tvm
 from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
-from tvm.script import tirx as T
-from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState, TMABar
-from tvm.tirx.lang.smem_desc import SmemDescriptor
-from tvm.tirx.lang.tile_scheduler import ClusterPersistentScheduler2D
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
+
+from .fp16_bf16_gemm import (
+    _BUILDER_MISSING,
+    MBarrier,
+    Pipeline,
+    PipelineState,
+    SmemDescriptor,
+    TMABar,
+    _builder_alloc_scalar,
+    _builder_assign,
+    _builder_bind,
+    _builder_emit,
+    _builder_scalar,
+)
 
 
 class WarpRole(IntEnum):
@@ -285,673 +297,1274 @@ def _mapa_u64(ptr, rank):
     return mapped[0]
 
 
-@T.inline
 def _mul_f32x2_inplace(values, index, multiplier):
     """Keep the packed multiply's register lifetime explicit in inline PTX."""
-    packed: T.uint64
-    rhs: T.uint64
-    T.ptx.mov.b64(packed, values[index], values[index + 1])
-    T.ptx.mov.b64(rhs, multiplier, multiplier)
-    T.ptx.mul.rz.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(values[index], values[index + 1], packed)
+    packed = _builder_alloc_scalar("packed", "uint64")
+    rhs = _builder_alloc_scalar("rhs", "uint64")
+    T.evaluate(T.ptx.mov.b64(packed, values[index], values[index + 1]))
+    T.evaluate(T.ptx.mov.b64(rhs, multiplier, multiplier))
+    T.evaluate(T.ptx.mul.rz.ftz.f32x2(packed, packed, rhs))
+    T.evaluate(T.ptx.mov.b64(values[index], values[index + 1], packed))
 
 
-@T.jit
-def _kernel(
-    A_packed: T.Buffer((M, K // 2), "uint8"),
-    B_packed: T.Buffer((N, K // 2), "uint8"),
-    SFA_in: T.Buffer((M, K // 16), "uint8", layout=sf_smem_layout(M, K // 16, sf_per_mma=4)),
-    SFB_in: T.Buffer((N, K // 16), "uint8", layout=sf_smem_layout(N, K // 16, sf_per_mma=4)),
-    alpha: T.Buffer((1,), "float32"),
-    D: T.Buffer((M, N), "bfloat16"),
-    *,
-    M: T.constexpr,
-    N: T.constexpr,
-    K: T.constexpr,
-    # Fixed hardware + tile/cluster/pipeline choices (tir_ws_kernel never
-    # overrides these). Derived quantities are computed from them below.
-    SM_COUNT: T.constexpr = 148,
-    CTA_GROUP: T.constexpr = 2,
-    CLUSTER_M: T.constexpr = 2,
-    CLUSTER_N: T.constexpr = 1,
-    CTA_M: T.constexpr = 128,
-    CTA_N: T.constexpr = 128,
-    CTA_K: T.constexpr = 256,
-    MMA_K: T.constexpr = 64,
-    EPI_TILE: T.constexpr = 64,
-    TMEM_LD_SIZE: T.constexpr = 64,
-    WB_PIPE_DEPTH: T.constexpr = 2,
-    PIPE_DEPTH: T.constexpr = 5,
-    TMEM_PIPE_DEPTH: T.constexpr = 1,
-    L2_GROUP_SIZE: T.constexpr = 8,
-    NUM_WARPS: T.constexpr = 8,
-    OVERLAP_EPI: T.constexpr = True,
-):
-    # Derived shapes (formulas, so they track the params above).
-    CLUSTER_SIZE = T.meta_var(CLUSTER_M * CLUSTER_N)
-    MMA_N = T.meta_var(CTA_N * CTA_GROUP)
-    SFB_N = T.meta_var(MMA_N)
-    MMA_K_BLOCKS = T.meta_var(CTA_K // MMA_K)
-    SF_CTA_K = T.meta_var(CTA_K // 16)
-    NUM_CLUSTERS = T.meta_var(SM_COUNT // CLUSTER_SIZE)
-    D_SWIZZLE_MODE = T.meta_var(
-        SwizzleMode.SWIZZLE_32B_ATOM
-        if EPI_TILE == 16
-        else SwizzleMode.SWIZZLE_64B_ATOM
-        if EPI_TILE == 32
-        else SwizzleMode.SWIZZLE_128B_ATOM
-    )
-    A_BYTES = T.meta_var(CTA_M * (CTA_K // 2) * CTA_GROUP)
-    B_BYTES = T.meta_var(CTA_N * (CTA_K // 2) * CTA_GROUP)
-    SFA_BYTES = T.meta_var(CTA_M * SF_CTA_K * CTA_GROUP)
-    SFB_BYTES = T.meta_var(SFB_N * SF_CTA_K * CTA_GROUP)
-    K_TILES = T.meta_var(K // CTA_K)
-    CLUSTER_M_TILES = T.meta_var(M // CTA_M // CLUSTER_M)
-    CLUSTER_N_TILES = T.meta_var(N // MMA_N // CLUSTER_N)
-    TMEM_LD = T.meta_var(
-        _TMEM_LD_X2 if EPI_TILE == 16 else _TMEM_LD_X4 if EPI_TILE == 32 else _TMEM_LD_X8
-    )
+class ClusterPersistentScheduler2D:
+    """Builder-native group-major persistent scheduler used by this kernel."""
 
-    # The packed FP4 operands are ordinary 2-D row-major byte tensors.  The
-    # scale factors retain FlashInfer's layout_128x4 packing: represent that
-    # physical layout as a 3-D uint16 tensor map rather than reinterpreting or
-    # reshuffling any E4M3 payloads in the kernel.
-    A_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    B_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    SFA_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    SFB_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    D_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        A_tensor_map,
-        "uint8",
-        2,
-        A_packed.data,
-        K // 2,
-        M,
-        K // 2,
-        CTA_K // 2,
-        CTA_M,
-        1,
-        1,
-        0,
-        SwizzleMode.SWIZZLE_128B_ATOM.value,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        B_tensor_map,
-        "uint8",
-        2,
-        B_packed.data,
-        K // 2,
-        N,
-        K // 2,
-        CTA_K // 2,
-        CTA_N,
-        1,
-        1,
-        0,
-        SwizzleMode.SWIZZLE_128B_ATOM.value,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        SFA_tensor_map,
-        "uint16",
-        3,
-        SFA_in.data,
-        256,
-        K // 64,
-        M // 128,
-        512,
-        K * 8,
-        256,
-        4,
-        1,
-        1,
-        1,
-        1,
-        0,
-        0,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        SFB_tensor_map,
-        "uint16",
-        3,
-        SFB_in.data,
-        256,
-        K // 64,
-        N // 128,
-        512,
-        K * 8,
-        256,
-        4,
-        1,
-        1,
-        1,
-        1,
-        0,
-        0,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        D_tensor_map,
-        "bfloat16",
-        2,
-        D.data,
-        N,
-        M,
-        N * 2,
-        EPI_TILE,
-        CTA_M,
-        1,
-        1,
-        0,
-        D_SWIZZLE_MODE.value,
-        2,
-        0,
-    )
-    T.device_entry()
-    cluster_rank = T.cta_id_in_cluster([CLUSTER_SIZE], preferred=[CLUSTER_SIZE])
-    cta_idx = T.cta_id([SM_COUNT])
-    tid_in_cta = T.thread_id([NUM_WARPS * 32])
-    lane_id = T.lane_id([32])
-    tid_in_wg = T.thread_id_in_wg([128])
-    wg_id = T.warpgroup_id([NUM_WARPS // 4])
-    warp_id = T.warp_id([NUM_WARPS])
-    if warp_id == 0:
-        if T.cuda.elect_sync():
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(A_tensor_map)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(B_tensor_map)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(SFA_tensor_map)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(SFB_tensor_map)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(D_tensor_map)))
-    cb_m: T.let = cluster_rank % CLUSTER_M
-    cb_n: T.let = cluster_rank // CLUSTER_M
-    pair_id: T.let = cluster_rank // CTA_GROUP
-    id_in_pair: T.let = cluster_rank % CTA_GROUP
-    pair_leader_rank: T.let = pair_id * CTA_GROUP
-    tile_scheduler = ClusterPersistentScheduler2D(
-        "tile_scheduler",
-        num_m_tiles=CLUSTER_M_TILES,
-        num_n_tiles=CLUSTER_N_TILES,
-        num_clusters=NUM_CLUSTERS,
-        l2_group_size=L2_GROUP_SIZE,
-    )
-    tile_scheduler.init(cta_idx // CLUSTER_SIZE)
-    m_idx = T.meta_var(tile_scheduler.m_idx)
-    n_idx = T.meta_var(tile_scheduler.n_idx)
-    cta_m = T.meta_var(m_idx * CLUSTER_M + cb_m)
-    cta_n = T.meta_var(n_idx * CLUSTER_N + cb_n)
-    a_m = T.meta_var(cta_m * CTA_M)
-    d_m = T.meta_var(cta_m * CTA_M)
-    b_n = T.meta_var(cta_n * MMA_N + id_in_pair * CTA_N)
-    d_n = T.meta_var(cta_n * MMA_N)
-    pool = T.SMEMPool()
-    A_smem_packed = pool.alloc_tcgen05_mma_AB((PIPE_DEPTH, CTA_M, CTA_K // 2), "uint8")
-    B_smem_packed = pool.alloc_tcgen05_mma_AB((PIPE_DEPTH, CTA_N, CTA_K // 2), "uint8")
-    SFA_smem = pool.alloc(
-        (PIPE_DEPTH, CTA_M, SF_CTA_K),
-        "uint8",
-        layout=sf_smem_layout(128, 16, sf_per_mma=4, pipe_depth=PIPE_DEPTH),
-        align=1024,
-    )
-    SFB_smem = pool.alloc(
-        (PIPE_DEPTH, SFB_N, SF_CTA_K),
-        "uint8",
-        layout=sf_smem_layout(SFB_N, 16, sf_per_mma=4, pipe_depth=PIPE_DEPTH),
-        align=1024,
-    )
-    output_smem = pool.alloc_tcgen05_mma_AB(
-        (WB_PIPE_DEPTH, CTA_M, EPI_TILE), "bfloat16", swizzle_mode=D_SWIZZLE_MODE
-    )
-    tmem_addr = pool.alloc([1], "uint32", align=4)
-    mbar_leader = tid_in_cta == 32
-    smem_pipe = Pipeline(pool, PIPE_DEPTH, full="tma", empty="tcgen05", leader=mbar_leader)
-    tile_full_bar = TMABar(pool, PIPE_DEPTH, leader=mbar_leader)
-    tile_full_bar.init(1)
-    scale_full_bar = TMABar(pool, PIPE_DEPTH, leader=mbar_leader)
-    scale_full_bar.init(1)
-    tmem_pipe = Pipeline(
-        pool,
-        TMEM_PIPE_DEPTH,
-        full="tcgen05",
-        empty="mbar",
-        init_empty=CTA_GROUP,
-        leader=mbar_leader,
-    )
-    tmem_finished = MBarrier(pool, 1, leader=mbar_leader)
-    tmem_finished.init(1)
-    pool.commit()
-    if mbar_leader:
-        T.ptx.fence.mbarrier_init.release.cluster()
-    tmem_pool = T.TMEMPool(pool, total_cols=512, cta_group=CTA_GROUP, tmem_addr=tmem_addr)
-    tmem = tmem_pool.alloc((CTA_M, 512), "float32")
-    A_smem = A_smem_packed.view("float4_e2m1fn")
-    B_smem = B_smem_packed.view("float4_e2m1fn")
-    sf_mma_k = T.meta_var(4)
-    SFB_n_chunks = T.meta_var(SFB_N // 128)
-    tmem_pool.move_base_to(448)
-    SFA_tmem = tmem_pool.alloc_sf(
-        (128, sf_mma_k * MMA_K_BLOCKS), "float8_e4m3fn", sf_per_mma=sf_mma_k
-    )
-    tmem_pool.move_base_to(464)
-    SFB_tmem = tmem_pool.alloc_sf(
-        (128 * SFB_n_chunks, sf_mma_k * MMA_K_BLOCKS), "float8_e4m3fn", sf_per_mma=sf_mma_k
-    )
-    sf_desc = T.meta_var(SmemDescriptor())
-    desc_a = T.meta_var(SmemDescriptor())
-    desc_b = T.meta_var(SmemDescriptor())
-    sf_desc.init(T.reinterpret("handle", T.uint64(0)), ldo=0, sdo=8, swizzle=0)
-    desc_a.init(A_smem.ptr_to([0, 0, 0]), ldo=0, sdo=64, swizzle=3)
-    desc_b.init(B_smem.ptr_to([0, 0, 0]), ldo=0, sdo=64, swizzle=3)
-    # Publish the weak shared-memory store performed by tcgen05.alloc through
-    # the existing cluster release/acquire before any other warp consumes the
-    # TMEM base address.
-    tmem_pool.commit()
-    T.ptx.barrier.cluster.arrive.release.aligned()
-    T.ptx.barrier.cluster.wait.acquire()
-    if tid_in_cta < 32:
-        T.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
-    pair_mask: T.int32
-    pair_mask = 0
-    pair_mask = pair_mask | 1 << pair_leader_rank
-    pair_mask = pair_mask | 1 << pair_leader_rank + 1
-    tma_cur = PipelineState(PIPE_DEPTH, 1)
-    mma_smem = PipelineState(PIPE_DEPTH, 0)
-    mma_tmem = PipelineState(TMEM_PIPE_DEPTH, 1)
-    accum: T.int32
-    accum = 0
-    epi_cur = PipelineState(TMEM_PIPE_DEPTH, 0)
-    epi_wb_state = PipelineState(WB_PIPE_DEPTH, 1)
-    alpha_local: T.float32
-    T.ptx.ld.global_.nc.f32(alpha_local, alpha.ptr_to([0]))
-    if warp_id == int(WarpRole.TMA):
+    _is_meta_class = True
 
-        @T.inline
-        def issue_tma_load(k_tile: T.int32):
-            stage = tma_cur.stage
-            k = T.meta_var(k_tile * CTA_K // 2)
-            smem_pipe.empty.wait(tma_cur.stage, tma_cur.phase)
-            if id_in_pair == 0:
-                tile_bytes = T.meta_var(A_BYTES + B_BYTES)
-                _rem1 = T.alloc_local([1], "uint64")
-                T.ptx.mapa.shared__cluster.u64(
-                    _rem1[0], tile_full_bar.ptr_to([stage]), T.uint32(pair_leader_rank)
-                )
-                T.ptx.mbarrier.arrive.expect_tx.b64(
-                    _rem1[0], T.uint32(tile_bytes), pred=T.bool(True)
-                )
-            single_cta_mask: T.int32 = 1 << id_in_pair
-            mapped_tile_bar = _mapa_u64(tile_full_bar.ptr_to([stage]), 0)
-            T.evaluate(
-                T.ptx[_TMA_G2S_2D](
-                    A_smem_packed.ptr_to([stage, 0, 0]),
-                    T.address_of(A_tensor_map),
-                    T.cast(k, "int32"),
-                    T.cast(a_m, "int32"),
-                    T.cuda.cvta_generic_to_shared(T.reinterpret("handle", mapped_tile_bar)),
-                    T.cast(single_cta_mask, "uint16"),
-                    T.uint64(_EVICT_NORMAL_L2_POLICY),
-                )
-            )
-            T.evaluate(
-                T.ptx[_TMA_G2S_2D](
-                    B_smem_packed.ptr_to([stage, 0, 0]),
-                    T.address_of(B_tensor_map),
-                    T.cast(k, "int32"),
-                    T.cast(b_n, "int32"),
-                    T.cuda.cvta_generic_to_shared(T.reinterpret("handle", mapped_tile_bar)),
-                    T.cast(single_cta_mask, "uint16"),
-                    T.uint64(_EVICT_NORMAL_L2_POLICY),
-                )
-            )
+    def __init__(
+        self,
+        prefix,
+        num_m_tiles,
+        num_n_tiles,
+        num_clusters,
+        l2_group_size=8,
+        cluster_m=1,
+        cluster_n=1,
+        serpentine=False,
+    ):
+        if serpentine:
+            raise ValueError("NVFP4 GEMM does not use serpentine scheduling")
+        del prefix
+        self._num_m_tiles = num_m_tiles
+        self._num_n_tiles = num_n_tiles
+        self._num_clusters = num_clusters
+        self._l2_group_size = l2_group_size
+        self._cluster_m = cluster_m
+        self._cluster_n = cluster_n
+        self._m_tile_rows = (num_m_tiles + cluster_m - 1) // cluster_m
+        self._n_tile_cols = (num_n_tiles + cluster_n - 1) // cluster_n
+        self._full_groups = self._m_tile_rows // l2_group_size
+        self._tail_rows = self._m_tile_rows - self._full_groups * l2_group_size
+        self._total_tiles = self._m_tile_rows * self._n_tile_cols * cluster_m * cluster_n
+        self.m_idx = T.local_scalar("int32").scalar
+        self.n_idx = T.local_scalar("int32").scalar
+        self.linear_idx = T.local_scalar("int32").scalar
+        self.work_idx = self.linear_idx
+        self.tile_count = T.local_scalar("int32").scalar
+        self.tile_idx = self.tile_count
 
-        if T.cuda.elect_sync():
-            while tile_scheduler.valid():
-                for k_tile in T.serial(K_TILES):
-                    issue_tma_load(k_tile)
-                    tma_cur.advance()
-                tile_scheduler.next_tile()
-    elif warp_id == int(WarpRole.TMA) + 1:
-
-        @T.inline
-        def issue_scale_tma_load(k_tile: T.int32):
-            stage = tma_cur.stage
-            sf_k = T.meta_var(k_tile * SF_CTA_K)
-            sf_m = T.meta_var((a_m // 128) * 128)
-            sf_n = T.meta_var((d_n // 128) * 128)
-            smem_pipe.empty.wait(tma_cur.stage, tma_cur.phase)
-            if id_in_pair == 0:
-                scale_bytes = T.meta_var(SFA_BYTES + SFB_BYTES)
-                _rem2 = T.alloc_local([1], "uint64")
-                T.ptx.mapa.shared__cluster.u64(
-                    _rem2[0], scale_full_bar.ptr_to([stage]), T.uint32(pair_leader_rank)
-                )
-                T.ptx.mbarrier.arrive.expect_tx.b64(
-                    _rem2[0], T.uint32(scale_bytes), pred=T.bool(True)
-                )
-            single_cta_mask: T.int32 = 1 << id_in_pair
-            # SFA: each CTA loads its half (single_cta_mask). SFB: multicast to
-            # both CTAs (pair_mask).
-            mapped_sfa_bar = _mapa_u64(scale_full_bar.ptr_to([stage]), 0)
-            T.evaluate(
-                T.ptx[_TMA_G2S_3D](
-                    SFA_smem.ptr_to([stage, 0, 0]),
-                    T.address_of(SFA_tensor_map),
-                    T.int32(0),
-                    T.cast(sf_k // 4, "int32"),
-                    T.cast(sf_m // 128, "int32"),
-                    T.cuda.cvta_generic_to_shared(T.reinterpret("handle", mapped_sfa_bar)),
-                    T.cast(single_cta_mask, "uint16"),
-                    T.uint64(_EVICT_NORMAL_L2_POLICY),
-                )
-            )
-            mapped_sfb_bar = _mapa_u64(scale_full_bar.ptr_to([stage]), 0)
-            if SFB_N == 128:
-                if id_in_pair == 0:
-                    T.evaluate(
-                        T.ptx[_TMA_G2S_3D](
-                            SFB_smem.ptr_to([stage, 0, 0]),
-                            T.address_of(SFB_tensor_map),
-                            T.int32(0),
-                            T.cast(sf_k // 4, "int32"),
-                            T.cast(sf_n // 128, "int32"),
-                            T.cuda.cvta_generic_to_shared(T.reinterpret("handle", mapped_sfb_bar)),
-                            T.cast(pair_mask, "uint16"),
-                            T.uint64(_EVICT_NORMAL_L2_POLICY),
-                        )
-                    )
-            else:
-                T.evaluate(
-                    T.ptx[_TMA_G2S_3D](
-                        SFB_smem.ptr_to([stage, cb_m * 128, 0]),
-                        T.address_of(SFB_tensor_map),
-                        T.int32(0),
-                        T.cast(sf_k // 4, "int32"),
-                        T.cast(sf_n // 128 + cb_m, "int32"),
-                        T.cuda.cvta_generic_to_shared(T.reinterpret("handle", mapped_sfb_bar)),
-                        T.cast(pair_mask, "uint16"),
-                        T.uint64(_EVICT_NORMAL_L2_POLICY),
-                    )
-                )
-
-        if T.cuda.elect_sync():
-            while tile_scheduler.valid():
-                for k_tile in T.serial(K_TILES):
-                    issue_scale_tma_load(k_tile)
-                    tma_cur.advance()
-                tile_scheduler.next_tile()
-    elif (warp_id == int(WarpRole.MMA)) & (id_in_pair == 0):
-
-        @T.inline
-        def execute_mma():
-            stage = mma_smem.stage
-            scale_full_bar.wait(mma_smem.stage, mma_smem.phase)
-            tile_full_bar.wait(mma_smem.stage, mma_smem.phase)
-            for flat in T.unroll(CTA_M // 32):
-                sfa_row = T.meta_var(flat % 4 * 32)
-                sfa_shared_addr: T.uint32 = T.cuda.cvta_generic_to_shared(
-                    T.ptr_byte_offset(
-                        SFA_smem.ptr_to([0, 0, 0]), (stage * CTA_M + sfa_row) * SF_CTA_K, "uint8"
-                    )
-                )
-                sfa_cp_desc: T.uint64 = T.bitwise_or(
-                    T.bitwise_and(sf_desc.desc, T.bitwise_not(T.uint64(0x3FFF))),
-                    T.cast(
-                        T.bitwise_and(
-                            T.shift_right(sfa_shared_addr, T.uint32(4)), T.uint32(0x3FFF)
-                        ),
-                        "uint64",
-                    ),
-                )
-                T.ptx[_TCGEN05_CP_2SM](
-                    T.cast(SFA_tmem.allocated_addr[0] + flat % 4 * 4, "uint32"), sfa_cp_desc
-                )
-            for flat in T.unroll(SFB_N // 32):
-                sfb_row = T.meta_var(flat % 4 * 32 + flat // 4 * 128)
-                sfb_shared_addr: T.uint32 = T.cuda.cvta_generic_to_shared(
-                    T.ptr_byte_offset(
-                        SFB_smem.ptr_to([0, 0, 0]), (stage * SFB_N + sfb_row) * SF_CTA_K, "uint8"
-                    )
-                )
-                sfb_cp_desc: T.uint64 = T.bitwise_or(
-                    T.bitwise_and(sf_desc.desc, T.bitwise_not(T.uint64(0x3FFF))),
-                    T.cast(
-                        T.bitwise_and(
-                            T.shift_right(sfb_shared_addr, T.uint32(4)), T.uint32(0x3FFF)
-                        ),
-                        "uint64",
-                    ),
-                )
-                T.ptx[_TCGEN05_CP_2SM](
-                    T.cast(
-                        SFB_tmem.allocated_addr[0] + flat % 4 * SFB_n_chunks * 4 + flat // 4 * 4,
-                        "uint32",
-                    ),
-                    sfb_cp_desc,
-                )
-            desc_i: T.uint32
-            T.cuda.tcgen05.encode_instr_descriptor_block_scaled(
-                T.address_of(desc_i),
-                d_dtype="float32",
-                a_dtype="float4_e2m1fn",
-                b_dtype="float4_e2m1fn",
-                sfa_dtype="float8_e4m3fn",
-                sfb_dtype="float8_e4m3fn",
-                sfa_tmem_addr=SFA_tmem.allocated_addr[0],
-                sfb_tmem_addr=SFB_tmem.allocated_addr[0],
-                M=CTA_M * CTA_GROUP,
-                N=MMA_N,
-                K=MMA_K,
-                trans_a=False,
-                trans_b=False,
-                n_cta_groups=CTA_GROUP,
-            )
-            for ki in T.unroll(MMA_K_BLOCKS):
-                desc_a_ki = T.meta_var(
-                    desc_a.add_16B_offset((stage * CTA_M * CTA_K + ki * MMA_K) // 32)
-                )
-                desc_b_ki = T.meta_var(
-                    desc_b.add_16B_offset((stage * CTA_N * CTA_K + ki * MMA_K) // 32)
-                )
-                sf_linear = T.meta_var(ki * sf_mma_k)
-                T.ptx[_MMA_NVFP4_2SM](
-                    T.cast(tmem.allocated_addr[0], "uint32"),
-                    desc_a_ki,
-                    desc_b_ki,
-                    desc_i,
-                    T.cuda.get_tmem_addr(
-                        SFA_tmem.allocated_addr[0],
-                        sf_linear % 512 // 16,
-                        sf_linear % 16 // sf_mma_k * sf_mma_k + sf_linear // 512,
-                    ),
-                    T.cuda.get_tmem_addr(
-                        SFB_tmem.allocated_addr[0],
-                        sf_linear % 512 // 16,
-                        sf_linear % 16 // sf_mma_k * sf_mma_k * SFB_n_chunks + sf_linear // 512,
-                    ),
-                    tvm.tirx.any(ki != 0, T.cast(accum, "bool")),
-                )
-            accum = 1
-            smem_pipe.empty.arrive(mma_smem.stage, cta_group=CTA_GROUP, cta_mask=pair_mask)
-
-        if T.cuda.elect_sync():
-            while tile_scheduler.valid():
-                tmem_pipe.empty.wait(mma_tmem.stage, mma_tmem.phase)
-                accum = 0
-                for k_tile in T.serial(K_TILES):
-                    execute_mma()
-                    mma_smem.advance()
-                tmem_pipe.full.arrive(mma_tmem.stage, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                mma_tmem.advance()
-                tile_scheduler.next_tile()
-    elif warp_id >= int(WarpRole.EPILOGUE):
-
-        @T.inline
-        def regs_to_smem(reg_bf16_words, chunk_index: T.constexpr, fragment_cols: T.constexpr):
-            # Each epilogue warp owns 32 rows.  stmatrix.x4 publishes two
-            # 16-row halves and one 16-column band at a time.  The former
-            # ldstmatrix dispatcher addressed the physical row-major tile
-            # first and then applied the hardware atom swizzle.  Reproduce
-            # that ordering explicitly instead of applying the buffer's
-            # logical tiled layout to the stmatrix seed coordinate.
-            swizzle_mask = T.meta_var(0x40 if EPI_TILE == 16 else 0xC0 if EPI_TILE == 32 else 0x1C0)
-            for cj in T.unroll(EPI_TILE // 16):
-                for mm in T.unroll(2):
-                    linear = T.meta_var(
-                        epi_wb_state.stage * CTA_M * EPI_TILE
-                        + warp_id % 4 * 32 * EPI_TILE
-                        + (lane_id % 16 + mm * 16) * EPI_TILE
-                        + lane_id // 16 * 8
-                        + cj * 16
-                    )
-                    swizzled = T.meta_var(
-                        T.bitwise_xor(
-                            linear, T.shift_right(T.bitwise_and(linear, swizzle_mask), T.int32(3))
-                        )
-                    )
-                    word_base = T.meta_var(
-                        mm * (fragment_cols // 4) + chunk_index * (EPI_TILE // 4) + cj * 4
-                    )
-                    T.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
-                        T.ptr_byte_offset(output_smem.ptr_to([0, 0, 0]), swizzled * 2, "bfloat16"),
-                        reg_bf16_words[word_base],
-                        reg_bf16_words[word_base + 1],
-                        reg_bf16_words[word_base + 2],
-                        reg_bf16_words[word_base + 3],
-                    )
-
-        @T.inline
-        def epilogue():
-            tmem_pipe.full.wait(epi_cur.stage, epi_cur.phase)
-
-            # Per-chunk store: R->S (stmatrix) then S->G (TMA). Shared by both schedules.
-            @T.inline
-            def store_epi_chunk(
-                reg_bf16_words,
-                chunk_index: T.constexpr,
-                linear_n: T.constexpr,
-                fragment_cols: T.constexpr,
-            ):
-                T.ptx.cp.async_.bulk.wait_group.read(WB_PIPE_DEPTH - 1)
-                T.cuda.warpgroup_sync(1)
-                regs_to_smem(reg_bf16_words, chunk_index, fragment_cols)
-                T.cuda.warpgroup_sync(1)
-                d_n_out: T.int32
-                d_n_out = d_n + linear_n
-                if tid_in_wg == 0:
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    T.evaluate(
-                        T.ptx[_TMA_S2G_EVICT_FIRST](
-                            T.address_of(D_tensor_map),
-                            T.cast(d_n_out, "int32"),
-                            T.cast(d_m, "int32"),
-                            output_smem.ptr_to([epi_wb_state.stage, 0, 0]),
-                            T.uint64(_EVICT_FIRST_L2_POLICY),
-                        )
-                    )
-                    T.ptx.cp.async_.bulk.commit_group()
-                epi_wb_state.advance()
-
-            # Fusion vs fission of {load; scale+cast; store}: overlap fuses and reuses
-            # a small (128, EPI_TILE) frag; non-overlap splits the loops, needing a big
-            # (128, MMA_N) frag (all chunks live between load and store).
-            if OVERLAP_EPI:
-                reg_f32 = T.alloc_local((EPI_TILE,), "float32")
-                reg_bf16_words = T.alloc_local((EPI_TILE // 2,), "uint32", align=16)
-                for no in T.unroll(MMA_N // EPI_TILE):
-                    linear_n = T.meta_var(no * EPI_TILE)
-                    for slab in T.unroll(2):
-                        reg_base = T.meta_var(slab * (EPI_TILE // 2))
-                        T.ptx[TMEM_LD](
-                            *[reg_f32[reg_base + j] for j in range(EPI_TILE // 2)],
-                            T.cuda.get_tmem_addr(tmem.allocated_addr[0], slab * 16, linear_n),
-                        )
-                    if no == MMA_N // EPI_TILE - 1:
-                        T.ptx.tcgen05.wait__ld.sync.aligned()
-                        if tid_in_wg == 0:
-                            tmem_pipe.empty.arrive(
-                                epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
-                            )
-                    for pair in T.unroll(EPI_TILE // 2):
-                        _mul_f32x2_inplace(reg_f32, pair * 2, alpha_local)
-                    for pair in T.unroll(EPI_TILE // 2):
-                        # PTX's packed cvt names the high-half source first.
-                        T.ptx.cvt.rn.bf16x2.f32(
-                            reg_bf16_words[pair], reg_f32[pair * 2 + 1], reg_f32[pair * 2]
-                        )
-                    store_epi_chunk(reg_bf16_words, 0, linear_n, EPI_TILE)
-            else:
-                # Preserve the dispatcher's two-slab register ordering: the
-                # first/second 64 TMEM rows occupy the two local halves.
-                reg_all_f32 = T.alloc_local((MMA_N,), "float32")
-                reg_all_pairs = reg_all_f32.view("uint64")
-                reg_all_bf16_words = T.alloc_local((MMA_N // 2,), "uint32", align=16)
-                for no in T.unroll(MMA_N // EPI_TILE):
-                    linear_n = T.meta_var(no * EPI_TILE)
-                    for slab in T.unroll(2):
-                        reg_base = T.meta_var(no * (EPI_TILE // 2) + slab * (MMA_N // 2))
-                        T.ptx[TMEM_LD](
-                            *[reg_all_f32[reg_base + j] for j in range(EPI_TILE // 2)],
-                            T.cuda.get_tmem_addr(tmem.allocated_addr[0], slab * 16, linear_n),
-                        )
-                T.ptx.tcgen05.wait__ld.sync.aligned()
-                for pair in T.unroll(MMA_N // 2):
-                    T.ptx.mul.rz.ftz.f32x2(
-                        reg_all_pairs[pair],
-                        T.cuda.make_float2(reg_all_f32[pair * 2], reg_all_f32[pair * 2 + 1]),
-                        T.cuda.make_float2(alpha_local, alpha_local),
-                    )
-                for pair in T.unroll(MMA_N // 2):
-                    T.ptx.cvt.rn.bf16x2.f32(
-                        reg_all_bf16_words[pair], reg_all_f32[pair * 2 + 1], reg_all_f32[pair * 2]
-                    )
-                if tid_in_wg == 0:
-                    tmem_pipe.empty.arrive(
-                        epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
-                    )
-                T.cuda.warpgroup_sync(1)
-                for no in T.unroll(MMA_N // EPI_TILE):
-                    linear_n = T.meta_var(no * EPI_TILE)
-                    store_epi_chunk(reg_all_bf16_words, no, linear_n, MMA_N)
-
-        while tile_scheduler.valid():
-            epilogue()
-            epi_cur.advance()
-            tile_scheduler.next_tile()
-        if tid_in_wg == 0:
-            T.ptx.cp.async_.bulk.wait_group.read(0)
-        T.cuda.warpgroup_sync(1)
-    if warp_id == int(WarpRole.EPILOGUE):
-        if T.cuda.elect_sync():
-            _rem3 = T.alloc_local([1], "uint64")
-            T.ptx.mapa.shared__cluster.u64(
-                _rem3[0], tmem_finished.ptr_to([0]), T.uint32(pair_leader_rank + 1 - id_in_pair)
-            )
-            T.ptx.mbarrier.arrive.b64(_rem3[0], T.uint32(1), pred=T.bool(True))
-        T.cuda.mbarrier_wait_acquire_cluster(tmem_finished.ptr_to([0]), 0)
-        tmem_dealloc_addr: T.uint32
-        T.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_addr.ptr_to([0]))
-        T.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
-            tmem_dealloc_addr, T.uint32(512)
+    def _set_tile_coords(self, tile_row, tile_col, cluster_m_offset, cluster_n_offset):
+        T.buffer_store(
+            self.m_idx.buffer, tile_row * self._cluster_m + cluster_m_offset, self.m_idx.indices
         )
+        T.buffer_store(
+            self.n_idx.buffer, tile_col * self._cluster_n + cluster_n_offset, self.n_idx.indices
+        )
+
+    def update_current_m_n_idx(self, work_idx):
+        cluster_m_offset = work_idx % self._cluster_m
+        t = work_idx // self._cluster_m
+        cluster_n_offset = t % self._cluster_n
+        tile_linear = t // self._cluster_n
+        group_size = self._l2_group_size
+        group_span = group_size * self._n_tile_cols
+
+        if self._full_groups == 0 and self._tail_rows == 0:
+            self._set_tile_coords(0, 0, cluster_m_offset, cluster_n_offset)
+        elif self._full_groups == 0:
+            rem = T.Bind(tile_linear - self._full_groups * group_span)
+            tile_row = T.Bind(self._full_groups * group_size + rem % self._tail_rows)
+            tile_col = T.Bind(rem // self._tail_rows)
+            self._set_tile_coords(tile_row, tile_col, cluster_m_offset, cluster_n_offset)
+        elif self._tail_rows == 0:
+            with T.If((self._full_groups > 0) & (tile_linear < self._full_groups * group_span)):
+                with T.Then():
+                    group_id = T.Bind(tile_linear // group_span)
+                    within_group = T.Bind(tile_linear % group_span)
+                    tile_row = T.Bind(group_id * group_size + within_group % group_size)
+                    tile_col = T.Bind(within_group // group_size)
+                    self._set_tile_coords(tile_row, tile_col, cluster_m_offset, cluster_n_offset)
+                with T.Else():
+                    self._set_tile_coords(0, 0, cluster_m_offset, cluster_n_offset)
+        else:
+            with T.If((self._full_groups > 0) & (tile_linear < self._full_groups * group_span)):
+                with T.Then():
+                    group_id = T.Bind(tile_linear // group_span)
+                    within_group = T.Bind(tile_linear % group_span)
+                    tile_row = T.Bind(group_id * group_size + within_group % group_size)
+                    tile_col = T.Bind(within_group // group_size)
+                    self._set_tile_coords(tile_row, tile_col, cluster_m_offset, cluster_n_offset)
+                with T.Else():
+                    rem = T.Bind(tile_linear - self._full_groups * group_span)
+                    tile_row = T.Bind(self._full_groups * group_size + rem % self._tail_rows)
+                    tile_col = T.Bind(rem // self._tail_rows)
+                    self._set_tile_coords(tile_row, tile_col, cluster_m_offset, cluster_n_offset)
+
+    def init(self, cluster_id):
+        T.buffer_store(self.linear_idx.buffer, cluster_id, self.linear_idx.indices)
+        T.buffer_store(self.tile_count.buffer, 0, self.tile_count.indices)
+        self.update_current_m_n_idx(cluster_id)
+
+    def next_tile(self):
+        T.buffer_store(
+            self.linear_idx.buffer, self.linear_idx + self._num_clusters, self.linear_idx.indices
+        )
+        T.buffer_store(self.tile_count.buffer, self.tile_count + 1, self.tile_count.indices)
+        self.update_current_m_n_idx(self.linear_idx)
+
+    def valid(self):
+        return self.linear_idx < self._total_tiles
+
+
+def _kernel(
+    *,
+    M,
+    N,
+    K,
+    SM_COUNT,
+    CTA_GROUP,
+    CLUSTER_M,
+    CLUSTER_N,
+    CTA_M,
+    CTA_N,
+    CTA_K,
+    MMA_K,
+    EPI_TILE,
+    TMEM_LD_SIZE,
+    WB_PIPE_DEPTH,
+    PIPE_DEPTH,
+    TMEM_PIPE_DEPTH,
+    L2_GROUP_SIZE,
+    NUM_WARPS,
+    OVERLAP_EPI,
+):
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("_kernel")
+            A_packed = T.arg("A_packed", T.Buffer((M, K // 2), "uint8"))
+            B_packed = T.arg("B_packed", T.Buffer((N, K // 2), "uint8"))
+            SFA_in = T.arg(
+                "SFA_in",
+                T.Buffer((M, K // 16), "uint8", layout=sf_smem_layout(M, K // 16, sf_per_mma=4)),
+            )
+            SFB_in = T.arg(
+                "SFB_in",
+                T.Buffer((N, K // 16), "uint8", layout=sf_smem_layout(N, K // 16, sf_per_mma=4)),
+            )
+            alpha = T.arg("alpha", T.Buffer((1,), "float32"))
+            D = T.arg("D", T.Buffer((M, N), "bfloat16"))
+            CLUSTER_SIZE = CLUSTER_M * CLUSTER_N
+            MMA_N = CTA_N * CTA_GROUP
+            SFB_N = MMA_N
+            MMA_K_BLOCKS = CTA_K // MMA_K
+            SF_CTA_K = CTA_K // 16
+            NUM_CLUSTERS = SM_COUNT // CLUSTER_SIZE
+            D_SWIZZLE_MODE = (
+                SwizzleMode.SWIZZLE_32B_ATOM
+                if EPI_TILE == 16
+                else SwizzleMode.SWIZZLE_64B_ATOM
+                if EPI_TILE == 32
+                else SwizzleMode.SWIZZLE_128B_ATOM
+            )
+            A_BYTES = CTA_M * (CTA_K // 2) * CTA_GROUP
+            B_BYTES = CTA_N * (CTA_K // 2) * CTA_GROUP
+            SFA_BYTES = CTA_M * SF_CTA_K * CTA_GROUP
+            SFB_BYTES = SFB_N * SF_CTA_K * CTA_GROUP
+            K_TILES = K // CTA_K
+            CLUSTER_M_TILES = M // CTA_M // CLUSTER_M
+            CLUSTER_N_TILES = N // MMA_N // CLUSTER_N
+            TMEM_LD = (
+                _TMEM_LD_X2 if EPI_TILE == 16 else _TMEM_LD_X4 if EPI_TILE == 32 else _TMEM_LD_X8
+            )
+            A_tensor_map = _builder_bind(
+                "A_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            B_tensor_map = _builder_bind(
+                "B_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            SFA_tensor_map = _builder_bind(
+                "SFA_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            SFB_tensor_map = _builder_bind(
+                "SFB_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            D_tensor_map = _builder_bind(
+                "D_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    A_tensor_map,
+                    "uint8",
+                    2,
+                    A_packed.data,
+                    K // 2,
+                    M,
+                    K // 2,
+                    CTA_K // 2,
+                    CTA_M,
+                    1,
+                    1,
+                    0,
+                    SwizzleMode.SWIZZLE_128B_ATOM.value,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    B_tensor_map,
+                    "uint8",
+                    2,
+                    B_packed.data,
+                    K // 2,
+                    N,
+                    K // 2,
+                    CTA_K // 2,
+                    CTA_N,
+                    1,
+                    1,
+                    0,
+                    SwizzleMode.SWIZZLE_128B_ATOM.value,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    SFA_tensor_map,
+                    "uint16",
+                    3,
+                    SFA_in.data,
+                    256,
+                    K // 64,
+                    M // 128,
+                    512,
+                    K * 8,
+                    256,
+                    4,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    0,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    SFB_tensor_map,
+                    "uint16",
+                    3,
+                    SFB_in.data,
+                    256,
+                    K // 64,
+                    N // 128,
+                    512,
+                    K * 8,
+                    256,
+                    4,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    0,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    D_tensor_map,
+                    "bfloat16",
+                    2,
+                    D.data,
+                    N,
+                    M,
+                    N * 2,
+                    EPI_TILE,
+                    CTA_M,
+                    1,
+                    1,
+                    0,
+                    D_SWIZZLE_MODE.value,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(T.device_entry())
+            cluster_rank = _builder_assign(
+                "cluster_rank",
+                T.cta_id_in_cluster([CLUSTER_SIZE], preferred=[CLUSTER_SIZE]),
+                locals().get("cluster_rank", _BUILDER_MISSING),
+            )
+            cta_idx = _builder_assign(
+                "cta_idx", T.cta_id([SM_COUNT]), locals().get("cta_idx", _BUILDER_MISSING)
+            )
+            tid_in_cta = _builder_assign(
+                "tid_in_cta",
+                T.thread_id([NUM_WARPS * 32]),
+                locals().get("tid_in_cta", _BUILDER_MISSING),
+            )
+            lane_id = _builder_assign(
+                "lane_id", T.lane_id([32]), locals().get("lane_id", _BUILDER_MISSING)
+            )
+            tid_in_wg = _builder_assign(
+                "tid_in_wg", T.thread_id_in_wg([128]), locals().get("tid_in_wg", _BUILDER_MISSING)
+            )
+            wg_id = _builder_assign(
+                "wg_id", T.warpgroup_id([NUM_WARPS // 4]), locals().get("wg_id", _BUILDER_MISSING)
+            )
+            warp_id = _builder_assign(
+                "warp_id", T.warp_id([NUM_WARPS]), locals().get("warp_id", _BUILDER_MISSING)
+            )
+            with T.If(warp_id == 0):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            _builder_emit(
+                                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(A_tensor_map)))
+                            )
+                            _builder_emit(
+                                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(B_tensor_map)))
+                            )
+                            _builder_emit(
+                                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(SFA_tensor_map)))
+                            )
+                            _builder_emit(
+                                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(SFB_tensor_map)))
+                            )
+                            _builder_emit(
+                                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(D_tensor_map)))
+                            )
+            cb_m = _builder_bind("cb_m", cluster_rank % CLUSTER_M, None)
+            cb_n = _builder_bind("cb_n", cluster_rank // CLUSTER_M, None)
+            pair_id = _builder_bind("pair_id", cluster_rank // CTA_GROUP, None)
+            id_in_pair = _builder_bind("id_in_pair", cluster_rank % CTA_GROUP, None)
+            pair_leader_rank = _builder_bind("pair_leader_rank", pair_id * CTA_GROUP, None)
+            tile_scheduler = _builder_assign(
+                "tile_scheduler",
+                ClusterPersistentScheduler2D(
+                    "tile_scheduler",
+                    num_m_tiles=CLUSTER_M_TILES,
+                    num_n_tiles=CLUSTER_N_TILES,
+                    num_clusters=NUM_CLUSTERS,
+                    l2_group_size=L2_GROUP_SIZE,
+                ),
+                locals().get("tile_scheduler", _BUILDER_MISSING),
+            )
+            _builder_emit(tile_scheduler.init(cta_idx // CLUSTER_SIZE))
+            m_idx = tile_scheduler.m_idx
+            n_idx = tile_scheduler.n_idx
+            cta_m = m_idx * CLUSTER_M + cb_m
+            cta_n = n_idx * CLUSTER_N + cb_n
+            a_m = cta_m * CTA_M
+            d_m = cta_m * CTA_M
+            b_n = cta_n * MMA_N + id_in_pair * CTA_N
+            d_n = cta_n * MMA_N
+            pool = _builder_assign("pool", T.SMEMPool(), locals().get("pool", _BUILDER_MISSING))
+            A_smem_packed = _builder_assign(
+                "A_smem_packed",
+                pool.alloc_tcgen05_mma_AB((PIPE_DEPTH, CTA_M, CTA_K // 2), "uint8"),
+                locals().get("A_smem_packed", _BUILDER_MISSING),
+            )
+            B_smem_packed = _builder_assign(
+                "B_smem_packed",
+                pool.alloc_tcgen05_mma_AB((PIPE_DEPTH, CTA_N, CTA_K // 2), "uint8"),
+                locals().get("B_smem_packed", _BUILDER_MISSING),
+            )
+            SFA_smem = _builder_assign(
+                "SFA_smem",
+                pool.alloc(
+                    (PIPE_DEPTH, CTA_M, SF_CTA_K),
+                    "uint8",
+                    layout=sf_smem_layout(128, 16, sf_per_mma=4, pipe_depth=PIPE_DEPTH),
+                    align=1024,
+                ),
+                locals().get("SFA_smem", _BUILDER_MISSING),
+            )
+            SFB_smem = _builder_assign(
+                "SFB_smem",
+                pool.alloc(
+                    (PIPE_DEPTH, SFB_N, SF_CTA_K),
+                    "uint8",
+                    layout=sf_smem_layout(SFB_N, 16, sf_per_mma=4, pipe_depth=PIPE_DEPTH),
+                    align=1024,
+                ),
+                locals().get("SFB_smem", _BUILDER_MISSING),
+            )
+            output_smem = _builder_assign(
+                "output_smem",
+                pool.alloc_tcgen05_mma_AB(
+                    (WB_PIPE_DEPTH, CTA_M, EPI_TILE), "bfloat16", swizzle_mode=D_SWIZZLE_MODE
+                ),
+                locals().get("output_smem", _BUILDER_MISSING),
+            )
+            tmem_addr = _builder_assign(
+                "tmem_addr",
+                pool.alloc([1], "uint32", align=4),
+                locals().get("tmem_addr", _BUILDER_MISSING),
+            )
+            mbar_leader = _builder_assign(
+                "mbar_leader", tid_in_cta == 32, locals().get("mbar_leader", _BUILDER_MISSING)
+            )
+            smem_pipe = _builder_assign(
+                "smem_pipe",
+                Pipeline(pool, PIPE_DEPTH, full="tma", empty="tcgen05", leader=mbar_leader),
+                locals().get("smem_pipe", _BUILDER_MISSING),
+            )
+            tile_full_bar = _builder_assign(
+                "tile_full_bar",
+                TMABar(pool, PIPE_DEPTH, leader=mbar_leader),
+                locals().get("tile_full_bar", _BUILDER_MISSING),
+            )
+            _builder_emit(tile_full_bar.init(1))
+            scale_full_bar = _builder_assign(
+                "scale_full_bar",
+                TMABar(pool, PIPE_DEPTH, leader=mbar_leader),
+                locals().get("scale_full_bar", _BUILDER_MISSING),
+            )
+            _builder_emit(scale_full_bar.init(1))
+            tmem_pipe = _builder_assign(
+                "tmem_pipe",
+                Pipeline(
+                    pool,
+                    TMEM_PIPE_DEPTH,
+                    full="tcgen05",
+                    empty="mbar",
+                    init_empty=CTA_GROUP,
+                    leader=mbar_leader,
+                ),
+                locals().get("tmem_pipe", _BUILDER_MISSING),
+            )
+            tmem_finished = _builder_assign(
+                "tmem_finished",
+                MBarrier(pool, 1, leader=mbar_leader),
+                locals().get("tmem_finished", _BUILDER_MISSING),
+            )
+            _builder_emit(tmem_finished.init(1))
+            _builder_emit(pool.commit())
+            with T.If(mbar_leader):
+                with T.Then():
+                    _builder_emit(T.ptx.fence.mbarrier_init.release.cluster())
+            tmem_pool = _builder_assign(
+                "tmem_pool",
+                T.TMEMPool(pool, total_cols=512, cta_group=CTA_GROUP, tmem_addr=tmem_addr),
+                locals().get("tmem_pool", _BUILDER_MISSING),
+            )
+            tmem = _builder_assign(
+                "tmem",
+                tmem_pool.alloc((CTA_M, 512), "float32"),
+                locals().get("tmem", _BUILDER_MISSING),
+            )
+            A_smem = _builder_assign(
+                "A_smem",
+                A_smem_packed.view("float4_e2m1fn"),
+                locals().get("A_smem", _BUILDER_MISSING),
+            )
+            B_smem = _builder_assign(
+                "B_smem",
+                B_smem_packed.view("float4_e2m1fn"),
+                locals().get("B_smem", _BUILDER_MISSING),
+            )
+            sf_mma_k = 4
+            SFB_n_chunks = SFB_N // 128
+            _builder_emit(tmem_pool.move_base_to(448))
+            SFA_tmem = _builder_assign(
+                "SFA_tmem",
+                tmem_pool.alloc_sf(
+                    (128, sf_mma_k * MMA_K_BLOCKS), "float8_e4m3fn", sf_per_mma=sf_mma_k
+                ),
+                locals().get("SFA_tmem", _BUILDER_MISSING),
+            )
+            _builder_emit(tmem_pool.move_base_to(464))
+            SFB_tmem = _builder_assign(
+                "SFB_tmem",
+                tmem_pool.alloc_sf(
+                    (128 * SFB_n_chunks, sf_mma_k * MMA_K_BLOCKS),
+                    "float8_e4m3fn",
+                    sf_per_mma=sf_mma_k,
+                ),
+                locals().get("SFB_tmem", _BUILDER_MISSING),
+            )
+            sf_desc = SmemDescriptor()
+            desc_a = SmemDescriptor()
+            desc_b = SmemDescriptor()
+            _builder_emit(
+                sf_desc.init(T.reinterpret("handle", T.uint64(0)), ldo=0, sdo=8, swizzle=0)
+            )
+            _builder_emit(desc_a.init(A_smem.ptr_to([0, 0, 0]), ldo=0, sdo=64, swizzle=3))
+            _builder_emit(desc_b.init(B_smem.ptr_to([0, 0, 0]), ldo=0, sdo=64, swizzle=3))
+            _builder_emit(tmem_pool.commit())
+            _builder_emit(T.ptx.barrier.cluster.arrive.release.aligned())
+            _builder_emit(T.ptx.barrier.cluster.wait.acquire())
+            with T.If(tid_in_cta < 32):
+                with T.Then():
+                    _builder_emit(
+                        T.ptx[
+                            f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"
+                        ]()
+                    )
+            pair_mask = _builder_alloc_scalar("pair_mask", "int32")
+            pair_mask = _builder_assign("pair_mask", 0, locals().get("pair_mask", _BUILDER_MISSING))
+            pair_mask = _builder_assign(
+                "pair_mask",
+                pair_mask | 1 << pair_leader_rank,
+                locals().get("pair_mask", _BUILDER_MISSING),
+            )
+            pair_mask = _builder_assign(
+                "pair_mask",
+                pair_mask | 1 << pair_leader_rank + 1,
+                locals().get("pair_mask", _BUILDER_MISSING),
+            )
+            tma_cur = _builder_assign(
+                "tma_cur", PipelineState(PIPE_DEPTH, 1), locals().get("tma_cur", _BUILDER_MISSING)
+            )
+            mma_smem = _builder_assign(
+                "mma_smem", PipelineState(PIPE_DEPTH, 0), locals().get("mma_smem", _BUILDER_MISSING)
+            )
+            mma_tmem = _builder_assign(
+                "mma_tmem",
+                PipelineState(TMEM_PIPE_DEPTH, 1),
+                locals().get("mma_tmem", _BUILDER_MISSING),
+            )
+            accum = _builder_alloc_scalar("accum", "int32")
+            accum = _builder_assign("accum", 0, locals().get("accum", _BUILDER_MISSING))
+            epi_cur = _builder_assign(
+                "epi_cur",
+                PipelineState(TMEM_PIPE_DEPTH, 0),
+                locals().get("epi_cur", _BUILDER_MISSING),
+            )
+            epi_wb_state = _builder_assign(
+                "epi_wb_state",
+                PipelineState(WB_PIPE_DEPTH, 1),
+                locals().get("epi_wb_state", _BUILDER_MISSING),
+            )
+            alpha_local = _builder_alloc_scalar("alpha_local", "float32")
+            _builder_emit(T.ptx.ld.global_.nc.f32(alpha_local, alpha.ptr_to([0])))
+            with T.If(warp_id == int(WarpRole.TMA)):
+                with T.Then():
+
+                    def issue_tma_load(k_tile: T.int32):
+                        stage = _builder_assign(
+                            "stage", tma_cur.stage, locals().get("stage", _BUILDER_MISSING)
+                        )
+                        k = k_tile * CTA_K // 2
+                        _builder_emit(smem_pipe.empty.wait(tma_cur.stage, tma_cur.phase))
+                        with T.If(id_in_pair == 0):
+                            with T.Then():
+                                tile_bytes = A_BYTES + B_BYTES
+                                _rem1 = _builder_assign(
+                                    "_rem1",
+                                    T.alloc_local([1], "uint64"),
+                                    locals().get("_rem1", _BUILDER_MISSING),
+                                )
+                                _builder_emit(
+                                    T.ptx.mapa.shared__cluster.u64(
+                                        _rem1[0],
+                                        tile_full_bar.ptr_to([stage]),
+                                        T.uint32(pair_leader_rank),
+                                    )
+                                )
+                                _builder_emit(
+                                    T.ptx.mbarrier.arrive.expect_tx.b64(
+                                        _rem1[0], T.uint32(tile_bytes), pred=T.bool(True)
+                                    )
+                                )
+                        single_cta_mask = _builder_scalar(
+                            "single_cta_mask", 1 << id_in_pair, "int32"
+                        )
+                        mapped_tile_bar = _builder_assign(
+                            "mapped_tile_bar",
+                            _mapa_u64(tile_full_bar.ptr_to([stage]), 0),
+                            locals().get("mapped_tile_bar", _BUILDER_MISSING),
+                        )
+                        _builder_emit(
+                            T.evaluate(
+                                T.ptx[_TMA_G2S_2D](
+                                    A_smem_packed.ptr_to([stage, 0, 0]),
+                                    T.address_of(A_tensor_map),
+                                    T.cast(k, "int32"),
+                                    T.cast(a_m, "int32"),
+                                    T.cuda.cvta_generic_to_shared(
+                                        T.reinterpret("handle", mapped_tile_bar)
+                                    ),
+                                    T.cast(single_cta_mask, "uint16"),
+                                    T.uint64(_EVICT_NORMAL_L2_POLICY),
+                                )
+                            )
+                        )
+                        _builder_emit(
+                            T.evaluate(
+                                T.ptx[_TMA_G2S_2D](
+                                    B_smem_packed.ptr_to([stage, 0, 0]),
+                                    T.address_of(B_tensor_map),
+                                    T.cast(k, "int32"),
+                                    T.cast(b_n, "int32"),
+                                    T.cuda.cvta_generic_to_shared(
+                                        T.reinterpret("handle", mapped_tile_bar)
+                                    ),
+                                    T.cast(single_cta_mask, "uint16"),
+                                    T.uint64(_EVICT_NORMAL_L2_POLICY),
+                                )
+                            )
+                        )
+
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            with T.While(tile_scheduler.valid()):
+                                with T.serial(K_TILES) as k_tile:
+                                    IRBuilder.name("k_tile", k_tile)
+                                    _builder_emit(issue_tma_load(k_tile))
+                                    _builder_emit(tma_cur.advance())
+                                _builder_emit(tile_scheduler.next_tile())
+                with T.Else():
+                    with T.If(warp_id == int(WarpRole.TMA) + 1):
+                        with T.Then():
+
+                            def issue_scale_tma_load(k_tile: T.int32):
+                                stage = _builder_assign(
+                                    "stage", tma_cur.stage, locals().get("stage", _BUILDER_MISSING)
+                                )
+                                sf_k = k_tile * SF_CTA_K
+                                sf_m = a_m // 128 * 128
+                                sf_n = d_n // 128 * 128
+                                _builder_emit(smem_pipe.empty.wait(tma_cur.stage, tma_cur.phase))
+                                with T.If(id_in_pair == 0):
+                                    with T.Then():
+                                        scale_bytes = SFA_BYTES + SFB_BYTES
+                                        _rem2 = _builder_assign(
+                                            "_rem2",
+                                            T.alloc_local([1], "uint64"),
+                                            locals().get("_rem2", _BUILDER_MISSING),
+                                        )
+                                        _builder_emit(
+                                            T.ptx.mapa.shared__cluster.u64(
+                                                _rem2[0],
+                                                scale_full_bar.ptr_to([stage]),
+                                                T.uint32(pair_leader_rank),
+                                            )
+                                        )
+                                        _builder_emit(
+                                            T.ptx.mbarrier.arrive.expect_tx.b64(
+                                                _rem2[0], T.uint32(scale_bytes), pred=T.bool(True)
+                                            )
+                                        )
+                                single_cta_mask = _builder_scalar(
+                                    "single_cta_mask", 1 << id_in_pair, "int32"
+                                )
+                                mapped_sfa_bar = _builder_assign(
+                                    "mapped_sfa_bar",
+                                    _mapa_u64(scale_full_bar.ptr_to([stage]), 0),
+                                    locals().get("mapped_sfa_bar", _BUILDER_MISSING),
+                                )
+                                _builder_emit(
+                                    T.evaluate(
+                                        T.ptx[_TMA_G2S_3D](
+                                            SFA_smem.ptr_to([stage, 0, 0]),
+                                            T.address_of(SFA_tensor_map),
+                                            T.int32(0),
+                                            T.cast(sf_k // 4, "int32"),
+                                            T.cast(sf_m // 128, "int32"),
+                                            T.cuda.cvta_generic_to_shared(
+                                                T.reinterpret("handle", mapped_sfa_bar)
+                                            ),
+                                            T.cast(single_cta_mask, "uint16"),
+                                            T.uint64(_EVICT_NORMAL_L2_POLICY),
+                                        )
+                                    )
+                                )
+                                mapped_sfb_bar = _builder_assign(
+                                    "mapped_sfb_bar",
+                                    _mapa_u64(scale_full_bar.ptr_to([stage]), 0),
+                                    locals().get("mapped_sfb_bar", _BUILDER_MISSING),
+                                )
+                                if SFB_N == 128:
+                                    with T.If(id_in_pair == 0):
+                                        with T.Then():
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    T.ptx[_TMA_G2S_3D](
+                                                        SFB_smem.ptr_to([stage, 0, 0]),
+                                                        T.address_of(SFB_tensor_map),
+                                                        T.int32(0),
+                                                        T.cast(sf_k // 4, "int32"),
+                                                        T.cast(sf_n // 128, "int32"),
+                                                        T.cuda.cvta_generic_to_shared(
+                                                            T.reinterpret("handle", mapped_sfb_bar)
+                                                        ),
+                                                        T.cast(pair_mask, "uint16"),
+                                                        T.uint64(_EVICT_NORMAL_L2_POLICY),
+                                                    )
+                                                )
+                                            )
+                                else:
+                                    _builder_emit(
+                                        T.evaluate(
+                                            T.ptx[_TMA_G2S_3D](
+                                                SFB_smem.ptr_to([stage, cb_m * 128, 0]),
+                                                T.address_of(SFB_tensor_map),
+                                                T.int32(0),
+                                                T.cast(sf_k // 4, "int32"),
+                                                T.cast(sf_n // 128 + cb_m, "int32"),
+                                                T.cuda.cvta_generic_to_shared(
+                                                    T.reinterpret("handle", mapped_sfb_bar)
+                                                ),
+                                                T.cast(pair_mask, "uint16"),
+                                                T.uint64(_EVICT_NORMAL_L2_POLICY),
+                                            )
+                                        )
+                                    )
+
+                            with T.If(T.cuda.elect_sync()):
+                                with T.Then():
+                                    with T.While(tile_scheduler.valid()):
+                                        with T.serial(K_TILES) as k_tile:
+                                            IRBuilder.name("k_tile", k_tile)
+                                            _builder_emit(issue_scale_tma_load(k_tile))
+                                            _builder_emit(tma_cur.advance())
+                                        _builder_emit(tile_scheduler.next_tile())
+                        with T.Else():
+                            with T.If((warp_id == int(WarpRole.MMA)) & (id_in_pair == 0)):
+                                with T.Then():
+
+                                    def execute_mma():
+                                        nonlocal accum
+                                        stage = _builder_assign(
+                                            "stage",
+                                            mma_smem.stage,
+                                            locals().get("stage", _BUILDER_MISSING),
+                                        )
+                                        _builder_emit(
+                                            scale_full_bar.wait(mma_smem.stage, mma_smem.phase)
+                                        )
+                                        _builder_emit(
+                                            tile_full_bar.wait(mma_smem.stage, mma_smem.phase)
+                                        )
+                                        with T.unroll(CTA_M // 32) as flat:
+                                            IRBuilder.name("flat", flat)
+                                            sfa_row = flat % 4 * 32
+                                            sfa_shared_addr = _builder_scalar(
+                                                "sfa_shared_addr",
+                                                T.cuda.cvta_generic_to_shared(
+                                                    T.ptr_byte_offset(
+                                                        SFA_smem.ptr_to([0, 0, 0]),
+                                                        (stage * CTA_M + sfa_row) * SF_CTA_K,
+                                                        "uint8",
+                                                    )
+                                                ),
+                                                "uint32",
+                                            )
+                                            sfa_cp_desc = _builder_scalar(
+                                                "sfa_cp_desc",
+                                                T.bitwise_or(
+                                                    T.bitwise_and(
+                                                        sf_desc.desc, T.bitwise_not(T.uint64(16383))
+                                                    ),
+                                                    T.cast(
+                                                        T.bitwise_and(
+                                                            T.shift_right(
+                                                                sfa_shared_addr, T.uint32(4)
+                                                            ),
+                                                            T.uint32(16383),
+                                                        ),
+                                                        "uint64",
+                                                    ),
+                                                ),
+                                                "uint64",
+                                            )
+                                            _builder_emit(
+                                                T.ptx[_TCGEN05_CP_2SM](
+                                                    T.cast(
+                                                        SFA_tmem.allocated_addr[0] + flat % 4 * 4,
+                                                        "uint32",
+                                                    ),
+                                                    sfa_cp_desc,
+                                                )
+                                            )
+                                        with T.unroll(SFB_N // 32) as flat:
+                                            IRBuilder.name("flat", flat)
+                                            sfb_row = flat % 4 * 32 + flat // 4 * 128
+                                            sfb_shared_addr = _builder_scalar(
+                                                "sfb_shared_addr",
+                                                T.cuda.cvta_generic_to_shared(
+                                                    T.ptr_byte_offset(
+                                                        SFB_smem.ptr_to([0, 0, 0]),
+                                                        (stage * SFB_N + sfb_row) * SF_CTA_K,
+                                                        "uint8",
+                                                    )
+                                                ),
+                                                "uint32",
+                                            )
+                                            sfb_cp_desc = _builder_scalar(
+                                                "sfb_cp_desc",
+                                                T.bitwise_or(
+                                                    T.bitwise_and(
+                                                        sf_desc.desc, T.bitwise_not(T.uint64(16383))
+                                                    ),
+                                                    T.cast(
+                                                        T.bitwise_and(
+                                                            T.shift_right(
+                                                                sfb_shared_addr, T.uint32(4)
+                                                            ),
+                                                            T.uint32(16383),
+                                                        ),
+                                                        "uint64",
+                                                    ),
+                                                ),
+                                                "uint64",
+                                            )
+                                            _builder_emit(
+                                                T.ptx[_TCGEN05_CP_2SM](
+                                                    T.cast(
+                                                        SFB_tmem.allocated_addr[0]
+                                                        + flat % 4 * SFB_n_chunks * 4
+                                                        + flat // 4 * 4,
+                                                        "uint32",
+                                                    ),
+                                                    sfb_cp_desc,
+                                                )
+                                            )
+                                        desc_i = _builder_alloc_scalar("desc_i", "uint32")
+                                        _builder_emit(
+                                            T.cuda.tcgen05.encode_instr_descriptor_block_scaled(
+                                                T.address_of(desc_i),
+                                                d_dtype="float32",
+                                                a_dtype="float4_e2m1fn",
+                                                b_dtype="float4_e2m1fn",
+                                                sfa_dtype="float8_e4m3fn",
+                                                sfb_dtype="float8_e4m3fn",
+                                                sfa_tmem_addr=SFA_tmem.allocated_addr[0],
+                                                sfb_tmem_addr=SFB_tmem.allocated_addr[0],
+                                                M=CTA_M * CTA_GROUP,
+                                                N=MMA_N,
+                                                K=MMA_K,
+                                                trans_a=False,
+                                                trans_b=False,
+                                                n_cta_groups=CTA_GROUP,
+                                            )
+                                        )
+                                        with T.unroll(MMA_K_BLOCKS) as ki:
+                                            IRBuilder.name("ki", ki)
+                                            desc_a_ki = desc_a.add_16B_offset(
+                                                (stage * CTA_M * CTA_K + ki * MMA_K) // 32
+                                            )
+                                            desc_b_ki = desc_b.add_16B_offset(
+                                                (stage * CTA_N * CTA_K + ki * MMA_K) // 32
+                                            )
+                                            sf_linear = ki * sf_mma_k
+                                            _builder_emit(
+                                                T.ptx[_MMA_NVFP4_2SM](
+                                                    T.cast(tmem.allocated_addr[0], "uint32"),
+                                                    desc_a_ki,
+                                                    desc_b_ki,
+                                                    desc_i,
+                                                    T.cuda.get_tmem_addr(
+                                                        SFA_tmem.allocated_addr[0],
+                                                        sf_linear % 512 // 16,
+                                                        sf_linear % 16 // sf_mma_k * sf_mma_k
+                                                        + sf_linear // 512,
+                                                    ),
+                                                    T.cuda.get_tmem_addr(
+                                                        SFB_tmem.allocated_addr[0],
+                                                        sf_linear % 512 // 16,
+                                                        sf_linear
+                                                        % 16
+                                                        // sf_mma_k
+                                                        * sf_mma_k
+                                                        * SFB_n_chunks
+                                                        + sf_linear // 512,
+                                                    ),
+                                                    tvm.tirx.any(ki != 0, T.cast(accum, "bool")),
+                                                )
+                                            )
+                                        accum = _builder_assign("accum", 1, accum)
+                                        _builder_emit(
+                                            smem_pipe.empty.arrive(
+                                                mma_smem.stage,
+                                                cta_group=CTA_GROUP,
+                                                cta_mask=pair_mask,
+                                            )
+                                        )
+
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            with T.While(tile_scheduler.valid()):
+                                                _builder_emit(
+                                                    tmem_pipe.empty.wait(
+                                                        mma_tmem.stage, mma_tmem.phase
+                                                    )
+                                                )
+                                                accum = _builder_assign(
+                                                    "accum",
+                                                    0,
+                                                    locals().get("accum", _BUILDER_MISSING),
+                                                )
+                                                with T.serial(K_TILES) as k_tile:
+                                                    IRBuilder.name("k_tile", k_tile)
+                                                    _builder_emit(execute_mma())
+                                                    _builder_emit(mma_smem.advance())
+                                                _builder_emit(
+                                                    tmem_pipe.full.arrive(
+                                                        mma_tmem.stage,
+                                                        cta_group=CTA_GROUP,
+                                                        cta_mask=pair_mask,
+                                                    )
+                                                )
+                                                _builder_emit(mma_tmem.advance())
+                                                _builder_emit(tile_scheduler.next_tile())
+                                with T.Else():
+                                    with T.If(warp_id >= int(WarpRole.EPILOGUE)):
+                                        with T.Then():
+
+                                            def regs_to_smem(
+                                                reg_bf16_words,
+                                                chunk_index: T.constexpr,
+                                                fragment_cols: T.constexpr,
+                                            ):
+                                                swizzle_mask = (
+                                                    64
+                                                    if EPI_TILE == 16
+                                                    else 192
+                                                    if EPI_TILE == 32
+                                                    else 448
+                                                )
+                                                with T.unroll(EPI_TILE // 16) as cj:
+                                                    IRBuilder.name("cj", cj)
+                                                    with T.unroll(2) as mm:
+                                                        IRBuilder.name("mm", mm)
+                                                        linear = (
+                                                            epi_wb_state.stage * CTA_M * EPI_TILE
+                                                            + warp_id % 4 * 32 * EPI_TILE
+                                                            + (lane_id % 16 + mm * 16) * EPI_TILE
+                                                            + lane_id // 16 * 8
+                                                            + cj * 16
+                                                        )
+                                                        swizzled = T.bitwise_xor(
+                                                            linear,
+                                                            T.shift_right(
+                                                                T.bitwise_and(linear, swizzle_mask),
+                                                                T.int32(3),
+                                                            ),
+                                                        )
+                                                        word_base = (
+                                                            mm * (fragment_cols // 4)
+                                                            + chunk_index * (EPI_TILE // 4)
+                                                            + cj * 4
+                                                        )
+                                                        _builder_emit(
+                                                            T.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
+                                                                T.ptr_byte_offset(
+                                                                    output_smem.ptr_to([0, 0, 0]),
+                                                                    swizzled * 2,
+                                                                    "bfloat16",
+                                                                ),
+                                                                reg_bf16_words[word_base],
+                                                                reg_bf16_words[word_base + 1],
+                                                                reg_bf16_words[word_base + 2],
+                                                                reg_bf16_words[word_base + 3],
+                                                            )
+                                                        )
+
+                                            def epilogue():
+                                                _builder_emit(
+                                                    tmem_pipe.full.wait(
+                                                        epi_cur.stage, epi_cur.phase
+                                                    )
+                                                )
+
+                                                def store_epi_chunk(
+                                                    reg_bf16_words,
+                                                    chunk_index: T.constexpr,
+                                                    linear_n: T.constexpr,
+                                                    fragment_cols: T.constexpr,
+                                                ):
+                                                    _builder_emit(
+                                                        T.ptx.cp.async_.bulk.wait_group.read(
+                                                            WB_PIPE_DEPTH - 1
+                                                        )
+                                                    )
+                                                    _builder_emit(T.cuda.warpgroup_sync(1))
+                                                    _builder_emit(
+                                                        regs_to_smem(
+                                                            reg_bf16_words,
+                                                            chunk_index,
+                                                            fragment_cols,
+                                                        )
+                                                    )
+                                                    _builder_emit(T.cuda.warpgroup_sync(1))
+                                                    d_n_out = _builder_alloc_scalar(
+                                                        "d_n_out", "int32"
+                                                    )
+                                                    d_n_out = _builder_assign(
+                                                        "d_n_out",
+                                                        d_n + linear_n,
+                                                        locals().get("d_n_out", _BUILDER_MISSING),
+                                                    )
+                                                    with T.If(tid_in_wg == 0):
+                                                        with T.Then():
+                                                            _builder_emit(
+                                                                T.ptx.fence.proxy.async_.shared__cta()
+                                                            )
+                                                            _builder_emit(
+                                                                T.evaluate(
+                                                                    T.ptx[_TMA_S2G_EVICT_FIRST](
+                                                                        T.address_of(D_tensor_map),
+                                                                        T.cast(d_n_out, "int32"),
+                                                                        T.cast(d_m, "int32"),
+                                                                        output_smem.ptr_to(
+                                                                            [
+                                                                                epi_wb_state.stage,
+                                                                                0,
+                                                                                0,
+                                                                            ]
+                                                                        ),
+                                                                        T.uint64(
+                                                                            _EVICT_FIRST_L2_POLICY
+                                                                        ),
+                                                                    )
+                                                                )
+                                                            )
+                                                            _builder_emit(
+                                                                T.ptx.cp.async_.bulk.commit_group()
+                                                            )
+                                                    _builder_emit(epi_wb_state.advance())
+
+                                                if OVERLAP_EPI:
+                                                    reg_f32 = _builder_assign(
+                                                        "reg_f32",
+                                                        T.alloc_local((EPI_TILE,), "float32"),
+                                                        locals().get("reg_f32", _BUILDER_MISSING),
+                                                    )
+                                                    reg_bf16_words = _builder_assign(
+                                                        "reg_bf16_words",
+                                                        T.alloc_local(
+                                                            (EPI_TILE // 2,), "uint32", align=16
+                                                        ),
+                                                        locals().get(
+                                                            "reg_bf16_words", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    with T.unroll(MMA_N // EPI_TILE) as no:
+                                                        IRBuilder.name("no", no)
+                                                        linear_n = no * EPI_TILE
+                                                        with T.unroll(2) as slab:
+                                                            IRBuilder.name("slab", slab)
+                                                            reg_base = slab * (EPI_TILE // 2)
+                                                            _builder_emit(
+                                                                T.ptx[TMEM_LD](
+                                                                    *[
+                                                                        reg_f32[reg_base + j]
+                                                                        for j in range(
+                                                                            EPI_TILE // 2
+                                                                        )
+                                                                    ],
+                                                                    T.cuda.get_tmem_addr(
+                                                                        tmem.allocated_addr[0],
+                                                                        slab * 16,
+                                                                        linear_n,
+                                                                    ),
+                                                                )
+                                                            )
+                                                        with T.If(no == MMA_N // EPI_TILE - 1):
+                                                            with T.Then():
+                                                                _builder_emit(
+                                                                    T.ptx.tcgen05.wait__ld.sync.aligned()
+                                                                )
+                                                                with T.If(tid_in_wg == 0):
+                                                                    with T.Then():
+                                                                        _builder_emit(
+                                                                            tmem_pipe.empty.arrive(
+                                                                                epi_cur.stage,
+                                                                                remote=pair_leader_rank,
+                                                                                pred=True,
+                                                                                count=1,
+                                                                            )
+                                                                        )
+                                                        with T.unroll(EPI_TILE // 2) as pair:
+                                                            IRBuilder.name("pair", pair)
+                                                            _builder_emit(
+                                                                _mul_f32x2_inplace(
+                                                                    reg_f32, pair * 2, alpha_local
+                                                                )
+                                                            )
+                                                        with T.unroll(EPI_TILE // 2) as pair:
+                                                            IRBuilder.name("pair", pair)
+                                                            _builder_emit(
+                                                                T.ptx.cvt.rn.bf16x2.f32(
+                                                                    reg_bf16_words[pair],
+                                                                    reg_f32[pair * 2 + 1],
+                                                                    reg_f32[pair * 2],
+                                                                )
+                                                            )
+                                                        _builder_emit(
+                                                            store_epi_chunk(
+                                                                reg_bf16_words,
+                                                                0,
+                                                                linear_n,
+                                                                EPI_TILE,
+                                                            )
+                                                        )
+                                                else:
+                                                    reg_all_f32 = _builder_assign(
+                                                        "reg_all_f32",
+                                                        T.alloc_local((MMA_N,), "float32"),
+                                                        locals().get(
+                                                            "reg_all_f32", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    reg_all_pairs = _builder_assign(
+                                                        "reg_all_pairs",
+                                                        reg_all_f32.view("uint64"),
+                                                        locals().get(
+                                                            "reg_all_pairs", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    reg_all_bf16_words = _builder_assign(
+                                                        "reg_all_bf16_words",
+                                                        T.alloc_local(
+                                                            (MMA_N // 2,), "uint32", align=16
+                                                        ),
+                                                        locals().get(
+                                                            "reg_all_bf16_words", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    with T.unroll(MMA_N // EPI_TILE) as no:
+                                                        IRBuilder.name("no", no)
+                                                        linear_n = no * EPI_TILE
+                                                        with T.unroll(2) as slab:
+                                                            IRBuilder.name("slab", slab)
+                                                            reg_base = no * (
+                                                                EPI_TILE // 2
+                                                            ) + slab * (MMA_N // 2)
+                                                            _builder_emit(
+                                                                T.ptx[TMEM_LD](
+                                                                    *[
+                                                                        reg_all_f32[reg_base + j]
+                                                                        for j in range(
+                                                                            EPI_TILE // 2
+                                                                        )
+                                                                    ],
+                                                                    T.cuda.get_tmem_addr(
+                                                                        tmem.allocated_addr[0],
+                                                                        slab * 16,
+                                                                        linear_n,
+                                                                    ),
+                                                                )
+                                                            )
+                                                    _builder_emit(
+                                                        T.ptx.tcgen05.wait__ld.sync.aligned()
+                                                    )
+                                                    with T.unroll(MMA_N // 2) as pair:
+                                                        IRBuilder.name("pair", pair)
+                                                        _builder_emit(
+                                                            T.ptx.mul.rz.ftz.f32x2(
+                                                                reg_all_pairs[pair],
+                                                                T.cuda.make_float2(
+                                                                    reg_all_f32[pair * 2],
+                                                                    reg_all_f32[pair * 2 + 1],
+                                                                ),
+                                                                T.cuda.make_float2(
+                                                                    alpha_local, alpha_local
+                                                                ),
+                                                            )
+                                                        )
+                                                    with T.unroll(MMA_N // 2) as pair:
+                                                        IRBuilder.name("pair", pair)
+                                                        _builder_emit(
+                                                            T.ptx.cvt.rn.bf16x2.f32(
+                                                                reg_all_bf16_words[pair],
+                                                                reg_all_f32[pair * 2 + 1],
+                                                                reg_all_f32[pair * 2],
+                                                            )
+                                                        )
+                                                    with T.If(tid_in_wg == 0):
+                                                        with T.Then():
+                                                            _builder_emit(
+                                                                tmem_pipe.empty.arrive(
+                                                                    epi_cur.stage,
+                                                                    remote=pair_leader_rank,
+                                                                    pred=True,
+                                                                    count=1,
+                                                                )
+                                                            )
+                                                    _builder_emit(T.cuda.warpgroup_sync(1))
+                                                    with T.unroll(MMA_N // EPI_TILE) as no:
+                                                        IRBuilder.name("no", no)
+                                                        linear_n = no * EPI_TILE
+                                                        _builder_emit(
+                                                            store_epi_chunk(
+                                                                reg_all_bf16_words,
+                                                                no,
+                                                                linear_n,
+                                                                MMA_N,
+                                                            )
+                                                        )
+
+                                            with T.While(tile_scheduler.valid()):
+                                                _builder_emit(epilogue())
+                                                _builder_emit(epi_cur.advance())
+                                                _builder_emit(tile_scheduler.next_tile())
+                                            with T.If(tid_in_wg == 0):
+                                                with T.Then():
+                                                    _builder_emit(
+                                                        T.ptx.cp.async_.bulk.wait_group.read(0)
+                                                    )
+                                            _builder_emit(T.cuda.warpgroup_sync(1))
+            with T.If(warp_id == int(WarpRole.EPILOGUE)):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            _rem3 = _builder_assign(
+                                "_rem3",
+                                T.alloc_local([1], "uint64"),
+                                locals().get("_rem3", _BUILDER_MISSING),
+                            )
+                            _builder_emit(
+                                T.ptx.mapa.shared__cluster.u64(
+                                    _rem3[0],
+                                    tmem_finished.ptr_to([0]),
+                                    T.uint32(pair_leader_rank + 1 - id_in_pair),
+                                )
+                            )
+                            _builder_emit(
+                                T.ptx.mbarrier.arrive.b64(_rem3[0], T.uint32(1), pred=T.bool(True))
+                            )
+                    _builder_emit(
+                        T.cuda.mbarrier_wait_acquire_cluster(tmem_finished.ptr_to([0]), 0)
+                    )
+                    tmem_dealloc_addr = _builder_alloc_scalar("tmem_dealloc_addr", "uint32")
+                    _builder_emit(T.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_addr.ptr_to([0])))
+                    _builder_emit(
+                        T.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
+                            tmem_dealloc_addr, T.uint32(512)
+                        )
+                    )
+    return builder.get()
 
 
 def tir_ws_kernel(M: int, N: int, K: int):
     assert M % 128 == 0 and N % 256 == 0 and K % 256 == 0
     assert (M // 128) % 2 == 0
     assert (K // 16) % 4 == 0
-    config = dict(TIRX_CONFIGS.get((M, N, K), {}))
-    return _kernel.specialize(M=M, N=N, K=K, **config)
+    config = {
+        "SM_COUNT": 148,
+        "CTA_GROUP": 2,
+        "CLUSTER_M": 2,
+        "CLUSTER_N": 1,
+        "CTA_M": 128,
+        "CTA_N": 128,
+        "CTA_K": 256,
+        "MMA_K": 64,
+        "EPI_TILE": 64,
+        "TMEM_LD_SIZE": 64,
+        "WB_PIPE_DEPTH": 2,
+        "PIPE_DEPTH": 5,
+        "TMEM_PIPE_DEPTH": 1,
+        "L2_GROUP_SIZE": 8,
+        "NUM_WARPS": 8,
+        "OVERLAP_EPI": True,
+    }
+    config.update(TIRX_CONFIGS.get((M, N, K), {}))
+    return _kernel(M=M, N=N, K=K, **config)
 
 
 TIRX_CONFIGS = {

@@ -16,11 +16,151 @@ from unittest import SkipTest
 
 import torch
 
+import tvm
+from tirx_kernels.flashmla.utils._ir_builder import MBarrier, TCGen05Bar, TMABar
 from tvm.backend.cuda.op import cuda_func_call
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import ir as I
+from tvm.script.ir_builder import tirx as T
+from tvm.script.ir_builder.base import IRBuilderFrame
+from tvm.tirx import IterVar, Layout, is_buffer_var
+from tvm.tirx.script.builder.ir import name_meta_class_value
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _TEST_DIFF_THRESHOLD = 5e-6
 _COMPILE_CACHE_NAMESPACE = "deepgemm.mqa_logits_fp4.compile"
+
+
+_BUILDER_MISSING = object()
+
+
+def _builder_runtime_condition(value):
+    return value
+
+
+def _builder_enter(frame):
+    frames = frame.frames if hasattr(frame, "frames") else [frame]
+    prim_func = next(
+        candidate
+        for candidate in reversed(IRBuilder.current().frames)
+        if type(candidate).__name__ == "PrimFuncFrame"
+    )
+    for item in frames:
+        prim_func.add_callback(lambda item=item: item.__exit__(None, None, None))
+        item.__enter__()
+
+
+def _builder_emit(value):
+    if value is None or isinstance(value, tvm.ir.Var):
+        return
+    if isinstance(value, IRBuilderFrame) or (
+        hasattr(value, "frames") and hasattr(value, "__enter__")
+    ):
+        _builder_enter(value)
+    elif tvm.ir.is_prim_expr(value) or isinstance(value, tvm.ir.Call):
+        T.evaluate(value)
+    elif isinstance(value, int | bool):
+        T.evaluate(tvm.tirx.const(value))
+
+
+def _builder_alloc_scalar(name, dtype):
+    scalar = T.local_scalar(dtype)
+    IRBuilder.name(name, scalar.scalar.buffer)
+    return scalar.scalar
+
+
+def _builder_scalar(name, value, dtype):
+    scalar = _builder_alloc_scalar(name, dtype)
+    T.buffer_store(scalar.buffer, value, scalar.indices)
+    return scalar
+
+
+def _builder_buffer(name, shape, dtype):
+    buffer = T.alloc_local(shape, dtype)
+    IRBuilder.name(name, buffer)
+    return buffer
+
+
+def _builder_bind(name, value, type_annotation=None):
+    result = T.Bind(value, type_annotation)
+    IRBuilder.name(name, result)
+    return result
+
+
+def _builder_assign(name, value, previous=_BUILDER_MISSING):
+    if isinstance(value, I.meta_var):
+        return value.value
+    if previous is not _BUILDER_MISSING:
+        if isinstance(previous, T.scalar_wrapper | tvm.tirx.expr.BufferLoad):
+            target = previous.scalar if isinstance(previous, T.scalar_wrapper) else previous
+            T.buffer_store(target.buffer, value, target.indices)
+            return target
+        if (
+            is_buffer_var(previous)
+            and len(previous.ty.shape) == 1
+            and bool(previous.ty.shape[0] == 1)
+        ):
+            try:
+                T.buffer_store(previous, value, [0])
+                return previous
+            except TypeError:
+                pass
+    if getattr(type(value), "_is_meta_class", False):
+        name_meta_class_value(name, value)
+        return value
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _builder_assign(f"{name}_{index}", item)
+        return value
+    if is_buffer_var(value) or isinstance(value, IterVar | Layout):
+        IRBuilder.name(name, value)
+        return value
+    if isinstance(value, tvm.ir.Var):
+        if isinstance(value.ty, tvm.ir.PointerType):
+            return _builder_bind(name, value, value.ty)
+        IRBuilder.name(name, value)
+        return value
+    if isinstance(value, tvm.ir.Expr) and isinstance(
+        getattr(value, "ty", None), tvm.ir.PointerType
+    ):
+        return _builder_bind(name, value, value.ty)
+    if isinstance(value, tvm.ir.Expr) and tvm.ir.is_prim_expr(value):
+        return _builder_scalar(name, value, str(value.ty.dtype))
+    if isinstance(value, tvm.tirx.expr.ExprOp):
+        return _builder_scalar(name, value, "bool")
+    return value
+
+
+def _builder_assign_many(names, values, previous):
+    return tuple(
+        _builder_assign(name, value, old) for name, value, old in zip(names, values, previous)
+    )
+
+
+@T.meta_class
+class Pipeline:
+    """Builder-native full/empty barrier pair matching TVM's pipeline helper."""
+
+    def __init__(
+        self,
+        pool,
+        stages,
+        *,
+        full,
+        empty,
+        init_full=1,
+        init_empty=1,
+        empty_phase_offset=0,
+        leader=None,
+    ):
+        barrier_kinds = {"tma": TMABar, "tcgen05": TCGen05Bar, "mbar": MBarrier}
+        self.stages = stages
+        self.full = barrier_kinds[full](pool, stages, leader=leader)
+        self.full.init(init_full)
+        self.empty = barrier_kinds[empty](
+            pool, stages, phase_offset=empty_phase_offset, leader=leader
+        )
+        self.empty.init(init_empty)
 
 
 @dataclass(frozen=True)
@@ -310,8 +450,6 @@ def _mqa_fp4_wrelu_reduce_src(num_heads: int) -> str:
 def get_kernel(**kwargs: Any):
     from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_tmem_layout
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
-    from tvm.script import tirx as T
-    from tvm.tirx.lang.pipeline import MBarrier, Pipeline
     from tvm.tirx.layout import S, TCol, TileLayout, TLane
 
     config = _make_config(**kwargs)
@@ -410,686 +548,1615 @@ def get_kernel(**kwargs: Any):
             )
         )
 
-    @T.prim_func
-    def sm100_fp4_mqa_logits(
-        seq_len: T.uint32,
-        seq_len_kv: T.uint32,
-        max_seqlen_k: T.uint32,
-        logits_stride: T.uint32,
-        cu_seq_len_k_start_h: T.handle,
-        cu_seq_len_k_end_h: T.handle,
-        logits_h: T.handle,
-        q_gmem_h: T.handle,
-        sf_q_gmem_h: T.handle,
-        kv_gmem_h: T.handle,
-        sf_kv_gmem_h: T.handle,
-        weights_gmem_h: T.handle,
-    ):
-        # seq_len / seq_len_kv are RUNTIME like DeepGEMM: one compiled kernel serves any
-        # length; structure stays compile-time. match_buffer must precede device_entry.
-        cu_seq_len_k_start = T.match_buffer(cu_seq_len_k_start_h, (seq_len,), "int32")
-        cu_seq_len_k_end = T.match_buffer(cu_seq_len_k_end_h, (seq_len,), "int32")
-        logits = T.match_buffer(
-            logits_h,
-            (
-                (T.cast(seq_len, "int32") + T.int32(block_q - 1))
-                // T.int32(block_q)
-                * T.int32(block_q),
-                T.cast(logits_stride, "int32"),
-            ),
-            logits_tir_dtype,
-        )
-        q_gmem = T.match_buffer(q_gmem_h, (seq_len * num_heads, head_dim // 2), "uint8")
-        sf_q_gmem = T.match_buffer(sf_q_gmem_h, (seq_len, num_heads), "uint32")
-        kv_gmem = T.match_buffer(kv_gmem_h, (seq_len_kv, head_dim // 2), "uint8")
-        # Preserve the public physical (1, seq_len_kv) buffer view; the unit
-        # outer dimension canonicalizes to the rank-1 SFKV tensor map below.
-        sf_kv_gmem = T.match_buffer(sf_kv_gmem_h, (1, seq_len_kv), "uint32")
-        weights_gmem = T.match_buffer(weights_gmem_h, (seq_len, num_heads), "float32")
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("sm100_fp4_mqa_logits")
+            seq_len = T.arg("seq_len", T.uint32())
+            seq_len_kv = T.arg("seq_len_kv", T.uint32())
+            max_seqlen_k = T.arg("max_seqlen_k", T.uint32())
+            logits_stride = T.arg("logits_stride", T.uint32())
+            cu_seq_len_k_start_h = T.arg("cu_seq_len_k_start_h", T.handle())
+            cu_seq_len_k_end_h = T.arg("cu_seq_len_k_end_h", T.handle())
+            logits_h = T.arg("logits_h", T.handle())
+            q_gmem_h = T.arg("q_gmem_h", T.handle())
+            sf_q_gmem_h = T.arg("sf_q_gmem_h", T.handle())
+            kv_gmem_h = T.arg("kv_gmem_h", T.handle())
+            sf_kv_gmem_h = T.arg("sf_kv_gmem_h", T.handle())
+            weights_gmem_h = T.arg("weights_gmem_h", T.handle())
+            # seq_len / seq_len_kv are RUNTIME like DeepGEMM: one compiled kernel serves any
+            # length; structure stays compile-time. match_buffer must precede device_entry.
+            cu_seq_len_k_start = _builder_assign(
+                "cu_seq_len_k_start",
+                T.match_buffer(cu_seq_len_k_start_h, (seq_len,), "int32"),
+                locals().get("cu_seq_len_k_start", _BUILDER_MISSING),
+            )
+            cu_seq_len_k_end = _builder_assign(
+                "cu_seq_len_k_end",
+                T.match_buffer(cu_seq_len_k_end_h, (seq_len,), "int32"),
+                locals().get("cu_seq_len_k_end", _BUILDER_MISSING),
+            )
+            logits = _builder_assign(
+                "logits",
+                T.match_buffer(
+                    logits_h,
+                    (
+                        (T.cast(seq_len, "int32") + T.int32(block_q - 1))
+                        // T.int32(block_q)
+                        * T.int32(block_q),
+                        T.cast(logits_stride, "int32"),
+                    ),
+                    logits_tir_dtype,
+                ),
+                locals().get("logits", _BUILDER_MISSING),
+            )
+            q_gmem = _builder_assign(
+                "q_gmem",
+                T.match_buffer(q_gmem_h, (seq_len * num_heads, head_dim // 2), "uint8"),
+                locals().get("q_gmem", _BUILDER_MISSING),
+            )
+            sf_q_gmem = _builder_assign(
+                "sf_q_gmem",
+                T.match_buffer(sf_q_gmem_h, (seq_len, num_heads), "uint32"),
+                locals().get("sf_q_gmem", _BUILDER_MISSING),
+            )
+            kv_gmem = _builder_assign(
+                "kv_gmem",
+                T.match_buffer(kv_gmem_h, (seq_len_kv, head_dim // 2), "uint8"),
+                locals().get("kv_gmem", _BUILDER_MISSING),
+            )
+            # Preserve the public physical (1, seq_len_kv) buffer view; the unit
+            # outer dimension canonicalizes to the rank-1 SFKV tensor map below.
+            sf_kv_gmem = _builder_assign(
+                "sf_kv_gmem",
+                T.match_buffer(sf_kv_gmem_h, (1, seq_len_kv), "uint32"),
+                locals().get("sf_kv_gmem", _BUILDER_MISSING),
+            )
+            weights_gmem = _builder_assign(
+                "weights_gmem",
+                T.match_buffer(weights_gmem_h, (seq_len, num_heads), "float32"),
+                locals().get("weights_gmem", _BUILDER_MISSING),
+            )
 
-        # Runtime tensor maps are part of the public runtime-length contract:
-        # packed Q/KV use the original 64-byte swizzle, while scales and
-        # weights remain unswizzled.  The rank-1 SFKV map is the canonical
-        # lowering of the physical (1, seq_len_kv) view above.
-        sf_kv_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            sf_kv_gmem_tensormap,
-            "uint32",
-            1,
-            sf_kv_gmem.data,
-            seq_len_kv,
-            block_kv,
-            1,
-            0,
-            0,
-            2,
-            0,
-        )
-        kv_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            kv_gmem_tensormap,
-            "uint8",
-            2,
-            kv_gmem.data,
-            head_dim // 2,
-            seq_len_kv,
-            head_dim // 2,
-            head_dim // 2,
-            block_kv,
-            1,
-            1,
-            0,
-            SwizzleMode.SWIZZLE_64B_ATOM.value,
-            2,
-            0,
-        )
-        weights_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            weights_gmem_tensormap,
-            "float32",
-            2,
-            weights_gmem.data,
-            num_heads,
-            seq_len,
-            num_heads * 4,
-            num_heads,
-            block_q,
-            1,
-            1,
-            0,
-            0,
-            2,
-            0,
-        )
-        sf_q_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            sf_q_gmem_tensormap,
-            "uint32",
-            2,
-            sf_q_gmem.data,
-            num_heads,
-            seq_len,
-            num_heads * 4,
-            num_heads,
-            block_q,
-            1,
-            1,
-            0,
-            0,
-            2,
-            0,
-        )
-        q_gmem_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            q_gmem_tensormap,
-            "uint8",
-            2,
-            q_gmem.data,
-            head_dim // 2,
-            seq_len * num_heads,
-            head_dim // 2,
-            head_dim // 2,
-            block_q * num_heads,
-            1,
-            1,
-            0,
-            SwizzleMode.SWIZZLE_64B_ATOM.value,
-            2,
-            0,
-        )
-        T.device_entry()
-        if config.logits_dtype == "float32":
-            # __launch_bounds__(kNumThreads, 1): without .minnctapersm ptxas ignores
-            # the setmaxnreg 56/224 budget (C7508); bf16 runs faster without it.
-            T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1})
-        # TIRX_TRANSCRIBE_START sm100_fp4_mqa_logits
-        aligned_sl: T.int32 = (
-            (T.cast(seq_len, "int32") + T.int32(block_q - 1)) // T.int32(block_q) * T.int32(block_q)
-        )
-        logits_flat = T.decl_buffer(
-            (aligned_sl * T.cast(logits_stride, "int32"),),
-            logits_tir_dtype,
-            data=logits.data,
-            scope="global",
-        )
-        sm_idx = T.cta_id([config.num_sms])
-        thread_idx = T.thread_id([num_threads])
-        warp_idx = T.warp_id([num_warps])
-        warpgroup_idx = T.warpgroup_id([num_warps // 4])
-        lane_idx = T.lane_id([32])
-        # Keep the former dispatcher placement: one warp-elected prefetch for
-        # each map, issued before any pipeline work.
-        if warp_idx == 0:
-            if T.cuda.elect_sync():
-                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_gmem_tensormap)))
-        if warp_idx == 0:
-            if T.cuda.elect_sync():
-                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(sf_q_gmem_tensormap)))
-        if warp_idx == 0:
-            if T.cuda.elect_sync():
-                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(weights_gmem_tensormap)))
-        if warp_idx == 0:
-            if T.cuda.elect_sync():
-                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(kv_gmem_tensormap)))
-        if warp_idx == 0:
-            if T.cuda.elect_sync():
-                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(sf_kv_gmem_tensormap)))
-        # SMEMPool owns the smem offsets; q/kv carry a 64B-atom swizzle (head_dim//2
-        # B/row). Under the pool .data is the arena base — use .ptr_to([0,...])/.view.
-        pool = T.SMEMPool()
-        smem_q = pool.alloc(
-            (num_q_stages, block_q * num_heads, head_dim // 2),
-            "uint8",
-            scope="shared.dyn",
-            align=swizzle_alignment,
-            layout=mma_shared_layout(
-                "uint8",
-                SwizzleMode.SWIZZLE_64B_ATOM,
-                (num_q_stages, block_q * num_heads, head_dim // 2),
-            ),
-        )
-        smem_kv = pool.alloc(
-            (num_kv_stages, block_kv, head_dim // 2),
-            "uint8",
-            scope="shared.dyn",
-            align=swizzle_alignment,
-            layout=mma_shared_layout(
-                "uint8", SwizzleMode.SWIZZLE_64B_ATOM, (num_kv_stages, block_kv, head_dim // 2)
-            ),
-        )
-        smem_sf_q = pool.alloc((num_q_stages, num_sfq), "uint32", align=16)
-        smem_sf_q_t = pool.alloc((num_q_stages, num_sfq), "uint32", align=16)
-        # 2D view for the copy_async(tma) dst: a fresh decl_buffer, NOT .view(shape)
-        # (the shape-view keeps the rank-2 layout and mis-maps the 3D TMA write).
-        smem_sf_q_2d = T.decl_buffer(
-            (num_q_stages, block_q, num_heads),
-            "uint32",
-            data=smem_sf_q.data,
-            scope="shared.dyn",
-            elem_offset=smem_sf_q.elem_offset,
-            align=16,
-        )
-        smem_sf_kv = pool.alloc((num_kv_stages, num_sfkv), "uint32", align=16)
-        smem_sf_kv_t = pool.alloc((num_kv_stages, num_sfkv), "uint32", align=16)
-        smem_weights = pool.alloc((num_q_stages, block_q, num_heads), "float32", align=16)
-        # Producer/consumer barrier pairs as Pipeline objects (full = data ready, empty
-        # = slot free); each Pipeline runs mbarrier.init itself, no separate init loop.
-        q_pipe = Pipeline(
-            pool,
-            num_q_stages,
-            full="tma",
-            empty="mbar",
-            init_full=1,
-            init_empty=num_math_threads + 32,
-        )
-        kv_pipe = Pipeline(
-            pool, num_kv_stages, full="tma", empty="tcgen05", init_full=1, init_empty=1
-        )
-        tmem_pipe = Pipeline(
-            pool, num_tmem_stages, full="tcgen05", empty="mbar", init_full=1, init_empty=128
-        )
-        # Per-stage handoff from the transpose worker; staging reuse is
-        # protected by the kv pipe.
-        sf_ready = MBarrier(pool, num_kv_stages)
-        sf_ready.init(1)
-        tmem_ptr_in_smem = pool.alloc((1,), "uint32", align=4)
-        pool.commit()
-        # TMEMPool gives a CONSTANT 0-based col_start so tcgen05.ld folds the base into
-        # the col offset; move_base_to overlaps the SF cols in the accumulator span.
-        tmem_pool = T.TMEMPool(
-            pool, total_cols=num_tmem_cols, cta_group=1, tmem_addr=tmem_ptr_in_smem
-        )
-        tmem = tmem_pool.alloc(
-            (128, num_tmem_cols), "float32", layout=tmem_layout, cols=num_tmem_cols
-        )
-        tmem_pool.move_base_to(tmem_start_col_of_sfq)
-        sfq_tmem = tmem_pool.alloc(
-            (128, num_sfq // 32), "float8_e8m0fnu", layout=sf_tmem_q_layout, cols=num_sfq // 32
-        )
-        tmem_pool.move_base_to(tmem_start_col_of_sfkv)
-        sfkv_tmem = tmem_pool.alloc(
-            (128, num_sfkv // 32), "float8_e8m0fnu", layout=sf_tmem_kv_layout, cols=num_sfkv // 32
-        )
-        seq_k_start = T.alloc_local((block_q,), "uint32")
-        seq_k_end = T.alloc_local((block_q,), "uint32")
-        schedule_result = T.alloc_local((2,), "uint32")
-
-        @T.inline
-        def store_logits(flat_offset, value):
+            # Runtime tensor maps are part of the public runtime-length contract:
+            # packed Q/KV use the original 64-byte swizzle, while scales and
+            # weights remain unswizzled.  The rank-1 SFKV map is the canonical
+            # lowering of the physical (1, seq_len_kv) view above.
+            sf_kv_gmem_tensormap = _builder_bind(
+                "sf_kv_gmem_tensormap", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    sf_kv_gmem_tensormap,
+                    "uint32",
+                    1,
+                    sf_kv_gmem.data,
+                    seq_len_kv,
+                    block_kv,
+                    1,
+                    0,
+                    0,
+                    2,
+                    0,
+                )
+            )
+            kv_gmem_tensormap = _builder_bind(
+                "kv_gmem_tensormap", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    kv_gmem_tensormap,
+                    "uint8",
+                    2,
+                    kv_gmem.data,
+                    head_dim // 2,
+                    seq_len_kv,
+                    head_dim // 2,
+                    head_dim // 2,
+                    block_kv,
+                    1,
+                    1,
+                    0,
+                    SwizzleMode.SWIZZLE_64B_ATOM.value,
+                    2,
+                    0,
+                )
+            )
+            weights_gmem_tensormap = _builder_bind(
+                "weights_gmem_tensormap", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    weights_gmem_tensormap,
+                    "float32",
+                    2,
+                    weights_gmem.data,
+                    num_heads,
+                    seq_len,
+                    num_heads * 4,
+                    num_heads,
+                    block_q,
+                    1,
+                    1,
+                    0,
+                    0,
+                    2,
+                    0,
+                )
+            )
+            sf_q_gmem_tensormap = _builder_bind(
+                "sf_q_gmem_tensormap", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    sf_q_gmem_tensormap,
+                    "uint32",
+                    2,
+                    sf_q_gmem.data,
+                    num_heads,
+                    seq_len,
+                    num_heads * 4,
+                    num_heads,
+                    block_q,
+                    1,
+                    1,
+                    0,
+                    0,
+                    2,
+                    0,
+                )
+            )
+            q_gmem_tensormap = _builder_bind(
+                "q_gmem_tensormap", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    q_gmem_tensormap,
+                    "uint8",
+                    2,
+                    q_gmem.data,
+                    head_dim // 2,
+                    seq_len * num_heads,
+                    head_dim // 2,
+                    head_dim // 2,
+                    block_q * num_heads,
+                    1,
+                    1,
+                    0,
+                    SwizzleMode.SWIZZLE_64B_ATOM.value,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(T.device_entry())
             if config.logits_dtype == "float32":
-                T.ptx.st.global_.f32(logits_flat.ptr_to([flat_offset]), value)
-            else:
-                T.ptx.st.global_.b16(logits_flat.ptr_to([flat_offset]), value)
-
-        @T.inline
-        def load_schedule(q_idx):
-            schedule_start: T.uint32 = T.uint32(0xFFFFFFFF)
-            schedule_end: T.uint32 = T.uint32(0)
-            for schedule_i in T.unroll(0, block_q):
-                row_idx: T.uint32 = T.min(
-                    q_idx * T.uint32(block_q) + T.uint32(schedule_i), seq_len - T.uint32(1)
-                )
-                row_start: T.int32
-                row_end: T.int32
-                T.ptx.ld.global_.s32(
-                    row_start, cu_seq_len_k_start.ptr_to([T.cast(row_idx, "int32")])
-                )
-                T.ptx.ld.global_.s32(row_end, cu_seq_len_k_end.ptr_to([T.cast(row_idx, "int32")]))
-                seq_k_start[schedule_i] = T.min(T.cast(row_start, "uint32"), seq_len_kv)
-                seq_k_end[schedule_i] = T.min(T.cast(row_end, "uint32"), seq_len_kv)
-                schedule_start = T.min(schedule_start, seq_k_start[schedule_i])
-                schedule_end = T.max(schedule_end, seq_k_end[schedule_i])
-            schedule_start = schedule_start // T.uint32(4) * T.uint32(4)
-            num_kv_blocks = (schedule_end - schedule_start + T.uint32(block_kv - 1)) // T.uint32(
-                block_kv
+                # __launch_bounds__(kNumThreads, 1): without .minnctapersm ptxas ignores
+                # the setmaxnreg 56/224 budget (C7508); bf16 runs faster without it.
+                _builder_emit(T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1}))
+            # TIRX_TRANSCRIBE_START sm100_fp4_mqa_logits
+            aligned_sl = _builder_scalar(
+                "aligned_sl",
+                (
+                    (T.cast(seq_len, "int32") + T.int32(block_q - 1))
+                    // T.int32(block_q)
+                    * T.int32(block_q)
+                ),
+                "int32",
             )
-            schedule_result[0] = schedule_start
-            schedule_result[1] = num_kv_blocks
-
-        # Pipeline constructors already ran mbarrier.init; fence + cta_sync publish them.
-        T.ptx.fence.mbarrier_init.release.cluster()
-
-        if warp_idx == spec_warp_start + 2:
-            T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
-                T.address_of(tmem_ptr_in_smem[0]), T.uint32(num_tmem_cols)
+            logits_flat = _builder_assign(
+                "logits_flat",
+                T.decl_buffer(
+                    (aligned_sl * T.cast(logits_stride, "int32"),),
+                    logits_tir_dtype,
+                    data=logits.data,
+                    scope="global",
+                ),
+                locals().get("logits_flat", _BUILDER_MISSING),
             )
-        T.cuda.cta_sync()
-
-        num_q_blocks: T.uint32 = (seq_len + T.uint32(block_q - 1)) // T.uint32(block_q)
-        cuda_grid_dependency_synchronize()
-
-        if warp_idx == spec_warp_start:
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
-            if T.cuda.elect_sync():
-                # Ring cursors with subtract-wrap (DeepGEMM RingPipeline): avoids ptxas
-                # magic-number division for `% kNumStages` on these hot paths.
-                q_stage_idx: T.uint32 = T.uint32(0)
-                q_phase: T.uint32 = T.uint32(0)
-                q_idx: T.uint32 = sm_idx
-                while q_idx < num_q_blocks:
-                    q_pipe.empty.wait(q_stage_idx, q_phase ^ T.uint32(1))
-                    # u32 row base — the copy_async(tma) gmem-layout grouping now
-                    # handles unsigned shape extents (no int32 cast needed).
-                    q_row0: T.uint32 = q_idx * T.uint32(block_q * num_heads)
-                    T.evaluate(
-                        T.ptx[tma_g2s_2d](
-                            smem_q.ptr_to([q_stage_idx, 0, 0]),
-                            T.address_of(q_gmem_tensormap),
-                            T.int32(0),
-                            T.cast(q_row0, "int32"),
-                            q_pipe.full.ptr_to([q_stage_idx]),
-                            cache_policy_evict_normal,
-                        )
-                    )
-                    q_blk0: T.uint32 = q_idx * T.uint32(block_q)
-                    T.evaluate(
-                        T.ptx[tma_g2s_2d](
-                            smem_sf_q_2d.ptr_to([q_stage_idx, 0, 0]),
-                            T.address_of(sf_q_gmem_tensormap),
-                            T.int32(0),
-                            T.cast(q_blk0, "int32"),
-                            q_pipe.full.ptr_to([q_stage_idx]),
-                            cache_policy_evict_normal,
-                        )
-                    )
-                    T.evaluate(
-                        T.ptx[tma_g2s_2d](
-                            smem_weights.ptr_to([q_stage_idx, 0, 0]),
-                            T.address_of(weights_gmem_tensormap),
-                            T.int32(0),
-                            T.cast(q_blk0, "int32"),
-                            q_pipe.full.ptr_to([q_stage_idx]),
-                            cache_policy_evict_normal,
-                        )
-                    )
-                    q_pipe.full.arrive(
-                        q_stage_idx,
-                        tx_count=smem_q_size_per_stage
-                        + real_num_sfq * 4
-                        + smem_weight_size_per_stage,
-                    )
-                    q_idx = q_idx + T.uint32(config.num_sms)
-                    q_stage_idx = q_stage_idx + T.uint32(1)
-                    if q_stage_idx >= T.uint32(num_q_stages):
-                        q_stage_idx = q_stage_idx - T.uint32(num_q_stages)
-                        q_phase = q_phase ^ T.uint32(1)
-            T.cuda.warp_sync()
-        elif warp_idx == spec_warp_start + 1:
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
-            if T.cuda.elect_sync():
-                kv_stage_idx: T.uint32 = T.uint32(0)
-                kv_phase: T.uint32 = T.uint32(0)
-                q_idx: T.uint32 = sm_idx
-                while q_idx < num_q_blocks:
-                    load_schedule(q_idx)
-                    kv_start: T.uint32 = schedule_result[0]
-                    num_kv_blocks: T.uint32 = schedule_result[1]
-                    kv_idx: T.uint32 = T.uint32(0)
-                    while kv_idx < num_kv_blocks:
-                        kv_pipe.empty.wait(kv_stage_idx, kv_phase ^ T.uint32(1))
-                        kv_row0: T.uint32 = kv_start + kv_idx * T.uint32(block_kv)
-                        T.evaluate(
-                            T.ptx[tma_g2s_2d](
-                                smem_kv.ptr_to([kv_stage_idx, 0, 0]),
-                                T.address_of(kv_gmem_tensormap),
-                                T.int32(0),
-                                T.cast(kv_row0, "int32"),
-                                kv_pipe.full.ptr_to([kv_stage_idx]),
-                                cache_policy_evict_normal,
+            sm_idx = _builder_assign(
+                "sm_idx", T.cta_id([config.num_sms]), locals().get("sm_idx", _BUILDER_MISSING)
+            )
+            thread_idx = _builder_assign(
+                "thread_idx",
+                T.thread_id([num_threads]),
+                locals().get("thread_idx", _BUILDER_MISSING),
+            )
+            warp_idx = _builder_assign(
+                "warp_idx", T.warp_id([num_warps]), locals().get("warp_idx", _BUILDER_MISSING)
+            )
+            warpgroup_idx = _builder_assign(
+                "warpgroup_idx",
+                T.warpgroup_id([num_warps // 4]),
+                locals().get("warpgroup_idx", _BUILDER_MISSING),
+            )
+            lane_idx = _builder_assign(
+                "lane_idx", T.lane_id([32]), locals().get("lane_idx", _BUILDER_MISSING)
+            )
+            # Keep the former dispatcher placement: one warp-elected prefetch for
+            # each map, issued before any pipeline work.
+            with T.If(warp_idx == 0):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            _builder_emit(
+                                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_gmem_tensormap)))
                             )
-                        )
-                        T.evaluate(
-                            T.ptx[tma_g2s_1d](
-                                smem_sf_kv.ptr_to([kv_stage_idx, 0]),
-                                T.address_of(sf_kv_gmem_tensormap),
-                                T.cast(kv_row0, "int32"),
-                                kv_pipe.full.ptr_to([kv_stage_idx]),
-                                cache_policy_evict_normal,
-                            )
-                        )
-                        kv_pipe.full.arrive(
-                            kv_stage_idx,
-                            tx_count=smem_kv_size_per_stage + smem_sf_kv_size_per_stage,
-                        )
-                        kv_idx = kv_idx + T.uint32(1)
-                        kv_stage_idx = kv_stage_idx + T.uint32(1)
-                        if kv_stage_idx >= T.uint32(num_kv_stages):
-                            kv_stage_idx = kv_stage_idx - T.uint32(num_kv_stages)
-                            kv_phase = kv_phase ^ T.uint32(1)
-                    q_idx = q_idx + T.uint32(config.num_sms)
-        elif warp_idx == spec_warp_start + 2:
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
-            tmem_allocated: T.uint32
-            T.ptx.ld.shared.u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
-            T.cuda.trap_when_assert_failed(tmem_allocated == T.uint32(0))
-            desc_i: T.uint32
-            # Encode the block-scaled instruction descriptor once; each K phase
-            # rotates its SF id from this same base descriptor below.
-            T.cuda.tcgen05.encode_instr_descriptor_block_scaled(
-                T.address_of(desc_i),
-                d_dtype="float32",
-                a_dtype="float4_e2m1fn",
-                b_dtype="float4_e2m1fn",
-                sfa_dtype="float8_e8m0fnu",
-                sfb_dtype="float8_e8m0fnu",
-                sfa_tmem_addr=0,
-                sfb_tmem_addr=0,
-                M=umma_m,
-                N=umma_n,
-                K=umma_k,
-                trans_a=False,
-                trans_b=False,
-                n_cta_groups=1,
-            )
-            # REGION D operand views: fp4 over the packed-uint8 smem bytes; .view also
-            # carries elem_offset, giving the true buffer start under the pool.
-            smem_kv_fp4 = smem_kv.view("float4_e2m1fn")
-            smem_q_fp4 = smem_q.view("float4_e2m1fn")
-            desc_sf: T.uint64
-            T.cuda.tcgen05.encode_matrix_descriptor(
-                T.address_of(desc_sf), T.reinterpret("handle", T.uint64(0)), ldo=0, sdo=8, swizzle=0
-            )
-            q_stage_idx: T.uint32 = T.uint32(0)
-            q_phase: T.uint32 = T.uint32(0)
-            kv_stage_idx: T.uint32 = T.uint32(0)
-            kv_phase: T.uint32 = T.uint32(0)
-            tmem_stage_idx: T.uint32 = T.uint32(0)
-            tmem_phase: T.uint32 = T.uint32(0)
-            # Monotonic MMA-issue count; the SFQ guard needs the un-wrapped
-            # value to name the previous issue.
-            tmem_issued: T.uint32 = T.uint32(0)
-            q_idx: T.uint32 = sm_idx
-            while q_idx < num_q_blocks:
-                load_schedule(q_idx)
-                kv_start: T.uint32 = schedule_result[0]
-                num_kv_blocks: T.uint32 = schedule_result[1]
-                q_pipe.full.wait(q_stage_idx, q_phase)
-                emit_sf_transpose(smem_sf_q, smem_sf_q_t, lane_idx, q_stage_idx, 0)
-                T.cuda.warp_sync()
-                T.ptx.fence.proxy.async_.shared__cta()
-                # Each tmem_pipe.full arrive commits all prior asynchronous
-                # TCGEN work from this issuer. Wait for the final commit from
-                # the preceding q block before overwriting its SFQ TMEM input.
-                if tmem_issued > T.uint32(0):
-                    previous_tmem_iter: T.uint32 = tmem_issued - T.uint32(1)
-                    tmem_pipe.full.wait(
-                        previous_tmem_iter % T.uint32(num_tmem_stages),
-                        (previous_tmem_iter // T.uint32(num_tmem_stages)) & T.uint32(1),
-                    )
-                if T.cuda.elect_sync():
-                    T.ptx[tcgen05_cp](
-                        T.uint32(tmem_start_col_of_sfq),
-                        replace_smem_desc_addr(desc_sf, smem_sf_q_t.ptr_to([q_stage_idx, 0])),
-                    )
-                T.cuda.warp_sync()
-                kv_idx: T.uint32 = T.uint32(0)
-                while kv_idx < num_kv_blocks:
-                    # UMMA reads smem_kv (kv full); staged SF comes from the
-                    # transpose worker (sf_ready).
-                    kv_pipe.full.wait(kv_stage_idx, kv_phase)
-                    sf_ready.wait(kv_stage_idx, kv_phase)
-                    # cp + MMA share ONE elect scope: drops a redundant elect.sync per
-                    # kv-iter and lets the cp overlap the MMA setup.
-                    if T.cuda.elect_sync():
-                        for sfkv_i in T.unroll(0, num_sfkv // num_utccp_aligned_elems):
-                            T.ptx[tcgen05_cp](
-                                T.uint32(tmem_start_col_of_sfkv + sfkv_i * 4),
-                                replace_smem_desc_addr(
-                                    desc_sf,
-                                    smem_sf_kv_t.ptr_to(
-                                        [kv_stage_idx, sfkv_i * num_utccp_aligned_elems]
-                                    ),
-                                ),
-                            )
-                        for math_wg_i in T.unroll(0, num_math_warpgroups):
-                            tmem_addr: T.uint32 = tmem_stage_idx * T.uint32(umma_n)
-                            tmem_pipe.empty.wait(tmem_stage_idx, tmem_phase ^ T.uint32(1))
-                            # REGION D: block-scaled FP4 UMMA, D = KV @ Qᵀ.  The
-                            # first K=64 phase overwrites and the second accumulates;
-                            # scale ids 0/2 select the two block-32 factors.
-                            desc_i_local: T.uint32 = desc_i
-                            for ki in T.unroll(0, head_dim // umma_k):
-                                sf_linear: T.int32 = ki * (umma_k // 32)
-                                T.cuda.runtime_instr_desc(
-                                    T.address_of(desc_i_local), sf_linear % (umma_k // 16)
+            with T.If(warp_idx == 0):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.prefetch.tensormap(T.address_of(sf_q_gmem_tensormap))
                                 )
-                                T.ptx[tcgen05_mma](
-                                    tmem_addr,
-                                    recompute_fp4_smem_desc(
-                                        smem_kv_fp4.ptr_to(
-                                            [kv_stage_idx, math_wg_i * umma_m, ki * umma_k]
+                            )
+            with T.If(warp_idx == 0):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.prefetch.tensormap(T.address_of(weights_gmem_tensormap))
+                                )
+                            )
+            with T.If(warp_idx == 0):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.prefetch.tensormap(T.address_of(kv_gmem_tensormap))
+                                )
+                            )
+            with T.If(warp_idx == 0):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.prefetch.tensormap(T.address_of(sf_kv_gmem_tensormap))
+                                )
+                            )
+            # SMEMPool owns the smem offsets; q/kv carry a 64B-atom swizzle (head_dim//2
+            # B/row). Under the pool .data is the arena base — use .ptr_to([0,...])/.view.
+            pool = _builder_assign("pool", T.SMEMPool(), locals().get("pool", _BUILDER_MISSING))
+            smem_q = _builder_assign(
+                "smem_q",
+                pool.alloc(
+                    (num_q_stages, block_q * num_heads, head_dim // 2),
+                    "uint8",
+                    scope="shared.dyn",
+                    align=swizzle_alignment,
+                    layout=mma_shared_layout(
+                        "uint8",
+                        SwizzleMode.SWIZZLE_64B_ATOM,
+                        (num_q_stages, block_q * num_heads, head_dim // 2),
+                    ),
+                ),
+                locals().get("smem_q", _BUILDER_MISSING),
+            )
+            smem_kv = _builder_assign(
+                "smem_kv",
+                pool.alloc(
+                    (num_kv_stages, block_kv, head_dim // 2),
+                    "uint8",
+                    scope="shared.dyn",
+                    align=swizzle_alignment,
+                    layout=mma_shared_layout(
+                        "uint8",
+                        SwizzleMode.SWIZZLE_64B_ATOM,
+                        (num_kv_stages, block_kv, head_dim // 2),
+                    ),
+                ),
+                locals().get("smem_kv", _BUILDER_MISSING),
+            )
+            smem_sf_q = _builder_assign(
+                "smem_sf_q",
+                pool.alloc((num_q_stages, num_sfq), "uint32", align=16),
+                locals().get("smem_sf_q", _BUILDER_MISSING),
+            )
+            smem_sf_q_t = _builder_assign(
+                "smem_sf_q_t",
+                pool.alloc((num_q_stages, num_sfq), "uint32", align=16),
+                locals().get("smem_sf_q_t", _BUILDER_MISSING),
+            )
+            # 2D view for the copy_async(tma) dst: a fresh decl_buffer, NOT .view(shape)
+            # (the shape-view keeps the rank-2 layout and mis-maps the 3D TMA write).
+            smem_sf_q_2d = _builder_assign(
+                "smem_sf_q_2d",
+                T.decl_buffer(
+                    (num_q_stages, block_q, num_heads),
+                    "uint32",
+                    data=smem_sf_q.data,
+                    scope="shared.dyn",
+                    elem_offset=smem_sf_q.elem_offset,
+                    align=16,
+                ),
+                locals().get("smem_sf_q_2d", _BUILDER_MISSING),
+            )
+            smem_sf_kv = _builder_assign(
+                "smem_sf_kv",
+                pool.alloc((num_kv_stages, num_sfkv), "uint32", align=16),
+                locals().get("smem_sf_kv", _BUILDER_MISSING),
+            )
+            smem_sf_kv_t = _builder_assign(
+                "smem_sf_kv_t",
+                pool.alloc((num_kv_stages, num_sfkv), "uint32", align=16),
+                locals().get("smem_sf_kv_t", _BUILDER_MISSING),
+            )
+            smem_weights = _builder_assign(
+                "smem_weights",
+                pool.alloc((num_q_stages, block_q, num_heads), "float32", align=16),
+                locals().get("smem_weights", _BUILDER_MISSING),
+            )
+            # Producer/consumer barrier pairs as Pipeline objects (full = data ready, empty
+            # = slot free); each Pipeline runs mbarrier.init itself, no separate init loop.
+            q_pipe = _builder_assign(
+                "q_pipe",
+                Pipeline(
+                    pool,
+                    num_q_stages,
+                    full="tma",
+                    empty="mbar",
+                    init_full=1,
+                    init_empty=num_math_threads + 32,
+                ),
+                locals().get("q_pipe", _BUILDER_MISSING),
+            )
+            kv_pipe = _builder_assign(
+                "kv_pipe",
+                Pipeline(
+                    pool, num_kv_stages, full="tma", empty="tcgen05", init_full=1, init_empty=1
+                ),
+                locals().get("kv_pipe", _BUILDER_MISSING),
+            )
+            tmem_pipe = _builder_assign(
+                "tmem_pipe",
+                Pipeline(
+                    pool, num_tmem_stages, full="tcgen05", empty="mbar", init_full=1, init_empty=128
+                ),
+                locals().get("tmem_pipe", _BUILDER_MISSING),
+            )
+            # Per-stage handoff from the transpose worker; staging reuse is
+            # protected by the kv pipe.
+            sf_ready = _builder_assign(
+                "sf_ready",
+                MBarrier(pool, num_kv_stages),
+                locals().get("sf_ready", _BUILDER_MISSING),
+            )
+            _builder_emit(sf_ready.init(1))
+            tmem_ptr_in_smem = _builder_assign(
+                "tmem_ptr_in_smem",
+                pool.alloc((1,), "uint32", align=4),
+                locals().get("tmem_ptr_in_smem", _BUILDER_MISSING),
+            )
+            _builder_emit(pool.commit())
+            # TMEMPool gives a CONSTANT 0-based col_start so tcgen05.ld folds the base into
+            # the col offset; move_base_to overlaps the SF cols in the accumulator span.
+            tmem_pool = _builder_assign(
+                "tmem_pool",
+                T.TMEMPool(pool, total_cols=num_tmem_cols, cta_group=1, tmem_addr=tmem_ptr_in_smem),
+                locals().get("tmem_pool", _BUILDER_MISSING),
+            )
+            tmem = _builder_assign(
+                "tmem",
+                tmem_pool.alloc(
+                    (128, num_tmem_cols), "float32", layout=tmem_layout, cols=num_tmem_cols
+                ),
+                locals().get("tmem", _BUILDER_MISSING),
+            )
+            _builder_emit(tmem_pool.move_base_to(tmem_start_col_of_sfq))
+            sfq_tmem = _builder_assign(
+                "sfq_tmem",
+                tmem_pool.alloc(
+                    (128, num_sfq // 32),
+                    "float8_e8m0fnu",
+                    layout=sf_tmem_q_layout,
+                    cols=num_sfq // 32,
+                ),
+                locals().get("sfq_tmem", _BUILDER_MISSING),
+            )
+            _builder_emit(tmem_pool.move_base_to(tmem_start_col_of_sfkv))
+            sfkv_tmem = _builder_assign(
+                "sfkv_tmem",
+                tmem_pool.alloc(
+                    (128, num_sfkv // 32),
+                    "float8_e8m0fnu",
+                    layout=sf_tmem_kv_layout,
+                    cols=num_sfkv // 32,
+                ),
+                locals().get("sfkv_tmem", _BUILDER_MISSING),
+            )
+            seq_k_start = _builder_assign(
+                "seq_k_start",
+                T.alloc_local((block_q,), "uint32"),
+                locals().get("seq_k_start", _BUILDER_MISSING),
+            )
+            seq_k_end = _builder_assign(
+                "seq_k_end",
+                T.alloc_local((block_q,), "uint32"),
+                locals().get("seq_k_end", _BUILDER_MISSING),
+            )
+            schedule_result = _builder_assign(
+                "schedule_result",
+                T.alloc_local((2,), "uint32"),
+                locals().get("schedule_result", _BUILDER_MISSING),
+            )
+
+            def store_logits(flat_offset, value):
+                if config.logits_dtype == "float32":
+                    _builder_emit(T.ptx.st.global_.f32(logits_flat.ptr_to([flat_offset]), value))
+                else:
+                    _builder_emit(T.ptx.st.global_.b16(logits_flat.ptr_to([flat_offset]), value))
+
+            def load_schedule(q_idx):
+                schedule_start = _builder_scalar("schedule_start", T.uint32(0xFFFFFFFF), "uint32")
+                schedule_end = _builder_scalar("schedule_end", T.uint32(0), "uint32")
+                with T.unroll(0, block_q) as schedule_i:
+                    IRBuilder.name("schedule_i", schedule_i)
+                    row_idx = _builder_scalar(
+                        "row_idx",
+                        T.min(
+                            q_idx * T.uint32(block_q) + T.uint32(schedule_i), seq_len - T.uint32(1)
+                        ),
+                        "uint32",
+                    )
+                    row_start = _builder_alloc_scalar("row_start", "int32")
+                    row_end = _builder_alloc_scalar("row_end", "int32")
+                    _builder_emit(
+                        T.ptx.ld.global_.s32(
+                            row_start, cu_seq_len_k_start.ptr_to([T.cast(row_idx, "int32")])
+                        )
+                    )
+                    _builder_emit(
+                        T.ptx.ld.global_.s32(
+                            row_end, cu_seq_len_k_end.ptr_to([T.cast(row_idx, "int32")])
+                        )
+                    )
+                    T.buffer_store(
+                        seq_k_start, T.min(T.cast(row_start, "uint32"), seq_len_kv), [schedule_i]
+                    )
+                    T.buffer_store(
+                        seq_k_end, T.min(T.cast(row_end, "uint32"), seq_len_kv), [schedule_i]
+                    )
+                    schedule_start = _builder_assign(
+                        "schedule_start",
+                        T.min(schedule_start, seq_k_start[schedule_i]),
+                        locals().get("schedule_start", _BUILDER_MISSING),
+                    )
+                    schedule_end = _builder_assign(
+                        "schedule_end",
+                        T.max(schedule_end, seq_k_end[schedule_i]),
+                        locals().get("schedule_end", _BUILDER_MISSING),
+                    )
+                schedule_start = _builder_assign(
+                    "schedule_start",
+                    schedule_start // T.uint32(4) * T.uint32(4),
+                    locals().get("schedule_start", _BUILDER_MISSING),
+                )
+                num_kv_blocks = _builder_assign(
+                    "num_kv_blocks",
+                    (schedule_end - schedule_start + T.uint32(block_kv - 1)) // T.uint32(block_kv),
+                    locals().get("num_kv_blocks", _BUILDER_MISSING),
+                )
+                T.buffer_store(schedule_result, schedule_start, [0])
+                T.buffer_store(schedule_result, num_kv_blocks, [1])
+
+            # Pipeline constructors already ran mbarrier.init; fence + cta_sync publish them.
+            _builder_emit(T.ptx.fence.mbarrier_init.release.cluster())
+
+            with T.If(warp_idx == spec_warp_start + 2):
+                with T.Then():
+                    _builder_emit(
+                        T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                            T.address_of(tmem_ptr_in_smem[0]), T.uint32(num_tmem_cols)
+                        )
+                    )
+            _builder_emit(T.cuda.cta_sync())
+
+            num_q_blocks = _builder_scalar(
+                "num_q_blocks", (seq_len + T.uint32(block_q - 1)) // T.uint32(block_q), "uint32"
+            )
+            _builder_emit(cuda_grid_dependency_synchronize())
+
+            with T.If(warp_idx == spec_warp_start):
+                with T.Then():
+                    _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(56))
+                    with T.If(T.cuda.elect_sync()):
+                        with T.Then():
+                            # Ring cursors with subtract-wrap (DeepGEMM RingPipeline): avoids ptxas
+                            # magic-number division for `% kNumStages` on these hot paths.
+                            q_stage_idx = _builder_scalar("q_stage_idx", T.uint32(0), "uint32")
+                            q_phase = _builder_scalar("q_phase", T.uint32(0), "uint32")
+                            q_idx = _builder_scalar("q_idx", sm_idx, "uint32")
+                            with T.While(q_idx < num_q_blocks):
+                                _builder_emit(q_pipe.empty.wait(q_stage_idx, q_phase ^ T.uint32(1)))
+                                # u32 row base — the copy_async(tma) gmem-layout grouping now
+                                # handles unsigned shape extents (no int32 cast needed).
+                                q_row0 = _builder_scalar(
+                                    "q_row0", q_idx * T.uint32(block_q * num_heads), "uint32"
+                                )
+                                _builder_emit(
+                                    T.evaluate(
+                                        T.ptx[tma_g2s_2d](
+                                            smem_q.ptr_to([q_stage_idx, 0, 0]),
+                                            T.address_of(q_gmem_tensormap),
+                                            T.int32(0),
+                                            T.cast(q_row0, "int32"),
+                                            q_pipe.full.ptr_to([q_stage_idx]),
+                                            cache_policy_evict_normal,
                                         )
-                                    ),
-                                    recompute_fp4_smem_desc(
-                                        smem_q_fp4.ptr_to([q_stage_idx, 0, ki * umma_k])
-                                    ),
-                                    desc_i_local,
-                                    T.cuda.get_tmem_addr(
-                                        tmem_start_col_of_sfkv + math_wg_i * 4,
-                                        sf_linear % 128 // 4,
-                                        sf_linear // 128,
-                                    ),
-                                    T.cuda.get_tmem_addr(
-                                        tmem_start_col_of_sfq,
-                                        sf_linear % 128 // 4,
-                                        sf_linear // 128,
-                                    ),
-                                    T.ptx.pred(ki != 0),
-                                )
-                            tmem_pipe.full.arrive(tmem_stage_idx)
-                            tmem_issued = tmem_issued + T.uint32(1)
-                            tmem_stage_idx = tmem_stage_idx + T.uint32(1)
-                            if tmem_stage_idx >= T.uint32(num_tmem_stages):
-                                tmem_stage_idx = tmem_stage_idx - T.uint32(num_tmem_stages)
-                                tmem_phase = tmem_phase ^ T.uint32(1)
-                    if T.cuda.elect_sync():
-                        kv_pipe.empty.arrive(kv_stage_idx, cta_group=1)
-                    kv_idx = kv_idx + T.uint32(1)
-                    kv_stage_idx = kv_stage_idx + T.uint32(1)
-                    if kv_stage_idx >= T.uint32(num_kv_stages):
-                        kv_stage_idx = kv_stage_idx - T.uint32(num_kv_stages)
-                        kv_phase = kv_phase ^ T.uint32(1)
-                q_pipe.empty.arrive(q_stage_idx)
-                q_idx = q_idx + T.uint32(config.num_sms)
-                q_stage_idx = q_stage_idx + T.uint32(1)
-                if q_stage_idx >= T.uint32(num_q_stages):
-                    q_stage_idx = q_stage_idx - T.uint32(num_q_stages)
-                    q_phase = q_phase ^ T.uint32(1)
-        elif warp_idx == spec_warp_start + 3:
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
-            # SF-KV transpose worker: overlaps transpose(k+1) with the
-            # tcgen05 warp's UTCCP+MMA of block k.
-            t_kv_stage: T.uint32 = T.uint32(0)
-            t_kv_phase: T.uint32 = T.uint32(0)
-            t_q_idx: T.uint32 = sm_idx
-            while t_q_idx < num_q_blocks:
-                load_schedule(t_q_idx)
-                t_num_kv: T.uint32 = schedule_result[1]
-                t_kv_i: T.uint32 = T.uint32(0)
-                while t_kv_i < t_num_kv:
-                    kv_pipe.full.wait(t_kv_stage, t_kv_phase)
-                    # The preceding tcgen05.cp read of this transposed stage
-                    # completes through kv_pipe.empty before the TMA producer
-                    # can refill the stage.  Reconnect that async-proxy read
-                    # to the generic-proxy stores which now reuse the same
-                    # physical shared-memory backing.
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    emit_sf_transpose(smem_sf_kv, smem_sf_kv_t, lane_idx, t_kv_stage, 0)
-                    emit_sf_transpose(
-                        smem_sf_kv, smem_sf_kv_t, lane_idx, t_kv_stage, num_utccp_aligned_elems
-                    )
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    if T.cuda.elect_sync():
-                        sf_ready.arrive(t_kv_stage)
-                    t_kv_i = t_kv_i + T.uint32(1)
-                    t_kv_stage = t_kv_stage + T.uint32(1)
-                    if t_kv_stage >= T.uint32(num_kv_stages):
-                        t_kv_stage = t_kv_stage - T.uint32(num_kv_stages)
-                        t_kv_phase = t_kv_phase ^ T.uint32(1)
-                t_q_idx = t_q_idx + T.uint32(config.num_sms)
-        elif warp_idx < spec_warp_start:
-            T.ptx.setmaxnreg.inc.sync.aligned.u32(224)
-            accum = T.alloc_local((num_heads,), "float32")
-            cached_weights = T.alloc_local((block_q, num_heads), "float32")
-            # f32-dense store offsets, hoisted and chained (+block_kv per split) to keep
-            # nvrtc's u64 IMAD.WIDE out of the hot loop; bf16-dense keeps per-iter form.
-            token_store_off = T.alloc_local((block_q,), "uint64")
-            q_stage_idx: T.uint32 = T.uint32(0)
-            q_phase: T.uint32 = T.uint32(0)
-            tmem_stage_idx: T.uint32 = T.cast(warpgroup_idx, "uint32")
-            tmem_phase: T.uint32 = T.uint32(0)
-            q_idx: T.uint32 = sm_idx
-            while q_idx < num_q_blocks:
-                load_schedule(q_idx)
-                kv_start: T.uint32 = schedule_result[0]
-                num_kv_blocks: T.uint32 = schedule_result[1]
-                q_pipe.full.wait(q_stage_idx, q_phase)
-                if num_kv_blocks > T.uint32(0):
-                    for weight_i in T.unroll(0, block_q):
-                        for weight_j in T.unroll(0, num_heads // 4):
-                            weight_col = weight_j * 4
-                            T.ptx.ld.shared.v4.f32(
-                                cached_weights[weight_i, weight_col],
-                                cached_weights[weight_i, weight_col + 1],
-                                cached_weights[weight_i, weight_col + 2],
-                                cached_weights[weight_i, weight_col + 3],
-                                smem_weights.ptr_to([q_stage_idx, weight_i, weight_col]),
-                            )
-                    # Publish the generic-proxy weight reads before this
-                    # consumer releases the Q stage for a later TMA overwrite.
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    if not config.compressed_logits and config.logits_dtype == "float32":
-                        for tb_i in T.unroll(0, block_q):
-                            token_store_off[tb_i] = T.cast(
-                                q_idx * T.uint32(block_q) + T.uint32(tb_i), "uint64"
-                            ) * T.cast(logits_stride, "uint64") + T.cast(
-                                kv_start + T.cast(thread_idx, "uint32"), "uint64"
-                            )
-                    kv_idx: T.uint32 = T.uint32(0)
-                    while kv_idx < num_kv_blocks:
-                        kv_offset: T.uint32 = (
-                            kv_start + kv_idx * T.uint32(block_kv) + T.cast(thread_idx, "uint32")
-                        )
-                        tmem_pipe.full.wait(tmem_stage_idx, tmem_phase)
-                        for q_inner_i in T.unroll(0, block_q):
-                            tmem_addr: T.uint32 = tmem_stage_idx * T.uint32(umma_n) + T.uint32(
-                                q_inner_i * num_heads
-                            )
-                            # REGION E: TMEM->register read as 2x tcgen05.ld.32x32b.x32
-                            # (DeepGEMM's 64-head shape); accum stays flat for the reduce.
-                            T.ptx[tcgen05_ld_x32](
-                                *[accum[head_i] for head_i in range(num_heads // 2)],
-                                T.cuda.get_tmem_addr(T.uint32(0), 0, tmem_addr),
-                            )
-                            T.ptx.tcgen05.wait__ld.sync.aligned()
-                            tmem_addr_hi: T.uint32 = tmem_addr + T.uint32(num_heads // 2)
-                            T.ptx[tcgen05_ld_x32](
-                                *[
-                                    accum[num_heads // 2 + head_i]
-                                    for head_i in range(num_heads // 2)
-                                ],
-                                T.cuda.get_tmem_addr(T.uint32(0), 0, tmem_addr_hi),
-                            )
-                            T.ptx.tcgen05.wait__ld.sync.aligned()
-                            if q_inner_i == block_q - 1:
-                                tmem_pipe.empty.arrive(tmem_stage_idx)
-                            result_f32: T.float32 = cuda_func_call(
-                                f"tvm_builtin_mqa_fp4_wrelu_reduce_{num_heads}",
-                                T.address_of(accum[0]),
-                                T.address_of(cached_weights[q_inner_i, 0]),
-                                source_code=_mqa_fp4_wrelu_reduce_src(num_heads),
-                                return_type="float32",
-                            )
-                            result = T.cast(result_f32, logits_tir_dtype)
-                            if config.compressed_logits:
-                                q_offset: T.uint64 = T.cast(
-                                    q_idx * T.uint32(block_q) + T.uint32(q_inner_i), "uint64"
-                                ) * T.cast(logits_stride, "uint64")
-                                row_k_start: T.uint32 = seq_k_start[q_inner_i]
-                                row_k_end: T.uint32 = seq_k_end[q_inner_i]
-                                # Range-guarded store: if-converts to a predicated @P STG
-                                # for this kernel (unlike fp8's clamp-to-padding variant).
-                                if row_k_start <= kv_offset and kv_offset < row_k_end:
-                                    store_logits(
-                                        q_offset
-                                        + T.cast(kv_offset, "uint64")
-                                        - T.cast(row_k_start, "uint64"),
-                                        result,
                                     )
-                            elif config.logits_dtype == "float32":
-                                store_logits(token_store_off[q_inner_i], result)
-                            else:
-                                # bf16-dense: per-iter offset; see token_store_off note.
-                                q_offset_bf16: T.uint64 = T.cast(
-                                    q_idx * T.uint32(block_q) + T.uint32(q_inner_i), "uint64"
-                                ) * T.cast(logits_stride, "uint64")
-                                store_logits(q_offset_bf16 + T.cast(kv_offset, "uint64"), result)
-                        if not config.compressed_logits and config.logits_dtype == "float32":
-                            for tb_i in T.unroll(0, block_q):
-                                token_store_off[tb_i] = token_store_off[tb_i] + T.uint64(block_kv)
-                        kv_idx = kv_idx + T.uint32(1)
-                        tmem_stage_idx = tmem_stage_idx + T.uint32(num_math_warpgroups)
-                        if tmem_stage_idx >= T.uint32(num_tmem_stages):
-                            tmem_stage_idx = tmem_stage_idx - T.uint32(num_tmem_stages)
-                            tmem_phase = tmem_phase ^ T.uint32(1)
-                q_pipe.empty.arrive(q_stage_idx)
-                q_idx = q_idx + T.uint32(config.num_sms)
-                q_stage_idx = q_stage_idx + T.uint32(1)
-                if q_stage_idx >= T.uint32(num_q_stages):
-                    q_stage_idx = q_stage_idx - T.uint32(num_q_stages)
-                    q_phase = q_phase ^ T.uint32(1)
-            T.ptx.bar.sync(8, T.uint32(num_math_threads))
-            if warp_idx == 0:
-                T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    T.uint32(0), T.uint32(num_tmem_cols)
-                )
+                                )
+                                q_blk0 = _builder_scalar(
+                                    "q_blk0", q_idx * T.uint32(block_q), "uint32"
+                                )
+                                _builder_emit(
+                                    T.evaluate(
+                                        T.ptx[tma_g2s_2d](
+                                            smem_sf_q_2d.ptr_to([q_stage_idx, 0, 0]),
+                                            T.address_of(sf_q_gmem_tensormap),
+                                            T.int32(0),
+                                            T.cast(q_blk0, "int32"),
+                                            q_pipe.full.ptr_to([q_stage_idx]),
+                                            cache_policy_evict_normal,
+                                        )
+                                    )
+                                )
+                                _builder_emit(
+                                    T.evaluate(
+                                        T.ptx[tma_g2s_2d](
+                                            smem_weights.ptr_to([q_stage_idx, 0, 0]),
+                                            T.address_of(weights_gmem_tensormap),
+                                            T.int32(0),
+                                            T.cast(q_blk0, "int32"),
+                                            q_pipe.full.ptr_to([q_stage_idx]),
+                                            cache_policy_evict_normal,
+                                        )
+                                    )
+                                )
+                                _builder_emit(
+                                    q_pipe.full.arrive(
+                                        q_stage_idx,
+                                        tx_count=smem_q_size_per_stage
+                                        + real_num_sfq * 4
+                                        + smem_weight_size_per_stage,
+                                    )
+                                )
+                                q_idx = _builder_assign(
+                                    "q_idx",
+                                    q_idx + T.uint32(config.num_sms),
+                                    locals().get("q_idx", _BUILDER_MISSING),
+                                )
+                                q_stage_idx = _builder_assign(
+                                    "q_stage_idx",
+                                    q_stage_idx + T.uint32(1),
+                                    locals().get("q_stage_idx", _BUILDER_MISSING),
+                                )
+                                with T.If(q_stage_idx >= T.uint32(num_q_stages)):
+                                    with T.Then():
+                                        q_stage_idx = _builder_assign(
+                                            "q_stage_idx",
+                                            q_stage_idx - T.uint32(num_q_stages),
+                                            locals().get("q_stage_idx", _BUILDER_MISSING),
+                                        )
+                                        q_phase = _builder_assign(
+                                            "q_phase",
+                                            q_phase ^ T.uint32(1),
+                                            locals().get("q_phase", _BUILDER_MISSING),
+                                        )
+                    _builder_emit(T.cuda.warp_sync())
+                with T.Else():
+                    with T.If(warp_idx == spec_warp_start + 1):
+                        with T.Then():
+                            _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(56))
+                            with T.If(T.cuda.elect_sync()):
+                                with T.Then():
+                                    kv_stage_idx = _builder_scalar(
+                                        "kv_stage_idx", T.uint32(0), "uint32"
+                                    )
+                                    kv_phase = _builder_scalar("kv_phase", T.uint32(0), "uint32")
+                                    q_idx = _builder_scalar("q_idx", sm_idx, "uint32")
+                                    with T.While(q_idx < num_q_blocks):
+                                        _builder_emit(load_schedule(q_idx))
+                                        kv_start = _builder_scalar(
+                                            "kv_start", schedule_result[0], "uint32"
+                                        )
+                                        num_kv_blocks = _builder_scalar(
+                                            "num_kv_blocks", schedule_result[1], "uint32"
+                                        )
+                                        kv_idx = _builder_scalar("kv_idx", T.uint32(0), "uint32")
+                                        with T.While(kv_idx < num_kv_blocks):
+                                            _builder_emit(
+                                                kv_pipe.empty.wait(
+                                                    kv_stage_idx, kv_phase ^ T.uint32(1)
+                                                )
+                                            )
+                                            kv_row0 = _builder_scalar(
+                                                "kv_row0",
+                                                kv_start + kv_idx * T.uint32(block_kv),
+                                                "uint32",
+                                            )
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    T.ptx[tma_g2s_2d](
+                                                        smem_kv.ptr_to([kv_stage_idx, 0, 0]),
+                                                        T.address_of(kv_gmem_tensormap),
+                                                        T.int32(0),
+                                                        T.cast(kv_row0, "int32"),
+                                                        kv_pipe.full.ptr_to([kv_stage_idx]),
+                                                        cache_policy_evict_normal,
+                                                    )
+                                                )
+                                            )
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    T.ptx[tma_g2s_1d](
+                                                        smem_sf_kv.ptr_to([kv_stage_idx, 0]),
+                                                        T.address_of(sf_kv_gmem_tensormap),
+                                                        T.cast(kv_row0, "int32"),
+                                                        kv_pipe.full.ptr_to([kv_stage_idx]),
+                                                        cache_policy_evict_normal,
+                                                    )
+                                                )
+                                            )
+                                            _builder_emit(
+                                                kv_pipe.full.arrive(
+                                                    kv_stage_idx,
+                                                    tx_count=smem_kv_size_per_stage
+                                                    + smem_sf_kv_size_per_stage,
+                                                )
+                                            )
+                                            kv_idx = _builder_assign(
+                                                "kv_idx",
+                                                kv_idx + T.uint32(1),
+                                                locals().get("kv_idx", _BUILDER_MISSING),
+                                            )
+                                            kv_stage_idx = _builder_assign(
+                                                "kv_stage_idx",
+                                                kv_stage_idx + T.uint32(1),
+                                                locals().get("kv_stage_idx", _BUILDER_MISSING),
+                                            )
+                                            with T.If(kv_stage_idx >= T.uint32(num_kv_stages)):
+                                                with T.Then():
+                                                    kv_stage_idx = _builder_assign(
+                                                        "kv_stage_idx",
+                                                        kv_stage_idx - T.uint32(num_kv_stages),
+                                                        locals().get(
+                                                            "kv_stage_idx", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    kv_phase = _builder_assign(
+                                                        "kv_phase",
+                                                        kv_phase ^ T.uint32(1),
+                                                        locals().get("kv_phase", _BUILDER_MISSING),
+                                                    )
+                                        q_idx = _builder_assign(
+                                            "q_idx",
+                                            q_idx + T.uint32(config.num_sms),
+                                            locals().get("q_idx", _BUILDER_MISSING),
+                                        )
+                        with T.Else():
+                            with T.If(warp_idx == spec_warp_start + 2):
+                                with T.Then():
+                                    _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(56))
+                                    tmem_allocated = _builder_alloc_scalar(
+                                        "tmem_allocated", "uint32"
+                                    )
+                                    _builder_emit(
+                                        T.ptx.ld.shared.u32(
+                                            tmem_allocated, tmem_ptr_in_smem.ptr_to([0])
+                                        )
+                                    )
+                                    _builder_emit(
+                                        T.cuda.trap_when_assert_failed(
+                                            tmem_allocated == T.uint32(0)
+                                        )
+                                    )
+                                    desc_i = _builder_alloc_scalar("desc_i", "uint32")
+                                    # Encode the block-scaled instruction descriptor once; each K phase
+                                    # rotates its SF id from this same base descriptor below.
+                                    _builder_emit(
+                                        T.cuda.tcgen05.encode_instr_descriptor_block_scaled(
+                                            T.address_of(desc_i),
+                                            d_dtype="float32",
+                                            a_dtype="float4_e2m1fn",
+                                            b_dtype="float4_e2m1fn",
+                                            sfa_dtype="float8_e8m0fnu",
+                                            sfb_dtype="float8_e8m0fnu",
+                                            sfa_tmem_addr=0,
+                                            sfb_tmem_addr=0,
+                                            M=umma_m,
+                                            N=umma_n,
+                                            K=umma_k,
+                                            trans_a=False,
+                                            trans_b=False,
+                                            n_cta_groups=1,
+                                        )
+                                    )
+                                    # REGION D operand views: fp4 over the packed-uint8 smem bytes; .view also
+                                    # carries elem_offset, giving the true buffer start under the pool.
+                                    smem_kv_fp4 = _builder_assign(
+                                        "smem_kv_fp4",
+                                        smem_kv.view("float4_e2m1fn"),
+                                        locals().get("smem_kv_fp4", _BUILDER_MISSING),
+                                    )
+                                    smem_q_fp4 = _builder_assign(
+                                        "smem_q_fp4",
+                                        smem_q.view("float4_e2m1fn"),
+                                        locals().get("smem_q_fp4", _BUILDER_MISSING),
+                                    )
+                                    desc_sf = _builder_alloc_scalar("desc_sf", "uint64")
+                                    _builder_emit(
+                                        T.cuda.tcgen05.encode_matrix_descriptor(
+                                            T.address_of(desc_sf),
+                                            T.reinterpret("handle", T.uint64(0)),
+                                            ldo=0,
+                                            sdo=8,
+                                            swizzle=0,
+                                        )
+                                    )
+                                    q_stage_idx = _builder_scalar(
+                                        "q_stage_idx", T.uint32(0), "uint32"
+                                    )
+                                    q_phase = _builder_scalar("q_phase", T.uint32(0), "uint32")
+                                    kv_stage_idx = _builder_scalar(
+                                        "kv_stage_idx", T.uint32(0), "uint32"
+                                    )
+                                    kv_phase = _builder_scalar("kv_phase", T.uint32(0), "uint32")
+                                    tmem_stage_idx = _builder_scalar(
+                                        "tmem_stage_idx", T.uint32(0), "uint32"
+                                    )
+                                    tmem_phase = _builder_scalar(
+                                        "tmem_phase", T.uint32(0), "uint32"
+                                    )
+                                    # Monotonic MMA-issue count; the SFQ guard needs the un-wrapped
+                                    # value to name the previous issue.
+                                    tmem_issued = _builder_scalar(
+                                        "tmem_issued", T.uint32(0), "uint32"
+                                    )
+                                    q_idx = _builder_scalar("q_idx", sm_idx, "uint32")
+                                    with T.While(q_idx < num_q_blocks):
+                                        _builder_emit(load_schedule(q_idx))
+                                        kv_start = _builder_scalar(
+                                            "kv_start", schedule_result[0], "uint32"
+                                        )
+                                        num_kv_blocks = _builder_scalar(
+                                            "num_kv_blocks", schedule_result[1], "uint32"
+                                        )
+                                        _builder_emit(q_pipe.full.wait(q_stage_idx, q_phase))
+                                        _builder_emit(
+                                            emit_sf_transpose(
+                                                smem_sf_q, smem_sf_q_t, lane_idx, q_stage_idx, 0
+                                            )
+                                        )
+                                        _builder_emit(T.cuda.warp_sync())
+                                        _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                        # Each tmem_pipe.full arrive commits all prior asynchronous
+                                        # TCGEN work from this issuer. Wait for the final commit from
+                                        # the preceding q block before overwriting its SFQ TMEM input.
+                                        with T.If(tmem_issued > T.uint32(0)):
+                                            with T.Then():
+                                                previous_tmem_iter = _builder_scalar(
+                                                    "previous_tmem_iter",
+                                                    tmem_issued - T.uint32(1),
+                                                    "uint32",
+                                                )
+                                                _builder_emit(
+                                                    tmem_pipe.full.wait(
+                                                        previous_tmem_iter
+                                                        % T.uint32(num_tmem_stages),
+                                                        (
+                                                            previous_tmem_iter
+                                                            // T.uint32(num_tmem_stages)
+                                                        )
+                                                        & T.uint32(1),
+                                                    )
+                                                )
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(
+                                                    T.ptx[tcgen05_cp](
+                                                        T.uint32(tmem_start_col_of_sfq),
+                                                        replace_smem_desc_addr(
+                                                            desc_sf,
+                                                            smem_sf_q_t.ptr_to([q_stage_idx, 0]),
+                                                        ),
+                                                    )
+                                                )
+                                        _builder_emit(T.cuda.warp_sync())
+                                        kv_idx = _builder_scalar("kv_idx", T.uint32(0), "uint32")
+                                        with T.While(kv_idx < num_kv_blocks):
+                                            # UMMA reads smem_kv (kv full); staged SF comes from the
+                                            # transpose worker (sf_ready).
+                                            _builder_emit(kv_pipe.full.wait(kv_stage_idx, kv_phase))
+                                            _builder_emit(sf_ready.wait(kv_stage_idx, kv_phase))
+                                            # cp + MMA share ONE elect scope: drops a redundant elect.sync per
+                                            # kv-iter and lets the cp overlap the MMA setup.
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    with T.unroll(
+                                                        0, num_sfkv // num_utccp_aligned_elems
+                                                    ) as sfkv_i:
+                                                        IRBuilder.name("sfkv_i", sfkv_i)
+                                                        _builder_emit(
+                                                            T.ptx[tcgen05_cp](
+                                                                T.uint32(
+                                                                    tmem_start_col_of_sfkv
+                                                                    + sfkv_i * 4
+                                                                ),
+                                                                replace_smem_desc_addr(
+                                                                    desc_sf,
+                                                                    smem_sf_kv_t.ptr_to(
+                                                                        [
+                                                                            kv_stage_idx,
+                                                                            sfkv_i
+                                                                            * num_utccp_aligned_elems,
+                                                                        ]
+                                                                    ),
+                                                                ),
+                                                            )
+                                                        )
+                                                    with T.unroll(
+                                                        0, num_math_warpgroups
+                                                    ) as math_wg_i:
+                                                        IRBuilder.name("math_wg_i", math_wg_i)
+                                                        tmem_addr = _builder_scalar(
+                                                            "tmem_addr",
+                                                            tmem_stage_idx * T.uint32(umma_n),
+                                                            "uint32",
+                                                        )
+                                                        _builder_emit(
+                                                            tmem_pipe.empty.wait(
+                                                                tmem_stage_idx,
+                                                                tmem_phase ^ T.uint32(1),
+                                                            )
+                                                        )
+                                                        # REGION D: block-scaled FP4 UMMA, D = KV @ Qᵀ.  The
+                                                        # first K=64 phase overwrites and the second accumulates;
+                                                        # scale ids 0/2 select the two block-32 factors.
+                                                        desc_i_local = _builder_scalar(
+                                                            "desc_i_local", desc_i, "uint32"
+                                                        )
+                                                        with T.unroll(0, head_dim // umma_k) as ki:
+                                                            IRBuilder.name("ki", ki)
+                                                            sf_linear = _builder_scalar(
+                                                                "sf_linear",
+                                                                ki * (umma_k // 32),
+                                                                "int32",
+                                                            )
+                                                            _builder_emit(
+                                                                T.cuda.runtime_instr_desc(
+                                                                    T.address_of(desc_i_local),
+                                                                    sf_linear % (umma_k // 16),
+                                                                )
+                                                            )
+                                                            _builder_emit(
+                                                                T.ptx[tcgen05_mma](
+                                                                    tmem_addr,
+                                                                    recompute_fp4_smem_desc(
+                                                                        smem_kv_fp4.ptr_to(
+                                                                            [
+                                                                                kv_stage_idx,
+                                                                                math_wg_i * umma_m,
+                                                                                ki * umma_k,
+                                                                            ]
+                                                                        )
+                                                                    ),
+                                                                    recompute_fp4_smem_desc(
+                                                                        smem_q_fp4.ptr_to(
+                                                                            [
+                                                                                q_stage_idx,
+                                                                                0,
+                                                                                ki * umma_k,
+                                                                            ]
+                                                                        )
+                                                                    ),
+                                                                    desc_i_local,
+                                                                    T.cuda.get_tmem_addr(
+                                                                        tmem_start_col_of_sfkv
+                                                                        + math_wg_i * 4,
+                                                                        sf_linear % 128 // 4,
+                                                                        sf_linear // 128,
+                                                                    ),
+                                                                    T.cuda.get_tmem_addr(
+                                                                        tmem_start_col_of_sfq,
+                                                                        sf_linear % 128 // 4,
+                                                                        sf_linear // 128,
+                                                                    ),
+                                                                    T.cast(ki != 0, "bool"),
+                                                                )
+                                                            )
+                                                        _builder_emit(
+                                                            tmem_pipe.full.arrive(tmem_stage_idx)
+                                                        )
+                                                        tmem_issued = _builder_assign(
+                                                            "tmem_issued",
+                                                            tmem_issued + T.uint32(1),
+                                                            locals().get(
+                                                                "tmem_issued", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        tmem_stage_idx = _builder_assign(
+                                                            "tmem_stage_idx",
+                                                            tmem_stage_idx + T.uint32(1),
+                                                            locals().get(
+                                                                "tmem_stage_idx", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(
+                                                            tmem_stage_idx
+                                                            >= T.uint32(num_tmem_stages)
+                                                        ):
+                                                            with T.Then():
+                                                                tmem_stage_idx = _builder_assign(
+                                                                    "tmem_stage_idx",
+                                                                    tmem_stage_idx
+                                                                    - T.uint32(num_tmem_stages),
+                                                                    locals().get(
+                                                                        "tmem_stage_idx",
+                                                                        _BUILDER_MISSING,
+                                                                    ),
+                                                                )
+                                                                tmem_phase = _builder_assign(
+                                                                    "tmem_phase",
+                                                                    tmem_phase ^ T.uint32(1),
+                                                                    locals().get(
+                                                                        "tmem_phase",
+                                                                        _BUILDER_MISSING,
+                                                                    ),
+                                                                )
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(
+                                                        kv_pipe.empty.arrive(
+                                                            kv_stage_idx, cta_group=1
+                                                        )
+                                                    )
+                                            kv_idx = _builder_assign(
+                                                "kv_idx",
+                                                kv_idx + T.uint32(1),
+                                                locals().get("kv_idx", _BUILDER_MISSING),
+                                            )
+                                            kv_stage_idx = _builder_assign(
+                                                "kv_stage_idx",
+                                                kv_stage_idx + T.uint32(1),
+                                                locals().get("kv_stage_idx", _BUILDER_MISSING),
+                                            )
+                                            with T.If(kv_stage_idx >= T.uint32(num_kv_stages)):
+                                                with T.Then():
+                                                    kv_stage_idx = _builder_assign(
+                                                        "kv_stage_idx",
+                                                        kv_stage_idx - T.uint32(num_kv_stages),
+                                                        locals().get(
+                                                            "kv_stage_idx", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    kv_phase = _builder_assign(
+                                                        "kv_phase",
+                                                        kv_phase ^ T.uint32(1),
+                                                        locals().get("kv_phase", _BUILDER_MISSING),
+                                                    )
+                                        _builder_emit(q_pipe.empty.arrive(q_stage_idx))
+                                        q_idx = _builder_assign(
+                                            "q_idx",
+                                            q_idx + T.uint32(config.num_sms),
+                                            locals().get("q_idx", _BUILDER_MISSING),
+                                        )
+                                        q_stage_idx = _builder_assign(
+                                            "q_stage_idx",
+                                            q_stage_idx + T.uint32(1),
+                                            locals().get("q_stage_idx", _BUILDER_MISSING),
+                                        )
+                                        with T.If(q_stage_idx >= T.uint32(num_q_stages)):
+                                            with T.Then():
+                                                q_stage_idx = _builder_assign(
+                                                    "q_stage_idx",
+                                                    q_stage_idx - T.uint32(num_q_stages),
+                                                    locals().get("q_stage_idx", _BUILDER_MISSING),
+                                                )
+                                                q_phase = _builder_assign(
+                                                    "q_phase",
+                                                    q_phase ^ T.uint32(1),
+                                                    locals().get("q_phase", _BUILDER_MISSING),
+                                                )
+                                with T.Else():
+                                    with T.If(warp_idx == spec_warp_start + 3):
+                                        with T.Then():
+                                            _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(56))
+                                            # SF-KV transpose worker: overlaps transpose(k+1) with the
+                                            # tcgen05 warp's UTCCP+MMA of block k.
+                                            t_kv_stage = _builder_scalar(
+                                                "t_kv_stage", T.uint32(0), "uint32"
+                                            )
+                                            t_kv_phase = _builder_scalar(
+                                                "t_kv_phase", T.uint32(0), "uint32"
+                                            )
+                                            t_q_idx = _builder_scalar("t_q_idx", sm_idx, "uint32")
+                                            with T.While(t_q_idx < num_q_blocks):
+                                                _builder_emit(load_schedule(t_q_idx))
+                                                t_num_kv = _builder_scalar(
+                                                    "t_num_kv", schedule_result[1], "uint32"
+                                                )
+                                                t_kv_i = _builder_scalar(
+                                                    "t_kv_i", T.uint32(0), "uint32"
+                                                )
+                                                with T.While(t_kv_i < t_num_kv):
+                                                    _builder_emit(
+                                                        kv_pipe.full.wait(t_kv_stage, t_kv_phase)
+                                                    )
+                                                    # The preceding tcgen05.cp read of this transposed stage
+                                                    # completes through kv_pipe.empty before the TMA producer
+                                                    # can refill the stage.  Reconnect that async-proxy read
+                                                    # to the generic-proxy stores which now reuse the same
+                                                    # physical shared-memory backing.
+                                                    _builder_emit(
+                                                        T.ptx.fence.proxy.async_.shared__cta()
+                                                    )
+                                                    _builder_emit(
+                                                        emit_sf_transpose(
+                                                            smem_sf_kv,
+                                                            smem_sf_kv_t,
+                                                            lane_idx,
+                                                            t_kv_stage,
+                                                            0,
+                                                        )
+                                                    )
+                                                    _builder_emit(
+                                                        emit_sf_transpose(
+                                                            smem_sf_kv,
+                                                            smem_sf_kv_t,
+                                                            lane_idx,
+                                                            t_kv_stage,
+                                                            num_utccp_aligned_elems,
+                                                        )
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.fence.proxy.async_.shared__cta()
+                                                    )
+                                                    with T.If(T.cuda.elect_sync()):
+                                                        with T.Then():
+                                                            _builder_emit(
+                                                                sf_ready.arrive(t_kv_stage)
+                                                            )
+                                                    t_kv_i = _builder_assign(
+                                                        "t_kv_i",
+                                                        t_kv_i + T.uint32(1),
+                                                        locals().get("t_kv_i", _BUILDER_MISSING),
+                                                    )
+                                                    t_kv_stage = _builder_assign(
+                                                        "t_kv_stage",
+                                                        t_kv_stage + T.uint32(1),
+                                                        locals().get(
+                                                            "t_kv_stage", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    with T.If(
+                                                        t_kv_stage >= T.uint32(num_kv_stages)
+                                                    ):
+                                                        with T.Then():
+                                                            t_kv_stage = _builder_assign(
+                                                                "t_kv_stage",
+                                                                t_kv_stage
+                                                                - T.uint32(num_kv_stages),
+                                                                locals().get(
+                                                                    "t_kv_stage", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            t_kv_phase = _builder_assign(
+                                                                "t_kv_phase",
+                                                                t_kv_phase ^ T.uint32(1),
+                                                                locals().get(
+                                                                    "t_kv_phase", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                t_q_idx = _builder_assign(
+                                                    "t_q_idx",
+                                                    t_q_idx + T.uint32(config.num_sms),
+                                                    locals().get("t_q_idx", _BUILDER_MISSING),
+                                                )
+                                        with T.Else():
+                                            with T.If(warp_idx < spec_warp_start):
+                                                with T.Then():
+                                                    _builder_emit(
+                                                        T.ptx.setmaxnreg.inc.sync.aligned.u32(224)
+                                                    )
+                                                    accum = _builder_assign(
+                                                        "accum",
+                                                        T.alloc_local((num_heads,), "float32"),
+                                                        locals().get("accum", _BUILDER_MISSING),
+                                                    )
+                                                    cached_weights = _builder_assign(
+                                                        "cached_weights",
+                                                        T.alloc_local(
+                                                            (block_q, num_heads), "float32"
+                                                        ),
+                                                        locals().get(
+                                                            "cached_weights", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    # f32-dense store offsets, hoisted and chained (+block_kv per split) to keep
+                                                    # nvrtc's u64 IMAD.WIDE out of the hot loop; bf16-dense keeps per-iter form.
+                                                    token_store_off = _builder_assign(
+                                                        "token_store_off",
+                                                        T.alloc_local((block_q,), "uint64"),
+                                                        locals().get(
+                                                            "token_store_off", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    q_stage_idx = _builder_scalar(
+                                                        "q_stage_idx", T.uint32(0), "uint32"
+                                                    )
+                                                    q_phase = _builder_scalar(
+                                                        "q_phase", T.uint32(0), "uint32"
+                                                    )
+                                                    tmem_stage_idx = _builder_scalar(
+                                                        "tmem_stage_idx",
+                                                        T.cast(warpgroup_idx, "uint32"),
+                                                        "uint32",
+                                                    )
+                                                    tmem_phase = _builder_scalar(
+                                                        "tmem_phase", T.uint32(0), "uint32"
+                                                    )
+                                                    q_idx = _builder_scalar(
+                                                        "q_idx", sm_idx, "uint32"
+                                                    )
+                                                    with T.While(q_idx < num_q_blocks):
+                                                        _builder_emit(load_schedule(q_idx))
+                                                        kv_start = _builder_scalar(
+                                                            "kv_start", schedule_result[0], "uint32"
+                                                        )
+                                                        num_kv_blocks = _builder_scalar(
+                                                            "num_kv_blocks",
+                                                            schedule_result[1],
+                                                            "uint32",
+                                                        )
+                                                        _builder_emit(
+                                                            q_pipe.full.wait(q_stage_idx, q_phase)
+                                                        )
+                                                        with T.If(num_kv_blocks > T.uint32(0)):
+                                                            with T.Then():
+                                                                with T.unroll(
+                                                                    0, block_q
+                                                                ) as weight_i:
+                                                                    IRBuilder.name(
+                                                                        "weight_i", weight_i
+                                                                    )
+                                                                    with T.unroll(
+                                                                        0, num_heads // 4
+                                                                    ) as weight_j:
+                                                                        IRBuilder.name(
+                                                                            "weight_j", weight_j
+                                                                        )
+                                                                        weight_col = _builder_assign(
+                                                                            "weight_col",
+                                                                            weight_j * 4,
+                                                                            locals().get(
+                                                                                "weight_col",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        _builder_emit(
+                                                                            T.ptx.ld.shared.v4.f32(
+                                                                                cached_weights[
+                                                                                    weight_i,
+                                                                                    weight_col,
+                                                                                ],
+                                                                                cached_weights[
+                                                                                    weight_i,
+                                                                                    weight_col + 1,
+                                                                                ],
+                                                                                cached_weights[
+                                                                                    weight_i,
+                                                                                    weight_col + 2,
+                                                                                ],
+                                                                                cached_weights[
+                                                                                    weight_i,
+                                                                                    weight_col + 3,
+                                                                                ],
+                                                                                smem_weights.ptr_to(
+                                                                                    [
+                                                                                        q_stage_idx,
+                                                                                        weight_i,
+                                                                                        weight_col,
+                                                                                    ]
+                                                                                ),
+                                                                            )
+                                                                        )
+                                                                # Publish the generic-proxy weight reads before this
+                                                                # consumer releases the Q stage for a later TMA overwrite.
+                                                                _builder_emit(
+                                                                    T.ptx.fence.proxy.async_.shared__cta()
+                                                                )
+                                                                if (
+                                                                    not config.compressed_logits
+                                                                    and config.logits_dtype
+                                                                    == "float32"
+                                                                ):
+                                                                    with T.unroll(
+                                                                        0, block_q
+                                                                    ) as tb_i:
+                                                                        IRBuilder.name("tb_i", tb_i)
+                                                                        T.buffer_store(
+                                                                            token_store_off,
+                                                                            T.cast(
+                                                                                q_idx
+                                                                                * T.uint32(block_q)
+                                                                                + T.uint32(tb_i),
+                                                                                "uint64",
+                                                                            )
+                                                                            * T.cast(
+                                                                                logits_stride,
+                                                                                "uint64",
+                                                                            )
+                                                                            + T.cast(
+                                                                                kv_start
+                                                                                + T.cast(
+                                                                                    thread_idx,
+                                                                                    "uint32",
+                                                                                ),
+                                                                                "uint64",
+                                                                            ),
+                                                                            [tb_i],
+                                                                        )
+                                                                kv_idx = _builder_scalar(
+                                                                    "kv_idx", T.uint32(0), "uint32"
+                                                                )
+                                                                with T.While(
+                                                                    kv_idx < num_kv_blocks
+                                                                ):
+                                                                    kv_offset = _builder_scalar(
+                                                                        "kv_offset",
+                                                                        (
+                                                                            kv_start
+                                                                            + kv_idx
+                                                                            * T.uint32(block_kv)
+                                                                            + T.cast(
+                                                                                thread_idx, "uint32"
+                                                                            )
+                                                                        ),
+                                                                        "uint32",
+                                                                    )
+                                                                    _builder_emit(
+                                                                        tmem_pipe.full.wait(
+                                                                            tmem_stage_idx,
+                                                                            tmem_phase,
+                                                                        )
+                                                                    )
+                                                                    with T.unroll(
+                                                                        0, block_q
+                                                                    ) as q_inner_i:
+                                                                        IRBuilder.name(
+                                                                            "q_inner_i", q_inner_i
+                                                                        )
+                                                                        tmem_addr = _builder_scalar(
+                                                                            "tmem_addr",
+                                                                            tmem_stage_idx
+                                                                            * T.uint32(umma_n)
+                                                                            + T.uint32(
+                                                                                q_inner_i
+                                                                                * num_heads
+                                                                            ),
+                                                                            "uint32",
+                                                                        )
+                                                                        # REGION E: TMEM->register read as 2x tcgen05.ld.32x32b.x32
+                                                                        # (DeepGEMM's 64-head shape); accum stays flat for the reduce.
+                                                                        _builder_emit(
+                                                                            T.ptx[tcgen05_ld_x32](
+                                                                                *[
+                                                                                    accum[head_i]
+                                                                                    for head_i in range(
+                                                                                        num_heads
+                                                                                        // 2
+                                                                                    )
+                                                                                ],
+                                                                                T.cuda.get_tmem_addr(
+                                                                                    T.uint32(0),
+                                                                                    0,
+                                                                                    tmem_addr,
+                                                                                ),
+                                                                            )
+                                                                        )
+                                                                        _builder_emit(
+                                                                            T.ptx.tcgen05.wait__ld.sync.aligned()
+                                                                        )
+                                                                        tmem_addr_hi = (
+                                                                            _builder_scalar(
+                                                                                "tmem_addr_hi",
+                                                                                tmem_addr
+                                                                                + T.uint32(
+                                                                                    num_heads // 2
+                                                                                ),
+                                                                                "uint32",
+                                                                            )
+                                                                        )
+                                                                        _builder_emit(
+                                                                            T.ptx[tcgen05_ld_x32](
+                                                                                *[
+                                                                                    accum[
+                                                                                        num_heads
+                                                                                        // 2
+                                                                                        + head_i
+                                                                                    ]
+                                                                                    for head_i in range(
+                                                                                        num_heads
+                                                                                        // 2
+                                                                                    )
+                                                                                ],
+                                                                                T.cuda.get_tmem_addr(
+                                                                                    T.uint32(0),
+                                                                                    0,
+                                                                                    tmem_addr_hi,
+                                                                                ),
+                                                                            )
+                                                                        )
+                                                                        _builder_emit(
+                                                                            T.ptx.tcgen05.wait__ld.sync.aligned()
+                                                                        )
+                                                                        with T.If(
+                                                                            q_inner_i == block_q - 1
+                                                                        ):
+                                                                            with T.Then():
+                                                                                _builder_emit(
+                                                                                    tmem_pipe.empty.arrive(
+                                                                                        tmem_stage_idx
+                                                                                    )
+                                                                                )
+                                                                        result_f32 = _builder_scalar(
+                                                                            "result_f32",
+                                                                            cuda_func_call(
+                                                                                f"tvm_builtin_mqa_fp4_wrelu_reduce_{num_heads}",
+                                                                                T.address_of(
+                                                                                    accum[0]
+                                                                                ),
+                                                                                T.address_of(
+                                                                                    cached_weights[
+                                                                                        q_inner_i, 0
+                                                                                    ]
+                                                                                ),
+                                                                                source_code=_mqa_fp4_wrelu_reduce_src(
+                                                                                    num_heads
+                                                                                ),
+                                                                                return_type="float32",
+                                                                            ),
+                                                                            "float32",
+                                                                        )
+                                                                        result = _builder_assign(
+                                                                            "result",
+                                                                            T.cast(
+                                                                                result_f32,
+                                                                                logits_tir_dtype,
+                                                                            ),
+                                                                            locals().get(
+                                                                                "result",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        if config.compressed_logits:
+                                                                            q_offset = _builder_scalar(
+                                                                                "q_offset",
+                                                                                T.cast(
+                                                                                    q_idx
+                                                                                    * T.uint32(
+                                                                                        block_q
+                                                                                    )
+                                                                                    + T.uint32(
+                                                                                        q_inner_i
+                                                                                    ),
+                                                                                    "uint64",
+                                                                                )
+                                                                                * T.cast(
+                                                                                    logits_stride,
+                                                                                    "uint64",
+                                                                                ),
+                                                                                "uint64",
+                                                                            )
+                                                                            row_k_start = (
+                                                                                _builder_scalar(
+                                                                                    "row_k_start",
+                                                                                    seq_k_start[
+                                                                                        q_inner_i
+                                                                                    ],
+                                                                                    "uint32",
+                                                                                )
+                                                                            )
+                                                                            row_k_end = (
+                                                                                _builder_scalar(
+                                                                                    "row_k_end",
+                                                                                    seq_k_end[
+                                                                                        q_inner_i
+                                                                                    ],
+                                                                                    "uint32",
+                                                                                )
+                                                                            )
+                                                                            # Range-guarded store: if-converts to a predicated @P STG
+                                                                            # for this kernel (unlike fp8's clamp-to-padding variant).
+                                                                            with T.If(
+                                                                                tvm.tirx.all(
+                                                                                    row_k_start
+                                                                                    <= kv_offset,
+                                                                                    kv_offset
+                                                                                    < row_k_end,
+                                                                                )
+                                                                            ):
+                                                                                with T.Then():
+                                                                                    _builder_emit(
+                                                                                        store_logits(
+                                                                                            q_offset
+                                                                                            + T.cast(
+                                                                                                kv_offset,
+                                                                                                "uint64",
+                                                                                            )
+                                                                                            - T.cast(
+                                                                                                row_k_start,
+                                                                                                "uint64",
+                                                                                            ),
+                                                                                            result,
+                                                                                        )
+                                                                                    )
+                                                                        elif (
+                                                                            config.logits_dtype
+                                                                            == "float32"
+                                                                        ):
+                                                                            _builder_emit(
+                                                                                store_logits(
+                                                                                    token_store_off[
+                                                                                        q_inner_i
+                                                                                    ],
+                                                                                    result,
+                                                                                )
+                                                                            )
+                                                                        else:
+                                                                            # bf16-dense: per-iter offset; see token_store_off note.
+                                                                            q_offset_bf16 = _builder_scalar(
+                                                                                "q_offset_bf16",
+                                                                                T.cast(
+                                                                                    q_idx
+                                                                                    * T.uint32(
+                                                                                        block_q
+                                                                                    )
+                                                                                    + T.uint32(
+                                                                                        q_inner_i
+                                                                                    ),
+                                                                                    "uint64",
+                                                                                )
+                                                                                * T.cast(
+                                                                                    logits_stride,
+                                                                                    "uint64",
+                                                                                ),
+                                                                                "uint64",
+                                                                            )
+                                                                            _builder_emit(
+                                                                                store_logits(
+                                                                                    q_offset_bf16
+                                                                                    + T.cast(
+                                                                                        kv_offset,
+                                                                                        "uint64",
+                                                                                    ),
+                                                                                    result,
+                                                                                )
+                                                                            )
+                                                                    if (
+                                                                        not config.compressed_logits
+                                                                        and config.logits_dtype
+                                                                        == "float32"
+                                                                    ):
+                                                                        with T.unroll(
+                                                                            0, block_q
+                                                                        ) as tb_i:
+                                                                            IRBuilder.name(
+                                                                                "tb_i", tb_i
+                                                                            )
+                                                                            T.buffer_store(
+                                                                                token_store_off,
+                                                                                token_store_off[
+                                                                                    tb_i
+                                                                                ]
+                                                                                + T.uint64(
+                                                                                    block_kv
+                                                                                ),
+                                                                                [tb_i],
+                                                                            )
+                                                                    kv_idx = _builder_assign(
+                                                                        "kv_idx",
+                                                                        kv_idx + T.uint32(1),
+                                                                        locals().get(
+                                                                            "kv_idx",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    tmem_stage_idx = (
+                                                                        _builder_assign(
+                                                                            "tmem_stage_idx",
+                                                                            tmem_stage_idx
+                                                                            + T.uint32(
+                                                                                num_math_warpgroups
+                                                                            ),
+                                                                            locals().get(
+                                                                                "tmem_stage_idx",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                    with T.If(
+                                                                        tmem_stage_idx
+                                                                        >= T.uint32(num_tmem_stages)
+                                                                    ):
+                                                                        with T.Then():
+                                                                            tmem_stage_idx = _builder_assign(
+                                                                                "tmem_stage_idx",
+                                                                                tmem_stage_idx
+                                                                                - T.uint32(
+                                                                                    num_tmem_stages
+                                                                                ),
+                                                                                locals().get(
+                                                                                    "tmem_stage_idx",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            tmem_phase = _builder_assign(
+                                                                                "tmem_phase",
+                                                                                tmem_phase
+                                                                                ^ T.uint32(1),
+                                                                                locals().get(
+                                                                                    "tmem_phase",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                        _builder_emit(
+                                                            q_pipe.empty.arrive(q_stage_idx)
+                                                        )
+                                                        q_idx = _builder_assign(
+                                                            "q_idx",
+                                                            q_idx + T.uint32(config.num_sms),
+                                                            locals().get("q_idx", _BUILDER_MISSING),
+                                                        )
+                                                        q_stage_idx = _builder_assign(
+                                                            "q_stage_idx",
+                                                            q_stage_idx + T.uint32(1),
+                                                            locals().get(
+                                                                "q_stage_idx", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(
+                                                            q_stage_idx >= T.uint32(num_q_stages)
+                                                        ):
+                                                            with T.Then():
+                                                                q_stage_idx = _builder_assign(
+                                                                    "q_stage_idx",
+                                                                    q_stage_idx
+                                                                    - T.uint32(num_q_stages),
+                                                                    locals().get(
+                                                                        "q_stage_idx",
+                                                                        _BUILDER_MISSING,
+                                                                    ),
+                                                                )
+                                                                q_phase = _builder_assign(
+                                                                    "q_phase",
+                                                                    q_phase ^ T.uint32(1),
+                                                                    locals().get(
+                                                                        "q_phase", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                    _builder_emit(
+                                                        T.ptx.bar.sync(
+                                                            8, T.uint32(num_math_threads)
+                                                        )
+                                                    )
+                                                    with T.If(warp_idx == 0):
+                                                        with T.Then():
+                                                            _builder_emit(
+                                                                T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                                                                    T.uint32(0),
+                                                                    T.uint32(num_tmem_cols),
+                                                                )
+                                                            )
 
-    return sm100_fp4_mqa_logits.with_attr(
+    return builder.get().with_attr(
         "tirx.kernel_launch_params",
         [
             "blockIdx.x",

@@ -24,10 +24,112 @@ from functools import cache
 import torch
 
 import tvm
-from tvm.script import tirx as T
+from tirx_kernels.flashmla.utils._ir_builder import MBarrier, PipelineState, TCGen05Bar, TMABar
+from tvm.ir.type import PointerType
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import ir as I
+from tvm.script.ir_builder import tirx as T
+from tvm.script.ir_builder.base import IRBuilderFrame
+from tvm.tirx import IterVar, Layout, is_buffer_var
 from tvm.tirx.cuda.iket import IketProfiler
-from tvm.tirx.lang.pipeline import MBarrier, PipelineState, TCGen05Bar, TMABar
 from tvm.tirx.layout import ComposeLayout, S, TileLayout
+from tvm.tirx.script.builder.ir import name_meta_class_value
+
+_BUILDER_MISSING = object()
+
+
+def _builder_enter(frame):
+    frames = frame.frames if hasattr(frame, "frames") else [frame]
+    prim_func = next(
+        candidate
+        for candidate in reversed(IRBuilder.current().frames)
+        if type(candidate).__name__ == "PrimFuncFrame"
+    )
+    for item in frames:
+        prim_func.add_callback(lambda item=item: item.__exit__(None, None, None))
+        item.__enter__()
+
+
+def _builder_emit(value):
+    if value is None or isinstance(value, tvm.ir.Var):
+        return
+    if isinstance(value, IRBuilderFrame) or (
+        hasattr(value, "frames") and hasattr(value, "__enter__")
+    ):
+        _builder_enter(value)
+    elif tvm.ir.is_prim_expr(value) or isinstance(value, tvm.ir.Call):
+        T.evaluate(value)
+    elif isinstance(value, int | bool):
+        T.evaluate(tvm.tirx.const(value))
+
+
+def _builder_alloc_scalar(name, dtype):
+    scalar = T.local_scalar(dtype)
+    IRBuilder.name(name, scalar.scalar.buffer)
+    return scalar.scalar
+
+
+def _builder_scalar(name, value, dtype):
+    scalar = _builder_alloc_scalar(name, dtype)
+    T.buffer_store(scalar.buffer, value, scalar.indices)
+    return scalar
+
+
+def _builder_bind(name, value, type_annotation=None):
+    result = T.Bind(value, type_annotation)
+    IRBuilder.name(name, result)
+    return result
+
+
+def _builder_assign(name, value, previous=_BUILDER_MISSING):
+    if isinstance(value, I.meta_var):
+        return value.value
+    if previous is not _BUILDER_MISSING:
+        if isinstance(previous, T.scalar_wrapper | tvm.tirx.expr.BufferLoad):
+            target = previous.scalar if isinstance(previous, T.scalar_wrapper) else previous
+            T.buffer_store(target.buffer, value, target.indices)
+            return target
+        if (
+            is_buffer_var(previous)
+            and len(previous.ty.shape) == 1
+            and bool(previous.ty.shape[0] == 1)
+        ):
+            try:
+                T.buffer_store(previous, value, [0])
+                return previous
+            except TypeError:
+                pass
+    if isinstance(value, PipelineState):
+        IRBuilder.name(f"{name}_stage", value.stage.buffer)
+        IRBuilder.name(f"{name}_phase", value.phase.buffer)
+        return value
+    if getattr(type(value), "_is_meta_class", False):
+        name_meta_class_value(name, value)
+        return value
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _builder_assign(f"{name}_{index}", item)
+        return value
+    if is_buffer_var(value) or isinstance(value, IterVar | Layout):
+        IRBuilder.name(name, value)
+        return value
+    if isinstance(value, tvm.ir.Var):
+        if isinstance(value.ty, PointerType):
+            return _builder_bind(name, value, value.ty)
+        IRBuilder.name(name, value)
+        return value
+    if isinstance(value, tvm.ir.Expr) and isinstance(getattr(value, "ty", None), PointerType):
+        return _builder_bind(name, value, value.ty)
+    if isinstance(value, tvm.ir.Expr) and tvm.ir.is_prim_expr(value):
+        return _builder_scalar(name, value, str(value.ty.dtype))
+    return value
+
+
+def _builder_assign_many(names, values, previous):
+    return tuple(
+        _builder_assign(name, value, old) for name, value, old in zip(names, values, previous)
+    )
+
 
 IKET_EVENT_NAMES = (
     "dq-reduce",
@@ -90,11 +192,6 @@ def build_preprocess(B, S, H, D):
     NBLK = S // ROWS_PER_BLOCK
     LOG2_E = math.log2(math.e)
 
-    try:
-        from tvm.script import tir as T
-    except ImportError:
-        from tvm.script import tirx as T
-
     def dot_f16x8(lhs, rhs):
         lhs_words = T.alloc_local((4,), "uint32")
         rhs_words = T.alloc_local((4,), "uint32")
@@ -127,73 +224,108 @@ def build_preprocess(B, S, H, D):
                 )
         return result[0]
 
-    @T.prim_func
-    def preprocess_kernel(
-        dO_buf: T.Buffer((B, S, H, D), "float16"),
-        O_buf: T.Buffer((B, S, H, D), "float16"),
-        LSE_buf: T.Buffer((B, H, S), "float32"),
-        dpsum_out: T.Buffer((B, H, S), "float32"),
-        LSE_log2_out: T.Buffer((B, H, S), "float32"),
-        dQ_accum: T.Buffer((B, H, S, D), "float32"),
-    ):
-        T.func_attr({"tir.is_scheduled": True, "tir.noalias": True})
-        for bx in T.thread_binding(NBLK, thread="blockIdx.x"):
-            for by in T.thread_binding(H, thread="blockIdx.y"):
-                for bz in T.thread_binding(B, thread="blockIdx.z"):
-                    for tx in T.thread_binding(BLOCK, thread="threadIdx.x"):
-                        col_in_row: T.int32 = tx % THREADS_PER_ROW
-                        row_in_wave: T.int32 = tx // THREADS_PER_ROW
-                        d_start: T.int32 = col_in_row * ELEMS_PER_THREAD
-
-                        # Match the official dependency shape: start the
-                        # independent LSE load before the O/dO dot products
-                        # and retain it until the final scalar conversion.
-                        # This lets its GMEM latency overlap the eight row
-                        # iterations below.
-                        lse_for_log2: T.float32 = T.float32(0)
-                        if tx < ROWS_PER_BLOCK:
-                            lse_s: T.int32 = bx * ROWS_PER_BLOCK + tx
-                            lse_for_log2 = LSE_buf[bz, by, lse_s]
-
-                        for row_iter in T.unroll(ROW_ITERS):
-                            s: T.int32 = (
-                                bx * ROWS_PER_BLOCK + row_iter * ROWS_PER_WAVE + row_in_wave
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("preprocess_kernel")
+            dO_buf = T.arg("dO_buf", T.Buffer((B, S, H, D), "float16"))
+            O_buf = T.arg("O_buf", T.Buffer((B, S, H, D), "float16"))
+            LSE_buf = T.arg("LSE_buf", T.Buffer((B, H, S), "float32"))
+            dpsum_out = T.arg("dpsum_out", T.Buffer((B, H, S), "float32"))
+            LSE_log2_out = T.arg("LSE_log2_out", T.Buffer((B, H, S), "float32"))
+            dQ_accum = T.arg("dQ_accum", T.Buffer((B, H, S, D), "float32"))
+            T.func_attr({"tir.is_scheduled": True, "tir.noalias": True})
+            with T.thread_binding(NBLK, thread="blockIdx.x") as bx:
+                IRBuilder.name("bx", bx)
+                with T.thread_binding(H, thread="blockIdx.y") as by:
+                    IRBuilder.name("by", by)
+                    with T.thread_binding(B, thread="blockIdx.z") as bz:
+                        IRBuilder.name("bz", bz)
+                        with T.thread_binding(BLOCK, thread="threadIdx.x") as tx:
+                            IRBuilder.name("tx", tx)
+                            col_in_row = _builder_scalar(
+                                "col_in_row", tx % THREADS_PER_ROW, "int32"
                             )
-                            acc: T.float32 = dot_f16x8(
-                                T.address_of(dO_buf[bz, s, by, d_start]),
-                                T.address_of(O_buf[bz, s, by, d_start]),
+                            row_in_wave = _builder_scalar(
+                                "row_in_wave", tx // THREADS_PER_ROW, "int32"
                             )
-                            for chunk in T.unroll(ELEMS_PER_THREAD // 4):
-                                for d in T.vectorized(4):
-                                    dQ_accum[bz, by, s, d_start + chunk * 4 + d] = T.float32(0)
-
-                            acc = acc + T.cuda.__shfl_xor_sync(
-                                T.uint32(0xFFFFFFFF), acc, 8, THREADS_PER_ROW
-                            )
-                            acc = acc + T.cuda.__shfl_xor_sync(
-                                T.uint32(0xFFFFFFFF), acc, 4, THREADS_PER_ROW
-                            )
-                            acc = acc + T.cuda.__shfl_xor_sync(
-                                T.uint32(0xFFFFFFFF), acc, 2, THREADS_PER_ROW
-                            )
-                            acc = acc + T.cuda.__shfl_xor_sync(
-                                T.uint32(0xFFFFFFFF), acc, 1, THREADS_PER_ROW
-                            )
-                            if col_in_row == 0:
-                                dpsum_out[bz, by, s] = acc
-
-                        # LSE conversion has one independent scalar per row;
-                        # spread the 128 rows across 128 threads instead of
-                        # serializing eight conversions on each row leader.
-                        if tx < ROWS_PER_BLOCK:
-                            lse_s: T.int32 = bx * ROWS_PER_BLOCK + tx
-                            LSE_log2_out[bz, by, lse_s] = T.if_then_else(
-                                lse_for_log2 == T.float32(-float("inf")),
-                                T.float32(0),
-                                lse_for_log2 * T.float32(LOG2_E),
+                            d_start = _builder_scalar(
+                                "d_start", col_in_row * ELEMS_PER_THREAD, "int32"
                             )
 
-    mod = tvm.IRModule({"main": preprocess_kernel})
+                            # Match the official dependency shape: start the
+                            # independent LSE load before the O/dO dot products
+                            # and retain it until the final scalar conversion.
+                            # This lets its GMEM latency overlap the eight row
+                            # iterations below.
+                            lse_for_log2 = _builder_scalar("lse_for_log2", T.float32(0), "float32")
+                            with T.If(tx < ROWS_PER_BLOCK):
+                                with T.Then():
+                                    lse_s = _builder_scalar(
+                                        "lse_s", bx * ROWS_PER_BLOCK + tx, "int32"
+                                    )
+                                    T.buffer_store(
+                                        lse_for_log2.buffer,
+                                        LSE_buf[bz, by, lse_s],
+                                        lse_for_log2.indices,
+                                    )
+
+                            with T.unroll(ROW_ITERS) as row_iter:
+                                IRBuilder.name("row_iter", row_iter)
+                                s = _builder_scalar(
+                                    "s",
+                                    bx * ROWS_PER_BLOCK + row_iter * ROWS_PER_WAVE + row_in_wave,
+                                    "int32",
+                                )
+                                acc = _builder_scalar(
+                                    "acc",
+                                    dot_f16x8(
+                                        T.address_of(dO_buf[bz, s, by, d_start]),
+                                        T.address_of(O_buf[bz, s, by, d_start]),
+                                    ),
+                                    "float32",
+                                )
+                                with T.unroll(ELEMS_PER_THREAD // 4) as chunk:
+                                    IRBuilder.name("chunk", chunk)
+                                    with T.vectorized(4) as d:
+                                        IRBuilder.name("d", d)
+                                        T.buffer_store(
+                                            dQ_accum,
+                                            T.float32(0),
+                                            [bz, by, s, d_start + chunk * 4 + d],
+                                        )
+
+                                for delta in (8, 4, 2, 1):
+                                    T.buffer_store(
+                                        acc.buffer,
+                                        acc
+                                        + T.cuda.__shfl_xor_sync(
+                                            T.uint32(0xFFFFFFFF), acc, delta, THREADS_PER_ROW
+                                        ),
+                                        acc.indices,
+                                    )
+                                with T.If(col_in_row == 0):
+                                    with T.Then():
+                                        T.buffer_store(dpsum_out, acc, [bz, by, s])
+
+                            # LSE conversion has one independent scalar per row;
+                            # spread the 128 rows across 128 threads instead of
+                            # serializing eight conversions on each row leader.
+                            with T.If(tx < ROWS_PER_BLOCK):
+                                with T.Then():
+                                    lse_s = _builder_scalar(
+                                        "lse_s", bx * ROWS_PER_BLOCK + tx, "int32"
+                                    )
+                                    T.buffer_store(
+                                        LSE_log2_out,
+                                        T.if_then_else(
+                                            lse_for_log2 == T.float32(-float("inf")),
+                                            T.float32(0),
+                                            lse_for_log2 * T.float32(LOG2_E),
+                                        ),
+                                        [bz, by, lse_s],
+                                    )
+
+    mod = tvm.IRModule({"main": builder.get()})
     from tirx_kernels.runner import cuda_target
 
     return tvm.compile(mod, target=cuda_target())
@@ -201,11 +333,6 @@ def build_preprocess(B, S, H, D):
 
 def build_cast_f32_to_f16(B, S, H, D, scale):
     """Scale and transpose the head-major dQ accumulation to fp16."""
-    try:
-        from tvm.script import tir as T
-    except ImportError:
-        from tvm.script import tirx as T
-
     GROUP_WIDTH = 4
     GROUPS_PER_THREAD = 4
     BLOCK = 256
@@ -224,38 +351,61 @@ def build_cast_f32_to_f16(B, S, H, D, scale):
         T.evaluate(T.ptx.cvt.rn.f16x2.f32(packed[1], scaled[3], scaled[2]))
         return T.ptx.st.global_.v2.b32(dst_ptr, packed[0], packed[1])
 
-    @T.prim_func
-    def cast_kernel(src: T.Buffer((B, H, S, D), "float32"), dst: T.Buffer((B, S, H, D), "float16")):
-        T.func_attr({"tir.is_scheduled": True, "tir.noalias": True})
-        for bx in T.thread_binding(NBLK, thread="blockIdx.x"):
-            for tx in T.thread_binding(BLOCK, thread="threadIdx.x"):
-                for e in T.unroll(GROUPS_PER_THREAD):
-                    group: T.int32 = bx * GROUPS_PER_BLOCK + e * BLOCK + tx
-                    if group < num_groups:
-                        d_group: T.int32 = group % (D // GROUP_WIDTH)
-                        h: T.int32 = group // (D // GROUP_WIDTH) % H
-                        s: T.int32 = group // (D // GROUP_WIDTH * H) % S
-                        b: T.int32 = group // (D // GROUP_WIDTH * H * S)
-                        d: T.int32 = d_group * GROUP_WIDTH
-                        # The raw tcgen05 dQ accumulator uses the physical
-                        # 128x128 C-fragment bit layout.  Decode that internal
-                        # layout while producing the public sequence-major dQ.
-                        s_in_block: T.int32 = s % 128
-                        src_s: T.int32 = (
-                            s // 128 * 128
-                            + ((s_in_block >> 5) & 1)
-                            + (((d >> 6) & 1) << 1)
-                            + (((d >> 2) & 15) << 2)
-                            + (((s_in_block >> 6) & 1) << 6)
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("cast_kernel")
+            src = T.arg("src", T.Buffer((B, H, S, D), "float32"))
+            dst = T.arg("dst", T.Buffer((B, S, H, D), "float16"))
+            T.func_attr({"tir.is_scheduled": True, "tir.noalias": True})
+            with T.thread_binding(NBLK, thread="blockIdx.x") as bx:
+                IRBuilder.name("bx", bx)
+                with T.thread_binding(BLOCK, thread="threadIdx.x") as tx:
+                    IRBuilder.name("tx", tx)
+                    with T.unroll(GROUPS_PER_THREAD) as e:
+                        IRBuilder.name("e", e)
+                        group = _builder_scalar(
+                            "group", bx * GROUPS_PER_BLOCK + e * BLOCK + tx, "int32"
                         )
-                        src_d: T.int32 = (s_in_block & 31) << 2
-                        scale_cast_f32x4_f16x4(
-                            T.address_of(dst[b, s, h, d]),
-                            T.address_of(src[b, h, src_s, src_d]),
-                            T.float32(scale),
-                        )
+                        with T.If(group < num_groups):
+                            with T.Then():
+                                d_group = _builder_scalar(
+                                    "d_group", group % (D // GROUP_WIDTH), "int32"
+                                )
+                                h = _builder_scalar("h", group // (D // GROUP_WIDTH) % H, "int32")
+                                s = _builder_scalar(
+                                    "s", group // (D // GROUP_WIDTH * H) % S, "int32"
+                                )
+                                b = _builder_scalar(
+                                    "b", group // (D // GROUP_WIDTH * H * S), "int32"
+                                )
+                                d = _builder_scalar("d", d_group * GROUP_WIDTH, "int32")
+                                # The raw tcgen05 dQ accumulator uses the physical
+                                # 128x128 C-fragment bit layout.  Decode that internal
+                                # layout while producing the public sequence-major dQ.
+                                s_in_block = _builder_scalar("s_in_block", s % 128, "int32")
+                                src_s = _builder_scalar(
+                                    "src_s",
+                                    s // 128 * 128
+                                    + T.bitwise_and(T.shift_right(s_in_block, 5), 1)
+                                    + T.shift_left(T.bitwise_and(T.shift_right(d, 6), 1), 1)
+                                    + T.shift_left(T.bitwise_and(T.shift_right(d, 2), 15), 2)
+                                    + T.shift_left(
+                                        T.bitwise_and(T.shift_right(s_in_block, 6), 1), 6
+                                    ),
+                                    "int32",
+                                )
+                                src_d = _builder_scalar(
+                                    "src_d", T.shift_left(T.bitwise_and(s_in_block, 31), 2), "int32"
+                                )
+                                _builder_emit(
+                                    scale_cast_f32x4_f16x4(
+                                        T.address_of(dst[b, s, h, d]),
+                                        T.address_of(src[b, h, src_s, src_d]),
+                                        T.float32(scale),
+                                    )
+                                )
 
-    mod = tvm.IRModule({"main": cast_kernel})
+    mod = tvm.IRModule({"main": builder.get()})
     from tirx_kernels.runner import cuda_target
 
     return tvm.compile(mod, target=cuda_target())
@@ -299,11 +449,10 @@ def build_kernel(
         start = T.bitwise_and(anchor_start + T.cast(byte_delta // 16, "uint64"), T.uint64(0x3FFF))
         return T.bitwise_or(T.uint64(layout_bits), start)
 
-    @T.inline
     def copy_128b(dst, value):
         # The dialect takes the payload as one 128-bit register; callers pass a
         # uint128 view element rather than a pointer into their local buffer.
-        T.ptx.st.weak.shared__cta.b128(dst, value)
+        T.evaluate(T.ptx.st.weak.shared__cta.b128(dst, value))
 
     def pointer_offset(ptr, offset):
         return T.ptr_byte_offset(ptr, offset * 2, "float16")
@@ -319,18 +468,18 @@ def build_kernel(
     # disabled here, but the operands are not optional.
     _MMA_KEEP_ALL_LANES = (0, 0, 0, 0, 0, 0, 0, 0)
 
-    @T.inline
     def mma_ss_one(d, accumulate, a_desc, b_desc, instruction):
-        T.ptx[_MMA_F16](
-            T.uint32(d),
-            T.uint64(a_desc),
-            T.uint64(b_desc),
-            T.uint32(instruction),
-            *_MMA_KEEP_ALL_LANES,
-            T.ptx.pred(accumulate),
+        T.evaluate(
+            T.ptx[_MMA_F16](
+                T.uint32(d),
+                T.uint64(a_desc),
+                T.uint64(b_desc),
+                T.uint32(instruction),
+                *_MMA_KEEP_ALL_LANES,
+                T.ptx.pred(accumulate),
+            )
         )
 
-    @T.inline
     def mma_ss8(d, accumulate, a_base, b_base):
         mma_ss_one(d, accumulate, a_base, b_base, 270532624)
         mma_ss_one(d, 1, a_base + 2, b_base + 2, 270532624)
@@ -341,18 +490,18 @@ def build_kernel(
         mma_ss_one(d, 1, a_base + 1028, b_base + 516, 270532624)
         mma_ss_one(d, 1, a_base + 1030, b_base + 518, 270532624)
 
-    @T.inline
     def mma_ts_one(d, a, accumulate, b_desc):
-        T.ptx[_MMA_F16](
-            T.uint32(d),
-            T.uint32(a),
-            T.uint64(b_desc),
-            T.uint32(270598160),
-            *_MMA_KEEP_ALL_LANES,
-            T.ptx.pred(accumulate),
+        T.evaluate(
+            T.ptx[_MMA_F16](
+                T.uint32(d),
+                T.uint32(a),
+                T.uint64(b_desc),
+                T.uint32(270598160),
+                *_MMA_KEEP_ALL_LANES,
+                T.ptx.pred(accumulate),
+            )
         )
 
-    @T.inline
     def mma_ts8(d, a, accumulate, b_base):
         mma_ts_one(d, a, accumulate, b_base)
         mma_ts_one(d, a + 8, 1, b_base + 128)
@@ -363,23 +512,18 @@ def build_kernel(
         mma_ts_one(d, a + 48, 1, b_base + 768)
         mma_ts_one(d, a + 56, 1, b_base + 896)
 
-    @T.inline
     def mma_s(d, accumulate, desc_k_row, desc_q_row):
         mma_ss8(d, accumulate, desc_k_row, desc_q_row)
 
-    @T.inline
     def mma_dp(d, accumulate, desc_v_row, desc_do_row):
         mma_ss8(d, accumulate, desc_v_row, desc_do_row)
 
-    @T.inline
     def mma_dv(d, a, accumulate, desc_do_col):
         mma_ts8(d, a, accumulate, desc_do_col)
 
-    @T.inline
     def mma_dk(d, a, accumulate, desc_q_col):
         mma_ts8(d, a, accumulate, desc_q_col)
 
-    @T.inline
     def mma_dq(d, accumulate, desc_ds_exch, desc_k_col):
         mma_ss_one(d, accumulate, desc_ds_exch, desc_k_col, 136413200)
         mma_ss_one(d, 1, desc_ds_exch + 128, desc_k_col + 128, 136413200)
@@ -398,9 +542,8 @@ def build_kernel(
         mma_ss_one(d, 1, desc_ds_exch + 1792, desc_k_col + 1792, 136413200)
         mma_ss_one(d, 1, desc_ds_exch + 1920, desc_k_col + 1920, 136413200)
 
-    @T.inline
     def cast_f32x2_to_f16x2(dst, src):
-        T.cuda.float22half2(dst, src)
+        T.evaluate(T.cuda.float22half2(dst, src))
 
     def fma_scale_sub_f32x2(scores, scale, lse):
         neg_lse = T.alloc_local((1,), "uint64")
@@ -486,15 +629,18 @@ def build_kernel(
             self.shape = [2] * self.n_dim
             self.shape[-1] = 1 << self.per_element
 
-        @T.inline
         def init(self):
-            for i in T.unroll(self.swizzle_len):
+            with T.unroll(self.swizzle_len) as i:
                 y_i = T.meta_var(self.row_base & (1 << i))
                 stride_i = T.meta_var(1 << (i + self.per_element))
-                self.signed_strides[i] = -stride_i if y_i > 0 else stride_i
-            for i in T.unroll(self.swizzle_len, self.atom_len):
+                T.buffer_store(
+                    self.signed_strides,
+                    T.if_then_else(y_i.value > 0, stride_i.value * -1, stride_i.value),
+                    [i],
+                )
+            with T.unroll(self.swizzle_len, self.atom_len) as i:
                 stride_i = T.meta_var(1 << (i + self.per_element))
-                self.signed_strides[i] = stride_i
+                T.buffer_store(self.signed_strides, stride_i.value, [i])
 
         def apply(self, offset):
             offset_layout = TileLayout(
@@ -573,1302 +719,805 @@ def build_kernel(
     iket = IketProfiler()
 
     # fmt: off
-    @T.prim_func
-    def kernel(
-        Q_g:      T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16),
-        K_g:      T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16),
-        V_g:      T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16),
-        dO_g:     T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16),
-        LSE_g:    T.Buffer((BATCH, HEADS_PER_BATCH, SEQ_LEN), f32),
-        dpsum_g:  T.Buffer((BATCH, HEADS_PER_BATCH, SEQ_LEN), f32),
-        dK_g:     T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16),
-        dV_g:     T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16),
-        dQ_acc_g: T.Buffer((BATCH, HEADS_PER_BATCH, SEQ_LEN, HEAD_DIM), f32),
-    ):
-        q_row_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", q_row_tensormap, "float16", 5, Q_g.data,
-            HEAD_DIM // 2, SEQ_LEN, 2, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            HEAD_DIM // 2, B_N, 2, 1, 1,
-            1, 1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        q_col_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", q_col_tensormap, "float16", 4, Q_g.data,
-            HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            B_N_COL, BLK_M, 1, 1,
-            1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        k_row_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", k_row_tensormap, "float16", 5, K_g.data,
-            HEAD_DIM // 2, SEQ_LEN, 2, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            HEAD_DIM // 2, CTA_N, 2, 1, 1,
-            1, 1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        k_col_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", k_col_tensormap, "float16", 4, K_g.data,
-            HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            B_N_COL, BLK_N, 1, 1,
-            1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        v_row_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", v_row_tensormap, "float16", 5, V_g.data,
-            HEAD_DIM // 2, SEQ_LEN, 2, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            HEAD_DIM // 2, CTA_N, 2, 1, 1,
-            1, 1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        do_row_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", do_row_tensormap, "float16", 5, dO_g.data,
-            HEAD_DIM // 2, SEQ_LEN, 2, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            HEAD_DIM // 2, B_N, 2, 1, 1,
-            1, 1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        do_col_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", do_col_tensormap, "float16", 4, dO_g.data,
-            HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            B_N_COL, BLK_M, 1, 1,
-            1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        lse_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", lse_tensormap, "float32", 3, LSE_g.data,
-            SEQ_LEN, HEADS_PER_BATCH, BATCH,
-            SEQ_LEN * 4, HEADS_PER_BATCH * SEQ_LEN * 4,
-            BLK_M, 1, 1,
-            1, 1, 1, 0, 0, 2, 0,
-        )
-        dpsum_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", dpsum_tensormap, "float32", 3, dpsum_g.data,
-            SEQ_LEN, HEADS_PER_BATCH, BATCH,
-            SEQ_LEN * 4, HEADS_PER_BATCH * SEQ_LEN * 4,
-            BLK_M, 1, 1,
-            1, 1, 1, 0, 0, 2, 0,
-        )
-        dk_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", dk_tensormap, "float16", 4, dK_g.data,
-            HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2,
-            SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            EPI_N, CTA_N, 1, 1,
-            1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        dv_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", dv_tensormap, "float16", 4, dV_g.data,
-            HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH,
-            HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2,
-            SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2,
-            EPI_N, CTA_N, 1, 1,
-            1, 1, 1, 1, 0, 3, 2, 0,
-        )
-        dq_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled", dq_tensormap, "float32", 4, dQ_acc_g.data,
-            HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH,
-            HEAD_DIM * 4, SEQ_LEN * HEAD_DIM * 4,
-            HEADS_PER_BATCH * SEQ_LEN * HEAD_DIM * 4,
-            HEAD_DIM, DQ_ROWS_PER_STAGE, 1, 1,
-            1, 1, 1, 1, 0, 0, 2, 0,
-        )
-        T.device_entry()
-        cluster_rank_ = T.cta_id_in_cluster([CLUSTER_SIZE], preferred=[CLUSTER_SIZE])
-        bx, by = T.cta_id([NUM_N_TILES * CLUSTER_SIZE, NUM_HEADS])
-        wg_id = T.warpgroup_id([WG_NUMBER])
-        warp_id = T.warp_id_in_wg([4])
-        lane_id = T.lane_id([32])
-        id_in_pair: T.let = cluster_rank_ % CTA_GROUP
-        pair_leader_rank: T.let = cluster_rank_ - id_in_pair
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("kernel")
+            Q_g = T.arg("Q_g", T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16))
+            K_g = T.arg("K_g", T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16))
+            V_g = T.arg("V_g", T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16))
+            dO_g = T.arg("dO_g", T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16))
+            LSE_g = T.arg("LSE_g", T.Buffer((BATCH, HEADS_PER_BATCH, SEQ_LEN), f32))
+            dpsum_g = T.arg("dpsum_g", T.Buffer((BATCH, HEADS_PER_BATCH, SEQ_LEN), f32))
+            dK_g = T.arg("dK_g", T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16))
+            dV_g = T.arg("dV_g", T.Buffer((BATCH, SEQ_LEN, HEADS_PER_BATCH, HEAD_DIM), f16))
+            dQ_acc_g = T.arg("dQ_acc_g", T.Buffer((BATCH, HEADS_PER_BATCH, SEQ_LEN, HEAD_DIM), f32))
+            q_row_tensormap = _builder_bind("q_row_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', q_row_tensormap, 'float16', 5, Q_g.data, HEAD_DIM // 2, SEQ_LEN, 2, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM // 2, B_N, 2, 1, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            q_col_tensormap = _builder_bind("q_col_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', q_col_tensormap, 'float16', 4, Q_g.data, HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, B_N_COL, BLK_M, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            k_row_tensormap = _builder_bind("k_row_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', k_row_tensormap, 'float16', 5, K_g.data, HEAD_DIM // 2, SEQ_LEN, 2, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM // 2, CTA_N, 2, 1, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            k_col_tensormap = _builder_bind("k_col_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', k_col_tensormap, 'float16', 4, K_g.data, HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, B_N_COL, BLK_N, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            v_row_tensormap = _builder_bind("v_row_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', v_row_tensormap, 'float16', 5, V_g.data, HEAD_DIM // 2, SEQ_LEN, 2, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM // 2, CTA_N, 2, 1, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            do_row_tensormap = _builder_bind("do_row_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', do_row_tensormap, 'float16', 5, dO_g.data, HEAD_DIM // 2, SEQ_LEN, 2, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM // 2, B_N, 2, 1, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            do_col_tensormap = _builder_bind("do_col_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', do_col_tensormap, 'float16', 4, dO_g.data, HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, B_N_COL, BLK_M, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            lse_tensormap = _builder_bind("lse_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', lse_tensormap, 'float32', 3, LSE_g.data, SEQ_LEN, HEADS_PER_BATCH, BATCH, SEQ_LEN * 4, HEADS_PER_BATCH * SEQ_LEN * 4, BLK_M, 1, 1, 1, 1, 1, 0, 0, 2, 0))
+            dpsum_tensormap = _builder_bind("dpsum_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', dpsum_tensormap, 'float32', 3, dpsum_g.data, SEQ_LEN, HEADS_PER_BATCH, BATCH, SEQ_LEN * 4, HEADS_PER_BATCH * SEQ_LEN * 4, BLK_M, 1, 1, 1, 1, 1, 0, 0, 2, 0))
+            dk_tensormap = _builder_bind("dk_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', dk_tensormap, 'float16', 4, dK_g.data, HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, EPI_N, CTA_N, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            dv_tensormap = _builder_bind("dv_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', dv_tensormap, 'float16', 4, dV_g.data, HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH, HEADS_PER_BATCH * HEAD_DIM * 2, HEAD_DIM * 2, SEQ_LEN * HEADS_PER_BATCH * HEAD_DIM * 2, EPI_N, CTA_N, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0))
+            dq_tensormap = _builder_bind("dq_tensormap", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', dq_tensormap, 'float32', 4, dQ_acc_g.data, HEAD_DIM, SEQ_LEN, HEADS_PER_BATCH, BATCH, HEAD_DIM * 4, SEQ_LEN * HEAD_DIM * 4, HEADS_PER_BATCH * SEQ_LEN * HEAD_DIM * 4, HEAD_DIM, DQ_ROWS_PER_STAGE, 1, 1, 1, 1, 1, 1, 0, 0, 2, 0))
+            _builder_emit(T.device_entry())
+            cluster_rank_ = _builder_assign("cluster_rank_", T.cta_id_in_cluster([CLUSTER_SIZE], preferred=[CLUSTER_SIZE]), locals().get("cluster_rank_", _BUILDER_MISSING))
+            bx, by = _builder_assign_many(('bx', 'by'), T.cta_id([NUM_N_TILES * CLUSTER_SIZE, NUM_HEADS]), (locals().get("bx", _BUILDER_MISSING), locals().get("by", _BUILDER_MISSING),))
+            wg_id = _builder_assign("wg_id", T.warpgroup_id([WG_NUMBER]), locals().get("wg_id", _BUILDER_MISSING))
+            warp_id = _builder_assign("warp_id", T.warp_id_in_wg([4]), locals().get("warp_id", _BUILDER_MISSING))
+            lane_id = _builder_assign("lane_id", T.lane_id([32]), locals().get("lane_id", _BUILDER_MISSING))
+            id_in_pair = _builder_bind("id_in_pair", cluster_rank_ % CTA_GROUP, None)
+            pair_leader_rank = _builder_bind("pair_leader_rank", cluster_rank_ - id_in_pair, None)
+            pool = _builder_assign("pool", T.SMEMPool(), locals().get("pool", _BUILDER_MISSING))
+            tmem_addr = _builder_assign("tmem_addr", pool.alloc((1,), 'uint32'), locals().get("tmem_addr", _BUILDER_MISSING))
+            tmem_dealloc_mbar = _builder_assign("tmem_dealloc_mbar", MBarrier(pool, 1, leader=(wg_id == 3) & (warp_id == 0) & (lane_id == 0)), locals().get("tmem_dealloc_mbar", _BUILDER_MISSING))
+            tma_kv = _builder_assign("tma_kv", TMABar(pool, 1), locals().get("tma_kv", _BUILDER_MISSING))
+            tma_a = _builder_assign("tma_a", TMABar(pool, 1), locals().get("tma_a", _BUILDER_MISSING))
+            tma_q = _builder_assign("tma_q", TMABar(pool, 1), locals().get("tma_q", _BUILDER_MISSING))
+            tma_lse = _builder_assign("tma_lse", TMABar(pool, 1), locals().get("tma_lse", _BUILDER_MISSING))
+            tma_dpsum = _builder_assign("tma_dpsum", TMABar(pool, 1), locals().get("tma_dpsum", _BUILDER_MISSING))
+            tma_qcol = _builder_assign("tma_qcol", TMABar(pool, 1), locals().get("tma_qcol", _BUILDER_MISSING))
+            mma2wg0_s = _builder_assign("mma2wg0_s", TCGen05Bar(pool, 1), locals().get("mma2wg0_s", _BUILDER_MISSING))
+            mma2wg0_dp = _builder_assign("mma2wg0_dp", TCGen05Bar(pool, 1), locals().get("mma2wg0_dp", _BUILDER_MISSING))
+            mma2wg0_dq = _builder_assign("mma2wg0_dq", TCGen05Bar(pool, 1), locals().get("mma2wg0_dq", _BUILDER_MISSING))
+            ds_exch_mbar = _builder_assign("ds_exch_mbar", MBarrier(pool, 1), locals().get("ds_exch_mbar", _BUILDER_MISSING))
+            ds_exch_consumed = _builder_assign("ds_exch_consumed", MBarrier(pool, 1), locals().get("ds_exch_consumed", _BUILDER_MISSING))
+            wg02mma = _builder_assign("wg02mma", MBarrier(pool, 1), locals().get("wg02mma", _BUILDER_MISSING))
+            wg02mma_tmem = _builder_assign("wg02mma_tmem", MBarrier(pool, 1), locals().get("wg02mma_tmem", _BUILDER_MISSING))
+            strip_ready = _builder_assign("strip_ready", MBarrier(pool, 1), locals().get("strip_ready", _BUILDER_MISSING))
+            s_tmem_consumed = _builder_assign("s_tmem_consumed", MBarrier(pool, 1), locals().get("s_tmem_consumed", _BUILDER_MISSING))
+            buf_a_consumed = _builder_assign("buf_a_consumed", MBarrier(pool, 1), locals().get("buf_a_consumed", _BUILDER_MISSING))
+            q_consumed = _builder_assign("q_consumed", MBarrier(pool, 1), locals().get("q_consumed", _BUILDER_MISSING))
+            lse_consumed = _builder_assign("lse_consumed", MBarrier(pool, 1), locals().get("lse_consumed", _BUILDER_MISSING))
+            dpsum_consumed = _builder_assign("dpsum_consumed", MBarrier(pool, 1), locals().get("dpsum_consumed", _BUILDER_MISSING))
+            qcol_consumed = _builder_assign("qcol_consumed", MBarrier(pool, 1), locals().get("qcol_consumed", _BUILDER_MISSING))
+            dq_tmem_free = _builder_assign("dq_tmem_free", MBarrier(pool, 1), locals().get("dq_tmem_free", _BUILDER_MISSING))
+            dv_done = _builder_assign("dv_done", TCGen05Bar(pool, 1), locals().get("dv_done", _BUILDER_MISSING))
+            dk_done = _builder_assign("dk_done", TCGen05Bar(pool, 1), locals().get("dk_done", _BUILDER_MISSING))
+            _builder_emit(pool.move_base_to(POOL_Q_ROW))
+            Q_row = _builder_assign("Q_row", pool.alloc((1, B_N, HEAD_DIM), f16, layout=q_row_layout), locals().get("Q_row", _BUILDER_MISSING))
+            K_smem = _builder_assign("K_smem", pool.alloc((CTA_N, HEAD_DIM), f16, layout=kv_layout), locals().get("K_smem", _BUILDER_MISSING))
+            V_smem = _builder_assign("V_smem", pool.alloc((CTA_N, HEAD_DIM), f16, layout=kv_layout), locals().get("V_smem", _BUILDER_MISSING))
+            dO_row = _builder_assign("dO_row", pool.alloc((B_N, HEAD_DIM), f16, layout=do_row_layout), locals().get("dO_row", _BUILDER_MISSING))
+            Q_col = _builder_assign("Q_col", pool.alloc((BLK_M, B_N_COL), f16, layout=q_col_layout), locals().get("Q_col", _BUILDER_MISSING))
+            dO_col = _builder_assign("dO_col", pool.alloc((BLK_M, B_N_COL), f16, layout=do_col_layout), locals().get("dO_col", _BUILDER_MISSING))
+            dS_send = _builder_assign("dS_send", pool.alloc((CTA_N, B_N), f16, layout=ds_stage_layout), locals().get("dS_send", _BUILDER_MISSING))
+            K_col = _builder_assign("K_col", pool.alloc((BLK_N, B_N_COL), f16, layout=k_col_layout), locals().get("K_col", _BUILDER_MISSING))
+            dS_exch = _builder_assign("dS_exch", pool.alloc((BLK_N, B_N), f16, layout=ds_exchange_layout), locals().get("dS_exch", _BUILDER_MISSING))
+            sLSE = _builder_assign("sLSE", pool.alloc((1, BLK_M), f32, layout=TileLayout(S[(1, BLK_M):(BLK_M, 1)])), locals().get("sLSE", _BUILDER_MISSING))
+            sDPsum = _builder_assign("sDPsum", pool.alloc((BLK_M,), f32, layout=TileLayout(S[(BLK_M,):(1,)])), locals().get("sDPsum", _BUILDER_MISSING))
+            dQ_smem = _builder_assign("dQ_smem", pool.alloc((DQ_STAGES, BLK_M, DQ_RED_N), f32, layout=dq_red_layout, align=1024), locals().get("dQ_smem", _BUILDER_MISSING))
+            _builder_emit(pool.move_base_to(K_smem.elem_offset * DTYPE_SIZE))
+            dK_epi = _builder_assign("dK_epi", pool.alloc((2, CTA_N, EPI_N), f16, layout=epi_layout_2), locals().get("dK_epi", _BUILDER_MISSING))
+            _builder_emit(pool.move_base_to(V_smem.elem_offset * DTYPE_SIZE))
+            dV_epi = _builder_assign("dV_epi", pool.alloc((2, CTA_N, EPI_N), f16, layout=epi_layout_2), locals().get("dV_epi", _BUILDER_MISSING))
+            _builder_emit(pool.commit())
+            desc_k_row = _builder_alloc_scalar("desc_k_row", "uint64")
+            desc_q_row = _builder_alloc_scalar("desc_q_row", "uint64")
+            desc_v_row = _builder_alloc_scalar("desc_v_row", "uint64")
+            desc_do_row = _builder_alloc_scalar("desc_do_row", "uint64")
+            desc_q_col = _builder_alloc_scalar("desc_q_col", "uint64")
+            desc_do_col = _builder_alloc_scalar("desc_do_col", "uint64")
+            desc_k_col = _builder_alloc_scalar("desc_k_col", "uint64")
+            desc_ds_exch = _builder_alloc_scalar("desc_ds_exch", "uint64")
+            _builder_emit(tma_kv.init(1))
+            _builder_emit(tma_a.init(1))
+            _builder_emit(tma_q.init(1))
+            _builder_emit(tma_lse.init(1))
+            _builder_emit(tma_dpsum.init(1))
+            _builder_emit(tma_qcol.init(1))
+            _builder_emit(mma2wg0_s.init(1))
+            _builder_emit(mma2wg0_dp.init(1))
+            _builder_emit(mma2wg0_dq.init(1))
+            _builder_emit(wg02mma.init(CTA_GROUP))
+            _builder_emit(wg02mma_tmem.init(8 * CTA_GROUP))
+            _builder_emit(strip_ready.init(8 * CTA_GROUP))
+            _builder_emit(s_tmem_consumed.init(8 * CTA_GROUP))
+            _builder_emit(buf_a_consumed.init(1))
+            _builder_emit(q_consumed.init(1))
+            _builder_emit(lse_consumed.init(8))
+            _builder_emit(dpsum_consumed.init(8))
+            _builder_emit(qcol_consumed.init(1))
+            _builder_emit(dq_tmem_free.init(4 * CTA_GROUP))
+            _builder_emit(ds_exch_mbar.init(1))
+            _builder_emit(ds_exch_consumed.init(1))
+            _builder_emit(dv_done.init(1))
+            _builder_emit(dk_done.init(1))
+            _builder_emit(tmem_dealloc_mbar.init(32))
+            pair_mask = _builder_alloc_scalar("pair_mask", "int32")
+            pair_mask = _builder_assign("pair_mask", 1 << pair_leader_rank | 1 << pair_leader_rank + 1, locals().get("pair_mask", _BUILDER_MISSING))
+            _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+            _builder_emit(T.ptx.fence.mbarrier_init.release.cluster())
+            _builder_emit(T.ptx.barrier.cluster.arrive.relaxed())
+            _builder_emit(T.ptx.barrier.cluster.wait())
+            tma_kv_cta0 = _builder_assign("tma_kv_cta0", tma_kv.remote_view(pair_leader_rank), locals().get("tma_kv_cta0", _BUILDER_MISSING))
+            tma_q_cta0 = _builder_assign("tma_q_cta0", tma_q.remote_view(pair_leader_rank), locals().get("tma_q_cta0", _BUILDER_MISSING))
+            tma_qcol_cta0 = _builder_assign("tma_qcol_cta0", tma_qcol.remote_view(pair_leader_rank), locals().get("tma_qcol_cta0", _BUILDER_MISSING))
+            tma_a_cta0 = _builder_assign("tma_a_cta0", tma_a.remote_view(pair_leader_rank), locals().get("tma_a_cta0", _BUILDER_MISSING))
+            n_tile_idx = bx // CLUSTER_SIZE
+            head_flat = by
+            b_idx = head_flat // HEADS_PER_BATCH
+            h_idx = head_flat % HEADS_PER_BATCH
+            n_st = n_tile_idx * BLK_N
+            n_st_cta = n_st + id_in_pair * CTA_N
+            m_tile_start = n_tile_idx * (BLK_N // BLK_M) if causal else 0
+            num_m_tiles_this_n = NUM_M_TILES - m_tile_start
+            m_st_first = m_tile_start * BLK_M
+            with T.If(wg_id == 3):
+                with T.Then():
+                    _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(104))
+                    with T.If(warp_id == 0):
+                        with T.Then():
+                            _builder_emit(T.ptx.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(T.address_of(tmem_addr), T.uint32(512)))
+                            _builder_emit(T.ptx.barrier.sync(T.uint32(5), 416))
+                    with T.If(warp_id == 1):
+                        with T.Then():
+                            with T.If(T.cuda.elect_sync()):
+                                with T.Then():
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_row_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_col_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(k_row_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(k_col_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(v_row_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(do_row_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(do_col_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dk_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dv_tensormap))))
+                                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dq_tensormap))))
+                            q_cons_ph = _builder_assign("q_cons_ph", PipelineState(1), locals().get("q_cons_ph", _BUILDER_MISSING))
+                            _builder_emit(q_cons_ph.init(1))
+                            lse_cons_ph = _builder_assign("lse_cons_ph", PipelineState(1), locals().get("lse_cons_ph", _BUILDER_MISSING))
+                            _builder_emit(lse_cons_ph.init(1))
+                            qcol_cons_ph = _builder_assign("qcol_cons_ph", PipelineState(1), locals().get("qcol_cons_ph", _BUILDER_MISSING))
+                            _builder_emit(qcol_cons_ph.init(1))
+                            a_cons_ph = _builder_assign("a_cons_ph", PipelineState(1), locals().get("a_cons_ph", _BUILDER_MISSING))
+                            _builder_emit(a_cons_ph.init(1))
+                            dpsum_cons_ph = _builder_assign("dpsum_cons_ph", PipelineState(1), locals().get("dpsum_cons_ph", _BUILDER_MISSING))
+                            _builder_emit(dpsum_cons_ph.init(1))
+                            K_COL_BYTES = BLK_N * B_N_COL * DTYPE_SIZE
+                            KV_TOTAL_BYTES = (CTA_N_BYTES * 2 + K_COL_BYTES) * CTA_GROUP
+                            Q_BATCH_BYTES = Q_ROW_BYTES * CTA_GROUP
+                            QCOL_BATCH_BYTES = Q_COL_BYTES * CTA_GROUP
+                            DO_BATCH_BYTES = (Q_ROW_BYTES + Q_COL_BYTES) * CTA_GROUP
 
-        pool = T.SMEMPool()
-        tmem_addr = pool.alloc((1,), "uint32")
-        tmem_dealloc_mbar = MBarrier(
-            pool,
-            1,
-            leader=(wg_id == 3) & (warp_id == 0) & (lane_id == 0),
-        )
-
-        # Barriers
-        tma_kv         = TMABar(pool, 1)
-        tma_a          = TMABar(pool, 1)        # depth 1: single buf_A
-        tma_q          = TMABar(pool, 1)        # single-stage in the current 2-CTA schedule
-        tma_lse        = TMABar(pool, 1)
-        tma_dpsum      = TMABar(pool, 1)
-        tma_qcol       = TMABar(pool, 1)     # depth 1: Q_col single-buf
-        mma2wg0_s      = TCGen05Bar(pool, 1)
-        mma2wg0_dp     = TCGen05Bar(pool, 1)
-        # mma2wg0_dvdk removed — buf_a_consumed/q_consumed signaled directly by tcgen05.commit
-        mma2wg0_dq     = TCGen05Bar(pool, 1)
-        ds_exch_mbar   = MBarrier(pool, 1)  # DSMEM exchange completion
-        ds_exch_consumed = MBarrier(pool, 1)  # dQ MMA released the single DSMEM buffer
-        wg02mma        = MBarrier(pool, 1)        # softmax fully done (incl DSMEM) → Phase E
-        wg02mma_tmem   = MBarrier(pool, 1)   # softmax dS in TMEM only → Phase D (early signal)
-        strip_ready    = MBarrier(pool, 1)
-        s_tmem_consumed = MBarrier(pool, 1)  # next S read drained before aliased dQ write
-        buf_a_consumed = MBarrier(pool, 1)  # depth 1: single buf_A
-        q_consumed     = MBarrier(pool, 1)     # single-stage Q_row release
-        lse_consumed   = MBarrier(pool, 1)
-        dpsum_consumed = MBarrier(pool, 1)
-        qcol_consumed  = MBarrier(pool, 1)  # depth 1: Q_col release
-        dq_tmem_free   = MBarrier(pool, 1)
-        dv_done        = TCGen05Bar(pool, 1)  # dV accumulator ready → epilogue stage 0
-        dk_done        = TCGen05Bar(pool, 1)  # dK accumulator ready → epilogue stage 1
-        pool.move_base_to(POOL_Q_ROW)
-
-
-        # Match SharedStorage's physical order in the upstream 2-CTA D=128
-        # specialization: sQ, sK, sV, sdO, sQt, sdOt, sdS_xchg, sKt, sdS.
-        Q_row     = pool.alloc((1, B_N, HEAD_DIM), f16, layout=q_row_layout)           # sQ: 16KB
-        K_smem    = pool.alloc((CTA_N, HEAD_DIM), f16, layout=kv_layout)               # sK: 32KB
-        V_smem    = pool.alloc((CTA_N, HEAD_DIM), f16, layout=kv_layout)               # sV: 32KB
-        dO_row    = pool.alloc((B_N, HEAD_DIM), f16, layout=do_row_layout)             # sdO: 16KB
-        Q_col     = pool.alloc((BLK_M, B_N_COL), f16, layout=q_col_layout)             # sQt: 16KB
-        dO_col    = pool.alloc((BLK_M, B_N_COL), f16, layout=do_col_layout)            # sdOt: 16KB
-        dS_send   = pool.alloc((CTA_N, B_N), f16, layout=ds_stage_layout)              # sdS_xchg: 16KB
-        K_col     = pool.alloc((BLK_N, B_N_COL), f16, layout=k_col_layout)             # sKt: 32KB
-        dS_exch   = pool.alloc((BLK_N, B_N), f16, layout=ds_exchange_layout)           # sdS: 32KB
-        sLSE      = pool.alloc((1, BLK_M), f32, layout=TileLayout(S[(1, BLK_M) : (BLK_M, 1)]))  # 512B
-        sDPsum    = pool.alloc((BLK_M,), f32, layout=TileLayout(S[(BLK_M,) : (1,)]))          # 512B
-        dQ_smem   = pool.alloc(
-            (DQ_STAGES, BLK_M, DQ_RED_N), f32,
-            layout=dq_red_layout, align=1024,
-        )
-        # Upstream's two-stage dKV epilogue reuses sV for dV and sK for dK.
-        # Both compute WGs collaborate on each output, one 64-column half per
-        # WG, while the MMA warp overlaps the dV epilogue with its dK/dQ tail.
-        pool.move_base_to(K_smem.elem_offset * DTYPE_SIZE)
-        dK_epi = pool.alloc((2, CTA_N, EPI_N), f16, layout=epi_layout_2)
-        pool.move_base_to(V_smem.elem_offset * DTYPE_SIZE)
-        dV_epi = pool.alloc((2, CTA_N, EPI_N), f16, layout=epi_layout_2)
-        pool.commit()
-
-        desc_k_row: T.uint64
-        desc_q_row: T.uint64
-        desc_v_row: T.uint64
-        desc_do_row: T.uint64
-        desc_q_col: T.uint64
-        desc_do_col: T.uint64
-        desc_k_col: T.uint64
-        desc_ds_exch: T.uint64
-
-        # Total: 32+32+32+32+16+16+16+32+1+0.5+8 = 217.5KB
-
-        tma_kv.init(1)
-        tma_a.init(1)
-        tma_q.init(1)
-        tma_lse.init(1)
-        tma_dpsum.init(1)
-        tma_qcol.init(1)
-        mma2wg0_s.init(1)
-        mma2wg0_dp.init(1)
-        # mma2wg0_dvdk removed
-        mma2wg0_dq.init(1)
-        wg02mma.init(CTA_GROUP)
-        wg02mma_tmem.init(8 * CTA_GROUP)  # one elected thread per compute warp
-        # PipelineUmmaAsync's empty side: one elected thread per compute warp,
-        # across both compute WGs and both CTAs.
-        strip_ready.init(8 * CTA_GROUP)
-        s_tmem_consumed.init(8 * CTA_GROUP)
-        buf_a_consumed.init(1)  # Phase C commit releases dO/dOt
-        q_consumed.init(1)     # signaled by tcgen05.commit
-        # LSE/dPsum are CTA-local streams.  One elected lane in each of the
-        # eight compute warps releases the single buffer after its warp has
-        # consumed the statistic, matching the current FA4 producer/consumer
-        # topology without tying either statistic to the Q/dO MMA lifetime.
-        lse_consumed.init(8)
-        dpsum_consumed.init(8)
-        qcol_consumed.init(1)  # signaled by tcgen05.commit
-        dq_tmem_free.init(4 * CTA_GROUP)  # one elected thread per reducer warp
-        ds_exch_mbar.init(1)
-        ds_exch_consumed.init(1)
-        dv_done.init(1)
-        dk_done.init(1)
-        tmem_dealloc_mbar.init(32)
-
-        pair_mask: T.int32
-        pair_mask = (1 << pair_leader_rank) | (1 << (pair_leader_rank + 1))
-
-        T.ptx.fence.proxy.async_.shared__cta()
-        T.ptx.fence.mbarrier_init.release.cluster()
-        T.ptx.barrier.cluster.arrive.relaxed()
-        T.ptx.barrier.cluster.wait()
-
-        # TMA barrier remote view for leader's mbar
-        tma_kv_cta0 = tma_kv.remote_view(pair_leader_rank)
-        tma_q_cta0 = tma_q.remote_view(pair_leader_rank)
-        tma_qcol_cta0 = tma_qcol.remote_view(pair_leader_rank)
-        tma_a_cta0 = tma_a.remote_view(pair_leader_rank)
-
-        # Match the upstream SingleTileScheduler: every physical 2-CTA
-        # cluster owns exactly one logical KV tile for the kernel lifetime.
-        n_tile_idx = T.meta_var(bx // CLUSTER_SIZE)
-        head_flat = T.meta_var(by)
-        b_idx = T.meta_var(head_flat // HEADS_PER_BATCH)
-        h_idx = T.meta_var(head_flat % HEADS_PER_BATCH)
-        n_st  = T.meta_var(n_tile_idx * BLK_N)
-        n_st_cta = T.meta_var(n_st + id_in_pair * CTA_N)  # per-CTA N offset
-        # In causal mode, K/V tile n can only receive gradients from Q rows
-        # at or below its first row.  BLK_N is exactly two BLK_M tiles, so
-        # skipping these all-zero leading tiles removes the triangular half
-        # of the dense schedule while keeping the pipeline trip count even.
-        m_tile_start = T.meta_var(n_tile_idx * (BLK_N // BLK_M) if causal else 0)
-        num_m_tiles_this_n = T.meta_var(NUM_M_TILES - m_tile_start)
-        m_st_first = T.meta_var(m_tile_start * BLK_M)
-
-        # ==============================================================
-        # WG3: MMA (warp0) + TMA (warp1), matching current FA4's physical
-        # warp placement.  The other two warps remain idle.
-        # ==============================================================
-        if wg_id == 3:
-            # setmaxnreg.sync.aligned is a four-warp collective.  The idle
-            # warp must request the same target as the MMA/load/relay warps;
-            # CUDA already DCE'd its isolated 24-register request in the
-            # profiled build, leaving this exact WG-wide dec-104 instruction.
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(104)
-            if warp_id == 0:
-                # The physical MMA warp owns TMEM allocation in both CTAs.
-                # MMA, compute, and dQ-reduce warps rendezvous on the same
-                # 13-warp named barrier used by the upstream allocator.
-                T.ptx.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(
-                    T.address_of(tmem_addr), T.uint32(512)
-                )
-                T.ptx.barrier.sync(T.uint32(5), 416)
-            if warp_id == 1:
-                # ---- TMA warp: 2 loads per M-tile (Q, dO) ----
-                if T.cuda.elect_sync():
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_row_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_col_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(k_row_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(k_col_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(v_row_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(do_row_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(do_col_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dk_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dv_tensormap)))
-                    T.evaluate(T.ptx.prefetch.tensormap(T.address_of(dq_tensormap)))
-                q_cons_ph = PipelineState(1)
-                q_cons_ph.init(1)
-                lse_cons_ph = PipelineState(1)
-                lse_cons_ph.init(1)
-                qcol_cons_ph = PipelineState(1)
-                qcol_cons_ph.init(1)
-                a_cons_ph = PipelineState(1)
-                a_cons_ph.init(1)
-                dpsum_cons_ph = PipelineState(1)
-                dpsum_cons_ph.init(1)
-
-                # Byte counts for TMA barriers (both CTAs arrive at leader's mbar)
-                K_COL_BYTES = T.meta_var(BLK_N * B_N_COL * DTYPE_SIZE)  # 256x64x2 = 32KB
-                KV_TOTAL_BYTES = T.meta_var((CTA_N_BYTES * 2 + K_COL_BYTES) * CTA_GROUP)  # K+V+K_col from both CTAs
-                Q_BATCH_BYTES = T.meta_var(Q_ROW_BYTES * CTA_GROUP)
-                QCOL_BATCH_BYTES = T.meta_var(Q_COL_BYTES * CTA_GROUP)  # Q_col separate
-                DO_BATCH_BYTES = T.meta_var((Q_ROW_BYTES + Q_COL_BYTES) * CTA_GROUP)
-
-                @T.inline
-                def tma_n_tile():
-                    # K/V: each CTA loads its CTA_N=128 rows
-                    if T.cuda.elect_sync():
-                        tma_g2s(
-                            5, K_smem.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]),
-                            T.address_of(k_row_tensormap),
-                            0, n_st_cta, 0, h_idx, b_idx,
-                        )
-                        tma_g2s(
-                            5, V_smem.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]),
-                            T.address_of(v_row_tensormap),
-                            0, n_st_cta, 0, h_idx, b_idx,
-                        )
-                        # K_col for Phase E: all BLK_N=256 rows, per-CTA 64 cols
-                        k_col_col_st = T.meta_var(id_in_pair * B_N_COL)
-                        tma_g2s(
-                            4, K_col.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]),
-                            T.address_of(k_col_tensormap),
-                            k_col_col_st, n_st, h_idx, b_idx,
-                        )
-                        if id_in_pair == 0:
-                            tma_kv.arrive(0, KV_TOTAL_BYTES)
-
-                    # Prologue: Q/Q_col/dO use the cluster MMA pipelines;
-                    # LSE and dPsum use independent CTA-local bulk-copy
-                    # pipelines consumed directly by the compute warps.
-                    tma_prefetch_token = iket.range_start("tma-prefetch")
-                    tma_wait_q_token = iket.range_start("tma-wait-q")
-                    q_consumed.wait(0, q_cons_ph.phase)
-                    iket.range_end(tma_wait_q_token)
-                    q_row_st = T.meta_var(m_st_first + id_in_pair * B_N)
-                    if T.cuda.elect_sync():
-                        tma_g2s(
-                            5, Q_row.ptr_to([0, 0, 0]), tma_q_cta0.ptr_to([0]),
-                            T.address_of(q_row_tensormap),
-                            0, q_row_st, 0, h_idx, b_idx,
-                        )
-                        if id_in_pair == 0:
-                            tma_q.arrive(0, Q_BATCH_BYTES)
-                    q_cons_ph.advance()
-                    tma_wait_lse_token = iket.range_start("tma-wait-lse")
-                    lse_consumed.wait(0, lse_cons_ph.phase)
-                    iket.range_end(tma_wait_lse_token)
-                    if T.cuda.elect_sync():
-                        tma_lse.arrive(0, LSE_BYTES)
-                        bulk_g2s_cta(
-                            sLSE.ptr_to([0, 0]),
-                            LSE_g.ptr_to([b_idx, h_idx, m_st_first]),
-                            LSE_BYTES, tma_lse.ptr_to([0]),
-                        )
-                    lse_cons_ph.advance()
-                    tma_wait_a_token = iket.range_start("tma-wait-a")
-                    buf_a_consumed.wait(0, a_cons_ph.phase)
-                    iket.range_end(tma_wait_a_token)
-                    do_col_st = T.meta_var(id_in_pair * B_N_COL)
-                    if T.cuda.elect_sync():
-                        tma_g2s(
-                            5, dO_row.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]),
-                            T.address_of(do_row_tensormap),
-                            0, q_row_st, 0, h_idx, b_idx,
-                        )
-                        tma_g2s(
-                            4, dO_col.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]),
-                            T.address_of(do_col_tensormap),
-                            do_col_st, m_st_first, h_idx, b_idx,
-                        )
-                        if id_in_pair == 0:
-                            tma_a.arrive(0, DO_BATCH_BYTES)
-                    a_cons_ph.advance()
-                    tma_wait_dpsum_token = iket.range_start("tma-wait-dpsum")
-                    dpsum_consumed.wait(0, dpsum_cons_ph.phase)
-                    iket.range_end(tma_wait_dpsum_token)
-                    if T.cuda.elect_sync():
-                        tma_dpsum.arrive(0, DPSUM_BYTES)
-                        bulk_g2s_cta(
-                            sDPsum.ptr_to([0]),
-                            dpsum_g.ptr_to([b_idx, h_idx, m_st_first]),
-                            DPSUM_BYTES, tma_dpsum.ptr_to([0]),
-                        )
-                    dpsum_cons_ph.advance()
-                    iket.range_end(tma_prefetch_token)
-
-                    # Loop: every stream is single-stage and independently
-                    # released at the earliest observable consumption point.
-                    for i_m in T.serial(num_m_tiles_this_n - 1, annotations={"disable_unroll": True}):
-                        m_st_next = T.meta_var((m_tile_start + i_m + 1) * BLK_M)
-                        q_row_st_next = T.meta_var(m_st_next + id_in_pair * B_N)
-                        q_col_st_next = T.meta_var(id_in_pair * B_N_COL)
-                        tma_prefetch_token = iket.range_start("tma-prefetch")
-
-                        # Qt trails the row-major streams by one M tile in the
-                        # official D=128 schedule.  Issue the previous tile at
-                        # the front of this producer trip so dK can consume it
-                        # while Q/LSE/dO/dPsum for the next tile are loading.
-                        m_st_qcol = T.meta_var(m_st_next - BLK_M)
-                        tma_wait_qcol_token = iket.range_start("tma-wait-qcol")
-                        qcol_consumed.wait(0, qcol_cons_ph.phase)
-                        iket.range_end(tma_wait_qcol_token)
-                        if T.cuda.elect_sync():
-                            tma_g2s(
-                                4, Q_col.ptr_to([0, 0]), tma_qcol_cta0.ptr_to([0]),
-                                T.address_of(q_col_tensormap),
-                                q_col_st_next, m_st_qcol, h_idx, b_idx,
-                            )
-                            if id_in_pair == 0:
-                                tma_qcol.arrive(0, QCOL_BATCH_BYTES)
-                        qcol_cons_ph.advance()
-
-                        tma_wait_q_token = iket.range_start("tma-wait-q")
-                        q_consumed.wait(0, q_cons_ph.phase)
-                        iket.range_end(tma_wait_q_token)
-                        if T.cuda.elect_sync():
-                            tma_g2s(
-                                5, Q_row.ptr_to([0, 0, 0]), tma_q_cta0.ptr_to([0]),
-                                T.address_of(q_row_tensormap),
-                                0, q_row_st_next, 0, h_idx, b_idx,
-                            )
-                            if id_in_pair == 0:
-                                tma_q.arrive(0, Q_BATCH_BYTES)
-                        q_cons_ph.advance()
-                        tma_wait_lse_token = iket.range_start("tma-wait-lse")
-                        lse_consumed.wait(0, lse_cons_ph.phase)
-                        iket.range_end(tma_wait_lse_token)
-                        if T.cuda.elect_sync():
-                            tma_lse.arrive(0, LSE_BYTES)
-                            bulk_g2s_cta(
-                                sLSE.ptr_to([0, 0]),
-                                LSE_g.ptr_to([b_idx, h_idx, m_st_next]),
-                                LSE_BYTES, tma_lse.ptr_to([0]),
-                            )
-                        lse_cons_ph.advance()
-                        tma_wait_a_token = iket.range_start("tma-wait-a")
-                        buf_a_consumed.wait(0, a_cons_ph.phase)
-                        iket.range_end(tma_wait_a_token)
-                        do_col_st_next = T.meta_var(id_in_pair * B_N_COL)
-                        if T.cuda.elect_sync():
-                            tma_g2s(
-                                5, dO_row.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]),
-                                T.address_of(do_row_tensormap),
-                                0, q_row_st_next, 0, h_idx, b_idx,
-                            )
-                            tma_g2s(
-                                4, dO_col.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]),
-                                T.address_of(do_col_tensormap),
-                                do_col_st_next, m_st_next, h_idx, b_idx,
-                            )
-                            if id_in_pair == 0:
-                                tma_a.arrive(0, DO_BATCH_BYTES)
-                        a_cons_ph.advance()
-                        tma_wait_dpsum_token = iket.range_start("tma-wait-dpsum")
-                        dpsum_consumed.wait(0, dpsum_cons_ph.phase)
-                        iket.range_end(tma_wait_dpsum_token)
-                        if T.cuda.elect_sync():
-                            tma_dpsum.arrive(0, DPSUM_BYTES)
-                            bulk_g2s_cta(
-                                sDPsum.ptr_to([0]),
-                                dpsum_g.ptr_to([b_idx, h_idx, m_st_next]),
-                                DPSUM_BYTES, tma_dpsum.ptr_to([0]),
-                            )
-                        dpsum_cons_ph.advance()
-
-                        iket.range_end(tma_prefetch_token)
-
-                    # The producer loop issues Qt for tiles [0, N-2].  Fill
-                    # the final tile for the dK tail after its predecessor has
-                    # released the single shared-memory buffer.
-                    tma_prefetch_token = iket.range_start("tma-prefetch")
-                    tma_wait_qcol_token = iket.range_start("tma-wait-qcol")
-                    qcol_consumed.wait(0, qcol_cons_ph.phase)
-                    iket.range_end(tma_wait_qcol_token)
-                    m_st_qcol_tail = T.meta_var(
-                        (m_tile_start + num_m_tiles_this_n - 1) * BLK_M
-                    )
-                    q_col_st_tail = T.meta_var(id_in_pair * B_N_COL)
-                    if T.cuda.elect_sync():
-                        tma_g2s(
-                            4, Q_col.ptr_to([0, 0]), tma_qcol_cta0.ptr_to([0]),
-                            T.address_of(q_col_tensormap),
-                            q_col_st_tail, m_st_qcol_tail, h_idx, b_idx,
-                        )
-                        if id_in_pair == 0:
-                            tma_qcol.arrive(0, QCOL_BATCH_BYTES)
-                    qcol_cons_ph.advance()
-                    iket.range_end(tma_prefetch_token)
-
-                tma_n_tile()
-
-            elif warp_id == 0 and id_in_pair == 0:
-                # ---- MMA warp (leader CTA only, TMEM accumulation for dV/dK) ----
-                # One real shared pointer anchors the whole SMEMPool backing;
-                # every other start field is the corresponding view offset
-                # relative to that anchor.  No shared.dyn base is assumed.
-                q_row_addr: T.uint32 = T.cuda.cvta_generic_to_shared(
-                    Q_row.ptr_to([0, 0, 0])
-                )
-                q_row_start: T.uint64 = T.cast(
-                    T.shift_right(q_row_addr, T.uint32(4)), "uint64"
-                )
-                desc_k_row = matrix_desc_from_anchor(
-                    MATRIX_DESC_F16_SS_LDO_1024,
-                    q_row_start,
-                    (K_smem.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
-                )
-                if not causal:
-                    desc_q_row = matrix_desc_from_anchor(
-                        MATRIX_DESC_F16_SS_LDO_512, q_row_start, 0
-                    )
-                desc_v_row = matrix_desc_from_anchor(
-                    MATRIX_DESC_F16_SS_LDO_1024,
-                    q_row_start,
-                    (V_smem.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
-                )
-                desc_do_row = matrix_desc_from_anchor(
-                    MATRIX_DESC_F16_SS_LDO_512,
-                    q_row_start,
-                    (dO_row.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
-                )
-                desc_q_col = matrix_desc_from_anchor(
-                    MATRIX_DESC_F16_TS,
-                    q_row_start,
-                    (Q_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
-                )
-                desc_do_col = matrix_desc_from_anchor(
-                    MATRIX_DESC_F16_TS,
-                    q_row_start,
-                    (dO_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
-                )
-                desc_k_col = matrix_desc_from_anchor(
-                    MATRIX_DESC_F16_TS,
-                    q_row_start,
-                    (K_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
-                )
-                desc_ds_exch = matrix_desc_from_anchor(
-                    MATRIX_DESC_F16_TS,
-                    q_row_start,
-                    (dS_exch.elem_offset - Q_row.elem_offset) * DTYPE_SIZE,
-                )
-                kv_ph = PipelineState(1)
-                kv_ph.init(0)
-                q_ph = PipelineState(1)
-                q_ph.init(0)
-                qcol_ph = PipelineState(1)
-                qcol_ph.init(0)
-                a_ph = PipelineState(1)
-                a_ph.init(0)
-                wg0_ph = PipelineState(1)         # wg02mma_tmem: dS in TMEM → Phase D
-                wg0_ph.init(0)               # first Phase D blocks
-                wg0_smem_ph = PipelineState(1)  # peer DSMEM arrival → Phase E
-                wg0_smem_ph.init(0)          # first Phase E blocks
-                strip_ready_ph = PipelineState(1)
-                strip_ready_ph.init(0)
-                s_tmem_consumed_ph = PipelineState(1)
-                s_tmem_consumed_ph.init(0)
-                dq_tmem_free_ph = PipelineState(1)
-                dq_tmem_free_ph.init(1)
-
-                accum_var: T.int32
-                accum_dv: T.int32
-                accum_dk: T.int32
-
-                @T.inline
-                def mma_n_tile():
-                    tma_kv.wait(0, kv_ph.phase)
-                    kv_ph.advance()
-                    accum_dv = 0
-                    accum_dk = 0
-
-                    # ---- Special first M-tile (i=0): A, B, C only ----
-                    # Phase A[0]: S = K @ Q_row^T, M=256 (128/CTA)
-                    mma_s_token = iket.range_start("mma-s")
-                    tma_q.wait(0, q_ph.phase)
-                    q_ph.advance()
-                    accum_var = 0
-                    if T.cuda.elect_sync():
-                        if causal:
-                            # Keep the causal Q-row descriptor issue-local.
-                            # Its address encoding is cheap to rebuild, while
-                            # carrying it across the whole 2-CTA MMA loop
-                            # creates avoidable uniform-register pressure.
-                            q_row_issue_addr: T.uint32 = T.cuda.cvta_generic_to_shared(
-                                Q_row.ptr_to([0, 0, 0])
-                            )
-                            q_row_issue_start: T.uint64 = T.cast(
-                                T.shift_right(q_row_issue_addr, T.uint32(4)), "uint64"
-                            )
-                            desc_q_row_issue: T.uint64 = matrix_desc_from_anchor(
-                                MATRIX_DESC_F16_SS_LDO_512, q_row_issue_start, 0
-                            )
-                            mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row_issue)
-                        else:
-                            mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
-                    if T.cuda.elect_sync():
-                        mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                        tcgen05_commit(
-                            q_consumed.ptr_to([0]),
-                            pair_mask,
-                        )
-                    iket.range_end(mma_s_token)
-
-                    # Phase B[0]: dP = V @ dO_row^T
-                    mma_dp_token = iket.range_start("mma-dp")
-                    tma_a.wait(0, a_ph.phase)
-                    a_ph.advance()
-                    accum_var = 0
-                    if T.cuda.elect_sync():
-                        mma_dp(TMEM_OFF_DP, accum_var, desc_v_row, desc_do_row)
-                    if T.cuda.elect_sync():
-                        mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                    iket.range_end(mma_dp_token)
-
-                    # Phase C[0]: dV += P^T @ dO_col, wait P strips ready
-                    mma_dv_token = iket.range_start("mma-dv")
-                    strip_ready.wait(0, strip_ready_ph.phase)
-                    strip_ready_ph.advance()
-                    if T.cuda.elect_sync():
-                        mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv, desc_do_col)
-                    accum_dv = 1
-                    if T.cuda.elect_sync():
-                        tcgen05_commit(buf_a_consumed.ptr_to([0]), pair_mask)
-                    iket.range_end(mma_dv_token)
-
-                    # ---- Main loop: M-tiles 1..N-1 ----
-                    for i_m_inner in T.serial(num_m_tiles_this_n - 1, annotations={"disable_unroll": True}):
-                        i_m = T.meta_var(m_tile_start + i_m_inner + 1)
-
-                        # Phase A[i_m]: S = K @ Q_row^T.  From the second
-                        # trip onward, this waits until the reducer has drained
-                        # the previous dQ tile that aliases the upper half of S.
-                        mma_s_token = iket.range_start("mma-s")
-                        tma_q.wait(0, q_ph.phase)
-                        q_ph.advance()
-                        dq_tmem_free.wait(0, dq_tmem_free_ph.phase)
-                        dq_tmem_free_ph.advance()
-                        accum_var = 0
-                        if T.cuda.elect_sync():
-                            if causal:
-                                q_row_issue_addr: T.uint32 = T.cuda.cvta_generic_to_shared(
-                                    Q_row.ptr_to([0, 0, 0])
+                            def tma_n_tile():
+                                with T.If(T.cuda.elect_sync()):
+                                    with T.Then():
+                                        _builder_emit(tma_g2s(5, K_smem.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]), T.address_of(k_row_tensormap), 0, n_st_cta, 0, h_idx, b_idx))
+                                        _builder_emit(tma_g2s(5, V_smem.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]), T.address_of(v_row_tensormap), 0, n_st_cta, 0, h_idx, b_idx))
+                                        k_col_col_st = id_in_pair * B_N_COL
+                                        _builder_emit(tma_g2s(4, K_col.ptr_to([0, 0]), tma_kv_cta0.ptr_to([0]), T.address_of(k_col_tensormap), k_col_col_st, n_st, h_idx, b_idx))
+                                        with T.If(id_in_pair == 0):
+                                            with T.Then():
+                                                _builder_emit(tma_kv.arrive(0, KV_TOTAL_BYTES))
+                                tma_prefetch_token = _builder_assign("tma_prefetch_token", iket.range_start('tma-prefetch'), locals().get("tma_prefetch_token", _BUILDER_MISSING))
+                                tma_wait_q_token = _builder_assign("tma_wait_q_token", iket.range_start('tma-wait-q'), locals().get("tma_wait_q_token", _BUILDER_MISSING))
+                                _builder_emit(q_consumed.wait(0, q_cons_ph.phase))
+                                _builder_emit(iket.range_end(tma_wait_q_token))
+                                q_row_st = m_st_first + id_in_pair * B_N
+                                with T.If(T.cuda.elect_sync()):
+                                    with T.Then():
+                                        _builder_emit(tma_g2s(5, Q_row.ptr_to([0, 0, 0]), tma_q_cta0.ptr_to([0]), T.address_of(q_row_tensormap), 0, q_row_st, 0, h_idx, b_idx))
+                                        with T.If(id_in_pair == 0):
+                                            with T.Then():
+                                                _builder_emit(tma_q.arrive(0, Q_BATCH_BYTES))
+                                _builder_emit(q_cons_ph.advance())
+                                tma_wait_lse_token = _builder_assign("tma_wait_lse_token", iket.range_start('tma-wait-lse'), locals().get("tma_wait_lse_token", _BUILDER_MISSING))
+                                _builder_emit(lse_consumed.wait(0, lse_cons_ph.phase))
+                                _builder_emit(iket.range_end(tma_wait_lse_token))
+                                with T.If(T.cuda.elect_sync()):
+                                    with T.Then():
+                                        _builder_emit(tma_lse.arrive(0, LSE_BYTES))
+                                        _builder_emit(bulk_g2s_cta(sLSE.ptr_to([0, 0]), LSE_g.ptr_to([b_idx, h_idx, m_st_first]), LSE_BYTES, tma_lse.ptr_to([0])))
+                                _builder_emit(lse_cons_ph.advance())
+                                tma_wait_a_token = _builder_assign("tma_wait_a_token", iket.range_start('tma-wait-a'), locals().get("tma_wait_a_token", _BUILDER_MISSING))
+                                _builder_emit(buf_a_consumed.wait(0, a_cons_ph.phase))
+                                _builder_emit(iket.range_end(tma_wait_a_token))
+                                do_col_st = id_in_pair * B_N_COL
+                                with T.If(T.cuda.elect_sync()):
+                                    with T.Then():
+                                        _builder_emit(tma_g2s(5, dO_row.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]), T.address_of(do_row_tensormap), 0, q_row_st, 0, h_idx, b_idx))
+                                        _builder_emit(tma_g2s(4, dO_col.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]), T.address_of(do_col_tensormap), do_col_st, m_st_first, h_idx, b_idx))
+                                        with T.If(id_in_pair == 0):
+                                            with T.Then():
+                                                _builder_emit(tma_a.arrive(0, DO_BATCH_BYTES))
+                                _builder_emit(a_cons_ph.advance())
+                                tma_wait_dpsum_token = _builder_assign("tma_wait_dpsum_token", iket.range_start('tma-wait-dpsum'), locals().get("tma_wait_dpsum_token", _BUILDER_MISSING))
+                                _builder_emit(dpsum_consumed.wait(0, dpsum_cons_ph.phase))
+                                _builder_emit(iket.range_end(tma_wait_dpsum_token))
+                                with T.If(T.cuda.elect_sync()):
+                                    with T.Then():
+                                        _builder_emit(tma_dpsum.arrive(0, DPSUM_BYTES))
+                                        _builder_emit(bulk_g2s_cta(sDPsum.ptr_to([0]), dpsum_g.ptr_to([b_idx, h_idx, m_st_first]), DPSUM_BYTES, tma_dpsum.ptr_to([0])))
+                                _builder_emit(dpsum_cons_ph.advance())
+                                _builder_emit(iket.range_end(tma_prefetch_token))
+                                with T.serial(num_m_tiles_this_n - 1, annotations={'disable_unroll': True}) as i_m:
+                                    IRBuilder.name("i_m", i_m)
+                                    m_st_next = (m_tile_start + i_m + 1) * BLK_M
+                                    q_row_st_next = m_st_next + id_in_pair * B_N
+                                    q_col_st_next = id_in_pair * B_N_COL
+                                    tma_prefetch_token = _builder_assign("tma_prefetch_token", iket.range_start('tma-prefetch'), locals().get("tma_prefetch_token", _BUILDER_MISSING))
+                                    m_st_qcol = m_st_next - BLK_M
+                                    tma_wait_qcol_token = _builder_assign("tma_wait_qcol_token", iket.range_start('tma-wait-qcol'), locals().get("tma_wait_qcol_token", _BUILDER_MISSING))
+                                    _builder_emit(qcol_consumed.wait(0, qcol_cons_ph.phase))
+                                    _builder_emit(iket.range_end(tma_wait_qcol_token))
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            _builder_emit(tma_g2s(4, Q_col.ptr_to([0, 0]), tma_qcol_cta0.ptr_to([0]), T.address_of(q_col_tensormap), q_col_st_next, m_st_qcol, h_idx, b_idx))
+                                            with T.If(id_in_pair == 0):
+                                                with T.Then():
+                                                    _builder_emit(tma_qcol.arrive(0, QCOL_BATCH_BYTES))
+                                    _builder_emit(qcol_cons_ph.advance())
+                                    tma_wait_q_token = _builder_assign("tma_wait_q_token", iket.range_start('tma-wait-q'), locals().get("tma_wait_q_token", _BUILDER_MISSING))
+                                    _builder_emit(q_consumed.wait(0, q_cons_ph.phase))
+                                    _builder_emit(iket.range_end(tma_wait_q_token))
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            _builder_emit(tma_g2s(5, Q_row.ptr_to([0, 0, 0]), tma_q_cta0.ptr_to([0]), T.address_of(q_row_tensormap), 0, q_row_st_next, 0, h_idx, b_idx))
+                                            with T.If(id_in_pair == 0):
+                                                with T.Then():
+                                                    _builder_emit(tma_q.arrive(0, Q_BATCH_BYTES))
+                                    _builder_emit(q_cons_ph.advance())
+                                    tma_wait_lse_token = _builder_assign("tma_wait_lse_token", iket.range_start('tma-wait-lse'), locals().get("tma_wait_lse_token", _BUILDER_MISSING))
+                                    _builder_emit(lse_consumed.wait(0, lse_cons_ph.phase))
+                                    _builder_emit(iket.range_end(tma_wait_lse_token))
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            _builder_emit(tma_lse.arrive(0, LSE_BYTES))
+                                            _builder_emit(bulk_g2s_cta(sLSE.ptr_to([0, 0]), LSE_g.ptr_to([b_idx, h_idx, m_st_next]), LSE_BYTES, tma_lse.ptr_to([0])))
+                                    _builder_emit(lse_cons_ph.advance())
+                                    tma_wait_a_token = _builder_assign("tma_wait_a_token", iket.range_start('tma-wait-a'), locals().get("tma_wait_a_token", _BUILDER_MISSING))
+                                    _builder_emit(buf_a_consumed.wait(0, a_cons_ph.phase))
+                                    _builder_emit(iket.range_end(tma_wait_a_token))
+                                    do_col_st_next = id_in_pair * B_N_COL
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            _builder_emit(tma_g2s(5, dO_row.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]), T.address_of(do_row_tensormap), 0, q_row_st_next, 0, h_idx, b_idx))
+                                            _builder_emit(tma_g2s(4, dO_col.ptr_to([0, 0]), tma_a_cta0.ptr_to([0]), T.address_of(do_col_tensormap), do_col_st_next, m_st_next, h_idx, b_idx))
+                                            with T.If(id_in_pair == 0):
+                                                with T.Then():
+                                                    _builder_emit(tma_a.arrive(0, DO_BATCH_BYTES))
+                                    _builder_emit(a_cons_ph.advance())
+                                    tma_wait_dpsum_token = _builder_assign("tma_wait_dpsum_token", iket.range_start('tma-wait-dpsum'), locals().get("tma_wait_dpsum_token", _BUILDER_MISSING))
+                                    _builder_emit(dpsum_consumed.wait(0, dpsum_cons_ph.phase))
+                                    _builder_emit(iket.range_end(tma_wait_dpsum_token))
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            _builder_emit(tma_dpsum.arrive(0, DPSUM_BYTES))
+                                            _builder_emit(bulk_g2s_cta(sDPsum.ptr_to([0]), dpsum_g.ptr_to([b_idx, h_idx, m_st_next]), DPSUM_BYTES, tma_dpsum.ptr_to([0])))
+                                    _builder_emit(dpsum_cons_ph.advance())
+                                    _builder_emit(iket.range_end(tma_prefetch_token))
+                                tma_prefetch_token = _builder_assign("tma_prefetch_token", iket.range_start('tma-prefetch'), locals().get("tma_prefetch_token", _BUILDER_MISSING))
+                                tma_wait_qcol_token = _builder_assign(
+                                    "tma_wait_qcol_token",
+                                    iket.range_start('tma-wait-qcol'),
+                                    _BUILDER_MISSING,
                                 )
-                                q_row_issue_start: T.uint64 = T.cast(
-                                    T.shift_right(q_row_issue_addr, T.uint32(4)), "uint64"
-                                )
-                                desc_q_row_issue: T.uint64 = matrix_desc_from_anchor(
-                                    MATRIX_DESC_F16_SS_LDO_512, q_row_issue_start, 0
-                                )
-                                mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row_issue)
-                            else:
-                                mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row)
-                        if T.cuda.elect_sync():
-                            mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                            tcgen05_commit(
-                                q_consumed.ptr_to([0]),
-                            pair_mask,
-                            )
-                        iket.range_end(mma_s_token)
+                                _builder_emit(qcol_consumed.wait(0, qcol_cons_ph.phase))
+                                _builder_emit(iket.range_end(tma_wait_qcol_token))
+                                m_st_qcol_tail = (m_tile_start + num_m_tiles_this_n - 1) * BLK_M
+                                q_col_st_tail = id_in_pair * B_N_COL
+                                with T.If(T.cuda.elect_sync()):
+                                    with T.Then():
+                                        _builder_emit(tma_g2s(4, Q_col.ptr_to([0, 0]), tma_qcol_cta0.ptr_to([0]), T.address_of(q_col_tensormap), q_col_st_tail, m_st_qcol_tail, h_idx, b_idx))
+                                        with T.If(id_in_pair == 0):
+                                            with T.Then():
+                                                _builder_emit(tma_qcol.arrive(0, QCOL_BATCH_BYTES))
+                                _builder_emit(qcol_cons_ph.advance())
+                                _builder_emit(iket.range_end(tma_prefetch_token))
+                            _builder_emit(tma_n_tile())
+                        with T.Else():
+                            with T.If(T.And(warp_id == 0, id_in_pair == 0)):
+                                with T.Then():
+                                    q_row_addr = _builder_scalar("q_row_addr", T.cuda.cvta_generic_to_shared(Q_row.ptr_to([0, 0, 0])), "uint32")
+                                    q_row_start = _builder_scalar("q_row_start", T.cast(T.shift_right(q_row_addr, T.uint32(4)), 'uint64'), "uint64")
+                                    desc_k_row = _builder_assign("desc_k_row", matrix_desc_from_anchor(MATRIX_DESC_F16_SS_LDO_1024, q_row_start, (K_smem.elem_offset - Q_row.elem_offset) * DTYPE_SIZE), locals().get("desc_k_row", _BUILDER_MISSING))
+                                    if not causal:
+                                        desc_q_row = _builder_assign("desc_q_row", matrix_desc_from_anchor(MATRIX_DESC_F16_SS_LDO_512, q_row_start, 0), locals().get("desc_q_row", _BUILDER_MISSING))
+                                    desc_v_row = _builder_assign("desc_v_row", matrix_desc_from_anchor(MATRIX_DESC_F16_SS_LDO_1024, q_row_start, (V_smem.elem_offset - Q_row.elem_offset) * DTYPE_SIZE), locals().get("desc_v_row", _BUILDER_MISSING))
+                                    desc_do_row = _builder_assign("desc_do_row", matrix_desc_from_anchor(MATRIX_DESC_F16_SS_LDO_512, q_row_start, (dO_row.elem_offset - Q_row.elem_offset) * DTYPE_SIZE), locals().get("desc_do_row", _BUILDER_MISSING))
+                                    desc_q_col = _builder_assign("desc_q_col", matrix_desc_from_anchor(MATRIX_DESC_F16_TS, q_row_start, (Q_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE), locals().get("desc_q_col", _BUILDER_MISSING))
+                                    desc_do_col = _builder_assign("desc_do_col", matrix_desc_from_anchor(MATRIX_DESC_F16_TS, q_row_start, (dO_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE), locals().get("desc_do_col", _BUILDER_MISSING))
+                                    desc_k_col = _builder_assign("desc_k_col", matrix_desc_from_anchor(MATRIX_DESC_F16_TS, q_row_start, (K_col.elem_offset - Q_row.elem_offset) * DTYPE_SIZE), locals().get("desc_k_col", _BUILDER_MISSING))
+                                    desc_ds_exch = _builder_assign("desc_ds_exch", matrix_desc_from_anchor(MATRIX_DESC_F16_TS, q_row_start, (dS_exch.elem_offset - Q_row.elem_offset) * DTYPE_SIZE), locals().get("desc_ds_exch", _BUILDER_MISSING))
+                                    kv_ph = _builder_assign("kv_ph", PipelineState(1), locals().get("kv_ph", _BUILDER_MISSING))
+                                    _builder_emit(kv_ph.init(0))
+                                    q_ph = _builder_assign("q_ph", PipelineState(1), locals().get("q_ph", _BUILDER_MISSING))
+                                    _builder_emit(q_ph.init(0))
+                                    qcol_ph = _builder_assign("qcol_ph", PipelineState(1), locals().get("qcol_ph", _BUILDER_MISSING))
+                                    _builder_emit(qcol_ph.init(0))
+                                    a_ph = _builder_assign("a_ph", PipelineState(1), locals().get("a_ph", _BUILDER_MISSING))
+                                    _builder_emit(a_ph.init(0))
+                                    wg0_ph = _builder_assign("wg0_ph", PipelineState(1), locals().get("wg0_ph", _BUILDER_MISSING))
+                                    _builder_emit(wg0_ph.init(0))
+                                    wg0_smem_ph = _builder_assign("wg0_smem_ph", PipelineState(1), locals().get("wg0_smem_ph", _BUILDER_MISSING))
+                                    _builder_emit(wg0_smem_ph.init(0))
+                                    strip_ready_ph = _builder_assign("strip_ready_ph", PipelineState(1), locals().get("strip_ready_ph", _BUILDER_MISSING))
+                                    _builder_emit(strip_ready_ph.init(0))
+                                    s_tmem_consumed_ph = _builder_assign("s_tmem_consumed_ph", PipelineState(1), locals().get("s_tmem_consumed_ph", _BUILDER_MISSING))
+                                    _builder_emit(s_tmem_consumed_ph.init(0))
+                                    dq_tmem_free_ph = _builder_assign("dq_tmem_free_ph", PipelineState(1), locals().get("dq_tmem_free_ph", _BUILDER_MISSING))
+                                    _builder_emit(dq_tmem_free_ph.init(1))
+                                    accum_var = _builder_alloc_scalar("accum_var", "int32")
+                                    accum_dv = _builder_alloc_scalar("accum_dv", "int32")
+                                    accum_dk = _builder_alloc_scalar("accum_dk", "int32")
 
-                        # Phase D[i_m-1]: dK += dS_tmem @ Q_col^T.  Once this
-                        # instruction is issued, ordered UMMA execution permits
-                        # the following dP to reuse the dS/dP TMEM region.
-                        mma_dk_token = iket.range_start("mma-dk")
-                        wg02mma_tmem.wait(0, wg0_ph.phase)
-                        wg0_ph.advance()
-                        tma_qcol.wait(0, qcol_ph.phase)
-                        qcol_ph.advance()
-                        if T.cuda.elect_sync():
-                            mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk, desc_q_col)
-                        if T.cuda.elect_sync():
-                            tcgen05_commit(qcol_consumed.ptr_to([0]), pair_mask)
-                        accum_dk = 1
-                        iket.range_end(mma_dk_token)
+                                    def mma_n_tile():
+                                        nonlocal accum_var, accum_dv, accum_dk
 
-                        # Phase B[i_m]: dP = V @ dO_row^T.
-                        mma_dp_token = iket.range_start("mma-dp")
-                        tma_a.wait(0, a_ph.phase)
-                        a_ph.advance()
-                        accum_var = 0
-                        if T.cuda.elect_sync():
-                            mma_dp(TMEM_OFF_DP, accum_var, desc_v_row, desc_do_row)
-                        if T.cuda.elect_sync():
-                            mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                        iket.range_end(mma_dp_token)
+                                        _builder_emit(tma_kv.wait(0, kv_ph.phase))
+                                        _builder_emit(kv_ph.advance())
+                                        accum_dv = _builder_assign("accum_dv", 0, accum_dv)
+                                        accum_dk = _builder_assign("accum_dk", 0, accum_dk)
+                                        mma_s_token = _builder_assign("mma_s_token", iket.range_start('mma-s'), locals().get("mma_s_token", _BUILDER_MISSING))
+                                        _builder_emit(tma_q.wait(0, q_ph.phase))
+                                        _builder_emit(q_ph.advance())
+                                        accum_var = _builder_assign("accum_var", 0, accum_var)
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                if causal:
+                                                    q_row_issue_addr = _builder_scalar("q_row_issue_addr", T.cuda.cvta_generic_to_shared(Q_row.ptr_to([0, 0, 0])), "uint32")
+                                                    q_row_issue_start = _builder_scalar("q_row_issue_start", T.cast(T.shift_right(q_row_issue_addr, T.uint32(4)), 'uint64'), "uint64")
+                                                    desc_q_row_issue = _builder_scalar("desc_q_row_issue", matrix_desc_from_anchor(MATRIX_DESC_F16_SS_LDO_512, q_row_issue_start, 0), "uint64")
+                                                    _builder_emit(mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row_issue))
+                                                else:
+                                                    _builder_emit(mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row))
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask))
+                                                _builder_emit(tcgen05_commit(q_consumed.ptr_to([0]), pair_mask))
+                                        _builder_emit(iket.range_end(mma_s_token))
+                                        mma_dp_token = _builder_assign("mma_dp_token", iket.range_start('mma-dp'), locals().get("mma_dp_token", _BUILDER_MISSING))
+                                        _builder_emit(tma_a.wait(0, a_ph.phase))
+                                        _builder_emit(a_ph.advance())
+                                        accum_var = _builder_assign("accum_var", 0, accum_var)
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(mma_dp(TMEM_OFF_DP, accum_var, desc_v_row, desc_do_row))
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask))
+                                        _builder_emit(iket.range_end(mma_dp_token))
+                                        mma_dv_token = _builder_assign("mma_dv_token", iket.range_start('mma-dv'), locals().get("mma_dv_token", _BUILDER_MISSING))
+                                        _builder_emit(strip_ready.wait(0, strip_ready_ph.phase))
+                                        _builder_emit(strip_ready_ph.advance())
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv, desc_do_col))
+                                        accum_dv = _builder_assign("accum_dv", 1, accum_dv)
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(tcgen05_commit(buf_a_consumed.ptr_to([0]), pair_mask))
+                                        _builder_emit(iket.range_end(mma_dv_token))
+                                        with T.serial(num_m_tiles_this_n - 1, annotations={'disable_unroll': True}) as i_m_inner:
+                                            IRBuilder.name("i_m_inner", i_m_inner)
+                                            i_m = m_tile_start + i_m_inner + 1
+                                            mma_s_token = _builder_assign("mma_s_token", iket.range_start('mma-s'), locals().get("mma_s_token", _BUILDER_MISSING))
+                                            _builder_emit(tma_q.wait(0, q_ph.phase))
+                                            _builder_emit(q_ph.advance())
+                                            _builder_emit(dq_tmem_free.wait(0, dq_tmem_free_ph.phase))
+                                            _builder_emit(dq_tmem_free_ph.advance())
+                                            accum_var = _builder_assign("accum_var", 0, accum_var)
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    if causal:
+                                                        q_row_issue_addr = _builder_scalar("q_row_issue_addr", T.cuda.cvta_generic_to_shared(Q_row.ptr_to([0, 0, 0])), "uint32")
+                                                        q_row_issue_start = _builder_scalar("q_row_issue_start", T.cast(T.shift_right(q_row_issue_addr, T.uint32(4)), 'uint64'), "uint64")
+                                                        desc_q_row_issue = _builder_scalar("desc_q_row_issue", matrix_desc_from_anchor(MATRIX_DESC_F16_SS_LDO_512, q_row_issue_start, 0), "uint64")
+                                                        _builder_emit(mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row_issue))
+                                                    else:
+                                                        _builder_emit(mma_s(TMEM_OFF_A, accum_var, desc_k_row, desc_q_row))
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask))
+                                                    _builder_emit(tcgen05_commit(q_consumed.ptr_to([0]), pair_mask))
+                                            _builder_emit(iket.range_end(mma_s_token))
+                                            mma_dk_token = _builder_assign("mma_dk_token", iket.range_start('mma-dk'), locals().get("mma_dk_token", _BUILDER_MISSING))
+                                            _builder_emit(wg02mma_tmem.wait(0, wg0_ph.phase))
+                                            _builder_emit(wg0_ph.advance())
+                                            _builder_emit(tma_qcol.wait(0, qcol_ph.phase))
+                                            _builder_emit(qcol_ph.advance())
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk, desc_q_col))
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(tcgen05_commit(qcol_consumed.ptr_to([0]), pair_mask))
+                                            accum_dk = _builder_assign("accum_dk", 1, accum_dk)
+                                            _builder_emit(iket.range_end(mma_dk_token))
+                                            mma_dp_token = _builder_assign("mma_dp_token", iket.range_start('mma-dp'), locals().get("mma_dp_token", _BUILDER_MISSING))
+                                            _builder_emit(tma_a.wait(0, a_ph.phase))
+                                            _builder_emit(a_ph.advance())
+                                            accum_var = _builder_assign("accum_var", 0, accum_var)
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(mma_dp(TMEM_OFF_DP, accum_var, desc_v_row, desc_do_row))
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask))
+                                            _builder_emit(iket.range_end(mma_dp_token))
+                                            mma_dq_ready_token = _builder_assign("mma_dq_ready_token", iket.range_start('mma-dq-ready-wait'), locals().get("mma_dq_ready_token", _BUILDER_MISSING))
+                                            _builder_emit(wg02mma.wait(0, wg0_smem_ph.phase))
+                                            _builder_emit(wg0_smem_ph.advance())
+                                            _builder_emit(iket.range_end(mma_dq_ready_token))
+                                            mma_dq_alias_token = _builder_assign("mma_dq_alias_token", iket.range_start('mma-dq-alias-wait'), locals().get("mma_dq_alias_token", _BUILDER_MISSING))
+                                            _builder_emit(s_tmem_consumed.wait(0, s_tmem_consumed_ph.phase))
+                                            _builder_emit(s_tmem_consumed_ph.advance())
+                                            _builder_emit(iket.range_end(mma_dq_alias_token))
+                                            mma_dq_issue_token = _builder_assign("mma_dq_issue_token", iket.range_start('mma-dq-issue'), locals().get("mma_dq_issue_token", _BUILDER_MISSING))
+                                            accum_var = _builder_assign("accum_var", 0, accum_var)
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(mma_dq(TMEM_OFF_DQ, accum_var, desc_ds_exch, desc_k_col))
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask))
+                                                    _builder_emit(tcgen05_commit(ds_exch_consumed.ptr_to([0]), pair_mask))
+                                            _builder_emit(iket.range_end(mma_dq_issue_token))
+                                            mma_dv_token = _builder_assign("mma_dv_token", iket.range_start('mma-dv'), locals().get("mma_dv_token", _BUILDER_MISSING))
+                                            _builder_emit(strip_ready.wait(0, strip_ready_ph.phase))
+                                            _builder_emit(strip_ready_ph.advance())
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv, desc_do_col))
+                                            with T.If(T.cuda.elect_sync()):
+                                                with T.Then():
+                                                    _builder_emit(tcgen05_commit(buf_a_consumed.ptr_to([0]), pair_mask))
+                                            _builder_emit(iket.range_end(mma_dv_token))
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(tcgen05_commit(dv_done.ptr_to([0]), pair_mask))
+                                        mma_dk_token = _builder_assign(
+                                            "mma_dk_token",
+                                            iket.range_start('mma-dk'),
+                                            _BUILDER_MISSING,
+                                        )
+                                        _builder_emit(wg02mma_tmem.wait(0, wg0_ph.phase))
+                                        _builder_emit(wg0_ph.advance())
+                                        _builder_emit(tma_qcol.wait(0, qcol_ph.phase))
+                                        _builder_emit(qcol_ph.advance())
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk, desc_q_col))
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(tcgen05_commit(qcol_consumed.ptr_to([0]), pair_mask))
+                                                _builder_emit(tcgen05_commit(dk_done.ptr_to([0]), pair_mask))
+                                        _builder_emit(iket.range_end(mma_dk_token))
+                                        _builder_emit(dq_tmem_free.wait(0, dq_tmem_free_ph.phase))
+                                        _builder_emit(dq_tmem_free_ph.advance())
+                                        mma_dq_ready_token = _builder_assign(
+                                            "mma_dq_ready_token",
+                                            iket.range_start('mma-dq-ready-wait'),
+                                            _BUILDER_MISSING,
+                                        )
+                                        _builder_emit(wg02mma.wait(0, wg0_smem_ph.phase))
+                                        _builder_emit(wg0_smem_ph.advance())
+                                        _builder_emit(iket.range_end(mma_dq_ready_token))
+                                        mma_dq_issue_token = _builder_assign(
+                                            "mma_dq_issue_token",
+                                            iket.range_start('mma-dq-issue'),
+                                            _BUILDER_MISSING,
+                                        )
+                                        accum_var = _builder_assign("accum_var", 0, accum_var)
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(mma_dq(TMEM_OFF_DQ, accum_var, desc_ds_exch, desc_k_col))
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                _builder_emit(mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask))
+                                                _builder_emit(tcgen05_commit(ds_exch_consumed.ptr_to([0]), pair_mask))
+                                        _builder_emit(iket.range_end(mma_dq_issue_token))
+                                        _builder_emit(dq_tmem_free.wait(0, dq_tmem_free_ph.phase))
+                                    _builder_emit(mma_n_tile())
+                                with T.Else():
+                                    with T.If(warp_id == 2):
+                                        with T.Then():
+                                            relay_ph = _builder_assign("relay_ph", PipelineState(1), locals().get("relay_ph", _BUILDER_MISSING))
+                                            _builder_emit(relay_ph.init(0))
 
-                        # Phase E[i_m-1]: dQ = dS_exch^T @ K_col.
-                        mma_dq_ready_token = iket.range_start("mma-dq-ready-wait")
-                        wg02mma.wait(0, wg0_smem_ph.phase)
-                        wg0_smem_ph.advance()
-                        iket.range_end(mma_dq_ready_token)
-                        # dQ aliases the upper half of S.  As in FA4's
-                        # delayed dS producer commit, require both the current
-                        # dS exchange and the next tile's drained S loads.
-                        mma_dq_alias_token = iket.range_start("mma-dq-alias-wait")
-                        s_tmem_consumed.wait(0, s_tmem_consumed_ph.phase)
-                        s_tmem_consumed_ph.advance()
-                        iket.range_end(mma_dq_alias_token)
-                        mma_dq_issue_token = iket.range_start("mma-dq-issue")
-                        accum_var = 0
-                        if T.cuda.elect_sync():
-                            mma_dq(TMEM_OFF_DQ, accum_var, desc_ds_exch, desc_k_col)
-                        if T.cuda.elect_sync():
-                            mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                            tcgen05_commit(
-                                ds_exch_consumed.ptr_to([0]),
-                            pair_mask,
-                            )
-                        iket.range_end(mma_dq_issue_token)
+                                            def relay_n_tile():
+                                                with T.serial(num_m_tiles_this_n, annotations={'disable_unroll': True}) as _:
+                                                    IRBuilder.name("_", _)
+                                                    _builder_emit(ds_exch_mbar.wait(0, relay_ph.phase))
+                                                    _builder_emit(relay_ph.advance())
+                                                    with T.If(T.cuda.elect_sync()):
+                                                        with T.Then():
+                                                            _builder_emit(wg02mma.arrive(0, remote=0, pred=True))
+                                            _builder_emit(relay_n_tile())
+                    with T.If(warp_id == 0):
+                        with T.Then():
+                            _builder_emit(T.ptx.tcgen05.relinquish_alloc_permit.cta_group__2.sync.aligned())
+                            _builder_emit(T.ptx.bar.sync(T.uint32(5), 416))
+                            _builder_emit(tmem_dealloc_mbar.arrive(0, remote=1 - id_in_pair, pred=True))
+                            _builder_emit(tmem_dealloc_mbar.wait(0, 0))
+                            tmem_dealloc_addr = _builder_alloc_scalar("tmem_dealloc_addr", "uint32")
+                            _builder_emit(T.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_addr.ptr_to([0])))
+                            _builder_emit(T.ptx['tcgen05.dealloc.cta_group::2.sync.aligned.b32'](tmem_dealloc_addr, T.uint32(512)))
+                with T.Else():
+                    with T.If((wg_id >= 1) & (wg_id <= 2)):
+                        with T.Then():
+                            _builder_emit(T.ptx.setmaxnreg.inc.sync.aligned.u32(136))
+                            _builder_emit(T.ptx.barrier.sync(T.uint32(5), 416))
+                            compute_wg = wg_id - 1
+                            gemm_s_ph = _builder_assign("gemm_s_ph", PipelineState(1), locals().get("gemm_s_ph", _BUILDER_MISSING))
+                            _builder_emit(gemm_s_ph.init(0))
+                            lse_ph = _builder_assign("lse_ph", PipelineState(1), locals().get("lse_ph", _BUILDER_MISSING))
+                            _builder_emit(lse_ph.init(0))
+                            ds_exch_ph = _builder_assign("ds_exch_ph", PipelineState(1), locals().get("ds_exch_ph", _BUILDER_MISSING))
+                            _builder_emit(ds_exch_ph.init(0))
+                            gemm_dp_ph = _builder_assign("gemm_dp_ph", PipelineState(1), locals().get("gemm_dp_ph", _BUILDER_MISSING))
+                            _builder_emit(gemm_dp_ph.init(0))
+                            dpsum_ph = _builder_assign("dpsum_ph", PipelineState(1), locals().get("dpsum_ph", _BUILDER_MISSING))
+                            _builder_emit(dpsum_ph.init(0))
+                            dv_done_ph = _builder_assign("dv_done_ph", PipelineState(1), locals().get("dv_done_ph", _BUILDER_MISSING))
+                            _builder_emit(dv_done_ph.init(0))
+                            dk_done_ph = _builder_assign("dk_done_ph", PipelineState(1), locals().get("dk_done_ph", _BUILDER_MISSING))
+                            _builder_emit(dk_done_ph.init(0))
+                            ds_exch_consumed_ph = _builder_assign("ds_exch_consumed_ph", PipelineState(1), locals().get("ds_exch_consumed_ph", _BUILDER_MISSING))
+                            _builder_emit(ds_exch_consumed_ph.init(1))
+                            dS_sw = _builder_assign("dS_sw", RowiseSwizzleOffset(3, 3, 3, warp_id * 32 + lane_id, prefix='dS_sw'), locals().get("dS_sw", _BUILDER_MISSING))
+                            _builder_emit(dS_sw.init())
+                            epi_sw = _builder_assign("epi_sw", RowiseSwizzleOffset(3, 3, 3, warp_id * 32 + lane_id, prefix='epi_sw'), locals().get("epi_sw", _BUILDER_MISSING))
+                            _builder_emit(epi_sw.init())
+                            strip_off = compute_wg * STRIP_SIZE
 
-                        # Phase C[i_m]: dV += P_tmem @ dO_col^T
-                        mma_dv_token = iket.range_start("mma-dv")
-                        strip_ready.wait(0, strip_ready_ph.phase)
-                        strip_ready_ph.advance()
-                        if T.cuda.elect_sync():
-                            mma_dv(TMEM_OFF_B, TMEM_OFF_A * 2, accum_dv, desc_do_col)
-                        if T.cuda.elect_sync():
-                            tcgen05_commit(buf_a_consumed.ptr_to([0]), pair_mask)
-                        iket.range_end(mma_dv_token)
+                            def softmax_n_tile():
+                                with T.serial(num_m_tiles_this_n, annotations={'disable_unroll': True}) as i_m_inner:
+                                    IRBuilder.name("i_m_inner", i_m_inner)
+                                    i_m = m_tile_start + i_m_inner
+                                    m_st_val = i_m * BLK_M
+                                    row_local = warp_id * 32 + lane_id
+                                    softmax_p_token = _builder_assign("softmax_p_token", iket.range_start('softmax-p'), locals().get("softmax_p_token", _BUILDER_MISSING))
+                                    _builder_emit(tma_lse.wait(0, lse_ph.phase))
+                                    _builder_emit(mma2wg0_s.wait(0, gemm_s_ph.phase))
+                                    _builder_emit(gemm_s_ph.advance())
+                                    S_strip = _builder_assign("S_strip", T.alloc_local((STRIP_SIZE,), f32), locals().get("S_strip", _BUILDER_MISSING))
+                                    tmem_s_col = TMEM_OFF_A + strip_off
+                                    with T.unroll(STRIP_SIZE // 32) as stage:
+                                        IRBuilder.name("stage", stage)
+                                        _builder_emit(tmem_load_32(S_strip, stage * 32, TMEM_OFF_A, 0, tmem_s_col + stage * 32))
+                                    _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                    with T.If((i_m_inner > 0) & (lane_id == 0)):
+                                        with T.Then():
+                                            _builder_emit(s_tmem_consumed.arrive(0, remote=0, pred=True))
+                                    P_f16 = _builder_assign("P_f16", T.alloc_local((STRIP_SIZE,), f16), locals().get("P_f16", _BUILDER_MISSING))
+                                    P_f16_u32 = _builder_assign("P_f16_u32", P_f16.view('uint32'), locals().get("P_f16_u32", _BUILDER_MISSING))
+                                    tmem_p_col = TMEM_OFF_A * 2 + strip_off
+                                    with T.unroll(STRIP_SIZE // 32) as stage:
+                                        IRBuilder.name("stage", stage)
+                                        with T.unroll(32 // 2) as j_inner:
+                                            IRBuilder.name("j_inner", j_inner)
+                                            j = stage * (32 // 2) + j_inner
+                                            lse_pair_0 = _builder_alloc_scalar("lse_pair_0", "float32")
+                                            lse_pair_1 = _builder_alloc_scalar("lse_pair_1", "float32")
+                                            _builder_emit(T.ptx.ld.shared.v2.f32(lse_pair_0, lse_pair_1, sLSE.ptr_to([0, strip_off + 2 * j])))
+                                            scaled_pair = _builder_bind("scaled_pair", fma_scale_sub_f32x2(T.cuda.make_float2(S_strip[2 * j], S_strip[2 * j + 1]), T.cuda.make_float2(T.float32(scale_log2), T.float32(scale_log2)), T.cuda.make_float2(lse_pair_0, lse_pair_1)), None)
+                                            T.buffer_store(S_strip, T.cuda.float2_x(scaled_pair), [2 * j])
+                                            T.buffer_store(S_strip, T.cuda.float2_y(scaled_pair), [2 * j + 1])
+                                            _builder_emit(T.ptx.ex2.approx.ftz.f32(S_strip[2 * j], S_strip[2 * j]))
+                                            _builder_emit(T.ptx.ex2.approx.ftz.f32(S_strip[2 * j + 1], S_strip[2 * j + 1]))
+                                        if causal:
+                                            with T.If(i_m < m_tile_start + BLK_N // BLK_M):
+                                                with T.Then():
+                                                    key_idx = n_st_cta + row_local
+                                                    with T.unroll(32 // 2) as j_inner:
+                                                        IRBuilder.name("j_inner", j_inner)
+                                                        j = stage * (32 // 2) + j_inner
+                                                        query_idx_0 = m_st_val + strip_off + 2 * j
+                                                        query_idx_1 = query_idx_0 + 1
+                                                        T.buffer_store(S_strip, T.if_then_else(query_idx_0 >= key_idx, S_strip[2 * j], T.float32(0)), [2 * j])
+                                                        T.buffer_store(S_strip, T.if_then_else(query_idx_1 >= key_idx, S_strip[2 * j + 1], T.float32(0)), [2 * j + 1])
+                                        with T.unroll(32 // 2) as j_inner:
+                                            IRBuilder.name("j_inner", j_inner)
+                                            j = stage * (32 // 2) + j_inner
+                                            _builder_emit(cast_f32x2_to_f16x2(T.address_of(P_f16[2 * j]), T.address_of(S_strip[2 * j])))
+                                        with T.If(stage == 0):
+                                            with T.Then():
+                                                _builder_emit(T.ptx.bar.sync(T.uint32(8), 256))
+                                        _builder_emit(tmem_store_16(P_f16_u32, stage * 16, TMEM_OFF_A, 0, (tmem_p_col + stage * 32) // 2))
+                                    _builder_emit(lse_ph.advance())
+                                    _builder_emit(T.ptx.tcgen05.wait__st.sync.aligned())
+                                    _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                    _builder_emit(T.ptx.bar.sync(T.uint32(8), 256))
+                                    with T.If(lane_id == 0):
+                                        with T.Then():
+                                            _builder_emit(lse_consumed.arrive(0))
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            _builder_emit(strip_ready.arrive(0, remote=0, pred=True))
+                                    _builder_emit(iket.range_end(softmax_p_token))
+                                    softmax_ds_token = _builder_assign("softmax_ds_token", iket.range_start('softmax-ds'), locals().get("softmax_ds_token", _BUILDER_MISSING))
+                                    _builder_emit(tma_dpsum.wait(0, dpsum_ph.phase))
+                                    _builder_emit(mma2wg0_dp.wait(0, gemm_dp_ph.phase))
+                                    _builder_emit(gemm_dp_ph.advance())
+                                    dP_strip = _builder_assign("dP_strip", T.alloc_local((STRIP_SIZE,), f32), locals().get("dP_strip", _BUILDER_MISSING))
+                                    dP_pairs = _builder_assign("dP_pairs", dP_strip.view('uint64'), locals().get("dP_pairs", _BUILDER_MISSING))
+                                    tmem_dp_col = TMEM_OFF_DP + strip_off
+                                    with T.unroll(STRIP_SIZE // 32) as stage:
+                                        IRBuilder.name("stage", stage)
+                                        _builder_emit(tmem_load_32(dP_strip, stage * 32, TMEM_OFF_A, 0, tmem_dp_col + stage * 32))
+                                    with T.unroll(STRIP_SIZE // 2) as j:
+                                        IRBuilder.name("j", j)
+                                        dpsum_pair_0 = _builder_alloc_scalar("dpsum_pair_0", "float32")
+                                        dpsum_pair_1 = _builder_alloc_scalar("dpsum_pair_1", "float32")
+                                        _builder_emit(T.ptx.ld.shared.v2.f32(dpsum_pair_0, dpsum_pair_1, sDPsum.ptr_to([strip_off + 2 * j])))
+                                        _builder_emit(T.ptx.sub.rn.ftz.f32x2(dP_pairs[j], T.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1]), T.cuda.make_float2(dpsum_pair_0, dpsum_pair_1)))
+                                        _builder_emit(T.ptx.mul.rn.ftz.f32x2(dP_pairs[j], T.cuda.make_float2(S_strip[2 * j], S_strip[2 * j + 1]), T.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1])))
+                                    _builder_emit(dpsum_ph.advance())
+                                    _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                    dS_full_f16 = _builder_assign("dS_full_f16", T.alloc_local((STRIP_SIZE,), f16), locals().get("dS_full_f16", _BUILDER_MISSING))
+                                    with T.unroll(STRIP_SIZE // 2) as j:
+                                        IRBuilder.name("j", j)
+                                        _builder_emit(cast_f32x2_to_f16x2(T.address_of(dS_full_f16[2 * j]), T.address_of(dP_strip[2 * j])))
+                                    _builder_emit(T.ptx.bar.sync(T.uint32(8), 256))
+                                    tmem_ds_col = TMEM_OFF_DP * 2 + strip_off
+                                    dS_f16_u32 = _builder_assign("dS_f16_u32", dS_full_f16.view('uint32'), locals().get("dS_f16_u32", _BUILDER_MISSING))
+                                    _builder_emit(tmem_store_32(dS_f16_u32, 0, TMEM_OFF_A, 0, tmem_ds_col // 2))
+                                    _builder_emit(T.ptx.tcgen05.wait__st.sync.aligned())
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            _builder_emit(wg02mma_tmem.arrive(0, remote=0, pred=True))
+                                    _builder_emit(iket.range_end(softmax_ds_token))
+                                    ds_exchange_token = _builder_assign("ds_exchange_token", iket.range_start('ds-exchange'), locals().get("ds_exchange_token", _BUILDER_MISSING))
+                                    _builder_emit(ds_exch_consumed.wait(0, ds_exch_consumed_ph.phase))
+                                    _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                    _builder_emit(ds_exch_consumed_ph.advance())
+                                    with T.If(compute_wg == id_in_pair):
+                                        with T.Then():
+                                            ds_row_base = id_in_pair * CTA_N
+                                            ds_row_st = _builder_alloc_scalar("ds_row_st", "int32")
+                                            ds_row_st = _builder_assign("ds_row_st", (ds_row_base + row_local) * B_N + (ds_row_base + row_local & 7) * 8, locals().get("ds_row_st", _BUILDER_MISSING))
+                                            with T.unroll(STRIP_SIZE // 8) as ni:
+                                                IRBuilder.name("ni", ni)
+                                                _builder_emit(copy_128b(pointer_offset(dS_exch.ptr_to([0, 0]), ds_row_st + dS_sw.apply(ni * 8)), dS_full_f16.view('uint128')[ni]))
+                                        with T.Else():
+                                            stage_row_st = _builder_alloc_scalar("stage_row_st", "int32")
+                                            stage_row_st = _builder_assign("stage_row_st", row_local * B_N + (row_local & 7) * 8, locals().get("stage_row_st", _BUILDER_MISSING))
+                                            with T.unroll(STRIP_SIZE // 8) as ni:
+                                                IRBuilder.name("ni", ni)
+                                                _builder_emit(copy_128b(pointer_offset(dS_send.ptr_to([0, 0]), stage_row_st + dS_sw.apply(ni * 8)), dS_full_f16.view('uint128')[ni]))
+                                    _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                    _builder_emit(T.ptx.bar.sync(T.uint32(8), 256))
+                                    with T.If(lane_id == 0):
+                                        with T.Then():
+                                            _builder_emit(dpsum_consumed.arrive(0))
+                                    with T.If((compute_wg != id_in_pair) & (warp_id == 0) & (lane_id == 0)):
+                                        with T.Then():
+                                            peer_cta = _builder_alloc_scalar("peer_cta", "int32")
+                                            peer_cta = _builder_assign("peer_cta", 1 - id_in_pair, locals().get("peer_cta", _BUILDER_MISSING))
+                                            ds_copy_bytes = CTA_N * B_N * DTYPE_SIZE
+                                            remote_mbar = _builder_assign("remote_mbar", T.alloc_local([1], 'uint32'), locals().get("remote_mbar", _BUILDER_MISSING))
+                                            _builder_emit(T.ptx.mapa.shared__cluster.u32(remote_mbar[0], T.cuda.cvta_generic_to_shared(ds_exch_mbar.ptr_to([0])), T.uint32(peer_cta)))
+                                            remote_dst = _builder_assign("remote_dst", T.alloc_local([1], 'uint32'), locals().get("remote_dst", _BUILDER_MISSING))
+                                            _builder_emit(T.ptx.mapa.shared__cluster.u32(remote_dst[0], T.cuda.cvta_generic_to_shared(dS_exch.ptr_to([id_in_pair * CTA_N, 0])), T.uint32(peer_cta)))
+                                            _builder_emit(T.ptx.mbarrier.arrive.expect_tx.shared__cluster.b64(remote_mbar[0], T.uint32(ds_copy_bytes), pred=True))
+                                            _builder_emit(T.ptx[_BULK_S2C](remote_dst[0], dS_send.ptr_to([0, 0]), T.uint32(ds_copy_bytes), remote_mbar[0]))
+                                    _builder_emit(iket.range_end(ds_exchange_token))
+                                dkv_epilogue_token = _builder_assign("dkv_epilogue_token", iket.range_start('dkv-epilogue'), locals().get("dkv_epilogue_token", _BUILDER_MISSING))
+                                _builder_emit(dv_done.wait(0, dv_done_ph.phase))
+                                _builder_emit(dv_done_ph.advance())
+                                dv_epi_strip = _builder_assign("dv_epi_strip", T.alloc_local((EPI_N,), f32), locals().get("dv_epi_strip", _BUILDER_MISSING))
+                                dv_epi_f16 = _builder_assign("dv_epi_f16", T.alloc_local((EPI_N,), f16), locals().get("dv_epi_f16", _BUILDER_MISSING))
+                                _builder_emit(tmem_load_64(dv_epi_strip, 0, TMEM_OFF_A, 0, TMEM_OFF_B + compute_wg * EPI_N))
+                                _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                with T.unroll(EPI_N // 2) as j:
+                                    IRBuilder.name("j", j)
+                                    _builder_emit(cast_f32x2_to_f16x2(T.address_of(dv_epi_f16[2 * j]), T.address_of(dv_epi_strip[2 * j])))
+                                epi_row_st = _builder_alloc_scalar("epi_row_st", "int32")
+                                epi_row_st = _builder_assign("epi_row_st", (warp_id * 32 + lane_id) * EPI_N + (warp_id * 32 + lane_id & 7) * 8, locals().get("epi_row_st", _BUILDER_MISSING))
+                                with T.unroll(EPI_N // 8) as ni:
+                                    IRBuilder.name("ni", ni)
+                                    _builder_emit(copy_128b(pointer_offset(dV_epi.ptr_to([compute_wg, 0, 0]), epi_row_st + epi_sw.apply(ni * 8)), dv_epi_f16.view('uint128')[ni]))
+                                _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                _builder_emit(T.ptx.bar.sync(T.uint32(wg_id + 10), 128))
+                                with T.If((warp_id == 0) & (lane_id == 0)):
+                                    with T.Then():
+                                        _builder_emit(tma_s2g(4, dV_epi.ptr_to([compute_wg, 0, 0]), T.address_of(dv_tensormap), compute_wg * EPI_N, n_st_cta, h_idx, b_idx))
+                                with T.If(warp_id == 0):
+                                    with T.Then():
+                                        _builder_emit(T.ptx.bar.arrive(T.uint32(wg_id + 10), 160))
+                                _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                _builder_emit(T.ptx.bar.sync(T.uint32(wg_id + 10), 160))
+                                _builder_emit(dk_done.wait(0, dk_done_ph.phase))
+                                _builder_emit(dk_done_ph.advance())
+                                dk_epi_strip = _builder_assign("dk_epi_strip", T.alloc_local((EPI_N,), f32), locals().get("dk_epi_strip", _BUILDER_MISSING))
+                                dk_epi_pairs = _builder_assign("dk_epi_pairs", dk_epi_strip.view('uint64'), locals().get("dk_epi_pairs", _BUILDER_MISSING))
+                                dk_epi_f16 = _builder_assign("dk_epi_f16", T.alloc_local((EPI_N,), f16), locals().get("dk_epi_f16", _BUILDER_MISSING))
+                                _builder_emit(tmem_load_64(dk_epi_strip, 0, TMEM_OFF_A, 0, TMEM_OFF_C + compute_wg * EPI_N))
+                                _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                with T.unroll(EPI_N // 2) as j:
+                                    IRBuilder.name("j", j)
+                                    _builder_emit(T.ptx.mul.rn.ftz.f32x2(dk_epi_pairs[j], T.cuda.make_float2(dk_epi_strip[2 * j], dk_epi_strip[2 * j + 1]), T.cuda.make_float2(T.float32(softmax_scale), T.float32(softmax_scale))))
+                                    _builder_emit(cast_f32x2_to_f16x2(T.address_of(dk_epi_f16[2 * j]), T.address_of(dk_epi_strip[2 * j])))
+                                with T.unroll(EPI_N // 8) as ni:
+                                    IRBuilder.name("ni", ni)
+                                    _builder_emit(copy_128b(pointer_offset(dK_epi.ptr_to([compute_wg, 0, 0]), epi_row_st + epi_sw.apply(ni * 8)), dk_epi_f16.view('uint128')[ni]))
+                                _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                _builder_emit(T.ptx.bar.sync(T.uint32(wg_id + 10), 128))
+                                with T.If((warp_id == 0) & (lane_id == 0)):
+                                    with T.Then():
+                                        _builder_emit(tma_s2g(4, dK_epi.ptr_to([compute_wg, 0, 0]), T.address_of(dk_tensormap), compute_wg * EPI_N, n_st_cta, h_idx, b_idx))
+                                with T.If(warp_id == 0):
+                                    with T.Then():
+                                        _builder_emit(T.ptx.bar.arrive(T.uint32(wg_id + 10), 160))
+                                _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                _builder_emit(T.ptx.bar.sync(T.uint32(wg_id + 10), 160))
+                                with T.If((warp_id == 0) & (lane_id == 0)):
+                                    with T.Then():
+                                        _builder_emit(T.ptx.cp.async_.bulk.commit_group())
+                                _builder_emit(iket.range_end(dkv_epilogue_token))
+                            _builder_emit(softmax_n_tile())
+                            _builder_emit(T.ptx.bar.arrive(T.uint32(5), 416))
+                        with T.Else():
+                            _builder_emit(T.ptx.setmaxnreg.inc.sync.aligned.u32(136))
+                            _builder_emit(T.ptx.barrier.sync(T.uint32(5), 416))
+                            gemm_dq_ph_wg3 = _builder_assign("gemm_dq_ph_wg3", PipelineState(1), locals().get("gemm_dq_ph_wg3", _BUILDER_MISSING))
+                            _builder_emit(gemm_dq_ph_wg3.init(0))
 
-                    # dV is complete before the remaining dK/dQ tail.  Match
-                    # sdKVaccum stage 0 by releasing all compute warps now so
-                    # its epilogue overlaps the tail below.
-                    if T.cuda.elect_sync():
-                        tcgen05_commit(
-                            dv_done.ptr_to([0]),
-                            pair_mask,
-                        )
-
-                    # ---- After loop: Phase D[N-1], Phase E[N-1] ----
-                    mma_dk_token = iket.range_start("mma-dk")
-                    wg02mma_tmem.wait(0, wg0_ph.phase)
-                    wg0_ph.advance()
-                    tma_qcol.wait(0, qcol_ph.phase)
-                    qcol_ph.advance()
-                    if T.cuda.elect_sync():
-                        mma_dk(TMEM_OFF_C, TMEM_OFF_DP, accum_dk, desc_q_col)
-                    if T.cuda.elect_sync():
-                        tcgen05_commit(qcol_consumed.ptr_to([0]), pair_mask)
-                        # sdKVaccum stage 1: release dK independently after its
-                        # final update, while the final dQ path remains live.
-                        tcgen05_commit(
-                            dk_done.ptr_to([0]),
-                            pair_mask,
-                        )
-                    iket.range_end(mma_dk_token)
-
-                    # The final dQ uses the same TMEM destination as the
-                    # preceding iteration.  Unlike the next loop trip, there
-                    # is no following Phase-A prologue to carry this release
-                    # wait, so consume it explicitly before the last write.
-                    dq_tmem_free.wait(0, dq_tmem_free_ph.phase)
-                    dq_tmem_free_ph.advance()
-                    mma_dq_ready_token = iket.range_start("mma-dq-ready-wait")
-                    wg02mma.wait(0, wg0_smem_ph.phase)
-                    wg0_smem_ph.advance()
-                    iket.range_end(mma_dq_ready_token)
-                    mma_dq_issue_token = iket.range_start("mma-dq-issue")
-                    accum_var = 0
-                    if T.cuda.elect_sync():
-                        mma_dq(TMEM_OFF_DQ, accum_var, desc_ds_exch, desc_k_col)
-                    if T.cuda.elect_sync():
-                        mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
-                        tcgen05_commit(
-                            ds_exch_consumed.ptr_to([0]),
-                            pair_mask,
-                        )
-                    iket.range_end(mma_dq_issue_token)
-
-                    # Consume the final reducer release before TMEM teardown.
-                    dq_tmem_free.wait(0, dq_tmem_free_ph.phase)
-
-                mma_n_tile()
-
-            elif warp_id == 2:
-                # Relay the per-CTA DSMEM completion to one leader-local
-                # barrier, keeping the MMA warp off the cross-CTA wait path.
-                relay_ph = PipelineState(1)
-                relay_ph.init(0)
-
-                @T.inline
-                def relay_n_tile():
-                    for _ in T.serial(num_m_tiles_this_n, annotations={"disable_unroll": True}):
-                        ds_exch_mbar.wait(0, relay_ph.phase)
-                        relay_ph.advance()
-                        if T.cuda.elect_sync():
-                            wg02mma.arrive(0, remote=0, pred=True)
-
-                relay_n_tile()
-
-            if warp_id == 0:
-                T.ptx.tcgen05.relinquish_alloc_permit.cta_group__2.sync.aligned()
-                T.ptx.bar.sync(T.uint32(5), 416)
-                tmem_dealloc_mbar.arrive(
-                    0, remote=1 - id_in_pair, pred=True
-                )
-                tmem_dealloc_mbar.wait(0, 0)
-                tmem_dealloc_addr: T.uint32
-                T.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_addr.ptr_to([0]))
-                T.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](
-                    tmem_dealloc_addr, T.uint32(512)
-                )
-
-        # ==============================================================
-        # WG1+WG2: softmax grad + dS + split epilogue
-        # ==============================================================
-        elif (wg_id >= 1) & (wg_id <= 2):
-            T.ptx.setmaxnreg.inc.sync.aligned.u32(136)
-            T.ptx.barrier.sync(T.uint32(5), 416)
-            compute_wg = T.meta_var(wg_id - 1)
-            gemm_s_ph = PipelineState(1)
-            gemm_s_ph.init(0)
-            lse_ph = PipelineState(1)
-            lse_ph.init(0)
-            ds_exch_ph = PipelineState(1)
-            ds_exch_ph.init(0)  # first wait blocks until DSMEM arrives
-            gemm_dp_ph = PipelineState(1)
-            gemm_dp_ph.init(0)
-            dpsum_ph = PipelineState(1)
-            dpsum_ph.init(0)
-            dv_done_ph = PipelineState(1)
-            dv_done_ph.init(0)
-            dk_done_ph = PipelineState(1)
-            dk_done_ph.init(0)
-            ds_exch_consumed_ph = PipelineState(1)
-            ds_exch_consumed_ph.init(1)
-
-            # Swizzle offsets for dS_smem and epilogue D_smem writes
-            dS_sw = RowiseSwizzleOffset(3, 3, 3, warp_id * 32 + lane_id, prefix="dS_sw")
-            dS_sw.init()
-            epi_sw = RowiseSwizzleOffset(3, 3, 3, warp_id * 32 + lane_id, prefix="epi_sw")
-            epi_sw.init()
-
-            # Strip offset: WG0 → strip 0 (cols 0:64), WG1 → strip 1 (cols 64:128)
-            strip_off = T.meta_var(compute_wg * STRIP_SIZE)
-
-            @T.inline
-            def softmax_n_tile():
-                for i_m_inner in T.serial(num_m_tiles_this_n, annotations={"disable_unroll": True}):
-                    i_m = T.meta_var(m_tile_start + i_m_inner)
-                    m_st_val = T.meta_var(i_m * BLK_M)
-                    row_local = T.meta_var(warp_id * 32 + lane_id)
-
-                    # LSE is an independent CTA-local stream: it may be
-                    # consumed and released as soon as P has been formed,
-                    # while Q_row is released by the Phase-A MMA commit.
-                    softmax_p_token = iket.range_start("softmax-p")
-                    tma_lse.wait(0, lse_ph.phase)
-
-                    # ---- Wait Phase A: S^T ready in TMEM ----
-                    mma2wg0_s.wait(0, gemm_s_ph.phase)
-                    gemm_s_ph.advance()
-
-                    S_strip = T.alloc_local((STRIP_SIZE,), f32)
-
-                    # Read strip: S^T cols [strip_off : strip_off+64]
-                    tmem_s_col = T.meta_var(TMEM_OFF_A + strip_off)
-                    for stage in T.unroll(STRIP_SIZE // 32):
-                        tmem_load_32(
-                            S_strip, stage * 32, TMEM_OFF_A, 0,
-                            tmem_s_col + stage * 32,
-                        )
-                    # D=128 aliases dQ with the upper half of S.  Match FA4's
-                    # delayed dS commit: publish the previous tile's dQ-safe
-                    # token immediately after this warp has drained the next
-                    # tile's S load, before doing any P arithmetic.
-                    T.ptx.tcgen05.wait__ld.sync.aligned()
-                    if (i_m_inner > 0) & (lane_id == 0):
-                        s_tmem_consumed.arrive(0, remote=0, pred=True)
-
-                    # Compute P^T = exp2(S^T * scale_log2 - LSE_log2[m]).
-                    # The base conversion is hoisted to preprocess.
-                    P_f16 = T.alloc_local((STRIP_SIZE,), f16)
-                    P_f16_u32 = P_f16.view("uint32")
-                    tmem_p_col = T.meta_var(TMEM_OFF_A * 2 + strip_off)
-                    for stage in T.unroll(STRIP_SIZE // 32):
-                        for j_inner in T.unroll(32 // 2):
-                            j = T.meta_var(stage * (32 // 2) + j_inner)
-                            lse_pair_0: T.float32
-                            lse_pair_1: T.float32
-                            T.ptx.ld.shared.v2.f32(
-                                lse_pair_0,
-                                lse_pair_1,
-                                sLSE.ptr_to([0, strip_off + 2 * j]),
-                            )
-                            scaled_pair: T.let = fma_scale_sub_f32x2(
-                                T.cuda.make_float2(S_strip[2 * j], S_strip[2 * j + 1]),
-                                T.cuda.make_float2(T.float32(scale_log2), T.float32(scale_log2)),
-                                T.cuda.make_float2(lse_pair_0, lse_pair_1),
-                            )
-                            S_strip[2 * j] = T.cuda.float2_x(scaled_pair)
-                            S_strip[2 * j + 1] = T.cuda.float2_y(scaled_pair)
-                            T.ptx.ex2.approx.ftz.f32(S_strip[2 * j], S_strip[2 * j])
-                            T.ptx.ex2.approx.ftz.f32(S_strip[2 * j + 1], S_strip[2 * j + 1])
-                        # Only the first two Q tiles that overlap this
-                        # 256-row K/V cluster can intersect the causal
-                        # diagonal.  Hoist the uniform branch outside the
-                        # unrolled element loop so later tiles pay one branch
-                        # per 32-column stage rather than 16 branches.
-                        if causal:
-                            if i_m < m_tile_start + BLK_N // BLK_M:
-                                key_idx = T.meta_var(n_st_cta + row_local)
-                                for j_inner in T.unroll(32 // 2):
-                                    j = T.meta_var(stage * (32 // 2) + j_inner)
-                                    query_idx_0 = T.meta_var(
-                                        m_st_val + strip_off + 2 * j
-                                    )
-                                    query_idx_1 = T.meta_var(query_idx_0 + 1)
-                                    S_strip[2 * j] = T.if_then_else(
-                                        query_idx_0 >= key_idx,
-                                        S_strip[2 * j],
-                                        T.float32(0),
-                                    )
-                                    S_strip[2 * j + 1] = T.if_then_else(
-                                        query_idx_1 >= key_idx,
-                                        S_strip[2 * j + 1],
-                                        T.float32(0),
-                                    )
-                        for j_inner in T.unroll(32 // 2):
-                            j = T.meta_var(stage * (32 // 2) + j_inner)
-                            cast_f32x2_to_f16x2(
-                                T.address_of(P_f16[2 * j]),
-                                T.address_of(S_strip[2 * j]),
-                            )
-
-                        # P aliases S in TMEM.  Once the first 32-column
-                        # register stage is ready, drain both S loads and
-                        # synchronize the compute warps before the first store.
-                        if stage == 0:
-                            T.ptx.bar.sync(T.uint32(8), 256)
-
-                        tmem_store_16(
-                            P_f16_u32, stage * 16, TMEM_OFF_A, 0,
-                            (tmem_p_col + stage * 32) // 2,
-                        )
-                    lse_ph.advance()
-                    T.ptx.tcgen05.wait__st.sync.aligned()
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    T.ptx.bar.sync(T.uint32(8), 256)
-                    # Bridge the generic LSE reads into the async proxy, then
-                    # publish the eight compute warps' release only after the
-                    # existing rendezvous has ordered every reader.
-                    if lane_id == 0:
-                        lse_consumed.arrive(0)
-
-                    # One elected thread per warp contributes to the shared
-                    # P-ready barrier in the leader CTA.
-                    if T.cuda.elect_sync():
-                        strip_ready.arrive(0, remote=0, pred=True)
-                    iket.range_end(softmax_p_token)
-
-                    # ---- Phase B: wait for dPsum and dP^T, read strip ----
-                    softmax_ds_token = iket.range_start("softmax-ds")
-                    tma_dpsum.wait(0, dpsum_ph.phase)
-                    mma2wg0_dp.wait(0, gemm_dp_ph.phase)
-                    gemm_dp_ph.advance()
-
-                    dP_strip = T.alloc_local((STRIP_SIZE,), f32)
-                    # .f32x2 writes its destination as one packed 64-bit
-                    # register, so address the same storage in pairs.
-                    dP_pairs = dP_strip.view("uint64")
-                    tmem_dp_col = T.meta_var(TMEM_OFF_DP + strip_off)
-                    for stage in T.unroll(STRIP_SIZE // 32):
-                        tmem_load_32(
-                            dP_strip, stage * 32, TMEM_OFF_A, 0,
-                            tmem_dp_col + stage * 32,
-                        )
-
-                    # dS^T[n,m] = P^T[n,j] * (dP^T[n,j] - dpsum[m]).
-                    for j in T.unroll(STRIP_SIZE // 2):
-                        dpsum_pair_0: T.float32
-                        dpsum_pair_1: T.float32
-                        T.ptx.ld.shared.v2.f32(
-                            dpsum_pair_0,
-                            dpsum_pair_1,
-                            sDPsum.ptr_to([strip_off + 2 * j]),
-                        )
-                        T.ptx.sub.rn.ftz.f32x2(
-                            dP_pairs[j],
-                            T.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1]),
-                            T.cuda.make_float2(dpsum_pair_0, dpsum_pair_1),
-                        )
-                        T.ptx.mul.rn.ftz.f32x2(
-                            dP_pairs[j],
-                            T.cuda.make_float2(S_strip[2 * j], S_strip[2 * j + 1]),
-                            T.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1]),
-                        )
-
-                    dpsum_ph.advance()
-
-                    T.ptx.tcgen05.wait__ld.sync.aligned()
-
-                    dS_full_f16 = T.alloc_local((STRIP_SIZE,), f16)
-                    for j in T.unroll(STRIP_SIZE // 2):
-                        cast_f32x2_to_f16x2(
-                            T.address_of(dS_full_f16[2 * j]),
-                            T.address_of(dP_strip[2 * j]),
-                        )
-
-                    T.ptx.bar.sync(T.uint32(8), 256)
-
-                    tmem_ds_col = T.meta_var(TMEM_OFF_DP * 2 + strip_off)
-                    dS_f16_u32 = dS_full_f16.view("uint32")
-                    tmem_store_32(
-                        dS_f16_u32, 0, TMEM_OFF_A, 0,
-                        tmem_ds_col // 2,
-                    )
-
-                    T.ptx.tcgen05.wait__st.sync.aligned()
-
-                    # The dK MMA only consumes dS from TMEM.  Release that
-                    # dependency before the independent SMEM visibility,
-                    # cross-WG rendezvous, and DSMEM exchange path.
-                    if T.cuda.elect_sync():
-                        wg02mma_tmem.arrive(0, remote=0, pred=True)
-                    iket.range_end(softmax_ds_token)
-
-                    # The DSMEM path is independent of dK.  Materialize its
-                    # local/outbound half only after the TMEM consumer has
-                    # been released.  The buffer itself is single-stage, so
-                    # wait until the preceding dQ MMA has stopped reading it
-                    # before publishing the next tile.
-                    ds_exchange_token = iket.range_start("ds-exchange")
-                    ds_exch_consumed.wait(0, ds_exch_consumed_ph.phase)
-                    # The empty barrier orders TCGEN completion, while this
-                    # proxy fence bridges the completed async-proxy read to
-                    # the generic stores that reuse dS_exch.
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    ds_exch_consumed_ph.advance()
-                    if compute_wg == id_in_pair:
-                        ds_row_base = T.meta_var(id_in_pair * CTA_N)
-                        ds_row_st: T.int32
-                        ds_row_st = (
-                            (ds_row_base + row_local) * B_N
-                            + ((ds_row_base + row_local) & 7) * 8
-                        )
-                        for ni in T.unroll(STRIP_SIZE // 8):
-                            copy_128b(
-                                pointer_offset(
-                                    dS_exch.ptr_to([0, 0]),
-                                    ds_row_st + dS_sw.apply(ni * 8),
-                                ),
-                                dS_full_f16.view("uint128")[ni],
-                            )
-                    else:
-                        stage_row_st: T.int32
-                        stage_row_st = row_local * B_N + (row_local & 7) * 8
-                        for ni in T.unroll(STRIP_SIZE // 8):
-                            copy_128b(
-                                pointer_offset(
-                                    dS_send.ptr_to([0, 0]),
-                                    stage_row_st + dS_sw.apply(ni * 8),
-                                ),
-                                dS_full_f16.view("uint128")[ni],
-                            )
-
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    T.ptx.bar.sync(T.uint32(8), 256)
-
-                    # This fence/rendezvous bridges both the dS stores used by
-                    # the DSMEM async copy and the completed generic dPsum
-                    # reads.  Release the CTA-local dPsum buffer only after all
-                    # eight compute warps have crossed it.
-                    if lane_id == 0:
-                        dpsum_consumed.arrive(0)
-
-                    # The sender WG starts the peer copy directly.  Its source
-                    # has independent storage, so the load warp can reuse dO
-                    # as soon as Phase C commits, without a relay-warp drain.
-                    if (compute_wg != id_in_pair) & (warp_id == 0) & (lane_id == 0):
-                        peer_cta: T.int32
-                        peer_cta = 1 - id_in_pair
-                        ds_copy_bytes = T.meta_var(CTA_N * B_N * DTYPE_SIZE)
-                        # mapa writes its result, so the peer-window addresses
-                        # are computed into registers first; both the arrival
-                        # and the copy then name the peer's shared window.
-                        remote_mbar = T.alloc_local([1], "uint32")
-                        T.ptx.mapa.shared__cluster.u32(
-                            remote_mbar[0],
-                            T.cuda.cvta_generic_to_shared(ds_exch_mbar.ptr_to([0])),
-                            T.uint32(peer_cta),
-                        )
-                        remote_dst = T.alloc_local([1], "uint32")
-                        T.ptx.mapa.shared__cluster.u32(
-                            remote_dst[0],
-                            T.cuda.cvta_generic_to_shared(
-                                dS_exch.ptr_to([id_in_pair * CTA_N, 0])
-                            ),
-                            T.uint32(peer_cta),
-                        )
-                        T.ptx.mbarrier.arrive.expect_tx.shared__cluster.b64(
-                            remote_mbar[0], T.uint32(ds_copy_bytes), pred=True
-                        )
-                        T.ptx[_BULK_S2C](
-                            remote_dst[0],
-                            dS_send.ptr_to([0, 0]),
-                            T.uint32(ds_copy_bytes),
-                            remote_mbar[0],
-                        )
-                    iket.range_end(ds_exchange_token)
-
-                # ---- Two-stage dKV epilogue ----
-                # Both compute WGs first split dV by 64-column halves, then
-                # split dK the same way.  Stage 0 overlaps the MMA dK/dQ tail.
-                dkv_epilogue_token = iket.range_start("dkv-epilogue")
-                dv_done.wait(0, dv_done_ph.phase)
-                dv_done_ph.advance()
-                dv_epi_strip = T.alloc_local((EPI_N,), f32)
-                dv_epi_f16 = T.alloc_local((EPI_N,), f16)
-                tmem_load_64(
-                    dv_epi_strip, 0, TMEM_OFF_A, 0,
-                    TMEM_OFF_B + compute_wg * EPI_N,
-                )
-                T.ptx.tcgen05.wait__ld.sync.aligned()
-                for j in T.unroll(EPI_N // 2):
-                    cast_f32x2_to_f16x2(
-                        T.address_of(dv_epi_f16[2 * j]),
-                        T.address_of(dv_epi_strip[2 * j]),
-                    )
-                epi_row_st: T.int32
-                epi_row_st = (
-                    warp_id * 32 + lane_id
-                ) * EPI_N + ((warp_id * 32 + lane_id) & 7) * 8
-                for ni in T.unroll(EPI_N // 8):
-                    copy_128b(
-                        pointer_offset(
-                            dV_epi.ptr_to([compute_wg, 0, 0]),
-                            epi_row_st + epi_sw.apply(ni * 8),
-                        ),
-                        dv_epi_f16.view("uint128")[ni],
-                    )
-                T.ptx.fence.proxy.async_.shared__cta()
-                T.ptx.bar.sync(T.uint32(wg_id + 10), 128)
-                if (warp_id == 0) & (lane_id == 0):
-                    tma_s2g(
-                        4,
-                        dV_epi.ptr_to([compute_wg, 0, 0]),
-                        T.address_of(dv_tensormap),
-                        compute_wg * EPI_N,
-                        n_st_cta,
-                        h_idx,
-                        b_idx,
-                    )
-                if warp_id == 0:
-                    T.ptx.bar.arrive(T.uint32(wg_id + 10), 160)
-                T.ptx.fence.proxy.async_.shared__cta()
-                T.ptx.bar.sync(T.uint32(wg_id + 10), 160)
-
-                dk_done.wait(0, dk_done_ph.phase)
-                dk_done_ph.advance()
-                dk_epi_strip = T.alloc_local((EPI_N,), f32)
-                dk_epi_pairs = dk_epi_strip.view("uint64")
-                dk_epi_f16 = T.alloc_local((EPI_N,), f16)
-                tmem_load_64(
-                    dk_epi_strip, 0, TMEM_OFF_A, 0,
-                    TMEM_OFF_C + compute_wg * EPI_N,
-                )
-                T.ptx.tcgen05.wait__ld.sync.aligned()
-                for j in T.unroll(EPI_N // 2):
-                    T.ptx.mul.rn.ftz.f32x2(
-                        dk_epi_pairs[j],
-                        T.cuda.make_float2(dk_epi_strip[2 * j], dk_epi_strip[2 * j + 1]),
-                        T.cuda.make_float2(
-                            T.float32(softmax_scale), T.float32(softmax_scale)
-                        ),
-                    )
-                    cast_f32x2_to_f16x2(
-                        T.address_of(dk_epi_f16[2 * j]),
-                        T.address_of(dk_epi_strip[2 * j]),
-                    )
-                for ni in T.unroll(EPI_N // 8):
-                    copy_128b(
-                        pointer_offset(
-                            dK_epi.ptr_to([compute_wg, 0, 0]),
-                            epi_row_st + epi_sw.apply(ni * 8),
-                        ),
-                        dk_epi_f16.view("uint128")[ni],
-                    )
-                T.ptx.fence.proxy.async_.shared__cta()
-                T.ptx.bar.sync(T.uint32(wg_id + 10), 128)
-                if (warp_id == 0) & (lane_id == 0):
-                    tma_s2g(
-                        4,
-                        dK_epi.ptr_to([compute_wg, 0, 0]),
-                        T.address_of(dk_tensormap),
-                        compute_wg * EPI_N,
-                        n_st_cta,
-                        h_idx,
-                        b_idx,
-                    )
-                if warp_id == 0:
-                    T.ptx.bar.arrive(T.uint32(wg_id + 10), 160)
-                T.ptx.fence.proxy.async_.shared__cta()
-                T.ptx.bar.sync(T.uint32(wg_id + 10), 160)
-                # Keep the terminal dV/dK stores asynchronous, but place both
-                # issues in one explicit bulk group so their lifetime remains
-                # visible to NumSim/checkers.  Neither source tile is reused.
-                if (warp_id == 0) & (lane_id == 0):
-                    T.ptx.cp.async_.bulk.commit_group()
-                iket.range_end(dkv_epilogue_token)
-
-            softmax_n_tile()
-            T.ptx.bar.arrive(T.uint32(5), 416)
-
-
-        # ==============================================================
-        # WG0: dQ reduce (TMEM → SMEM → TMA reduce)
-        # ==============================================================
-        else:
-            T.ptx.setmaxnreg.inc.sync.aligned.u32(136)
-            T.ptx.barrier.sync(T.uint32(5), 416)
-            gemm_dq_ph_wg3 = PipelineState(1)
-            gemm_dq_ph_wg3.init(0)
-
-            @T.inline
-            def wg3_n_tile():
-                for i_m_inner in T.serial(num_m_tiles_this_n, annotations={"disable_unroll": True}):
-                    i_m = T.meta_var(m_tile_start + i_m_inner)
-                    m_st_val = T.meta_var(i_m * BLK_M)
-                    row_local = T.meta_var(warp_id * 32 + lane_id)
-
-                    dq_reduce_token = iket.range_start("dq-reduce")
-                    mma2wg0_dq.wait(0, gemm_dq_ph_wg3.phase)
-                    gemm_dq_ph_wg3.advance()
-
-                    # Datapath-B readback is a physical (128, 64) image of the
-                    # logical (64, 128) dQ tile.
-                    dQ_full = T.alloc_local((64,), f32)
-                    tmem_load_32(
-                        dQ_full, 32, TMEM_OFF_DQ, warp_id * 32, 0
-                    )
-                    tmem_load_32(
-                        dQ_full, 0, TMEM_OFF_DQ, warp_id * 32, 32
-                    )
-
-                    # Drain dQ before releasing the shared dP/dQ region.
-                    T.ptx.tcgen05.wait__ld.sync.aligned()
-                    T.cuda.warp_sync()
-                    if T.cuda.elect_sync():
-                        dq_tmem_free.arrive(0, remote=0, pred=True)
-
-                    m_st_cta = T.meta_var(m_st_val + id_in_pair * DQ_M_PER_CTA)
-                    dq_reduce_elected: T.let = T.cuda.elect_sync()
-
-                    for stage in T.unroll(DQ_REDUCE_ITERS):
-                        dq_reduce_stage_token = iket.range_start("dq-reduce-stage")
-                        smem_slot = T.meta_var(stage % DQ_STAGES)
-                        dq_stage_st = smem_slot * BLK_M * DQ_RED_N
-                        dq_reg_st = T.meta_var(
-                            (
-                                (stage + DQ_REDUCE_ITERS // 2)
-                                % DQ_REDUCE_ITERS
-                            )
-                            * DQ_RED_N
-                        )
-                        for chunk in T.unroll(DQ_RED_N // 4):
-                            copy_128b(
-                                pointer_offset_f32(
-                                    dQ_smem.ptr_to([0, 0, 0]),
-                                    dq_stage_st
-                                    + chunk * BLK_M * 4
-                                    + row_local * 4,
-                                ),
-                                dQ_full.view("uint128")[(dq_reg_st + chunk * 4) // 4],
-                            )
-                        T.ptx.fence.proxy.async_.shared__cta()
-                        T.cuda.warpgroup_sync(4)
-
-                        if warp_id == 0:
-                            if dq_reduce_elected:
-                                tma_s2g_reduce(
-                                    4,
-                                    dQ_smem.ptr_to([smem_slot, 0, 0]),
-                                    T.address_of(dq_tensormap),
-                                    "add",
-                                    0,
-                                    m_st_cta + stage * DQ_ROWS_PER_STAGE,
-                                    h_idx,
-                                    b_idx,
-                                )
-                            T.ptx.cp.async_.bulk.commit_group()
-                            T.ptx.cp.async_.bulk.wait_group(DQ_STAGES - 1)
-                        T.cuda.warpgroup_sync(4)
-                        iket.range_end(dq_reduce_stage_token)
-                    iket.range_end(dq_reduce_token)
-
-                # Wait for all pending TMA reduces
-                if warp_id == 0:
-                    T.ptx.cp.async_.bulk.wait_group(0)
-                T.cuda.warpgroup_sync(4)
-
-            wg3_n_tile()
-            T.ptx.bar.arrive(T.uint32(5), 416)
+                            def wg3_n_tile():
+                                with T.serial(num_m_tiles_this_n, annotations={'disable_unroll': True}) as i_m_inner:
+                                    IRBuilder.name("i_m_inner", i_m_inner)
+                                    i_m = m_tile_start + i_m_inner
+                                    m_st_val = i_m * BLK_M
+                                    row_local = warp_id * 32 + lane_id
+                                    dq_reduce_token = _builder_assign("dq_reduce_token", iket.range_start('dq-reduce'), locals().get("dq_reduce_token", _BUILDER_MISSING))
+                                    _builder_emit(mma2wg0_dq.wait(0, gemm_dq_ph_wg3.phase))
+                                    _builder_emit(gemm_dq_ph_wg3.advance())
+                                    dQ_full = _builder_assign("dQ_full", T.alloc_local((64,), f32), locals().get("dQ_full", _BUILDER_MISSING))
+                                    _builder_emit(tmem_load_32(dQ_full, 32, TMEM_OFF_DQ, warp_id * 32, 0))
+                                    _builder_emit(tmem_load_32(dQ_full, 0, TMEM_OFF_DQ, warp_id * 32, 32))
+                                    _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                    _builder_emit(T.cuda.warp_sync())
+                                    with T.If(T.cuda.elect_sync()):
+                                        with T.Then():
+                                            _builder_emit(dq_tmem_free.arrive(0, remote=0, pred=True))
+                                    m_st_cta = m_st_val + id_in_pair * DQ_M_PER_CTA
+                                    dq_reduce_elected = _builder_bind("dq_reduce_elected", T.cuda.elect_sync(), None)
+                                    with T.unroll(DQ_REDUCE_ITERS) as stage:
+                                        IRBuilder.name("stage", stage)
+                                        dq_reduce_stage_token = _builder_assign("dq_reduce_stage_token", iket.range_start('dq-reduce-stage'), locals().get("dq_reduce_stage_token", _BUILDER_MISSING))
+                                        smem_slot = stage % DQ_STAGES
+                                        dq_stage_st = _builder_assign("dq_stage_st", smem_slot * BLK_M * DQ_RED_N, locals().get("dq_stage_st", _BUILDER_MISSING))
+                                        dq_reg_st = (stage + DQ_REDUCE_ITERS // 2) % DQ_REDUCE_ITERS * DQ_RED_N
+                                        with T.unroll(DQ_RED_N // 4) as chunk:
+                                            IRBuilder.name("chunk", chunk)
+                                            _builder_emit(copy_128b(pointer_offset_f32(dQ_smem.ptr_to([0, 0, 0]), dq_stage_st + chunk * BLK_M * 4 + row_local * 4), dQ_full.view('uint128')[(dq_reg_st + chunk * 4) // 4]))
+                                        _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                        _builder_emit(T.cuda.warpgroup_sync(4))
+                                        with T.If(warp_id == 0):
+                                            with T.Then():
+                                                with T.If(dq_reduce_elected):
+                                                    with T.Then():
+                                                        _builder_emit(tma_s2g_reduce(4, dQ_smem.ptr_to([smem_slot, 0, 0]), T.address_of(dq_tensormap), 'add', 0, m_st_cta + stage * DQ_ROWS_PER_STAGE, h_idx, b_idx))
+                                                _builder_emit(T.ptx.cp.async_.bulk.commit_group())
+                                                _builder_emit(T.ptx.cp.async_.bulk.wait_group(DQ_STAGES - 1))
+                                        _builder_emit(T.cuda.warpgroup_sync(4))
+                                        _builder_emit(iket.range_end(dq_reduce_stage_token))
+                                    _builder_emit(iket.range_end(dq_reduce_token))
+                                with T.If(warp_id == 0):
+                                    with T.Then():
+                                        _builder_emit(T.ptx.cp.async_.bulk.wait_group(0))
+                                _builder_emit(T.cuda.warpgroup_sync(4))
+                            _builder_emit(wg3_n_tile())
+                            _builder_emit(T.ptx.bar.arrive(T.uint32(5), 416))
     # fmt: on
-    return kernel
+    return builder.get()
 
 
 # ---------------------------------------------------------------------------

@@ -27,11 +27,18 @@ scheduler/gemm.cuh.
 
 from __future__ import annotations
 
+import tvm
 from tvm.backend.cuda.cpp.descriptors import (
     encode_instr_descriptor_block_scaled_uint32,
     encode_smem_descriptor_base_uint64,
 )
-from tvm.script import tirx as T
+from tvm.ir.type import PointerType
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import ir as I
+from tvm.script.ir_builder import tirx as T
+from tvm.script.ir_builder.base import IRBuilderFrame
+from tvm.tirx import IterVar, Layout, is_buffer_var
+from tvm.tirx.script.builder.ir import name_meta_class_value
 
 from .spec import (
     BLOCK_K,
@@ -69,6 +76,109 @@ _TORCH_SMEM_DTYPE = {
     "fp32": "float32",
 }
 _UMMA_DTYPE = {"fp8": "float8_e4m3fn", "fp4": "float4_e2m1fn"}
+
+_BUILDER_MISSING = object()
+
+
+def _builder_runtime_condition(value):
+    return value
+
+
+def _builder_enter(frame):
+    frames = frame.frames if hasattr(frame, "frames") else [frame]
+    prim_func = next(
+        candidate
+        for candidate in reversed(IRBuilder.current().frames)
+        if type(candidate).__name__ == "PrimFuncFrame"
+    )
+    for item in frames:
+        prim_func.add_callback(lambda item=item: item.__exit__(None, None, None))
+        item.__enter__()
+
+
+def _builder_emit(value):
+    if value is None or isinstance(value, tvm.ir.Var):
+        return
+    if isinstance(value, IRBuilderFrame) or (
+        hasattr(value, "frames") and hasattr(value, "__enter__")
+    ):
+        _builder_enter(value)
+    elif tvm.ir.is_prim_expr(value) or isinstance(value, tvm.ir.Call):
+        T.evaluate(value)
+    elif isinstance(value, int | bool):
+        T.evaluate(tvm.tirx.const(value))
+
+
+def _builder_alloc_scalar(name, dtype):
+    scalar = T.local_scalar(dtype)
+    IRBuilder.name(name, scalar.scalar.buffer)
+    return scalar.scalar
+
+
+def _builder_scalar(name, value, dtype):
+    scalar = _builder_alloc_scalar(name, dtype)
+    T.buffer_store(scalar.buffer, value, scalar.indices)
+    return scalar
+
+
+def _builder_buffer(name, shape, dtype):
+    buffer = T.alloc_local(shape, dtype)
+    IRBuilder.name(name, buffer)
+    return buffer
+
+
+def _builder_bind(name, value, type_annotation=None):
+    result = T.Bind(value, type_annotation)
+    IRBuilder.name(name, result)
+    return result
+
+
+def _builder_assign(name, value, previous=_BUILDER_MISSING):
+    if isinstance(value, I.meta_var):
+        return value.value
+    if previous is not _BUILDER_MISSING:
+        if isinstance(previous, T.scalar_wrapper | tvm.tirx.expr.BufferLoad):
+            target = previous.scalar if isinstance(previous, T.scalar_wrapper) else previous
+            T.buffer_store(target.buffer, value, target.indices)
+            return target
+        if (
+            is_buffer_var(previous)
+            and len(previous.ty.shape) == 1
+            and bool(previous.ty.shape[0] == 1)
+        ):
+            try:
+                T.buffer_store(previous, value, [0])
+                return previous
+            except TypeError:
+                pass
+    if getattr(type(value), "_is_meta_class", False):
+        name_meta_class_value(name, value)
+        return value
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _builder_assign(f"{name}_{index}", item)
+        return value
+    if is_buffer_var(value) or isinstance(value, IterVar | Layout):
+        IRBuilder.name(name, value)
+        return value
+    if isinstance(value, tvm.ir.Var):
+        if isinstance(value.ty, PointerType):
+            return _builder_bind(name, value, value.ty)
+        IRBuilder.name(name, value)
+        return value
+    if isinstance(value, tvm.ir.Expr) and isinstance(getattr(value, "ty", None), PointerType):
+        return _builder_bind(name, value, value.ty)
+    if isinstance(value, tvm.ir.Expr) and tvm.ir.is_prim_expr(value):
+        return _builder_scalar(name, value, str(value.ty.dtype))
+    if isinstance(value, tvm.tirx.expr.ExprOp):
+        return _builder_scalar(name, value, "bool")
+    return value
+
+
+def _builder_assign_many(names, values, previous):
+    return tuple(
+        _builder_assign(name, value, old) for name, value, old in zip(names, values, previous)
+    )
 
 
 def _validate(spec: GemmSpec) -> None:
@@ -433,1610 +543,4487 @@ def build_kernel(spec: GemmSpec):
             out.append(T.cast(batch, "int32"))
         return out
 
-    @T.prim_func
-    def sm100_fp8_fp4_gemm_1d1d(
-        grouped_layout_ptr: T.handle,
-        grouped_len: T.int32,
-        shape_m: T.int32,
-        shape_n: T.int32,
-        shape_k: T.int32,
-        tensor_map_a: T.TensorMap(),
-        tensor_map_b: T.TensorMap(),
-        tensor_map_sfa: T.TensorMap(),
-        tensor_map_sfb: T.TensorMap(),
-        tensor_map_cd: T.TensorMap(),
-    ):
-        grouped_layout = T.match_buffer(grouped_layout_ptr, (grouped_len,), "int32")
-        T.device_entry()
-        T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1})
-
-        # ---- role ids -------------------------------------------------------
-        sm_idx = T.cta_id([spec.num_sms])
-        if cta_group > 1:
-            cta_in_cluster = T.cta_id_in_cluster([cta_group])
-            is_leader_cta = cta_in_cluster == 0
-        else:
-            is_leader_cta = True
-        thread_idx = T.thread_id([spec.num_non_epilogue_threads + spec.num_epilogue_threads])
-        lane_idx = T.lane_id([32])
-        warp: T.int32
-        T.ptx.shfl_sync.idx.b32(
-            warp, thread_idx // 32, T.uint32(0), T.uint32(0x1F), T.uint32(0xFFFFFFFF)
-        )
-
-        # ---- shared memory --------------------------------------------------
-        smem = T.alloc_buffer([spec.smem_size], "uint8", scope="shared.dyn", align=1024)
-        T.attr({"tirx.dyn_smem_bytes": spec.smem_size})
-
-        smem_cd_data: T.let = T.reinterpret(PointerType(PrimType(cd_dtype)), smem.ptr_to([0]))
-        smem_a_data: T.let = T.reinterpret(
-            PointerType(PrimType(a_smem_dtype)), smem.ptr_to([spec.smem_a_offset])
-        )
-        smem_b_data: T.let = T.reinterpret(
-            PointerType(PrimType(b_smem_dtype)), smem.ptr_to([spec.smem_b_offset])
-        )
-        smem_sfa_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32")), smem.ptr_to([spec.smem_sfa_offset])
-        )
-        smem_sfb_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32")), smem.ptr_to([spec.smem_sfb_offset])
-        )
-        smem_bar_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint64")), smem.ptr_to([spec.smem_barrier_offset])
-        )
-        smem_tmem_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32")), smem.ptr_to([spec.smem_tmem_ptr_offset])
-        )
-
-        # C/D is a linear byte view: the swizzle lives in the CD TensorMap and in
-        # the epilogue's own `col ^= row % (swizzle / 16)` arithmetic below.
-        smem_cd = T.decl_buffer(
-            (NUM_TMA_STORE_STAGES, store_block_m, store_block_n),
-            cd_dtype,
-            data=smem_cd_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=1024,
-        )
-        smem_a = T.decl_buffer(
-            (stages, load_block_m, block_k),
-            a_smem_dtype,
-            data=smem_a_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=1024,
-            layout=a_layout,
-        )
-        smem_b = T.decl_buffer(
-            (stages, load_block_n, block_k),
-            b_smem_dtype,
-            data=smem_b_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=1024,
-            layout=b_layout,
-        )
-        smem_sfa = T.decl_buffer(
-            (stages, sf_block_m),
-            "uint32",
-            data=smem_sfa_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=16,
-        )
-        smem_sfb = T.decl_buffer(
-            (stages, sf_block_n),
-            "uint32",
-            data=smem_sfb_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=16,
-        )
-        barriers = T.decl_buffer(
-            (num_barriers,),
-            "uint64",
-            data=smem_bar_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=8,
-        )
-        tmem_slot = T.decl_buffer(
-            (1,), "uint32", data=smem_tmem_data, scope="shared.dyn", elem_offset=0, align=4
-        )
-        smem_cd_word_data: T.let = T.reinterpret(PointerType(PrimType("uint32")), smem.ptr_to([0]))
-        smem_cd_u32 = T.decl_buffer(
-            (NUM_TMA_STORE_STAGES * cd_stage_bytes // 4,),
-            "uint32",
-            data=smem_cd_word_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=1024,
-        )
-
-        # ---- tensor memory --------------------------------------------------
-        tmem = T.decl_buffer(
-            (128, spec.num_tmem_cols),
-            "float32",
-            scope="tmem",
-            allocated_addr=tmem_slot[0],
-            layout=TileLayout(S[(128, spec.num_tmem_cols) : (1 @ TLane, 1 @ TCol)]),
-        )
-        sfa_tmem = T.decl_buffer(
-            (128, sf_block_m // 32),
-            "float8_e8m0fnu",
-            scope="tmem",
-            allocated_addr=spec.tmem_start_col_of_sfa,
-            layout=sf_tmem_layout(128, SF_K=sf_block_m // 32, sf_per_mma=1),
-        )
-        sfb_tmem = T.decl_buffer(
-            (128, sf_block_n // 32),
-            "float8_e8m0fnu",
-            scope="tmem",
-            allocated_addr=spec.tmem_start_col_of_sfb,
-            layout=sf_tmem_layout(128, SF_K=sf_block_n // 32, sf_per_mma=1),
-        )
-
-        # ---- cluster rendezvous before the 2-CTA TMEM allocation -------------
-        if cta_group > 1:
-            T.ptx.barrier.cluster.arrive.relaxed.aligned()
-            T.ptx.barrier.cluster.wait.acquire.aligned()
-
-        if warp == 0:
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_a)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_b)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_sfa)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_sfb)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_cd)))
-
-        # ---- barrier init and TMEM allocation -------------------------------
-        if warp == 1:
-            init_elected: T.uint32
-            init_elected_lane: T.uint32
-            T.ptx.elect_sync(init_elected_lane, init_elected, T.uint32(0xFFFFFFFF))
-            if init_elected == T.uint32(1):
-                for s in T.unroll(0, stages):
-                    T.ptx.mbarrier.init.shared.b64(barriers.ptr_to([full_base + s]), T.uint32(1))
-                    T.ptx.mbarrier.init.shared.b64(barriers.ptr_to([empty_base + s]), T.uint32(1))
-                    T.ptx.mbarrier.init.shared.b64(
-                        barriers.ptr_to([with_sf_base + s]), T.uint32(cta_group * 32)
-                    )
-                for e in T.unroll(0, NUM_EPILOGUE_STAGES):
-                    T.ptx.mbarrier.init.shared.b64(
-                        barriers.ptr_to([tmem_full_base + e]), T.uint32(1)
-                    )
-                    T.ptx.mbarrier.init.shared.b64(
-                        barriers.ptr_to([tmem_empty_base + e]),
-                        T.uint32(cta_group * num_store_threads),
-                    )
-                T.evaluate(T.ptx.fence.mbarrier_init.release.cluster())
-        elif warp == 2:
-            T.ptx[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
-                T.address_of(tmem_slot[0]), T.uint32(spec.num_tmem_cols)
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("sm100_fp8_fp4_gemm_1d1d")
+            grouped_layout_ptr = T.arg("grouped_layout_ptr", T.handle())
+            grouped_len = T.arg("grouped_len", T.int32())
+            shape_m = T.arg("shape_m", T.int32())
+            shape_n = T.arg("shape_n", T.int32())
+            shape_k = T.arg("shape_k", T.int32())
+            tensor_map_a = T.arg("tensor_map_a", T.TensorMap())
+            tensor_map_b = T.arg("tensor_map_b", T.TensorMap())
+            tensor_map_sfa = T.arg("tensor_map_sfa", T.TensorMap())
+            tensor_map_sfb = T.arg("tensor_map_sfb", T.TensorMap())
+            tensor_map_cd = T.arg("tensor_map_cd", T.TensorMap())
+            grouped_layout = _builder_assign(
+                "grouped_layout",
+                T.match_buffer(grouped_layout_ptr, (grouped_len,), "int32"),
+                locals().get("grouped_layout", _BUILDER_MISSING),
             )
-
-        if cta_group > 1:
-            T.ptx.barrier.cluster.arrive.relaxed.aligned()
-            T.ptx.barrier.cluster.wait.acquire.aligned()
-        else:
-            T.ptx.bar.sync(T.uint32(0))
-
-        T.evaluate(T.ptx.griddepcontrol.wait())
-
-        # ===============================================================
-        # Persistent scheduler (source `scheduler/gemm.cuh`)
-        # ===============================================================
-        # Each scheduler-driving role keeps its own copy of this state and walks
-        # the identical block sequence; that is what keeps the four roles'
-        # `stage_idx`/`phase` cursors in lockstep without any extra barrier.
-
-        # `compiled_dims` bakes a dimension in; thechoice happens in Python, so a
-        # baked dimension becomes a literal and its runtime argument goes dead
-        # (source `:123-125`).  The parameter cannot be reassigned -- TVMScript
-        # forbids shadowing a parameter name.
-        eff_m = spec.shape_m if spec.shape_m > 0 else shape_m
-        eff_n = spec.shape_n if spec.shape_n > 0 else shape_n
-        eff_k = spec.shape_k if spec.shape_k > 0 else shape_k
-
-        num_m_blocks: T.int32
-        num_n_blocks: T.int32
-        num_blocks: T.int32
-        num_k_blocks: T.int32
-        num_m_blocks = _uceil(eff_m, block_m)
-        num_n_blocks = (eff_n + (block_n - 1)) // block_n
-        num_blocks = num_m_blocks * num_n_blocks
-        num_k_blocks = _uceil(eff_k, block_k)
-        shape_sfa_k: T.int32
-        shape_sfb_k: T.int32
-        shape_sfa_k = (eff_k + (spec.gran_k_a * 4 - 1)) // (spec.gran_k_a * 4)
-        shape_sfb_k = (eff_k + (spec.gran_k_b * 4 - 1)) // (spec.gran_k_b * 4)
-
-        # ===============================================================
-        # Role 0: TMA load warp, one elected lane (source `:206`)
-        # ===============================================================
-
-        if warp == 0:
-            ld_elected: T.uint32
-            ld_elected_lane: T.uint32
-            T.ptx.elect_sync(ld_elected_lane, ld_elected, T.uint32(0xFFFFFFFF))
-            if ld_elected == T.uint32(1):
-                ld_stage: T.int32
-                ld_phase: T.int32
-                ld_stage = 0
-                ld_phase = 0
-                ld_it: T.int32
-                ld_valid: T.int32
-                ld_grp: T.int32
-                ld_cum: T.int32
-                ld_nmb: T.int32
-                ld_last: T.int32
-                ld_psum: T.int32
-                ld_nb: T.int32
-                ld_nxt: T.int32
-                ld_nxtk: T.int32
-                ld_sfk: T.int32
-                ld_kblocks: T.int32
-                ld_vgrp: T.int32
-                ld_kend: T.int32
-                ld_it = 0
-                ld_valid = 1
-                ld_grp = 0
-                ld_cum = 0
-                ld_last = 0
-                # Scheduler cursor init (`scheduler/gemm.cuh:88`).
-                ld_sfk = 0
-                ld_vgrp = 0
-                ld_kend = 0
-                ld_nxt = 0
-                ld_nxtk = 0
-                ld_kblocks = 0
-                if is_k_grouped:
-                    # Start on the first non-empty group (`get_next_k_group`, `:66`).
-                    ld_psum = 0
-                    ld_nmb = num_m_blocks
-                    if is_k_grouped_psum:
-                        while ld_grp < num_groups:
-                            ld_nxtk = grouped_layout[ld_grp]
-                            ld_last = (_uceil(ld_kend, k_alignment)) * k_alignment
-                            ld_psum = ld_nxtk - ld_last
-                            ld_kend = ld_nxtk
-                            if ld_psum > 0:
-                                break
-                            ld_grp = ld_grp + 1
-                    else:
-                        while ld_grp < num_groups:
-                            ld_psum = grouped_layout[ld_grp]
-                            if ld_psum > 0:
-                                break
-                            ld_grp = ld_grp + 1
-                        ld_nxt = ld_grp + 1
-                        while ld_nxt < num_groups:
-                            ld_nxtk = grouped_layout[ld_nxt]
-                            if ld_nxtk > 0:
-                                break
-                            ld_nxt = ld_nxt + 1
-                elif is_m_grouped_psum:
-                    ld_psum = grouped_layout[0]
-                    ld_nmb = _uceil(ld_psum, block_m)
-                else:
-                    ld_psum = 0
-                    ld_nmb = num_m_blocks
-                while ld_valid == 1:
-                    ld_nb = ld_it * num_sms + sm_idx
-                    # `get_next_block`: advance the group cursor for this linear block index.
-                    ld_done: T.int32
-                    ld_done = 0
-                    if is_m_grouped_masked:
-                        while ld_done == 0:
-                            if ld_grp == num_groups:
-                                ld_valid = 0
-                                ld_done = 1
-                            else:
-                                ld_nmb = _uceil(grouped_layout[ld_grp], block_m)
-                                if ld_nb < (ld_cum + ld_nmb) * num_n_blocks:
-                                    ld_done = 1
-                                else:
-                                    ld_cum = ld_cum + ld_nmb
-                                    ld_grp = ld_grp + 1
-                    elif is_m_grouped_psum:
-                        while ld_done == 0:
-                            if ld_nb < (ld_cum + ld_nmb) * num_n_blocks:
-                                ld_done = 1
-                            else:
-                                ld_grp = ld_grp + 1
-                                if ld_grp == num_groups:
-                                    ld_valid = 0
-                                    ld_done = 1
-                                else:
-                                    ld_last = (_uceil(ld_psum, block_m)) * block_m
-                                    ld_psum = grouped_layout[ld_grp]
-                                    ld_cum = ld_cum + ld_nmb
-                                    ld_nmb = _uceil(ld_psum - ld_last, block_m)
-                    elif is_k_grouped:
-                        # Walk the valid (non-empty) groups; each contributes `num_blocks`
-                        # tiles and its own K extent (`scheduler/gemm.cuh:238`).
-                        while ld_done == 0:
-                            if ld_grp == num_groups:
-                                ld_valid = 0
-                                ld_done = 1
-                            elif ld_nb < (ld_vgrp + 1) * num_blocks:
-                                ld_done = 1
-                            else:
-                                ld_sfk = ld_sfk + (_uceil(ld_psum, sf_k_span))
-                                ld_vgrp = ld_vgrp + 1
-                                if is_k_grouped_psum:
-                                    ld_grp = ld_grp + 1
-                                    while ld_grp < num_groups:
-                                        ld_nxtk = grouped_layout[ld_grp]
-                                        ld_last = (_uceil(ld_kend, k_alignment)) * k_alignment
-                                        ld_psum = ld_nxtk - ld_last
-                                        ld_kend = ld_nxtk
-                                        if ld_psum > 0:
-                                            break
-                                        ld_grp = ld_grp + 1
-                                else:
-                                    ld_last = ld_last + ld_psum
-                                    ld_grp = ld_nxt
-                                    ld_nxt = ld_nxt + 1
-                                    ld_psum = ld_nxtk
-                                    while ld_nxt < num_groups:
-                                        ld_nxtk = grouped_layout[ld_nxt]
-                                        if ld_nxtk > 0:
-                                            break
-                                        ld_nxt = ld_nxt + 1
-                        ld_cum = ld_vgrp * num_m_blocks
-                    elif is_batched:
-                        if ld_nb >= num_blocks * num_groups:
-                            ld_valid = 0
-                        else:
-                            ld_grp = ld_nb // num_blocks
-                            ld_cum = ld_grp * num_m_blocks
-                            ld_nmb = num_m_blocks
-                    else:
-                        if ld_nb >= num_blocks:
-                            ld_valid = 0
-                    if ld_valid == 1:
-                        ld_kblocks = _uceil(ld_psum, block_k) if is_k_grouped else num_k_blocks
-                        # One swizzle walk feeds `m_idx`, `n_idx` and the tail-block
-                        # test below, as the source's single `get_swizzled_block_idx`
-                        # call does (`scheduler/gemm.cuh:197`).
-                        ld_m_local, ld_n_local = _swizzled(
-                            ld_nb - ld_cum * num_n_blocks, ld_nmb, num_n_blocks
-                        )
-                        m_idx: T.int32
-                        n_idx: T.int32
-                        m_idx = (
-                            ld_m_local + (_udiv(ld_last, block_m) if is_m_grouped_psum else 0)
-                        ) * block_m
-                        n_idx = ld_n_local * block_n
-                        sfa_mn: T.int32
-                        sfb_mn: T.int32
-                        # The scale factors are indexed by the *whole* block, before
-                        # the cluster split below.
-                        sfa_mn = m_idx
-                        sfb_mn = n_idx
-                        # `get_global_idx` carries the expert offset on whichever of
-                        # B's axes the group was folded into: N for a K-major B,
-                        # K for an MN-major one (source `:223`, `:233`, `:271`).
-                        k_b_idx: T.int32
-                        k_a_offset: T.int32
-                        k_b_idx = 0
-                        k_a_offset = 0
-                        sfa_k_offset: T.int32
-                        sfa_k_offset = 0
-                        if is_m_grouped_contiguous:
-                            # Non-psum contiguous: the expert is a per-row id.
-                            expert: T.int32
-                            expert = T.max(0, grouped_layout[m_idx])
-                            if major_b_is_k:
-                                n_idx = expert * eff_n + n_idx
-                            else:
-                                k_b_idx = expert * eff_k + k_b_idx
-                            sfb_k_offset = expert * shape_sfb_k
-                        elif is_m_grouped_masked:
-                            # Masked: A, B, SFA and SFB are all `[G, ...]` slabs, so every axis
-                            # carries the group offset (source `:221-234`, `:264-272`).
-                            m_idx = ld_grp * eff_m + m_idx
-                            if major_b_is_k:
-                                n_idx = ld_grp * eff_n + n_idx
-                            else:
-                                k_b_idx = ld_grp * eff_k + k_b_idx
-                            sfa_k_offset = ld_grp * shape_sfa_k
-                            sfb_k_offset = ld_grp * shape_sfb_k
-                        elif is_m_grouped_psum:
-                            # PSUM: A is one flat `[M, K]`; only B and SFB are grouped.
-                            if major_b_is_k:
-                                n_idx = ld_grp * eff_n + n_idx
-                            else:
-                                k_b_idx = ld_grp * eff_k + k_b_idx
-                            sfb_k_offset = ld_grp * shape_sfb_k
-                        elif is_k_grouped:
-                            # Groups are concatenated along K; both operands are MN-major, so the
-                            # K index carries the running offset and the SF index its own
-                            # cumulative row count (source `:166-180`).
-                            k_a_offset = ld_last
-                            k_b_idx = ld_last
-                            sfa_k_offset = ld_sfk
-                            sfb_k_offset = ld_sfk
-                        elif is_batched:
-                            # Batched: the batch index rides the SF outer extent (source `:183`).
-                            sfa_k_offset = ld_grp * shape_sfa_k
-                            sfb_k_offset = ld_grp * shape_sfb_k
-                        else:
-                            sfb_k_offset = 0
-                        # Each CTA of a cluster loads its own slice; the 2-CTA
-                        # behaviour lives here and in the UMMA, not in a multicast
-                        # TMA (source `:237-240`).
-                        if use_effective_m:
-                            # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
-                            ld_eff_m: T.int32
-                            ld_eff_m = block_m
-                            with T.If(ld_m_local == ld_nmb - 1), T.Then():
-                                ld_eff_m = (
-                                    _uceil(
-                                        ld_psum - (ld_m_local + _udiv(ld_last, block_m)) * block_m,
-                                        UMMA_STEP_N,
-                                    )
-                                    * UMMA_STEP_N
-                                )
-                        if cta_group > 1:
-                            if is_multicast_on_a:
-                                m_idx = m_idx + cta_in_cluster * (
-                                    _udiv(ld_eff_m, cta_group) if use_effective_m else load_block_m
-                                )
-                            else:
-                                n_idx = n_idx + cta_in_cluster * load_block_n
-                        ld_k: T.int32
-                        ld_k = 0
-                        while ld_k < ld_kblocks:
-                            ld_wait: T.uint32
-                            ld_wait = T.uint32(0)
-                            while ld_wait == T.uint32(0):
-                                T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-                                    ld_wait,
-                                    barriers.ptr_to([empty_base + ld_stage]),
-                                    T.cast(T.bitwise_xor(ld_phase, 1), "uint32"),
-                                    T.uint32(TRY_WAIT_TICKS),
-                                )
-                            k_b: T.int32
-                            k_a: T.int32
-                            k_b = k_b_idx + ld_k * block_k
-                            k_a = k_a_offset + ld_k * block_k
-                            for i in T.unroll(0, num_a_atoms):
-                                T.evaluate(
-                                    T.ptx[load_chain](
-                                        smem_a.ptr_to([ld_stage, 0, i * a_atom])
-                                        if major_a_is_k
-                                        else smem_a.ptr_to([ld_stage, 0, 0]),
-                                        T.address_of(tensor_map_a),
-                                        *_tma_coords(
-                                            (k_a + i * a_atom, m_idx)
-                                            if major_a_is_k
-                                            else (m_idx + i * a_atom, k_a),
-                                            ld_grp,
-                                        ),
-                                        barriers.ptr_to([full_base + ld_stage]),
-                                        T.uint64(EVICT_NORMAL),
-                                    )
-                                )
-                            for i in T.unroll(0, num_b_atoms):
-                                T.evaluate(
-                                    T.ptx[load_chain](
-                                        smem_b.ptr_to([ld_stage, 0, i * b_atom])
-                                        if major_b_is_k
-                                        else smem_b.ptr_to([ld_stage, 0, 0]),
-                                        T.address_of(tensor_map_b),
-                                        *_tma_coords(
-                                            (k_b + i * b_atom, n_idx)
-                                            if major_b_is_k
-                                            else (n_idx + i * b_atom, k_b),
-                                            ld_grp,
-                                        ),
-                                        barriers.ptr_to([full_base + ld_stage]),
-                                        T.uint64(EVICT_NORMAL),
-                                    )
-                                )
-                            arrival: T.int32
-                            arrival = arrival_bytes_ab
-                            if ld_k % sfa_stages_per_load == 0:
-                                T.evaluate(
-                                    T.ptx[sf_load_chain](
-                                        smem_sfa.ptr_to([ld_stage, 0]),
-                                        T.address_of(tensor_map_sfa),
-                                        T.cast(sfa_mn, "int32"),
-                                        T.cast(sfa_k_offset + ld_k // sfa_stages_per_load, "int32"),
-                                        barriers.ptr_to([full_base + ld_stage]),
-                                        T.uint64(EVICT_NORMAL),
-                                    )
-                                )
-                                arrival = arrival + block_m * 4
-                            if ld_k % sfb_stages_per_load == 0:
-                                T.evaluate(
-                                    T.ptx[sf_load_chain](
-                                        smem_sfb.ptr_to([ld_stage, 0]),
-                                        T.address_of(tensor_map_sfb),
-                                        T.cast(sfb_mn, "int32"),
-                                        T.cast(sfb_k_offset + ld_k // sfb_stages_per_load, "int32"),
-                                        barriers.ptr_to([full_base + ld_stage]),
-                                        T.uint64(EVICT_NORMAL),
-                                    )
-                                )
-                                arrival = arrival + block_n * 4
-                            T.ptx.mbarrier.arrive.expect_tx.shared.b64(
-                                barriers.ptr_to([full_base + ld_stage]), T.cast(arrival, "uint32")
-                            )
-                            ld_k = ld_k + 1
-                            ld_stage = T.Select(ld_stage == stages - 1, 0, ld_stage + 1)
-                            ld_phase = T.bitwise_xor(ld_phase, T.cast(ld_stage == 0, "int32"))
-                    ld_it = ld_it + 1
-
-        # ===============================================================
-        # Role 1: UMMA issue warp, leader CTA only (source `:281`)
-        # ===============================================================
-
-        elif warp == 1:
-            if is_leader_cta:
-                desc_a: T.uint64
-                desc_b: T.uint64
-                desc_sf: T.uint64
-                desc_i: T.uint32
-                # Every descriptor field but the shared address is a build-time
-                # constant, so the bases are folded in Python and only
-                # `addr >> 4` is computed here.  The `*_DESC_BASE` constants
-                # come from the same bit layout the runtime C encoders fill in.
-                a_smem_u32: T.uint32
-                b_smem_u32: T.uint32
-                sfa_smem_u32: T.uint32
-                sfb_smem_u32: T.uint32
-                a_smem_u32 = T.cuda.cvta_generic_to_shared(smem_a.ptr_to([0, 0, 0]))
-                b_smem_u32 = T.cuda.cvta_generic_to_shared(smem_b.ptr_to([0, 0, 0]))
-                sfa_smem_u32 = T.cuda.cvta_generic_to_shared(smem_sfa.ptr_to([0, 0]))
-                sfb_smem_u32 = T.cuda.cvta_generic_to_shared(smem_sfb.ptr_to([0, 0]))
-                desc_a = _with_smem_addr(_u64_const(A_DESC_BASE), a_smem_u32)
-                desc_b = _with_smem_addr(_u64_const(B_DESC_BASE), b_smem_u32)
-                # `make_sf_desc`: unswizzled, stride offset 8*16, leading offset 0.
-                desc_sf = _with_smem_addr(_u64_const(SF_DESC_BASE), sfa_smem_u32)
-                # Stays a mutable local: the scale-factor ids and, under
-                # `use_effective_m`, the N field are patched per MMA below.
-                desc_i = T.uint32(INSTR_DESC)
-                # The per-stage descriptor low words live one stage per lane; a warp
-                # shuffle indexes the table instead of recomputing the descriptor.
-                a_desc_lo: T.uint32
-                b_desc_lo: T.uint32
-                a_desc_lo = T.Select(
-                    lane_idx < stages,
-                    T.cast(T.bitwise_and(desc_a, T.uint64(0xFFFFFFFF)), "uint32")
-                    + T.cast(lane_idx * (a_bytes_per_stage // 16), "uint32"),
-                    T.uint32(0),
+            _builder_emit(T.device_entry())
+            _builder_emit(T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1}))
+            sm_idx = _builder_assign(
+                "sm_idx", T.cta_id([spec.num_sms]), locals().get("sm_idx", _BUILDER_MISSING)
+            )
+            if cta_group > 1:
+                cta_in_cluster = _builder_assign(
+                    "cta_in_cluster",
+                    T.cta_id_in_cluster([cta_group]),
+                    locals().get("cta_in_cluster", _BUILDER_MISSING),
                 )
-                b_desc_lo = T.Select(
-                    lane_idx < stages,
-                    T.cast(T.bitwise_and(desc_b, T.uint64(0xFFFFFFFF)), "uint32")
-                    + T.cast(lane_idx * (b_bytes_per_stage // 16), "uint32"),
-                    T.uint32(0),
+                is_leader_cta = _builder_assign(
+                    "is_leader_cta",
+                    cta_in_cluster == 0,
+                    locals().get("is_leader_cta", _BUILDER_MISSING),
                 )
-
-                mma_stage: T.int32
-                mma_phase: T.int32
-                mma_iter: T.int32
-                mma_stage = 0
-                mma_phase = 0
-                mma_it: T.int32
-                mma_valid: T.int32
-                mma_grp: T.int32
-                mma_cum: T.int32
-                mma_nmb: T.int32
-                mma_last: T.int32
-                mma_psum: T.int32
-                mma_nb: T.int32
-                mma_nxt: T.int32
-                mma_nxtk: T.int32
-                mma_kblocks: T.int32
-                mma_vgrp: T.int32
-                mma_kend: T.int32
-                # `cute::elect_one_sync()` is loop-invariant for this fully-active warp;
-                # nvcc hoists it into a uniform predicate, so hoist it here too rather
-                # than re-executing `elect.sync` twice per K block.
-                mma_elected: T.uint32
-                mma_elected_lane: T.uint32
-                T.ptx.elect_sync(mma_elected_lane, mma_elected, T.uint32(0xFFFFFFFF))
-                mma_it = 0
-                mma_valid = 1
-                mma_grp = 0
-                mma_cum = 0
-                mma_last = 0
-                # Scheduler cursor init (`scheduler/gemm.cuh:88`).
-                mma_vgrp = 0
-                mma_kend = 0
-                mma_nxt = 0
-                mma_nxtk = 0
-                mma_kblocks = 0
-                if is_k_grouped:
-                    # Start on the first non-empty group (`get_next_k_group`, `:66`).
-                    mma_psum = 0
-                    mma_nmb = num_m_blocks
-                    if is_k_grouped_psum:
-                        while mma_grp < num_groups:
-                            mma_nxtk = grouped_layout[mma_grp]
-                            mma_last = (_uceil(mma_kend, k_alignment)) * k_alignment
-                            mma_psum = mma_nxtk - mma_last
-                            mma_kend = mma_nxtk
-                            if mma_psum > 0:
-                                break
-                            mma_grp = mma_grp + 1
-                    else:
-                        while mma_grp < num_groups:
-                            mma_psum = grouped_layout[mma_grp]
-                            if mma_psum > 0:
-                                break
-                            mma_grp = mma_grp + 1
-                        mma_nxt = mma_grp + 1
-                        while mma_nxt < num_groups:
-                            mma_nxtk = grouped_layout[mma_nxt]
-                            if mma_nxtk > 0:
-                                break
-                            mma_nxt = mma_nxt + 1
-                elif is_m_grouped_psum:
-                    mma_psum = grouped_layout[0]
-                    mma_nmb = _uceil(mma_psum, block_m)
-                else:
-                    mma_psum = 0
-                    mma_nmb = num_m_blocks
-                mma_iter = 0
-                while mma_valid == 1:
-                    mma_nb = mma_it * num_sms + sm_idx
-                    # `get_next_block`: advance the group cursor for this linear block index.
-                    mma_done: T.int32
-                    mma_done = 0
-                    if is_m_grouped_masked:
-                        while mma_done == 0:
-                            if mma_grp == num_groups:
-                                mma_valid = 0
-                                mma_done = 1
-                            else:
-                                mma_nmb = _uceil(grouped_layout[mma_grp], block_m)
-                                if mma_nb < (mma_cum + mma_nmb) * num_n_blocks:
-                                    mma_done = 1
-                                else:
-                                    mma_cum = mma_cum + mma_nmb
-                                    mma_grp = mma_grp + 1
-                    elif is_m_grouped_psum:
-                        while mma_done == 0:
-                            if mma_nb < (mma_cum + mma_nmb) * num_n_blocks:
-                                mma_done = 1
-                            else:
-                                mma_grp = mma_grp + 1
-                                if mma_grp == num_groups:
-                                    mma_valid = 0
-                                    mma_done = 1
-                                else:
-                                    mma_last = (_uceil(mma_psum, block_m)) * block_m
-                                    mma_psum = grouped_layout[mma_grp]
-                                    mma_cum = mma_cum + mma_nmb
-                                    mma_nmb = _uceil(mma_psum - mma_last, block_m)
-                    elif is_k_grouped:
-                        # Walk the valid (non-empty) groups; each contributes `num_blocks`
-                        # tiles and its own K extent (`scheduler/gemm.cuh:238`).
-                        while mma_done == 0:
-                            if mma_grp == num_groups:
-                                mma_valid = 0
-                                mma_done = 1
-                            elif mma_nb < (mma_vgrp + 1) * num_blocks:
-                                mma_done = 1
-                            else:
-                                mma_vgrp = mma_vgrp + 1
-                                if is_k_grouped_psum:
-                                    mma_grp = mma_grp + 1
-                                    while mma_grp < num_groups:
-                                        mma_nxtk = grouped_layout[mma_grp]
-                                        mma_last = (_uceil(mma_kend, k_alignment)) * k_alignment
-                                        mma_psum = mma_nxtk - mma_last
-                                        mma_kend = mma_nxtk
-                                        if mma_psum > 0:
-                                            break
-                                        mma_grp = mma_grp + 1
-                                else:
-                                    mma_last = mma_last + mma_psum
-                                    mma_grp = mma_nxt
-                                    mma_nxt = mma_nxt + 1
-                                    mma_psum = mma_nxtk
-                                    while mma_nxt < num_groups:
-                                        mma_nxtk = grouped_layout[mma_nxt]
-                                        if mma_nxtk > 0:
-                                            break
-                                        mma_nxt = mma_nxt + 1
-                        mma_cum = mma_vgrp * num_m_blocks
-                    elif is_batched:
-                        if mma_nb >= num_blocks * num_groups:
-                            mma_valid = 0
-                        else:
-                            mma_grp = mma_nb // num_blocks
-                            mma_cum = mma_grp * num_m_blocks
-                            mma_nmb = num_m_blocks
-                    else:
-                        if mma_nb >= num_blocks:
-                            mma_valid = 0
-                    if mma_valid == 1:
-                        if use_effective_m:
-                            # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
-                            mma_eff_m: T.int32
-                            mma_m_local: T.int32
-                            mma_m_local = _swizzled(
-                                mma_nb - mma_cum * num_n_blocks, mma_nmb, num_n_blocks
-                            )[0]
-                            mma_eff_m = block_m
-                            with T.If(mma_m_local == mma_nmb - 1), T.Then():
-                                mma_eff_m = (
-                                    _uceil(
-                                        mma_psum
-                                        - (mma_m_local + _udiv(mma_last, block_m)) * block_m,
-                                        UMMA_STEP_N,
-                                    )
-                                    * UMMA_STEP_N
-                                )
-                            desc_i = T.bitwise_or(
-                                T.bitwise_and(desc_i, T.uint32(UMMA_N_FIELD_MASK)),
-                                T.shift_left(T.cast(mma_eff_m // 8, "uint32"), T.uint32(17)),
-                            )
-                        mma_kblocks = _uceil(mma_psum, block_k) if is_k_grouped else num_k_blocks
-                        accum_stage: T.int32
-                        accum_phase: T.int32
-                        accum_stage = mma_iter % NUM_EPILOGUE_STAGES
-                        accum_phase = T.bitwise_and(mma_iter // NUM_EPILOGUE_STAGES, 1)
-                        mma_tmem_wait: T.uint32
-                        mma_tmem_wait = T.uint32(0)
-                        while mma_tmem_wait == T.uint32(0):
-                            T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-                                mma_tmem_wait,
-                                barriers.ptr_to([tmem_empty_base + accum_stage]),
-                                T.cast(T.bitwise_xor(accum_phase, 1), "uint32"),
-                                T.uint32(TRY_WAIT_TICKS),
-                            )
-                        T.ptx.tcgen05.fence__after_thread_sync()
-
-                        mma_k: T.int32
-                        mma_k = 0
-                        # `#pragma unroll 4` (source `:339`).  Four bodies per back-edge with
-                        # `mma_k == 4 * j + u` makes `mma_k % kNumSF?StagesPerLoad` the constant
-                        # `u`, which is what removes the scale-factor id arithmetic and the UTCCP
-                        # branch from three of every four K blocks.
-                        mma_k_rounded: T.int32
-                        mma_k_rounded = (
-                            (mma_kblocks + (MMA_K_UNROLL - 1)) // MMA_K_UNROLL
-                        ) * MMA_K_UNROLL
-                        while mma_k < mma_k_rounded:
-                            for u in T.unroll(0, MMA_K_UNROLL):
-                                with T.If(mma_k < mma_kblocks), T.Then():
-                                    mma_sf_wait: T.uint32
-                                    mma_sf_wait = T.uint32(0)
-                                    while mma_sf_wait == T.uint32(0):
-                                        T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-                                            mma_sf_wait,
-                                            barriers.ptr_to([with_sf_base + mma_stage]),
-                                            T.cast(mma_phase, "uint32"),
-                                            T.uint32(TRY_WAIT_TICKS),
-                                        )
-                                    T.ptx.tcgen05.fence__after_thread_sync()
-                                    a_base_lo: T.uint32
-                                    b_base_lo: T.uint32
-                                    T.ptx.shfl_sync.idx.b32(
-                                        a_base_lo,
-                                        a_desc_lo,
-                                        T.cast(mma_stage, "uint32"),
-                                        T.uint32(0x1F),
-                                        T.uint32(0xFFFFFFFF),
-                                    )
-                                    T.ptx.shfl_sync.idx.b32(
-                                        b_base_lo,
-                                        b_desc_lo,
-                                        T.cast(mma_stage, "uint32"),
-                                        T.uint32(0x1F),
-                                        T.uint32(0xFFFFFFFF),
-                                    )
-                                    # One elected lane owns the UTCCP and UMMA issues.  Predicating the
-                                    # instructions keeps the warp converged; branching on the elected
-                                    # lane instead costs a BSSY/BSYNC pair per K block.
-                                    if u % sfa_stages_per_load == 0:
-                                        for c in T.unroll(0, num_sfa_chunks):
-                                            desc_sf = _rebase(
-                                                desc_sf,
-                                                sfa_smem_u32
-                                                + T.cast(mma_stage * (sf_block_m * 4), "uint32")
-                                                + T.uint32(c * NUM_UTCCP_ALIGNED_ELEMS * 4),
-                                            )
-                                            T.evaluate(
-                                                T.ptx[utccp_chain](
-                                                    T.cast(
-                                                        sfa_tmem.allocated_addr[0] + c * 4, "uint32"
-                                                    ),
-                                                    desc_sf,
-                                                    pred=mma_elected == T.uint32(1),
-                                                )
-                                            )
-                                    if u % sfb_stages_per_load == 0:
-                                        for c in T.unroll(0, num_sfb_chunks):
-                                            desc_sf = _rebase(
-                                                desc_sf,
-                                                sfb_smem_u32
-                                                + T.cast(mma_stage * (sf_block_n * 4), "uint32")
-                                                + T.uint32(c * NUM_UTCCP_ALIGNED_ELEMS * 4),
-                                            )
-                                            T.evaluate(
-                                                T.ptx[utccp_chain](
-                                                    T.cast(
-                                                        sfb_tmem.allocated_addr[0] + c * 4, "uint32"
-                                                    ),
-                                                    desc_sf,
-                                                    pred=mma_elected == T.uint32(1),
-                                                )
-                                            )
-                                    for ki in T.unroll(0, umma_k_steps):
-                                        # `issue_full_k_block` / `issue_tail_k_block`:
-                                        # only the leading `ceil_div(remaining_k, UMMA_K)`
-                                        # steps of a partial final K block are valid.
-                                        with (
-                                            T.If(
-                                                T.Or(
-                                                    mma_k < mma_kblocks - 1,
-                                                    ki * UMMA_K
-                                                    < (mma_psum if is_k_grouped else eff_k)
-                                                    - mma_k * block_k,
-                                                )
-                                                if may_have_tail_k
-                                                else ki < umma_k_steps
-                                            ),
-                                            T.Then(),
-                                        ):
-                                            sfa_id: T.uint32
-                                            sfb_id: T.uint32
-                                            sfa_id = (
-                                                T.cast(ki, "uint32")
-                                                if sfa_stages_per_load == 1
-                                                else T.cast(u % sfa_stages_per_load, "uint32")
-                                            )
-                                            sfb_id = (
-                                                T.cast(ki, "uint32")
-                                                if sfb_stages_per_load == 1
-                                                else T.cast(u % sfb_stages_per_load, "uint32")
-                                            )
-                                            rt_desc: T.uint32
-                                            rt_desc = _with_sf_id(
-                                                desc_i,
-                                                sfb_id if swap_ab else sfa_id,
-                                                sfa_id if swap_ab else sfb_id,
-                                            )
-                                            adv_a: T.uint64
-                                            adv_b: T.uint64
-                                            adv_a = _advance_lo(
-                                                desc_a, a_base_lo, ki * a_k_step_units
-                                            )
-                                            adv_b = _advance_lo(
-                                                desc_b, b_base_lo, ki * b_k_step_units
-                                            )
-                                            T.evaluate(
-                                                T.ptx[mma_chain](
-                                                    T.cast(accum_stage * umma_n, "uint32"),
-                                                    adv_b if swap_ab else adv_a,
-                                                    adv_a if swap_ab else adv_b,
-                                                    rt_desc,
-                                                    T.cast(
-                                                        (
-                                                            sfb_tmem if swap_ab else sfa_tmem
-                                                        ).allocated_addr[0],
-                                                        "uint32",
-                                                    ),
-                                                    T.cast(
-                                                        (
-                                                            sfa_tmem if swap_ab else sfb_tmem
-                                                        ).allocated_addr[0],
-                                                        "uint32",
-                                                    ),
-                                                    T.Or(ki > 0, mma_k > 0),
-                                                    pred=mma_elected == T.uint32(1),
-                                                )
-                                            )
-                                    T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF))
-                                    # `tcgen05.commit` implies `fence::before_thread_sync`.
-                                    # Same here: predicate the commits on the elected lane rather than
-                                    # branching, so the warp never diverges inside the K loop.
-                                    if cta_group > 1:
-                                        T.evaluate(
-                                            T.ptx[commit_mc_chain](
-                                                barriers.ptr_to([empty_base + mma_stage]),
-                                                T.uint16((1 << cta_group) - 1),
-                                                pred=mma_elected == T.uint32(1),
-                                            )
-                                        )
-                                    else:
-                                        T.evaluate(
-                                            T.ptx[commit_chain](
-                                                barriers.ptr_to([empty_base + mma_stage]),
-                                                pred=mma_elected == T.uint32(1),
-                                            )
-                                        )
-                                    if cta_group > 1:
-                                        T.evaluate(
-                                            T.ptx[commit_mc_chain](
-                                                barriers.ptr_to([tmem_full_base + accum_stage]),
-                                                T.uint16((1 << cta_group) - 1),
-                                                pred=T.And(
-                                                    mma_elected == T.uint32(1),
-                                                    mma_k == mma_kblocks - 1,
-                                                ),
-                                            )
-                                        )
-                                    else:
-                                        T.evaluate(
-                                            T.ptx[commit_chain](
-                                                barriers.ptr_to([tmem_full_base + accum_stage]),
-                                                pred=T.And(
-                                                    mma_elected == T.uint32(1),
-                                                    mma_k == mma_kblocks - 1,
-                                                ),
-                                            )
-                                        )
-                                    T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF))
-                                    mma_stage = T.Select(mma_stage == stages - 1, 0, mma_stage + 1)
-                                    mma_phase = T.bitwise_xor(
-                                        mma_phase, T.cast(mma_stage == 0, "int32")
-                                    )
-                                # Advance unconditionally: the guard only masks the rounded-up tail,
-                                # and the loop still has to reach `mma_k_rounded`.
-                                mma_k = mma_k + 1
-                        mma_iter = mma_iter + 1
-                    mma_it = mma_it + 1
-
-                # A 2-CTA cluster needs one more accumulator wait before the
-                # barriers can be safely destroyed (source `:426`).
-                if cta_group > 1:
-                    if mma_iter > 0:
-                        mma_end_wait: T.uint32
-                        mma_end_wait = T.uint32(0)
-                        while mma_end_wait == T.uint32(0):
-                            T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-                                mma_end_wait,
-                                barriers.ptr_to(
-                                    [tmem_empty_base + (mma_iter - 1) % NUM_EPILOGUE_STAGES]
-                                ),
-                                T.cast(
-                                    T.bitwise_and((mma_iter - 1) // NUM_EPILOGUE_STAGES, 1),
-                                    "uint32",
-                                ),
-                                T.uint32(TRY_WAIT_TICKS),
-                            )
-
-        # ===============================================================
-        # Role 2: scale-factor transposer warp (source `:432`)
-        # ===============================================================
-
-        elif warp == 2:
-            tr_stage: T.int32
-            tr_phase: T.int32
-            tr_stage = 0
-            tr_phase = 0
-            tr_it: T.int32
-            tr_valid: T.int32
-            tr_grp: T.int32
-            tr_cum: T.int32
-            tr_nmb: T.int32
-            tr_last: T.int32
-            tr_psum: T.int32
-            tr_nb: T.int32
-            tr_nxt: T.int32
-            tr_nxtk: T.int32
-            tr_kblocks: T.int32
-            tr_vgrp: T.int32
-            tr_kend: T.int32
-            tr_it = 0
-            tr_valid = 1
-            tr_grp = 0
-            tr_cum = 0
-            tr_last = 0
-            # Scheduler cursor init (`scheduler/gemm.cuh:88`).
-            tr_vgrp = 0
-            tr_kend = 0
-            tr_nxt = 0
-            tr_nxtk = 0
-            tr_kblocks = 0
-            if is_k_grouped:
-                # Start on the first non-empty group (`get_next_k_group`, `:66`).
-                tr_psum = 0
-                tr_nmb = num_m_blocks
-                if is_k_grouped_psum:
-                    while tr_grp < num_groups:
-                        tr_nxtk = grouped_layout[tr_grp]
-                        tr_last = (_uceil(tr_kend, k_alignment)) * k_alignment
-                        tr_psum = tr_nxtk - tr_last
-                        tr_kend = tr_nxtk
-                        if tr_psum > 0:
-                            break
-                        tr_grp = tr_grp + 1
-                else:
-                    while tr_grp < num_groups:
-                        tr_psum = grouped_layout[tr_grp]
-                        if tr_psum > 0:
-                            break
-                        tr_grp = tr_grp + 1
-                    tr_nxt = tr_grp + 1
-                    while tr_nxt < num_groups:
-                        tr_nxtk = grouped_layout[tr_nxt]
-                        if tr_nxtk > 0:
-                            break
-                        tr_nxt = tr_nxt + 1
-            elif is_m_grouped_psum:
-                tr_psum = grouped_layout[0]
-                tr_nmb = _uceil(tr_psum, block_m)
             else:
-                tr_psum = 0
-                tr_nmb = num_m_blocks
-            sf_vals = T.alloc_local((4,), "uint32")
-            while tr_valid == 1:
-                tr_nb = tr_it * num_sms + sm_idx
-                # `get_next_block`: advance the group cursor for this linear block index.
-                tr_done: T.int32
-                tr_done = 0
-                if is_m_grouped_masked:
-                    while tr_done == 0:
-                        if tr_grp == num_groups:
-                            tr_valid = 0
-                            tr_done = 1
-                        else:
-                            tr_nmb = _uceil(grouped_layout[tr_grp], block_m)
-                            if tr_nb < (tr_cum + tr_nmb) * num_n_blocks:
-                                tr_done = 1
-                            else:
-                                tr_cum = tr_cum + tr_nmb
-                                tr_grp = tr_grp + 1
-                elif is_m_grouped_psum:
-                    while tr_done == 0:
-                        if tr_nb < (tr_cum + tr_nmb) * num_n_blocks:
-                            tr_done = 1
-                        else:
-                            tr_grp = tr_grp + 1
-                            if tr_grp == num_groups:
-                                tr_valid = 0
-                                tr_done = 1
-                            else:
-                                tr_last = (_uceil(tr_psum, block_m)) * block_m
-                                tr_psum = grouped_layout[tr_grp]
-                                tr_cum = tr_cum + tr_nmb
-                                tr_nmb = _uceil(tr_psum - tr_last, block_m)
-                elif is_k_grouped:
-                    # Walk the valid (non-empty) groups; each contributes `num_blocks`
-                    # tiles and its own K extent (`scheduler/gemm.cuh:238`).
-                    while tr_done == 0:
-                        if tr_grp == num_groups:
-                            tr_valid = 0
-                            tr_done = 1
-                        elif tr_nb < (tr_vgrp + 1) * num_blocks:
-                            tr_done = 1
-                        else:
-                            tr_vgrp = tr_vgrp + 1
-                            if is_k_grouped_psum:
-                                tr_grp = tr_grp + 1
-                                while tr_grp < num_groups:
-                                    tr_nxtk = grouped_layout[tr_grp]
-                                    tr_last = (_uceil(tr_kend, k_alignment)) * k_alignment
-                                    tr_psum = tr_nxtk - tr_last
-                                    tr_kend = tr_nxtk
-                                    if tr_psum > 0:
-                                        break
-                                    tr_grp = tr_grp + 1
-                            else:
-                                tr_last = tr_last + tr_psum
-                                tr_grp = tr_nxt
-                                tr_nxt = tr_nxt + 1
-                                tr_psum = tr_nxtk
-                                while tr_nxt < num_groups:
-                                    tr_nxtk = grouped_layout[tr_nxt]
-                                    if tr_nxtk > 0:
-                                        break
-                                    tr_nxt = tr_nxt + 1
-                    tr_cum = tr_vgrp * num_m_blocks
-                elif is_batched:
-                    if tr_nb >= num_blocks * num_groups:
-                        tr_valid = 0
-                    else:
-                        tr_grp = tr_nb // num_blocks
-                        tr_cum = tr_grp * num_m_blocks
-                        tr_nmb = num_m_blocks
-                else:
-                    if tr_nb >= num_blocks:
-                        tr_valid = 0
-                if tr_valid == 1:
-                    tr_kblocks = _uceil(tr_psum, block_k) if is_k_grouped else num_k_blocks
-                    tr_k: T.int32
-                    tr_k = 0
-                    while tr_k < tr_kblocks:
-                        tr_wait: T.uint32
-                        tr_wait = T.uint32(0)
-                        while tr_wait == T.uint32(0):
-                            T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-                                tr_wait,
-                                barriers.ptr_to([full_base + tr_stage]),
-                                T.cast(tr_phase, "uint32"),
-                                T.uint32(TRY_WAIT_TICKS),
-                            )
-                        # The prior logical task may still read this stage through tcgen05's
-                        # async proxy.  Complete that handoff before generic-proxy transpose
-                        # stores reuse the same shared bytes.
-                        T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
-                        if tr_k % sfa_stages_per_load == 0:
-                            for c in T.unroll(0, num_sfa_chunks):
-                                base = c * NUM_UTCCP_ALIGNED_ELEMS
-                                for i in T.unroll(0, 4):
-                                    sf_vals[i] = smem_sfa[tr_stage, base + i * 32 + lane_idx]
-                                T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF))
-                                for i in T.unroll(0, 4):
-                                    smem_sfa[tr_stage, base + lane_idx * 4 + i] = sf_vals[i]
-                            T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
-                        if tr_k % sfb_stages_per_load == 0:
-                            for c in T.unroll(0, num_sfb_chunks):
-                                base = c * NUM_UTCCP_ALIGNED_ELEMS
-                                for i in T.unroll(0, 4):
-                                    sf_vals[i] = smem_sfb[tr_stage, base + i * 32 + lane_idx]
-                                T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF))
-                                for i in T.unroll(0, 4):
-                                    smem_sfb[tr_stage, base + lane_idx * 4 + i] = sf_vals[i]
-                            T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
-                        # `arrive(0u)` passes a destination CTA rank, not a count:
-                        # every thread arrives on the leader CTA's barrier copy.
-                        rem = T.alloc_local((1,), "uint64")
-                        T.ptx.mapa.shared__cluster.u64(
-                            rem[0], barriers.ptr_to([with_sf_base + tr_stage]), T.uint32(0)
-                        )
-                        T.ptx.mbarrier.arrive.b64(rem[0], T.uint32(1), pred=T.bool(True))
-                        tr_k = tr_k + 1
-                        tr_stage = T.Select(tr_stage == stages - 1, 0, tr_stage + 1)
-                        tr_phase = T.bitwise_xor(tr_phase, T.cast(tr_stage == 0, "int32"))
-                tr_it = tr_it + 1
-
-        # ===============================================================
-        # Role 3: epilogue warps (source `:470`)
-        # ===============================================================
-
-        elif warp >= first_epilogue_warp and warp < first_epilogue_warp + num_store_warps:
-            ep_warp: T.int32
-            ep_warp = warp - first_epilogue_warp
-            tma_stage: T.int32
-            ep_it: T.int32
-            ep_valid: T.int32
-            ep_grp: T.int32
-            ep_cum: T.int32
-            ep_nmb: T.int32
-            ep_last: T.int32
-            ep_psum: T.int32
-            ep_nb: T.int32
-            ep_nxt: T.int32
-            ep_nxtk: T.int32
-            ep_vgrp: T.int32
-            ep_kend: T.int32
-            ep_it = 0
-            ep_valid = 1
-            ep_grp = 0
-            ep_cum = 0
-            ep_last = 0
-            # Scheduler cursor init (`scheduler/gemm.cuh:88`).
-            ep_vgrp = 0
-            ep_kend = 0
-            ep_nxt = 0
-            ep_nxtk = 0
-            if is_k_grouped:
-                # Start on the first non-empty group (`get_next_k_group`, `:66`).
-                ep_psum = 0
-                ep_nmb = num_m_blocks
-                if is_k_grouped_psum:
-                    while ep_grp < num_groups:
-                        ep_nxtk = grouped_layout[ep_grp]
-                        ep_last = (_uceil(ep_kend, k_alignment)) * k_alignment
-                        ep_psum = ep_nxtk - ep_last
-                        ep_kend = ep_nxtk
-                        if ep_psum > 0:
-                            break
-                        ep_grp = ep_grp + 1
-                else:
-                    while ep_grp < num_groups:
-                        ep_psum = grouped_layout[ep_grp]
-                        if ep_psum > 0:
-                            break
-                        ep_grp = ep_grp + 1
-                    ep_nxt = ep_grp + 1
-                    while ep_nxt < num_groups:
-                        ep_nxtk = grouped_layout[ep_nxt]
-                        if ep_nxtk > 0:
-                            break
-                        ep_nxt = ep_nxt + 1
-            elif is_m_grouped_psum:
-                ep_psum = grouped_layout[0]
-                ep_nmb = _uceil(ep_psum, block_m)
-            else:
-                ep_psum = 0
-                ep_nmb = num_m_blocks
-            tma_stage = 0
-            values = T.alloc_local((8,), "uint32")
-            packed = T.alloc_local((4,), "uint32")
-            while ep_valid == 1:
-                ep_nb = ep_it * num_sms + sm_idx
-                # `get_next_block`: advance the group cursor for this linear block index.
-                ep_done: T.int32
-                ep_done = 0
-                if is_m_grouped_masked:
-                    while ep_done == 0:
-                        if ep_grp == num_groups:
-                            ep_valid = 0
-                            ep_done = 1
-                        else:
-                            ep_nmb = _uceil(grouped_layout[ep_grp], block_m)
-                            if ep_nb < (ep_cum + ep_nmb) * num_n_blocks:
-                                ep_done = 1
-                            else:
-                                ep_cum = ep_cum + ep_nmb
-                                ep_grp = ep_grp + 1
-                elif is_m_grouped_psum:
-                    while ep_done == 0:
-                        if ep_nb < (ep_cum + ep_nmb) * num_n_blocks:
-                            ep_done = 1
-                        else:
-                            ep_grp = ep_grp + 1
-                            if ep_grp == num_groups:
-                                ep_valid = 0
-                                ep_done = 1
-                            else:
-                                ep_last = (_uceil(ep_psum, block_m)) * block_m
-                                ep_psum = grouped_layout[ep_grp]
-                                ep_cum = ep_cum + ep_nmb
-                                ep_nmb = _uceil(ep_psum - ep_last, block_m)
-                elif is_k_grouped:
-                    # Walk the valid (non-empty) groups; each contributes `num_blocks`
-                    # tiles and its own K extent (`scheduler/gemm.cuh:238`).
-                    while ep_done == 0:
-                        if ep_grp == num_groups:
-                            ep_valid = 0
-                            ep_done = 1
-                        elif ep_nb < (ep_vgrp + 1) * num_blocks:
-                            ep_done = 1
-                        else:
-                            ep_vgrp = ep_vgrp + 1
-                            if is_k_grouped_psum:
-                                ep_grp = ep_grp + 1
-                                while ep_grp < num_groups:
-                                    ep_nxtk = grouped_layout[ep_grp]
-                                    ep_last = (_uceil(ep_kend, k_alignment)) * k_alignment
-                                    ep_psum = ep_nxtk - ep_last
-                                    ep_kend = ep_nxtk
-                                    if ep_psum > 0:
-                                        break
-                                    ep_grp = ep_grp + 1
-                            else:
-                                ep_last = ep_last + ep_psum
-                                ep_grp = ep_nxt
-                                ep_nxt = ep_nxt + 1
-                                ep_psum = ep_nxtk
-                                while ep_nxt < num_groups:
-                                    ep_nxtk = grouped_layout[ep_nxt]
-                                    if ep_nxtk > 0:
-                                        break
-                                    ep_nxt = ep_nxt + 1
-                    ep_cum = ep_vgrp * num_m_blocks
-                elif is_batched:
-                    if ep_nb >= num_blocks * num_groups:
-                        ep_valid = 0
-                    else:
-                        ep_grp = ep_nb // num_blocks
-                        ep_cum = ep_grp * num_m_blocks
-                        ep_nmb = num_m_blocks
-                else:
-                    if ep_nb >= num_blocks:
-                        ep_valid = 0
-                if ep_valid == 1:
-                    accum_stage_e: T.int32
-                    accum_phase_e: T.int32
-                    accum_stage_e = ep_it % NUM_EPILOGUE_STAGES
-                    accum_phase_e = T.bitwise_and(ep_it // NUM_EPILOGUE_STAGES, 1)
-                    ep_wait: T.uint32
-                    ep_wait = T.uint32(0)
-                    while ep_wait == T.uint32(0):
-                        T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-                            ep_wait,
-                            barriers.ptr_to([tmem_full_base + accum_stage_e]),
-                            T.cast(accum_phase_e, "uint32"),
-                            T.uint32(TRY_WAIT_TICKS),
-                        )
-                    T.ptx.tcgen05.fence__after_thread_sync()
-                    # One swizzle walk feeds `base_m`, `base_n` and the tail-block test.
-                    ep_m_local, ep_n_local = _swizzled(
-                        ep_nb - ep_cum * num_n_blocks, ep_nmb, num_n_blocks
+                is_leader_cta = _builder_assign(
+                    "is_leader_cta", True, locals().get("is_leader_cta", _BUILDER_MISSING)
+                )
+            thread_idx = _builder_assign(
+                "thread_idx",
+                T.thread_id([spec.num_non_epilogue_threads + spec.num_epilogue_threads]),
+                locals().get("thread_idx", _BUILDER_MISSING),
+            )
+            lane_idx = _builder_assign(
+                "lane_idx", T.lane_id([32]), locals().get("lane_idx", _BUILDER_MISSING)
+            )
+            warp = _builder_alloc_scalar("warp", "int32")
+            _builder_emit(
+                T.ptx.shfl_sync.idx.b32(
+                    warp, thread_idx // 32, T.uint32(0), T.uint32(31), T.uint32(4294967295)
+                )
+            )
+            smem = _builder_assign(
+                "smem",
+                T.alloc_buffer([spec.smem_size], "uint8", scope="shared.dyn", align=1024),
+                locals().get("smem", _BUILDER_MISSING),
+            )
+            _builder_emit(T.attr({"tirx.dyn_smem_bytes": spec.smem_size}))
+            smem_cd_data = _builder_bind(
+                "smem_cd_data",
+                T.reinterpret(PointerType(PrimType(cd_dtype)), smem.ptr_to([0])),
+                None,
+            )
+            smem_a_data = _builder_bind(
+                "smem_a_data",
+                T.reinterpret(
+                    PointerType(PrimType(a_smem_dtype)), smem.ptr_to([spec.smem_a_offset])
+                ),
+                None,
+            )
+            smem_b_data = _builder_bind(
+                "smem_b_data",
+                T.reinterpret(
+                    PointerType(PrimType(b_smem_dtype)), smem.ptr_to([spec.smem_b_offset])
+                ),
+                None,
+            )
+            smem_sfa_data = _builder_bind(
+                "smem_sfa_data",
+                T.reinterpret(PointerType(PrimType("uint32")), smem.ptr_to([spec.smem_sfa_offset])),
+                None,
+            )
+            smem_sfb_data = _builder_bind(
+                "smem_sfb_data",
+                T.reinterpret(PointerType(PrimType("uint32")), smem.ptr_to([spec.smem_sfb_offset])),
+                None,
+            )
+            smem_bar_data = _builder_bind(
+                "smem_bar_data",
+                T.reinterpret(
+                    PointerType(PrimType("uint64")), smem.ptr_to([spec.smem_barrier_offset])
+                ),
+                None,
+            )
+            smem_tmem_data = _builder_bind(
+                "smem_tmem_data",
+                T.reinterpret(
+                    PointerType(PrimType("uint32")), smem.ptr_to([spec.smem_tmem_ptr_offset])
+                ),
+                None,
+            )
+            smem_cd = _builder_assign(
+                "smem_cd",
+                T.decl_buffer(
+                    (NUM_TMA_STORE_STAGES, store_block_m, store_block_n),
+                    cd_dtype,
+                    data=smem_cd_data,
+                    scope="shared.dyn",
+                    elem_offset=0,
+                    align=1024,
+                ),
+                locals().get("smem_cd", _BUILDER_MISSING),
+            )
+            smem_a = _builder_assign(
+                "smem_a",
+                T.decl_buffer(
+                    (stages, load_block_m, block_k),
+                    a_smem_dtype,
+                    data=smem_a_data,
+                    scope="shared.dyn",
+                    elem_offset=0,
+                    align=1024,
+                    layout=a_layout,
+                ),
+                locals().get("smem_a", _BUILDER_MISSING),
+            )
+            smem_b = _builder_assign(
+                "smem_b",
+                T.decl_buffer(
+                    (stages, load_block_n, block_k),
+                    b_smem_dtype,
+                    data=smem_b_data,
+                    scope="shared.dyn",
+                    elem_offset=0,
+                    align=1024,
+                    layout=b_layout,
+                ),
+                locals().get("smem_b", _BUILDER_MISSING),
+            )
+            smem_sfa = _builder_assign(
+                "smem_sfa",
+                T.decl_buffer(
+                    (stages, sf_block_m),
+                    "uint32",
+                    data=smem_sfa_data,
+                    scope="shared.dyn",
+                    elem_offset=0,
+                    align=16,
+                ),
+                locals().get("smem_sfa", _BUILDER_MISSING),
+            )
+            smem_sfb = _builder_assign(
+                "smem_sfb",
+                T.decl_buffer(
+                    (stages, sf_block_n),
+                    "uint32",
+                    data=smem_sfb_data,
+                    scope="shared.dyn",
+                    elem_offset=0,
+                    align=16,
+                ),
+                locals().get("smem_sfb", _BUILDER_MISSING),
+            )
+            barriers = _builder_assign(
+                "barriers",
+                T.decl_buffer(
+                    (num_barriers,),
+                    "uint64",
+                    data=smem_bar_data,
+                    scope="shared.dyn",
+                    elem_offset=0,
+                    align=8,
+                ),
+                locals().get("barriers", _BUILDER_MISSING),
+            )
+            tmem_slot = _builder_assign(
+                "tmem_slot",
+                T.decl_buffer(
+                    (1,), "uint32", data=smem_tmem_data, scope="shared.dyn", elem_offset=0, align=4
+                ),
+                locals().get("tmem_slot", _BUILDER_MISSING),
+            )
+            smem_cd_word_data = _builder_bind(
+                "smem_cd_word_data",
+                T.reinterpret(PointerType(PrimType("uint32")), smem.ptr_to([0])),
+                None,
+            )
+            smem_cd_u32 = _builder_assign(
+                "smem_cd_u32",
+                T.decl_buffer(
+                    (NUM_TMA_STORE_STAGES * cd_stage_bytes // 4,),
+                    "uint32",
+                    data=smem_cd_word_data,
+                    scope="shared.dyn",
+                    elem_offset=0,
+                    align=1024,
+                ),
+                locals().get("smem_cd_u32", _BUILDER_MISSING),
+            )
+            tmem = _builder_assign(
+                "tmem",
+                T.decl_buffer(
+                    (128, spec.num_tmem_cols),
+                    "float32",
+                    scope="tmem",
+                    allocated_addr=tmem_slot[0],
+                    layout=TileLayout(S[(128, spec.num_tmem_cols) : (1 @ TLane, 1 @ TCol)]),
+                ),
+                locals().get("tmem", _BUILDER_MISSING),
+            )
+            sfa_tmem = _builder_assign(
+                "sfa_tmem",
+                T.decl_buffer(
+                    (128, sf_block_m // 32),
+                    "float8_e8m0fnu",
+                    scope="tmem",
+                    allocated_addr=spec.tmem_start_col_of_sfa,
+                    layout=sf_tmem_layout(128, SF_K=sf_block_m // 32, sf_per_mma=1),
+                ),
+                locals().get("sfa_tmem", _BUILDER_MISSING),
+            )
+            sfb_tmem = _builder_assign(
+                "sfb_tmem",
+                T.decl_buffer(
+                    (128, sf_block_n // 32),
+                    "float8_e8m0fnu",
+                    scope="tmem",
+                    allocated_addr=spec.tmem_start_col_of_sfb,
+                    layout=sf_tmem_layout(128, SF_K=sf_block_n // 32, sf_per_mma=1),
+                ),
+                locals().get("sfb_tmem", _BUILDER_MISSING),
+            )
+            if cta_group > 1:
+                _builder_emit(T.ptx.barrier.cluster.arrive.relaxed.aligned())
+                _builder_emit(T.ptx.barrier.cluster.wait.acquire.aligned())
+            with T.If(warp == 0):
+                with T.Then():
+                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_a))))
+                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_b))))
+                    _builder_emit(
+                        T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_sfa)))
                     )
-                    base_m: T.int32
-                    base_n: T.int32
-                    base_m = (
-                        ep_m_local + (_udiv(ep_last, block_m) if is_m_grouped_psum else 0)
-                    ) * block_m
-                    base_n = ep_n_local * block_n
-                    if is_m_grouped_masked or is_k_grouped:
-                        base_m = ep_grp * eff_m + base_m
-                    tmem_base: T.int32
-                    tmem_base = accum_stage_e * umma_n
-
-                    # `num_stores = effective_m / STORE_BLOCK_M` (sketch `:1276`).
-                    ep_stores: T.int32
-                    if use_effective_m:
-                        # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
-                        ep_eff_m: T.int32
-                        ep_eff_m = block_m
-                        with T.If(ep_m_local == ep_nmb - 1), T.Then():
-                            ep_eff_m = (
-                                _uceil(
-                                    ep_psum - (ep_m_local + _udiv(ep_last, block_m)) * block_m,
-                                    UMMA_STEP_N,
+                    _builder_emit(
+                        T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_sfb)))
+                    )
+                    _builder_emit(T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_cd))))
+            with T.If(warp == 1):
+                with T.Then():
+                    init_elected = _builder_alloc_scalar("init_elected", "uint32")
+                    init_elected_lane = _builder_alloc_scalar("init_elected_lane", "uint32")
+                    _builder_emit(
+                        T.ptx.elect_sync(init_elected_lane, init_elected, T.uint32(4294967295))
+                    )
+                    with T.If(init_elected == T.uint32(1)):
+                        with T.Then():
+                            with T.unroll(0, stages) as s:
+                                IRBuilder.name("s", s)
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        barriers.ptr_to([full_base + s]), T.uint32(1)
+                                    )
                                 )
-                                * UMMA_STEP_N
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        barriers.ptr_to([empty_base + s]), T.uint32(1)
+                                    )
+                                )
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        barriers.ptr_to([with_sf_base + s]),
+                                        T.uint32(cta_group * 32),
+                                    )
+                                )
+                            with T.unroll(0, NUM_EPILOGUE_STAGES) as e:
+                                IRBuilder.name("e", e)
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        barriers.ptr_to([tmem_full_base + e]), T.uint32(1)
+                                    )
+                                )
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        barriers.ptr_to([tmem_empty_base + e]),
+                                        T.uint32(cta_group * num_store_threads),
+                                    )
+                                )
+                            _builder_emit(T.evaluate(T.ptx.fence.mbarrier_init.release.cluster()))
+                with T.Else():
+                    with T.If(warp == 2):
+                        with T.Then():
+                            _builder_emit(
+                                T.ptx[
+                                    f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"
+                                ](T.address_of(tmem_slot[0]), T.uint32(spec.num_tmem_cols))
                             )
-                        ep_stores = _udiv(ep_eff_m, store_block_m)
-                    else:
-                        ep_stores = num_swap_stores
-
-                    if swap_ab:
-                        for st in T.unroll(0, num_swap_stores):
-                            with T.If(st < ep_stores), T.Then():
-                                if ep_warp == 0:
-                                    T.evaluate(
-                                        T.ptx.cp.async_.bulk.wait_group(NUM_TMA_STORE_STAGES - 1)
-                                    )
-                                T.ptx.bar.sync(
-                                    T.uint32(EPILOGUE_NAMED_BARRIER), T.uint32(num_store_threads)
+            if cta_group > 1:
+                _builder_emit(T.ptx.barrier.cluster.arrive.relaxed.aligned())
+                _builder_emit(T.ptx.barrier.cluster.wait.acquire.aligned())
+            else:
+                _builder_emit(T.ptx.bar.sync(T.uint32(0)))
+            _builder_emit(T.evaluate(T.ptx.griddepcontrol.wait()))
+            eff_m = _builder_scalar("eff_m", spec.shape_m if spec.shape_m > 0 else shape_m, "int32")
+            eff_n = _builder_scalar("eff_n", spec.shape_n if spec.shape_n > 0 else shape_n, "int32")
+            eff_k = _builder_scalar("eff_k", spec.shape_k if spec.shape_k > 0 else shape_k, "int32")
+            num_m_blocks = _builder_alloc_scalar("num_m_blocks", "int32")
+            num_n_blocks = _builder_alloc_scalar("num_n_blocks", "int32")
+            num_blocks = _builder_alloc_scalar("num_blocks", "int32")
+            num_k_blocks = _builder_alloc_scalar("num_k_blocks", "int32")
+            num_m_blocks = _builder_assign(
+                "num_m_blocks",
+                _uceil(eff_m, block_m),
+                locals().get("num_m_blocks", _BUILDER_MISSING),
+            )
+            num_n_blocks = _builder_assign(
+                "num_n_blocks",
+                (eff_n + (block_n - 1)) // block_n,
+                locals().get("num_n_blocks", _BUILDER_MISSING),
+            )
+            num_blocks = _builder_assign(
+                "num_blocks",
+                num_m_blocks * num_n_blocks,
+                locals().get("num_blocks", _BUILDER_MISSING),
+            )
+            num_k_blocks = _builder_assign(
+                "num_k_blocks",
+                _uceil(eff_k, block_k),
+                locals().get("num_k_blocks", _BUILDER_MISSING),
+            )
+            shape_sfa_k = _builder_alloc_scalar("shape_sfa_k", "int32")
+            shape_sfb_k = _builder_alloc_scalar("shape_sfb_k", "int32")
+            shape_sfa_k = _builder_assign(
+                "shape_sfa_k",
+                (eff_k + (spec.gran_k_a * 4 - 1)) // (spec.gran_k_a * 4),
+                locals().get("shape_sfa_k", _BUILDER_MISSING),
+            )
+            shape_sfb_k = _builder_assign(
+                "shape_sfb_k",
+                (eff_k + (spec.gran_k_b * 4 - 1)) // (spec.gran_k_b * 4),
+                locals().get("shape_sfb_k", _BUILDER_MISSING),
+            )
+            with T.If(warp == 0):
+                with T.Then():
+                    ld_elected = _builder_alloc_scalar("ld_elected", "uint32")
+                    ld_elected_lane = _builder_alloc_scalar("ld_elected_lane", "uint32")
+                    _builder_emit(
+                        T.ptx.elect_sync(ld_elected_lane, ld_elected, T.uint32(4294967295))
+                    )
+                    with T.If(ld_elected == T.uint32(1)):
+                        with T.Then():
+                            ld_stage = _builder_alloc_scalar("ld_stage", "int32")
+                            ld_phase = _builder_alloc_scalar("ld_phase", "int32")
+                            ld_stage = _builder_assign(
+                                "ld_stage", 0, locals().get("ld_stage", _BUILDER_MISSING)
+                            )
+                            ld_phase = _builder_assign(
+                                "ld_phase", 0, locals().get("ld_phase", _BUILDER_MISSING)
+                            )
+                            ld_it = _builder_alloc_scalar("ld_it", "int32")
+                            ld_valid = _builder_alloc_scalar("ld_valid", "int32")
+                            ld_grp = _builder_alloc_scalar("ld_grp", "int32")
+                            ld_cum = _builder_alloc_scalar("ld_cum", "int32")
+                            ld_nmb = _builder_alloc_scalar("ld_nmb", "int32")
+                            ld_last = _builder_alloc_scalar("ld_last", "int32")
+                            ld_psum = _builder_alloc_scalar("ld_psum", "int32")
+                            ld_nb = _builder_alloc_scalar("ld_nb", "int32")
+                            ld_nxt = _builder_alloc_scalar("ld_nxt", "int32")
+                            ld_nxtk = _builder_alloc_scalar("ld_nxtk", "int32")
+                            ld_sfk = _builder_alloc_scalar("ld_sfk", "int32")
+                            ld_kblocks = _builder_alloc_scalar("ld_kblocks", "int32")
+                            ld_vgrp = _builder_alloc_scalar("ld_vgrp", "int32")
+                            ld_kend = _builder_alloc_scalar("ld_kend", "int32")
+                            ld_it = _builder_assign(
+                                "ld_it", 0, locals().get("ld_it", _BUILDER_MISSING)
+                            )
+                            ld_valid = _builder_assign(
+                                "ld_valid", 1, locals().get("ld_valid", _BUILDER_MISSING)
+                            )
+                            ld_grp = _builder_assign(
+                                "ld_grp", 0, locals().get("ld_grp", _BUILDER_MISSING)
+                            )
+                            ld_cum = _builder_assign(
+                                "ld_cum", 0, locals().get("ld_cum", _BUILDER_MISSING)
+                            )
+                            ld_last = _builder_assign(
+                                "ld_last", 0, locals().get("ld_last", _BUILDER_MISSING)
+                            )
+                            ld_sfk = _builder_assign(
+                                "ld_sfk", 0, locals().get("ld_sfk", _BUILDER_MISSING)
+                            )
+                            ld_vgrp = _builder_assign(
+                                "ld_vgrp", 0, locals().get("ld_vgrp", _BUILDER_MISSING)
+                            )
+                            ld_kend = _builder_assign(
+                                "ld_kend", 0, locals().get("ld_kend", _BUILDER_MISSING)
+                            )
+                            ld_nxt = _builder_assign(
+                                "ld_nxt", 0, locals().get("ld_nxt", _BUILDER_MISSING)
+                            )
+                            ld_nxtk = _builder_assign(
+                                "ld_nxtk", 0, locals().get("ld_nxtk", _BUILDER_MISSING)
+                            )
+                            ld_kblocks = _builder_assign(
+                                "ld_kblocks", 0, locals().get("ld_kblocks", _BUILDER_MISSING)
+                            )
+                            if is_k_grouped:
+                                ld_psum = _builder_assign(
+                                    "ld_psum", 0, locals().get("ld_psum", _BUILDER_MISSING)
                                 )
-                                for i in T.unroll(0, num_atom_rows):
-                                    taddr_s: T.uint32
-                                    taddr_s = T.cast(
-                                        tmem_base + st * store_block_m + i * 8, "uint32"
-                                    )
-                                    atom_byte = (
-                                        ep_warp // warps_per_atom
-                                    ) * store_block_m * swizzle_cd + i * 8 * swizzle_cd
-                                    if cd_is_fp32:
-                                        T.evaluate(
-                                            T.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
-                                                *[values[j] for j in range(8)], taddr_s
-                                            )
+                                ld_nmb = _builder_assign(
+                                    "ld_nmb", num_m_blocks, locals().get("ld_nmb", _BUILDER_MISSING)
+                                )
+                                if is_k_grouped_psum:
+                                    with T.While(ld_grp < num_groups):
+                                        ld_nxtk = _builder_assign(
+                                            "ld_nxtk",
+                                            grouped_layout[ld_grp],
+                                            locals().get("ld_nxtk", _BUILDER_MISSING),
                                         )
-                                        T.ptx.tcgen05.wait__ld.sync.aligned()
-                                        col_f: T.int32
-                                        col_f = lane_idx // 4
-                                        for row in T.unroll(0, 8):
-                                            smem_cd_u32[
-                                                (
-                                                    tma_stage * cd_stage_bytes
-                                                    + atom_byte
-                                                    + row * (16 * 8)
-                                                    + T.bitwise_xor(col_f, row) * 16
-                                                    + (lane_idx % 4) * 4
+                                        ld_last = _builder_assign(
+                                            "ld_last",
+                                            _uceil(ld_kend, k_alignment) * k_alignment,
+                                            locals().get("ld_last", _BUILDER_MISSING),
+                                        )
+                                        ld_psum = _builder_assign(
+                                            "ld_psum",
+                                            ld_nxtk - ld_last,
+                                            locals().get("ld_psum", _BUILDER_MISSING),
+                                        )
+                                        ld_kend = _builder_assign(
+                                            "ld_kend",
+                                            ld_nxtk,
+                                            locals().get("ld_kend", _BUILDER_MISSING),
+                                        )
+                                        with T.If(ld_psum > 0):
+                                            with T.Then():
+                                                T.evaluate(T.break_loop())
+                                        ld_grp = _builder_assign(
+                                            "ld_grp",
+                                            ld_grp + 1,
+                                            locals().get("ld_grp", _BUILDER_MISSING),
+                                        )
+                                else:
+                                    with T.While(ld_grp < num_groups):
+                                        ld_psum = _builder_assign(
+                                            "ld_psum",
+                                            grouped_layout[ld_grp],
+                                            locals().get("ld_psum", _BUILDER_MISSING),
+                                        )
+                                        with T.If(ld_psum > 0):
+                                            with T.Then():
+                                                T.evaluate(T.break_loop())
+                                        ld_grp = _builder_assign(
+                                            "ld_grp",
+                                            ld_grp + 1,
+                                            locals().get("ld_grp", _BUILDER_MISSING),
+                                        )
+                                    ld_nxt = _builder_assign(
+                                        "ld_nxt",
+                                        ld_grp + 1,
+                                        locals().get("ld_nxt", _BUILDER_MISSING),
+                                    )
+                                    with T.While(ld_nxt < num_groups):
+                                        ld_nxtk = _builder_assign(
+                                            "ld_nxtk",
+                                            grouped_layout[ld_nxt],
+                                            locals().get("ld_nxtk", _BUILDER_MISSING),
+                                        )
+                                        with T.If(ld_nxtk > 0):
+                                            with T.Then():
+                                                T.evaluate(T.break_loop())
+                                        ld_nxt = _builder_assign(
+                                            "ld_nxt",
+                                            ld_nxt + 1,
+                                            locals().get("ld_nxt", _BUILDER_MISSING),
+                                        )
+                            elif is_m_grouped_psum:
+                                ld_psum = _builder_assign(
+                                    "ld_psum",
+                                    grouped_layout[0],
+                                    locals().get("ld_psum", _BUILDER_MISSING),
+                                )
+                                ld_nmb = _builder_assign(
+                                    "ld_nmb",
+                                    _uceil(ld_psum, block_m),
+                                    locals().get("ld_nmb", _BUILDER_MISSING),
+                                )
+                            else:
+                                ld_psum = _builder_assign(
+                                    "ld_psum", 0, locals().get("ld_psum", _BUILDER_MISSING)
+                                )
+                                ld_nmb = _builder_assign(
+                                    "ld_nmb", num_m_blocks, locals().get("ld_nmb", _BUILDER_MISSING)
+                                )
+                            with T.While(ld_valid == 1):
+                                ld_nb = _builder_assign(
+                                    "ld_nb",
+                                    ld_it * num_sms + sm_idx,
+                                    locals().get("ld_nb", _BUILDER_MISSING),
+                                )
+                                ld_done = _builder_alloc_scalar("ld_done", "int32")
+                                ld_done = _builder_assign(
+                                    "ld_done", 0, locals().get("ld_done", _BUILDER_MISSING)
+                                )
+                                if is_m_grouped_masked:
+                                    with T.While(ld_done == 0):
+                                        with T.If(ld_grp == num_groups):
+                                            with T.Then():
+                                                ld_valid = _builder_assign(
+                                                    "ld_valid",
+                                                    0,
+                                                    locals().get("ld_valid", _BUILDER_MISSING),
                                                 )
-                                                // 4
-                                            ] = values[row]
-                                    else:
-                                        # Two `16x256b` slices: the second takes the upper
-                                        # 16 rows via bit 20 of the TMEM address.
-                                        T.evaluate(
-                                            T.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
-                                                values[0], values[1], values[2], values[3], taddr_s
-                                            )
-                                        )
-                                        T.evaluate(
-                                            T.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
-                                                values[4],
-                                                values[5],
-                                                values[6],
-                                                values[7],
-                                                T.bitwise_or(taddr_s, T.uint32(0x00100000)),
-                                            )
-                                        )
-                                        T.ptx.tcgen05.wait__ld.sync.aligned()
-                                        for j in T.unroll(0, 4):
-                                            # `cvt.rn.bf16x2.f32 d, a, b` packs a
-                                            # into the UPPER half and b into the
-                                            # lower, the reverse of the
-                                            # `make_float2(lo, hi)` helper this
-                                            # replaces -- hence the swap.
-                                            T.ptx.cvt.rn.bf16x2.f32(
-                                                packed[j],
-                                                T.reinterpret("float32", values[2 * j + 1]),
-                                                T.reinterpret("float32", values[2 * j]),
-                                            )
-                                        row_s: T.int32
-                                        col_s: T.int32
-                                        row_s = lane_idx % 8
-                                        col_s = (ep_warp % 2) * 4 + lane_idx // 8
-                                        T.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                                            smem_cd_u32.ptr_to(
-                                                [
-                                                    (
-                                                        tma_stage * cd_stage_bytes
-                                                        + atom_byte
-                                                        + row_s * (16 * 8)
-                                                        + T.bitwise_xor(col_s, row_s) * 16
-                                                    )
-                                                    // 4
-                                                ]
-                                            ),
-                                            packed[0],
-                                            packed[1],
-                                            packed[2],
-                                            packed[3],
-                                        )
-
-                                if st == ep_stores - 1:
-                                    T.ptx.tcgen05.fence__before_thread_sync()
-                                    rem_s = T.alloc_local((1,), "uint64")
-                                    T.ptx.mapa.shared__cluster.u64(
-                                        rem_s[0],
-                                        barriers.ptr_to([tmem_empty_base + accum_stage_e]),
-                                        T.uint32(0),
-                                    )
-                                    T.ptx.mbarrier.arrive.b64(
-                                        rem_s[0], T.uint32(1), pred=T.bool(True)
-                                    )
-
-                                T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
-                                T.ptx.bar.sync(
-                                    T.uint32(EPILOGUE_NAMED_BARRIER), T.uint32(num_store_threads)
-                                )
-                                if ep_warp == 0:
-                                    # The store is issued by one elected lane; predicate rather than
-                                    # branch so the epilogue warp stays converged.
-                                    ep_elected: T.uint32
-                                    ep_elected_lane: T.uint32
-                                    T.ptx.elect_sync(
-                                        ep_elected_lane, ep_elected, T.uint32(0xFFFFFFFF)
-                                    )
-                                    for i in T.unroll(0, num_n_atoms):
-                                        T.evaluate(
-                                            T.ptx[
-                                                reduce_chain if with_accumulation else store_chain
-                                            ](
-                                                T.address_of(tensor_map_cd),
-                                                *_tma_coords(
-                                                    (
-                                                        base_n + i * store_block_n_atom,
-                                                        base_m + st * store_block_m,
-                                                    ),
-                                                    ep_grp,
-                                                ),
-                                                smem_cd_u32.ptr_to(
-                                                    [
-                                                        (
-                                                            tma_stage * cd_stage_bytes
-                                                            + i * store_block_m * swizzle_cd
+                                                ld_done = _builder_assign(
+                                                    "ld_done",
+                                                    1,
+                                                    locals().get("ld_done", _BUILDER_MISSING),
+                                                )
+                                            with T.Else():
+                                                ld_nmb = _builder_assign(
+                                                    "ld_nmb",
+                                                    _uceil(grouped_layout[ld_grp], block_m),
+                                                    locals().get("ld_nmb", _BUILDER_MISSING),
+                                                )
+                                                with T.If(ld_nb < (ld_cum + ld_nmb) * num_n_blocks):
+                                                    with T.Then():
+                                                        ld_done = _builder_assign(
+                                                            "ld_done",
+                                                            1,
+                                                            locals().get(
+                                                                "ld_done", _BUILDER_MISSING
+                                                            ),
                                                         )
-                                                        // 4
-                                                    ]
-                                                ),
-                                                pred=ep_elected == T.uint32(1),
+                                                    with T.Else():
+                                                        ld_cum = _builder_assign(
+                                                            "ld_cum",
+                                                            ld_cum + ld_nmb,
+                                                            locals().get(
+                                                                "ld_cum", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ld_grp = _builder_assign(
+                                                            "ld_grp",
+                                                            ld_grp + 1,
+                                                            locals().get(
+                                                                "ld_grp", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                elif is_m_grouped_psum:
+                                    with T.While(ld_done == 0):
+                                        with T.If(ld_nb < (ld_cum + ld_nmb) * num_n_blocks):
+                                            with T.Then():
+                                                ld_done = _builder_assign(
+                                                    "ld_done",
+                                                    1,
+                                                    locals().get("ld_done", _BUILDER_MISSING),
+                                                )
+                                            with T.Else():
+                                                ld_grp = _builder_assign(
+                                                    "ld_grp",
+                                                    ld_grp + 1,
+                                                    locals().get("ld_grp", _BUILDER_MISSING),
+                                                )
+                                                with T.If(ld_grp == num_groups):
+                                                    with T.Then():
+                                                        ld_valid = _builder_assign(
+                                                            "ld_valid",
+                                                            0,
+                                                            locals().get(
+                                                                "ld_valid", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ld_done = _builder_assign(
+                                                            "ld_done",
+                                                            1,
+                                                            locals().get(
+                                                                "ld_done", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    with T.Else():
+                                                        ld_last = _builder_assign(
+                                                            "ld_last",
+                                                            _uceil(ld_psum, block_m) * block_m,
+                                                            locals().get(
+                                                                "ld_last", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ld_psum = _builder_assign(
+                                                            "ld_psum",
+                                                            grouped_layout[ld_grp],
+                                                            locals().get(
+                                                                "ld_psum", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ld_cum = _builder_assign(
+                                                            "ld_cum",
+                                                            ld_cum + ld_nmb,
+                                                            locals().get(
+                                                                "ld_cum", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ld_nmb = _builder_assign(
+                                                            "ld_nmb",
+                                                            _uceil(ld_psum - ld_last, block_m),
+                                                            locals().get(
+                                                                "ld_nmb", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                elif is_k_grouped:
+                                    with T.While(ld_done == 0):
+                                        with T.If(ld_grp == num_groups):
+                                            with T.Then():
+                                                ld_valid = _builder_assign(
+                                                    "ld_valid",
+                                                    0,
+                                                    locals().get("ld_valid", _BUILDER_MISSING),
+                                                )
+                                                ld_done = _builder_assign(
+                                                    "ld_done",
+                                                    1,
+                                                    locals().get("ld_done", _BUILDER_MISSING),
+                                                )
+                                            with T.Else():
+                                                with T.If(ld_nb < (ld_vgrp + 1) * num_blocks):
+                                                    with T.Then():
+                                                        ld_done = _builder_assign(
+                                                            "ld_done",
+                                                            1,
+                                                            locals().get(
+                                                                "ld_done", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    with T.Else():
+                                                        ld_sfk = _builder_assign(
+                                                            "ld_sfk",
+                                                            ld_sfk + _uceil(ld_psum, sf_k_span),
+                                                            locals().get(
+                                                                "ld_sfk", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ld_vgrp = _builder_assign(
+                                                            "ld_vgrp",
+                                                            ld_vgrp + 1,
+                                                            locals().get(
+                                                                "ld_vgrp", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        if is_k_grouped_psum:
+                                                            ld_grp = _builder_assign(
+                                                                "ld_grp",
+                                                                ld_grp + 1,
+                                                                locals().get(
+                                                                    "ld_grp", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            with T.While(ld_grp < num_groups):
+                                                                ld_nxtk = _builder_assign(
+                                                                    "ld_nxtk",
+                                                                    grouped_layout[ld_grp],
+                                                                    locals().get(
+                                                                        "ld_nxtk", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                ld_last = _builder_assign(
+                                                                    "ld_last",
+                                                                    _uceil(ld_kend, k_alignment)
+                                                                    * k_alignment,
+                                                                    locals().get(
+                                                                        "ld_last", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                ld_psum = _builder_assign(
+                                                                    "ld_psum",
+                                                                    ld_nxtk - ld_last,
+                                                                    locals().get(
+                                                                        "ld_psum", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                ld_kend = _builder_assign(
+                                                                    "ld_kend",
+                                                                    ld_nxtk,
+                                                                    locals().get(
+                                                                        "ld_kend", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                with T.If(ld_psum > 0):
+                                                                    with T.Then():
+                                                                        T.evaluate(T.break_loop())
+                                                                ld_grp = _builder_assign(
+                                                                    "ld_grp",
+                                                                    ld_grp + 1,
+                                                                    locals().get(
+                                                                        "ld_grp", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                        else:
+                                                            ld_last = _builder_assign(
+                                                                "ld_last",
+                                                                ld_last + ld_psum,
+                                                                locals().get(
+                                                                    "ld_last", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            ld_grp = _builder_assign(
+                                                                "ld_grp",
+                                                                ld_nxt,
+                                                                locals().get(
+                                                                    "ld_grp", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            ld_nxt = _builder_assign(
+                                                                "ld_nxt",
+                                                                ld_nxt + 1,
+                                                                locals().get(
+                                                                    "ld_nxt", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            ld_psum = _builder_assign(
+                                                                "ld_psum",
+                                                                ld_nxtk,
+                                                                locals().get(
+                                                                    "ld_psum", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            with T.While(ld_nxt < num_groups):
+                                                                ld_nxtk = _builder_assign(
+                                                                    "ld_nxtk",
+                                                                    grouped_layout[ld_nxt],
+                                                                    locals().get(
+                                                                        "ld_nxtk", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                with T.If(ld_nxtk > 0):
+                                                                    with T.Then():
+                                                                        T.evaluate(T.break_loop())
+                                                                ld_nxt = _builder_assign(
+                                                                    "ld_nxt",
+                                                                    ld_nxt + 1,
+                                                                    locals().get(
+                                                                        "ld_nxt", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                    ld_cum = _builder_assign(
+                                        "ld_cum",
+                                        ld_vgrp * num_m_blocks,
+                                        locals().get("ld_cum", _BUILDER_MISSING),
+                                    )
+                                elif is_batched:
+                                    with T.If(ld_nb >= num_blocks * num_groups):
+                                        with T.Then():
+                                            ld_valid = _builder_assign(
+                                                "ld_valid",
+                                                0,
+                                                locals().get("ld_valid", _BUILDER_MISSING),
                                             )
+                                        with T.Else():
+                                            ld_grp = _builder_assign(
+                                                "ld_grp",
+                                                ld_nb // num_blocks,
+                                                locals().get("ld_grp", _BUILDER_MISSING),
+                                            )
+                                            ld_cum = _builder_assign(
+                                                "ld_cum",
+                                                ld_grp * num_m_blocks,
+                                                locals().get("ld_cum", _BUILDER_MISSING),
+                                            )
+                                            ld_nmb = _builder_assign(
+                                                "ld_nmb",
+                                                num_m_blocks,
+                                                locals().get("ld_nmb", _BUILDER_MISSING),
+                                            )
+                                if not (
+                                    is_m_grouped_masked
+                                    or is_m_grouped_psum
+                                    or is_k_grouped
+                                    or is_batched
+                                ):
+                                    with T.If(ld_nb >= num_blocks):
+                                        with T.Then():
+                                            ld_valid = _builder_assign(
+                                                "ld_valid",
+                                                0,
+                                                locals().get("ld_valid", _BUILDER_MISSING),
+                                            )
+                                with T.If(ld_valid == 1):
+                                    with T.Then():
+                                        ld_kblocks = _builder_assign(
+                                            "ld_kblocks",
+                                            _uceil(ld_psum, block_k)
+                                            if is_k_grouped
+                                            else num_k_blocks,
+                                            locals().get("ld_kblocks", _BUILDER_MISSING),
                                         )
-                                    T.evaluate(T.ptx.cp.async_.bulk.commit_group())
-                                T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF))
-                                tma_stage = T.Select(
-                                    tma_stage == NUM_TMA_STORE_STAGES - 1, 0, tma_stage + 1
-                                )
-                    else:
-                        for w in T.unroll(0, num_m_waves):
-                            for st in T.unroll(0, num_stores):
-                                if ep_warp == 0:
-                                    T.evaluate(
-                                        T.ptx.cp.async_.bulk.wait_group(NUM_TMA_STORE_STAGES - 1)
-                                    )
-                                T.ptx.bar.sync(
-                                    T.uint32(EPILOGUE_NAMED_BARRIER), T.uint32(num_store_threads)
-                                )
-                                for i in T.unroll(0, elems_per_store):
-                                    bank_group = i + lane_idx * (swizzle_cd // 16)
-                                    row = (i // 8 + lane_idx) if has_shortcut else (bank_group // 8)
-                                    col = i if has_shortcut else (bank_group % 8)
-                                    col = T.bitwise_xor(col, row % (swizzle_cd // 16))
-                                    # `smem_ptr` in the source: one address per bank
-                                    # group, four registers stored at it.
-                                    cd_word: T.int32
-                                    cd_word = _cd_word(tma_stage, ep_warp, row, col, 0)
-                                    taddr: T.uint32
-                                    taddr = T.cast(
-                                        tmem_base
-                                        + w * block_n
-                                        + st * store_block_n
-                                        + i * elems_per_bank_group,
-                                        "uint32",
-                                    )
-                                    if cd_is_fp32:
-                                        T.evaluate(
-                                            T.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
-                                                values[0], values[1], values[2], values[3], taddr
-                                            )
-                                        )
-                                        T.ptx.tcgen05.wait__ld.sync.aligned()
-                                        for j in T.unroll(0, 4):
-                                            smem_cd_u32[cd_word + j] = values[j]
-                                    else:
-                                        T.evaluate(
-                                            T.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
-                                                *[values[j] for j in range(8)], taddr
-                                            )
-                                        )
-                                        T.ptx.tcgen05.wait__ld.sync.aligned()
-                                        for j in T.unroll(0, 4):
-                                            # `cvt.rn.bf16x2.f32 d, a, b` packs a
-                                            # into the UPPER half and b into the
-                                            # lower, the reverse of the
-                                            # `make_float2(lo, hi)` helper this
-                                            # replaces -- hence the swap.
-                                            T.ptx.cvt.rn.bf16x2.f32(
-                                                packed[j],
-                                                T.reinterpret("float32", values[2 * j + 1]),
-                                                T.reinterpret("float32", values[2 * j]),
-                                            )
-                                        for j in T.unroll(0, 4):
-                                            smem_cd_u32[cd_word + j] = packed[j]
-
-                                if w == num_m_waves - 1 and st == num_stores - 1:
-                                    T.ptx.tcgen05.fence__before_thread_sync()
-                                    rem_e = T.alloc_local((1,), "uint64")
-                                    T.ptx.mapa.shared__cluster.u64(
-                                        rem_e[0],
-                                        barriers.ptr_to([tmem_empty_base + accum_stage_e]),
-                                        T.uint32(0),
-                                    )
-                                    T.ptx.mbarrier.arrive.b64(
-                                        rem_e[0], T.uint32(1), pred=T.bool(True)
-                                    )
-
-                                T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
-                                T.ptx.bar.sync(
-                                    T.uint32(EPILOGUE_NAMED_BARRIER), T.uint32(num_store_threads)
-                                )
-                                if ep_warp == 0:
-                                    # The store is issued by one elected lane; predicate rather than
-                                    # branch so the epilogue warp stays converged.
-                                    ep_elected: T.uint32
-                                    ep_elected_lane: T.uint32
-                                    T.ptx.elect_sync(
-                                        ep_elected_lane, ep_elected, T.uint32(0xFFFFFFFF)
-                                    )
-                                    T.evaluate(
-                                        T.ptx[reduce_chain if with_accumulation else store_chain](
-                                            T.address_of(tensor_map_cd),
-                                            *_tma_coords(
-                                                (
-                                                    base_n + st * store_block_n,
-                                                    base_m + w * store_block_m,
-                                                ),
-                                                ep_grp,
+                                        ld_m_local, ld_n_local = _builder_assign_many(
+                                            ("ld_m_local", "ld_n_local"),
+                                            _swizzled(
+                                                ld_nb - ld_cum * num_n_blocks, ld_nmb, num_n_blocks
                                             ),
-                                            smem_cd.ptr_to([tma_stage, 0, 0]),
-                                            pred=ep_elected == T.uint32(1),
+                                            (
+                                                locals().get("ld_m_local", _BUILDER_MISSING),
+                                                locals().get("ld_n_local", _BUILDER_MISSING),
+                                            ),
+                                        )
+                                        m_idx = _builder_alloc_scalar("m_idx", "int32")
+                                        n_idx = _builder_alloc_scalar("n_idx", "int32")
+                                        m_idx = _builder_assign(
+                                            "m_idx",
+                                            (
+                                                ld_m_local
+                                                + (
+                                                    _udiv(ld_last, block_m)
+                                                    if is_m_grouped_psum
+                                                    else 0
+                                                )
+                                            )
+                                            * block_m,
+                                            locals().get("m_idx", _BUILDER_MISSING),
+                                        )
+                                        n_idx = _builder_assign(
+                                            "n_idx",
+                                            ld_n_local * block_n,
+                                            locals().get("n_idx", _BUILDER_MISSING),
+                                        )
+                                        sfa_mn = _builder_alloc_scalar("sfa_mn", "int32")
+                                        sfb_mn = _builder_alloc_scalar("sfb_mn", "int32")
+                                        sfa_mn = _builder_assign(
+                                            "sfa_mn",
+                                            m_idx,
+                                            locals().get("sfa_mn", _BUILDER_MISSING),
+                                        )
+                                        sfb_mn = _builder_assign(
+                                            "sfb_mn",
+                                            n_idx,
+                                            locals().get("sfb_mn", _BUILDER_MISSING),
+                                        )
+                                        k_b_idx = _builder_alloc_scalar("k_b_idx", "int32")
+                                        k_a_offset = _builder_alloc_scalar("k_a_offset", "int32")
+                                        k_b_idx = _builder_assign(
+                                            "k_b_idx", 0, locals().get("k_b_idx", _BUILDER_MISSING)
+                                        )
+                                        k_a_offset = _builder_assign(
+                                            "k_a_offset",
+                                            0,
+                                            locals().get("k_a_offset", _BUILDER_MISSING),
+                                        )
+                                        sfa_k_offset = _builder_alloc_scalar(
+                                            "sfa_k_offset", "int32"
+                                        )
+                                        sfa_k_offset = _builder_assign(
+                                            "sfa_k_offset",
+                                            0,
+                                            locals().get("sfa_k_offset", _BUILDER_MISSING),
+                                        )
+                                        if is_m_grouped_contiguous:
+                                            expert = _builder_alloc_scalar("expert", "int32")
+                                            expert = _builder_assign(
+                                                "expert",
+                                                T.max(0, grouped_layout[m_idx]),
+                                                locals().get("expert", _BUILDER_MISSING),
+                                            )
+                                            if major_b_is_k:
+                                                n_idx = _builder_assign(
+                                                    "n_idx",
+                                                    expert * eff_n + n_idx,
+                                                    locals().get("n_idx", _BUILDER_MISSING),
+                                                )
+                                            else:
+                                                k_b_idx = _builder_assign(
+                                                    "k_b_idx",
+                                                    expert * eff_k + k_b_idx,
+                                                    locals().get("k_b_idx", _BUILDER_MISSING),
+                                                )
+                                            sfb_k_offset = _builder_assign(
+                                                "sfb_k_offset",
+                                                expert * shape_sfb_k,
+                                                locals().get("sfb_k_offset", _BUILDER_MISSING),
+                                            )
+                                        elif is_m_grouped_masked:
+                                            m_idx = _builder_assign(
+                                                "m_idx",
+                                                ld_grp * eff_m + m_idx,
+                                                locals().get("m_idx", _BUILDER_MISSING),
+                                            )
+                                            if major_b_is_k:
+                                                n_idx = _builder_assign(
+                                                    "n_idx",
+                                                    ld_grp * eff_n + n_idx,
+                                                    locals().get("n_idx", _BUILDER_MISSING),
+                                                )
+                                            else:
+                                                k_b_idx = _builder_assign(
+                                                    "k_b_idx",
+                                                    ld_grp * eff_k + k_b_idx,
+                                                    locals().get("k_b_idx", _BUILDER_MISSING),
+                                                )
+                                            sfa_k_offset = _builder_assign(
+                                                "sfa_k_offset",
+                                                ld_grp * shape_sfa_k,
+                                                locals().get("sfa_k_offset", _BUILDER_MISSING),
+                                            )
+                                            sfb_k_offset = _builder_assign(
+                                                "sfb_k_offset",
+                                                ld_grp * shape_sfb_k,
+                                                locals().get("sfb_k_offset", _BUILDER_MISSING),
+                                            )
+                                        elif is_m_grouped_psum:
+                                            if major_b_is_k:
+                                                n_idx = _builder_assign(
+                                                    "n_idx",
+                                                    ld_grp * eff_n + n_idx,
+                                                    locals().get("n_idx", _BUILDER_MISSING),
+                                                )
+                                            else:
+                                                k_b_idx = _builder_assign(
+                                                    "k_b_idx",
+                                                    ld_grp * eff_k + k_b_idx,
+                                                    locals().get("k_b_idx", _BUILDER_MISSING),
+                                                )
+                                            sfb_k_offset = _builder_assign(
+                                                "sfb_k_offset",
+                                                ld_grp * shape_sfb_k,
+                                                locals().get("sfb_k_offset", _BUILDER_MISSING),
+                                            )
+                                        elif is_k_grouped:
+                                            k_a_offset = _builder_assign(
+                                                "k_a_offset",
+                                                ld_last,
+                                                locals().get("k_a_offset", _BUILDER_MISSING),
+                                            )
+                                            k_b_idx = _builder_assign(
+                                                "k_b_idx",
+                                                ld_last,
+                                                locals().get("k_b_idx", _BUILDER_MISSING),
+                                            )
+                                            sfa_k_offset = _builder_assign(
+                                                "sfa_k_offset",
+                                                ld_sfk,
+                                                locals().get("sfa_k_offset", _BUILDER_MISSING),
+                                            )
+                                            sfb_k_offset = _builder_assign(
+                                                "sfb_k_offset",
+                                                ld_sfk,
+                                                locals().get("sfb_k_offset", _BUILDER_MISSING),
+                                            )
+                                        elif is_batched:
+                                            sfa_k_offset = _builder_assign(
+                                                "sfa_k_offset",
+                                                ld_grp * shape_sfa_k,
+                                                locals().get("sfa_k_offset", _BUILDER_MISSING),
+                                            )
+                                            sfb_k_offset = _builder_alloc_scalar(
+                                                "sfb_k_offset", "int32"
+                                            )
+                                            sfb_k_offset = _builder_assign(
+                                                "sfb_k_offset",
+                                                ld_grp * shape_sfb_k,
+                                                locals().get("sfb_k_offset", _BUILDER_MISSING),
+                                            )
+                                        else:
+                                            sfb_k_offset = _builder_alloc_scalar(
+                                                "sfb_k_offset", "int32"
+                                            )
+                                            sfb_k_offset = _builder_assign(
+                                                "sfb_k_offset",
+                                                0,
+                                                locals().get("sfb_k_offset", _BUILDER_MISSING),
+                                            )
+                                        if use_effective_m:
+                                            ld_eff_m = _builder_alloc_scalar("ld_eff_m", "int32")
+                                            ld_eff_m = _builder_assign(
+                                                "ld_eff_m",
+                                                block_m,
+                                                locals().get("ld_eff_m", _BUILDER_MISSING),
+                                            )
+                                            with T.If(ld_m_local == ld_nmb - 1), T.Then():
+                                                ld_eff_m = _builder_assign(
+                                                    "ld_eff_m",
+                                                    _uceil(
+                                                        ld_psum
+                                                        - (ld_m_local + _udiv(ld_last, block_m))
+                                                        * block_m,
+                                                        UMMA_STEP_N,
+                                                    )
+                                                    * UMMA_STEP_N,
+                                                    locals().get("ld_eff_m", _BUILDER_MISSING),
+                                                )
+                                        if cta_group > 1:
+                                            if is_multicast_on_a:
+                                                m_idx = _builder_assign(
+                                                    "m_idx",
+                                                    m_idx
+                                                    + cta_in_cluster
+                                                    * (
+                                                        _udiv(ld_eff_m, cta_group)
+                                                        if use_effective_m
+                                                        else load_block_m
+                                                    ),
+                                                    locals().get("m_idx", _BUILDER_MISSING),
+                                                )
+                                            else:
+                                                n_idx = _builder_assign(
+                                                    "n_idx",
+                                                    n_idx + cta_in_cluster * load_block_n,
+                                                    locals().get("n_idx", _BUILDER_MISSING),
+                                                )
+                                        ld_k = _builder_alloc_scalar("ld_k", "int32")
+                                        ld_k = _builder_assign(
+                                            "ld_k", 0, locals().get("ld_k", _BUILDER_MISSING)
+                                        )
+                                        with T.While(ld_k < ld_kblocks):
+                                            ld_wait = _builder_alloc_scalar("ld_wait", "uint32")
+                                            ld_wait = _builder_assign(
+                                                "ld_wait",
+                                                T.uint32(0),
+                                                locals().get("ld_wait", _BUILDER_MISSING),
+                                            )
+                                            with T.While(ld_wait == T.uint32(0)):
+                                                _builder_emit(
+                                                    T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+                                                        ld_wait,
+                                                        barriers.ptr_to([empty_base + ld_stage]),
+                                                        T.cast(
+                                                            T.bitwise_xor(ld_phase, 1), "uint32"
+                                                        ),
+                                                        T.uint32(TRY_WAIT_TICKS),
+                                                    )
+                                                )
+                                            k_b = _builder_alloc_scalar("k_b", "int32")
+                                            k_a = _builder_alloc_scalar("k_a", "int32")
+                                            k_b = _builder_assign(
+                                                "k_b",
+                                                k_b_idx + ld_k * block_k,
+                                                locals().get("k_b", _BUILDER_MISSING),
+                                            )
+                                            k_a = _builder_assign(
+                                                "k_a",
+                                                k_a_offset + ld_k * block_k,
+                                                locals().get("k_a", _BUILDER_MISSING),
+                                            )
+                                            with T.unroll(0, num_a_atoms) as i:
+                                                IRBuilder.name("i", i)
+                                                _builder_emit(
+                                                    T.evaluate(
+                                                        T.ptx[load_chain](
+                                                            smem_a.ptr_to([ld_stage, 0, i * a_atom])
+                                                            if major_a_is_k
+                                                            else smem_a.ptr_to([ld_stage, 0, 0]),
+                                                            T.address_of(tensor_map_a),
+                                                            *_tma_coords(
+                                                                (k_a + i * a_atom, m_idx)
+                                                                if major_a_is_k
+                                                                else (m_idx + i * a_atom, k_a),
+                                                                ld_grp,
+                                                            ),
+                                                            barriers.ptr_to([full_base + ld_stage]),
+                                                            T.uint64(EVICT_NORMAL),
+                                                        )
+                                                    )
+                                                )
+                                            with T.unroll(0, num_b_atoms) as i:
+                                                IRBuilder.name("i", i)
+                                                _builder_emit(
+                                                    T.evaluate(
+                                                        T.ptx[load_chain](
+                                                            smem_b.ptr_to([ld_stage, 0, i * b_atom])
+                                                            if major_b_is_k
+                                                            else smem_b.ptr_to([ld_stage, 0, 0]),
+                                                            T.address_of(tensor_map_b),
+                                                            *_tma_coords(
+                                                                (k_b + i * b_atom, n_idx)
+                                                                if major_b_is_k
+                                                                else (n_idx + i * b_atom, k_b),
+                                                                ld_grp,
+                                                            ),
+                                                            barriers.ptr_to([full_base + ld_stage]),
+                                                            T.uint64(EVICT_NORMAL),
+                                                        )
+                                                    )
+                                                )
+                                            arrival = _builder_alloc_scalar("arrival", "int32")
+                                            arrival = _builder_assign(
+                                                "arrival",
+                                                arrival_bytes_ab,
+                                                locals().get("arrival", _BUILDER_MISSING),
+                                            )
+                                            with T.If(T.EQ(ld_k % sfa_stages_per_load, 0)):
+                                                with T.Then():
+                                                    _builder_emit(
+                                                        T.evaluate(
+                                                            T.ptx[sf_load_chain](
+                                                                smem_sfa.ptr_to([ld_stage, 0]),
+                                                                T.address_of(tensor_map_sfa),
+                                                                T.cast(sfa_mn, "int32"),
+                                                                T.cast(
+                                                                    sfa_k_offset
+                                                                    + ld_k // sfa_stages_per_load,
+                                                                    "int32",
+                                                                ),
+                                                                barriers.ptr_to(
+                                                                    [full_base + ld_stage]
+                                                                ),
+                                                                T.uint64(EVICT_NORMAL),
+                                                            )
+                                                        )
+                                                    )
+                                                    arrival = _builder_assign(
+                                                        "arrival",
+                                                        arrival + block_m * 4,
+                                                        locals().get("arrival", _BUILDER_MISSING),
+                                                    )
+                                            with T.If(T.EQ(ld_k % sfb_stages_per_load, 0)):
+                                                with T.Then():
+                                                    _builder_emit(
+                                                        T.evaluate(
+                                                            T.ptx[sf_load_chain](
+                                                                smem_sfb.ptr_to([ld_stage, 0]),
+                                                                T.address_of(tensor_map_sfb),
+                                                                T.cast(sfb_mn, "int32"),
+                                                                T.cast(
+                                                                    sfb_k_offset
+                                                                    + ld_k // sfb_stages_per_load,
+                                                                    "int32",
+                                                                ),
+                                                                barriers.ptr_to(
+                                                                    [full_base + ld_stage]
+                                                                ),
+                                                                T.uint64(EVICT_NORMAL),
+                                                            )
+                                                        )
+                                                    )
+                                                    arrival = _builder_assign(
+                                                        "arrival",
+                                                        arrival + block_n * 4,
+                                                        locals().get("arrival", _BUILDER_MISSING),
+                                                    )
+                                            _builder_emit(
+                                                T.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                                    barriers.ptr_to([full_base + ld_stage]),
+                                                    T.cast(arrival, "uint32"),
+                                                )
+                                            )
+                                            ld_k = _builder_assign(
+                                                "ld_k",
+                                                ld_k + 1,
+                                                locals().get("ld_k", _BUILDER_MISSING),
+                                            )
+                                            ld_stage = _builder_assign(
+                                                "ld_stage",
+                                                T.Select(ld_stage == stages - 1, 0, ld_stage + 1),
+                                                locals().get("ld_stage", _BUILDER_MISSING),
+                                            )
+                                            ld_phase = _builder_assign(
+                                                "ld_phase",
+                                                T.bitwise_xor(
+                                                    ld_phase, T.cast(ld_stage == 0, "int32")
+                                                ),
+                                                locals().get("ld_phase", _BUILDER_MISSING),
+                                            )
+                                ld_it = _builder_assign(
+                                    "ld_it", ld_it + 1, locals().get("ld_it", _BUILDER_MISSING)
+                                )
+                with T.Else():
+                    with T.If(warp == 1):
+                        with T.Then():
+                            with T.If(is_leader_cta):
+                                with T.Then():
+                                    desc_a = _builder_alloc_scalar("desc_a", "uint64")
+                                    desc_b = _builder_alloc_scalar("desc_b", "uint64")
+                                    desc_sf = _builder_alloc_scalar("desc_sf", "uint64")
+                                    desc_i = _builder_alloc_scalar("desc_i", "uint32")
+                                    a_smem_u32 = _builder_alloc_scalar("a_smem_u32", "uint32")
+                                    b_smem_u32 = _builder_alloc_scalar("b_smem_u32", "uint32")
+                                    sfa_smem_u32 = _builder_alloc_scalar("sfa_smem_u32", "uint32")
+                                    sfb_smem_u32 = _builder_alloc_scalar("sfb_smem_u32", "uint32")
+                                    a_smem_u32 = _builder_assign(
+                                        "a_smem_u32",
+                                        T.cuda.cvta_generic_to_shared(smem_a.ptr_to([0, 0, 0])),
+                                        locals().get("a_smem_u32", _BUILDER_MISSING),
+                                    )
+                                    b_smem_u32 = _builder_assign(
+                                        "b_smem_u32",
+                                        T.cuda.cvta_generic_to_shared(smem_b.ptr_to([0, 0, 0])),
+                                        locals().get("b_smem_u32", _BUILDER_MISSING),
+                                    )
+                                    sfa_smem_u32 = _builder_assign(
+                                        "sfa_smem_u32",
+                                        T.cuda.cvta_generic_to_shared(smem_sfa.ptr_to([0, 0])),
+                                        locals().get("sfa_smem_u32", _BUILDER_MISSING),
+                                    )
+                                    sfb_smem_u32 = _builder_assign(
+                                        "sfb_smem_u32",
+                                        T.cuda.cvta_generic_to_shared(smem_sfb.ptr_to([0, 0])),
+                                        locals().get("sfb_smem_u32", _BUILDER_MISSING),
+                                    )
+                                    desc_a = _builder_assign(
+                                        "desc_a",
+                                        _with_smem_addr(_u64_const(A_DESC_BASE), a_smem_u32),
+                                        locals().get("desc_a", _BUILDER_MISSING),
+                                    )
+                                    desc_b = _builder_assign(
+                                        "desc_b",
+                                        _with_smem_addr(_u64_const(B_DESC_BASE), b_smem_u32),
+                                        locals().get("desc_b", _BUILDER_MISSING),
+                                    )
+                                    desc_sf = _builder_assign(
+                                        "desc_sf",
+                                        _with_smem_addr(_u64_const(SF_DESC_BASE), sfa_smem_u32),
+                                        locals().get("desc_sf", _BUILDER_MISSING),
+                                    )
+                                    desc_i = _builder_assign(
+                                        "desc_i",
+                                        T.uint32(INSTR_DESC),
+                                        locals().get("desc_i", _BUILDER_MISSING),
+                                    )
+                                    a_desc_lo = _builder_alloc_scalar("a_desc_lo", "uint32")
+                                    b_desc_lo = _builder_alloc_scalar("b_desc_lo", "uint32")
+                                    a_desc_lo = _builder_assign(
+                                        "a_desc_lo",
+                                        T.Select(
+                                            lane_idx < stages,
+                                            T.cast(
+                                                T.bitwise_and(desc_a, T.uint64(4294967295)),
+                                                "uint32",
+                                            )
+                                            + T.cast(
+                                                lane_idx * (a_bytes_per_stage // 16), "uint32"
+                                            ),
+                                            T.uint32(0),
+                                        ),
+                                        locals().get("a_desc_lo", _BUILDER_MISSING),
+                                    )
+                                    b_desc_lo = _builder_assign(
+                                        "b_desc_lo",
+                                        T.Select(
+                                            lane_idx < stages,
+                                            T.cast(
+                                                T.bitwise_and(desc_b, T.uint64(4294967295)),
+                                                "uint32",
+                                            )
+                                            + T.cast(
+                                                lane_idx * (b_bytes_per_stage // 16), "uint32"
+                                            ),
+                                            T.uint32(0),
+                                        ),
+                                        locals().get("b_desc_lo", _BUILDER_MISSING),
+                                    )
+                                    mma_stage = _builder_alloc_scalar("mma_stage", "int32")
+                                    mma_phase = _builder_alloc_scalar("mma_phase", "int32")
+                                    mma_iter = _builder_alloc_scalar("mma_iter", "int32")
+                                    mma_stage = _builder_assign(
+                                        "mma_stage", 0, locals().get("mma_stage", _BUILDER_MISSING)
+                                    )
+                                    mma_phase = _builder_assign(
+                                        "mma_phase", 0, locals().get("mma_phase", _BUILDER_MISSING)
+                                    )
+                                    mma_it = _builder_alloc_scalar("mma_it", "int32")
+                                    mma_valid = _builder_alloc_scalar("mma_valid", "int32")
+                                    mma_grp = _builder_alloc_scalar("mma_grp", "int32")
+                                    mma_cum = _builder_alloc_scalar("mma_cum", "int32")
+                                    mma_nmb = _builder_alloc_scalar("mma_nmb", "int32")
+                                    mma_last = _builder_alloc_scalar("mma_last", "int32")
+                                    mma_psum = _builder_alloc_scalar("mma_psum", "int32")
+                                    mma_nb = _builder_alloc_scalar("mma_nb", "int32")
+                                    mma_nxt = _builder_alloc_scalar("mma_nxt", "int32")
+                                    mma_nxtk = _builder_alloc_scalar("mma_nxtk", "int32")
+                                    mma_kblocks = _builder_alloc_scalar("mma_kblocks", "int32")
+                                    mma_vgrp = _builder_alloc_scalar("mma_vgrp", "int32")
+                                    mma_kend = _builder_alloc_scalar("mma_kend", "int32")
+                                    mma_elected = _builder_alloc_scalar("mma_elected", "uint32")
+                                    mma_elected_lane = _builder_alloc_scalar(
+                                        "mma_elected_lane", "uint32"
+                                    )
+                                    _builder_emit(
+                                        T.ptx.elect_sync(
+                                            mma_elected_lane, mma_elected, T.uint32(4294967295)
                                         )
                                     )
-                                    T.evaluate(T.ptx.cp.async_.bulk.commit_group())
-                                T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF))
-                                tma_stage = T.Select(
-                                    tma_stage == NUM_TMA_STORE_STAGES - 1, 0, tma_stage + 1
-                                )
-                ep_it = ep_it + 1
+                                    mma_it = _builder_assign(
+                                        "mma_it", 0, locals().get("mma_it", _BUILDER_MISSING)
+                                    )
+                                    mma_valid = _builder_assign(
+                                        "mma_valid", 1, locals().get("mma_valid", _BUILDER_MISSING)
+                                    )
+                                    mma_grp = _builder_assign(
+                                        "mma_grp", 0, locals().get("mma_grp", _BUILDER_MISSING)
+                                    )
+                                    mma_cum = _builder_assign(
+                                        "mma_cum", 0, locals().get("mma_cum", _BUILDER_MISSING)
+                                    )
+                                    mma_last = _builder_assign(
+                                        "mma_last", 0, locals().get("mma_last", _BUILDER_MISSING)
+                                    )
+                                    mma_vgrp = _builder_assign(
+                                        "mma_vgrp", 0, locals().get("mma_vgrp", _BUILDER_MISSING)
+                                    )
+                                    mma_kend = _builder_assign(
+                                        "mma_kend", 0, locals().get("mma_kend", _BUILDER_MISSING)
+                                    )
+                                    mma_nxt = _builder_assign(
+                                        "mma_nxt", 0, locals().get("mma_nxt", _BUILDER_MISSING)
+                                    )
+                                    mma_nxtk = _builder_assign(
+                                        "mma_nxtk", 0, locals().get("mma_nxtk", _BUILDER_MISSING)
+                                    )
+                                    mma_kblocks = _builder_assign(
+                                        "mma_kblocks",
+                                        0,
+                                        locals().get("mma_kblocks", _BUILDER_MISSING),
+                                    )
+                                    if is_k_grouped:
+                                        mma_psum = _builder_assign(
+                                            "mma_psum",
+                                            0,
+                                            locals().get("mma_psum", _BUILDER_MISSING),
+                                        )
+                                        mma_nmb = _builder_assign(
+                                            "mma_nmb",
+                                            num_m_blocks,
+                                            locals().get("mma_nmb", _BUILDER_MISSING),
+                                        )
+                                        if is_k_grouped_psum:
+                                            with T.While(mma_grp < num_groups):
+                                                mma_nxtk = _builder_assign(
+                                                    "mma_nxtk",
+                                                    grouped_layout[mma_grp],
+                                                    locals().get("mma_nxtk", _BUILDER_MISSING),
+                                                )
+                                                mma_last = _builder_assign(
+                                                    "mma_last",
+                                                    _uceil(mma_kend, k_alignment) * k_alignment,
+                                                    locals().get("mma_last", _BUILDER_MISSING),
+                                                )
+                                                mma_psum = _builder_assign(
+                                                    "mma_psum",
+                                                    mma_nxtk - mma_last,
+                                                    locals().get("mma_psum", _BUILDER_MISSING),
+                                                )
+                                                mma_kend = _builder_assign(
+                                                    "mma_kend",
+                                                    mma_nxtk,
+                                                    locals().get("mma_kend", _BUILDER_MISSING),
+                                                )
+                                                with T.If(mma_psum > 0):
+                                                    with T.Then():
+                                                        T.evaluate(T.break_loop())
+                                                mma_grp = _builder_assign(
+                                                    "mma_grp",
+                                                    mma_grp + 1,
+                                                    locals().get("mma_grp", _BUILDER_MISSING),
+                                                )
+                                        else:
+                                            with T.While(mma_grp < num_groups):
+                                                mma_psum = _builder_assign(
+                                                    "mma_psum",
+                                                    grouped_layout[mma_grp],
+                                                    locals().get("mma_psum", _BUILDER_MISSING),
+                                                )
+                                                with T.If(mma_psum > 0):
+                                                    with T.Then():
+                                                        T.evaluate(T.break_loop())
+                                                mma_grp = _builder_assign(
+                                                    "mma_grp",
+                                                    mma_grp + 1,
+                                                    locals().get("mma_grp", _BUILDER_MISSING),
+                                                )
+                                            mma_nxt = _builder_assign(
+                                                "mma_nxt",
+                                                mma_grp + 1,
+                                                locals().get("mma_nxt", _BUILDER_MISSING),
+                                            )
+                                            with T.While(mma_nxt < num_groups):
+                                                mma_nxtk = _builder_assign(
+                                                    "mma_nxtk",
+                                                    grouped_layout[mma_nxt],
+                                                    locals().get("mma_nxtk", _BUILDER_MISSING),
+                                                )
+                                                with T.If(mma_nxtk > 0):
+                                                    with T.Then():
+                                                        T.evaluate(T.break_loop())
+                                                mma_nxt = _builder_assign(
+                                                    "mma_nxt",
+                                                    mma_nxt + 1,
+                                                    locals().get("mma_nxt", _BUILDER_MISSING),
+                                                )
+                                    elif is_m_grouped_psum:
+                                        mma_psum = _builder_assign(
+                                            "mma_psum",
+                                            grouped_layout[0],
+                                            locals().get("mma_psum", _BUILDER_MISSING),
+                                        )
+                                        mma_nmb = _builder_assign(
+                                            "mma_nmb",
+                                            _uceil(mma_psum, block_m),
+                                            locals().get("mma_nmb", _BUILDER_MISSING),
+                                        )
+                                    else:
+                                        mma_psum = _builder_assign(
+                                            "mma_psum",
+                                            0,
+                                            locals().get("mma_psum", _BUILDER_MISSING),
+                                        )
+                                        mma_nmb = _builder_assign(
+                                            "mma_nmb",
+                                            num_m_blocks,
+                                            locals().get("mma_nmb", _BUILDER_MISSING),
+                                        )
+                                    mma_iter = _builder_assign(
+                                        "mma_iter", 0, locals().get("mma_iter", _BUILDER_MISSING)
+                                    )
+                                    with T.While(mma_valid == 1):
+                                        mma_nb = _builder_assign(
+                                            "mma_nb",
+                                            mma_it * num_sms + sm_idx,
+                                            locals().get("mma_nb", _BUILDER_MISSING),
+                                        )
+                                        mma_done = _builder_alloc_scalar("mma_done", "int32")
+                                        mma_done = _builder_assign(
+                                            "mma_done",
+                                            0,
+                                            locals().get("mma_done", _BUILDER_MISSING),
+                                        )
+                                        if is_m_grouped_masked:
+                                            with T.While(mma_done == 0):
+                                                with T.If(mma_grp == num_groups):
+                                                    with T.Then():
+                                                        mma_valid = _builder_assign(
+                                                            "mma_valid",
+                                                            0,
+                                                            locals().get(
+                                                                "mma_valid", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        mma_done = _builder_assign(
+                                                            "mma_done",
+                                                            1,
+                                                            locals().get(
+                                                                "mma_done", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    with T.Else():
+                                                        mma_nmb = _builder_assign(
+                                                            "mma_nmb",
+                                                            _uceil(
+                                                                grouped_layout[mma_grp], block_m
+                                                            ),
+                                                            locals().get(
+                                                                "mma_nmb", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(
+                                                            mma_nb
+                                                            < (mma_cum + mma_nmb) * num_n_blocks
+                                                        ):
+                                                            with T.Then():
+                                                                mma_done = _builder_assign(
+                                                                    "mma_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "mma_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                mma_cum = _builder_assign(
+                                                                    "mma_cum",
+                                                                    mma_cum + mma_nmb,
+                                                                    locals().get(
+                                                                        "mma_cum", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                mma_grp = _builder_assign(
+                                                                    "mma_grp",
+                                                                    mma_grp + 1,
+                                                                    locals().get(
+                                                                        "mma_grp", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                        elif is_m_grouped_psum:
+                                            with T.While(mma_done == 0):
+                                                with T.If(
+                                                    mma_nb < (mma_cum + mma_nmb) * num_n_blocks
+                                                ):
+                                                    with T.Then():
+                                                        mma_done = _builder_assign(
+                                                            "mma_done",
+                                                            1,
+                                                            locals().get(
+                                                                "mma_done", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    with T.Else():
+                                                        mma_grp = _builder_assign(
+                                                            "mma_grp",
+                                                            mma_grp + 1,
+                                                            locals().get(
+                                                                "mma_grp", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(mma_grp == num_groups):
+                                                            with T.Then():
+                                                                mma_valid = _builder_assign(
+                                                                    "mma_valid",
+                                                                    0,
+                                                                    locals().get(
+                                                                        "mma_valid",
+                                                                        _BUILDER_MISSING,
+                                                                    ),
+                                                                )
+                                                                mma_done = _builder_assign(
+                                                                    "mma_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "mma_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                mma_last = _builder_assign(
+                                                                    "mma_last",
+                                                                    _uceil(mma_psum, block_m)
+                                                                    * block_m,
+                                                                    locals().get(
+                                                                        "mma_last", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                mma_psum = _builder_assign(
+                                                                    "mma_psum",
+                                                                    grouped_layout[mma_grp],
+                                                                    locals().get(
+                                                                        "mma_psum", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                mma_cum = _builder_assign(
+                                                                    "mma_cum",
+                                                                    mma_cum + mma_nmb,
+                                                                    locals().get(
+                                                                        "mma_cum", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                mma_nmb = _builder_assign(
+                                                                    "mma_nmb",
+                                                                    _uceil(
+                                                                        mma_psum - mma_last, block_m
+                                                                    ),
+                                                                    locals().get(
+                                                                        "mma_nmb", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                        elif is_k_grouped:
+                                            with T.While(mma_done == 0):
+                                                with T.If(mma_grp == num_groups):
+                                                    with T.Then():
+                                                        mma_valid = _builder_assign(
+                                                            "mma_valid",
+                                                            0,
+                                                            locals().get(
+                                                                "mma_valid", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        mma_done = _builder_assign(
+                                                            "mma_done",
+                                                            1,
+                                                            locals().get(
+                                                                "mma_done", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    with T.Else():
+                                                        with T.If(
+                                                            mma_nb < (mma_vgrp + 1) * num_blocks
+                                                        ):
+                                                            with T.Then():
+                                                                mma_done = _builder_assign(
+                                                                    "mma_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "mma_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                mma_vgrp = _builder_assign(
+                                                                    "mma_vgrp",
+                                                                    mma_vgrp + 1,
+                                                                    locals().get(
+                                                                        "mma_vgrp", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                if is_k_grouped_psum:
+                                                                    mma_grp = _builder_assign(
+                                                                        "mma_grp",
+                                                                        mma_grp + 1,
+                                                                        locals().get(
+                                                                            "mma_grp",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    with T.While(
+                                                                        mma_grp < num_groups
+                                                                    ):
+                                                                        mma_nxtk = _builder_assign(
+                                                                            "mma_nxtk",
+                                                                            grouped_layout[mma_grp],
+                                                                            locals().get(
+                                                                                "mma_nxtk",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        mma_last = _builder_assign(
+                                                                            "mma_last",
+                                                                            _uceil(
+                                                                                mma_kend,
+                                                                                k_alignment,
+                                                                            )
+                                                                            * k_alignment,
+                                                                            locals().get(
+                                                                                "mma_last",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        mma_psum = _builder_assign(
+                                                                            "mma_psum",
+                                                                            mma_nxtk - mma_last,
+                                                                            locals().get(
+                                                                                "mma_psum",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        mma_kend = _builder_assign(
+                                                                            "mma_kend",
+                                                                            mma_nxtk,
+                                                                            locals().get(
+                                                                                "mma_kend",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        with T.If(mma_psum > 0):
+                                                                            with T.Then():
+                                                                                T.evaluate(
+                                                                                    T.break_loop()
+                                                                                )
+                                                                        mma_grp = _builder_assign(
+                                                                            "mma_grp",
+                                                                            mma_grp + 1,
+                                                                            locals().get(
+                                                                                "mma_grp",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                else:
+                                                                    mma_last = _builder_assign(
+                                                                        "mma_last",
+                                                                        mma_last + mma_psum,
+                                                                        locals().get(
+                                                                            "mma_last",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    mma_grp = _builder_assign(
+                                                                        "mma_grp",
+                                                                        mma_nxt,
+                                                                        locals().get(
+                                                                            "mma_grp",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    mma_nxt = _builder_assign(
+                                                                        "mma_nxt",
+                                                                        mma_nxt + 1,
+                                                                        locals().get(
+                                                                            "mma_nxt",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    mma_psum = _builder_assign(
+                                                                        "mma_psum",
+                                                                        mma_nxtk,
+                                                                        locals().get(
+                                                                            "mma_psum",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    with T.While(
+                                                                        mma_nxt < num_groups
+                                                                    ):
+                                                                        mma_nxtk = _builder_assign(
+                                                                            "mma_nxtk",
+                                                                            grouped_layout[mma_nxt],
+                                                                            locals().get(
+                                                                                "mma_nxtk",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        with T.If(mma_nxtk > 0):
+                                                                            with T.Then():
+                                                                                T.evaluate(
+                                                                                    T.break_loop()
+                                                                                )
+                                                                        mma_nxt = _builder_assign(
+                                                                            "mma_nxt",
+                                                                            mma_nxt + 1,
+                                                                            locals().get(
+                                                                                "mma_nxt",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                            mma_cum = _builder_assign(
+                                                "mma_cum",
+                                                mma_vgrp * num_m_blocks,
+                                                locals().get("mma_cum", _BUILDER_MISSING),
+                                            )
+                                        elif is_batched:
+                                            with T.If(mma_nb >= num_blocks * num_groups):
+                                                with T.Then():
+                                                    mma_valid = _builder_assign(
+                                                        "mma_valid",
+                                                        0,
+                                                        locals().get("mma_valid", _BUILDER_MISSING),
+                                                    )
+                                                with T.Else():
+                                                    mma_grp = _builder_assign(
+                                                        "mma_grp",
+                                                        mma_nb // num_blocks,
+                                                        locals().get("mma_grp", _BUILDER_MISSING),
+                                                    )
+                                                    mma_cum = _builder_assign(
+                                                        "mma_cum",
+                                                        mma_grp * num_m_blocks,
+                                                        locals().get("mma_cum", _BUILDER_MISSING),
+                                                    )
+                                                    mma_nmb = _builder_assign(
+                                                        "mma_nmb",
+                                                        num_m_blocks,
+                                                        locals().get("mma_nmb", _BUILDER_MISSING),
+                                                    )
+                                        if not (
+                                            is_m_grouped_masked
+                                            or is_m_grouped_psum
+                                            or is_k_grouped
+                                            or is_batched
+                                        ):
+                                            with T.If(mma_nb >= num_blocks):
+                                                with T.Then():
+                                                    mma_valid = _builder_assign(
+                                                        "mma_valid",
+                                                        0,
+                                                        locals().get("mma_valid", _BUILDER_MISSING),
+                                                    )
+                                        with T.If(mma_valid == 1):
+                                            with T.Then():
+                                                if use_effective_m:
+                                                    mma_eff_m = _builder_alloc_scalar(
+                                                        "mma_eff_m", "int32"
+                                                    )
+                                                    mma_m_local = _builder_alloc_scalar(
+                                                        "mma_m_local", "int32"
+                                                    )
+                                                    mma_m_local = _builder_assign(
+                                                        "mma_m_local",
+                                                        _swizzled(
+                                                            mma_nb - mma_cum * num_n_blocks,
+                                                            mma_nmb,
+                                                            num_n_blocks,
+                                                        )[0],
+                                                        locals().get(
+                                                            "mma_m_local", _BUILDER_MISSING
+                                                        ),
+                                                    )
+                                                    mma_eff_m = _builder_assign(
+                                                        "mma_eff_m",
+                                                        block_m,
+                                                        locals().get("mma_eff_m", _BUILDER_MISSING),
+                                                    )
+                                                    with T.If(mma_m_local == mma_nmb - 1), T.Then():
+                                                        mma_eff_m = _builder_assign(
+                                                            "mma_eff_m",
+                                                            _uceil(
+                                                                mma_psum
+                                                                - (
+                                                                    mma_m_local
+                                                                    + _udiv(mma_last, block_m)
+                                                                )
+                                                                * block_m,
+                                                                UMMA_STEP_N,
+                                                            )
+                                                            * UMMA_STEP_N,
+                                                            locals().get(
+                                                                "mma_eff_m", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    desc_i = _builder_assign(
+                                                        "desc_i",
+                                                        T.bitwise_or(
+                                                            T.bitwise_and(
+                                                                desc_i, T.uint32(UMMA_N_FIELD_MASK)
+                                                            ),
+                                                            T.shift_left(
+                                                                T.cast(mma_eff_m // 8, "uint32"),
+                                                                T.uint32(17),
+                                                            ),
+                                                        ),
+                                                        locals().get("desc_i", _BUILDER_MISSING),
+                                                    )
+                                                mma_kblocks = _builder_assign(
+                                                    "mma_kblocks",
+                                                    _uceil(mma_psum, block_k)
+                                                    if is_k_grouped
+                                                    else num_k_blocks,
+                                                    locals().get("mma_kblocks", _BUILDER_MISSING),
+                                                )
+                                                accum_stage = _builder_alloc_scalar(
+                                                    "accum_stage", "int32"
+                                                )
+                                                accum_phase = _builder_alloc_scalar(
+                                                    "accum_phase", "int32"
+                                                )
+                                                accum_stage = _builder_assign(
+                                                    "accum_stage",
+                                                    mma_iter % NUM_EPILOGUE_STAGES,
+                                                    locals().get("accum_stage", _BUILDER_MISSING),
+                                                )
+                                                accum_phase = _builder_assign(
+                                                    "accum_phase",
+                                                    T.bitwise_and(
+                                                        mma_iter // NUM_EPILOGUE_STAGES, 1
+                                                    ),
+                                                    locals().get("accum_phase", _BUILDER_MISSING),
+                                                )
+                                                mma_tmem_wait = _builder_alloc_scalar(
+                                                    "mma_tmem_wait", "uint32"
+                                                )
+                                                mma_tmem_wait = _builder_assign(
+                                                    "mma_tmem_wait",
+                                                    T.uint32(0),
+                                                    locals().get("mma_tmem_wait", _BUILDER_MISSING),
+                                                )
+                                                with T.While(mma_tmem_wait == T.uint32(0)):
+                                                    _builder_emit(
+                                                        T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+                                                            mma_tmem_wait,
+                                                            barriers.ptr_to(
+                                                                [tmem_empty_base + accum_stage]
+                                                            ),
+                                                            T.cast(
+                                                                T.bitwise_xor(accum_phase, 1),
+                                                                "uint32",
+                                                            ),
+                                                            T.uint32(TRY_WAIT_TICKS),
+                                                        )
+                                                    )
+                                                _builder_emit(
+                                                    T.ptx.tcgen05.fence__after_thread_sync()
+                                                )
+                                                mma_k = _builder_alloc_scalar("mma_k", "int32")
+                                                mma_k = _builder_assign(
+                                                    "mma_k",
+                                                    0,
+                                                    locals().get("mma_k", _BUILDER_MISSING),
+                                                )
+                                                mma_k_rounded = _builder_alloc_scalar(
+                                                    "mma_k_rounded", "int32"
+                                                )
+                                                mma_k_rounded = _builder_assign(
+                                                    "mma_k_rounded",
+                                                    (mma_kblocks + (MMA_K_UNROLL - 1))
+                                                    // MMA_K_UNROLL
+                                                    * MMA_K_UNROLL,
+                                                    locals().get("mma_k_rounded", _BUILDER_MISSING),
+                                                )
+                                                with T.While(mma_k < mma_k_rounded):
+                                                    with T.unroll(0, MMA_K_UNROLL) as u:
+                                                        IRBuilder.name("u", u)
+                                                        with T.If(mma_k < mma_kblocks), T.Then():
+                                                            mma_sf_wait = _builder_alloc_scalar(
+                                                                "mma_sf_wait", "uint32"
+                                                            )
+                                                            mma_sf_wait = _builder_assign(
+                                                                "mma_sf_wait",
+                                                                T.uint32(0),
+                                                                locals().get(
+                                                                    "mma_sf_wait", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            with T.While(
+                                                                mma_sf_wait == T.uint32(0)
+                                                            ):
+                                                                _builder_emit(
+                                                                    T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+                                                                        mma_sf_wait,
+                                                                        barriers.ptr_to(
+                                                                            [
+                                                                                with_sf_base
+                                                                                + mma_stage
+                                                                            ]
+                                                                        ),
+                                                                        T.cast(mma_phase, "uint32"),
+                                                                        T.uint32(TRY_WAIT_TICKS),
+                                                                    )
+                                                                )
+                                                            _builder_emit(
+                                                                T.ptx.tcgen05.fence__after_thread_sync()
+                                                            )
+                                                            a_base_lo = _builder_alloc_scalar(
+                                                                "a_base_lo", "uint32"
+                                                            )
+                                                            b_base_lo = _builder_alloc_scalar(
+                                                                "b_base_lo", "uint32"
+                                                            )
+                                                            _builder_emit(
+                                                                T.ptx.shfl_sync.idx.b32(
+                                                                    a_base_lo,
+                                                                    a_desc_lo,
+                                                                    T.cast(mma_stage, "uint32"),
+                                                                    T.uint32(31),
+                                                                    T.uint32(4294967295),
+                                                                )
+                                                            )
+                                                            _builder_emit(
+                                                                T.ptx.shfl_sync.idx.b32(
+                                                                    b_base_lo,
+                                                                    b_desc_lo,
+                                                                    T.cast(mma_stage, "uint32"),
+                                                                    T.uint32(31),
+                                                                    T.uint32(4294967295),
+                                                                )
+                                                            )
+                                                            with T.If(
+                                                                T.EQ(u % sfa_stages_per_load, 0)
+                                                            ):
+                                                                with T.Then():
+                                                                    with T.unroll(
+                                                                        0, num_sfa_chunks
+                                                                    ) as c:
+                                                                        IRBuilder.name("c", c)
+                                                                        desc_sf = _builder_assign(
+                                                                            "desc_sf",
+                                                                            _rebase(
+                                                                                desc_sf,
+                                                                                sfa_smem_u32
+                                                                                + T.cast(
+                                                                                    mma_stage
+                                                                                    * (
+                                                                                        sf_block_m
+                                                                                        * 4
+                                                                                    ),
+                                                                                    "uint32",
+                                                                                )
+                                                                                + T.uint32(
+                                                                                    c
+                                                                                    * NUM_UTCCP_ALIGNED_ELEMS
+                                                                                    * 4
+                                                                                ),
+                                                                            ),
+                                                                            locals().get(
+                                                                                "desc_sf",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        _builder_emit(
+                                                                            T.evaluate(
+                                                                                T.ptx[utccp_chain](
+                                                                                    T.cast(
+                                                                                        sfa_tmem.allocated_addr[
+                                                                                            0
+                                                                                        ]
+                                                                                        + c * 4,
+                                                                                        "uint32",
+                                                                                    ),
+                                                                                    desc_sf,
+                                                                                    pred=T.cast(
+                                                                                        mma_elected
+                                                                                        == T.uint32(
+                                                                                            1
+                                                                                        ),
+                                                                                        "bool",
+                                                                                    ),
+                                                                                )
+                                                                            )
+                                                                        )
+                                                            with T.If(
+                                                                T.EQ(u % sfb_stages_per_load, 0)
+                                                            ):
+                                                                with T.Then():
+                                                                    with T.unroll(
+                                                                        0, num_sfb_chunks
+                                                                    ) as c:
+                                                                        IRBuilder.name("c", c)
+                                                                        desc_sf = _builder_assign(
+                                                                            "desc_sf",
+                                                                            _rebase(
+                                                                                desc_sf,
+                                                                                sfb_smem_u32
+                                                                                + T.cast(
+                                                                                    mma_stage
+                                                                                    * (
+                                                                                        sf_block_n
+                                                                                        * 4
+                                                                                    ),
+                                                                                    "uint32",
+                                                                                )
+                                                                                + T.uint32(
+                                                                                    c
+                                                                                    * NUM_UTCCP_ALIGNED_ELEMS
+                                                                                    * 4
+                                                                                ),
+                                                                            ),
+                                                                            locals().get(
+                                                                                "desc_sf",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        _builder_emit(
+                                                                            T.evaluate(
+                                                                                T.ptx[utccp_chain](
+                                                                                    T.cast(
+                                                                                        sfb_tmem.allocated_addr[
+                                                                                            0
+                                                                                        ]
+                                                                                        + c * 4,
+                                                                                        "uint32",
+                                                                                    ),
+                                                                                    desc_sf,
+                                                                                    pred=T.cast(
+                                                                                        mma_elected
+                                                                                        == T.uint32(
+                                                                                            1
+                                                                                        ),
+                                                                                        "bool",
+                                                                                    ),
+                                                                                )
+                                                                            )
+                                                                        )
+                                                            with T.unroll(0, umma_k_steps) as ki:
+                                                                IRBuilder.name("ki", ki)
+                                                                with (
+                                                                    T.If(
+                                                                        T.Or(
+                                                                            mma_k < mma_kblocks - 1,
+                                                                            ki * UMMA_K
+                                                                            < (
+                                                                                mma_psum
+                                                                                if is_k_grouped
+                                                                                else eff_k
+                                                                            )
+                                                                            - mma_k * block_k,
+                                                                        )
+                                                                        if may_have_tail_k
+                                                                        else ki < umma_k_steps
+                                                                    ),
+                                                                    T.Then(),
+                                                                ):
+                                                                    sfa_id = _builder_alloc_scalar(
+                                                                        "sfa_id", "uint32"
+                                                                    )
+                                                                    sfb_id = _builder_alloc_scalar(
+                                                                        "sfb_id", "uint32"
+                                                                    )
+                                                                    sfa_id = _builder_assign(
+                                                                        "sfa_id",
+                                                                        T.cast(ki, "uint32")
+                                                                        if sfa_stages_per_load == 1
+                                                                        else T.cast(
+                                                                            u % sfa_stages_per_load,
+                                                                            "uint32",
+                                                                        ),
+                                                                        locals().get(
+                                                                            "sfa_id",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    sfb_id = _builder_assign(
+                                                                        "sfb_id",
+                                                                        T.cast(ki, "uint32")
+                                                                        if sfb_stages_per_load == 1
+                                                                        else T.cast(
+                                                                            u % sfb_stages_per_load,
+                                                                            "uint32",
+                                                                        ),
+                                                                        locals().get(
+                                                                            "sfb_id",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    rt_desc = _builder_alloc_scalar(
+                                                                        "rt_desc", "uint32"
+                                                                    )
+                                                                    rt_desc = _builder_assign(
+                                                                        "rt_desc",
+                                                                        _with_sf_id(
+                                                                            desc_i,
+                                                                            sfb_id
+                                                                            if swap_ab
+                                                                            else sfa_id,
+                                                                            sfa_id
+                                                                            if swap_ab
+                                                                            else sfb_id,
+                                                                        ),
+                                                                        locals().get(
+                                                                            "rt_desc",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    adv_a = _builder_alloc_scalar(
+                                                                        "adv_a", "uint64"
+                                                                    )
+                                                                    adv_b = _builder_alloc_scalar(
+                                                                        "adv_b", "uint64"
+                                                                    )
+                                                                    adv_a = _builder_assign(
+                                                                        "adv_a",
+                                                                        _advance_lo(
+                                                                            desc_a,
+                                                                            a_base_lo,
+                                                                            ki * a_k_step_units,
+                                                                        ),
+                                                                        locals().get(
+                                                                            "adv_a",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    adv_b = _builder_assign(
+                                                                        "adv_b",
+                                                                        _advance_lo(
+                                                                            desc_b,
+                                                                            b_base_lo,
+                                                                            ki * b_k_step_units,
+                                                                        ),
+                                                                        locals().get(
+                                                                            "adv_b",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    _builder_emit(
+                                                                        T.evaluate(
+                                                                            T.ptx[mma_chain](
+                                                                                T.cast(
+                                                                                    accum_stage
+                                                                                    * umma_n,
+                                                                                    "uint32",
+                                                                                ),
+                                                                                adv_b
+                                                                                if swap_ab
+                                                                                else adv_a,
+                                                                                adv_a
+                                                                                if swap_ab
+                                                                                else adv_b,
+                                                                                rt_desc,
+                                                                                T.cast(
+                                                                                    (
+                                                                                        sfb_tmem
+                                                                                        if swap_ab
+                                                                                        else sfa_tmem
+                                                                                    ).allocated_addr[
+                                                                                        0
+                                                                                    ],
+                                                                                    "uint32",
+                                                                                ),
+                                                                                T.cast(
+                                                                                    (
+                                                                                        sfa_tmem
+                                                                                        if swap_ab
+                                                                                        else sfb_tmem
+                                                                                    ).allocated_addr[
+                                                                                        0
+                                                                                    ],
+                                                                                    "uint32",
+                                                                                ),
+                                                                                T.Or(
+                                                                                    ki > 0,
+                                                                                    mma_k > 0,
+                                                                                ),
+                                                                                pred=T.cast(
+                                                                                    mma_elected
+                                                                                    == T.uint32(1),
+                                                                                    "bool",
+                                                                                ),
+                                                                            )
+                                                                        )
+                                                                    )
+                                                            _builder_emit(
+                                                                T.ptx.bar.warp.sync(
+                                                                    T.uint32(4294967295)
+                                                                )
+                                                            )
+                                                            if cta_group > 1:
+                                                                _builder_emit(
+                                                                    T.evaluate(
+                                                                        T.ptx[commit_mc_chain](
+                                                                            barriers.ptr_to(
+                                                                                [
+                                                                                    empty_base
+                                                                                    + mma_stage
+                                                                                ]
+                                                                            ),
+                                                                            T.uint16(
+                                                                                (1 << cta_group) - 1
+                                                                            ),
+                                                                            pred=T.cast(
+                                                                                mma_elected
+                                                                                == T.uint32(1),
+                                                                                "bool",
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                )
+                                                            else:
+                                                                _builder_emit(
+                                                                    T.evaluate(
+                                                                        T.ptx[commit_chain](
+                                                                            barriers.ptr_to(
+                                                                                [
+                                                                                    empty_base
+                                                                                    + mma_stage
+                                                                                ]
+                                                                            ),
+                                                                            pred=T.cast(
+                                                                                mma_elected
+                                                                                == T.uint32(1),
+                                                                                "bool",
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                )
+                                                            if cta_group > 1:
+                                                                _builder_emit(
+                                                                    T.evaluate(
+                                                                        T.ptx[commit_mc_chain](
+                                                                            barriers.ptr_to(
+                                                                                [
+                                                                                    tmem_full_base
+                                                                                    + accum_stage
+                                                                                ]
+                                                                            ),
+                                                                            T.uint16(
+                                                                                (1 << cta_group) - 1
+                                                                            ),
+                                                                            pred=T.cast(
+                                                                                T.And(
+                                                                                    mma_elected
+                                                                                    == T.uint32(1),
+                                                                                    mma_k
+                                                                                    == mma_kblocks
+                                                                                    - 1,
+                                                                                ),
+                                                                                "bool",
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                )
+                                                            else:
+                                                                _builder_emit(
+                                                                    T.evaluate(
+                                                                        T.ptx[commit_chain](
+                                                                            barriers.ptr_to(
+                                                                                [
+                                                                                    tmem_full_base
+                                                                                    + accum_stage
+                                                                                ]
+                                                                            ),
+                                                                            pred=T.cast(
+                                                                                T.And(
+                                                                                    mma_elected
+                                                                                    == T.uint32(1),
+                                                                                    mma_k
+                                                                                    == mma_kblocks
+                                                                                    - 1,
+                                                                                ),
+                                                                                "bool",
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                )
+                                                            _builder_emit(
+                                                                T.ptx.bar.warp.sync(
+                                                                    T.uint32(4294967295)
+                                                                )
+                                                            )
+                                                            mma_stage = _builder_assign(
+                                                                "mma_stage",
+                                                                T.Select(
+                                                                    mma_stage == stages - 1,
+                                                                    0,
+                                                                    mma_stage + 1,
+                                                                ),
+                                                                locals().get(
+                                                                    "mma_stage", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            mma_phase = _builder_assign(
+                                                                "mma_phase",
+                                                                T.bitwise_xor(
+                                                                    mma_phase,
+                                                                    T.cast(mma_stage == 0, "int32"),
+                                                                ),
+                                                                locals().get(
+                                                                    "mma_phase", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                        mma_k = _builder_assign(
+                                                            "mma_k",
+                                                            mma_k + 1,
+                                                            locals().get("mma_k", _BUILDER_MISSING),
+                                                        )
+                                                mma_iter = _builder_assign(
+                                                    "mma_iter",
+                                                    mma_iter + 1,
+                                                    locals().get("mma_iter", _BUILDER_MISSING),
+                                                )
+                                        mma_it = _builder_assign(
+                                            "mma_it",
+                                            mma_it + 1,
+                                            locals().get("mma_it", _BUILDER_MISSING),
+                                        )
+                                    if cta_group > 1:
+                                        with T.If(mma_iter > 0):
+                                            with T.Then():
+                                                mma_end_wait = _builder_alloc_scalar(
+                                                    "mma_end_wait", "uint32"
+                                                )
+                                                mma_end_wait = _builder_assign(
+                                                    "mma_end_wait",
+                                                    T.uint32(0),
+                                                    locals().get("mma_end_wait", _BUILDER_MISSING),
+                                                )
+                                                with T.While(mma_end_wait == T.uint32(0)):
+                                                    _builder_emit(
+                                                        T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+                                                            mma_end_wait,
+                                                            barriers.ptr_to(
+                                                                [
+                                                                    tmem_empty_base
+                                                                    + (mma_iter - 1)
+                                                                    % NUM_EPILOGUE_STAGES
+                                                                ]
+                                                            ),
+                                                            T.cast(
+                                                                T.bitwise_and(
+                                                                    (mma_iter - 1)
+                                                                    // NUM_EPILOGUE_STAGES,
+                                                                    1,
+                                                                ),
+                                                                "uint32",
+                                                            ),
+                                                            T.uint32(TRY_WAIT_TICKS),
+                                                        )
+                                                    )
+                        with T.Else():
+                            with T.If(warp == 2):
+                                with T.Then():
+                                    tr_stage = _builder_alloc_scalar("tr_stage", "int32")
+                                    tr_phase = _builder_alloc_scalar("tr_phase", "int32")
+                                    tr_stage = _builder_assign(
+                                        "tr_stage", 0, locals().get("tr_stage", _BUILDER_MISSING)
+                                    )
+                                    tr_phase = _builder_assign(
+                                        "tr_phase", 0, locals().get("tr_phase", _BUILDER_MISSING)
+                                    )
+                                    tr_it = _builder_alloc_scalar("tr_it", "int32")
+                                    tr_valid = _builder_alloc_scalar("tr_valid", "int32")
+                                    tr_grp = _builder_alloc_scalar("tr_grp", "int32")
+                                    tr_cum = _builder_alloc_scalar("tr_cum", "int32")
+                                    tr_nmb = _builder_alloc_scalar("tr_nmb", "int32")
+                                    tr_last = _builder_alloc_scalar("tr_last", "int32")
+                                    tr_psum = _builder_alloc_scalar("tr_psum", "int32")
+                                    tr_nb = _builder_alloc_scalar("tr_nb", "int32")
+                                    tr_nxt = _builder_alloc_scalar("tr_nxt", "int32")
+                                    tr_nxtk = _builder_alloc_scalar("tr_nxtk", "int32")
+                                    tr_kblocks = _builder_alloc_scalar("tr_kblocks", "int32")
+                                    tr_vgrp = _builder_alloc_scalar("tr_vgrp", "int32")
+                                    tr_kend = _builder_alloc_scalar("tr_kend", "int32")
+                                    tr_it = _builder_assign(
+                                        "tr_it", 0, locals().get("tr_it", _BUILDER_MISSING)
+                                    )
+                                    tr_valid = _builder_assign(
+                                        "tr_valid", 1, locals().get("tr_valid", _BUILDER_MISSING)
+                                    )
+                                    tr_grp = _builder_assign(
+                                        "tr_grp", 0, locals().get("tr_grp", _BUILDER_MISSING)
+                                    )
+                                    tr_cum = _builder_assign(
+                                        "tr_cum", 0, locals().get("tr_cum", _BUILDER_MISSING)
+                                    )
+                                    tr_last = _builder_assign(
+                                        "tr_last", 0, locals().get("tr_last", _BUILDER_MISSING)
+                                    )
+                                    tr_vgrp = _builder_assign(
+                                        "tr_vgrp", 0, locals().get("tr_vgrp", _BUILDER_MISSING)
+                                    )
+                                    tr_kend = _builder_assign(
+                                        "tr_kend", 0, locals().get("tr_kend", _BUILDER_MISSING)
+                                    )
+                                    tr_nxt = _builder_assign(
+                                        "tr_nxt", 0, locals().get("tr_nxt", _BUILDER_MISSING)
+                                    )
+                                    tr_nxtk = _builder_assign(
+                                        "tr_nxtk", 0, locals().get("tr_nxtk", _BUILDER_MISSING)
+                                    )
+                                    tr_kblocks = _builder_assign(
+                                        "tr_kblocks",
+                                        0,
+                                        locals().get("tr_kblocks", _BUILDER_MISSING),
+                                    )
+                                    if is_k_grouped:
+                                        tr_psum = _builder_assign(
+                                            "tr_psum", 0, locals().get("tr_psum", _BUILDER_MISSING)
+                                        )
+                                        tr_nmb = _builder_assign(
+                                            "tr_nmb",
+                                            num_m_blocks,
+                                            locals().get("tr_nmb", _BUILDER_MISSING),
+                                        )
+                                        if is_k_grouped_psum:
+                                            with T.While(tr_grp < num_groups):
+                                                tr_nxtk = _builder_assign(
+                                                    "tr_nxtk",
+                                                    grouped_layout[tr_grp],
+                                                    locals().get("tr_nxtk", _BUILDER_MISSING),
+                                                )
+                                                tr_last = _builder_assign(
+                                                    "tr_last",
+                                                    _uceil(tr_kend, k_alignment) * k_alignment,
+                                                    locals().get("tr_last", _BUILDER_MISSING),
+                                                )
+                                                tr_psum = _builder_assign(
+                                                    "tr_psum",
+                                                    tr_nxtk - tr_last,
+                                                    locals().get("tr_psum", _BUILDER_MISSING),
+                                                )
+                                                tr_kend = _builder_assign(
+                                                    "tr_kend",
+                                                    tr_nxtk,
+                                                    locals().get("tr_kend", _BUILDER_MISSING),
+                                                )
+                                                with T.If(tr_psum > 0):
+                                                    with T.Then():
+                                                        T.evaluate(T.break_loop())
+                                                tr_grp = _builder_assign(
+                                                    "tr_grp",
+                                                    tr_grp + 1,
+                                                    locals().get("tr_grp", _BUILDER_MISSING),
+                                                )
+                                        else:
+                                            with T.While(tr_grp < num_groups):
+                                                tr_psum = _builder_assign(
+                                                    "tr_psum",
+                                                    grouped_layout[tr_grp],
+                                                    locals().get("tr_psum", _BUILDER_MISSING),
+                                                )
+                                                with T.If(tr_psum > 0):
+                                                    with T.Then():
+                                                        T.evaluate(T.break_loop())
+                                                tr_grp = _builder_assign(
+                                                    "tr_grp",
+                                                    tr_grp + 1,
+                                                    locals().get("tr_grp", _BUILDER_MISSING),
+                                                )
+                                            tr_nxt = _builder_assign(
+                                                "tr_nxt",
+                                                tr_grp + 1,
+                                                locals().get("tr_nxt", _BUILDER_MISSING),
+                                            )
+                                            with T.While(tr_nxt < num_groups):
+                                                tr_nxtk = _builder_assign(
+                                                    "tr_nxtk",
+                                                    grouped_layout[tr_nxt],
+                                                    locals().get("tr_nxtk", _BUILDER_MISSING),
+                                                )
+                                                with T.If(tr_nxtk > 0):
+                                                    with T.Then():
+                                                        T.evaluate(T.break_loop())
+                                                tr_nxt = _builder_assign(
+                                                    "tr_nxt",
+                                                    tr_nxt + 1,
+                                                    locals().get("tr_nxt", _BUILDER_MISSING),
+                                                )
+                                    elif is_m_grouped_psum:
+                                        tr_psum = _builder_assign(
+                                            "tr_psum",
+                                            grouped_layout[0],
+                                            locals().get("tr_psum", _BUILDER_MISSING),
+                                        )
+                                        tr_nmb = _builder_assign(
+                                            "tr_nmb",
+                                            _uceil(tr_psum, block_m),
+                                            locals().get("tr_nmb", _BUILDER_MISSING),
+                                        )
+                                    else:
+                                        tr_psum = _builder_assign(
+                                            "tr_psum", 0, locals().get("tr_psum", _BUILDER_MISSING)
+                                        )
+                                        tr_nmb = _builder_assign(
+                                            "tr_nmb",
+                                            num_m_blocks,
+                                            locals().get("tr_nmb", _BUILDER_MISSING),
+                                        )
+                                    sf_vals = _builder_assign(
+                                        "sf_vals",
+                                        T.alloc_local((4,), "uint32"),
+                                        locals().get("sf_vals", _BUILDER_MISSING),
+                                    )
+                                    with T.While(tr_valid == 1):
+                                        tr_nb = _builder_assign(
+                                            "tr_nb",
+                                            tr_it * num_sms + sm_idx,
+                                            locals().get("tr_nb", _BUILDER_MISSING),
+                                        )
+                                        tr_done = _builder_alloc_scalar("tr_done", "int32")
+                                        tr_done = _builder_assign(
+                                            "tr_done", 0, locals().get("tr_done", _BUILDER_MISSING)
+                                        )
+                                        if is_m_grouped_masked:
+                                            with T.While(tr_done == 0):
+                                                with T.If(tr_grp == num_groups):
+                                                    with T.Then():
+                                                        tr_valid = _builder_assign(
+                                                            "tr_valid",
+                                                            0,
+                                                            locals().get(
+                                                                "tr_valid", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        tr_done = _builder_assign(
+                                                            "tr_done",
+                                                            1,
+                                                            locals().get(
+                                                                "tr_done", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    with T.Else():
+                                                        tr_nmb = _builder_assign(
+                                                            "tr_nmb",
+                                                            _uceil(grouped_layout[tr_grp], block_m),
+                                                            locals().get(
+                                                                "tr_nmb", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(
+                                                            tr_nb < (tr_cum + tr_nmb) * num_n_blocks
+                                                        ):
+                                                            with T.Then():
+                                                                tr_done = _builder_assign(
+                                                                    "tr_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "tr_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                tr_cum = _builder_assign(
+                                                                    "tr_cum",
+                                                                    tr_cum + tr_nmb,
+                                                                    locals().get(
+                                                                        "tr_cum", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                tr_grp = _builder_assign(
+                                                                    "tr_grp",
+                                                                    tr_grp + 1,
+                                                                    locals().get(
+                                                                        "tr_grp", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                        elif is_m_grouped_psum:
+                                            with T.While(tr_done == 0):
+                                                with T.If(tr_nb < (tr_cum + tr_nmb) * num_n_blocks):
+                                                    with T.Then():
+                                                        tr_done = _builder_assign(
+                                                            "tr_done",
+                                                            1,
+                                                            locals().get(
+                                                                "tr_done", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    with T.Else():
+                                                        tr_grp = _builder_assign(
+                                                            "tr_grp",
+                                                            tr_grp + 1,
+                                                            locals().get(
+                                                                "tr_grp", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(tr_grp == num_groups):
+                                                            with T.Then():
+                                                                tr_valid = _builder_assign(
+                                                                    "tr_valid",
+                                                                    0,
+                                                                    locals().get(
+                                                                        "tr_valid", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                tr_done = _builder_assign(
+                                                                    "tr_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "tr_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                tr_last = _builder_assign(
+                                                                    "tr_last",
+                                                                    _uceil(tr_psum, block_m)
+                                                                    * block_m,
+                                                                    locals().get(
+                                                                        "tr_last", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                tr_psum = _builder_assign(
+                                                                    "tr_psum",
+                                                                    grouped_layout[tr_grp],
+                                                                    locals().get(
+                                                                        "tr_psum", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                tr_cum = _builder_assign(
+                                                                    "tr_cum",
+                                                                    tr_cum + tr_nmb,
+                                                                    locals().get(
+                                                                        "tr_cum", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                tr_nmb = _builder_assign(
+                                                                    "tr_nmb",
+                                                                    _uceil(
+                                                                        tr_psum - tr_last, block_m
+                                                                    ),
+                                                                    locals().get(
+                                                                        "tr_nmb", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                        elif is_k_grouped:
+                                            with T.While(tr_done == 0):
+                                                with T.If(tr_grp == num_groups):
+                                                    with T.Then():
+                                                        tr_valid = _builder_assign(
+                                                            "tr_valid",
+                                                            0,
+                                                            locals().get(
+                                                                "tr_valid", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        tr_done = _builder_assign(
+                                                            "tr_done",
+                                                            1,
+                                                            locals().get(
+                                                                "tr_done", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    with T.Else():
+                                                        with T.If(
+                                                            tr_nb < (tr_vgrp + 1) * num_blocks
+                                                        ):
+                                                            with T.Then():
+                                                                tr_done = _builder_assign(
+                                                                    "tr_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "tr_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                tr_vgrp = _builder_assign(
+                                                                    "tr_vgrp",
+                                                                    tr_vgrp + 1,
+                                                                    locals().get(
+                                                                        "tr_vgrp", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                if is_k_grouped_psum:
+                                                                    tr_grp = _builder_assign(
+                                                                        "tr_grp",
+                                                                        tr_grp + 1,
+                                                                        locals().get(
+                                                                            "tr_grp",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    with T.While(
+                                                                        tr_grp < num_groups
+                                                                    ):
+                                                                        tr_nxtk = _builder_assign(
+                                                                            "tr_nxtk",
+                                                                            grouped_layout[tr_grp],
+                                                                            locals().get(
+                                                                                "tr_nxtk",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        tr_last = _builder_assign(
+                                                                            "tr_last",
+                                                                            _uceil(
+                                                                                tr_kend, k_alignment
+                                                                            )
+                                                                            * k_alignment,
+                                                                            locals().get(
+                                                                                "tr_last",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        tr_psum = _builder_assign(
+                                                                            "tr_psum",
+                                                                            tr_nxtk - tr_last,
+                                                                            locals().get(
+                                                                                "tr_psum",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        tr_kend = _builder_assign(
+                                                                            "tr_kend",
+                                                                            tr_nxtk,
+                                                                            locals().get(
+                                                                                "tr_kend",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        with T.If(tr_psum > 0):
+                                                                            with T.Then():
+                                                                                T.evaluate(
+                                                                                    T.break_loop()
+                                                                                )
+                                                                        tr_grp = _builder_assign(
+                                                                            "tr_grp",
+                                                                            tr_grp + 1,
+                                                                            locals().get(
+                                                                                "tr_grp",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                else:
+                                                                    tr_last = _builder_assign(
+                                                                        "tr_last",
+                                                                        tr_last + tr_psum,
+                                                                        locals().get(
+                                                                            "tr_last",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    tr_grp = _builder_assign(
+                                                                        "tr_grp",
+                                                                        tr_nxt,
+                                                                        locals().get(
+                                                                            "tr_grp",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    tr_nxt = _builder_assign(
+                                                                        "tr_nxt",
+                                                                        tr_nxt + 1,
+                                                                        locals().get(
+                                                                            "tr_nxt",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    tr_psum = _builder_assign(
+                                                                        "tr_psum",
+                                                                        tr_nxtk,
+                                                                        locals().get(
+                                                                            "tr_psum",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                                    with T.While(
+                                                                        tr_nxt < num_groups
+                                                                    ):
+                                                                        tr_nxtk = _builder_assign(
+                                                                            "tr_nxtk",
+                                                                            grouped_layout[tr_nxt],
+                                                                            locals().get(
+                                                                                "tr_nxtk",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        with T.If(tr_nxtk > 0):
+                                                                            with T.Then():
+                                                                                T.evaluate(
+                                                                                    T.break_loop()
+                                                                                )
+                                                                        tr_nxt = _builder_assign(
+                                                                            "tr_nxt",
+                                                                            tr_nxt + 1,
+                                                                            locals().get(
+                                                                                "tr_nxt",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                            tr_cum = _builder_assign(
+                                                "tr_cum",
+                                                tr_vgrp * num_m_blocks,
+                                                locals().get("tr_cum", _BUILDER_MISSING),
+                                            )
+                                        elif is_batched:
+                                            with T.If(tr_nb >= num_blocks * num_groups):
+                                                with T.Then():
+                                                    tr_valid = _builder_assign(
+                                                        "tr_valid",
+                                                        0,
+                                                        locals().get("tr_valid", _BUILDER_MISSING),
+                                                    )
+                                                with T.Else():
+                                                    tr_grp = _builder_assign(
+                                                        "tr_grp",
+                                                        tr_nb // num_blocks,
+                                                        locals().get("tr_grp", _BUILDER_MISSING),
+                                                    )
+                                                    tr_cum = _builder_assign(
+                                                        "tr_cum",
+                                                        tr_grp * num_m_blocks,
+                                                        locals().get("tr_cum", _BUILDER_MISSING),
+                                                    )
+                                                    tr_nmb = _builder_assign(
+                                                        "tr_nmb",
+                                                        num_m_blocks,
+                                                        locals().get("tr_nmb", _BUILDER_MISSING),
+                                                    )
+                                        if not (
+                                            is_m_grouped_masked
+                                            or is_m_grouped_psum
+                                            or is_k_grouped
+                                            or is_batched
+                                        ):
+                                            with T.If(tr_nb >= num_blocks):
+                                                with T.Then():
+                                                    tr_valid = _builder_assign(
+                                                        "tr_valid",
+                                                        0,
+                                                        locals().get("tr_valid", _BUILDER_MISSING),
+                                                    )
+                                        with T.If(tr_valid == 1):
+                                            with T.Then():
+                                                tr_kblocks = _builder_assign(
+                                                    "tr_kblocks",
+                                                    _uceil(tr_psum, block_k)
+                                                    if is_k_grouped
+                                                    else num_k_blocks,
+                                                    locals().get("tr_kblocks", _BUILDER_MISSING),
+                                                )
+                                                tr_k = _builder_alloc_scalar("tr_k", "int32")
+                                                tr_k = _builder_assign(
+                                                    "tr_k",
+                                                    0,
+                                                    locals().get("tr_k", _BUILDER_MISSING),
+                                                )
+                                                with T.While(tr_k < tr_kblocks):
+                                                    tr_wait = _builder_alloc_scalar(
+                                                        "tr_wait", "uint32"
+                                                    )
+                                                    tr_wait = _builder_assign(
+                                                        "tr_wait",
+                                                        T.uint32(0),
+                                                        locals().get("tr_wait", _BUILDER_MISSING),
+                                                    )
+                                                    with T.While(tr_wait == T.uint32(0)):
+                                                        _builder_emit(
+                                                            T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+                                                                tr_wait,
+                                                                barriers.ptr_to(
+                                                                    [full_base + tr_stage]
+                                                                ),
+                                                                T.cast(tr_phase, "uint32"),
+                                                                T.uint32(TRY_WAIT_TICKS),
+                                                            )
+                                                        )
+                                                    # The prior logical task may still read this
+                                                    # stage through tcgen05's async proxy. Complete
+                                                    # that handoff before generic-proxy transpose
+                                                    # stores reuse the same shared bytes.
+                                                    _builder_emit(
+                                                        T.ptx.fence.proxy.async_.shared__cta()
+                                                    )
+                                                    with T.If(T.EQ(tr_k % sfa_stages_per_load, 0)):
+                                                        with T.Then():
+                                                            with T.unroll(0, num_sfa_chunks) as c:
+                                                                IRBuilder.name("c", c)
+                                                                base = _builder_alloc_scalar(
+                                                                    "base", "int32"
+                                                                )
+                                                                base = _builder_assign(
+                                                                    "base",
+                                                                    c * NUM_UTCCP_ALIGNED_ELEMS,
+                                                                    locals().get(
+                                                                        "base", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                with T.unroll(0, 4) as i:
+                                                                    IRBuilder.name("i", i)
+                                                                    T.buffer_store(
+                                                                        sf_vals,
+                                                                        smem_sfa[
+                                                                            tr_stage,
+                                                                            base
+                                                                            + i * 32
+                                                                            + lane_idx,
+                                                                        ],
+                                                                        [i],
+                                                                    )
+                                                                _builder_emit(
+                                                                    T.ptx.bar.warp.sync(
+                                                                        T.uint32(4294967295)
+                                                                    )
+                                                                )
+                                                                with T.unroll(0, 4) as i:
+                                                                    IRBuilder.name("i", i)
+                                                                    T.buffer_store(
+                                                                        smem_sfa,
+                                                                        sf_vals[i],
+                                                                        [
+                                                                            tr_stage,
+                                                                            base
+                                                                            + lane_idx * 4
+                                                                            + i,
+                                                                        ],
+                                                                    )
+                                                            _builder_emit(
+                                                                T.evaluate(
+                                                                    T.ptx.fence.proxy.async_.shared__cta()
+                                                                )
+                                                            )
+                                                    with T.If(T.EQ(tr_k % sfb_stages_per_load, 0)):
+                                                        with T.Then():
+                                                            with T.unroll(0, num_sfb_chunks) as c:
+                                                                IRBuilder.name("c", c)
+                                                                base = _builder_alloc_scalar(
+                                                                    "base", "int32"
+                                                                )
+                                                                base = _builder_assign(
+                                                                    "base",
+                                                                    c * NUM_UTCCP_ALIGNED_ELEMS,
+                                                                    locals().get(
+                                                                        "base", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                with T.unroll(0, 4) as i:
+                                                                    IRBuilder.name("i", i)
+                                                                    T.buffer_store(
+                                                                        sf_vals,
+                                                                        smem_sfb[
+                                                                            tr_stage,
+                                                                            base
+                                                                            + i * 32
+                                                                            + lane_idx,
+                                                                        ],
+                                                                        [i],
+                                                                    )
+                                                                _builder_emit(
+                                                                    T.ptx.bar.warp.sync(
+                                                                        T.uint32(4294967295)
+                                                                    )
+                                                                )
+                                                                with T.unroll(0, 4) as i:
+                                                                    IRBuilder.name("i", i)
+                                                                    T.buffer_store(
+                                                                        smem_sfb,
+                                                                        sf_vals[i],
+                                                                        [
+                                                                            tr_stage,
+                                                                            base
+                                                                            + lane_idx * 4
+                                                                            + i,
+                                                                        ],
+                                                                    )
+                                                            _builder_emit(
+                                                                T.evaluate(
+                                                                    T.ptx.fence.proxy.async_.shared__cta()
+                                                                )
+                                                            )
+                                                    rem = _builder_assign(
+                                                        "rem",
+                                                        T.alloc_local((1,), "uint64"),
+                                                        locals().get("rem", _BUILDER_MISSING),
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.mapa.shared__cluster.u64(
+                                                            rem[0],
+                                                            barriers.ptr_to(
+                                                                [with_sf_base + tr_stage]
+                                                            ),
+                                                            T.uint32(0),
+                                                        )
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.mbarrier.arrive.b64(
+                                                            rem[0], T.uint32(1), pred=T.bool(True)
+                                                        )
+                                                    )
+                                                    tr_k = _builder_assign(
+                                                        "tr_k",
+                                                        tr_k + 1,
+                                                        locals().get("tr_k", _BUILDER_MISSING),
+                                                    )
+                                                    tr_stage = _builder_assign(
+                                                        "tr_stage",
+                                                        T.Select(
+                                                            tr_stage == stages - 1, 0, tr_stage + 1
+                                                        ),
+                                                        locals().get("tr_stage", _BUILDER_MISSING),
+                                                    )
+                                                    tr_phase = _builder_assign(
+                                                        "tr_phase",
+                                                        T.bitwise_xor(
+                                                            tr_phase, T.cast(tr_stage == 0, "int32")
+                                                        ),
+                                                        locals().get("tr_phase", _BUILDER_MISSING),
+                                                    )
+                                        tr_it = _builder_assign(
+                                            "tr_it",
+                                            tr_it + 1,
+                                            locals().get("tr_it", _BUILDER_MISSING),
+                                        )
+                                with T.Else():
+                                    with T.If(
+                                        T.And(
+                                            warp >= first_epilogue_warp,
+                                            warp < first_epilogue_warp + num_store_warps,
+                                        )
+                                    ):
+                                        with T.Then():
+                                            ep_warp = _builder_alloc_scalar("ep_warp", "int32")
+                                            ep_warp = _builder_assign(
+                                                "ep_warp",
+                                                warp - first_epilogue_warp,
+                                                locals().get("ep_warp", _BUILDER_MISSING),
+                                            )
+                                            tma_stage = _builder_alloc_scalar("tma_stage", "int32")
+                                            ep_it = _builder_alloc_scalar("ep_it", "int32")
+                                            ep_valid = _builder_alloc_scalar("ep_valid", "int32")
+                                            ep_grp = _builder_alloc_scalar("ep_grp", "int32")
+                                            ep_cum = _builder_alloc_scalar("ep_cum", "int32")
+                                            ep_nmb = _builder_alloc_scalar("ep_nmb", "int32")
+                                            ep_last = _builder_alloc_scalar("ep_last", "int32")
+                                            ep_psum = _builder_alloc_scalar("ep_psum", "int32")
+                                            ep_nb = _builder_alloc_scalar("ep_nb", "int32")
+                                            ep_nxt = _builder_alloc_scalar("ep_nxt", "int32")
+                                            ep_nxtk = _builder_alloc_scalar("ep_nxtk", "int32")
+                                            ep_vgrp = _builder_alloc_scalar("ep_vgrp", "int32")
+                                            ep_kend = _builder_alloc_scalar("ep_kend", "int32")
+                                            ep_it = _builder_assign(
+                                                "ep_it", 0, locals().get("ep_it", _BUILDER_MISSING)
+                                            )
+                                            ep_valid = _builder_assign(
+                                                "ep_valid",
+                                                1,
+                                                locals().get("ep_valid", _BUILDER_MISSING),
+                                            )
+                                            ep_grp = _builder_assign(
+                                                "ep_grp",
+                                                0,
+                                                locals().get("ep_grp", _BUILDER_MISSING),
+                                            )
+                                            ep_cum = _builder_assign(
+                                                "ep_cum",
+                                                0,
+                                                locals().get("ep_cum", _BUILDER_MISSING),
+                                            )
+                                            ep_last = _builder_assign(
+                                                "ep_last",
+                                                0,
+                                                locals().get("ep_last", _BUILDER_MISSING),
+                                            )
+                                            ep_vgrp = _builder_assign(
+                                                "ep_vgrp",
+                                                0,
+                                                locals().get("ep_vgrp", _BUILDER_MISSING),
+                                            )
+                                            ep_kend = _builder_assign(
+                                                "ep_kend",
+                                                0,
+                                                locals().get("ep_kend", _BUILDER_MISSING),
+                                            )
+                                            ep_nxt = _builder_assign(
+                                                "ep_nxt",
+                                                0,
+                                                locals().get("ep_nxt", _BUILDER_MISSING),
+                                            )
+                                            ep_nxtk = _builder_assign(
+                                                "ep_nxtk",
+                                                0,
+                                                locals().get("ep_nxtk", _BUILDER_MISSING),
+                                            )
+                                            if is_k_grouped:
+                                                ep_psum = _builder_assign(
+                                                    "ep_psum",
+                                                    0,
+                                                    locals().get("ep_psum", _BUILDER_MISSING),
+                                                )
+                                                ep_nmb = _builder_assign(
+                                                    "ep_nmb",
+                                                    num_m_blocks,
+                                                    locals().get("ep_nmb", _BUILDER_MISSING),
+                                                )
+                                                if is_k_grouped_psum:
+                                                    with T.While(ep_grp < num_groups):
+                                                        ep_nxtk = _builder_assign(
+                                                            "ep_nxtk",
+                                                            grouped_layout[ep_grp],
+                                                            locals().get(
+                                                                "ep_nxtk", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ep_last = _builder_assign(
+                                                            "ep_last",
+                                                            _uceil(ep_kend, k_alignment)
+                                                            * k_alignment,
+                                                            locals().get(
+                                                                "ep_last", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ep_psum = _builder_assign(
+                                                            "ep_psum",
+                                                            ep_nxtk - ep_last,
+                                                            locals().get(
+                                                                "ep_psum", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ep_kend = _builder_assign(
+                                                            "ep_kend",
+                                                            ep_nxtk,
+                                                            locals().get(
+                                                                "ep_kend", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(ep_psum > 0):
+                                                            with T.Then():
+                                                                T.evaluate(T.break_loop())
+                                                        ep_grp = _builder_assign(
+                                                            "ep_grp",
+                                                            ep_grp + 1,
+                                                            locals().get(
+                                                                "ep_grp", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                else:
+                                                    with T.While(ep_grp < num_groups):
+                                                        ep_psum = _builder_assign(
+                                                            "ep_psum",
+                                                            grouped_layout[ep_grp],
+                                                            locals().get(
+                                                                "ep_psum", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(ep_psum > 0):
+                                                            with T.Then():
+                                                                T.evaluate(T.break_loop())
+                                                        ep_grp = _builder_assign(
+                                                            "ep_grp",
+                                                            ep_grp + 1,
+                                                            locals().get(
+                                                                "ep_grp", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                    ep_nxt = _builder_assign(
+                                                        "ep_nxt",
+                                                        ep_grp + 1,
+                                                        locals().get("ep_nxt", _BUILDER_MISSING),
+                                                    )
+                                                    with T.While(ep_nxt < num_groups):
+                                                        ep_nxtk = _builder_assign(
+                                                            "ep_nxtk",
+                                                            grouped_layout[ep_nxt],
+                                                            locals().get(
+                                                                "ep_nxtk", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.If(ep_nxtk > 0):
+                                                            with T.Then():
+                                                                T.evaluate(T.break_loop())
+                                                        ep_nxt = _builder_assign(
+                                                            "ep_nxt",
+                                                            ep_nxt + 1,
+                                                            locals().get(
+                                                                "ep_nxt", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                            elif is_m_grouped_psum:
+                                                ep_psum = _builder_assign(
+                                                    "ep_psum",
+                                                    grouped_layout[0],
+                                                    locals().get("ep_psum", _BUILDER_MISSING),
+                                                )
+                                                ep_nmb = _builder_assign(
+                                                    "ep_nmb",
+                                                    _uceil(ep_psum, block_m),
+                                                    locals().get("ep_nmb", _BUILDER_MISSING),
+                                                )
+                                            else:
+                                                ep_psum = _builder_assign(
+                                                    "ep_psum",
+                                                    0,
+                                                    locals().get("ep_psum", _BUILDER_MISSING),
+                                                )
+                                                ep_nmb = _builder_assign(
+                                                    "ep_nmb",
+                                                    num_m_blocks,
+                                                    locals().get("ep_nmb", _BUILDER_MISSING),
+                                                )
+                                            tma_stage = _builder_assign(
+                                                "tma_stage",
+                                                0,
+                                                locals().get("tma_stage", _BUILDER_MISSING),
+                                            )
+                                            values = _builder_assign(
+                                                "values",
+                                                T.alloc_local((8,), "uint32"),
+                                                locals().get("values", _BUILDER_MISSING),
+                                            )
+                                            packed = _builder_assign(
+                                                "packed",
+                                                T.alloc_local((4,), "uint32"),
+                                                locals().get("packed", _BUILDER_MISSING),
+                                            )
+                                            with T.While(ep_valid == 1):
+                                                ep_nb = _builder_assign(
+                                                    "ep_nb",
+                                                    ep_it * num_sms + sm_idx,
+                                                    locals().get("ep_nb", _BUILDER_MISSING),
+                                                )
+                                                ep_done = _builder_alloc_scalar("ep_done", "int32")
+                                                ep_done = _builder_assign(
+                                                    "ep_done",
+                                                    0,
+                                                    locals().get("ep_done", _BUILDER_MISSING),
+                                                )
+                                                if is_m_grouped_masked:
+                                                    with T.While(ep_done == 0):
+                                                        with T.If(ep_grp == num_groups):
+                                                            with T.Then():
+                                                                ep_valid = _builder_assign(
+                                                                    "ep_valid",
+                                                                    0,
+                                                                    locals().get(
+                                                                        "ep_valid", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                ep_done = _builder_assign(
+                                                                    "ep_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "ep_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                ep_nmb = _builder_assign(
+                                                                    "ep_nmb",
+                                                                    _uceil(
+                                                                        grouped_layout[ep_grp],
+                                                                        block_m,
+                                                                    ),
+                                                                    locals().get(
+                                                                        "ep_nmb", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                with T.If(
+                                                                    ep_nb
+                                                                    < (ep_cum + ep_nmb)
+                                                                    * num_n_blocks
+                                                                ):
+                                                                    with T.Then():
+                                                                        ep_done = _builder_assign(
+                                                                            "ep_done",
+                                                                            1,
+                                                                            locals().get(
+                                                                                "ep_done",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                    with T.Else():
+                                                                        ep_cum = _builder_assign(
+                                                                            "ep_cum",
+                                                                            ep_cum + ep_nmb,
+                                                                            locals().get(
+                                                                                "ep_cum",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        ep_grp = _builder_assign(
+                                                                            "ep_grp",
+                                                                            ep_grp + 1,
+                                                                            locals().get(
+                                                                                "ep_grp",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                elif is_m_grouped_psum:
+                                                    with T.While(ep_done == 0):
+                                                        with T.If(
+                                                            ep_nb < (ep_cum + ep_nmb) * num_n_blocks
+                                                        ):
+                                                            with T.Then():
+                                                                ep_done = _builder_assign(
+                                                                    "ep_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "ep_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                ep_grp = _builder_assign(
+                                                                    "ep_grp",
+                                                                    ep_grp + 1,
+                                                                    locals().get(
+                                                                        "ep_grp", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                with T.If(ep_grp == num_groups):
+                                                                    with T.Then():
+                                                                        ep_valid = _builder_assign(
+                                                                            "ep_valid",
+                                                                            0,
+                                                                            locals().get(
+                                                                                "ep_valid",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        ep_done = _builder_assign(
+                                                                            "ep_done",
+                                                                            1,
+                                                                            locals().get(
+                                                                                "ep_done",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                    with T.Else():
+                                                                        ep_last = _builder_assign(
+                                                                            "ep_last",
+                                                                            _uceil(ep_psum, block_m)
+                                                                            * block_m,
+                                                                            locals().get(
+                                                                                "ep_last",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        ep_psum = _builder_assign(
+                                                                            "ep_psum",
+                                                                            grouped_layout[ep_grp],
+                                                                            locals().get(
+                                                                                "ep_psum",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        ep_cum = _builder_assign(
+                                                                            "ep_cum",
+                                                                            ep_cum + ep_nmb,
+                                                                            locals().get(
+                                                                                "ep_cum",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        ep_nmb = _builder_assign(
+                                                                            "ep_nmb",
+                                                                            _uceil(
+                                                                                ep_psum - ep_last,
+                                                                                block_m,
+                                                                            ),
+                                                                            locals().get(
+                                                                                "ep_nmb",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                elif is_k_grouped:
+                                                    with T.While(ep_done == 0):
+                                                        with T.If(ep_grp == num_groups):
+                                                            with T.Then():
+                                                                ep_valid = _builder_assign(
+                                                                    "ep_valid",
+                                                                    0,
+                                                                    locals().get(
+                                                                        "ep_valid", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                                ep_done = _builder_assign(
+                                                                    "ep_done",
+                                                                    1,
+                                                                    locals().get(
+                                                                        "ep_done", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            with T.Else():
+                                                                with T.If(
+                                                                    ep_nb
+                                                                    < (ep_vgrp + 1) * num_blocks
+                                                                ):
+                                                                    with T.Then():
+                                                                        ep_done = _builder_assign(
+                                                                            "ep_done",
+                                                                            1,
+                                                                            locals().get(
+                                                                                "ep_done",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                    with T.Else():
+                                                                        ep_vgrp = _builder_assign(
+                                                                            "ep_vgrp",
+                                                                            ep_vgrp + 1,
+                                                                            locals().get(
+                                                                                "ep_vgrp",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        if is_k_grouped_psum:
+                                                                            ep_grp = _builder_assign(
+                                                                                "ep_grp",
+                                                                                ep_grp + 1,
+                                                                                locals().get(
+                                                                                    "ep_grp",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            with T.While(
+                                                                                ep_grp < num_groups
+                                                                            ):
+                                                                                ep_nxtk = _builder_assign(
+                                                                                    "ep_nxtk",
+                                                                                    grouped_layout[
+                                                                                        ep_grp
+                                                                                    ],
+                                                                                    locals().get(
+                                                                                        "ep_nxtk",
+                                                                                        _BUILDER_MISSING,
+                                                                                    ),
+                                                                                )
+                                                                                ep_last = _builder_assign(
+                                                                                    "ep_last",
+                                                                                    _uceil(
+                                                                                        ep_kend,
+                                                                                        k_alignment,
+                                                                                    )
+                                                                                    * k_alignment,
+                                                                                    locals().get(
+                                                                                        "ep_last",
+                                                                                        _BUILDER_MISSING,
+                                                                                    ),
+                                                                                )
+                                                                                ep_psum = _builder_assign(
+                                                                                    "ep_psum",
+                                                                                    ep_nxtk
+                                                                                    - ep_last,
+                                                                                    locals().get(
+                                                                                        "ep_psum",
+                                                                                        _BUILDER_MISSING,
+                                                                                    ),
+                                                                                )
+                                                                                ep_kend = _builder_assign(
+                                                                                    "ep_kend",
+                                                                                    ep_nxtk,
+                                                                                    locals().get(
+                                                                                        "ep_kend",
+                                                                                        _BUILDER_MISSING,
+                                                                                    ),
+                                                                                )
+                                                                                with T.If(
+                                                                                    ep_psum > 0
+                                                                                ):
+                                                                                    with T.Then():
+                                                                                        T.evaluate(
+                                                                                            T.break_loop()
+                                                                                        )
+                                                                                ep_grp = _builder_assign(
+                                                                                    "ep_grp",
+                                                                                    ep_grp + 1,
+                                                                                    locals().get(
+                                                                                        "ep_grp",
+                                                                                        _BUILDER_MISSING,
+                                                                                    ),
+                                                                                )
+                                                                        else:
+                                                                            ep_last = _builder_assign(
+                                                                                "ep_last",
+                                                                                ep_last + ep_psum,
+                                                                                locals().get(
+                                                                                    "ep_last",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            ep_grp = _builder_assign(
+                                                                                "ep_grp",
+                                                                                ep_nxt,
+                                                                                locals().get(
+                                                                                    "ep_grp",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            ep_nxt = _builder_assign(
+                                                                                "ep_nxt",
+                                                                                ep_nxt + 1,
+                                                                                locals().get(
+                                                                                    "ep_nxt",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            ep_psum = _builder_assign(
+                                                                                "ep_psum",
+                                                                                ep_nxtk,
+                                                                                locals().get(
+                                                                                    "ep_psum",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            with T.While(
+                                                                                ep_nxt < num_groups
+                                                                            ):
+                                                                                ep_nxtk = _builder_assign(
+                                                                                    "ep_nxtk",
+                                                                                    grouped_layout[
+                                                                                        ep_nxt
+                                                                                    ],
+                                                                                    locals().get(
+                                                                                        "ep_nxtk",
+                                                                                        _BUILDER_MISSING,
+                                                                                    ),
+                                                                                )
+                                                                                with T.If(
+                                                                                    ep_nxtk > 0
+                                                                                ):
+                                                                                    with T.Then():
+                                                                                        T.evaluate(
+                                                                                            T.break_loop()
+                                                                                        )
+                                                                                ep_nxt = _builder_assign(
+                                                                                    "ep_nxt",
+                                                                                    ep_nxt + 1,
+                                                                                    locals().get(
+                                                                                        "ep_nxt",
+                                                                                        _BUILDER_MISSING,
+                                                                                    ),
+                                                                                )
+                                                    ep_cum = _builder_assign(
+                                                        "ep_cum",
+                                                        ep_vgrp * num_m_blocks,
+                                                        locals().get("ep_cum", _BUILDER_MISSING),
+                                                    )
+                                                elif is_batched:
+                                                    with T.If(ep_nb >= num_blocks * num_groups):
+                                                        with T.Then():
+                                                            ep_valid = _builder_assign(
+                                                                "ep_valid",
+                                                                0,
+                                                                locals().get(
+                                                                    "ep_valid", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                        with T.Else():
+                                                            ep_grp = _builder_assign(
+                                                                "ep_grp",
+                                                                ep_nb // num_blocks,
+                                                                locals().get(
+                                                                    "ep_grp", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            ep_cum = _builder_assign(
+                                                                "ep_cum",
+                                                                ep_grp * num_m_blocks,
+                                                                locals().get(
+                                                                    "ep_cum", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            ep_nmb = _builder_assign(
+                                                                "ep_nmb",
+                                                                num_m_blocks,
+                                                                locals().get(
+                                                                    "ep_nmb", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                if not (
+                                                    is_m_grouped_masked
+                                                    or is_m_grouped_psum
+                                                    or is_k_grouped
+                                                    or is_batched
+                                                ):
+                                                    with T.If(ep_nb >= num_blocks):
+                                                        with T.Then():
+                                                            ep_valid = _builder_assign(
+                                                                "ep_valid",
+                                                                0,
+                                                                locals().get(
+                                                                    "ep_valid", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                with T.If(ep_valid == 1):
+                                                    with T.Then():
+                                                        accum_stage_e = _builder_alloc_scalar(
+                                                            "accum_stage_e", "int32"
+                                                        )
+                                                        accum_phase_e = _builder_alloc_scalar(
+                                                            "accum_phase_e", "int32"
+                                                        )
+                                                        accum_stage_e = _builder_assign(
+                                                            "accum_stage_e",
+                                                            ep_it % NUM_EPILOGUE_STAGES,
+                                                            locals().get(
+                                                                "accum_stage_e", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        accum_phase_e = _builder_assign(
+                                                            "accum_phase_e",
+                                                            T.bitwise_and(
+                                                                ep_it // NUM_EPILOGUE_STAGES, 1
+                                                            ),
+                                                            locals().get(
+                                                                "accum_phase_e", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ep_wait = _builder_alloc_scalar(
+                                                            "ep_wait", "uint32"
+                                                        )
+                                                        ep_wait = _builder_assign(
+                                                            "ep_wait",
+                                                            T.uint32(0),
+                                                            locals().get(
+                                                                "ep_wait", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        with T.While(ep_wait == T.uint32(0)):
+                                                            _builder_emit(
+                                                                T.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
+                                                                    ep_wait,
+                                                                    barriers.ptr_to(
+                                                                        [
+                                                                            tmem_full_base
+                                                                            + accum_stage_e
+                                                                        ]
+                                                                    ),
+                                                                    T.cast(accum_phase_e, "uint32"),
+                                                                    T.uint32(TRY_WAIT_TICKS),
+                                                                )
+                                                            )
+                                                        _builder_emit(
+                                                            T.ptx.tcgen05.fence__after_thread_sync()
+                                                        )
+                                                        ep_m_local, ep_n_local = (
+                                                            _builder_assign_many(
+                                                                ("ep_m_local", "ep_n_local"),
+                                                                _swizzled(
+                                                                    ep_nb - ep_cum * num_n_blocks,
+                                                                    ep_nmb,
+                                                                    num_n_blocks,
+                                                                ),
+                                                                (
+                                                                    locals().get(
+                                                                        "ep_m_local",
+                                                                        _BUILDER_MISSING,
+                                                                    ),
+                                                                    locals().get(
+                                                                        "ep_n_local",
+                                                                        _BUILDER_MISSING,
+                                                                    ),
+                                                                ),
+                                                            )
+                                                        )
+                                                        base_m = _builder_alloc_scalar(
+                                                            "base_m", "int32"
+                                                        )
+                                                        base_n = _builder_alloc_scalar(
+                                                            "base_n", "int32"
+                                                        )
+                                                        base_m = _builder_assign(
+                                                            "base_m",
+                                                            (
+                                                                ep_m_local
+                                                                + (
+                                                                    _udiv(ep_last, block_m)
+                                                                    if is_m_grouped_psum
+                                                                    else 0
+                                                                )
+                                                            )
+                                                            * block_m,
+                                                            locals().get(
+                                                                "base_m", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        base_n = _builder_assign(
+                                                            "base_n",
+                                                            ep_n_local * block_n,
+                                                            locals().get(
+                                                                "base_n", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        if is_m_grouped_masked or is_k_grouped:
+                                                            base_m = _builder_assign(
+                                                                "base_m",
+                                                                ep_grp * eff_m + base_m,
+                                                                locals().get(
+                                                                    "base_m", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                        tmem_base = _builder_alloc_scalar(
+                                                            "tmem_base", "int32"
+                                                        )
+                                                        tmem_base = _builder_assign(
+                                                            "tmem_base",
+                                                            accum_stage_e * umma_n,
+                                                            locals().get(
+                                                                "tmem_base", _BUILDER_MISSING
+                                                            ),
+                                                        )
+                                                        ep_stores = _builder_alloc_scalar(
+                                                            "ep_stores", "int32"
+                                                        )
+                                                        if use_effective_m:
+                                                            ep_eff_m = _builder_alloc_scalar(
+                                                                "ep_eff_m", "int32"
+                                                            )
+                                                            ep_eff_m = _builder_assign(
+                                                                "ep_eff_m",
+                                                                block_m,
+                                                                locals().get(
+                                                                    "ep_eff_m", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                            with (
+                                                                T.If(ep_m_local == ep_nmb - 1),
+                                                                T.Then(),
+                                                            ):
+                                                                ep_eff_m = _builder_assign(
+                                                                    "ep_eff_m",
+                                                                    _uceil(
+                                                                        ep_psum
+                                                                        - (
+                                                                            ep_m_local
+                                                                            + _udiv(
+                                                                                ep_last, block_m
+                                                                            )
+                                                                        )
+                                                                        * block_m,
+                                                                        UMMA_STEP_N,
+                                                                    )
+                                                                    * UMMA_STEP_N,
+                                                                    locals().get(
+                                                                        "ep_eff_m", _BUILDER_MISSING
+                                                                    ),
+                                                                )
+                                                            ep_stores = _builder_assign(
+                                                                "ep_stores",
+                                                                _udiv(ep_eff_m, store_block_m),
+                                                                locals().get(
+                                                                    "ep_stores", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                        else:
+                                                            ep_stores = _builder_assign(
+                                                                "ep_stores",
+                                                                num_swap_stores,
+                                                                locals().get(
+                                                                    "ep_stores", _BUILDER_MISSING
+                                                                ),
+                                                            )
+                                                        if swap_ab:
+                                                            with T.unroll(0, num_swap_stores) as st:
+                                                                IRBuilder.name("st", st)
+                                                                with T.If(st < ep_stores), T.Then():
+                                                                    with T.If(ep_warp == 0):
+                                                                        with T.Then():
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx.cp.async_.bulk.wait_group(
+                                                                                        NUM_TMA_STORE_STAGES
+                                                                                        - 1
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                    _builder_emit(
+                                                                        T.ptx.bar.sync(
+                                                                            T.uint32(
+                                                                                EPILOGUE_NAMED_BARRIER
+                                                                            ),
+                                                                            T.uint32(
+                                                                                num_store_threads
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                    with T.unroll(
+                                                                        0, num_atom_rows
+                                                                    ) as i:
+                                                                        IRBuilder.name("i", i)
+                                                                        taddr_s = (
+                                                                            _builder_alloc_scalar(
+                                                                                "taddr_s", "uint32"
+                                                                            )
+                                                                        )
+                                                                        taddr_s = _builder_assign(
+                                                                            "taddr_s",
+                                                                            T.cast(
+                                                                                tmem_base
+                                                                                + st * store_block_m
+                                                                                + i * 8,
+                                                                                "uint32",
+                                                                            ),
+                                                                            locals().get(
+                                                                                "taddr_s",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        atom_byte = _builder_assign(
+                                                                            "atom_byte",
+                                                                            ep_warp
+                                                                            // warps_per_atom
+                                                                            * store_block_m
+                                                                            * swizzle_cd
+                                                                            + i * 8 * swizzle_cd,
+                                                                            locals().get(
+                                                                                "atom_byte",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        if cd_is_fp32:
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx[
+                                                                                        "tcgen05.ld.sync.aligned.32x32b.x8.b32"
+                                                                                    ](
+                                                                                        *[
+                                                                                            values[
+                                                                                                j
+                                                                                            ]
+                                                                                            for j in range(
+                                                                                                8
+                                                                                            )
+                                                                                        ],
+                                                                                        taddr_s,
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.tcgen05.wait__ld.sync.aligned()
+                                                                            )
+                                                                            col_f = _builder_alloc_scalar(
+                                                                                "col_f", "int32"
+                                                                            )
+                                                                            col_f = _builder_assign(
+                                                                                "col_f",
+                                                                                lane_idx // 4,
+                                                                                locals().get(
+                                                                                    "col_f",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            with T.unroll(
+                                                                                0, 8
+                                                                            ) as row:
+                                                                                IRBuilder.name(
+                                                                                    "row", row
+                                                                                )
+                                                                                T.buffer_store(
+                                                                                    smem_cd_u32,
+                                                                                    values[row],
+                                                                                    [
+                                                                                        (
+                                                                                            tma_stage
+                                                                                            * cd_stage_bytes
+                                                                                            + atom_byte
+                                                                                            + row
+                                                                                            * (
+                                                                                                16
+                                                                                                * 8
+                                                                                            )
+                                                                                            + T.bitwise_xor(
+                                                                                                col_f,
+                                                                                                row,
+                                                                                            )
+                                                                                            * 16
+                                                                                            + lane_idx
+                                                                                            % 4
+                                                                                            * 4
+                                                                                        )
+                                                                                        // 4
+                                                                                    ],
+                                                                                )
+                                                                        else:
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx[
+                                                                                        "tcgen05.ld.sync.aligned.16x256b.x1.b32"
+                                                                                    ](
+                                                                                        values[0],
+                                                                                        values[1],
+                                                                                        values[2],
+                                                                                        values[3],
+                                                                                        taddr_s,
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx[
+                                                                                        "tcgen05.ld.sync.aligned.16x256b.x1.b32"
+                                                                                    ](
+                                                                                        values[4],
+                                                                                        values[5],
+                                                                                        values[6],
+                                                                                        values[7],
+                                                                                        T.bitwise_or(
+                                                                                            taddr_s,
+                                                                                            T.uint32(
+                                                                                                1048576
+                                                                                            ),
+                                                                                        ),
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.tcgen05.wait__ld.sync.aligned()
+                                                                            )
+                                                                            with T.unroll(
+                                                                                0, 4
+                                                                            ) as j:
+                                                                                IRBuilder.name(
+                                                                                    "j", j
+                                                                                )
+                                                                                _builder_emit(
+                                                                                    T.ptx.cvt.rn.bf16x2.f32(
+                                                                                        packed[j],
+                                                                                        T.reinterpret(
+                                                                                            "float32",
+                                                                                            values[
+                                                                                                2
+                                                                                                * j
+                                                                                                + 1
+                                                                                            ],
+                                                                                        ),
+                                                                                        T.reinterpret(
+                                                                                            "float32",
+                                                                                            values[
+                                                                                                2
+                                                                                                * j
+                                                                                            ],
+                                                                                        ),
+                                                                                    )
+                                                                                )
+                                                                            row_s = _builder_alloc_scalar(
+                                                                                "row_s", "int32"
+                                                                            )
+                                                                            col_s = _builder_alloc_scalar(
+                                                                                "col_s", "int32"
+                                                                            )
+                                                                            row_s = _builder_assign(
+                                                                                "row_s",
+                                                                                lane_idx % 8,
+                                                                                locals().get(
+                                                                                    "row_s",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            col_s = _builder_assign(
+                                                                                "col_s",
+                                                                                ep_warp % 2 * 4
+                                                                                + lane_idx // 8,
+                                                                                locals().get(
+                                                                                    "col_s",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                                                                                    smem_cd_u32.ptr_to(
+                                                                                        [
+                                                                                            (
+                                                                                                tma_stage
+                                                                                                * cd_stage_bytes
+                                                                                                + atom_byte
+                                                                                                + row_s
+                                                                                                * (
+                                                                                                    16
+                                                                                                    * 8
+                                                                                                )
+                                                                                                + T.bitwise_xor(
+                                                                                                    col_s,
+                                                                                                    row_s,
+                                                                                                )
+                                                                                                * 16
+                                                                                            )
+                                                                                            // 4
+                                                                                        ]
+                                                                                    ),
+                                                                                    packed[0],
+                                                                                    packed[1],
+                                                                                    packed[2],
+                                                                                    packed[3],
+                                                                                )
+                                                                            )
+                                                                    with T.If(st == ep_stores - 1):
+                                                                        with T.Then():
+                                                                            _builder_emit(
+                                                                                T.ptx.tcgen05.fence__before_thread_sync()
+                                                                            )
+                                                                            rem_s = _builder_assign(
+                                                                                "rem_s",
+                                                                                T.alloc_local(
+                                                                                    (1,), "uint64"
+                                                                                ),
+                                                                                locals().get(
+                                                                                    "rem_s",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.mapa.shared__cluster.u64(
+                                                                                    rem_s[0],
+                                                                                    barriers.ptr_to(
+                                                                                        [
+                                                                                            tmem_empty_base
+                                                                                            + accum_stage_e
+                                                                                        ]
+                                                                                    ),
+                                                                                    T.uint32(0),
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.mbarrier.arrive.b64(
+                                                                                    rem_s[0],
+                                                                                    T.uint32(1),
+                                                                                    pred=T.bool(
+                                                                                        True
+                                                                                    ),
+                                                                                )
+                                                                            )
+                                                                    _builder_emit(
+                                                                        T.evaluate(
+                                                                            T.ptx.fence.proxy.async_.shared__cta()
+                                                                        )
+                                                                    )
+                                                                    _builder_emit(
+                                                                        T.ptx.bar.sync(
+                                                                            T.uint32(
+                                                                                EPILOGUE_NAMED_BARRIER
+                                                                            ),
+                                                                            T.uint32(
+                                                                                num_store_threads
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                    with T.If(ep_warp == 0):
+                                                                        with T.Then():
+                                                                            ep_elected = _builder_alloc_scalar(
+                                                                                "ep_elected",
+                                                                                "uint32",
+                                                                            )
+                                                                            ep_elected_lane = _builder_alloc_scalar(
+                                                                                "ep_elected_lane",
+                                                                                "uint32",
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.elect_sync(
+                                                                                    ep_elected_lane,
+                                                                                    ep_elected,
+                                                                                    T.uint32(
+                                                                                        4294967295
+                                                                                    ),
+                                                                                )
+                                                                            )
+                                                                            with T.unroll(
+                                                                                0, num_n_atoms
+                                                                            ) as i:
+                                                                                IRBuilder.name(
+                                                                                    "i", i
+                                                                                )
+                                                                                _builder_emit(
+                                                                                    T.evaluate(
+                                                                                        T.ptx[
+                                                                                            reduce_chain
+                                                                                            if with_accumulation
+                                                                                            else store_chain
+                                                                                        ](
+                                                                                            T.address_of(
+                                                                                                tensor_map_cd
+                                                                                            ),
+                                                                                            *_tma_coords(
+                                                                                                (
+                                                                                                    base_n
+                                                                                                    + i
+                                                                                                    * store_block_n_atom,
+                                                                                                    base_m
+                                                                                                    + st
+                                                                                                    * store_block_m,
+                                                                                                ),
+                                                                                                ep_grp,
+                                                                                            ),
+                                                                                            smem_cd_u32.ptr_to(
+                                                                                                [
+                                                                                                    (
+                                                                                                        tma_stage
+                                                                                                        * cd_stage_bytes
+                                                                                                        + i
+                                                                                                        * store_block_m
+                                                                                                        * swizzle_cd
+                                                                                                    )
+                                                                                                    // 4
+                                                                                                ]
+                                                                                            ),
+                                                                                            pred=T.cast(
+                                                                                                ep_elected
+                                                                                                == T.uint32(
+                                                                                                    1
+                                                                                                ),
+                                                                                                "bool",
+                                                                                            ),
+                                                                                        )
+                                                                                    )
+                                                                                )
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx.cp.async_.bulk.commit_group()
+                                                                                )
+                                                                            )
+                                                                    _builder_emit(
+                                                                        T.ptx.bar.warp.sync(
+                                                                            T.uint32(4294967295)
+                                                                        )
+                                                                    )
+                                                                    tma_stage = _builder_assign(
+                                                                        "tma_stage",
+                                                                        T.Select(
+                                                                            tma_stage
+                                                                            == NUM_TMA_STORE_STAGES
+                                                                            - 1,
+                                                                            0,
+                                                                            tma_stage + 1,
+                                                                        ),
+                                                                        locals().get(
+                                                                            "tma_stage",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                        else:
+                                                            with T.unroll(0, num_m_waves) as w:
+                                                                IRBuilder.name("w", w)
+                                                                with T.unroll(0, num_stores) as st:
+                                                                    IRBuilder.name("st", st)
+                                                                    with T.If(ep_warp == 0):
+                                                                        with T.Then():
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx.cp.async_.bulk.wait_group(
+                                                                                        NUM_TMA_STORE_STAGES
+                                                                                        - 1
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                    _builder_emit(
+                                                                        T.ptx.bar.sync(
+                                                                            T.uint32(
+                                                                                EPILOGUE_NAMED_BARRIER
+                                                                            ),
+                                                                            T.uint32(
+                                                                                num_store_threads
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                    with T.unroll(
+                                                                        0, elems_per_store
+                                                                    ) as i:
+                                                                        IRBuilder.name("i", i)
+                                                                        bank_group = (
+                                                                            _builder_alloc_scalar(
+                                                                                "bank_group",
+                                                                                "int32",
+                                                                            )
+                                                                        )
+                                                                        bank_group = _builder_assign(
+                                                                            "bank_group",
+                                                                            i
+                                                                            + lane_idx
+                                                                            * (swizzle_cd // 16),
+                                                                            locals().get(
+                                                                                "bank_group",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        row = _builder_alloc_scalar(
+                                                                            "row", "int32"
+                                                                        )
+                                                                        row = _builder_assign(
+                                                                            "row",
+                                                                            i // 8 + lane_idx
+                                                                            if has_shortcut
+                                                                            else bank_group // 8,
+                                                                            locals().get(
+                                                                                "row",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        col = _builder_alloc_scalar(
+                                                                            "col", "int32"
+                                                                        )
+                                                                        col = _builder_assign(
+                                                                            "col",
+                                                                            i
+                                                                            if has_shortcut
+                                                                            else bank_group % 8,
+                                                                            locals().get(
+                                                                                "col",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        col = _builder_assign(
+                                                                            "col",
+                                                                            T.bitwise_xor(
+                                                                                col,
+                                                                                row
+                                                                                % (
+                                                                                    swizzle_cd // 16
+                                                                                ),
+                                                                            ),
+                                                                            locals().get(
+                                                                                "col",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        cd_word = (
+                                                                            _builder_alloc_scalar(
+                                                                                "cd_word", "int32"
+                                                                            )
+                                                                        )
+                                                                        cd_word = _builder_assign(
+                                                                            "cd_word",
+                                                                            _cd_word(
+                                                                                tma_stage,
+                                                                                ep_warp,
+                                                                                row,
+                                                                                col,
+                                                                                0,
+                                                                            ),
+                                                                            locals().get(
+                                                                                "cd_word",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        taddr = (
+                                                                            _builder_alloc_scalar(
+                                                                                "taddr", "uint32"
+                                                                            )
+                                                                        )
+                                                                        taddr = _builder_assign(
+                                                                            "taddr",
+                                                                            T.cast(
+                                                                                tmem_base
+                                                                                + w * block_n
+                                                                                + st * store_block_n
+                                                                                + i
+                                                                                * elems_per_bank_group,
+                                                                                "uint32",
+                                                                            ),
+                                                                            locals().get(
+                                                                                "taddr",
+                                                                                _BUILDER_MISSING,
+                                                                            ),
+                                                                        )
+                                                                        if cd_is_fp32:
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx[
+                                                                                        "tcgen05.ld.sync.aligned.32x32b.x4.b32"
+                                                                                    ](
+                                                                                        values[0],
+                                                                                        values[1],
+                                                                                        values[2],
+                                                                                        values[3],
+                                                                                        taddr,
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.tcgen05.wait__ld.sync.aligned()
+                                                                            )
+                                                                            with T.unroll(
+                                                                                0, 4
+                                                                            ) as j:
+                                                                                IRBuilder.name(
+                                                                                    "j", j
+                                                                                )
+                                                                                T.buffer_store(
+                                                                                    smem_cd_u32,
+                                                                                    values[j],
+                                                                                    [cd_word + j],
+                                                                                )
+                                                                        else:
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx[
+                                                                                        "tcgen05.ld.sync.aligned.32x32b.x8.b32"
+                                                                                    ](
+                                                                                        *[
+                                                                                            values[
+                                                                                                j
+                                                                                            ]
+                                                                                            for j in range(
+                                                                                                8
+                                                                                            )
+                                                                                        ],
+                                                                                        taddr,
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.tcgen05.wait__ld.sync.aligned()
+                                                                            )
+                                                                            with T.unroll(
+                                                                                0, 4
+                                                                            ) as j:
+                                                                                IRBuilder.name(
+                                                                                    "j", j
+                                                                                )
+                                                                                _builder_emit(
+                                                                                    T.ptx.cvt.rn.bf16x2.f32(
+                                                                                        packed[j],
+                                                                                        T.reinterpret(
+                                                                                            "float32",
+                                                                                            values[
+                                                                                                2
+                                                                                                * j
+                                                                                                + 1
+                                                                                            ],
+                                                                                        ),
+                                                                                        T.reinterpret(
+                                                                                            "float32",
+                                                                                            values[
+                                                                                                2
+                                                                                                * j
+                                                                                            ],
+                                                                                        ),
+                                                                                    )
+                                                                                )
+                                                                            with T.unroll(
+                                                                                0, 4
+                                                                            ) as j:
+                                                                                IRBuilder.name(
+                                                                                    "j", j
+                                                                                )
+                                                                                T.buffer_store(
+                                                                                    smem_cd_u32,
+                                                                                    packed[j],
+                                                                                    [cd_word + j],
+                                                                                )
+                                                                    with T.If(
+                                                                        T.And(
+                                                                            w == num_m_waves - 1,
+                                                                            st == num_stores - 1,
+                                                                        )
+                                                                    ):
+                                                                        with T.Then():
+                                                                            _builder_emit(
+                                                                                T.ptx.tcgen05.fence__before_thread_sync()
+                                                                            )
+                                                                            rem_e = _builder_assign(
+                                                                                "rem_e",
+                                                                                T.alloc_local(
+                                                                                    (1,), "uint64"
+                                                                                ),
+                                                                                locals().get(
+                                                                                    "rem_e",
+                                                                                    _BUILDER_MISSING,
+                                                                                ),
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.mapa.shared__cluster.u64(
+                                                                                    rem_e[0],
+                                                                                    barriers.ptr_to(
+                                                                                        [
+                                                                                            tmem_empty_base
+                                                                                            + accum_stage_e
+                                                                                        ]
+                                                                                    ),
+                                                                                    T.uint32(0),
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.mbarrier.arrive.b64(
+                                                                                    rem_e[0],
+                                                                                    T.uint32(1),
+                                                                                    pred=T.bool(
+                                                                                        True
+                                                                                    ),
+                                                                                )
+                                                                            )
+                                                                    _builder_emit(
+                                                                        T.evaluate(
+                                                                            T.ptx.fence.proxy.async_.shared__cta()
+                                                                        )
+                                                                    )
+                                                                    _builder_emit(
+                                                                        T.ptx.bar.sync(
+                                                                            T.uint32(
+                                                                                EPILOGUE_NAMED_BARRIER
+                                                                            ),
+                                                                            T.uint32(
+                                                                                num_store_threads
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                    with T.If(ep_warp == 0):
+                                                                        with T.Then():
+                                                                            ep_elected = _builder_alloc_scalar(
+                                                                                "ep_elected",
+                                                                                "uint32",
+                                                                            )
+                                                                            ep_elected_lane = _builder_alloc_scalar(
+                                                                                "ep_elected_lane",
+                                                                                "uint32",
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.ptx.elect_sync(
+                                                                                    ep_elected_lane,
+                                                                                    ep_elected,
+                                                                                    T.uint32(
+                                                                                        4294967295
+                                                                                    ),
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx[
+                                                                                        reduce_chain
+                                                                                        if with_accumulation
+                                                                                        else store_chain
+                                                                                    ](
+                                                                                        T.address_of(
+                                                                                            tensor_map_cd
+                                                                                        ),
+                                                                                        *_tma_coords(
+                                                                                            (
+                                                                                                base_n
+                                                                                                + st
+                                                                                                * store_block_n,
+                                                                                                base_m
+                                                                                                + w
+                                                                                                * store_block_m,
+                                                                                            ),
+                                                                                            ep_grp,
+                                                                                        ),
+                                                                                        smem_cd.ptr_to(
+                                                                                            [
+                                                                                                tma_stage,
+                                                                                                0,
+                                                                                                0,
+                                                                                            ]
+                                                                                        ),
+                                                                                        pred=T.cast(
+                                                                                            ep_elected
+                                                                                            == T.uint32(
+                                                                                                1
+                                                                                            ),
+                                                                                            "bool",
+                                                                                        ),
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                            _builder_emit(
+                                                                                T.evaluate(
+                                                                                    T.ptx.cp.async_.bulk.commit_group()
+                                                                                )
+                                                                            )
+                                                                    _builder_emit(
+                                                                        T.ptx.bar.warp.sync(
+                                                                            T.uint32(4294967295)
+                                                                        )
+                                                                    )
+                                                                    tma_stage = _builder_assign(
+                                                                        "tma_stage",
+                                                                        T.Select(
+                                                                            tma_stage
+                                                                            == NUM_TMA_STORE_STAGES
+                                                                            - 1,
+                                                                            0,
+                                                                            tma_stage + 1,
+                                                                        ),
+                                                                        locals().get(
+                                                                            "tma_stage",
+                                                                            _BUILDER_MISSING,
+                                                                        ),
+                                                                    )
+                                                ep_it = _builder_assign(
+                                                    "ep_it",
+                                                    ep_it + 1,
+                                                    locals().get("ep_it", _BUILDER_MISSING),
+                                                )
+            if cta_group > 1:
+                _builder_emit(T.ptx.barrier.cluster.arrive.relaxed.aligned())
+                _builder_emit(T.ptx.barrier.cluster.wait.acquire.aligned())
+            else:
+                _builder_emit(T.ptx.bar.sync(T.uint32(0)))
+            with T.If(warp == 0):
+                with T.Then():
+                    _builder_emit(
+                        T.ptx[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
+                            T.uint32(0), T.uint32(spec.num_tmem_cols)
+                        )
+                    )
 
-        # ===============================================================
-        # Teardown (source `:524`)
-        # ===============================================================
-
-        if cta_group > 1:
-            T.ptx.barrier.cluster.arrive.relaxed.aligned()
-            T.ptx.barrier.cluster.wait.acquire.aligned()
-        else:
-            T.ptx.bar.sync(T.uint32(0))
-
-        # The allocating warp (2) and the freeing warp (0) deliberately differ.
-        if warp == 0:
-            T.ptx[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
-                T.uint32(0), T.uint32(spec.num_tmem_cols)
-            )
-
-    return sm100_fp8_fp4_gemm_1d1d
+    return builder.get()
 
 
 def _blocks_per_group(spec: GemmSpec) -> int:

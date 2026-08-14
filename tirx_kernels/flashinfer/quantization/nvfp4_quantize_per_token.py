@@ -48,7 +48,10 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     warp_reduce_max,
 )
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
+
+from ._ir_builder import flat_attr, name, scalar, store
 
 FLOAT32_MAX = 3.4028234663852886e38
 
@@ -141,98 +144,118 @@ def get_kernel(
             return row * pad_cols + col  # compute_sf_index_linear_gpu
         return sf_offset_128x4(row, col, pad_cols)
 
-    @T.prim_func
-    def nvfp4_quantize_per_token(
-        in_ptr: T.handle,
-        out_ptr: T.handle,
-        sf_ptr: T.handle,
-        pts_ptr: T.handle,
-        m_rows: T.int32,
-        gsi_ptr: T.handle,
-    ):
-        in_global = T.match_buffer(in_ptr, shape=[m * k], dtype=dtype, scope="global")
-        out_global = T.match_buffer(out_ptr, shape=[m * (k // 2)], dtype="uint8", scope="global")
-        sf_out = T.match_buffer(
-            sf_ptr, shape=[_sf_numel(m, k, sf_layout)], dtype="uint8", scope="global"
-        )
-        pts_out = T.match_buffer(pts_ptr, shape=[m], dtype="float32", scope="global")
-        gsi = T.match_buffer(gsi_ptr, shape=[1], dtype="float32", scope="global")
-        T.device_entry()
-        T.attr({"tirx.launch_bounds_min_blocks_per_sm": 2})
-        bx = T.cta_id([m])
-        tx = T.thread_id([_PER_TOKEN_THREADS])
-
-        if enable_pdl:
-            T.evaluate(T.ptx.griddepcontrol.wait())
-
-        red_buf = T.alloc_shared([_PER_TOKEN_WARPS], "float32")
-
-        # One CTA per row; 64-bit row bases (kernel:786-817).
-        row_idx = bx
-        in_row = T.cast(row_idx, "int64") * k
-        out_row = T.cast(row_idx, "int64") * (k // 2)
-
-        # Pass 1: row amax (kernel:819-834).
-        local_amax: T.float32 = T.float32(0.0)
-        sf_col: T.int32 = tx
-        while sf_col < nsb:
-            elem_off = in_row + sf_col * NVFP4_SF_VEC_SIZE
-            v0 = ld_global_v4_u32(T.address_of(in_global[elem_off]))
-            v1 = ld_global_v4_u32(T.address_of(in_global[elem_off + 8]))
-            words = [v0[i] for i in range(4)] + [v1[i] for i in range(4)]
-            block_max = pair_max_to_f32(absmax_8(words, dtype), dtype)
-            local_amax = fmax_f32(local_amax, block_max)
-            sf_col = sf_col + _PER_TOKEN_THREADS
-
-        # Warp + block max reduction (kernel:836-837; fp4_common:1356-1391).
-        warp_amax = warp_reduce_max(local_amax)
-        lane = T.truncmod(tx, T.int32(32))
-        warp = T.truncdiv(tx, T.int32(32))
-        if lane == 0:
-            red_buf[warp] = warp_amax
-        T.ptx.bar.sync(T.uint32(0), T.uint32(_PER_TOKEN_THREADS))
-        block_val: T.float32 = T.float32(0.0)
-        if lane < _PER_TOKEN_WARPS:
-            block_val = red_buf[lane]
-        row_amax = warp_reduce_max(block_val)
-
-        gs_inv = ld_global_f32(gsi, 0)
-        # _row_scales, fast-math path (kernel:729-738).
-        encode_scale: T.float32 = T.float32(0.0)
-        token_scale: T.float32 = T.float32(0.0)
-        if row_amax == T.float32(0.0):
-            encode_scale = T.float32(FLOAT32_MAX)
-            token_scale = T.float32(0.0)
-        else:
-            token_scale = mul_f32(row_amax, gs_inv)
-            encode_scale = rcp_approx_ftz(token_scale)
-
-        if tx == 0:
-            pts_out[row_idx] = token_scale
-        T.ptx.bar.sync(T.uint32(0), T.uint32(_PER_TOKEN_THREADS))
-
-        # Pass 2: quantize with the row encode scale (kernel:846-875).
-        sf_col2: T.int32 = tx
-        while sf_col2 < nsb:
-            scale_fp8, packed64 = _process_block_pt(
-                in_global, in_row + sf_col2 * NVFP4_SF_VEC_SIZE, encode_scale, dtype=dtype
+    with IRBuilder() as ib:
+        with T.prim_func():
+            T.func_name("nvfp4_quantize_per_token")
+            in_ptr = T.arg("in_ptr", T.handle())
+            out_ptr = T.arg("out_ptr", T.handle())
+            sf_ptr = T.arg("sf_ptr", T.handle())
+            pts_ptr = T.arg("pts_ptr", T.handle())
+            m_rows = T.arg("m_rows", T.int32())
+            gsi_ptr = T.arg("gsi_ptr", T.handle())
+            in_global = name(
+                T.match_buffer(in_ptr, shape=[m * k], dtype=dtype, scope="global"), "in_global"
             )
-            # Source order: SF byte store, then output store (:869/:873).
-            st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sf_col2)]), scale_fp8)
-            st_global_u64(T.address_of(out_global[out_row + sf_col2 * 8]), packed64)
-            sf_col2 = sf_col2 + _PER_TOKEN_THREADS
+            out_global = name(
+                T.match_buffer(out_ptr, shape=[m * (k // 2)], dtype="uint8", scope="global"),
+                "out_global",
+            )
+            sf_out = name(
+                T.match_buffer(
+                    sf_ptr, shape=[_sf_numel(m, k, sf_layout)], dtype="uint8", scope="global"
+                ),
+                "sf_out",
+            )
+            pts_out = name(
+                T.match_buffer(pts_ptr, shape=[m], dtype="float32", scope="global"), "pts_out"
+            )
+            gsi = name(T.match_buffer(gsi_ptr, shape=[1], dtype="float32", scope="global"), "gsi")
+            T.device_entry()
+            flat_attr({"tirx.launch_bounds_min_blocks_per_sm": 2})
+            bx = name(T.cta_id([m]), "bx")
+            tx = name(T.thread_id([_PER_TOKEN_THREADS]), "tx")
 
-        # Padding SF columns for swizzled layouts (kernel:877-882).
-        if sf_layout != "linear":
-            sf_pad: T.int32 = nsb + tx
-            while sf_pad < pad_cols:
-                st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sf_pad)]), T.uint8(0))
-                sf_pad = sf_pad + _PER_TOKEN_THREADS
+            if enable_pdl:
+                T.evaluate(T.ptx.griddepcontrol.wait())
 
-        if enable_pdl:
-            T.evaluate(T.ptx.griddepcontrol.launch_dependents())
+            red_buf = name(T.alloc_shared([_PER_TOKEN_WARPS], "float32"), "red_buf")
 
-    return nvfp4_quantize_per_token
+            # One CTA per row; 64-bit row bases (kernel:786-817).
+            row_idx = scalar("row_idx", "int32", bx)
+            in_row = scalar("in_row", "int64", T.cast(row_idx, "int64") * k)
+            out_row = scalar("out_row", "int64", T.cast(row_idx, "int64") * (k // 2))
+
+            # Pass 1: row amax (kernel:819-834).
+            local_amax = scalar("local_amax", "float32", T.float32(0.0))
+            sf_col = scalar("sf_col", "int32", tx)
+            with T.While(sf_col < nsb):
+                elem_off = scalar("elem_off", "int64", in_row + sf_col * NVFP4_SF_VEC_SIZE)
+                v0 = name(ld_global_v4_u32(T.address_of(in_global[elem_off])), "v0")
+                v1 = name(ld_global_v4_u32(T.address_of(in_global[elem_off + 8])), "v1")
+                words = [v0[i] for i in range(4)] + [v1[i] for i in range(4)]
+                for i, word in enumerate(words):
+                    scalar(f"words_{i}", "uint32", word)
+                block_max = scalar(
+                    "block_max", "float32", pair_max_to_f32(absmax_8(words, dtype), dtype)
+                )
+                store(local_amax, fmax_f32(local_amax, block_max))
+                store(sf_col, sf_col + _PER_TOKEN_THREADS)
+
+            # Warp + block max reduction (kernel:836-837; fp4_common:1356-1391).
+            warp_amax = scalar("warp_amax", "float32", warp_reduce_max(local_amax))
+            lane = scalar("lane", "int32", T.truncmod(tx, T.int32(32)))
+            warp = scalar("warp", "int32", T.truncdiv(tx, T.int32(32)))
+            with T.If(lane == 0):
+                with T.Then():
+                    T.buffer_store(red_buf, warp_amax, [warp])
+            T.evaluate(T.ptx.bar.sync(T.uint32(0), T.uint32(_PER_TOKEN_THREADS)))
+            block_val = scalar("block_val", "float32", T.float32(0.0))
+            with T.If(lane < _PER_TOKEN_WARPS):
+                with T.Then():
+                    store(block_val, red_buf[lane])
+            row_amax = scalar("row_amax", "float32", warp_reduce_max(block_val))
+
+            gs_inv = scalar("gs_inv", "float32", ld_global_f32(gsi, 0))
+            # _row_scales, fast-math path (kernel:729-738).
+            encode_scale = scalar("encode_scale", "float32", T.float32(0.0))
+            token_scale = scalar("token_scale", "float32", T.float32(0.0))
+            with T.If(row_amax == T.float32(0.0)):
+                with T.Then():
+                    store(encode_scale, T.float32(FLOAT32_MAX))
+                    store(token_scale, T.float32(0.0))
+                with T.Else():
+                    store(token_scale, mul_f32(row_amax, gs_inv))
+                    store(encode_scale, rcp_approx_ftz(token_scale))
+
+            with T.If(tx == 0):
+                with T.Then():
+                    T.buffer_store(pts_out, token_scale, [row_idx])
+            T.evaluate(T.ptx.bar.sync(T.uint32(0), T.uint32(_PER_TOKEN_THREADS)))
+
+            # Pass 2: quantize with the row encode scale (kernel:846-875).
+            sf_col2 = scalar("sf_col2", "int32", tx)
+            with T.While(sf_col2 < nsb):
+                scale_fp8, packed64 = _process_block_pt(
+                    in_global, in_row + sf_col2 * NVFP4_SF_VEC_SIZE, encode_scale, dtype=dtype
+                )
+                scale_fp8 = scalar("scale_fp8", "uint8", scale_fp8)
+                packed64 = scalar("packed64", "uint64", packed64)
+                # Source order: SF byte store, then output store (:869/:873).
+                st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sf_col2)]), scale_fp8)
+                st_global_u64(T.address_of(out_global[out_row + sf_col2 * 8]), packed64)
+                store(sf_col2, sf_col2 + _PER_TOKEN_THREADS)
+
+            # Padding SF columns for swizzled layouts (kernel:877-882).
+            if sf_layout != "linear":
+                sf_pad = scalar("sf_pad", "int32", nsb + tx)
+                with T.While(sf_pad < pad_cols):
+                    st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sf_pad)]), T.uint8(0))
+                    store(sf_pad, sf_pad + _PER_TOKEN_THREADS)
+
+            if enable_pdl:
+                T.evaluate(T.ptx.griddepcontrol.launch_dependents())
+
+    return ib.get()
 
 
 def prepare_data(

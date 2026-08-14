@@ -31,6 +31,40 @@ export TVM_LIBRARY_PATH="${TVM_PATH}/build/lib"
 
 Entry point: `python -m tirx_kernels.bench_suite` (same flags as `run.py`).
 
+## IR Builder migration gate
+
+The migration gate is a separate direct old/current oracle. Launch it through
+the checked-in wrapper so CUDA 13.2 NVRTC is selected before Python or
+cuda-bindings can load another NVRTC:
+
+```bash
+python -m tirx_kernels.bench_suite.run_ir_builder_gate \
+  --paired-old-checkout /path/to/old/tirx-kernels \
+  --paired-current-checkout /path/to/current/tirx-kernels
+```
+
+The wrapper resolves `/usr/local/cuda-13.2` by default; set
+`TIRX_BENCH_CUDA_HOME` only when that toolkit is installed elsewhere. The
+formal runner verifies the loaded NVRTC and NVRTC-builtins paths and version,
+then records their SHA-256 values in the run JSON. It also fixes five rounds,
+mean aggregation, the strict `speedup_pct > -1.0` row oracle, zero utilization,
+and the historical raw-framebuffer `0.5%` allocation gate.
+
+Formal scope is derived from the canonical `default: true` rows, with every
+`num_gpus > 1` or `exclusive_resource: nvshmem` row recorded as
+`user-exempted` rather than silently removed or counted as passing. The
+completed migration evidence is intentionally narrower than the rebased tree:
+it covers the 195 canonical default rows at `1097cce839f89a94` (187 required and
+8 user-exempted). Kernels and default rows added upstream afterward were not
+migrated or accepted by that evidence.
+
+Each required row keeps one physical GPU claim while alternating one-round
+old/current subprocesses. The run JSON retains both five-element sample arrays,
+checkout source hashes, execution order, resolved-config hash, and direct
+speedup. Paired subprocesses execute only the local implementation; ordinary
+daily runs retain the upstream CPU-prepare/GPU-execute pipeline and all
+reference implementations.
+
 ### Default-sweep prerequisites
 
 Every row benches our kernel **and all of its reference impls**; a reference
@@ -258,6 +292,11 @@ defaults to FlashInfer's `auto` backend; set
 | `--max-prepare-processes N` | host/GPU-derived | Maximum concurrent one-shot CPU prepare children |
 | `--ready-backlog N` | at least prepare bound and 2× visible GPUs | Maximum PREPARING+READY children awaiting assignment |
 | `--check-imports` | off | Import every kernel selected by the workload file and exit |
+| `--all-configs` | off | Assemble every canonical config row, retaining its `default` flag |
+| `--paired-old-checkout PATH` | off | Run direct old/current measurements against this checkout |
+| `--paired-current-checkout PATH` | current tree | Current side of a paired measurement |
+| `--speedup-threshold PCT` | `-1` | Strict direct speedup floor for paired rows |
+| `--ir-builder-migration-gate` | off | Enforce the formal migration scope and fixed measurement contract |
 
 Round aggregation is always the arithmetic mean. The raw five-element sample arrays
 remain in the run JSON for variance and outlier inspection.

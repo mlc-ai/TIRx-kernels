@@ -122,8 +122,12 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 
 def get_kernel(**kwargs: Any):
-    _name, mod, _reason = _select_impl(**kwargs)
-    return mod.get_kernel(**kwargs)
+    name, _mod, _reason = _select_impl(**kwargs)
+    if name == _HEAD64_NAME:
+        return _head64.get_kernel(**kwargs)
+    if name == _SMALL_TOPK_NAME:
+        return _small_topk.get_kernel(**kwargs)
+    return _head128.get_kernel(**kwargs)
 
 
 def run_test(**kwargs: Any) -> None:

@@ -27,12 +27,17 @@ import torch
 import tvm
 import tvm.testing
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
+from tirx_kernels.flashmla.utils._ir_builder import (
+    MBarrier,
+    PipelineState,
+    SmemDescriptor,
+    TCGen05Bar,
+    TMABar,
+)
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
-from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState, TCGen05Bar
-from tvm.tirx.lang.smem_desc import SmemDescriptor
-from tvm.tirx.lang.tile_scheduler import FlashAttentionLinearScheduler, FlashAttentionLPTScheduler
 
 M_CLUSTER = 1
 N_CLUSTER = 1
@@ -147,128 +152,145 @@ def get_n_block_min_causal_mask(m_block_idx, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TI
     return T.max(0, n_idx // BLK_N)
 
 
-@T.inline
 def ex2_emulation_2(out, idx, x, y):
-    poly_ex2_deg3 = T.meta_var((1.0, 0.6951461434364319, 0.22756439447402954, 0.07711908966302872))
-    fp32_round_int = T.meta_var(float(2**23 + 2**22))
-    xy_clamped: T.f32[2]
-    xy_clamped[0] = T.max(x, -127.0)
-    xy_clamped[1] = T.max(y, -127.0)
-    packed: T.uint64
-    rhs: T.uint64
-    addend: T.uint64
-    xy_rounded: T.f32[2]
-    T.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1])
-    T.ptx.mov.b64(rhs, T.float32(fp32_round_int), T.float32(fp32_round_int))
-    T.ptx.add.rm.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(xy_rounded[0], xy_rounded[1], packed)
-    xy_rounded_back: T.f32[2]
-    T.ptx.mov.b64(packed, xy_rounded[0], xy_rounded[1])
-    T.ptx.mov.b64(rhs, T.float32(fp32_round_int), T.float32(fp32_round_int))
-    T.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(xy_rounded_back[0], xy_rounded_back[1], packed)
-    xy_frac: T.f32[2]
-    T.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1])
-    T.ptx.mov.b64(rhs, xy_rounded_back[0], xy_rounded_back[1])
-    T.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(xy_frac[0], xy_frac[1], packed)
-    xy_frac_ex2: T.f32[2]
-    xy_frac_ex2[0] = poly_ex2_deg3[3]
-    xy_frac_ex2[1] = poly_ex2_deg3[3]
-    T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
-    T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
-    T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[2]), T.float32(poly_ex2_deg3[2]))
-    T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
-    T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
-    T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
-    T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
-    T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[1]), T.float32(poly_ex2_deg3[1]))
-    T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
-    T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
-    T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
-    T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
-    T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[0]), T.float32(poly_ex2_deg3[0]))
-    T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
-    T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
-    out[idx] = combine_int_frac_ex2(xy_rounded[0], xy_frac_ex2[0])
-    out[idx + 1] = combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1])
+    poly_ex2_deg3 = T.meta_var(
+        (1.0, 0.6951461434364319, 0.22756439447402954, 0.07711908966302872)
+    ).value
+    fp32_round_int = T.meta_var(float(2**23 + 2**22)).value
+    xy_clamped = _builder_name("xy_clamped", T.alloc_local((2,), "float32"))
+    T.buffer_store(xy_clamped, T.max(x, -127.0), [0])
+    T.buffer_store(xy_clamped, T.max(y, -127.0), [1])
+    packed = _builder_alloc_scalar("packed", "uint64")
+    rhs = _builder_alloc_scalar("rhs", "uint64")
+    addend = _builder_alloc_scalar("addend", "uint64")
+    xy_rounded = _builder_name("xy_rounded", T.alloc_local((2,), "float32"))
+    _builder_emit(T.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1]))
+    _builder_emit(T.ptx.mov.b64(rhs, T.float32(fp32_round_int), T.float32(fp32_round_int)))
+    _builder_emit(T.ptx.add.rm.ftz.f32x2(packed, packed, rhs))
+    _builder_emit(T.ptx.mov.b64(xy_rounded[0], xy_rounded[1], packed))
+    xy_rounded_back = _builder_name("xy_rounded_back", T.alloc_local((2,), "float32"))
+    _builder_emit(T.ptx.mov.b64(packed, xy_rounded[0], xy_rounded[1]))
+    _builder_emit(T.ptx.mov.b64(rhs, T.float32(fp32_round_int), T.float32(fp32_round_int)))
+    _builder_emit(T.ptx.sub.rn.ftz.f32x2(packed, packed, rhs))
+    _builder_emit(T.ptx.mov.b64(xy_rounded_back[0], xy_rounded_back[1], packed))
+    xy_frac = _builder_name("xy_frac", T.alloc_local((2,), "float32"))
+    _builder_emit(T.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1]))
+    _builder_emit(T.ptx.mov.b64(rhs, xy_rounded_back[0], xy_rounded_back[1]))
+    _builder_emit(T.ptx.sub.rn.ftz.f32x2(packed, packed, rhs))
+    _builder_emit(T.ptx.mov.b64(xy_frac[0], xy_frac[1], packed))
+    xy_frac_ex2 = _builder_name("xy_frac_ex2", T.alloc_local((2,), "float32"))
+    T.buffer_store(xy_frac_ex2, poly_ex2_deg3[3], [0])
+    T.buffer_store(xy_frac_ex2, poly_ex2_deg3[3], [1])
+    _builder_emit(T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1]))
+    _builder_emit(T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1]))
+    _builder_emit(T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[2]), T.float32(poly_ex2_deg3[2])))
+    _builder_emit(T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend))
+    _builder_emit(T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed))
+    _builder_emit(T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1]))
+    _builder_emit(T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1]))
+    _builder_emit(T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[1]), T.float32(poly_ex2_deg3[1])))
+    _builder_emit(T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend))
+    _builder_emit(T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed))
+    _builder_emit(T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1]))
+    _builder_emit(T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1]))
+    _builder_emit(T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[0]), T.float32(poly_ex2_deg3[0])))
+    _builder_emit(T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend))
+    _builder_emit(T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed))
+    T.buffer_store(out, combine_int_frac_ex2(xy_rounded[0], xy_frac_ex2[0]), [idx])
+    T.buffer_store(out, combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1]), [idx + 1])
 
 
-@T.inline
 def fma_f32x2(values, idx, multiplier, addend_value):
     """Apply the packed f32x2 FMA emitted by the former tile primitive."""
-    packed: T.uint64
-    rhs: T.uint64
-    addend: T.uint64
-    T.ptx.mov.b64(packed, values[idx], values[idx + 1])
-    T.ptx.mov.b64(rhs, multiplier, multiplier)
-    T.ptx.mov.b64(addend, addend_value, addend_value)
-    T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
-    T.ptx.mov.b64(values[idx], values[idx + 1], packed)
+    packed = _builder_alloc_scalar("packed", "uint64")
+    rhs = _builder_alloc_scalar("rhs", "uint64")
+    addend = _builder_alloc_scalar("addend", "uint64")
+    _builder_emit(T.ptx.mov.b64(packed, values[idx], values[idx + 1]))
+    _builder_emit(T.ptx.mov.b64(rhs, multiplier, multiplier))
+    _builder_emit(T.ptx.mov.b64(addend, addend_value, addend_value))
+    _builder_emit(T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend))
+    _builder_emit(T.ptx.mov.b64(values[idx], values[idx + 1], packed))
 
 
-@T.inline
 def mul_f32x2(values, idx, multiplier):
     """Apply the packed f32x2 multiply emitted by the former tile primitive."""
-    packed: T.uint64
-    rhs: T.uint64
-    T.ptx.mov.b64(packed, values[idx], values[idx + 1])
-    T.ptx.mov.b64(rhs, multiplier, multiplier)
-    T.ptx.mul.rz.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(values[idx], values[idx + 1], packed)
+    packed = _builder_alloc_scalar("packed", "uint64")
+    rhs = _builder_alloc_scalar("rhs", "uint64")
+    _builder_emit(T.ptx.mov.b64(packed, values[idx], values[idx + 1]))
+    _builder_emit(T.ptx.mov.b64(rhs, multiplier, multiplier))
+    _builder_emit(T.ptx.mul.rz.ftz.f32x2(packed, packed, rhs))
+    _builder_emit(T.ptx.mov.b64(values[idx], values[idx + 1], packed))
 
 
-@T.inline
 def reduce_max_128(out, values, accum=False):
     """SM100 three-input max tree used by the former tile reduction."""
-    temp: T.f32[4]
-    for i in T.unroll(4):
-        if accum and i == 0:
-            T.ptx["max.f32"](temp[i], values[2 * i], values[2 * i + 1], out[0])
+    temp = _builder_name("temp", T.alloc_local((4,), "float32"))
+    with T.unroll(4) as i:
+        if accum:
+            _builder_if_5_8 = _builder_scope_enter(T.If(T.And(T.bool(True), i == 0)))
+            _builder_then_5_8 = _builder_scope_enter(T.Then())
+            _builder_emit(T.ptx["max.f32"](temp[i], values[2 * i], values[2 * i + 1], out[0]))
+            _builder_scope_exit(_builder_then_5_8)
+            _builder_else_5_8 = _builder_scope_enter(T.Else())
+            T.buffer_store(temp, T.max(values[2 * i], values[2 * i + 1]), [i])
+            _builder_scope_exit(_builder_else_5_8)
+            _builder_scope_exit(_builder_if_5_8)
         else:
-            temp[i] = T.max(values[2 * i], values[2 * i + 1])
-    for outer in T.serial(15):
-        for i in T.unroll(4):
-            T.ptx["max.f32"](
-                temp[i],
-                temp[i],
-                values[8 * (outer + 1) + 2 * i],
-                values[8 * (outer + 1) + 2 * i + 1],
+            T.buffer_store(temp, T.max(values[2 * i], values[2 * i + 1]), [i])
+    with T.serial(15) as outer:
+        with T.unroll(4) as i:
+            _builder_emit(
+                T.ptx["max.f32"](
+                    temp[i],
+                    temp[i],
+                    values[8 * (outer + 1) + 2 * i],
+                    values[8 * (outer + 1) + 2 * i + 1],
+                )
             )
-    out[0] = T.max(temp[0], temp[1])
-    T.ptx["max.f32"](out[0], out[0], temp[2], temp[3])
+    T.buffer_store(out, T.max(temp[0], temp[1]), [0])
+    _builder_emit(T.ptx["max.f32"](out[0], out[0], temp[2], temp[3]))
 
 
-@T.inline
 def reduce_sum_128(out, values, accum=False):
     """Preserve the packed add tree and accumulator insertion order."""
-    local_sum: T.f32[8]
-    packed: T.uint64
-    rhs: T.uint64
-    for i in T.unroll(8):
-        if accum and i == 0:
-            local_sum[i] = values[i] + out[0]
+    local_sum = _builder_name("local_sum", T.alloc_local((8,), "float32"))
+    packed = _builder_alloc_scalar("packed", "uint64")
+    rhs = _builder_alloc_scalar("rhs", "uint64")
+    with T.unroll(8) as i:
+        if accum:
+            _builder_if_7_8 = _builder_scope_enter(T.If(T.And(T.bool(True), i == 0)))
+            _builder_then_7_8 = _builder_scope_enter(T.Then())
+            T.buffer_store(local_sum, values[i] + out[0], [i])
+            _builder_scope_exit(_builder_then_7_8)
+            _builder_else_7_8 = _builder_scope_enter(T.Else())
+            T.buffer_store(local_sum, values[i], [i])
+            _builder_scope_exit(_builder_else_7_8)
+            _builder_scope_exit(_builder_if_7_8)
         else:
-            local_sum[i] = values[i]
-    for outer in T.serial(15):
-        for i in T.unroll(4):
-            T.ptx.mov.b64(packed, local_sum[2 * i], local_sum[2 * i + 1])
-            T.ptx.mov.b64(rhs, values[8 * (outer + 1) + 2 * i], values[8 * (outer + 1) + 2 * i + 1])
-            T.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
-            T.ptx.mov.b64(local_sum[2 * i], local_sum[2 * i + 1], packed)
-    T.ptx.mov.b64(packed, local_sum[0], local_sum[1])
-    T.ptx.mov.b64(rhs, local_sum[2], local_sum[3])
-    T.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(local_sum[0], local_sum[1], packed)
-    T.ptx.mov.b64(packed, local_sum[4], local_sum[5])
-    T.ptx.mov.b64(rhs, local_sum[6], local_sum[7])
-    T.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(local_sum[4], local_sum[5], packed)
-    T.ptx.mov.b64(packed, local_sum[0], local_sum[1])
-    T.ptx.mov.b64(rhs, local_sum[4], local_sum[5])
-    T.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(local_sum[0], local_sum[1], packed)
-    out[0] = local_sum[0] + local_sum[1]
+            T.buffer_store(local_sum, values[i], [i])
+    with T.serial(15) as outer:
+        with T.unroll(4) as i:
+            _builder_emit(T.ptx.mov.b64(packed, local_sum[2 * i], local_sum[2 * i + 1]))
+            _builder_emit(
+                T.ptx.mov.b64(
+                    rhs, values[8 * (outer + 1) + 2 * i], values[8 * (outer + 1) + 2 * i + 1]
+                )
+            )
+            _builder_emit(T.ptx.add.rn.ftz.f32x2(packed, packed, rhs))
+            _builder_emit(T.ptx.mov.b64(local_sum[2 * i], local_sum[2 * i + 1], packed))
+    _builder_emit(T.ptx.mov.b64(packed, local_sum[0], local_sum[1]))
+    _builder_emit(T.ptx.mov.b64(rhs, local_sum[2], local_sum[3]))
+    _builder_emit(T.ptx.add.rn.ftz.f32x2(packed, packed, rhs))
+    _builder_emit(T.ptx.mov.b64(local_sum[0], local_sum[1], packed))
+    _builder_emit(T.ptx.mov.b64(packed, local_sum[4], local_sum[5]))
+    _builder_emit(T.ptx.mov.b64(rhs, local_sum[6], local_sum[7]))
+    _builder_emit(T.ptx.add.rn.ftz.f32x2(packed, packed, rhs))
+    _builder_emit(T.ptx.mov.b64(local_sum[4], local_sum[5], packed))
+    _builder_emit(T.ptx.mov.b64(packed, local_sum[0], local_sum[1]))
+    _builder_emit(T.ptx.mov.b64(rhs, local_sum[4], local_sum[5]))
+    _builder_emit(T.ptx.add.rn.ftz.f32x2(packed, packed, rhs))
+    _builder_emit(T.ptx.mov.b64(local_sum[0], local_sum[1], packed))
+    T.buffer_store(out, local_sum[0] + local_sum[1], [0])
 
 
 WG_NUMBER = 4
@@ -300,12 +322,131 @@ b_type_pv = tvm.DataType("float16")
 d_type_pv = tvm.DataType("float32")
 
 
-@T.jit
-def _kernel(
-    Q: T.Buffer((BATCH_SIZE, SEQ_LEN_Q, NUM_QO_HEADS, HEAD_DIM), "float16"),
-    K: T.Buffer((BATCH_SIZE, SEQ_LEN_KV, NUM_KV_HEADS, HEAD_DIM), "float16"),
-    V: T.Buffer((BATCH_SIZE, SEQ_LEN_KV, NUM_KV_HEADS, HEAD_DIM), "float16"),
-    O: T.Buffer((BATCH_SIZE, SEQ_LEN_Q, NUM_QO_HEADS, HEAD_DIM), "float16"),
+@T.meta_class
+class Pipeline:
+    """Builder-native composition of the canonical full/empty barrier pair."""
+
+    def __init__(
+        self,
+        pool,
+        stages,
+        *,
+        full,
+        empty,
+        init_full=1,
+        init_empty=1,
+        empty_phase_offset=0,
+        leader=None,
+    ):
+        barrier_kinds = {"tma": TMABar, "tcgen05": TCGen05Bar, "mbar": MBarrier}
+        self.stages = stages
+        self.full = barrier_kinds[full](pool, stages, leader=leader)
+        self.full.init(init_full)
+        self.empty = barrier_kinds[empty](
+            pool, stages, phase_offset=empty_phase_offset, leader=leader
+        )
+        self.empty.init(init_empty)
+
+
+@T.meta_class
+class FlashAttentionLinearScheduler:
+    """Builder-native form of TVM's linear FlashAttention scheduler."""
+
+    def __init__(self, prefix, num_batches, num_heads, num_m_blocks, num_ctas):
+        self._prefix = prefix
+        self._num_batches = num_batches
+        self._num_heads = num_heads
+        self._num_m_blocks = num_m_blocks
+        self._num_ctas = num_ctas
+        self._total_tasks = num_batches * num_heads * num_m_blocks
+        self.m_idx = T.local_scalar("int32")
+        self.n_idx = T.local_scalar("int32")
+        self.linear_idx = T.local_scalar("int32")
+        self.batch_idx = T.local_scalar("int32")
+        self.head_idx = T.local_scalar("int32")
+        self.m_block_idx = T.local_scalar("int32")
+
+    def _update(self, linear_idx):
+        head_m_product = self._num_heads * self._num_m_blocks
+        T.buffer_store(self.batch_idx.buffer, linear_idx // head_m_product, [0])
+        T.buffer_store(self.head_idx.buffer, linear_idx % head_m_product // self._num_m_blocks, [0])
+        T.buffer_store(self.m_block_idx.buffer, linear_idx % self._num_m_blocks, [0])
+
+    def init(self, cta_id):
+        T.buffer_store(self.linear_idx.buffer, cta_id, [0])
+        self._update(cta_id)
+
+    def next_tile(self):
+        T.buffer_store(self.linear_idx.buffer, self.linear_idx + self._num_ctas, [0])
+        self._update(self.linear_idx)
+
+    def valid(self):
+        return self.linear_idx < self._total_tasks
+
+
+@T.meta_class
+class FlashAttentionLPTScheduler:
+    """Builder-native form of TVM's causal LPT/L2 FlashAttention scheduler."""
+
+    def __init__(self, prefix, num_batches, num_heads, num_m_blocks, l2_swizzle, num_ctas=None):
+        self._prefix = prefix
+        self._num_batches = num_batches
+        self._num_heads = num_heads
+        self._num_m_blocks = num_m_blocks
+        self._l2_swizzle = l2_swizzle
+        self._num_ctas = num_ctas
+        self._total_tasks = num_batches * num_heads * num_m_blocks
+        self._num_hb = num_batches * num_heads
+        self._l2_major = l2_swizzle * num_m_blocks
+        self._num_hb_quotient = self._num_hb // l2_swizzle
+        self.m_idx = T.local_scalar("int32")
+        self.n_idx = T.local_scalar("int32")
+        self.linear_idx = T.local_scalar("int32")
+        self.batch_idx = T.local_scalar("int32")
+        self.head_idx = T.local_scalar("int32")
+        self.m_block_idx = T.local_scalar("int32")
+
+    def _update(self, linear_idx):
+        bidhb = _builder_bind("bidhb", linear_idx // self._l2_major)
+        l2_mod = _builder_bind("l2_mod", linear_idx % self._l2_major)
+        num_hb_remainder = _builder_bind(
+            "num_hb_remainder", T.max(self._num_hb % self._l2_swizzle, 1)
+        )
+        m_block_raw = _builder_bind(
+            "m_block_raw",
+            T.Select(
+                bidhb < self._num_hb_quotient,
+                l2_mod // self._l2_swizzle,
+                l2_mod // num_hb_remainder,
+            ),
+        )
+        bidhb_residual = _builder_bind(
+            "bidhb_residual",
+            T.Select(
+                bidhb < self._num_hb_quotient, l2_mod % self._l2_swizzle, l2_mod % num_hb_remainder
+            ),
+        )
+        bidhb_actual = _builder_bind("bidhb_actual", bidhb * self._l2_swizzle + bidhb_residual)
+        T.buffer_store(self.batch_idx.buffer, bidhb_actual // self._num_heads, [0])
+        T.buffer_store(self.head_idx.buffer, bidhb_actual % self._num_heads, [0])
+        T.buffer_store(self.m_block_idx.buffer, self._num_m_blocks - 1 - m_block_raw, [0])
+
+    def init(self, cta_id):
+        T.buffer_store(self.linear_idx.buffer, cta_id, [0])
+        self._update(cta_id)
+
+    def next_tile(self):
+        if self._num_ctas is None:
+            T.buffer_store(self.linear_idx.buffer, self._total_tasks, [0])
+        else:
+            T.buffer_store(self.linear_idx.buffer, self.linear_idx + self._num_ctas, [0])
+            self._update(self.linear_idx)
+
+    def valid(self):
+        return self.linear_idx < self._total_tasks
+
+
+def _build_kernel(
     *,
     BATCH_SIZE: T.constexpr,
     SEQ_LEN_Q: T.constexpr,
@@ -313,460 +454,508 @@ def _kernel(
     NUM_QO_HEADS: T.constexpr,
     NUM_KV_HEADS: T.constexpr,
     HEAD_DIM: T.constexpr,
-    is_causal: T.constexpr = False,
-    CTA_GROUP: T.constexpr = 1,
-    TMEM_PIPE_DEPTH: T.constexpr = TMEM_PIPE_DEPTH,
-    SMEM_PIPE_DEPTH_KV: T.constexpr = SMEM_PIPE_DEPTH_KV,
+    is_causal: T.constexpr,
+    CTA_GROUP: T.constexpr,
+    TMEM_PIPE_DEPTH: T.constexpr,
+    SMEM_PIPE_DEPTH_KV: T.constexpr,
 ):
-    GQA_RATIO = T.meta_var(NUM_QO_HEADS // NUM_KV_HEADS)
-    SEQ_Q_PER_TILE = T.meta_var(BLK_M // GQA_RATIO)
-    # HW named barrier for the softmax->correction stats handshake
-    # (cf. FA4 CuTeDSL sm_stats_barrier). One 256-thread barrier per stage
-    # (1 + stage): the whole softmax wg arrives, the whole correction wg
-    # syncs — collective release exactly like the 128-count mbarrier it
-    # replaces, but with HW-barrier wake instead of mbarrier
-    # try_wait+nanosleep (that wait gates p_o_rescale and thus the PV MMA).
-    # Per-warp pairing (softmax warp w <-> correction warp w) measured 12%
-    # WORSE on GQA-packed causal: uneven per-warp softmax finish times make
-    # pairwise rendezvous slower than collective release. The reverse
-    # (sScale slot reuse) direction stays on softmax_corr.empty.
-    # Stats handshake barrier WIDTH. cutedsl uses a 64-thread PAIRWISE
-    # barrier (softmax warp w <-> correction warp w, sm_stats_barrier
-    # index stage*4+warp). TIRx adopted a 256-thread COLLECTIVE barrier
-    # because per-warp pairing regressed GQA-PACKED causal 12% (uneven
-    # per-warp softmax finish times -> pairwise waits for the slow
-    # partner). But for GQA_RATIO==1 the rows within a warp are uniform,
-    # so pairwise rendezvous releases each correction warp as soon as ITS
-    # partner softmax warp finishes — no waiting for the slowest of all
-    # 128. ncu (s2048_h32kv32_c): the 256-collective shows a 3.7-cycle
-    # barrier stall (32% of 11.6 cyc/issue) that cutedsl's 64-pairwise
-    # lacks (cutedsl 10.8 cyc/issue). Gate on GQA==1.
-    STATS_BAR_PAIRWISE = T.meta_var(GQA_RATIO == 1)
-    L2_SIZE = T.meta_var(50 * 1024 * 1024)
-    SIZE_ONE_KV_HEAD = T.meta_var(SEQ_LEN_KV * HEAD_DIM * 2 * F16_BYTES)
-    L2_SWIZZLE = T.meta_var(
-        1 if L2_SIZE < SIZE_ONE_KV_HEAD else 1 << int(math.log2(L2_SIZE // SIZE_ONE_KV_HEAD))
-    )
-    SSCALE_TOTAL_SIZE = T.meta_var(2 * SMEM_PIPE_DEPTH_Q * BLK_M)
-    assert TMEM_PIPE_DEPTH * MMA_N <= N_COLS_TMEM, "TMEM columns exceeded"
-    num_q_blocks_total = T.meta_var(ceildiv(SEQ_LEN_Q, SEQ_Q_PER_TILE))
-    num_q_blocks = T.meta_var(ceildiv(num_q_blocks_total, SMEM_PIPE_DEPTH_Q))
-    num_total_tasks = T.meta_var(BATCH_SIZE * NUM_KV_HEADS * num_q_blocks)
-    Q_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    Q_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    K_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    K_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    V_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    V_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    O_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    if GQA_RATIO == 1:
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            Q_tensor_map,
-            "float16",
-            3,
-            Q.data,
-            HEAD_DIM // 2,
-            SEQ_LEN_Q,
-            BATCH_SIZE * NUM_QO_HEADS * 2,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            Q_tensor_map_1,
-            "float16",
-            3,
-            Q.data,
-            HEAD_DIM // 2,
-            SEQ_LEN_Q,
-            BATCH_SIZE * NUM_QO_HEADS * 2,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            O_tensor_map,
-            "float16",
-            3,
-            O.data,
-            HEAD_DIM // 2,
-            SEQ_LEN_Q,
-            BATCH_SIZE * NUM_QO_HEADS * 2,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-    else:
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            Q_tensor_map,
-            "float16",
-            4,
-            Q.data,
-            HEAD_DIM // 2,
-            NUM_QO_HEADS,
-            SEQ_LEN_Q,
-            BATCH_SIZE * 2,
-            HEAD_DIM * F16_BYTES,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            GQA_RATIO,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            Q_tensor_map_1,
-            "float16",
-            4,
-            Q.data,
-            HEAD_DIM // 2,
-            NUM_QO_HEADS,
-            SEQ_LEN_Q,
-            BATCH_SIZE * 2,
-            HEAD_DIM * F16_BYTES,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            GQA_RATIO,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            O_tensor_map,
-            "float16",
-            4,
-            O.data,
-            HEAD_DIM // 2,
-            NUM_QO_HEADS,
-            SEQ_LEN_Q,
-            BATCH_SIZE * 2,
-            HEAD_DIM * F16_BYTES,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            GQA_RATIO,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        K_tensor_map,
-        "float16",
-        3,
-        K.data,
-        HEAD_DIM // 2,
-        SEQ_LEN_KV,
-        BATCH_SIZE * NUM_KV_HEADS * 2,
-        NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
-        HEAD_DIM,
-        HEAD_DIM // 2,
-        BLK_N,
-        2,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        K_tensor_map_1,
-        "float16",
-        3,
-        K.data,
-        HEAD_DIM // 2,
-        SEQ_LEN_KV,
-        BATCH_SIZE * NUM_KV_HEADS * 2,
-        NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
-        HEAD_DIM,
-        HEAD_DIM // 2,
-        BLK_N,
-        2,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        V_tensor_map,
-        "float16",
-        3,
-        V.data,
-        HEAD_DIM // 2,
-        SEQ_LEN_KV,
-        BATCH_SIZE * NUM_KV_HEADS * 2,
-        NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
-        HEAD_DIM,
-        HEAD_DIM // 2,
-        BLK_N,
-        2,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        V_tensor_map_1,
-        "float16",
-        3,
-        V.data,
-        HEAD_DIM // 2,
-        SEQ_LEN_KV,
-        BATCH_SIZE * NUM_KV_HEADS * 2,
-        NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
-        HEAD_DIM,
-        HEAD_DIM // 2,
-        BLK_N,
-        2,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    # When every CTA runs exactly ONE task (causal always launches
-    # cta_count == num_total_tasks; non-causal whenever tasks <= 148), the
-    # task tail is fully exposed on the critical path — there is no next
-    # task to overlap the correction-wg epilogue with. In that regime the
-    # epilogue runs on the SOFTMAX warpgroups instead: each wg handles its
-    # own stage, so the two stages epilogue IN PARALLEL (correction did
-    # them serially), row_sum is normalized straight from the register
-    # (no sScale round-trip, no tail stats-handshake trip), and the idle
-    # 200-reg softmax budget affords 32-wide TMEM loads (4 round trips vs
-    # 16-wide x 8). Single-task locked-clock decomposition vs cutedsl
-    # (q256 kv2048 causal): tail 7.2/6.6us vs baseline 6.6/5.8 — the tail
-    # is where the small-shape ratio lives. Multi-task persistent shapes
-    # keep the correction-wg epilogue (it overlaps the next task there).
-    # Measured (ncu back-to-back, GPU 6): causal -1.9..-2.6%
-    # (s1024_h32kv32_c 22.05→21.47us, s1024_h32kv16_c 20.16→19.78);
-    # NON-causal single-wave (s1024_h32kv32) consistently +2% — restrict
-    # to causal, where the LPT longest-task tail is the kernel's critical
-    # path.
-    EPI_ON_SOFTMAX = T.meta_var(is_causal)
-    EARLY_Q_RELEASE = T.meta_var(not is_causal)
-    max_ctas: T.let = 148
-    cta_count: T.let = T.min(max_ctas, num_total_tasks) if not is_causal else num_total_tasks
-    T.device_entry()
-    T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1})
-    bx = T.cta_id([cta_count])
-    wg_id = T.warpgroup_id([4])
-    warp_id = T.warp_id_in_wg([4])
-    tid_in_wg = T.thread_id_in_wg([128])
-    pool = T.SMEMPool()
-    Q_smem = pool.alloc_tcgen05_mma_AB((SMEM_PIPE_DEPTH_Q, BLK_M, HEAD_DIM), "float16")
-    K_smem = pool.alloc_tcgen05_mma_AB((SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM), "float16")
-    V_smem = K_smem.view(SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM)
-    O_smem = pool.alloc_tcgen05_mma_AB((TMEM_PIPE_DEPTH, BLK_M, HEAD_DIM), "float16")
-    q_desc = SmemDescriptor()
-    q_desc.init(Q_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-    q_desc.make_lo_uniform()
-    k_desc = SmemDescriptor()
-    k_desc.init(K_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-    k_desc.make_lo_uniform()
-    v_desc = SmemDescriptor()
-    v_desc.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-    v_desc.make_lo_uniform()
-    q_desc_steady = SmemDescriptor()
-    k_desc_steady = SmemDescriptor()
-    v_desc_steady_hi = SmemDescriptor()
-    v_desc_tail_lo = SmemDescriptor()
-    v_desc_tail_hi = SmemDescriptor()
-    if is_causal and GQA_RATIO > 1:
-        q_desc_steady.init(Q_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        q_desc_steady.make_lo_uniform()
-        k_desc_steady.init(K_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        k_desc_steady.make_lo_uniform()
-        v_desc_steady_hi.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        v_desc_steady_hi.make_lo_uniform()
-        v_desc_tail_lo.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        v_desc_tail_lo.make_lo_uniform()
-        v_desc_tail_hi.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        v_desc_tail_hi.make_lo_uniform()
-    sScale = pool.alloc((SSCALE_TOTAL_SIZE,), "float32", align=1024)
-    tmem_addr = pool.alloc([1], "uint32")
-    ACC_SCALE_BASE: T.let = 0
-    ROW_SUM_BASE: T.let = 0
-    kv_pipe = PipelineState(SMEM_PIPE_DEPTH_KV)
-    phase_q: T.int32
-    phase_s_full: T.int32
-    phase_tmem: T.int32
-    phase_s0_s1: T.int32
-    phase_q_load: T.int32
-    phase_oepi: T.int32
-    q_load = Pipeline(pool, SMEM_PIPE_DEPTH_Q, full="tma", empty="tcgen05", empty_phase_offset=1)
-    kv_load = Pipeline(pool, SMEM_PIPE_DEPTH_KV, full="tma", empty="tcgen05", empty_phase_offset=1)
-    p_o_rescale = MBarrier(pool, 2)
-    p_o_rescale.init(256)
-    s_ready = TCGen05Bar(pool, 2)
-    s_ready.init(1)
-    o_ready = TCGen05Bar(pool, 2)
-    o_ready.init(1)
-    softmax_corr = Pipeline(
-        pool, 2, full="mbar", empty="mbar", init_full=128, init_empty=128, empty_phase_offset=1
-    )
-    corr_epi = Pipeline(
-        pool,
-        TMEM_PIPE_DEPTH,
-        full="mbar",
-        empty="mbar",
-        init_full=128,
-        init_empty=32,
-        empty_phase_offset=1,
-    )
-    p_ready_2 = MBarrier(pool, 2)
-    p_ready_2.init(128)
-    bar_s0_s1_sequence = MBarrier(pool, 8)
-    # Init in the FIRST init group so the single prologue fence (below) covers
-    # it; lets us drop the redundant 2nd fence+cta_sync (MEMBAR/FENCE/BSSY
-    # excess vs cutedsl, which uses one prologue init barrier).
-    bar_s0_s1_sequence.init(32)
-    pool.commit()
-    iket = IketProfiler()
-    # TMEM is allocated by the MMA warp (cta-scope warp 12 = wg3/warp0) and
-    # the alloc deliberately sits AFTER the prologue cta_syncs (commit is
-    # emitted further down): every other warp's first TMEM access is
-    # transitively gated behind this warp's progress (softmax via s_ready
-    # from the first QK gemm, correction via the softmax handshake, TMA
-    # store via corr_epi), so no CTA-wide sync on the alloc is needed, and
-    # the TMA load warp issues the first Q/K copies without waiting for it.
-    # FA4 CuTeDSL structures its prologue the same way (alloc inside the
-    # MMA warp's branch; load warps never wait for it).
-    tmem_pool = T.TMEMPool(
-        pool,
-        total_cols=N_COLS_TMEM,
-        cta_group=CTA_GROUP,
-        tmem_addr=tmem_addr,
-        alloc_warp=12,
-        dealloc_warp=0,
-    )
-    _tmem_f32 = tmem_pool.alloc((128, N_COLS_TMEM), "float32")
-    tmem_pool.move_base_to(0)
-    _tmem_f16 = tmem_pool.alloc((128, N_COLS_TMEM * 2), "float16")
-    T.ptx.fence.proxy.async_.shared__cta()
-    T.ptx.fence.mbarrier_init.release.cluster()
-    T.cuda.cta_sync()
-    # Direct tcgen05 addresses preserve the same overlay: S occupies columns
-    # [0, 256), O occupies [256, 512), and packed-f16 P aliases the high half
-    # of each S stage.
-    scheduler = (
-        FlashAttentionLPTScheduler(
-            "fa_scheduler",
-            num_batches=BATCH_SIZE,
-            num_heads=NUM_KV_HEADS,
-            num_m_blocks=num_q_blocks,
-            l2_swizzle=L2_SWIZZLE,
-        )
-        if is_causal
-        else FlashAttentionLinearScheduler(
-            "fa_scheduler",
-            num_batches=BATCH_SIZE,
-            num_heads=NUM_KV_HEADS,
-            num_m_blocks=num_q_blocks,
-            num_ctas=cta_count,
-        )
-    )
-    scheduler.init(bx)
-    kv_pipe.init(0)
-    phase_q = 0
-    phase_oepi = 0
-    phase_tmem = 0
-    phase_s_full = 0
-    if USE_S0_S1_BARRIER:
-        phase_s0_s1 = T.if_then_else(wg_id == 1, 0, 1)
-    phase_q_load = 0
-    tmem_pool.commit()
-    if (wg_id == 3) & (warp_id == 0):
-        allocated_tmem_addr: T.uint32
-        T.ptx.ld.shared.u32(allocated_tmem_addr, tmem_addr.ptr_to([0]))
-        T.cuda.trap_when_assert_failed(allocated_tmem_addr == T.uint32(0))
-    if wg_id == 2:
-        for i_q in T.unroll(2):
-            p_o_rescale.arrive(i_q)
-    num_kv_blocks: T.let = ceildiv(SEQ_LEN_KV, BLK_N)
-    while scheduler.valid():
-        m_block_idx = T.meta_var(scheduler.m_block_idx)
-        batch_idx = T.meta_var(scheduler.batch_idx)
-        kv_head_idx = T.meta_var(scheduler.head_idx)
-        m_start = T.meta_var(m_block_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q)
-        if wg_id == 3:
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(48)
-            if warp_id == 1:
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("_kernel")
+            Q = T.arg("Q", T.Buffer((BATCH_SIZE, SEQ_LEN_Q, NUM_QO_HEADS, HEAD_DIM), "float16"))
+            K = T.arg("K", T.Buffer((BATCH_SIZE, SEQ_LEN_KV, NUM_KV_HEADS, HEAD_DIM), "float16"))
+            V = T.arg("V", T.Buffer((BATCH_SIZE, SEQ_LEN_KV, NUM_KV_HEADS, HEAD_DIM), "float16"))
+            O = T.arg("O", T.Buffer((BATCH_SIZE, SEQ_LEN_Q, NUM_QO_HEADS, HEAD_DIM), "float16"))
+            GQA_RATIO = T.meta_var(NUM_QO_HEADS // NUM_KV_HEADS).value
+            SEQ_Q_PER_TILE = T.meta_var(BLK_M // GQA_RATIO).value
+            STATS_BAR_PAIRWISE = T.meta_var(GQA_RATIO == 1).value
+            L2_SIZE = T.meta_var(50 * 1024 * 1024).value
+            SIZE_ONE_KV_HEAD = T.meta_var(SEQ_LEN_KV * HEAD_DIM * 2 * F16_BYTES).value
+            L2_SWIZZLE = T.meta_var(
+                1
+                if L2_SIZE < SIZE_ONE_KV_HEAD
+                else 1 << int(math.log2(L2_SIZE // SIZE_ONE_KV_HEAD))
+            ).value
+            SSCALE_TOTAL_SIZE = T.meta_var(2 * SMEM_PIPE_DEPTH_Q * BLK_M).value
+            with T.Assert(T.bool(TMEM_PIPE_DEPTH * MMA_N <= N_COLS_TMEM), "TMEM columns exceeded"):
+                T.evaluate(0)
+            num_q_blocks_total = T.meta_var(ceildiv(SEQ_LEN_Q, SEQ_Q_PER_TILE)).value
+            num_q_blocks = T.meta_var(ceildiv(num_q_blocks_total, SMEM_PIPE_DEPTH_Q)).value
+            num_total_tasks = T.meta_var(BATCH_SIZE * NUM_KV_HEADS * num_q_blocks).value
+            Q_tensor_map = _builder_bind(
+                "Q_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            Q_tensor_map_1 = _builder_bind(
+                "Q_tensor_map_1", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            K_tensor_map = _builder_bind(
+                "K_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            K_tensor_map_1 = _builder_bind(
+                "K_tensor_map_1", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            V_tensor_map = _builder_bind(
+                "V_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            V_tensor_map_1 = _builder_bind(
+                "V_tensor_map_1", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            O_tensor_map = _builder_bind(
+                "O_tensor_map", T.tvm_stack_alloca("tensormap", 1), T.TensorMap()
+            )
+            if GQA_RATIO == 1:
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        Q_tensor_map,
+                        "float16",
+                        3,
+                        Q.data,
+                        HEAD_DIM // 2,
+                        SEQ_LEN_Q,
+                        BATCH_SIZE * NUM_QO_HEADS * 2,
+                        NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
+                        HEAD_DIM,
+                        HEAD_DIM // 2,
+                        SEQ_Q_PER_TILE,
+                        2,
+                        1,
+                        1,
+                        1,
+                        0,
+                        3,
+                        2,
+                        0,
+                    )
+                )
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        Q_tensor_map_1,
+                        "float16",
+                        3,
+                        Q.data,
+                        HEAD_DIM // 2,
+                        SEQ_LEN_Q,
+                        BATCH_SIZE * NUM_QO_HEADS * 2,
+                        NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
+                        HEAD_DIM,
+                        HEAD_DIM // 2,
+                        SEQ_Q_PER_TILE,
+                        2,
+                        1,
+                        1,
+                        1,
+                        0,
+                        3,
+                        2,
+                        0,
+                    )
+                )
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        O_tensor_map,
+                        "float16",
+                        3,
+                        O.data,
+                        HEAD_DIM // 2,
+                        SEQ_LEN_Q,
+                        BATCH_SIZE * NUM_QO_HEADS * 2,
+                        NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
+                        HEAD_DIM,
+                        HEAD_DIM // 2,
+                        SEQ_Q_PER_TILE,
+                        2,
+                        1,
+                        1,
+                        1,
+                        0,
+                        3,
+                        2,
+                        0,
+                    )
+                )
+            else:
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        Q_tensor_map,
+                        "float16",
+                        4,
+                        Q.data,
+                        HEAD_DIM // 2,
+                        NUM_QO_HEADS,
+                        SEQ_LEN_Q,
+                        BATCH_SIZE * 2,
+                        HEAD_DIM * F16_BYTES,
+                        NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
+                        HEAD_DIM,
+                        HEAD_DIM // 2,
+                        GQA_RATIO,
+                        SEQ_Q_PER_TILE,
+                        2,
+                        1,
+                        1,
+                        1,
+                        1,
+                        0,
+                        3,
+                        2,
+                        0,
+                    )
+                )
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        Q_tensor_map_1,
+                        "float16",
+                        4,
+                        Q.data,
+                        HEAD_DIM // 2,
+                        NUM_QO_HEADS,
+                        SEQ_LEN_Q,
+                        BATCH_SIZE * 2,
+                        HEAD_DIM * F16_BYTES,
+                        NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
+                        HEAD_DIM,
+                        HEAD_DIM // 2,
+                        GQA_RATIO,
+                        SEQ_Q_PER_TILE,
+                        2,
+                        1,
+                        1,
+                        1,
+                        1,
+                        0,
+                        3,
+                        2,
+                        0,
+                    )
+                )
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        O_tensor_map,
+                        "float16",
+                        4,
+                        O.data,
+                        HEAD_DIM // 2,
+                        NUM_QO_HEADS,
+                        SEQ_LEN_Q,
+                        BATCH_SIZE * 2,
+                        HEAD_DIM * F16_BYTES,
+                        NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
+                        HEAD_DIM,
+                        HEAD_DIM // 2,
+                        GQA_RATIO,
+                        SEQ_Q_PER_TILE,
+                        2,
+                        1,
+                        1,
+                        1,
+                        1,
+                        0,
+                        3,
+                        2,
+                        0,
+                    )
+                )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    K_tensor_map,
+                    "float16",
+                    3,
+                    K.data,
+                    HEAD_DIM // 2,
+                    SEQ_LEN_KV,
+                    BATCH_SIZE * NUM_KV_HEADS * 2,
+                    NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
+                    HEAD_DIM,
+                    HEAD_DIM // 2,
+                    BLK_N,
+                    2,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    K_tensor_map_1,
+                    "float16",
+                    3,
+                    K.data,
+                    HEAD_DIM // 2,
+                    SEQ_LEN_KV,
+                    BATCH_SIZE * NUM_KV_HEADS * 2,
+                    NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
+                    HEAD_DIM,
+                    HEAD_DIM // 2,
+                    BLK_N,
+                    2,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    V_tensor_map,
+                    "float16",
+                    3,
+                    V.data,
+                    HEAD_DIM // 2,
+                    SEQ_LEN_KV,
+                    BATCH_SIZE * NUM_KV_HEADS * 2,
+                    NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
+                    HEAD_DIM,
+                    HEAD_DIM // 2,
+                    BLK_N,
+                    2,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    V_tensor_map_1,
+                    "float16",
+                    3,
+                    V.data,
+                    HEAD_DIM // 2,
+                    SEQ_LEN_KV,
+                    BATCH_SIZE * NUM_KV_HEADS * 2,
+                    NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
+                    HEAD_DIM,
+                    HEAD_DIM // 2,
+                    BLK_N,
+                    2,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
+                )
+            )
+            EPI_ON_SOFTMAX = T.meta_var(is_causal).value
+            EARLY_Q_RELEASE = T.meta_var(not is_causal).value
+            max_ctas = _builder_bind("max_ctas", 148)
+            cta_count = _builder_bind(
+                "cta_count", T.min(max_ctas, num_total_tasks) if not is_causal else num_total_tasks
+            )
+            _builder_emit(T.device_entry())
+            _builder_enter(T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1}))
+            bx = _builder_name("bx", T.cta_id([cta_count]))
+            wg_id = _builder_name("wg_id", T.warpgroup_id([4]))
+            warp_id = _builder_name("warp_id", T.warp_id_in_wg([4]))
+            tid_in_wg = _builder_name("tid_in_wg", T.thread_id_in_wg([128]))
+            pool = _builder_meta("pool", T.SMEMPool())
+            Q_smem = _builder_scalar(
+                "Q_smem", pool.alloc_tcgen05_mma_AB((SMEM_PIPE_DEPTH_Q, BLK_M, HEAD_DIM), "float16")
+            )
+            K_smem = _builder_scalar(
+                "K_smem",
+                pool.alloc_tcgen05_mma_AB((SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM), "float16"),
+            )
+            V_smem = _builder_scalar("V_smem", K_smem.view(SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM))
+            O_smem = _builder_scalar(
+                "O_smem", pool.alloc_tcgen05_mma_AB((TMEM_PIPE_DEPTH, BLK_M, HEAD_DIM), "float16")
+            )
+            q_desc = _builder_scalar("q_desc", SmemDescriptor())
+            _builder_emit(q_desc.init(Q_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3))
+            _builder_emit(q_desc.make_lo_uniform())
+            k_desc = _builder_scalar("k_desc", SmemDescriptor())
+            _builder_emit(k_desc.init(K_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3))
+            _builder_emit(k_desc.make_lo_uniform())
+            v_desc = _builder_scalar("v_desc", SmemDescriptor())
+            _builder_emit(v_desc.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3))
+            _builder_emit(v_desc.make_lo_uniform())
+            q_desc_steady = _builder_scalar("q_desc_steady", SmemDescriptor())
+            k_desc_steady = _builder_scalar("k_desc_steady", SmemDescriptor())
+            v_desc_steady_hi = _builder_scalar("v_desc_steady_hi", SmemDescriptor())
+            v_desc_tail_lo = _builder_scalar("v_desc_tail_lo", SmemDescriptor())
+            v_desc_tail_hi = _builder_scalar("v_desc_tail_hi", SmemDescriptor())
+            if is_causal and GQA_RATIO > 1:
+                _builder_emit(
+                    q_desc_steady.init(Q_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
+                )
+                _builder_emit(q_desc_steady.make_lo_uniform())
+                _builder_emit(
+                    k_desc_steady.init(K_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
+                )
+                _builder_emit(k_desc_steady.make_lo_uniform())
+                _builder_emit(
+                    v_desc_steady_hi.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
+                )
+                _builder_emit(v_desc_steady_hi.make_lo_uniform())
+                _builder_emit(
+                    v_desc_tail_lo.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
+                )
+                _builder_emit(v_desc_tail_lo.make_lo_uniform())
+                _builder_emit(
+                    v_desc_tail_hi.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
+                )
+                _builder_emit(v_desc_tail_hi.make_lo_uniform())
+            sScale = _builder_name(
+                "sScale", pool.alloc((SSCALE_TOTAL_SIZE,), "float32", align=1024)
+            )
+            tmem_addr = _builder_name("tmem_addr", pool.alloc([1], "uint32"))
+            ACC_SCALE_BASE = _builder_bind("ACC_SCALE_BASE", 0)
+            ROW_SUM_BASE = _builder_bind("ROW_SUM_BASE", 0)
+            kv_pipe = _builder_scalar("kv_pipe", PipelineState(SMEM_PIPE_DEPTH_KV))
+            phase_q = _builder_alloc_scalar("phase_q", "int32")
+            phase_s_full = _builder_alloc_scalar("phase_s_full", "int32")
+            phase_tmem = _builder_alloc_scalar("phase_tmem", "int32")
+            phase_s0_s1 = _builder_alloc_scalar("phase_s0_s1", "int32")
+            phase_q_load = _builder_alloc_scalar("phase_q_load", "int32")
+            phase_oepi = _builder_alloc_scalar("phase_oepi", "int32")
+            q_load = _builder_scalar(
+                "q_load",
+                Pipeline(
+                    pool, SMEM_PIPE_DEPTH_Q, full="tma", empty="tcgen05", empty_phase_offset=1
+                ),
+            )
+            kv_load = _builder_scalar(
+                "kv_load",
+                Pipeline(
+                    pool, SMEM_PIPE_DEPTH_KV, full="tma", empty="tcgen05", empty_phase_offset=1
+                ),
+            )
+            p_o_rescale = _builder_scalar("p_o_rescale", MBarrier(pool, 2))
+            _builder_emit(p_o_rescale.init(256))
+            s_ready = _builder_scalar("s_ready", TCGen05Bar(pool, 2))
+            _builder_emit(s_ready.init(1))
+            o_ready = _builder_scalar("o_ready", TCGen05Bar(pool, 2))
+            _builder_emit(o_ready.init(1))
+            softmax_corr = _builder_scalar(
+                "softmax_corr",
+                Pipeline(
+                    pool,
+                    2,
+                    full="mbar",
+                    empty="mbar",
+                    init_full=128,
+                    init_empty=128,
+                    empty_phase_offset=1,
+                ),
+            )
+            corr_epi = _builder_scalar(
+                "corr_epi",
+                Pipeline(
+                    pool,
+                    TMEM_PIPE_DEPTH,
+                    full="mbar",
+                    empty="mbar",
+                    init_full=128,
+                    init_empty=32,
+                    empty_phase_offset=1,
+                ),
+            )
+            p_ready_2 = _builder_scalar("p_ready_2", MBarrier(pool, 2))
+            _builder_emit(p_ready_2.init(128))
+            bar_s0_s1_sequence = _builder_scalar("bar_s0_s1_sequence", MBarrier(pool, 8))
+            _builder_emit(bar_s0_s1_sequence.init(32))
+            _builder_emit(pool.commit())
+            iket = _builder_scalar("iket", IketProfiler())
+            tmem_pool = _builder_scalar(
+                "tmem_pool",
+                T.TMEMPool(
+                    pool,
+                    total_cols=N_COLS_TMEM,
+                    cta_group=CTA_GROUP,
+                    tmem_addr=tmem_addr,
+                    alloc_warp=12,
+                    dealloc_warp=0,
+                ),
+            )
+            _tmem_f32 = _builder_scalar("_tmem_f32", tmem_pool.alloc((128, N_COLS_TMEM), "float32"))
+            _builder_emit(tmem_pool.move_base_to(0))
+            _tmem_f16 = _builder_scalar(
+                "_tmem_f16", tmem_pool.alloc((128, N_COLS_TMEM * 2), "float16")
+            )
+            _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+            _builder_emit(T.ptx.fence.mbarrier_init.release.cluster())
+            _builder_emit(T.cuda.cta_sync())
+            scheduler = _builder_scalar(
+                "scheduler",
+                FlashAttentionLPTScheduler(
+                    "fa_scheduler",
+                    num_batches=BATCH_SIZE,
+                    num_heads=NUM_KV_HEADS,
+                    num_m_blocks=num_q_blocks,
+                    l2_swizzle=L2_SWIZZLE,
+                )
+                if is_causal
+                else FlashAttentionLinearScheduler(
+                    "fa_scheduler",
+                    num_batches=BATCH_SIZE,
+                    num_heads=NUM_KV_HEADS,
+                    num_m_blocks=num_q_blocks,
+                    num_ctas=cta_count,
+                ),
+            )
+            _builder_emit(scheduler.init(bx))
+            _builder_emit(kv_pipe.init(0))
+            T.buffer_store(phase_q.buffer, 0, [0])
+            T.buffer_store(phase_oepi.buffer, 0, [0])
+            T.buffer_store(phase_tmem.buffer, 0, [0])
+            T.buffer_store(phase_s_full.buffer, 0, [0])
+            if USE_S0_S1_BARRIER:
+                T.buffer_store(phase_s0_s1.buffer, T.if_then_else(wg_id == 1, 0, 1), [0])
+            T.buffer_store(phase_q_load.buffer, 0, [0])
+            _builder_emit(tmem_pool.commit())
+            _builder_if_444_4 = _builder_scope_enter(T.If((wg_id == 3) & (warp_id == 0)))
+            _builder_then_444_4 = _builder_scope_enter(T.Then())
+            allocated_tmem_addr = _builder_alloc_scalar("allocated_tmem_addr", "uint32")
+            _builder_emit(T.ptx.ld.shared.u32(allocated_tmem_addr, tmem_addr.ptr_to([0])))
+            _builder_emit(T.cuda.trap_when_assert_failed(allocated_tmem_addr == T.uint32(0)))
+            _builder_scope_exit(_builder_then_444_4)
+            _builder_scope_exit(_builder_if_444_4)
+            _builder_if_448_4 = _builder_scope_enter(T.If(wg_id == 2))
+            _builder_then_448_4 = _builder_scope_enter(T.Then())
+            with T.unroll(2) as i_q:
+                _builder_emit(p_o_rescale.arrive(i_q))
+            _builder_scope_exit(_builder_then_448_4)
+            _builder_scope_exit(_builder_if_448_4)
+            num_kv_blocks = _builder_bind("num_kv_blocks", ceildiv(SEQ_LEN_KV, BLK_N))
+            with T.While(scheduler.valid()):
+                m_block_idx = T.meta_var(scheduler.m_block_idx).value
+                batch_idx = T.meta_var(scheduler.batch_idx).value
+                kv_head_idx = T.meta_var(scheduler.head_idx).value
+                m_start = T.meta_var(m_block_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q).value
+                _builder_if_457_8 = _builder_scope_enter(T.If(wg_id == 3))
+                _builder_then_457_8 = _builder_scope_enter(T.Then())
+                _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(48))
+                _builder_if_459_12 = _builder_scope_enter(T.If(warp_id == 1))
+                _builder_then_459_12 = _builder_scope_enter(T.Then())
 
-                @T.inline
                 def load_q(i_q, tensor_map):
-                    q_load.empty.wait(i_q, phase_q_load)
-                    tma_q_token = iket.range_start("issue-tma-q")
-                    if T.cuda.elect_sync():
-                        if GQA_RATIO == 1:
+                    _builder_emit(q_load.empty.wait(i_q, phase_q_load))
+                    tma_q_token = _builder_scalar("tma_q_token", iket.range_start("issue-tma-q"))
+                    _builder_if_465_20 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                    _builder_then_465_20 = _builder_scope_enter(T.Then())
+                    if GQA_RATIO == 1:
+                        _builder_emit(
                             T.evaluate(
                                 T.ptx[_TMA_G2S_3D](
                                     Q_smem.ptr_to([i_q, 0, 0]),
@@ -777,7 +966,9 @@ def _kernel(
                                     T.cuda.cvta_generic_to_shared(q_load.full.buf.ptr_to([i_q])),
                                 )
                             )
-                        else:
+                        )
+                    else:
+                        _builder_emit(
                             T.evaluate(
                                 T.ptx[_TMA_G2S_4D](
                                     Q_smem.ptr_to([i_q, 0, 0]),
@@ -789,14 +980,18 @@ def _kernel(
                                     T.cuda.cvta_generic_to_shared(q_load.full.buf.ptr_to([i_q])),
                                 )
                             )
-                        q_load.full.arrive(i_q, CTA_GROUP * BLK_M * HEAD_DIM * F16_BYTES)
-                    iket.range_end(tma_q_token)
+                        )
+                    _builder_emit(q_load.full.arrive(i_q, CTA_GROUP * BLK_M * HEAD_DIM * F16_BYTES))
+                    _builder_scope_exit(_builder_then_465_20)
+                    _builder_scope_exit(_builder_if_465_20)
+                    _builder_emit(iket.range_end(tma_q_token))
 
-                @T.inline
                 def load_k(i_kv, tensor_map):
-                    kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase)
-                    tma_k_token = iket.range_start("issue-tma-k")
-                    if T.cuda.elect_sync():
+                    _builder_emit(kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase))
+                    tma_k_token = _builder_scalar("tma_k_token", iket.range_start("issue-tma-k"))
+                    _builder_if_496_20 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                    _builder_then_496_20 = _builder_scope_enter(T.Then())
+                    _builder_emit(
                         T.evaluate(
                             T.ptx[_TMA_G2S_3D](
                                 K_smem.ptr_to([kv_pipe.stage, 0, 0]),
@@ -809,15 +1004,21 @@ def _kernel(
                                 ),
                             )
                         )
+                    )
+                    _builder_emit(
                         kv_load.full.arrive(kv_pipe.stage, CTA_GROUP * BLK_N * HEAD_DIM * F16_BYTES)
-                    iket.range_end(tma_k_token)
-                    kv_pipe.advance()
+                    )
+                    _builder_scope_exit(_builder_then_496_20)
+                    _builder_scope_exit(_builder_if_496_20)
+                    _builder_emit(iket.range_end(tma_k_token))
+                    _builder_emit(kv_pipe.advance())
 
-                @T.inline
                 def load_v(i_kv, tensor_map):
-                    kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase)
-                    tma_v_token = iket.range_start("issue-tma-v")
-                    if T.cuda.elect_sync():
+                    _builder_emit(kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase))
+                    tma_v_token = _builder_scalar("tma_v_token", iket.range_start("issue-tma-v"))
+                    _builder_if_517_20 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                    _builder_then_517_20 = _builder_scope_enter(T.Then())
+                    _builder_emit(
                         T.evaluate(
                             T.ptx[_TMA_G2S_3D](
                                 V_smem.ptr_to([kv_pipe.stage, 0, 0]),
@@ -830,34 +1031,49 @@ def _kernel(
                                 ),
                             )
                         )
+                    )
+                    _builder_emit(
                         kv_load.full.arrive(kv_pipe.stage, CTA_GROUP * BLK_N * HEAD_DIM * F16_BYTES)
-                    iket.range_end(tma_v_token)
-                    kv_pipe.advance()
+                    )
+                    _builder_scope_exit(_builder_then_517_20)
+                    _builder_scope_exit(_builder_if_517_20)
+                    _builder_emit(iket.range_end(tma_v_token))
+                    _builder_emit(kv_pipe.advance())
 
-                load_trip_count: T.int32
-                load_trip_count = (
+                load_trip_count = _builder_alloc_scalar("load_trip_count", "int32")
+                T.buffer_store(
+                    load_trip_count.buffer,
                     get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
                     if is_causal
-                    else num_kv_blocks
+                    else num_kv_blocks,
+                    [0],
                 )
-                load_q(0, Q_tensor_map)
-                load_k(load_trip_count - 1, K_tensor_map)
-                load_q(1, Q_tensor_map_1)
-                phase_q_load ^= 1
-                load_v(load_trip_count - 1, V_tensor_map)
-                for _i in T.serial(load_trip_count - 1, unroll=False):
-                    i_kv: T.let = load_trip_count - 2 - _i
-                    load_k(i_kv, K_tensor_map_1)
-                    load_v(i_kv, V_tensor_map_1)
-            if warp_id == 2:
-                corr_epi.full.wait(0, phase_tmem)
-                tma_store_token = iket.range_start("tma-store")
-                for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                    if i_q != 0:
-                        corr_epi.full.wait(i_q, phase_tmem)
-                    m_start_global = T.meta_var(m_start + i_q * SEQ_Q_PER_TILE)
-                    if T.cuda.elect_sync():
-                        if GQA_RATIO == 1:
+                _builder_emit(load_q(0, Q_tensor_map))
+                _builder_emit(load_k(load_trip_count - 1, K_tensor_map))
+                _builder_emit(load_q(1, Q_tensor_map_1))
+                T.buffer_store(phase_q_load.buffer, phase_q_load ^ 1, [0])
+                _builder_emit(load_v(load_trip_count - 1, V_tensor_map))
+                with T.serial(load_trip_count - 1, unroll=False) as _i:
+                    i_kv = _builder_bind("i_kv", load_trip_count - 2 - _i)
+                    _builder_emit(load_k(i_kv, K_tensor_map_1))
+                    _builder_emit(load_v(i_kv, V_tensor_map_1))
+                _builder_scope_exit(_builder_then_459_12)
+                _builder_scope_exit(_builder_if_459_12)
+                _builder_if_549_12 = _builder_scope_enter(T.If(warp_id == 2))
+                _builder_then_549_12 = _builder_scope_enter(T.Then())
+                _builder_emit(corr_epi.full.wait(0, phase_tmem))
+                tma_store_token = _builder_scalar("tma_store_token", iket.range_start("tma-store"))
+                with T.unroll(SMEM_PIPE_DEPTH_Q) as i_q:
+                    _builder_if_553_20 = _builder_scope_enter(T.If(i_q != 0))
+                    _builder_then_553_20 = _builder_scope_enter(T.Then())
+                    _builder_emit(corr_epi.full.wait(i_q, phase_tmem))
+                    _builder_scope_exit(_builder_then_553_20)
+                    _builder_scope_exit(_builder_if_553_20)
+                    m_start_global = T.meta_var(m_start + i_q * SEQ_Q_PER_TILE).value
+                    _builder_if_556_20 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                    _builder_then_556_20 = _builder_scope_enter(T.Then())
+                    if GQA_RATIO == 1:
+                        _builder_emit(
                             T.evaluate(
                                 T.ptx[_TMA_S2G_3D](
                                     T.address_of(O_tensor_map),
@@ -867,7 +1083,9 @@ def _kernel(
                                     O_smem.ptr_to([i_q, 0, 0]),
                                 )
                             )
-                        else:
+                        )
+                    else:
+                        _builder_emit(
                             T.evaluate(
                                 T.ptx[_TMA_S2G_4D](
                                     T.address_of(O_tensor_map),
@@ -878,24 +1096,28 @@ def _kernel(
                                     O_smem.ptr_to([i_q, 0, 0]),
                                 )
                             )
-                    T.ptx.cp.async_.bulk.commit_group()
-                # Drain the stores stage by stage. The wait count lives in the
-                # instruction text, so it has to be a literal rather than a loop
-                # variable -- written out per stage for SMEM_PIPE_DEPTH_Q == 2.
-                T.ptx.cp.async_.bulk.wait_group(1)
-                corr_epi.empty.arrive(0)
-                T.ptx.cp.async_.bulk.wait_group(0)
-                corr_epi.empty.arrive(1)
-                iket.range_end(tma_store_token)
-                phase_tmem ^= 1
-            if warp_id == 0:
-                acc: T.int32
-                acc = 0
+                        )
+                    _builder_scope_exit(_builder_then_556_20)
+                    _builder_scope_exit(_builder_if_556_20)
+                    _builder_emit(T.ptx.cp.async_.bulk.commit_group())
+                _builder_emit(T.ptx.cp.async_.bulk.wait_group(1))
+                _builder_emit(corr_epi.empty.arrive(0))
+                _builder_emit(T.ptx.cp.async_.bulk.wait_group(0))
+                _builder_emit(corr_epi.empty.arrive(1))
+                _builder_emit(iket.range_end(tma_store_token))
+                T.buffer_store(phase_tmem.buffer, phase_tmem ^ 1, [0])
+                _builder_scope_exit(_builder_then_549_12)
+                _builder_scope_exit(_builder_if_549_12)
+                _builder_if_588_12 = _builder_scope_enter(T.If(warp_id == 0))
+                _builder_then_588_12 = _builder_scope_enter(T.Then())
+                acc = _builder_alloc_scalar("acc", "int32")
+                T.buffer_store(acc.buffer, 0, [0])
 
-                @T.inline
                 def gemm_qk(q_stage, kv_stage, q_desc_value, k_desc_value):
-                    for ki in T.unroll(HEAD_DIM // MMA_K):
-                        if T.cuda.elect_sync():
+                    with T.unroll(HEAD_DIM // MMA_K) as ki:
+                        _builder_if_595_24 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                        _builder_then_595_24 = _builder_scope_enter(T.Then())
+                        _builder_emit(
                             T.ptx[_MMA_F16](
                                 T.cast(q_stage * MMA_N, "uint32"),
                                 _smem_desc_add_16B_offset(
@@ -909,25 +1131,24 @@ def _kernel(
                                 T.uint32(0),
                                 T.uint32(0),
                                 T.uint32(0),
-                                ki != 0,
+                                T.cast(ki != 0, "bool"),
                             )
-                    if T.cuda.elect_sync():
-                        s_ready.arrive(q_stage)
+                        )
+                        _builder_scope_exit(_builder_then_595_24)
+                        _builder_scope_exit(_builder_if_595_24)
+                    _builder_if_611_20 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                    _builder_then_611_20 = _builder_scope_enter(T.Then())
+                    _builder_emit(s_ready.arrive(q_stage))
+                    _builder_scope_exit(_builder_then_611_20)
+                    _builder_scope_exit(_builder_if_611_20)
 
-                # PV gemm split point, regime-tuned: for causal, 64 cols
-                # (p_o_rescale waits TWO P quarter-stores instead of three,
-                # releasing the MMA warp earlier in the
-                # softmax->P->PV->QK->s_ready loop that binds the small-shape
-                # cadence; single-task phase tables vs cutedsl showed TIRx
-                # softmax idling ~26% of its cadence on s_ready vs baseline
-                # 14%). For non-causal the earlier release measured 2-3pp
-                # WORSE on s1024 shapes — keep 96.
-                K_SPLIT = T.meta_var((4 if is_causal else 6) * MMA_K)
+                K_SPLIT = T.meta_var((4 if is_causal else 6) * MMA_K).value
 
-                @T.inline
                 def gemm_pv_part1(i_q, kv_stage, should_accumulate, v_desc_value):
-                    for ki in T.unroll(K_SPLIT // MMA_K):
-                        if T.cuda.elect_sync():
+                    with T.unroll(K_SPLIT // MMA_K) as ki:
+                        _builder_if_627_24 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                        _builder_then_627_24 = _builder_scope_enter(T.Then())
+                        _builder_emit(
                             T.ptx[_MMA_F16](
                                 T.cast((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "uint32"),
                                 T.cast(i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2), "uint32"),
@@ -937,14 +1158,20 @@ def _kernel(
                                 T.uint32(0),
                                 T.uint32(0),
                                 T.uint32(0),
-                                tvm.tirx.any(ki != 0, T.cast(should_accumulate, "bool")),
+                                T.cast(
+                                    tvm.tirx.any(ki != 0, T.cast(should_accumulate, "bool")), "bool"
+                                ),
                             )
+                        )
+                        _builder_scope_exit(_builder_then_627_24)
+                        _builder_scope_exit(_builder_if_627_24)
 
-                @T.inline
                 def gemm_pv_part2(i_q, kv_stage, v_desc_value):
-                    p_ready_2.wait(i_q, phase_tmem)
-                    for ki in T.unroll((BLK_N - K_SPLIT) // MMA_K):
-                        if T.cuda.elect_sync():
+                    _builder_emit(p_ready_2.wait(i_q, phase_tmem))
+                    with T.unroll((BLK_N - K_SPLIT) // MMA_K) as ki:
+                        _builder_if_644_24 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                        _builder_then_644_24 = _builder_scope_enter(T.Then())
+                        _builder_emit(
                             T.ptx[_MMA_F16](
                                 T.cast((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "uint32"),
                                 T.cast(
@@ -961,582 +1188,831 @@ def _kernel(
                                 T.uint32(0),
                                 T.bool(True),
                             )
+                        )
+                        _builder_scope_exit(_builder_then_644_24)
+                        _builder_scope_exit(_builder_if_644_24)
 
-                @T.inline
                 def gemm_pv(i_q, kv_stage, should_accumulate, v_desc_lo, v_desc_hi):
-                    gemm_pv_part1(i_q, kv_stage, should_accumulate, v_desc_lo)
-                    gemm_pv_part2(i_q, kv_stage, v_desc_hi)
+                    _builder_emit(gemm_pv_part1(i_q, kv_stage, should_accumulate, v_desc_lo))
+                    _builder_emit(gemm_pv_part2(i_q, kv_stage, v_desc_hi))
 
-                for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                    q_load.full.wait(i_q, phase_q_load)
-                    if i_q == 0:
-                        kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
-                    gemm_qk(i_q, kv_pipe.stage, q_desc.desc, k_desc.desc)
-                    if i_q == 1:
-                        if T.cuda.elect_sync():
-                            kv_load.empty.arrive(kv_pipe.stage)
-                kv_pipe.advance()
-                mma_trip_count: T.int32
-                mma_trip_count = (
+                with T.unroll(SMEM_PIPE_DEPTH_Q) as i_q:
+                    _builder_emit(q_load.full.wait(i_q, phase_q_load))
+                    _builder_if_669_20 = _builder_scope_enter(T.If(i_q == 0))
+                    _builder_then_669_20 = _builder_scope_enter(T.Then())
+                    _builder_emit(kv_load.full.wait(kv_pipe.stage, kv_pipe.phase))
+                    _builder_scope_exit(_builder_then_669_20)
+                    _builder_scope_exit(_builder_if_669_20)
+                    _builder_emit(gemm_qk(i_q, kv_pipe.stage, q_desc.desc, k_desc.desc))
+                    _builder_if_672_20 = _builder_scope_enter(T.If(i_q == 1))
+                    _builder_then_672_20 = _builder_scope_enter(T.Then())
+                    _builder_if_673_24 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                    _builder_then_673_24 = _builder_scope_enter(T.Then())
+                    _builder_emit(kv_load.empty.arrive(kv_pipe.stage))
+                    _builder_scope_exit(_builder_then_673_24)
+                    _builder_scope_exit(_builder_if_673_24)
+                    _builder_scope_exit(_builder_then_672_20)
+                    _builder_scope_exit(_builder_if_672_20)
+                _builder_emit(kv_pipe.advance())
+                mma_trip_count = _builder_alloc_scalar("mma_trip_count", "int32")
+                T.buffer_store(
+                    mma_trip_count.buffer,
                     get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
                     if is_causal
-                    else num_kv_blocks
+                    else num_kv_blocks,
+                    [0],
                 )
-                for i_kv in T.serial(mma_trip_count - 1, unroll=False):
-                    stage_v: T.let = kv_pipe.stage
-                    phase_v: T.let = kv_pipe.phase
-                    kv_pipe.advance()
-                    stage_k = T.meta_var(kv_pipe.stage)
-                    phase_k = T.meta_var(kv_pipe.phase)
-                    for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                        if i_q == 0:
-                            kv_load.full.wait(stage_v, phase_v)
-                        p_o_rescale.wait(i_q, phase_tmem)
+                with T.serial(mma_trip_count - 1, unroll=False) as i_kv:
+                    stage_v = _builder_bind("stage_v", kv_pipe.stage)
+                    phase_v = _builder_bind("phase_v", kv_pipe.phase)
+                    _builder_emit(kv_pipe.advance())
+                    stage_k = T.meta_var(kv_pipe.stage).value
+                    phase_k = T.meta_var(kv_pipe.phase).value
+                    with T.unroll(SMEM_PIPE_DEPTH_Q) as i_q:
+                        _builder_if_689_24 = _builder_scope_enter(T.If(i_q == 0))
+                        _builder_then_689_24 = _builder_scope_enter(T.Then())
+                        _builder_emit(kv_load.full.wait(stage_v, phase_v))
+                        _builder_scope_exit(_builder_then_689_24)
+                        _builder_scope_exit(_builder_if_689_24)
+                        _builder_emit(p_o_rescale.wait(i_q, phase_tmem))
+                        _builder_emit(
+                            gemm_pv(
+                                i_q,
+                                stage_v,
+                                acc,
+                                v_desc.desc,
+                                v_desc_steady_hi.desc
+                                if is_causal and GQA_RATIO > 1
+                                else v_desc.desc,
+                            )
+                        )
+                        _builder_if_699_24 = _builder_scope_enter(T.If(i_q == 1))
+                        _builder_then_699_24 = _builder_scope_enter(T.Then())
+                        _builder_if_700_28 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                        _builder_then_700_28 = _builder_scope_enter(T.Then())
+                        _builder_emit(kv_load.empty.arrive(stage_v))
+                        _builder_scope_exit(_builder_then_700_28)
+                        _builder_scope_exit(_builder_if_700_28)
+                        _builder_scope_exit(_builder_then_699_24)
+                        _builder_scope_exit(_builder_if_699_24)
+                        _builder_if_702_24 = _builder_scope_enter(T.If(i_q == 0))
+                        _builder_then_702_24 = _builder_scope_enter(T.Then())
+                        _builder_emit(kv_load.full.wait(stage_k, phase_k))
+                        _builder_scope_exit(_builder_then_702_24)
+                        _builder_scope_exit(_builder_if_702_24)
+                        _builder_emit(
+                            gemm_qk(
+                                i_q,
+                                stage_k,
+                                q_desc_steady.desc if is_causal and GQA_RATIO > 1 else q_desc.desc,
+                                k_desc_steady.desc if is_causal and GQA_RATIO > 1 else k_desc.desc,
+                            )
+                        )
+                        if EARLY_Q_RELEASE:
+                            _builder_if_720_28 = _builder_scope_enter(
+                                T.If(i_kv == mma_trip_count - 2)
+                            )
+                            _builder_then_720_28 = _builder_scope_enter(T.Then())
+                            _builder_if_721_32 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                            _builder_then_721_32 = _builder_scope_enter(T.Then())
+                            _builder_emit(q_load.empty.arrive(i_q))
+                            _builder_scope_exit(_builder_then_721_32)
+                            _builder_scope_exit(_builder_if_721_32)
+                            _builder_scope_exit(_builder_then_720_28)
+                            _builder_scope_exit(_builder_if_720_28)
+                        _builder_if_723_24 = _builder_scope_enter(T.If(i_q == 1))
+                        _builder_then_723_24 = _builder_scope_enter(T.Then())
+                        _builder_if_724_28 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                        _builder_then_724_28 = _builder_scope_enter(T.Then())
+                        _builder_emit(kv_load.empty.arrive(stage_k))
+                        _builder_scope_exit(_builder_then_724_28)
+                        _builder_scope_exit(_builder_if_724_28)
+                        _builder_scope_exit(_builder_then_723_24)
+                        _builder_scope_exit(_builder_if_723_24)
+                    T.buffer_store(acc.buffer, 1, [0])
+                    _builder_emit(kv_pipe.advance())
+                    T.buffer_store(phase_tmem.buffer, phase_tmem ^ 1, [0])
+                with T.unroll(SMEM_PIPE_DEPTH_Q) as i_q:
+                    _builder_if_730_20 = _builder_scope_enter(T.If(i_q == 0))
+                    _builder_then_730_20 = _builder_scope_enter(T.Then())
+                    _builder_emit(kv_load.full.wait(kv_pipe.stage, kv_pipe.phase))
+                    _builder_scope_exit(_builder_then_730_20)
+                    _builder_scope_exit(_builder_if_730_20)
+                    _builder_emit(p_o_rescale.wait(i_q, phase_tmem))
+                    _builder_emit(
                         gemm_pv(
                             i_q,
-                            stage_v,
+                            kv_pipe.stage,
                             acc,
-                            v_desc.desc,
-                            v_desc_steady_hi.desc if is_causal and GQA_RATIO > 1 else v_desc.desc,
+                            v_desc_tail_lo.desc if is_causal and GQA_RATIO > 1 else v_desc.desc,
+                            v_desc_tail_hi.desc if is_causal and GQA_RATIO > 1 else v_desc.desc,
                         )
-                        if i_q == 1:
-                            if T.cuda.elect_sync():
-                                kv_load.empty.arrive(stage_v)
-                        if i_q == 0:
-                            kv_load.full.wait(stage_k, phase_k)
-                        gemm_qk(
-                            i_q,
-                            stage_k,
-                            q_desc_steady.desc if is_causal and GQA_RATIO > 1 else q_desc.desc,
-                            k_desc_steady.desc if is_causal and GQA_RATIO > 1 else k_desc.desc,
-                        )
-                        # Early Q release (non-causal / multi-task CTAs):
-                        # Q[i_q]'s LAST reader is this final QK — committing
-                        # here fires when it completes, ~2 tail-PV gemms
-                        # before the end-of-task commit, so the next task's
-                        # Q TMA load overlaps the PV tail + epilogue.
-                        # Causal keeps the tail commit: one task per CTA
-                        # (nothing to overlap) and packed-causal tasks can
-                        # have mma_trip_count == 1, where this steady-loop
-                        # site never executes.
-                        if EARLY_Q_RELEASE:
-                            if i_kv == mma_trip_count - 2:
-                                if T.cuda.elect_sync():
-                                    q_load.empty.arrive(i_q)
-                        if i_q == 1:
-                            if T.cuda.elect_sync():
-                                kv_load.empty.arrive(stage_k)
-                    acc = 1
-                    kv_pipe.advance()
-                    phase_tmem ^= 1
-                for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                    if i_q == 0:
-                        kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
-                    p_o_rescale.wait(i_q, phase_tmem)
-                    gemm_pv(
-                        i_q,
-                        kv_pipe.stage,
-                        acc,
-                        v_desc_tail_lo.desc if is_causal and GQA_RATIO > 1 else v_desc.desc,
-                        v_desc_tail_hi.desc if is_causal and GQA_RATIO > 1 else v_desc.desc,
                     )
-                    if i_q == 1:
-                        if T.cuda.elect_sync():
-                            kv_load.empty.arrive(kv_pipe.stage)
-                    if T.cuda.elect_sync():
-                        o_ready.arrive(i_q)
-                kv_pipe.advance()
-                phase_tmem ^= 1
+                    _builder_if_740_20 = _builder_scope_enter(T.If(i_q == 1))
+                    _builder_then_740_20 = _builder_scope_enter(T.Then())
+                    _builder_if_741_24 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                    _builder_then_741_24 = _builder_scope_enter(T.Then())
+                    _builder_emit(kv_load.empty.arrive(kv_pipe.stage))
+                    _builder_scope_exit(_builder_then_741_24)
+                    _builder_scope_exit(_builder_if_741_24)
+                    _builder_scope_exit(_builder_then_740_20)
+                    _builder_scope_exit(_builder_if_740_20)
+                    _builder_if_743_20 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                    _builder_then_743_20 = _builder_scope_enter(T.Then())
+                    _builder_emit(o_ready.arrive(i_q))
+                    _builder_scope_exit(_builder_then_743_20)
+                    _builder_scope_exit(_builder_if_743_20)
+                _builder_emit(kv_pipe.advance())
+                T.buffer_store(phase_tmem.buffer, phase_tmem ^ 1, [0])
                 if not EARLY_Q_RELEASE:
-                    for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                        if T.cuda.elect_sync():
-                            q_load.empty.arrive(i_q)
-                phase_q_load ^= 1
-        elif wg_id < 2:
-            T.ptx.setmaxnreg.inc.sync.aligned.u32(200)
-            scale_log2 = T.meta_var(math.log2(math.e) / math.sqrt(HEAD_DIM))
-            rescale_threshold = T.meta_var(8.0)
-            row_max: T.f32[1]
-            row_sum: T.f32[1]
-            if warp_id == 0:
-                iket.mark("softmax-baseline")
+                    with T.unroll(SMEM_PIPE_DEPTH_Q) as i_q:
+                        _builder_if_749_24 = _builder_scope_enter(T.If(T.cuda.elect_sync()))
+                        _builder_then_749_24 = _builder_scope_enter(T.Then())
+                        _builder_emit(q_load.empty.arrive(i_q))
+                        _builder_scope_exit(_builder_then_749_24)
+                        _builder_scope_exit(_builder_if_749_24)
+                T.buffer_store(phase_q_load.buffer, phase_q_load ^ 1, [0])
+                _builder_scope_exit(_builder_then_588_12)
+                _builder_scope_exit(_builder_if_588_12)
+                _builder_scope_exit(_builder_then_457_8)
+                _builder_else_457_8 = _builder_scope_enter(T.Else())
+                _builder_if_752_8 = _builder_scope_enter(T.If(wg_id < 2))
+                _builder_then_752_8 = _builder_scope_enter(T.Then())
+                _builder_emit(T.ptx.setmaxnreg.inc.sync.aligned.u32(200))
+                scale_log2 = T.meta_var(math.log2(math.e) / math.sqrt(HEAD_DIM)).value
+                rescale_threshold = T.meta_var(8.0).value
+                row_max = _builder_name("row_max", T.alloc_local((1,), "float32"))
+                row_sum = _builder_name("row_sum", T.alloc_local((1,), "float32"))
+                _builder_if_758_12 = _builder_scope_enter(T.If(warp_id == 0))
+                _builder_then_758_12 = _builder_scope_enter(T.Then())
+                _builder_emit(iket.mark("softmax-baseline"))
+                _builder_scope_exit(_builder_then_758_12)
+                _builder_scope_exit(_builder_if_758_12)
 
-            @T.inline
-            def mask_r2p(s_chunk_buf, col_limit, ncol: T.int32):
-                """Apply mask using R2P-style bit manipulation.
+                def mask_r2p(s_chunk_buf, col_limit, ncol: T.int32):
+                    """Apply mask using R2P-style bit manipulation.
 
-                Optimizes: for j in range(N): buf[j] = -inf if j >= col_limit else buf[j]
-                Into: bitmask operations that compile to R2P PTX instruction.
+                    Optimizes: for j in range(N): buf[j] = -inf if j >= col_limit else buf[j]
+                    Into: bitmask operations that compile to R2P PTX instruction.
 
-                Following flash_attn/cute/mask.py mask_r2p(): process in 32-col
-                chunks (shl_u32_clamp tolerates shift>=32, so no 24-col split).
+                    Following flash_attn/cute/mask.py mask_r2p(): process in 32-col
+                    chunks (shl_u32_clamp tolerates shift>=32, so no 24-col split).
 
-                The bit test `mask & (1 << i)` compiles to the R2P (Register to Predicate)
-                PTX instruction, which is more efficient than per-column comparisons.
-                """
-                ncol = T.meta_var(ncol)
-                # Subtract-free low-k bitmask: ~(0xFFFFFFFF<<k) gives the low-k-bits
-                # mask with NO `-1`; the ~ fuses into the per-column `& (1<<i)` test
-                # as ANDN (one LOP3), so there is no VIADD per chunk. shl clamps
-                # k>=32 -> 0 => mask_inv=0 => ~=all-ones => keep all (k>=32 correct),
-                # so no VIMNMX either. The bit test compiles to R2P.
-                CHUNK_SIZE: T.let = 32
-                num_chunks: T.let = ceildiv(ncol, CHUNK_SIZE)
-                s_chunk_local = s_chunk_buf.local(ncol)
-                for s in T.unroll(num_chunks):
-                    k_keep: T.let = T.max(col_limit - s * CHUNK_SIZE, 0)
-                    mask_inv: T.uint32
-                    mask_inv = shl_u32_clamp(T.uint32(0xFFFFFFFF), T.cast(k_keep, "uint32"))
-                    for i in T.unroll(CHUNK_SIZE):
-                        if i < ncol - s * CHUNK_SIZE:
-                            c: T.let = s * CHUNK_SIZE + i
-                            in_bound: T.let = T.bitwise_and(
-                                T.bitwise_not(mask_inv), T.shift_left(T.uint32(1), i)
-                            )
-                            s_chunk_local[c] = T.Select(
-                                T.cast(in_bound, "bool"), s_chunk_local[c], T.float32(-float("inf"))
-                            )
-
-            @T.inline
-            def apply_causal_mask(s_chunk_buf, m_blk_idx, n_blk_idx):
-                """Apply causal mask to attention scores.
-
-                Following flash_attn/cute/mask.py apply_mask_sm100() lines 384-400:
-                causal_row_offset = 1 + seqlen_k - n_block * tile_n - seqlen_q
-                row_idx = thread_row + m_block * tile_m
-                col_limit_right = row_idx + causal_row_offset
-                Mask if col >= col_limit_right
-
-                Coordinate Mapping:
-                - BLK_M = 128 packed rows per tile
-                - SEQ_Q_PER_TILE = BLK_M // GQA_RATIO (e.g., 32 for GQA_RATIO=4)
-                - Each warpgroup handles one Q stage with SEQ_Q_PER_TILE sequence positions
-                - tid_in_wg (0-127) maps to packed rows: (seq_pos, head) = (tid//GQA_RATIO, tid%GQA_RATIO)
-                """
-                seq_pos_in_wg: T.let = tid_in_wg // GQA_RATIO
-                row_idx: T.let = (
-                    m_blk_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
-                    + wg_id * SEQ_Q_PER_TILE
-                    + seq_pos_in_wg
-                )
-                causal_row_offset: T.let = 1 + SEQ_LEN_KV - n_blk_idx * BLK_N - SEQ_LEN_Q
-                col_limit_right: T.let = row_idx + causal_row_offset
-                mask_r2p(s_chunk_buf, col_limit_right, BLK_N)
-
-            @T.inline
-            def softmax_step(i_kv, apply_mask=False, is_first=False):
-                s_chunk_buf: T.f32[BLK_N]
-                p_chunk_buf_f32: T.f32[BLK_N // 2]
-                p_chunk_buf = T.decl_buffer((BLK_N,), dtype="float16", data=p_chunk_buf_f32.data)
-                p_chunk_u32 = p_chunk_buf.view("uint32")
-                s_ready.wait(wg_id, phase_s_full)
-                if warp_id == 0:
-                    iket.mark("softmax-phase-0")
-                softmax_max_token = iket.sentinel_token("softmax-max")
-                if warp_id == 0:
-                    softmax_max_token = iket.range_start("softmax-max")
-                tile_max: T.f32[1]
-                for chunk_idx in T.unroll(BLK_N // SOFTMAX_LD_CHUNK):
-                    T.evaluate(
-                        _tmem_load(
-                            s_chunk_buf,
-                            chunk_idx * SOFTMAX_LD_CHUNK,
-                            T.cuda.get_tmem_addr(
-                                T.uint32(0), 0, wg_id * MMA_N + chunk_idx * SOFTMAX_LD_CHUNK
-                            ),
-                            SOFTMAX_LD_CHUNK,
+                    The bit test `mask & (1 << i)` compiles to the R2P (Register to Predicate)
+                    PTX instruction, which is more efficient than per-column comparisons.
+                    """
+                    ncol = T.meta_var(ncol).value
+                    CHUNK_SIZE = _builder_bind("CHUNK_SIZE", 32)
+                    num_chunks = _builder_bind("num_chunks", ceildiv(ncol, CHUNK_SIZE))
+                    s_chunk_local = _builder_scalar("s_chunk_local", s_chunk_buf.local(ncol))
+                    with T.unroll(num_chunks) as s:
+                        k_keep = _builder_bind("k_keep", T.max(col_limit - s * CHUNK_SIZE, 0))
+                        mask_inv = _builder_alloc_scalar("mask_inv", "uint32")
+                        T.buffer_store(
+                            mask_inv.buffer,
+                            shl_u32_clamp(T.uint32(4294967295), T.cast(k_keep, "uint32")),
+                            [0],
                         )
-                    )
-                if apply_mask:
-                    apply_causal_mask(s_chunk_buf, m_block_idx, i_kv)
-                row_max_old: T.f32
-                if is_first:
-                    reduce_max_128(tile_max, s_chunk_buf)
-                else:
-                    # row_max is initialized by the first softmax step.  Keep
-                    # its load inside the non-first specialization so the
-                    # first step does not read an uninitialized local value
-                    # whose result is dead on that path.
-                    row_max_old = row_max[0]
-                    tile_max[0] = row_max_old
-                    reduce_max_128(tile_max, s_chunk_buf, accum=True)
-                row_max_new: T.f32
-                acc_scale: T.f32
-                acc_scale_: T.f32
-                row_max_safe: T.f32
-                row_max_new = tile_max[0]
-                row_max_safe = T.if_then_else(tile_max[0] == -float("inf"), 0.0, tile_max[0])
-                if is_first:
-                    acc_scale = T.float32(1.0)
-                else:
-                    acc_scale_ = (row_max_old - row_max_safe) * scale_log2
-                    if acc_scale_ >= -rescale_threshold:
-                        row_max_new = row_max_old
-                        row_max_safe = row_max_old
-                        acc_scale = T.float32(1.0)
-                    else:
-                        T.ptx.ex2.approx.ftz.f32(acc_scale, acc_scale_)
-                row_max[0] = row_max_new
-                row_max_scaled: T.let = row_max_safe * scale_log2
-                if warp_id == 0:
-                    iket.mark("softmax-phase-1")
-                iket.range_end(softmax_max_token)
-                if tid_in_wg < BLK_M and (not is_first):
-                    sScale_idx: T.let = ACC_SCALE_BASE + tid_in_wg + wg_id * BLK_M
-                    T.ptx.st.shared.f32(sScale.ptr_to([sScale_idx]), acc_scale)
-                # Stats-ready handshake to the correction wg via HW named
-                # barrier (FA4 CuTeDSL sm_stats_barrier): softmax warp w of
-                # stage wg_id pairs with correction warp w on barrier
-                # 1 + wg_id*4 + w (64 threads). bar.arrive is non-blocking and
-                # the correction side's bar.sync wakes without the mbarrier
-                # try_wait + nanosleep latency — this wait gates p_o_rescale
-                # and therefore the PV MMA. The reverse (sScale slot reuse)
-                # direction stays on softmax_corr.empty.
-                if STATS_BAR_PAIRWISE:
-                    T.ptx.bar.arrive(T.uint32(1 + wg_id * 4 + warp_id), 64)
-                else:
-                    T.ptx.bar.arrive(T.uint32(1 + wg_id), 256)
-                softmax_fma_token = iket.sentinel_token("softmax-fma")
-                if warp_id == 0:
-                    softmax_fma_token = iket.range_start("softmax-fma")
-                for i in T.unroll(BLK_N // 2):
-                    fma_f32x2(s_chunk_buf, 2 * i, T.float32(scale_log2), -row_max_scaled)
-                iket.range_end(softmax_fma_token)
-                if USE_S0_S1_BARRIER:
-                    bar_s0_s1_sequence.wait(wg_id * 4 + warp_id, phase_s0_s1)
-                softmax_exp2_token = iket.sentinel_token("softmax-exp2")
-                if warp_id == 0:
-                    softmax_exp2_token = iket.range_start("softmax-exp2")
-                for frag_idx in T.unroll(4):
-                    s_chunk_local = s_chunk_buf.local(BLK_N)
-                    for i in T.unroll(BLK_N // 4 // 2):
-                        idx = T.meta_var(frag_idx * BLK_N // 4 + 2 * i)
-                        # ex2 emulation ratio is shape-tuned (cf. FA4 CuTeDSL
-                        # _TUNING_CONFIG keyed on is_causal); see module-level
-                        # EMU_* knobs.
-                        emu_pairs = T.meta_var(EMU_PAIRS_CAUSAL if is_causal else EMU_PAIRS_NC)
-                        emu_start = T.meta_var(EMU_START_CAUSAL if is_causal else EMU_START_NC)
-                        if (
-                            i * 2 % 16 < 16 - 2 * emu_pairs
-                            or frag_idx >= 4 - 1
-                            or frag_idx < emu_start
-                            or apply_mask
-                        ):
-                            T.ptx.ex2.approx.ftz.f32(s_chunk_local[idx], s_chunk_local[idx])
-                            T.ptx.ex2.approx.ftz.f32(s_chunk_local[idx + 1], s_chunk_local[idx + 1])
-                        else:
-                            ex2_emulation_2(
-                                s_chunk_local, idx, s_chunk_local[idx], s_chunk_local[idx + 1]
+                        with T.unroll(CHUNK_SIZE) as i:
+                            _builder_if_788_24 = _builder_scope_enter(
+                                T.If(i < ncol - s * CHUNK_SIZE)
                             )
-                    for i in T.unroll(BLK_N // 4 // 2):
-                        idx = T.meta_var(frag_idx * BLK_N // 4 + 2 * i)
-                        T.evaluate(_cast_f32x2_f16x2(p_chunk_buf, s_chunk_buf, idx))
-                if USE_S0_S1_BARRIER:
-                    bar_s0_s1_sequence.arrive((1 - wg_id) * 4 + warp_id)
-                iket.range_end(softmax_exp2_token)
-                softmax_tmem_st_token = iket.sentinel_token("softmax-tmem-st")
-                if warp_id == 0:
-                    softmax_tmem_st_token = iket.range_start("softmax-tmem-st")
-                P_SPLIT_Q = T.meta_var(2 if is_causal else 3)
-                for i in T.unroll(P_SPLIT_Q):
-                    T.evaluate(
-                        _tmem_store(
-                            p_chunk_u32,
-                            i * BLK_N // 4 // 2,
-                            T.cuda.get_tmem_addr(
-                                T.uint32(0), 0, (wg_id * 2 * MMA_N + MMA_N + i * BLK_N // 4) // 2
-                            ),
-                        )
-                    )
-                T.ptx.tcgen05.wait__st.sync.aligned()
-                p_o_rescale.arrive(wg_id)
-                for i in T.unroll(4 - P_SPLIT_Q):
-                    T.evaluate(
-                        _tmem_store(
-                            p_chunk_u32,
-                            (P_SPLIT_Q + i) * BLK_N // 4 // 2,
-                            T.cuda.get_tmem_addr(
-                                T.uint32(0),
-                                0,
-                                (wg_id * 2 * MMA_N + MMA_N + (P_SPLIT_Q + i) * BLK_N // 4) // 2,
-                            ),
-                        )
-                    )
-                if warp_id == 0:
-                    iket.mark("softmax-phase-2")
-                T.ptx.tcgen05.wait__st.sync.aligned()
-                p_ready_2.arrive(wg_id)
-                if warp_id == 0:
-                    iket.mark("softmax-phase-3")
-                iket.range_end(softmax_tmem_st_token)
-                softmax_corr.empty.wait(wg_id, phase_q)
-                if warp_id == 0:
-                    iket.mark("softmax-phase-4")
-                softmax_sum_token = iket.sentinel_token("softmax-sum")
-                if warp_id == 0:
-                    softmax_sum_token = iket.range_start("softmax-sum")
-                phase_s_full ^= 1
-                phase_q ^= 1
-                if is_first:
-                    reduce_sum_128(row_sum, s_chunk_buf)
-                else:
-                    row_sum[0] = row_sum[0] * acc_scale
-                    reduce_sum_128(row_sum, s_chunk_buf, accum=True)
-                if warp_id == 0:
-                    iket.mark("softmax-phase-5")
-                iket.range_end(softmax_sum_token)
-                if USE_S0_S1_BARRIER:
-                    phase_s0_s1 ^= 1
+                            _builder_then_788_24 = _builder_scope_enter(T.Then())
+                            c = _builder_bind("c", s * CHUNK_SIZE + i)
+                            in_bound = _builder_bind(
+                                "in_bound",
+                                T.bitwise_and(
+                                    T.bitwise_not(mask_inv), T.shift_left(T.uint32(1), i)
+                                ),
+                            )
+                            T.buffer_store(
+                                s_chunk_local,
+                                T.Select(
+                                    T.cast(in_bound, "bool"),
+                                    s_chunk_local[c],
+                                    T.float32(-float("inf")),
+                                ),
+                                [c],
+                            )
+                            _builder_scope_exit(_builder_then_788_24)
+                            _builder_scope_exit(_builder_if_788_24)
 
-            # Pre-loop empty.wait guards this task's first sScale write
-            # against the PREVIOUS task's tail row_sum read. Under
-            # EPI_ON_SOFTMAX there is no tail row_sum slot use and no
-            # previous task (one task per CTA), and correction's tail
-            # empty credits are gone too — the wait must go with them
-            # (credit/wait audit: n arrives vs n in-step waits per slot).
-            if not EPI_ON_SOFTMAX:
-                softmax_corr.empty.wait(wg_id, phase_q)
-            # Keep the phase flip even when the wait is gone: parities are
-            # absolute, and correction's prologue empty.arrive can land
-            # BEFORE this wg reaches its step-1 wait — starting the in-step
-            # waits at phase 1 makes step-1 consume that prologue credit
-            # exactly like the original protocol (synccheck-verified; the
-            # phase-0 "free pass" is NOT sticky and deadlocks if the flip
-            # outruns the waiter).
-            phase_q ^= 1
-            n_block_max: T.let = get_n_block_max(
-                m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE
-            )
-            n_block_min_causal: T.let = (
-                get_n_block_min_causal_mask(m_block_idx, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
-                if is_causal
-                else n_block_max
-            )
-            softmax_step(n_block_max - 1, apply_mask=is_causal, is_first=True)
-            n_block_max_after_p1: T.let = n_block_max - 1
-            num_phase2_blocks: T.let = T.max(n_block_max_after_p1 - n_block_min_causal, 0)
-            for i in T.serial(num_phase2_blocks, unroll=False):
-                n_block: T.let = n_block_max_after_p1 - 1 - i
-                softmax_step(n_block, apply_mask=True)
-            n_block_max_after_p2: T.let = T.min(n_block_max_after_p1, n_block_min_causal)
-            for i in T.serial(n_block_max_after_p2, unroll=False):
-                n_block: T.let = n_block_max_after_p2 - 1 - i
-                softmax_step(n_block, apply_mask=False)
-            if EPI_ON_SOFTMAX:
-                # Stage-parallel epilogue on this wg: row_sum is already in
-                # a register (no sScale round-trip / tail stats trip), and
-                # the post-loop softmax register file is idle — 32-wide
-                # TMEM loads are free (4 round trips, vs 8x16 under the
-                # correction wg's 64-reg budget).
-                EPI_LD_SM = T.meta_var(32)
-                o_ready.wait(wg_id, phase_oepi)
-                corr_epi.empty.wait(wg_id, phase_oepi)
-                epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
-                if warp_id == 0:
-                    epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
-                acc_O_row_is_zero_or_nan: T.let = tvm.tirx.any(
-                    row_sum[0] == T.float32(0.0), row_sum[0] != row_sum[0]
-                )
-                norm_scale_sm: T.float32
-                T.ptx.rcp.approx.ftz.f32(
-                    norm_scale_sm, T.Select(acc_O_row_is_zero_or_nan, T.float32(1.0), row_sum[0])
-                )
-                o_row_f32_sm: T.f32[EPI_LD_SM]
-                o_row_f16_sm: T.f16[EPI_LD_SM]
-                o_row_f16_sm_u32 = T.decl_buffer(
-                    (EPI_LD_SM // 2,), "uint32", data=o_row_f16_sm.data
-                )
-                for epi_q in T.unroll(2):
-                    if wg_id == epi_q:
-                        for d_tile in T.unroll(ceildiv(HEAD_DIM, EPI_LD_SM)):
-                            d_start: T.let = d_tile * EPI_LD_SM
+                def apply_causal_mask(s_chunk_buf, m_blk_idx, n_blk_idx):
+                    """Apply causal mask to attention scores.
+
+                    Following flash_attn/cute/mask.py apply_mask_sm100() lines 384-400:
+                    causal_row_offset = 1 + seqlen_k - n_block * tile_n - seqlen_q
+                    row_idx = thread_row + m_block * tile_m
+                    col_limit_right = row_idx + causal_row_offset
+                    Mask if col >= col_limit_right
+
+                    Coordinate Mapping:
+                    - BLK_M = 128 packed rows per tile
+                    - SEQ_Q_PER_TILE = BLK_M // GQA_RATIO (e.g., 32 for GQA_RATIO=4)
+                    - Each warpgroup handles one Q stage with SEQ_Q_PER_TILE sequence positions
+                    - tid_in_wg (0-127) maps to packed rows: (seq_pos, head) = (tid//GQA_RATIO, tid%GQA_RATIO)
+                    """
+                    seq_pos_in_wg = _builder_bind("seq_pos_in_wg", tid_in_wg // GQA_RATIO)
+                    row_idx = _builder_bind(
+                        "row_idx",
+                        m_blk_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
+                        + wg_id * SEQ_Q_PER_TILE
+                        + seq_pos_in_wg,
+                    )
+                    causal_row_offset = _builder_bind(
+                        "causal_row_offset", 1 + SEQ_LEN_KV - n_blk_idx * BLK_N - SEQ_LEN_Q
+                    )
+                    col_limit_right = _builder_bind("col_limit_right", row_idx + causal_row_offset)
+                    _builder_emit(mask_r2p(s_chunk_buf, col_limit_right, BLK_N))
+
+                def softmax_step(i_kv, apply_mask=False, is_first=False):
+                    s_chunk_buf = _builder_name("s_chunk_buf", T.alloc_local((BLK_N,), "float32"))
+                    p_chunk_buf_f32 = _builder_name(
+                        "p_chunk_buf_f32", T.alloc_local((BLK_N // 2,), "float32")
+                    )
+                    p_chunk_buf = _builder_name(
+                        "p_chunk_buf",
+                        T.decl_buffer((BLK_N,), dtype="float16", data=p_chunk_buf_f32.data),
+                    )
+                    p_chunk_u32 = _builder_scalar("p_chunk_u32", p_chunk_buf.view("uint32"))
+                    _builder_emit(s_ready.wait(wg_id, phase_s_full))
+                    _builder_if_830_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_830_16 = _builder_scope_enter(T.Then())
+                    _builder_emit(iket.mark("softmax-phase-0"))
+                    _builder_scope_exit(_builder_then_830_16)
+                    _builder_scope_exit(_builder_if_830_16)
+                    softmax_max_token = _builder_scalar(
+                        "softmax_max_token", iket.sentinel_token("softmax-max")
+                    )
+                    _builder_if_833_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_833_16 = _builder_scope_enter(T.Then())
+                    T.buffer_store(softmax_max_token.buffer, iket.range_start("softmax-max"), [0])
+                    _builder_scope_exit(_builder_then_833_16)
+                    _builder_scope_exit(_builder_if_833_16)
+                    tile_max = _builder_name("tile_max", T.alloc_local((1,), "float32"))
+                    with T.unroll(BLK_N // SOFTMAX_LD_CHUNK) as chunk_idx:
+                        _builder_emit(
                             T.evaluate(
                                 _tmem_load(
-                                    o_row_f32_sm,
-                                    0,
+                                    s_chunk_buf,
+                                    chunk_idx * SOFTMAX_LD_CHUNK,
+                                    T.cuda.get_tmem_addr(
+                                        T.uint32(0), 0, wg_id * MMA_N + chunk_idx * SOFTMAX_LD_CHUNK
+                                    ),
+                                    SOFTMAX_LD_CHUNK,
+                                )
+                            )
+                        )
+                    if apply_mask:
+                        _builder_emit(apply_causal_mask(s_chunk_buf, m_block_idx, i_kv))
+                    row_max_old = _builder_alloc_scalar("row_max_old", "f32")
+                    if is_first:
+                        _builder_emit(reduce_max_128(tile_max, s_chunk_buf))
+                    else:
+                        T.buffer_store(row_max_old.buffer, row_max[0], [0])
+                        T.buffer_store(tile_max, row_max_old, [0])
+                        _builder_emit(reduce_max_128(tile_max, s_chunk_buf, accum=True))
+                    row_max_new = _builder_alloc_scalar("row_max_new", "f32")
+                    acc_scale = _builder_alloc_scalar("acc_scale", "f32")
+                    acc_scale_ = _builder_alloc_scalar("acc_scale_", "f32")
+                    row_max_safe = _builder_alloc_scalar("row_max_safe", "f32")
+                    T.buffer_store(row_max_new.buffer, tile_max[0], [0])
+                    T.buffer_store(
+                        row_max_safe.buffer,
+                        T.if_then_else(tile_max[0] == -float("inf"), 0.0, tile_max[0]),
+                        [0],
+                    )
+                    if is_first:
+                        T.buffer_store(acc_scale.buffer, T.float32(1.0), [0])
+                    else:
+                        T.buffer_store(
+                            acc_scale_.buffer, (row_max_old - row_max_safe) * scale_log2, [0]
+                        )
+                        _builder_if_870_20 = _builder_scope_enter(
+                            T.If(acc_scale_ >= -rescale_threshold)
+                        )
+                        _builder_then_870_20 = _builder_scope_enter(T.Then())
+                        T.buffer_store(row_max_new.buffer, row_max_old, [0])
+                        T.buffer_store(row_max_safe.buffer, row_max_old, [0])
+                        T.buffer_store(acc_scale.buffer, T.float32(1.0), [0])
+                        _builder_scope_exit(_builder_then_870_20)
+                        _builder_else_870_20 = _builder_scope_enter(T.Else())
+                        _builder_emit(T.ptx.ex2.approx.ftz.f32(acc_scale, acc_scale_))
+                        _builder_scope_exit(_builder_else_870_20)
+                        _builder_scope_exit(_builder_if_870_20)
+                    T.buffer_store(row_max, row_max_new, [0])
+                    row_max_scaled = _builder_bind("row_max_scaled", row_max_safe * scale_log2)
+                    _builder_if_878_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_878_16 = _builder_scope_enter(T.Then())
+                    _builder_emit(iket.mark("softmax-phase-1"))
+                    _builder_scope_exit(_builder_then_878_16)
+                    _builder_scope_exit(_builder_if_878_16)
+                    _builder_emit(iket.range_end(softmax_max_token))
+                    _builder_if_881_16 = _builder_scope_enter(
+                        T.If(T.And(tid_in_wg < BLK_M, T.bool(not is_first)))
+                    )
+                    _builder_then_881_16 = _builder_scope_enter(T.Then())
+                    sScale_idx = _builder_bind(
+                        "sScale_idx", ACC_SCALE_BASE + tid_in_wg + wg_id * BLK_M
+                    )
+                    _builder_emit(T.ptx.st.shared.f32(sScale.ptr_to([sScale_idx]), acc_scale))
+                    _builder_scope_exit(_builder_then_881_16)
+                    _builder_scope_exit(_builder_if_881_16)
+                    if STATS_BAR_PAIRWISE:
+                        _builder_emit(T.ptx.bar.arrive(T.uint32(1 + wg_id * 4 + warp_id), 64))
+                    else:
+                        _builder_emit(T.ptx.bar.arrive(T.uint32(1 + wg_id), 256))
+                    softmax_fma_token = _builder_scalar(
+                        "softmax_fma_token", iket.sentinel_token("softmax-fma")
+                    )
+                    _builder_if_897_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_897_16 = _builder_scope_enter(T.Then())
+                    T.buffer_store(softmax_fma_token.buffer, iket.range_start("softmax-fma"), [0])
+                    _builder_scope_exit(_builder_then_897_16)
+                    _builder_scope_exit(_builder_if_897_16)
+                    with T.unroll(BLK_N // 2) as i:
+                        _builder_emit(
+                            fma_f32x2(s_chunk_buf, 2 * i, T.float32(scale_log2), -row_max_scaled)
+                        )
+                    _builder_emit(iket.range_end(softmax_fma_token))
+                    if USE_S0_S1_BARRIER:
+                        _builder_emit(bar_s0_s1_sequence.wait(wg_id * 4 + warp_id, phase_s0_s1))
+                    softmax_exp2_token = _builder_scalar(
+                        "softmax_exp2_token", iket.sentinel_token("softmax-exp2")
+                    )
+                    _builder_if_905_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_905_16 = _builder_scope_enter(T.Then())
+                    T.buffer_store(softmax_exp2_token.buffer, iket.range_start("softmax-exp2"), [0])
+                    _builder_scope_exit(_builder_then_905_16)
+                    _builder_scope_exit(_builder_if_905_16)
+                    with T.unroll(4) as frag_idx:
+                        s_chunk_local = _builder_scalar("s_chunk_local", s_chunk_buf.local(BLK_N))
+                        with T.unroll(BLK_N // 4 // 2) as i:
+                            idx = T.meta_var(frag_idx * BLK_N // 4 + 2 * i).value
+                            emu_pairs = T.meta_var(
+                                EMU_PAIRS_CAUSAL if is_causal else EMU_PAIRS_NC
+                            ).value
+                            emu_start = T.meta_var(
+                                EMU_START_CAUSAL if is_causal else EMU_START_NC
+                            ).value
+                            _builder_if_916_24 = _builder_scope_enter(
+                                T.If(
+                                    T.Or(
+                                        T.Or(
+                                            T.Or(
+                                                i * 2 % 16 < 16 - 2 * emu_pairs, frag_idx >= 4 - 1
+                                            ),
+                                            frag_idx < emu_start,
+                                        ),
+                                        apply_mask,
+                                    )
+                                )
+                            )
+                            _builder_then_916_24 = _builder_scope_enter(T.Then())
+                            _builder_emit(
+                                T.ptx.ex2.approx.ftz.f32(s_chunk_local[idx], s_chunk_local[idx])
+                            )
+                            _builder_emit(
+                                T.ptx.ex2.approx.ftz.f32(
+                                    s_chunk_local[idx + 1], s_chunk_local[idx + 1]
+                                )
+                            )
+                            _builder_scope_exit(_builder_then_916_24)
+                            _builder_else_916_24 = _builder_scope_enter(T.Else())
+                            _builder_emit(
+                                ex2_emulation_2(
+                                    s_chunk_local, idx, s_chunk_local[idx], s_chunk_local[idx + 1]
+                                )
+                            )
+                            _builder_scope_exit(_builder_else_916_24)
+                            _builder_scope_exit(_builder_if_916_24)
+                        with T.unroll(BLK_N // 4 // 2) as i:
+                            idx = T.meta_var(frag_idx * BLK_N // 4 + 2 * i).value
+                            _builder_emit(
+                                T.evaluate(_cast_f32x2_f16x2(p_chunk_buf, s_chunk_buf, idx))
+                            )
+                    if USE_S0_S1_BARRIER:
+                        _builder_emit(bar_s0_s1_sequence.arrive((1 - wg_id) * 4 + warp_id))
+                    _builder_emit(iket.range_end(softmax_exp2_token))
+                    softmax_tmem_st_token = _builder_scalar(
+                        "softmax_tmem_st_token", iket.sentinel_token("softmax-tmem-st")
+                    )
+                    _builder_if_935_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_935_16 = _builder_scope_enter(T.Then())
+                    T.buffer_store(
+                        softmax_tmem_st_token.buffer, iket.range_start("softmax-tmem-st"), [0]
+                    )
+                    _builder_scope_exit(_builder_then_935_16)
+                    _builder_scope_exit(_builder_if_935_16)
+                    P_SPLIT_Q = T.meta_var(2 if is_causal else 3).value
+                    with T.unroll(P_SPLIT_Q) as i:
+                        _builder_emit(
+                            T.evaluate(
+                                _tmem_store(
+                                    p_chunk_u32,
+                                    i * BLK_N // 4 // 2,
                                     T.cuda.get_tmem_addr(
                                         T.uint32(0),
                                         0,
-                                        (SMEM_PIPE_DEPTH_Q + epi_q) * MMA_N + d_start,
+                                        (wg_id * 2 * MMA_N + MMA_N + i * BLK_N // 4) // 2,
                                     ),
-                                    EPI_LD_SM,
                                 )
                             )
-                            for i in T.unroll(EPI_LD_SM // 2):
-                                mul_f32x2(o_row_f32_sm, 2 * i, norm_scale_sm)
-                            for i in T.unroll(EPI_LD_SM // 2):
-                                T.evaluate(_cast_f32x2_f16x2(o_row_f16_sm, o_row_f32_sm, 2 * i))
-                            for i in T.unroll(EPI_LD_SM // 8):
-                                T.ptx.st.shared.v4.u32(
-                                    O_smem.ptr_to([epi_q, tid_in_wg, d_start + i * 8]),
-                                    o_row_f16_sm_u32[i * 4],
-                                    o_row_f16_sm_u32[i * 4 + 1],
-                                    o_row_f16_sm_u32[i * 4 + 2],
-                                    o_row_f16_sm_u32[i * 4 + 3],
-                                )
-                iket.range_end(epi_ld_tmem_token)
-                T.ptx.fence.proxy.async_.shared__cta()
-                corr_epi.full.arrive(wg_id)
-                p_o_rescale.arrive(wg_id)
-                phase_oepi ^= 1
-            else:
-                if tid_in_wg < BLK_M:
-                    T.ptx.st.shared.f32(
-                        sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + wg_id * BLK_M]), row_sum[0]
-                    )
-                if STATS_BAR_PAIRWISE:
-                    T.ptx.bar.arrive(T.uint32(1 + wg_id * 4 + warp_id), 64)
-                else:
-                    T.ptx.bar.arrive(T.uint32(1 + wg_id), 256)
-        if wg_id == 2:
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(64)
-            if STATS_BAR_PAIRWISE:
-                T.ptx.bar.sync(T.uint32(1 + 0 * 4 + warp_id), 64)
-            else:
-                T.ptx.bar.sync(T.uint32(1 + 0), 256)
-            softmax_corr.empty.arrive(0)
-            if STATS_BAR_PAIRWISE:
-                T.ptx.bar.sync(T.uint32(1 + 1 * 4 + warp_id), 64)
-            else:
-                T.ptx.bar.sync(T.uint32(1 + 1), 256)
-            phase_q ^= 1
-            corr_trip_count: T.let = (
-                get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
-                if is_causal
-                else num_kv_blocks
-            )
-            for i_kv in T.serial(corr_trip_count - 1, unroll=False):
-                for i_q in T.unroll(2):
-                    if STATS_BAR_PAIRWISE:
-                        T.ptx.bar.sync(T.uint32(1 + i_q * 4 + warp_id), 64)
-                    else:
-                        T.ptx.bar.sync(T.uint32(1 + i_q), 256)
-                    correction_token = iket.sentinel_token("correction")
-                    if warp_id == 0:
-                        correction_token = iket.range_start("correction")
-                    acc_scale: T.f32
-                    should_rescale: T.i32
-                    if tid_in_wg < BLK_M:
-                        T.ptx.ld.shared.f32(
-                            acc_scale, sScale.ptr_to([ACC_SCALE_BASE + tid_in_wg + i_q * BLK_M])
                         )
-                        should_rescale = T.Select(acc_scale < T.float32(1.0), 1, 0)
-                    else:
-                        should_rescale = 0
-                    any_needs_rescale: T.let = T.cuda.any_sync(4294967295, should_rescale)
-                    if any_needs_rescale != 0:
-                        if tid_in_wg < BLK_M:
-                            RESCALE_TILE = T.meta_var(16)
-                            o_row: T.f32[RESCALE_TILE]
-                            for d_tile in T.unroll(ceildiv(HEAD_DIM, RESCALE_TILE)):
-                                d_start: T.let = d_tile * RESCALE_TILE
-                                if d_start < HEAD_DIM:
-                                    T.evaluate(
-                                        _tmem_load(
-                                            o_row,
-                                            0,
-                                            T.cuda.get_tmem_addr(
-                                                T.uint32(0),
-                                                0,
-                                                (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start,
-                                            ),
-                                            RESCALE_TILE,
-                                        )
-                                    )
-                                    for i in T.unroll(RESCALE_TILE // 2):
-                                        mul_f32x2(o_row, 2 * i, acc_scale)
-                                    T.evaluate(
-                                        _tmem_store(
-                                            o_row,
-                                            0,
-                                            T.cuda.get_tmem_addr(
-                                                T.uint32(0),
-                                                0,
-                                                (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start,
-                                            ),
-                                        )
-                                    )
-                            T.ptx.tcgen05.wait__st.sync.aligned()
-                    p_o_rescale.arrive(i_q)
-                    softmax_corr.empty.arrive(1 - i_q)
-                    iket.range_end(correction_token)
-                phase_q ^= 1
-            softmax_corr.empty.arrive(1)
-            if not EPI_ON_SOFTMAX:
-                for i_q in T.unroll(2):
-                    if STATS_BAR_PAIRWISE:
-                        T.ptx.bar.sync(T.uint32(1 + i_q * 4 + warp_id), 64)
-                    else:
-                        T.ptx.bar.sync(T.uint32(1 + i_q), 256)
-                    row_sum: T.f32
-                    T.ptx.ld.shared.f32(
-                        row_sum, sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + i_q * BLK_M])
-                    )
-                    softmax_corr.empty.arrive(i_q)
-                    o_ready.wait(i_q, phase_tmem)
-                    corr_epi.empty.wait(i_q, phase_tmem)
-                    epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
-                    if warp_id == 0:
-                        epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
-                    acc_O_mn_row_is_zero_or_nan: T.let = tvm.tirx.any(
-                        row_sum == T.float32(0.0), row_sum != row_sum
-                    )
-                    norm_scale: T.float32
-                    T.ptx.rcp.approx.ftz.f32(
-                        norm_scale, T.Select(acc_O_mn_row_is_zero_or_nan, T.float32(1.0), row_sum)
-                    )
-                    o_row_f32: T.f32[TMEM_EPI_LD_SIZE]
-                    o_row_f16: T.f16[TMEM_EPI_LD_SIZE]
-                    o_row_f16_u32 = T.decl_buffer(
-                        (TMEM_EPI_LD_SIZE // 2,), "uint32", data=o_row_f16.data
-                    )
-                    for d_tile in T.unroll(ceildiv(HEAD_DIM, TMEM_EPI_LD_SIZE)):
-                        d_start: T.let = d_tile * TMEM_EPI_LD_SIZE
-                        if d_start < HEAD_DIM:
+                    _builder_emit(T.ptx.tcgen05.wait__st.sync.aligned())
+                    _builder_emit(p_o_rescale.arrive(wg_id))
+                    with T.unroll(4 - P_SPLIT_Q) as i:
+                        _builder_emit(
                             T.evaluate(
-                                _tmem_load(
-                                    o_row_f32,
-                                    0,
+                                _tmem_store(
+                                    p_chunk_u32,
+                                    (P_SPLIT_Q + i) * BLK_N // 4 // 2,
                                     T.cuda.get_tmem_addr(
-                                        T.uint32(0), 0, (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start
+                                        T.uint32(0),
+                                        0,
+                                        (wg_id * 2 * MMA_N + MMA_N + (P_SPLIT_Q + i) * BLK_N // 4)
+                                        // 2,
                                     ),
-                                    TMEM_EPI_LD_SIZE,
                                 )
                             )
-                            for i in T.unroll(TMEM_EPI_LD_SIZE // 2):
-                                mul_f32x2(o_row_f32, 2 * i, norm_scale)
-                            for i in T.unroll(TMEM_EPI_LD_SIZE // 2):
-                                T.evaluate(_cast_f32x2_f16x2(o_row_f16, o_row_f32, 2 * i))
-                            for i in T.unroll(TMEM_EPI_LD_SIZE // 8):
-                                T.ptx.st.shared.v4.u32(
-                                    O_smem.ptr_to([i_q, tid_in_wg, d_start + i * 8]),
-                                    o_row_f16_u32[i * 4],
-                                    o_row_f16_u32[i * 4 + 1],
-                                    o_row_f16_u32[i * 4 + 2],
-                                    o_row_f16_u32[i * 4 + 3],
+                        )
+                    _builder_if_962_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_962_16 = _builder_scope_enter(T.Then())
+                    _builder_emit(iket.mark("softmax-phase-2"))
+                    _builder_scope_exit(_builder_then_962_16)
+                    _builder_scope_exit(_builder_if_962_16)
+                    _builder_emit(T.ptx.tcgen05.wait__st.sync.aligned())
+                    _builder_emit(p_ready_2.arrive(wg_id))
+                    _builder_if_966_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_966_16 = _builder_scope_enter(T.Then())
+                    _builder_emit(iket.mark("softmax-phase-3"))
+                    _builder_scope_exit(_builder_then_966_16)
+                    _builder_scope_exit(_builder_if_966_16)
+                    _builder_emit(iket.range_end(softmax_tmem_st_token))
+                    _builder_emit(softmax_corr.empty.wait(wg_id, phase_q))
+                    _builder_if_970_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_970_16 = _builder_scope_enter(T.Then())
+                    _builder_emit(iket.mark("softmax-phase-4"))
+                    _builder_scope_exit(_builder_then_970_16)
+                    _builder_scope_exit(_builder_if_970_16)
+                    softmax_sum_token = _builder_scalar(
+                        "softmax_sum_token", iket.sentinel_token("softmax-sum")
+                    )
+                    _builder_if_973_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_973_16 = _builder_scope_enter(T.Then())
+                    T.buffer_store(softmax_sum_token.buffer, iket.range_start("softmax-sum"), [0])
+                    _builder_scope_exit(_builder_then_973_16)
+                    _builder_scope_exit(_builder_if_973_16)
+                    T.buffer_store(phase_s_full.buffer, phase_s_full ^ 1, [0])
+                    T.buffer_store(phase_q.buffer, phase_q ^ 1, [0])
+                    if is_first:
+                        _builder_emit(reduce_sum_128(row_sum, s_chunk_buf))
+                    else:
+                        T.buffer_store(row_sum, row_sum[0] * acc_scale, [0])
+                        _builder_emit(reduce_sum_128(row_sum, s_chunk_buf, accum=True))
+                    _builder_if_982_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_982_16 = _builder_scope_enter(T.Then())
+                    _builder_emit(iket.mark("softmax-phase-5"))
+                    _builder_scope_exit(_builder_then_982_16)
+                    _builder_scope_exit(_builder_if_982_16)
+                    _builder_emit(iket.range_end(softmax_sum_token))
+                    if USE_S0_S1_BARRIER:
+                        T.buffer_store(phase_s0_s1.buffer, phase_s0_s1 ^ 1, [0])
+
+                if not EPI_ON_SOFTMAX:
+                    _builder_emit(softmax_corr.empty.wait(wg_id, phase_q))
+                T.buffer_store(phase_q.buffer, phase_q ^ 1, [0])
+                n_block_max = _builder_bind(
+                    "n_block_max",
+                    get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE),
+                )
+                n_block_min_causal = _builder_bind(
+                    "n_block_min_causal",
+                    get_n_block_min_causal_mask(m_block_idx, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
+                    if is_causal
+                    else n_block_max,
+                )
+                _builder_emit(softmax_step(n_block_max - 1, apply_mask=is_causal, is_first=True))
+                n_block_max_after_p1 = _builder_bind("n_block_max_after_p1", n_block_max - 1)
+                num_phase2_blocks = _builder_bind(
+                    "num_phase2_blocks", T.max(n_block_max_after_p1 - n_block_min_causal, 0)
+                )
+                with T.serial(num_phase2_blocks, unroll=False) as i:
+                    n_block = _builder_bind("n_block", n_block_max_after_p1 - 1 - i)
+                    _builder_emit(softmax_step(n_block, apply_mask=True))
+                n_block_max_after_p2 = _builder_bind(
+                    "n_block_max_after_p2", T.min(n_block_max_after_p1, n_block_min_causal)
+                )
+                with T.serial(n_block_max_after_p2, unroll=False) as i:
+                    n_block = _builder_bind("n_block", n_block_max_after_p2 - 1 - i)
+                    _builder_emit(softmax_step(n_block, apply_mask=False))
+                if EPI_ON_SOFTMAX:
+                    EPI_LD_SM = T.meta_var(32).value
+                    _builder_emit(o_ready.wait(wg_id, phase_oepi))
+                    _builder_emit(corr_epi.empty.wait(wg_id, phase_oepi))
+                    epi_ld_tmem_token = _builder_scalar(
+                        "epi_ld_tmem_token", iket.sentinel_token("epi-ld-tmem")
+                    )
+                    _builder_if_1032_16 = _builder_scope_enter(T.If(warp_id == 0))
+                    _builder_then_1032_16 = _builder_scope_enter(T.Then())
+                    T.buffer_store(epi_ld_tmem_token.buffer, iket.range_start("epi-ld-tmem"), [0])
+                    _builder_scope_exit(_builder_then_1032_16)
+                    _builder_scope_exit(_builder_if_1032_16)
+                    acc_O_row_is_zero_or_nan = _builder_bind(
+                        "acc_O_row_is_zero_or_nan",
+                        tvm.tirx.any(row_sum[0] == T.float32(0.0), row_sum[0] != row_sum[0]),
+                    )
+                    norm_scale_sm = _builder_alloc_scalar("norm_scale_sm", "float32")
+                    _builder_emit(
+                        T.ptx.rcp.approx.ftz.f32(
+                            norm_scale_sm,
+                            T.Select(acc_O_row_is_zero_or_nan, T.float32(1.0), row_sum[0]),
+                        )
+                    )
+                    o_row_f32_sm = _builder_name(
+                        "o_row_f32_sm", T.alloc_local((EPI_LD_SM,), "float32")
+                    )
+                    o_row_f16_sm = _builder_name(
+                        "o_row_f16_sm", T.alloc_local((EPI_LD_SM,), "float16")
+                    )
+                    o_row_f16_sm_u32 = _builder_name(
+                        "o_row_f16_sm_u32",
+                        T.decl_buffer((EPI_LD_SM // 2,), "uint32", data=o_row_f16_sm.data),
+                    )
+                    with T.unroll(2) as epi_q:
+                        _builder_if_1047_20 = _builder_scope_enter(T.If(wg_id == epi_q))
+                        _builder_then_1047_20 = _builder_scope_enter(T.Then())
+                        with T.unroll(ceildiv(HEAD_DIM, EPI_LD_SM)) as d_tile:
+                            d_start = _builder_bind("d_start", d_tile * EPI_LD_SM)
+                            _builder_emit(
+                                T.evaluate(
+                                    _tmem_load(
+                                        o_row_f32_sm,
+                                        0,
+                                        T.cuda.get_tmem_addr(
+                                            T.uint32(0),
+                                            0,
+                                            (SMEM_PIPE_DEPTH_Q + epi_q) * MMA_N + d_start,
+                                        ),
+                                        EPI_LD_SM,
+                                    )
                                 )
-                    iket.range_end(epi_ld_tmem_token)
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    corr_epi.full.arrive(i_q)
-                    p_o_rescale.arrive(i_q)
-                phase_tmem ^= 1
-            phase_q ^= 1
-        scheduler.next_tile()
-    T.cuda.cta_sync()
-    if (wg_id == 0) & (warp_id == 0):
-        dealloc_tmem_addr: T.uint32
-        T.ptx.ld.shared.u32(dealloc_tmem_addr, tmem_addr.ptr_to([0]))
-        T.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
-        T.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
-            dealloc_tmem_addr, T.uint32(N_COLS_TMEM)
-        )
-    # No final cta_sync: warps exit independently after the dealloc. On the
-    # single-task causal shapes the kernel-end barrier is fully exposed (~11%
-    # of stall samples on the tail); dropping it is safe (50x reused-module
-    # GPU verify PASS — tcgen05 dealloc/relinquish by warp 0 needs no CTA-wide
-    # rendezvous, and there is no post-exit SMEM/TMEM reuse) and lifts the warm
-    # ratio ~+0.5pp. Validated first via tvm_callback_cuda_postproc injection,
-    # then moved here.
+                            )
+                            with T.unroll(EPI_LD_SM // 2) as i:
+                                _builder_emit(mul_f32x2(o_row_f32_sm, 2 * i, norm_scale_sm))
+                            with T.unroll(EPI_LD_SM // 2) as i:
+                                _builder_emit(
+                                    T.evaluate(_cast_f32x2_f16x2(o_row_f16_sm, o_row_f32_sm, 2 * i))
+                                )
+                            with T.unroll(EPI_LD_SM // 8) as i:
+                                _builder_emit(
+                                    T.ptx.st.shared.v4.u32(
+                                        O_smem.ptr_to([epi_q, tid_in_wg, d_start + i * 8]),
+                                        o_row_f16_sm_u32[i * 4],
+                                        o_row_f16_sm_u32[i * 4 + 1],
+                                        o_row_f16_sm_u32[i * 4 + 2],
+                                        o_row_f16_sm_u32[i * 4 + 3],
+                                    )
+                                )
+                        _builder_scope_exit(_builder_then_1047_20)
+                        _builder_scope_exit(_builder_if_1047_20)
+                    _builder_emit(iket.range_end(epi_ld_tmem_token))
+                    _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                    _builder_emit(corr_epi.full.arrive(wg_id))
+                    _builder_emit(p_o_rescale.arrive(wg_id))
+                    T.buffer_store(phase_oepi.buffer, phase_oepi ^ 1, [0])
+                else:
+                    _builder_if_1080_16 = _builder_scope_enter(T.If(tid_in_wg < BLK_M))
+                    _builder_then_1080_16 = _builder_scope_enter(T.Then())
+                    _builder_emit(
+                        T.ptx.st.shared.f32(
+                            sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + wg_id * BLK_M]), row_sum[0]
+                        )
+                    )
+                    _builder_scope_exit(_builder_then_1080_16)
+                    _builder_scope_exit(_builder_if_1080_16)
+                    if STATS_BAR_PAIRWISE:
+                        _builder_emit(T.ptx.bar.arrive(T.uint32(1 + wg_id * 4 + warp_id), 64))
+                    else:
+                        _builder_emit(T.ptx.bar.arrive(T.uint32(1 + wg_id), 256))
+                _builder_scope_exit(_builder_then_752_8)
+                _builder_scope_exit(_builder_if_752_8)
+                _builder_scope_exit(_builder_else_457_8)
+                _builder_scope_exit(_builder_if_457_8)
+                _builder_if_1088_8 = _builder_scope_enter(T.If(wg_id == 2))
+                _builder_then_1088_8 = _builder_scope_enter(T.Then())
+                _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(64))
+                if STATS_BAR_PAIRWISE:
+                    _builder_emit(T.ptx.bar.sync(T.uint32(1 + 0 * 4 + warp_id), 64))
+                else:
+                    _builder_emit(T.ptx.bar.sync(T.uint32(1 + 0), 256))
+                _builder_emit(softmax_corr.empty.arrive(0))
+                if STATS_BAR_PAIRWISE:
+                    _builder_emit(T.ptx.bar.sync(T.uint32(1 + 1 * 4 + warp_id), 64))
+                else:
+                    _builder_emit(T.ptx.bar.sync(T.uint32(1 + 1), 256))
+                T.buffer_store(phase_q.buffer, phase_q ^ 1, [0])
+                corr_trip_count = _builder_bind(
+                    "corr_trip_count",
+                    get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
+                    if is_causal
+                    else num_kv_blocks,
+                )
+                with T.serial(corr_trip_count - 1, unroll=False) as i_kv:
+                    with T.unroll(2) as i_q:
+                        if STATS_BAR_PAIRWISE:
+                            _builder_emit(T.ptx.bar.sync(T.uint32(1 + i_q * 4 + warp_id), 64))
+                        else:
+                            _builder_emit(T.ptx.bar.sync(T.uint32(1 + i_q), 256))
+                        correction_token = _builder_scalar(
+                            "correction_token", iket.sentinel_token("correction")
+                        )
+                        _builder_if_1112_20 = _builder_scope_enter(T.If(warp_id == 0))
+                        _builder_then_1112_20 = _builder_scope_enter(T.Then())
+                        T.buffer_store(correction_token.buffer, iket.range_start("correction"), [0])
+                        _builder_scope_exit(_builder_then_1112_20)
+                        _builder_scope_exit(_builder_if_1112_20)
+                        acc_scale = _builder_alloc_scalar("acc_scale", "f32")
+                        should_rescale = _builder_alloc_scalar("should_rescale", "i32")
+                        _builder_if_1116_20 = _builder_scope_enter(T.If(tid_in_wg < BLK_M))
+                        _builder_then_1116_20 = _builder_scope_enter(T.Then())
+                        _builder_emit(
+                            T.ptx.ld.shared.f32(
+                                acc_scale, sScale.ptr_to([ACC_SCALE_BASE + tid_in_wg + i_q * BLK_M])
+                            )
+                        )
+                        T.buffer_store(
+                            should_rescale.buffer, T.Select(acc_scale < T.float32(1.0), 1, 0), [0]
+                        )
+                        _builder_scope_exit(_builder_then_1116_20)
+                        _builder_else_1116_20 = _builder_scope_enter(T.Else())
+                        T.buffer_store(should_rescale.buffer, 0, [0])
+                        _builder_scope_exit(_builder_else_1116_20)
+                        _builder_scope_exit(_builder_if_1116_20)
+                        any_needs_rescale = _builder_bind(
+                            "any_needs_rescale", T.cuda.any_sync(4294967295, should_rescale)
+                        )
+                        _builder_if_1124_20 = _builder_scope_enter(T.If(any_needs_rescale != 0))
+                        _builder_then_1124_20 = _builder_scope_enter(T.Then())
+                        _builder_if_1125_24 = _builder_scope_enter(T.If(tid_in_wg < BLK_M))
+                        _builder_then_1125_24 = _builder_scope_enter(T.Then())
+                        RESCALE_TILE = T.meta_var(16).value
+                        o_row = _builder_name("o_row", T.alloc_local((RESCALE_TILE,), "float32"))
+                        with T.unroll(ceildiv(HEAD_DIM, RESCALE_TILE)) as d_tile:
+                            d_start = _builder_bind("d_start", d_tile * RESCALE_TILE)
+                            _builder_if_1130_32 = _builder_scope_enter(T.If(d_start < HEAD_DIM))
+                            _builder_then_1130_32 = _builder_scope_enter(T.Then())
+                            _builder_emit(
+                                T.evaluate(
+                                    _tmem_load(
+                                        o_row,
+                                        0,
+                                        T.cuda.get_tmem_addr(
+                                            T.uint32(0),
+                                            0,
+                                            (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start,
+                                        ),
+                                        RESCALE_TILE,
+                                    )
+                                )
+                            )
+                            with T.unroll(RESCALE_TILE // 2) as i:
+                                _builder_emit(mul_f32x2(o_row, 2 * i, acc_scale))
+                            _builder_emit(
+                                T.evaluate(
+                                    _tmem_store(
+                                        o_row,
+                                        0,
+                                        T.cuda.get_tmem_addr(
+                                            T.uint32(0),
+                                            0,
+                                            (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start,
+                                        ),
+                                    )
+                                )
+                            )
+                            _builder_scope_exit(_builder_then_1130_32)
+                            _builder_scope_exit(_builder_if_1130_32)
+                        _builder_emit(T.ptx.tcgen05.wait__st.sync.aligned())
+                        _builder_scope_exit(_builder_then_1125_24)
+                        _builder_scope_exit(_builder_if_1125_24)
+                        _builder_scope_exit(_builder_then_1124_20)
+                        _builder_scope_exit(_builder_if_1124_20)
+                        _builder_emit(p_o_rescale.arrive(i_q))
+                        _builder_emit(softmax_corr.empty.arrive(1 - i_q))
+                        _builder_emit(iket.range_end(correction_token))
+                    T.buffer_store(phase_q.buffer, phase_q ^ 1, [0])
+                _builder_emit(softmax_corr.empty.arrive(1))
+                if not EPI_ON_SOFTMAX:
+                    with T.unroll(2) as i_q:
+                        if STATS_BAR_PAIRWISE:
+                            _builder_emit(T.ptx.bar.sync(T.uint32(1 + i_q * 4 + warp_id), 64))
+                        else:
+                            _builder_emit(T.ptx.bar.sync(T.uint32(1 + i_q), 256))
+                        row_sum = _builder_alloc_scalar("row_sum", "f32")
+                        _builder_emit(
+                            T.ptx.ld.shared.f32(
+                                row_sum, sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + i_q * BLK_M])
+                            )
+                        )
+                        _builder_emit(softmax_corr.empty.arrive(i_q))
+                        _builder_emit(o_ready.wait(i_q, phase_tmem))
+                        _builder_emit(corr_epi.empty.wait(i_q, phase_tmem))
+                        epi_ld_tmem_token = _builder_scalar(
+                            "epi_ld_tmem_token", iket.sentinel_token("epi-ld-tmem")
+                        )
+                        _builder_if_1176_20 = _builder_scope_enter(T.If(warp_id == 0))
+                        _builder_then_1176_20 = _builder_scope_enter(T.Then())
+                        T.buffer_store(
+                            epi_ld_tmem_token.buffer, iket.range_start("epi-ld-tmem"), [0]
+                        )
+                        _builder_scope_exit(_builder_then_1176_20)
+                        _builder_scope_exit(_builder_if_1176_20)
+                        acc_O_mn_row_is_zero_or_nan = _builder_bind(
+                            "acc_O_mn_row_is_zero_or_nan",
+                            tvm.tirx.any(row_sum == T.float32(0.0), row_sum != row_sum),
+                        )
+                        norm_scale = _builder_alloc_scalar("norm_scale", "float32")
+                        _builder_emit(
+                            T.ptx.rcp.approx.ftz.f32(
+                                norm_scale,
+                                T.Select(acc_O_mn_row_is_zero_or_nan, T.float32(1.0), row_sum),
+                            )
+                        )
+                        o_row_f32 = _builder_name(
+                            "o_row_f32", T.alloc_local((TMEM_EPI_LD_SIZE,), "float32")
+                        )
+                        o_row_f16 = _builder_name(
+                            "o_row_f16", T.alloc_local((TMEM_EPI_LD_SIZE,), "float16")
+                        )
+                        o_row_f16_u32 = _builder_name(
+                            "o_row_f16_u32",
+                            T.decl_buffer((TMEM_EPI_LD_SIZE // 2,), "uint32", data=o_row_f16.data),
+                        )
+                        with T.unroll(ceildiv(HEAD_DIM, TMEM_EPI_LD_SIZE)) as d_tile:
+                            d_start = _builder_bind("d_start", d_tile * TMEM_EPI_LD_SIZE)
+                            _builder_if_1192_24 = _builder_scope_enter(T.If(d_start < HEAD_DIM))
+                            _builder_then_1192_24 = _builder_scope_enter(T.Then())
+                            _builder_emit(
+                                T.evaluate(
+                                    _tmem_load(
+                                        o_row_f32,
+                                        0,
+                                        T.cuda.get_tmem_addr(
+                                            T.uint32(0),
+                                            0,
+                                            (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start,
+                                        ),
+                                        TMEM_EPI_LD_SIZE,
+                                    )
+                                )
+                            )
+                            with T.unroll(TMEM_EPI_LD_SIZE // 2) as i:
+                                _builder_emit(mul_f32x2(o_row_f32, 2 * i, norm_scale))
+                            with T.unroll(TMEM_EPI_LD_SIZE // 2) as i:
+                                _builder_emit(
+                                    T.evaluate(_cast_f32x2_f16x2(o_row_f16, o_row_f32, 2 * i))
+                                )
+                            with T.unroll(TMEM_EPI_LD_SIZE // 8) as i:
+                                _builder_emit(
+                                    T.ptx.st.shared.v4.u32(
+                                        O_smem.ptr_to([i_q, tid_in_wg, d_start + i * 8]),
+                                        o_row_f16_u32[i * 4],
+                                        o_row_f16_u32[i * 4 + 1],
+                                        o_row_f16_u32[i * 4 + 2],
+                                        o_row_f16_u32[i * 4 + 3],
+                                    )
+                                )
+                            _builder_scope_exit(_builder_then_1192_24)
+                            _builder_scope_exit(_builder_if_1192_24)
+                        _builder_emit(iket.range_end(epi_ld_tmem_token))
+                        _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                        _builder_emit(corr_epi.full.arrive(i_q))
+                        _builder_emit(p_o_rescale.arrive(i_q))
+                    T.buffer_store(phase_tmem.buffer, phase_tmem ^ 1, [0])
+                T.buffer_store(phase_q.buffer, phase_q ^ 1, [0])
+                _builder_scope_exit(_builder_then_1088_8)
+                _builder_scope_exit(_builder_if_1088_8)
+                _builder_emit(scheduler.next_tile())
+            # Every TMEM consumer is inside the tile loop above. Synchronize
+            # all CTA warps after they leave it and before warp 0 deallocates
+            # the shared TMEM allocation.
+            _builder_emit(T.cuda.cta_sync())
+            _builder_if_1222_4 = _builder_scope_enter(T.If((wg_id == 0) & (warp_id == 0)))
+            _builder_then_1222_4 = _builder_scope_enter(T.Then())
+            dealloc_tmem_addr = _builder_alloc_scalar("dealloc_tmem_addr", "uint32")
+            _builder_emit(T.ptx.ld.shared.u32(dealloc_tmem_addr, tmem_addr.ptr_to([0])))
+            _builder_emit(
+                T.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
+            )
+            _builder_emit(
+                T.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
+                    dealloc_tmem_addr, T.uint32(N_COLS_TMEM)
+                )
+            )
+            _builder_scope_exit(_builder_then_1222_4)
+            _builder_scope_exit(_builder_if_1222_4)
+    return builder.get()
 
 
 def get_flash_attention4_kernel(
@@ -1588,7 +2064,7 @@ def get_flash_attention4_kernel(
     _deep_o = is_causal and seq_len_q <= 1024
     _tmem_depth = 3 if _deep_o else TMEM_PIPE_DEPTH
     _kv_depth = 2 if _deep_o else SMEM_PIPE_DEPTH_KV
-    return _kernel.specialize(
+    return _build_kernel(
         BATCH_SIZE=batch_size,
         SEQ_LEN_Q=seq_len_q,
         SEQ_LEN_KV=seq_len_kv,
@@ -1596,6 +2072,7 @@ def get_flash_attention4_kernel(
         NUM_KV_HEADS=num_kv_heads,
         HEAD_DIM=head_dim,
         is_causal=is_causal,
+        CTA_GROUP=1,
         TMEM_PIPE_DEPTH=_tmem_depth,
         SMEM_PIPE_DEPTH_KV=_kv_depth,
     )
@@ -1608,6 +2085,78 @@ def prepare_data(batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, 
     V = torch.randn((batch_size, seq_len_kv, num_kv_heads, head_dim), dtype=torch.float16)
     O = torch.zeros((batch_size, seq_len_q, num_qo_heads, head_dim), dtype=torch.float16)
     return (Q, K, V, O)
+
+
+def _builder_name(name: str, value):
+    """Name a directly constructed builder value and return it."""
+    try:
+        return IRBuilder.name(name, value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _builder_meta(name: str, value):
+    """Name resources owned by an IR-builder meta-class instance."""
+    from tvm.tirx.script.builder.ir import name_meta_class_value
+
+    name_meta_class_value(name, value)
+    return value
+
+
+def _builder_scalar(name: str, value, dtype: str | None = None):
+    """Materialize the mutable scalar semantics used by the former parser."""
+    if isinstance(value, tvm.tirx.Buffer):
+        return _builder_name(name, value)
+    value_type = getattr(value, "ty", None)
+    if value_type is None:
+        return _builder_meta(name, value)
+    if value_type is not None and not isinstance(value_type, tvm.ir.PrimType):
+        return _builder_bind(name, value, value.ty)
+    if dtype is None:
+        dtype = str(value.ty.dtype)
+    scalar = T.alloc_scalar(dtype=dtype, scope="local")
+    IRBuilder.name(name, scalar.scalar.buffer)
+    T.buffer_store(scalar.scalar.buffer, value, [0])
+    return scalar.scalar
+
+
+def _builder_alloc_scalar(name: str, dtype: str):
+    """Allocate a mutable scalar without inventing an initializer."""
+    scalar = T.alloc_scalar(dtype=dtype, scope="local")
+    IRBuilder.name(name, scalar.scalar.buffer)
+    return scalar.scalar
+
+
+def _builder_bind(name: str, value, type_annotation=None):
+    """Emit and name an immutable builder Bind."""
+    result = T.Bind(value, type_annotation)
+    IRBuilder.name(name, result)
+    return result
+
+
+def _builder_enter(frame):
+    """Enter a flat builder frame until its enclosing PrimFunc completes."""
+    frame.add_callback(lambda: frame.__exit__(None, None, None))
+    frame.__enter__()
+
+
+def _builder_scope_enter(frame):
+    """Enter a builder frame without adding Python source nesting."""
+    frame.__enter__()
+    return frame
+
+
+def _builder_scope_exit(frame):
+    """Exit a frame entered by :func:`_builder_scope_enter`."""
+    frame.__exit__(None, None, None)
+
+
+def _builder_emit(value):
+    """Match TVMScript expression-statement emission in direct builder code."""
+    if value is None or isinstance(value, tvm.ir.Var):
+        return
+    if tvm.ir.is_prim_expr(value) or isinstance(value, tvm.ir.Call):
+        T.evaluate(value)
 
 
 KERNEL_META = {"name": "flash_attention4", "category": "flashattention", "compute_capability": 10}

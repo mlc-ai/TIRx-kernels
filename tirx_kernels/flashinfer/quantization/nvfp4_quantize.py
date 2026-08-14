@@ -51,7 +51,10 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     st_global_u64,
 )
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
+
+from ._ir_builder import flat_attr, name, scalar, store
 
 KERNEL_META = {"name": "nvfp4_quantize", "category": "flashinfer", "compute_capability": 10}
 
@@ -202,174 +205,160 @@ def get_kernel(
             return sf_offset_8x4(row, col, pad_cols)
         return sf_offset_128x4(row, col, pad_cols)
 
-    if sf_layout == "linear":
-        grid_x, block_x, total_sf_blocks = _linear_launch(m, k)
+    linear = sf_layout == "linear"
+    if linear:
+        grid_x, block_x, _ = _linear_launch(m, k)
+        needs_col_loop = False
+        rows_per_block = 0
+    else:
+        grid_x, block_x, _ = _swizzled_launch(m, k, sf_layout)
+        needs_col_loop = nsb > block_x
+        rows_per_block = 1 if needs_col_loop else block_x // nsb
 
-        @T.prim_func
-        def nvfp4_quantize_linear(
-            in_ptr: T.handle,
-            out_ptr: T.handle,
-            sf_ptr: T.handle,
-            m_rows: T.int32,
-            total_sf: T.int32,
-            gs_ptr: T.handle,
-        ):
-            in_global = T.match_buffer(
-                in_ptr, shape=[m * k * (2 if fuse_silu else 1)], dtype=dtype, scope="global"
+    with IRBuilder() as ib:
+        with T.prim_func():
+            T.func_name("nvfp4_quantize_linear" if linear else "nvfp4_quantize_swizzled")
+            in_ptr = T.arg("in_ptr", T.handle())
+            out_ptr = T.arg("out_ptr", T.handle())
+            sf_ptr = T.arg("sf_ptr", T.handle())
+            m_rows = T.arg("m_rows", T.int32())
+            if linear:
+                total_sf = T.arg("total_sf", T.int32())
+            else:
+                padded_rows = T.arg("padded_rows", T.int32())
+            gs_ptr = T.arg("gs_ptr", T.handle())
+            in_global = name(
+                T.match_buffer(in_ptr, [m * k * (2 if fuse_silu else 1)], dtype, scope="global"),
+                "in_global",
             )
-            out_global = T.match_buffer(
-                out_ptr, shape=[m * (k // 2)], dtype="uint8", scope="global"
+            out_global = name(
+                T.match_buffer(out_ptr, [m * (k // 2)], "uint8", scope="global"), "out_global"
             )
-            sf_out = T.match_buffer(
-                sf_ptr, shape=[m * (k // NVFP4_SF_VEC_SIZE)], dtype="uint8", scope="global"
+            sf_shape = (
+                m * (k // NVFP4_SF_VEC_SIZE)
+                if linear
+                else _padded_m(m, sf_layout) * _padded_sf_cols(k)
             )
-            gs = T.match_buffer(gs_ptr, shape=[1], dtype="float32", scope="global")
+            sf_out = name(T.match_buffer(sf_ptr, [sf_shape], "uint8", scope="global"), "sf_out")
+            gs = name(T.match_buffer(gs_ptr, [1], "float32", scope="global"), "gs")
             T.device_entry()
-            T.attr({"tirx.launch_bounds_min_blocks_per_sm": 2})
-            bx = T.cta_id([grid_x])
-            tx = T.thread_id([block_x])
-
+            flat_attr({"tirx.launch_bounds_min_blocks_per_sm": 2})
+            bx = name(T.cta_id([grid_x]), "bx")
+            tx = name(T.thread_id([block_x]), "tx")
             if enable_pdl:
                 T.evaluate(T.ptx.griddepcontrol.wait())
+            gs_val = scalar("gs_val", "float32", ld_global_f32(gs, 0))
 
-            # Device global scale: one broadcast load per thread (:322-325).
-            gs_val = ld_global_f32(gs, 0)
-
-            # Flat SF-block grid-stride loop (nvfp4_quantize.py:330-359).
-            # The opaque stride keeps nvcc from strength-reducing the loop
-            # into up-front pointer-induction chains; the source binary
-            # recomputes addresses per iteration.
-            stride = opaque_i32(grid_x * _LINEAR_SF_BLOCKS_PER_TB)
-            sf_idx: T.int32 = bx * _LINEAR_SF_BLOCKS_PER_TB + tx
-            while sf_idx < total_sf:
-                row_idx = T.truncdiv(sf_idx, T.int32(nsb))
-                col_idx = T.truncmod(sf_idx, T.int32(nsb))
-                scale_fp8, packed64 = _process_block(
-                    in_global, row_idx, col_idx, gs_val, dtype=dtype, k=k, fuse_silu=fuse_silu
+            if linear:
+                stride = scalar("stride", "int32", opaque_i32(grid_x * _LINEAR_SF_BLOCKS_PER_TB))
+                sf_idx = scalar("sf_idx", "int32", bx * _LINEAR_SF_BLOCKS_PER_TB + tx)
+                with T.While(sf_idx < total_sf):
+                    row_idx = scalar("row_idx", "int32", T.truncdiv(sf_idx, T.int32(nsb)))
+                    col_idx = scalar("col_idx", "int32", T.truncmod(sf_idx, T.int32(nsb)))
+                    scale, packed = _process_block(
+                        in_global, row_idx, col_idx, gs_val, dtype=dtype, k=k, fuse_silu=fuse_silu
+                    )
+                    scale = scalar("scale_fp8", "uint8", scale)
+                    packed = scalar("packed64", "uint64", packed)
+                    st_global_u8(T.address_of(sf_out[sf_idx]), scale)
+                    out_off = scalar("out_off", "int32", row_idx * (k // 2) + col_idx * 8)
+                    st_global_u64(T.address_of(out_global[out_off]), packed)
+                    store(sf_idx, sf_idx + stride)
+            elif needs_col_loop:
+                row_idx = scalar("row_idx", "int32", bx)
+                with T.While(row_idx < padded_rows):
+                    with T.If(row_idx >= m_rows):
+                        with T.Then():
+                            sc_pad = scalar("sc_pad", "int32", tx)
+                            with T.While(sc_pad < pad_cols):
+                                st_global_u8(
+                                    T.address_of(sf_out[sf_offset(row_idx, sc_pad)]), T.uint8(0)
+                                )
+                                store(sc_pad, sc_pad + block_x)
+                        with T.Else():
+                            sc = scalar("sc", "int32", tx)
+                            with T.While(sc < nsb):
+                                scale, packed = _process_block(
+                                    in_global,
+                                    row_idx,
+                                    sc,
+                                    gs_val,
+                                    dtype=dtype,
+                                    k=k,
+                                    fuse_silu=fuse_silu,
+                                )
+                                scale = scalar("scale_fp8", "uint8", scale)
+                                packed = scalar("packed64", "uint64", packed)
+                                st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sc)]), scale)
+                                out_off = scalar("out_off", "int32", row_idx * (k // 2) + sc * 8)
+                                st_global_u64(T.address_of(out_global[out_off]), packed)
+                                store(sc, sc + block_x)
+                            sc_tail = scalar("sc_tail", "int32", nsb + tx)
+                            with T.While(sc_tail < pad_cols):
+                                st_global_u8(
+                                    T.address_of(sf_out[sf_offset(row_idx, sc_tail)]), T.uint8(0)
+                                )
+                                store(sc_tail, sc_tail + block_x)
+                    store(row_idx, row_idx + grid_x)
+            else:
+                row_in_block = scalar("row_in_block", "int32", T.truncdiv(tx, T.int32(nsb)))
+                sf_idx_in_row = scalar("sf_idx_in_row", "int32", T.truncmod(tx, T.int32(nsb)))
+                row_batch_idx = scalar("row_batch_idx", "int32", bx)
+                row_idx2 = scalar(
+                    "row_idx2", "int32", row_batch_idx * rows_per_block + row_in_block
                 )
-                # Source order: SF byte store, then the output store (:351/:357).
-                st_global_u8(T.address_of(sf_out[sf_idx]), scale_fp8)
-                out_off = row_idx * (k // 2) + col_idx * 8
-                st_global_u64(T.address_of(out_global[out_off]), packed64)
-                sf_idx = sf_idx + stride
-
+                with T.While(row_batch_idx * rows_per_block < padded_rows):
+                    with T.If(row_idx2 < padded_rows):
+                        with T.Then():
+                            with T.If(row_idx2 >= m_rows):
+                                with T.Then():
+                                    local_sf = scalar("local_sf", "int32", sf_idx_in_row)
+                                    with T.While(local_sf < pad_cols):
+                                        st_global_u8(
+                                            T.address_of(sf_out[sf_offset(row_idx2, local_sf)]),
+                                            T.uint8(0),
+                                        )
+                                        store(local_sf, local_sf + nsb)
+                                with T.Else():
+                                    with T.If(sf_idx_in_row < nsb):
+                                        with T.Then():
+                                            scale, packed = _process_block(
+                                                in_global,
+                                                row_idx2,
+                                                sf_idx_in_row,
+                                                gs_val,
+                                                dtype=dtype,
+                                                k=k,
+                                                fuse_silu=fuse_silu,
+                                            )
+                                            scale = scalar("scale_fp8", "uint8", scale)
+                                            packed = scalar("packed64", "uint64", packed)
+                                            st_global_u8(
+                                                T.address_of(
+                                                    sf_out[sf_offset(row_idx2, sf_idx_in_row)]
+                                                ),
+                                                scale,
+                                            )
+                                            out_off = scalar(
+                                                "out_off",
+                                                "int32",
+                                                row_idx2 * (k // 2) + sf_idx_in_row * 8,
+                                            )
+                                            st_global_u64(T.address_of(out_global[out_off]), packed)
+                                    if pad_cols != nsb:
+                                        pad_col = scalar("pad_col", "int32", nsb + sf_idx_in_row)
+                                        with T.While(pad_col < pad_cols):
+                                            st_global_u8(
+                                                T.address_of(sf_out[sf_offset(row_idx2, pad_col)]),
+                                                T.uint8(0),
+                                            )
+                                            store(pad_col, pad_col + nsb)
+                    store(row_batch_idx, row_batch_idx + grid_x)
+                    store(row_idx2, row_batch_idx * rows_per_block + row_in_block)
             if enable_pdl:
                 T.evaluate(T.ptx.griddepcontrol.launch_dependents())
 
-        return nvfp4_quantize_linear
-
-    grid_x, block_x, padded_m = _swizzled_launch(m, k, sf_layout)
-    needs_col_loop = nsb > block_x
-    rows_per_block = 1 if needs_col_loop else block_x // nsb
-
-    @T.prim_func
-    def nvfp4_quantize_swizzled(
-        in_ptr: T.handle,
-        out_ptr: T.handle,
-        sf_ptr: T.handle,
-        m_rows: T.int32,
-        padded_rows: T.int32,
-        gs_ptr: T.handle,
-    ):
-        in_global = T.match_buffer(
-            in_ptr, shape=[m * k * (2 if fuse_silu else 1)], dtype=dtype, scope="global"
-        )
-        out_global = T.match_buffer(out_ptr, shape=[m * (k // 2)], dtype="uint8", scope="global")
-        sf_out = T.match_buffer(
-            sf_ptr,
-            shape=[_padded_m(m, sf_layout) * _padded_sf_cols(k)],
-            dtype="uint8",
-            scope="global",
-        )
-        gs = T.match_buffer(gs_ptr, shape=[1], dtype="float32", scope="global")
-        T.device_entry()
-        T.attr({"tirx.launch_bounds_min_blocks_per_sm": 2})
-        bx = T.cta_id([grid_x])
-        tx = T.thread_id([block_x])
-
-        if enable_pdl:
-            T.evaluate(T.ptx.griddepcontrol.wait())
-
-        gs_val = ld_global_f32(gs, 0)
-
-        if needs_col_loop:
-            # Large K (K/16 > 512): one row per block iteration with a column
-            # loop (nvfp4_quantize.py:523-576).
-            row_idx: T.int32 = bx
-            while row_idx < padded_rows:
-                if row_idx >= m_rows:
-                    # Padding row: zero-fill by ALL threads, stride block_x.
-                    sc_pad: T.int32 = tx
-                    while sc_pad < pad_cols:
-                        st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sc_pad)]), T.uint8(0))
-                        sc_pad = sc_pad + block_x
-                else:
-                    sc: T.int32 = tx
-                    while sc < nsb:
-                        scale_fp8, packed64 = _process_block(
-                            in_global, row_idx, sc, gs_val, dtype=dtype, k=k, fuse_silu=fuse_silu
-                        )
-                        # Source order: SF byte store, then output (:557/:563).
-                        st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sc)]), scale_fp8)
-                        out_off = row_idx * (k // 2) + sc * 8
-                        st_global_u64(T.address_of(out_global[out_off]), packed64)
-                        sc = sc + block_x
-                    # Padding SF columns of a data row (:568-574).
-                    sc_tail: T.int32 = nsb + tx
-                    while sc_tail < pad_cols:
-                        st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sc_tail)]), T.uint8(0))
-                        sc_tail = sc_tail + block_x
-                row_idx = row_idx + grid_x
-        else:
-            # Small K: multi-row processing (nvfp4_quantize.py:577-642).
-            row_in_block = T.truncdiv(tx, T.int32(nsb))
-            sf_idx_in_row = T.truncmod(tx, T.int32(nsb))
-
-            row_batch_idx: T.int32 = bx
-            row_idx2: T.int32 = row_batch_idx * rows_per_block + row_in_block
-            while row_batch_idx * rows_per_block < padded_rows:
-                if row_idx2 < padded_rows:
-                    if row_idx2 >= m_rows:
-                        # Padding row: zero ALL padded SF columns; stride is
-                        # threads_per_row == nsb (:597-603).
-                        local_sf: T.int32 = sf_idx_in_row
-                        while local_sf < pad_cols:
-                            st_global_u8(
-                                T.address_of(sf_out[sf_offset(row_idx2, local_sf)]), T.uint8(0)
-                            )
-                            local_sf = local_sf + nsb
-                    else:
-                        if sf_idx_in_row < nsb:
-                            scale_fp8, packed64 = _process_block(
-                                in_global,
-                                row_idx2,
-                                sf_idx_in_row,
-                                gs_val,
-                                dtype=dtype,
-                                k=k,
-                                fuse_silu=fuse_silu,
-                            )
-                            # Source order: SF byte store, then output (:619/:625).
-                            st_global_u8(
-                                T.address_of(sf_out[sf_offset(row_idx2, sf_idx_in_row)]), scale_fp8
-                            )
-                            out_off = row_idx2 * (k // 2) + sf_idx_in_row * 8
-                            st_global_u64(T.address_of(out_global[out_off]), packed64)
-                        # Padding SF columns of a data row (:627-638).
-                        if pad_cols != nsb:
-                            pad_col: T.int32 = nsb + sf_idx_in_row
-                            while pad_col < pad_cols:
-                                st_global_u8(
-                                    T.address_of(sf_out[sf_offset(row_idx2, pad_col)]), T.uint8(0)
-                                )
-                                pad_col = pad_col + nsb
-                row_batch_idx = row_batch_idx + grid_x
-                row_idx2 = row_batch_idx * rows_per_block + row_in_block
-
-        if enable_pdl:
-            T.evaluate(T.ptx.griddepcontrol.launch_dependents())
-
-    return nvfp4_quantize_swizzled
+    return ib.get()
 
 
 def prepare_data(

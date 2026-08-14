@@ -20,7 +20,8 @@ from typing import Any
 
 from tirx_kernels.runner import bench
 from tvm.ir.type import PointerType, PrimType
-from tvm.script import tirx as T
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
 
 KERNEL_META = {
     "name": "silu_and_mul_nvfp4_experts_quantize",
@@ -167,6 +168,13 @@ def _unpack_hi_f32(word, dtype):
     )
 
 
+def _local_scalar(ib, name, dtype, value):
+    scalar = T.alloc_local([1], dtype)
+    ib.name(name, scalar)
+    T.buffer_store(scalar, value, [0])
+    return scalar
+
+
 def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand", **kwargs):
     """Return the TIRx specialization for one (dtype, n_experts, m, k) config."""
     _validate(dtype, n_experts, m, k)
@@ -177,204 +185,362 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
     hmax2 = _hmax2(dtype)
     hmax = _hmax(dtype)
 
-    @T.prim_func
-    def silu_and_mul_nvfp4_experts_quantize(
-        in_ptr: T.handle,
-        sf_scale_ptr: T.handle,
-        out_ptr: T.handle,
-        sf_out_ptr: T.handle,
-        mask_ptr: T.handle,
-        num_rows: T.int32,
-        num_cols: T.int32,
-        num_experts: T.int32,
-        use_silu_and_mul: T.int32,  # source ABI is bool; i32 keeps the same branch shape
-    ):
-        input_global = T.match_buffer(
-            in_ptr, shape=[num_rows * 2 * num_cols], dtype=dtype, scope="global"
-        )
-        sf_scale = T.match_buffer(
-            sf_scale_ptr, shape=[num_experts], dtype="float32", scope="global"
-        )
-        out_global = T.match_buffer(
-            out_ptr, shape=[num_rows * (num_cols // 16)], dtype="uint64", scope="global"
-        )
-        sf_out = T.match_buffer(
-            sf_out_ptr,
-            shape=[
-                num_experts
-                * ((num_rows // num_experts + 127) // 128 * 128)
-                * ((num_cols // 16 + 3) // 4 * 4)
-            ],
-            dtype="uint8",
-            scope="global",
-        )
-        mask = T.match_buffer(mask_ptr, shape=[num_experts], dtype="int32", scope="global")
-        T.device_entry()
-        T.attr({"tirx.launch_bounds_min_blocks_per_sm": 4})
-        bx = T.cta_id([grid_x])
-        tx = T.thread_id([block_x])
+    with IRBuilder() as ib:
+        with T.prim_func():
+            T.func_name("silu_and_mul_nvfp4_experts_quantize")
+            in_ptr = T.arg("in_ptr", T.handle())
+            sf_scale_ptr = T.arg("sf_scale_ptr", T.handle())
+            out_ptr = T.arg("out_ptr", T.handle())
+            sf_out_ptr = T.arg("sf_out_ptr", T.handle())
+            mask_ptr = T.arg("mask_ptr", T.handle())
+            num_rows = T.arg("num_rows", T.int32())
+            num_cols = T.arg("num_cols", T.int32())
+            num_experts = T.arg("num_experts", T.int32())
+            # Source ABI is bool; i32 keeps the same branch shape.
+            use_silu_and_mul = T.arg("use_silu_and_mul", T.int32())
 
-        # Expert partition (quantization.cuh:642-663).
-        tid32 = bx * block_x + tx
-        stride = T.truncdiv(grid_x * block_x, num_experts)
-        part_rem = T.truncmod(grid_x * block_x, num_experts)
-        expert_idx: T.int32 = T.int32(0)
-        tid_in_expert: T.int32 = T.int32(0)
-        actual_stride: T.int32 = stride
-        if part_rem > 0:
-            bound = part_rem * (stride + 1)
-            if tid32 < bound:
-                expert_idx = T.truncdiv(tid32, stride + 1)
-                tid_in_expert = T.truncmod(tid32, stride + 1)
-                actual_stride = stride + 1
-            else:
-                expert_idx = part_rem + T.truncdiv(tid32 - bound, stride)
-                tid_in_expert = T.truncmod(tid32 - bound, stride)
-                actual_stride = stride
-        else:
-            expert_idx = T.truncdiv(tid32, stride)
-            tid_in_expert = T.truncmod(tid32, stride)
-            actual_stride = stride
-
-        m_rows = T.truncdiv(num_rows, num_experts)
-        padded_m = (m_rows + 127) // 128 * 128
-        cols_per_row = T.truncdiv(num_cols, T.int32(ELTS_PER_THREAD))
-        use_mask = T.reinterpret("uint64", T.address_of(mask[0])) != T.uint64(0)
-        actual_cols: T.int32 = cols_per_row
-        if use_silu_and_mul != 0:
-            actual_cols = cols_per_row * 2
-
-        x64 = T.alloc_local([4], "uint64")
-        y64 = T.alloc_local([4], "uint64")
-        xw = T.decl_buffer(
-            [8],
-            "uint32",
-            data=T.reinterpret(PointerType(PrimType("uint32")), T.address_of(x64[0])),
-            scope="local",
-        )
-        yw = T.decl_buffer(
-            [8],
-            "uint32",
-            data=T.reinterpret(PointerType(PrimType("uint32")), T.address_of(y64[0])),
-            scope="local",
-        )
-        packed = T.alloc_local([1], "uint32")
-        e_tmp = T.alloc_local([1], "float32")
-        r_tmp = T.alloc_local([1], "float32")
-        lm = T.alloc_local([1], "uint32")
-        e4m3_u16 = T.alloc_local([1], "uint16")
-        f16p = T.alloc_local([1], "uint32")
-        fp = T.alloc_local([16], "float32")
-        e2m1_v = T.alloc_local([1], "uint64")
-        sf_b8 = T.alloc_local([1], "uint8")
-
-        # Grid-stride loop over this expert's chunks (quantization.cuh:675-720).
-        global_idx: T.int32 = tid_in_expert + expert_idx * m_rows * cols_per_row
-        loop_bound: T.int32 = (expert_idx + 1) * m_rows * cols_per_row
-        while global_idx < loop_bound:
-            row_idx = T.truncdiv(global_idx, cols_per_row)
-            col_idx = T.truncmod(global_idx, cols_per_row)
-            row_idx_in_expert = row_idx - expert_idx * m_rows
-
-            if use_mask:
-                if row_idx_in_expert >= mask[expert_idx]:
-                    break
-
-            in_offset = T.cast(row_idx, "int64") * actual_cols + col_idx
-            T.ptx.ld.global_.v4.b64(
-                x64[0],
-                x64[1],
-                x64[2],
-                x64[3],
-                T.address_of(input_global[in_offset * ELTS_PER_THREAD]),
+            input_global = T.match_buffer(
+                in_ptr, shape=[num_rows * 2 * num_cols], dtype=dtype, scope="global"
             )
-            if use_silu_and_mul != 0:
-                T.ptx.ld.global_.v4.b64(
-                    y64[0],
-                    y64[1],
-                    y64[2],
-                    y64[3],
-                    T.address_of(input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD]),
+            sf_scale = T.match_buffer(
+                sf_scale_ptr, shape=[num_experts], dtype="float32", scope="global"
+            )
+            out_global = T.match_buffer(
+                out_ptr, shape=[num_rows * (num_cols // 16)], dtype="uint64", scope="global"
+            )
+            sf_out = T.match_buffer(
+                sf_out_ptr,
+                shape=[
+                    num_experts
+                    * ((num_rows // num_experts + 127) // 128 * 128)
+                    * ((num_cols // 16 + 3) // 4 * 4)
+                ],
+                dtype="uint8",
+                scope="global",
+            )
+            mask = T.match_buffer(mask_ptr, shape=[num_experts], dtype="int32", scope="global")
+            for name, value in (
+                ("input_global", input_global),
+                ("sf_scale", sf_scale),
+                ("out_global", out_global),
+                ("sf_out", sf_out),
+                ("mask", mask),
+            ):
+                ib.name(name, value)
+
+            T.device_entry()
+            with T.attr({"tirx.launch_bounds_min_blocks_per_sm": 4}):
+                bx = T.cta_id([grid_x])
+                tx = T.thread_id([block_x])
+                ib.name("bx", bx)
+                ib.name("tx", tx)
+
+                # Expert partition (quantization.cuh:642-663).
+                tid32 = _local_scalar(ib, "tid32", "int32", bx * block_x + tx)
+                stride = _local_scalar(
+                    ib, "stride", "int32", T.truncdiv(grid_x * block_x, num_experts)
                 )
-                # silu_and_mul (utils:1142-1166): fp32 silu*mul per element,
-                # rounded back to DTYPE pairs in place.
-                for i in T.unroll(8):
-                    x_lo = _unpack_lo_f32(xw[i], dtype)
-                    x_hi = _unpack_hi_f32(xw[i], dtype)
-                    y_lo = _unpack_lo_f32(yw[i], dtype)
-                    y_hi = _unpack_hi_f32(yw[i], dtype)
-                    T.evaluate(
-                        T.ptx.ex2.approx.ftz.f32(e_tmp[0], x_lo * T.float32(-1.4426950408889634))
+                part_rem = _local_scalar(
+                    ib, "part_rem", "int32", T.truncmod(grid_x * block_x, num_experts)
+                )
+                expert_idx = _local_scalar(ib, "expert_idx", "int32", T.int32(0))
+                tid_in_expert = _local_scalar(ib, "tid_in_expert", "int32", T.int32(0))
+                actual_stride = _local_scalar(ib, "actual_stride", "int32", stride[0])
+                with T.If(part_rem[0] > 0):
+                    with T.Then():
+                        bound = _local_scalar(ib, "bound", "int32", part_rem[0] * (stride[0] + 1))
+                        with T.If(tid32[0] < bound[0]):
+                            with T.Then():
+                                T.buffer_store(expert_idx, T.truncdiv(tid32[0], stride[0] + 1), [0])
+                                T.buffer_store(
+                                    tid_in_expert, T.truncmod(tid32[0], stride[0] + 1), [0]
+                                )
+                                T.buffer_store(actual_stride, stride[0] + 1, [0])
+                            with T.Else():
+                                T.buffer_store(
+                                    expert_idx,
+                                    part_rem[0] + T.truncdiv(tid32[0] - bound[0], stride[0]),
+                                    [0],
+                                )
+                                T.buffer_store(
+                                    tid_in_expert, T.truncmod(tid32[0] - bound[0], stride[0]), [0]
+                                )
+                                T.buffer_store(actual_stride, stride[0], [0])
+                    with T.Else():
+                        T.buffer_store(expert_idx, T.truncdiv(tid32[0], stride[0]), [0])
+                        T.buffer_store(tid_in_expert, T.truncmod(tid32[0], stride[0]), [0])
+                        T.buffer_store(actual_stride, stride[0], [0])
+
+                m_rows = _local_scalar(ib, "m_rows", "int32", T.truncdiv(num_rows, num_experts))
+                padded_m = _local_scalar(ib, "padded_m", "int32", (m_rows[0] + 127) // 128 * 128)
+                cols_per_row = _local_scalar(
+                    ib, "cols_per_row", "int32", T.truncdiv(num_cols, T.int32(ELTS_PER_THREAD))
+                )
+                use_mask = _local_scalar(
+                    ib,
+                    "use_mask",
+                    "bool",
+                    T.reinterpret("uint64", T.address_of(mask[0])) != T.uint64(0),
+                )
+                actual_cols = _local_scalar(ib, "actual_cols", "int32", cols_per_row[0])
+                with T.If(use_silu_and_mul != 0):
+                    with T.Then():
+                        T.buffer_store(actual_cols, cols_per_row[0] * 2, [0])
+
+                x64 = T.alloc_local([4], "uint64")
+                y64 = T.alloc_local([4], "uint64")
+                xw = T.decl_buffer(
+                    [8],
+                    "uint32",
+                    data=T.reinterpret(PointerType(PrimType("uint32")), T.address_of(x64[0])),
+                    scope="local",
+                )
+                yw = T.decl_buffer(
+                    [8],
+                    "uint32",
+                    data=T.reinterpret(PointerType(PrimType("uint32")), T.address_of(y64[0])),
+                    scope="local",
+                )
+                packed = T.alloc_local([1], "uint32")
+                e_tmp = T.alloc_local([1], "float32")
+                r_tmp = T.alloc_local([1], "float32")
+                lm = T.alloc_local([1], "uint32")
+                e4m3_u16 = T.alloc_local([1], "uint16")
+                f16p = T.alloc_local([1], "uint32")
+                fp = T.alloc_local([16], "float32")
+                e2m1_v = T.alloc_local([1], "uint64")
+                sf_b8 = T.alloc_local([1], "uint8")
+                for name, value in (
+                    ("x64", x64),
+                    ("y64", y64),
+                    ("xw", xw),
+                    ("yw", yw),
+                    ("packed", packed),
+                    ("e_tmp", e_tmp),
+                    ("r_tmp", r_tmp),
+                    ("lm", lm),
+                    ("e4m3_u16", e4m3_u16),
+                    ("f16p", f16p),
+                    ("fp", fp),
+                    ("e2m1_v", e2m1_v),
+                    ("sf_b8", sf_b8),
+                ):
+                    ib.name(name, value)
+
+                # Grid-stride loop over this expert's chunks (quantization.cuh:675-720).
+                global_idx = _local_scalar(
+                    ib,
+                    "global_idx",
+                    "int32",
+                    tid_in_expert[0] + expert_idx[0] * m_rows[0] * cols_per_row[0],
+                )
+                loop_bound = _local_scalar(
+                    ib, "loop_bound", "int32", (expert_idx[0] + 1) * m_rows[0] * cols_per_row[0]
+                )
+                with T.While(global_idx[0] < loop_bound[0]):
+                    row_idx = _local_scalar(
+                        ib, "row_idx", "int32", T.truncdiv(global_idx[0], cols_per_row[0])
                     )
-                    out_lo = (x_lo / (T.float32(1.0) + e_tmp[0])) * y_lo
-                    T.evaluate(
-                        T.ptx.ex2.approx.ftz.f32(e_tmp[0], x_hi * T.float32(-1.4426950408889634))
+                    col_idx = _local_scalar(
+                        ib, "col_idx", "int32", T.truncmod(global_idx[0], cols_per_row[0])
                     )
-                    out_hi = (x_hi / (T.float32(1.0) + e_tmp[0])) * y_hi
-                    if dtype == "float16":
-                        T.evaluate(T.ptx.cvt.rn.f16x2.f32(packed[0], out_hi, out_lo))
-                    else:
-                        T.evaluate(T.ptx.cvt.rn.bf16x2.f32(packed[0], out_hi, out_lo))
-                    xw[i] = packed[0]
+                    row_idx_in_expert = _local_scalar(
+                        ib, "row_idx_in_expert", "int32", row_idx[0] - expert_idx[0] * m_rows[0]
+                    )
 
-            out_offset = T.cast(row_idx, "int64") * cols_per_row + col_idx
+                    with T.If(use_mask[0]):
+                        with T.Then():
+                            with T.If(row_idx_in_expert[0] >= mask[expert_idx[0]]):
+                                with T.Then():
+                                    T.evaluate(T.break_loop())
 
-            # SFScale select (branch-lowered in the source).
-            sfscale_val: T.f32 = T.float32(1.0)
-            if T.reinterpret("uint64", T.address_of(sf_scale[0])) != T.uint64(0):
-                sfscale_val = sf_scale[expert_idx]
+                    in_offset = _local_scalar(
+                        ib,
+                        "in_offset",
+                        "int64",
+                        T.cast(row_idx[0], "int64") * actual_cols[0] + col_idx[0],
+                    )
+                    T.evaluate(
+                        T.ptx.ld.global_.v4.b64(
+                            x64[0],
+                            x64[1],
+                            x64[2],
+                            x64[3],
+                            T.address_of(input_global[in_offset[0] * ELTS_PER_THREAD]),
+                        )
+                    )
+                    with T.If(use_silu_and_mul != 0):
+                        with T.Then():
+                            T.evaluate(
+                                T.ptx.ld.global_.v4.b64(
+                                    y64[0],
+                                    y64[1],
+                                    y64[2],
+                                    y64[3],
+                                    T.address_of(
+                                        input_global[
+                                            (in_offset[0] + cols_per_row[0]) * ELTS_PER_THREAD
+                                        ]
+                                    ),
+                                )
+                            )
+                            # silu_and_mul (utils:1142-1166): fp32 silu*mul per element,
+                            # rounded back to DTYPE pairs in place.
+                            with T.unroll(8) as i:
+                                x_lo = _local_scalar(
+                                    ib, "x_lo", "float32", _unpack_lo_f32(xw[i], dtype)
+                                )
+                                x_hi = _local_scalar(
+                                    ib, "x_hi", "float32", _unpack_hi_f32(xw[i], dtype)
+                                )
+                                y_lo = _local_scalar(
+                                    ib, "y_lo", "float32", _unpack_lo_f32(yw[i], dtype)
+                                )
+                                y_hi = _local_scalar(
+                                    ib, "y_hi", "float32", _unpack_hi_f32(yw[i], dtype)
+                                )
+                                T.evaluate(
+                                    T.ptx.ex2.approx.ftz.f32(
+                                        e_tmp[0], x_lo[0] * T.float32(-1.4426950408889634)
+                                    )
+                                )
+                                out_lo = _local_scalar(
+                                    ib,
+                                    "out_lo",
+                                    "float32",
+                                    (x_lo[0] / (T.float32(1.0) + e_tmp[0])) * y_lo[0],
+                                )
+                                T.evaluate(
+                                    T.ptx.ex2.approx.ftz.f32(
+                                        e_tmp[0], x_hi[0] * T.float32(-1.4426950408889634)
+                                    )
+                                )
+                                out_hi = _local_scalar(
+                                    ib,
+                                    "out_hi",
+                                    "float32",
+                                    (x_hi[0] / (T.float32(1.0) + e_tmp[0])) * y_hi[0],
+                                )
+                                if dtype == "float16":
+                                    T.evaluate(
+                                        T.ptx.cvt.rn.f16x2.f32(packed[0], out_hi[0], out_lo[0])
+                                    )
+                                else:
+                                    T.evaluate(
+                                        T.ptx.cvt.rn.bf16x2.f32(packed[0], out_hi[0], out_lo[0])
+                                    )
+                                T.buffer_store(xw, packed[0], [i])
 
-            # SF swizzled output address (utils:1096-1140 + quantization.cuh:706-714).
-            num_cols_padded = (
-                (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4) * (SF_VEC_SIZE * 4)
-            )
-            num_cols_sfout = num_cols_padded // SF_VEC_SIZE // 4
-            sf_expert_base = expert_idx * padded_m * num_cols_sfout
-            num_k_tiles = (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4)
-            sf_off = (
-                T.truncdiv(row_idx_in_expert, T.int32(128)) * (num_k_tiles * 512)
-                + T.truncdiv(col_idx, T.int32(4)) * 512
-                + (row_idx_in_expert % 32) * 16
-                + T.truncdiv(row_idx_in_expert % 128, T.int32(32)) * 4
-                + (col_idx % 4)
-            )
-            sf_byte = T.cast(sf_expert_base, "int64") * 4 + sf_off
+                    out_offset = _local_scalar(
+                        ib,
+                        "out_offset",
+                        "int64",
+                        T.cast(row_idx[0], "int64") * cols_per_row[0] + col_idx[0],
+                    )
 
-            # Local abs-max over the 8 packed pairs (silu-rounded values).
-            lm[0] = habs2(xw[0])
-            for i in T.unroll(7):
-                lm[0] = hmax2(lm[0], habs2(xw[i + 1]))
-            lm_lo = T.cast(T.bitwise_and(lm[0], T.uint32(0xFFFF)), "uint16")
-            lm_hi = T.cast(T.shift_right(lm[0], T.uint32(16)), "uint16")
-            vec_max = T.cast(T.reinterpret(dtype, hmax(lm_lo, lm_hi)), "float32")
+                    # SFScale select (branch-lowered in the source).
+                    sfscale_val = _local_scalar(ib, "sfscale_val", "float32", T.float32(1.0))
+                    with T.If(T.reinterpret("uint64", T.address_of(sf_scale[0])) != T.uint64(0)):
+                        with T.Then():
+                            T.buffer_store(sfscale_val, sf_scale[expert_idx[0]], [0])
 
-            # SF computation (default env: fast-math rcp, E4M3).
-            T.evaluate(T.ptx.rcp.approx.ftz.f32(r_tmp[0], T.float32(6.0)))
-            sf_value = sfscale_val * (vec_max * r_tmp[0])
-            T.evaluate(T.ptx.cvt.rn.satfinite.e4m3x2.f32(e4m3_u16[0], T.float32(0.0), sf_value))
-            sf_b8[0] = T.cast(e4m3_u16[0], "uint8")
-            T.evaluate(T.ptx.cvt.rn.f16x2.e4m3x2(f16p[0], e4m3_u16[0]))
-            sf_value_r = _unpack_lo_f32(f16p[0], "float16")
-            output_scale: T.f32 = T.float32(0.0)
-            if vec_max != 0.0:
-                T.evaluate(T.ptx.rcp.approx.ftz.f32(r_tmp[0], sfscale_val))
-                T.evaluate(T.ptx.rcp.approx.ftz.f32(e_tmp[0], sf_value_r * r_tmp[0]))
-                output_scale = e_tmp[0]
+                    # SF swizzled output address (utils:1096-1140 + quantization.cuh:706-714).
+                    num_cols_padded = _local_scalar(
+                        ib,
+                        "num_cols_padded",
+                        "int32",
+                        (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4) * (SF_VEC_SIZE * 4),
+                    )
+                    num_cols_sfout = _local_scalar(
+                        ib, "num_cols_sfout", "int32", num_cols_padded[0] // SF_VEC_SIZE // 4
+                    )
+                    sf_expert_base = _local_scalar(
+                        ib,
+                        "sf_expert_base",
+                        "int32",
+                        expert_idx[0] * padded_m[0] * num_cols_sfout[0],
+                    )
+                    num_k_tiles = _local_scalar(
+                        ib,
+                        "num_k_tiles",
+                        "int32",
+                        (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4),
+                    )
+                    sf_off = _local_scalar(
+                        ib,
+                        "sf_off",
+                        "int32",
+                        T.truncdiv(row_idx_in_expert[0], T.int32(128)) * (num_k_tiles[0] * 512)
+                        + T.truncdiv(col_idx[0], T.int32(4)) * 512
+                        + (row_idx_in_expert[0] % 32) * 16
+                        + T.truncdiv(row_idx_in_expert[0] % 128, T.int32(32)) * 4
+                        + (col_idx[0] % 4),
+                    )
+                    sf_byte = _local_scalar(
+                        ib, "sf_byte", "int64", T.cast(sf_expert_base[0], "int64") * 4 + sf_off[0]
+                    )
 
-            # SF byte store (STG.8, per thread).
-            if T.reinterpret("uint64", T.address_of(sf_out[0])) != T.uint64(0):
-                T.ptx.st.global_.b8(T.address_of(sf_out[sf_byte]), sf_b8[0])
+                    # Local abs-max over the 8 packed pairs (silu-rounded values).
+                    T.buffer_store(lm, habs2(xw[0]), [0])
+                    with T.unroll(7) as i:
+                        T.buffer_store(lm, hmax2(lm[0], habs2(xw[i + 1])), [0])
+                    lm_lo = _local_scalar(
+                        ib,
+                        "lm_lo",
+                        "uint16",
+                        T.cast(T.bitwise_and(lm[0], T.uint32(0xFFFF)), "uint16"),
+                    )
+                    lm_hi = _local_scalar(
+                        ib, "lm_hi", "uint16", T.cast(T.shift_right(lm[0], T.uint32(16)), "uint16")
+                    )
+                    vec_max = _local_scalar(
+                        ib,
+                        "vec_max",
+                        "float32",
+                        T.cast(T.reinterpret(dtype, hmax(lm_lo[0], lm_hi[0])), "float32"),
+                    )
 
-            # Scale to e2m1 and pack (fp32_vec_to_e2m1 source asm block).
-            for i in T.unroll(8):
-                fp[2 * i] = _unpack_lo_f32(xw[i], dtype) * output_scale
-                fp[2 * i + 1] = _unpack_hi_f32(xw[i], dtype) * output_scale
-            e2m1_v[0] = _fp32_vec_to_e2m1_16([fp[i] for i in range(16)])
-            T.ptx.st.global_.b64(T.address_of(out_global[out_offset]), e2m1_v[0])
+                    # SF computation (default env: fast-math rcp, E4M3).
+                    T.evaluate(T.ptx.rcp.approx.ftz.f32(r_tmp[0], T.float32(6.0)))
+                    sf_value = _local_scalar(
+                        ib, "sf_value", "float32", sfscale_val[0] * (vec_max[0] * r_tmp[0])
+                    )
+                    T.evaluate(
+                        T.ptx.cvt.rn.satfinite.e4m3x2.f32(e4m3_u16[0], T.float32(0.0), sf_value[0])
+                    )
+                    T.buffer_store(sf_b8, T.cast(e4m3_u16[0], "uint8"), [0])
+                    T.evaluate(T.ptx.cvt.rn.f16x2.e4m3x2(f16p[0], e4m3_u16[0]))
+                    sf_value_r = _local_scalar(
+                        ib, "sf_value_r", "float32", _unpack_lo_f32(f16p[0], "float16")
+                    )
+                    output_scale = _local_scalar(ib, "output_scale", "float32", T.float32(0.0))
+                    with T.If(vec_max[0] != 0.0):
+                        with T.Then():
+                            T.evaluate(T.ptx.rcp.approx.ftz.f32(r_tmp[0], sfscale_val[0]))
+                            T.evaluate(T.ptx.rcp.approx.ftz.f32(e_tmp[0], sf_value_r[0] * r_tmp[0]))
+                            T.buffer_store(output_scale, e_tmp[0], [0])
 
-            global_idx = global_idx + actual_stride
+                    # SF byte store (STG.8, per thread).
+                    with T.If(T.reinterpret("uint64", T.address_of(sf_out[0])) != T.uint64(0)):
+                        with T.Then():
+                            T.evaluate(
+                                T.ptx.st.global_.b8(T.address_of(sf_out[sf_byte[0]]), sf_b8[0])
+                            )
 
-    return silu_and_mul_nvfp4_experts_quantize
+                    # Scale to e2m1 and pack (fp32_vec_to_e2m1 source asm block).
+                    with T.unroll(8) as i:
+                        T.buffer_store(fp, _unpack_lo_f32(xw[i], dtype) * output_scale[0], [2 * i])
+                        T.buffer_store(
+                            fp, _unpack_hi_f32(xw[i], dtype) * output_scale[0], [2 * i + 1]
+                        )
+                    T.buffer_store(e2m1_v, _fp32_vec_to_e2m1_16([fp[i] for i in range(16)]), [0])
+                    T.evaluate(
+                        T.ptx.st.global_.b64(T.address_of(out_global[out_offset[0]]), e2m1_v[0])
+                    )
+
+                    T.buffer_store(global_idx, global_idx[0] + actual_stride[0], [0])
+
+    return ib.get()
 
 
 def prepare_data(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand", **kwargs):

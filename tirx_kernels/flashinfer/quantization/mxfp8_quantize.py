@@ -42,7 +42,10 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     ue8m0_to_inv_scale,
 )
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
+
+from ._ir_builder import flat_attr, name, scalar, store
 
 KERNEL_META = {"name": "mxfp8_quantize", "category": "flashinfer", "compute_capability": 10}
 
@@ -214,183 +217,189 @@ def get_kernel(
             return sf_offset_8x4(row, col, pad_cols)
         return sf_offset_128x4(row, col, pad_cols)
 
-    if sf_layout == "linear":
+    linear = sf_layout == "linear"
+    if linear:
         grid_x, block_x, _ = _linear_launch(m, k, use_2t)
         sfbpt = _LINEAR_WARPS * sfbpw
+        threads_per_row = col_units_per_block = rows_per_block = 0
+        needs_col_loop = False
+    else:
+        grid_x, block_x, _ = _swizzled_launch(m, k, sf_layout, use_2t)
+        threads_per_row = nsb * tps
+        col_units_per_block = block_x // tps
+        needs_col_loop = nsb > col_units_per_block
+        rows_per_block = 1 if needs_col_loop else col_units_per_block // nsb
 
-        @T.prim_func
-        def mxfp8_quantize_linear(
-            in_ptr: T.handle, out_ptr: T.handle, sf_ptr: T.handle, total_sf: T.int32
-        ):
-            in_global = T.match_buffer(in_ptr, shape=[m * k], dtype=dtype, scope="global")
-            out_global = T.match_buffer(out_ptr, shape=[m * k], dtype="uint8", scope="global")
-            sf_out = T.match_buffer(
-                sf_ptr, shape=[m * (k // SF_VEC_SIZE)], dtype="uint8", scope="global"
+    with IRBuilder() as ib:
+        with T.prim_func():
+            T.func_name("mxfp8_quantize_linear" if linear else "mxfp8_quantize_swizzled")
+            in_ptr = T.arg("in_ptr", T.handle())
+            out_ptr = T.arg("out_ptr", T.handle())
+            sf_ptr = T.arg("sf_ptr", T.handle())
+            if linear:
+                total_sf = T.arg("total_sf", T.int32())
+            else:
+                m_rows = T.arg("m_rows", T.int32())
+                padded_rows = T.arg("padded_rows", T.int32())
+            in_global = name(T.match_buffer(in_ptr, [m * k], dtype, scope="global"), "in_global")
+            out_global = name(
+                T.match_buffer(out_ptr, [m * k], "uint8", scope="global"), "out_global"
             )
+            sf_shape = (
+                m * (k // SF_VEC_SIZE) if linear else _padded_m(m, sf_layout) * _padded_sf_cols(k)
+            )
+            sf_out = name(T.match_buffer(sf_ptr, [sf_shape], "uint8", scope="global"), "sf_out")
             T.device_entry()
-            T.attr({"tirx.launch_bounds_min_blocks_per_sm": _BLOCKS_PER_SM})
-            bx = T.cta_id([grid_x])
-            tx = T.thread_id([block_x])
-
+            flat_attr({"tirx.launch_bounds_min_blocks_per_sm": _BLOCKS_PER_SM})
+            bx = name(T.cta_id([grid_x]), "bx")
+            tx = name(T.thread_id([block_x]), "tx")
             if enable_pdl:
                 T.evaluate(T.ptx.griddepcontrol.wait())
 
-            warp_idx = T.truncdiv(tx, T.int32(WARP_SIZE))
-            lane_idx = T.truncmod(tx, T.int32(WARP_SIZE))
-            sf_idx_in_warp = T.truncdiv(lane_idx, T.int32(tps))
-            thread_in_sf = T.truncmod(lane_idx, T.int32(tps))
-
-            # Grid-stride loop over flat SF blocks (mxfp8_quantize.py:248-326).
-            sf_idx: T.int32 = bx * sfbpt + warp_idx * sfbpw + sf_idx_in_warp
-            while sf_idx < total_sf:
-                row_idx = T.truncdiv(sf_idx, T.int32(nsb))
-                col_idx = T.truncmod(sf_idx, T.int32(nsb))
-                scale_ue8m0_u32 = _quantize_block(
-                    in_global,
-                    out_global,
-                    row_idx,
-                    col_idx,
-                    thread_in_sf,
-                    dtype=dtype,
-                    use_2t=use_2t,
-                    k=k,
+            if linear:
+                warp_idx = scalar("warp_idx", "int32", T.truncdiv(tx, T.int32(WARP_SIZE)))
+                lane_idx = scalar("lane_idx", "int32", T.truncmod(tx, T.int32(WARP_SIZE)))
+                sf_idx_in_warp = scalar(
+                    "sf_idx_in_warp", "int32", T.truncdiv(lane_idx, T.int32(tps))
                 )
-                if thread_in_sf == 0:
-                    st_global_u8(T.address_of(sf_out[sf_idx]), T.cast(scale_ue8m0_u32, "uint8"))
-                sf_idx = sf_idx + grid_x * sfbpt
-
+                thread_in_sf = scalar("thread_in_sf", "int32", T.truncmod(lane_idx, T.int32(tps)))
+                sf_idx = scalar("sf_idx", "int32", bx * sfbpt + warp_idx * sfbpw + sf_idx_in_warp)
+                with T.While(sf_idx < total_sf):
+                    row_idx = scalar("row_idx", "int32", T.truncdiv(sf_idx, T.int32(nsb)))
+                    col_idx = scalar("col_idx", "int32", T.truncmod(sf_idx, T.int32(nsb)))
+                    scale = _quantize_block(
+                        in_global,
+                        out_global,
+                        row_idx,
+                        col_idx,
+                        thread_in_sf,
+                        dtype=dtype,
+                        use_2t=use_2t,
+                        k=k,
+                    )
+                    scale = scalar("scale_ue8m0_u32", "uint32", scale)
+                    with T.If(thread_in_sf == 0):
+                        with T.Then():
+                            st_global_u8(T.address_of(sf_out[sf_idx]), T.cast(scale, "uint8"))
+                    store(sf_idx, sf_idx + grid_x * sfbpt)
+            elif needs_col_loop:
+                col_unit_idx = scalar("col_unit_idx", "int32", T.truncdiv(tx, T.int32(tps)))
+                thread_in_unit = scalar("thread_in_unit", "int32", T.truncmod(tx, T.int32(tps)))
+                row_idx = scalar("row_idx", "int32", bx)
+                with T.While(row_idx < padded_rows):
+                    with T.If(row_idx >= m_rows):
+                        with T.Then():
+                            sc_pad = scalar("sc_pad", "int32", col_unit_idx)
+                            with T.While(sc_pad < pad_cols):
+                                with T.If(thread_in_unit == 0):
+                                    with T.Then():
+                                        st_global_u8(
+                                            T.address_of(sf_out[sf_offset(row_idx, sc_pad)]),
+                                            T.uint8(0),
+                                        )
+                                store(sc_pad, sc_pad + col_units_per_block)
+                        with T.Else():
+                            sc = scalar("sc", "int32", col_unit_idx)
+                            with T.While(sc < nsb):
+                                scale = _quantize_block(
+                                    in_global,
+                                    out_global,
+                                    row_idx,
+                                    sc,
+                                    thread_in_unit,
+                                    dtype=dtype,
+                                    use_2t=use_2t,
+                                    k=k,
+                                )
+                                scale = scalar("scale_ue8m0_u32", "uint32", scale)
+                                with T.If(thread_in_unit == 0):
+                                    with T.Then():
+                                        st_global_u8(
+                                            T.address_of(sf_out[sf_offset(row_idx, sc)]),
+                                            T.cast(scale, "uint8"),
+                                        )
+                                store(sc, sc + col_units_per_block)
+                            sc_tail = scalar("sc_tail", "int32", nsb + col_unit_idx)
+                            with T.While(sc_tail < pad_cols):
+                                with T.If(thread_in_unit == 0):
+                                    with T.Then():
+                                        st_global_u8(
+                                            T.address_of(sf_out[sf_offset(row_idx, sc_tail)]),
+                                            T.uint8(0),
+                                        )
+                                store(sc_tail, sc_tail + col_units_per_block)
+                    store(row_idx, row_idx + grid_x)
+            else:
+                row_in_block = scalar(
+                    "row_in_block", "int32", T.truncdiv(tx, T.int32(threads_per_row))
+                )
+                local_tidx = scalar("local_tidx", "int32", T.truncmod(tx, T.int32(threads_per_row)))
+                sf_col_idx = scalar("sf_col_idx", "int32", T.truncdiv(local_tidx, T.int32(tps)))
+                thread_in_unit = scalar(
+                    "thread_in_unit", "int32", T.truncmod(local_tidx, T.int32(tps))
+                )
+                row_batch_idx = scalar("row_batch_idx", "int32", bx)
+                row_idx2 = scalar(
+                    "row_idx2", "int32", row_batch_idx * rows_per_block + row_in_block
+                )
+                with T.While(row_batch_idx * rows_per_block < padded_rows):
+                    with T.If(row_idx2 < padded_rows):
+                        with T.Then():
+                            with T.If(row_idx2 >= m_rows):
+                                with T.Then():
+                                    with T.If(thread_in_unit == 0):
+                                        with T.Then():
+                                            pad_col = scalar("pad_col", "int32", sf_col_idx)
+                                            with T.While(pad_col < pad_cols):
+                                                st_global_u8(
+                                                    T.address_of(
+                                                        sf_out[sf_offset(row_idx2, pad_col)]
+                                                    ),
+                                                    T.uint8(0),
+                                                )
+                                                store(pad_col, pad_col + nsb)
+                                with T.Else():
+                                    with T.If(sf_col_idx < nsb):
+                                        with T.Then():
+                                            scale = _quantize_block(
+                                                in_global,
+                                                out_global,
+                                                row_idx2,
+                                                sf_col_idx,
+                                                thread_in_unit,
+                                                dtype=dtype,
+                                                use_2t=use_2t,
+                                                k=k,
+                                            )
+                                            scale = scalar("scale_ue8m0_u32", "uint32", scale)
+                                            with T.If(thread_in_unit == 0):
+                                                with T.Then():
+                                                    st_global_u8(
+                                                        T.address_of(
+                                                            sf_out[sf_offset(row_idx2, sf_col_idx)]
+                                                        ),
+                                                        T.cast(scale, "uint8"),
+                                                    )
+                                    if pad_cols != nsb:
+                                        with T.If(thread_in_unit == 0):
+                                            with T.Then():
+                                                pad_col2 = scalar(
+                                                    "pad_col2", "int32", nsb + sf_col_idx
+                                                )
+                                                with T.While(pad_col2 < pad_cols):
+                                                    st_global_u8(
+                                                        T.address_of(
+                                                            sf_out[sf_offset(row_idx2, pad_col2)]
+                                                        ),
+                                                        T.uint8(0),
+                                                    )
+                                                    store(pad_col2, pad_col2 + nsb)
+                    store(row_batch_idx, row_batch_idx + grid_x)
+                    store(row_idx2, row_batch_idx * rows_per_block + row_in_block)
             if enable_pdl:
                 T.evaluate(T.ptx.griddepcontrol.launch_dependents())
 
-        return mxfp8_quantize_linear
-
-    grid_x, block_x, padded_m = _swizzled_launch(m, k, sf_layout, use_2t)
-    threads_per_row = nsb * tps
-    col_units_per_block = block_x // tps
-    needs_col_loop = nsb > col_units_per_block
-    rows_per_block = 1 if needs_col_loop else col_units_per_block // nsb
-
-    @T.prim_func
-    def mxfp8_quantize_swizzled(
-        in_ptr: T.handle, out_ptr: T.handle, sf_ptr: T.handle, m_rows: T.int32, padded_rows: T.int32
-    ):
-        in_global = T.match_buffer(in_ptr, shape=[m * k], dtype=dtype, scope="global")
-        out_global = T.match_buffer(out_ptr, shape=[m * k], dtype="uint8", scope="global")
-        sf_out = T.match_buffer(
-            sf_ptr,
-            shape=[_padded_m(m, sf_layout) * _padded_sf_cols(k)],
-            dtype="uint8",
-            scope="global",
-        )
-        T.device_entry()
-        T.attr({"tirx.launch_bounds_min_blocks_per_sm": _BLOCKS_PER_SM})
-        bx = T.cta_id([grid_x])
-        tx = T.thread_id([block_x])
-
-        if enable_pdl:
-            T.evaluate(T.ptx.griddepcontrol.wait())
-
-        if needs_col_loop:
-            # Large K: one row per block iteration with a column loop
-            # (mxfp8_quantize.py:469-589).
-            col_unit_idx = T.truncdiv(tx, T.int32(tps))
-            thread_in_unit = T.truncmod(tx, T.int32(tps))
-
-            row_idx: T.int32 = bx
-            while row_idx < padded_rows:
-                if row_idx >= m_rows:
-                    # Padding row: zero out scale factors only (:481-489).
-                    sc_pad: T.int32 = col_unit_idx
-                    while sc_pad < pad_cols:
-                        if thread_in_unit == 0:
-                            st_global_u8(
-                                T.address_of(sf_out[sf_offset(row_idx, sc_pad)]), T.uint8(0)
-                            )
-                        sc_pad = sc_pad + col_units_per_block
-                else:
-                    # Data row: quantize each SF block in the column loop.
-                    sc: T.int32 = col_unit_idx
-                    while sc < nsb:
-                        scale_ue8m0_u32 = _quantize_block(
-                            in_global,
-                            out_global,
-                            row_idx,
-                            sc,
-                            thread_in_unit,
-                            dtype=dtype,
-                            use_2t=use_2t,
-                            k=k,
-                        )
-                        if thread_in_unit == 0:
-                            st_global_u8(
-                                T.address_of(sf_out[sf_offset(row_idx, sc)]),
-                                T.cast(scale_ue8m0_u32, "uint8"),
-                            )
-                        sc = sc + col_units_per_block
-                    # Padding SF columns of a data row (:580-587).
-                    sc_tail: T.int32 = nsb + col_unit_idx
-                    while sc_tail < pad_cols:
-                        if thread_in_unit == 0:
-                            st_global_u8(
-                                T.address_of(sf_out[sf_offset(row_idx, sc_tail)]), T.uint8(0)
-                            )
-                        sc_tail = sc_tail + col_units_per_block
-                row_idx = row_idx + grid_x
-        else:
-            # Small K: multi-row processing (mxfp8_quantize.py:590-727).
-            row_in_block = T.truncdiv(tx, T.int32(threads_per_row))
-            local_tidx = T.truncmod(tx, T.int32(threads_per_row))
-            sf_col_idx = T.truncdiv(local_tidx, T.int32(tps))
-            thread_in_unit = T.truncmod(local_tidx, T.int32(tps))
-
-            row_batch_idx: T.int32 = bx
-            row_idx2: T.int32 = row_batch_idx * rows_per_block + row_in_block
-            while row_batch_idx * rows_per_block < padded_rows:
-                if row_idx2 < padded_rows:
-                    if row_idx2 >= m_rows:
-                        # Padding row: zero ALL padded SF columns; the stride is
-                        # num_sf_blocks_per_row (:609-620).
-                        if thread_in_unit == 0:
-                            pad_col: T.int32 = sf_col_idx
-                            while pad_col < pad_cols:
-                                st_global_u8(
-                                    T.address_of(sf_out[sf_offset(row_idx2, pad_col)]), T.uint8(0)
-                                )
-                                pad_col = pad_col + nsb
-                    else:
-                        if sf_col_idx < nsb:
-                            scale_ue8m0_u32 = _quantize_block(
-                                in_global,
-                                out_global,
-                                row_idx2,
-                                sf_col_idx,
-                                thread_in_unit,
-                                dtype=dtype,
-                                use_2t=use_2t,
-                                k=k,
-                            )
-                            if thread_in_unit == 0:
-                                st_global_u8(
-                                    T.address_of(sf_out[sf_offset(row_idx2, sf_col_idx)]),
-                                    T.cast(scale_ue8m0_u32, "uint8"),
-                                )
-                        # Padding SF columns of a data row (:711-723).
-                        if pad_cols != nsb:
-                            if thread_in_unit == 0:
-                                pad_col2: T.int32 = nsb + sf_col_idx
-                                while pad_col2 < pad_cols:
-                                    st_global_u8(
-                                        T.address_of(sf_out[sf_offset(row_idx2, pad_col2)]),
-                                        T.uint8(0),
-                                    )
-                                    pad_col2 = pad_col2 + nsb
-                row_batch_idx = row_batch_idx + grid_x
-                row_idx2 = row_batch_idx * rows_per_block + row_in_block
-
-        if enable_pdl:
-            T.evaluate(T.ptx.griddepcontrol.launch_dependents())
-
-    return mxfp8_quantize_swizzled
+    return ib.get()
 
 
 def prepare_data(

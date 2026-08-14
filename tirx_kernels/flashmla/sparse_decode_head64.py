@@ -15,11 +15,23 @@ from unittest import SkipTest
 
 import torch
 
+from tirx_kernels.flashmla.utils._ir_builder import (
+    MBarrier,
+    PipelineState,
+    SmemDescriptor,
+    TCGen05Bar,
+    TMABar,
+)
+from tirx_kernels.flashmla.utils._ir_builder import builder_alloc_scalar as _builder_alloc_scalar
+from tirx_kernels.flashmla.utils._ir_builder import builder_assign as _builder_assign
+from tirx_kernels.flashmla.utils._ir_builder import builder_bind as _builder_bind
+from tirx_kernels.flashmla.utils._ir_builder import builder_emit as _builder_emit
+from tirx_kernels.flashmla.utils._ir_builder import builder_enter as _builder_enter
+from tirx_kernels.flashmla.utils._ir_builder import builder_scalar as _builder_scalar
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.ir import PointerType, PrimType
-from tvm.script import tirx as T
-from tvm.tirx.lang.pipeline import MBarrier, PipelineState, TCGen05Bar, TMABar
-from tvm.tirx.lang.smem_desc import SmemDescriptor
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
 from tvm.tirx.layout import S, TileLayout, laneid, wid_in_wg
 
 B_H = 64
@@ -410,2129 +422,3580 @@ def _kv_storage_spec(
     return bytes_per_token, tma_k_stride, stride_kv_block, num_tma_rows
 
 
-@T.jit
-def _kernel(
-    q_h: T.handle,
-    kv_h: T.handle,
-    indices_h: T.handle,
-    topk_length_h: T.Optional(T.handle),
-    attn_sink_h: T.Optional(T.handle),
-    lse_h: T.handle,
-    out_h: T.handle,
-    lse_accum_h: T.handle,
-    o_accum_h: T.handle,
-    tile_scheduler_metadata_h: T.handle,
-    num_splits_h: T.handle,
-    extra_kv_h: T.Optional(T.handle),
-    extra_indices_h: T.Optional(T.handle),
-    extra_topk_length_h: T.Optional(T.handle),
-    sm_scale_div_log2: T.float32,
-    stride_q_b: T.int32,
-    stride_q_s_q: T.int32,
-    stride_q_h_q: T.int32,
-    stride_kv_block: T.int32,
-    stride_kv_row: T.int32,
-    stride_indices_b: T.int32,
-    stride_indices_s_q: T.int32,
-    stride_lse_b: T.int32,
-    stride_lse_s_q: T.int32,
-    stride_o_b: T.int32,
-    stride_o_s_q: T.int32,
-    stride_o_h_q: T.int32,
-    stride_extra_kv_block: T.int32,
-    stride_extra_kv_row: T.int32,
-    stride_extra_indices_b: T.int32,
-    stride_extra_indices_s_q: T.int32,
-    stride_lse_accum_split: T.int32,
-    stride_lse_accum_s_q: T.int32,
-    stride_o_accum_split: T.int32,
-    stride_o_accum_s_q: T.int32,
-    stride_o_accum_h_q: T.int32,
-    b: T.int32,
-    s_q: T.int32,
-    topk: T.int32,
-    extra_topk: T.int32,
-    num_blocks: T.int32,
-    extra_num_blocks: T.int32,
-    page_block_size: T.int32,
-    extra_page_block_size: T.int32,
-    num_sm_parts: T.int32,
+def _build_kernel(
     *,
     model_type: T.constexpr,
     use_pdl: T.constexpr,
+    _have_topk_length_h=True,
+    _have_attn_sink_h=True,
+    _have_extra_kv_h=True,
+    _have_extra_indices_h=True,
+    _have_extra_topk_length_h=True,
 ):
-    is_v32 = T.meta_var(model_type is ModelType.V32)
-    d_qk = T.meta_var(576 if is_v32 else 512)
-    d_nope = T.meta_var(512 if is_v32 else 448)
-    num_scales = T.meta_var(4 if is_v32 else 8)
-    tma_k_stride = T.meta_var(656 if is_v32 else 576)
-    q_tail_start = T.meta_var(256 if is_v32 else 224)
-    rope_tile = T.meta_var(32 if is_v32 else 64)
-    rows_per_group = T.meta_var(B_TOPK // (128 // 8))
-    cols_per_group = T.meta_var(d_nope // (8 * 8))
-
-    # params.h:71-99.  Optional tensor presence is specialized before FFI,
-    # while every source stride remains a runtime kernel operand.  The
-    # views are descriptor/addressing views over the caller's storage, not
-    # packed substitutes.
-    q = T.match_buffer(
-        q_h,
-        (b, stride_q_b // stride_q_s_q, stride_q_s_q // stride_q_h_q, stride_q_h_q),
-        "bfloat16",
-        scope="global",
-    )
-    kv = T.match_buffer(
-        kv_h,
-        (num_blocks * (stride_kv_block // tma_k_stride), tma_k_stride // BF16_BYTES),
-        "bfloat16",
-        scope="global",
-    )
-    indices = T.match_buffer(
-        indices_h,
-        ((b - 1) * stride_indices_b + (s_q - 1) * stride_indices_s_q + topk,),
-        "int32",
-        scope="global",
-    )
-    if topk_length_h is not None:
-        topk_length = T.match_buffer(topk_length_h, (b,), "int32", scope="global")
-    if attn_sink_h is not None:
-        attn_sink = T.match_buffer(attn_sink_h, (B_H,), "float32", scope="global")
-    lse = T.match_buffer(
-        lse_h,
-        ((b - 1) * stride_lse_b + (s_q - 1) * stride_lse_s_q + B_H,),
-        "float32",
-        scope="global",
-    )
-    out = T.match_buffer(
-        out_h,
-        (b, stride_o_b // stride_o_s_q, stride_o_s_q // stride_o_h_q, stride_o_h_q),
-        "bfloat16",
-        scope="global",
-    )
-    lse_accum = T.match_buffer(
-        lse_accum_h,
-        ((b + num_sm_parts - 1) * stride_lse_accum_split + (s_q - 1) * stride_lse_accum_s_q + B_H,),
-        "float32",
-        scope="global",
-    )
-    o_accum = T.match_buffer(
-        o_accum_h,
-        (
-            (b + num_sm_parts - 1) * stride_o_accum_split
-            + (s_q - 1) * stride_o_accum_s_q
-            + (B_H - 1) * stride_o_accum_h_q
-            + D_V,
-        ),
-        "float32",
-        scope="global",
-    )
-    tile_scheduler_metadata = T.match_buffer(
-        tile_scheduler_metadata_h, (num_sm_parts, 8), "int32", scope="global"
-    )
-    num_splits = T.match_buffer(num_splits_h, (b + 1,), "int32", scope="global")
-    if extra_kv_h is not None:
-        extra_kv = T.match_buffer(
-            extra_kv_h,
-            (
-                extra_num_blocks * (stride_extra_kv_block // tma_k_stride),
-                tma_k_stride // BF16_BYTES,
-            ),
-            "bfloat16",
-            scope="global",
-        )
-    if extra_indices_h is not None:
-        extra_indices = T.match_buffer(
-            extra_indices_h,
-            ((b - 1) * stride_extra_indices_b + (s_q - 1) * stride_extra_indices_s_q + extra_topk,),
-            "int32",
-            scope="global",
-        )
-    if extra_topk_length_h is not None:
-        extra_topk_length = T.match_buffer(extra_topk_length_h, (b,), "int32", scope="global")
-
-    # kernel.cuh:909-937.  Split the physical row storage into the two
-    # MODEL_TYPE-specific TensorMap views.  CUDA consumes both as
-    # (TMA row, inner element) gather4 operands.
-    kv_nope_tma = kv.view("int64").sub[:, : d_nope // 8]
-    kv_rope_start = T.meta_var((d_nope + (16 if is_v32 else 0)) // BF16_BYTES)
-    kv_rope_tma = kv.sub[:, kv_rope_start : kv_rope_start + 64]
-    if extra_kv_h is not None:
-        extra_kv_nope_tma = extra_kv.view("int64").sub[:, : d_nope // 8]
-        extra_kv_rope_tma = extra_kv.sub[:, kv_rope_start : kv_rope_start + 64]
-
-    # The former tile lowering synthesized these host-side TensorMaps.
-    # Keep their exact rank, byte strides, boxes, swizzles, and L2 promotion
-    # in the public PrimFunc so construction no longer requires a lowering
-    # pass.  Alternate extra-cache maps deliberately are not prefetched,
-    # matching the source selector path emitted by the former dispatcher.
-    kv_rope_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        kv_rope_tensormap,
-        "bfloat16",
-        2,
-        T.handle_add_byte_offset(kv.data, kv_rope_start * BF16_BYTES),
-        64,
-        num_blocks * (stride_kv_block // tma_k_stride),
-        tma_k_stride,
-        rope_tile,
-        1,
-        1,
-        1,
-        0,
-        2 if is_v32 else 3,
-        2,
-        0,
-    )
-    kv_nope_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        kv_nope_tensormap,
-        "int64",
-        2,
-        kv.data,
-        d_nope // 8,
-        num_blocks * (stride_kv_block // tma_k_stride),
-        tma_k_stride,
-        d_nope // 8,
-        1,
-        1,
-        1,
-        0,
-        0,
-        2,
-        0,
-    )
-    if extra_kv_h is not None:
-        extra_kv_rope_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            extra_kv_rope_tensormap,
-            "bfloat16",
-            2,
-            T.handle_add_byte_offset(extra_kv.data, kv_rope_start * BF16_BYTES),
-            64,
-            extra_num_blocks * (stride_extra_kv_block // tma_k_stride),
-            tma_k_stride,
-            rope_tile,
-            1,
-            1,
-            1,
-            0,
-            2 if is_v32 else 3,
-            2,
-            0,
-        )
-        extra_kv_nope_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            extra_kv_nope_tensormap,
-            "int64",
-            2,
-            extra_kv.data,
-            d_nope // 8,
-            extra_num_blocks * (stride_extra_kv_block // tma_k_stride),
-            tma_k_stride,
-            d_nope // 8,
-            1,
-            1,
-            1,
-            0,
-            0,
-            2,
-            0,
-        )
-    q_strided_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        q_strided_tensormap,
-        "bfloat16",
-        4,
-        q.data,
-        d_qk,
-        B_H,
-        s_q,
-        b,
-        stride_q_h_q * BF16_BYTES,
-        stride_q_s_q * BF16_BYTES,
-        stride_q_b * BF16_BYTES,
-        64,
-        B_H,
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    if is_v32:
-        q_tail_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            q_tail_tensormap,
-            "bfloat16",
-            5,
-            q.data,
-            32,
-            B_H,
-            d_qk // 32,
-            s_q,
-            b,
-            stride_q_h_q * BF16_BYTES,
-            32 * BF16_BYTES,
-            stride_q_s_q * BF16_BYTES,
-            stride_q_b * BF16_BYTES,
-            32,
-            B_H,
-            2,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            2,
-            2,
-            0,
-        )
-    out_tensormap: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        out_tensormap,
-        "bfloat16",
-        4,
-        out.data,
-        D_V,
-        B_H,
-        s_q,
-        b,
-        stride_o_h_q * BF16_BYTES,
-        stride_o_s_q * BF16_BYTES,
-        stride_o_b * BF16_BYTES,
-        64,
-        B_H,
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-
-    T.device_entry()
-    T.attr(
-        {"tirx.launch_bounds_min_blocks_per_sm": 1, "tirx.launch_bounds_max_blocks_per_cluster": 1}
-    )
-    # MODEL_TYPE is the sole implementation specialization.  Keep its
-    # branch selector and exact SharedMemoryPlan size as parser/meta-time
-    # Python values; binding either as an ordinary scalar would turn it
-    # into a TIR expression and destroy the C++ if-constexpr structure.
-    source_smem_size = T.meta_var(232192 if is_v32 else 218848)
-    # kernel.cuh:25-33.  Grid is exactly (s_q, num_sm_parts, 1), with
-    # three 128-thread warpgroups and the same canonical role indices.
-    s_q_idx, partition_idx, _ = T.cta_id([s_q, num_sm_parts, 1])
-    thread_idx = T.thread_id([NUM_THREADS])
-    warpgroup_idx = T.warpgroup_id([3])
-    warp_idx_in_wg = T.warp_id_in_wg([4])
-    lane_idx = T.lane_id([32])
-    idx_in_warpgroup = T.thread_id_in_wg([128])
-    warp_idx: T.let = warpgroup_idx * 4 + warp_idx_in_wg
-
-    if warp_idx == 0:
-        if T.cuda.elect_sync() != T.uint32(0):
-            # The former dispatcher emitted one descriptor per syntactic
-            # output TMA site.  Eight prefetches preserve that PTX protocol
-            # while the explicit kernel safely reuses the identical map.
-            for _prefetch_i in T.unroll(8):
-                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(out_tensormap)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_strided_tensormap)))
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("_kernel")
+            q_h = T.arg("q_h", T.handle())
+            kv_h = T.arg("kv_h", T.handle())
+            indices_h = T.arg("indices_h", T.handle())
+            if _have_topk_length_h:
+                topk_length_h = T.arg("topk_length_h", T.handle())
+            else:
+                topk_length_h = None
+            if _have_attn_sink_h:
+                attn_sink_h = T.arg("attn_sink_h", T.handle())
+            else:
+                attn_sink_h = None
+            lse_h = T.arg("lse_h", T.handle())
+            out_h = T.arg("out_h", T.handle())
+            lse_accum_h = T.arg("lse_accum_h", T.handle())
+            o_accum_h = T.arg("o_accum_h", T.handle())
+            tile_scheduler_metadata_h = T.arg("tile_scheduler_metadata_h", T.handle())
+            num_splits_h = T.arg("num_splits_h", T.handle())
+            if _have_extra_kv_h:
+                extra_kv_h = T.arg("extra_kv_h", T.handle())
+            else:
+                extra_kv_h = None
+            if _have_extra_indices_h:
+                extra_indices_h = T.arg("extra_indices_h", T.handle())
+            else:
+                extra_indices_h = None
+            if _have_extra_topk_length_h:
+                extra_topk_length_h = T.arg("extra_topk_length_h", T.handle())
+            else:
+                extra_topk_length_h = None
+            sm_scale_div_log2 = T.arg("sm_scale_div_log2", T.float32())
+            stride_q_b = T.arg("stride_q_b", T.int32())
+            stride_q_s_q = T.arg("stride_q_s_q", T.int32())
+            stride_q_h_q = T.arg("stride_q_h_q", T.int32())
+            stride_kv_block = T.arg("stride_kv_block", T.int32())
+            stride_kv_row = T.arg("stride_kv_row", T.int32())
+            stride_indices_b = T.arg("stride_indices_b", T.int32())
+            stride_indices_s_q = T.arg("stride_indices_s_q", T.int32())
+            stride_lse_b = T.arg("stride_lse_b", T.int32())
+            stride_lse_s_q = T.arg("stride_lse_s_q", T.int32())
+            stride_o_b = T.arg("stride_o_b", T.int32())
+            stride_o_s_q = T.arg("stride_o_s_q", T.int32())
+            stride_o_h_q = T.arg("stride_o_h_q", T.int32())
+            stride_extra_kv_block = T.arg("stride_extra_kv_block", T.int32())
+            stride_extra_kv_row = T.arg("stride_extra_kv_row", T.int32())
+            stride_extra_indices_b = T.arg("stride_extra_indices_b", T.int32())
+            stride_extra_indices_s_q = T.arg("stride_extra_indices_s_q", T.int32())
+            stride_lse_accum_split = T.arg("stride_lse_accum_split", T.int32())
+            stride_lse_accum_s_q = T.arg("stride_lse_accum_s_q", T.int32())
+            stride_o_accum_split = T.arg("stride_o_accum_split", T.int32())
+            stride_o_accum_s_q = T.arg("stride_o_accum_s_q", T.int32())
+            stride_o_accum_h_q = T.arg("stride_o_accum_h_q", T.int32())
+            b = T.arg("b", T.int32())
+            s_q = T.arg("s_q", T.int32())
+            topk = T.arg("topk", T.int32())
+            extra_topk = T.arg("extra_topk", T.int32())
+            num_blocks = T.arg("num_blocks", T.int32())
+            extra_num_blocks = T.arg("extra_num_blocks", T.int32())
+            page_block_size = T.arg("page_block_size", T.int32())
+            extra_page_block_size = T.arg("extra_page_block_size", T.int32())
+            num_sm_parts = T.arg("num_sm_parts", T.int32())
+            is_v32 = model_type is ModelType.V32
+            d_qk = 576 if is_v32 else 512
+            d_nope = 512 if is_v32 else 448
+            num_scales = 4 if is_v32 else 8
+            tma_k_stride = 656 if is_v32 else 576
+            q_tail_start = 256 if is_v32 else 224
+            rope_tile = 32 if is_v32 else 64
+            rows_per_group = B_TOPK // (128 // 8)
+            cols_per_group = d_nope // (8 * 8)
+            q = _builder_assign(
+                "q",
+                T.match_buffer(
+                    q_h,
+                    (b, stride_q_b // stride_q_s_q, stride_q_s_q // stride_q_h_q, stride_q_h_q),
+                    "bfloat16",
+                    scope="global",
+                ),
+            )
+            kv = _builder_assign(
+                "kv",
+                T.match_buffer(
+                    kv_h,
+                    (num_blocks * (stride_kv_block // tma_k_stride), tma_k_stride // BF16_BYTES),
+                    "bfloat16",
+                    scope="global",
+                ),
+            )
+            indices = _builder_assign(
+                "indices",
+                T.match_buffer(
+                    indices_h,
+                    ((b - 1) * stride_indices_b + (s_q - 1) * stride_indices_s_q + topk,),
+                    "int32",
+                    scope="global",
+                ),
+            )
+            if topk_length_h is not None:
+                topk_length = _builder_assign(
+                    "topk_length", T.match_buffer(topk_length_h, (b,), "int32", scope="global")
+                )
+            if attn_sink_h is not None:
+                attn_sink = _builder_assign(
+                    "attn_sink", T.match_buffer(attn_sink_h, (B_H,), "float32", scope="global")
+                )
+            lse = _builder_assign(
+                "lse",
+                T.match_buffer(
+                    lse_h,
+                    ((b - 1) * stride_lse_b + (s_q - 1) * stride_lse_s_q + B_H,),
+                    "float32",
+                    scope="global",
+                ),
+            )
+            out = _builder_assign(
+                "out",
+                T.match_buffer(
+                    out_h,
+                    (b, stride_o_b // stride_o_s_q, stride_o_s_q // stride_o_h_q, stride_o_h_q),
+                    "bfloat16",
+                    scope="global",
+                ),
+            )
+            lse_accum = _builder_assign(
+                "lse_accum",
+                T.match_buffer(
+                    lse_accum_h,
+                    (
+                        (b + num_sm_parts - 1) * stride_lse_accum_split
+                        + (s_q - 1) * stride_lse_accum_s_q
+                        + B_H,
+                    ),
+                    "float32",
+                    scope="global",
+                ),
+            )
+            o_accum = _builder_assign(
+                "o_accum",
+                T.match_buffer(
+                    o_accum_h,
+                    (
+                        (b + num_sm_parts - 1) * stride_o_accum_split
+                        + (s_q - 1) * stride_o_accum_s_q
+                        + (B_H - 1) * stride_o_accum_h_q
+                        + D_V,
+                    ),
+                    "float32",
+                    scope="global",
+                ),
+            )
+            tile_scheduler_metadata = _builder_assign(
+                "tile_scheduler_metadata",
+                T.match_buffer(
+                    tile_scheduler_metadata_h, (num_sm_parts, 8), "int32", scope="global"
+                ),
+            )
+            num_splits = _builder_assign(
+                "num_splits", T.match_buffer(num_splits_h, (b + 1,), "int32", scope="global")
+            )
+            if extra_kv_h is not None:
+                extra_kv = _builder_assign(
+                    "extra_kv",
+                    T.match_buffer(
+                        extra_kv_h,
+                        (
+                            extra_num_blocks * (stride_extra_kv_block // tma_k_stride),
+                            tma_k_stride // BF16_BYTES,
+                        ),
+                        "bfloat16",
+                        scope="global",
+                    ),
+                )
+            if extra_indices_h is not None:
+                extra_indices = _builder_assign(
+                    "extra_indices",
+                    T.match_buffer(
+                        extra_indices_h,
+                        (
+                            (b - 1) * stride_extra_indices_b
+                            + (s_q - 1) * stride_extra_indices_s_q
+                            + extra_topk,
+                        ),
+                        "int32",
+                        scope="global",
+                    ),
+                )
+            if extra_topk_length_h is not None:
+                extra_topk_length = _builder_assign(
+                    "extra_topk_length",
+                    T.match_buffer(extra_topk_length_h, (b,), "int32", scope="global"),
+                )
+            kv_nope_tma = _builder_assign("kv_nope_tma", kv.view("int64").sub[:, : d_nope // 8])
+            kv_rope_start = (d_nope + (16 if is_v32 else 0)) // BF16_BYTES
+            kv_rope_tma = _builder_assign(
+                "kv_rope_tma", kv.sub[:, kv_rope_start : kv_rope_start + 64]
+            )
+            if extra_kv_h is not None:
+                extra_kv_nope_tma = _builder_assign(
+                    "extra_kv_nope_tma", extra_kv.view("int64").sub[:, : d_nope // 8]
+                )
+                extra_kv_rope_tma = _builder_assign(
+                    "extra_kv_rope_tma", extra_kv.sub[:, kv_rope_start : kv_rope_start + 64]
+                )
+            kv_rope_tensormap = _builder_bind(
+                "kv_rope_tensormap",
+                T.tvm_stack_alloca("tensormap", 1),
+                type_annotation=T.TensorMap(),
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    kv_rope_tensormap,
+                    "bfloat16",
+                    2,
+                    T.handle_add_byte_offset(kv.data, kv_rope_start * BF16_BYTES),
+                    64,
+                    num_blocks * (stride_kv_block // tma_k_stride),
+                    tma_k_stride,
+                    rope_tile,
+                    1,
+                    1,
+                    1,
+                    0,
+                    2 if is_v32 else 3,
+                    2,
+                    0,
+                )
+            )
+            kv_nope_tensormap = _builder_bind(
+                "kv_nope_tensormap",
+                T.tvm_stack_alloca("tensormap", 1),
+                type_annotation=T.TensorMap(),
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    kv_nope_tensormap,
+                    "int64",
+                    2,
+                    kv.data,
+                    d_nope // 8,
+                    num_blocks * (stride_kv_block // tma_k_stride),
+                    tma_k_stride,
+                    d_nope // 8,
+                    1,
+                    1,
+                    1,
+                    0,
+                    0,
+                    2,
+                    0,
+                )
+            )
+            if extra_kv_h is not None:
+                extra_kv_rope_tensormap = _builder_bind(
+                    "extra_kv_rope_tensormap",
+                    T.tvm_stack_alloca("tensormap", 1),
+                    type_annotation=T.TensorMap(),
+                )
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        extra_kv_rope_tensormap,
+                        "bfloat16",
+                        2,
+                        T.handle_add_byte_offset(extra_kv.data, kv_rope_start * BF16_BYTES),
+                        64,
+                        extra_num_blocks * (stride_extra_kv_block // tma_k_stride),
+                        tma_k_stride,
+                        rope_tile,
+                        1,
+                        1,
+                        1,
+                        0,
+                        2 if is_v32 else 3,
+                        2,
+                        0,
+                    )
+                )
+                extra_kv_nope_tensormap = _builder_bind(
+                    "extra_kv_nope_tensormap",
+                    T.tvm_stack_alloca("tensormap", 1),
+                    type_annotation=T.TensorMap(),
+                )
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        extra_kv_nope_tensormap,
+                        "int64",
+                        2,
+                        extra_kv.data,
+                        d_nope // 8,
+                        extra_num_blocks * (stride_extra_kv_block // tma_k_stride),
+                        tma_k_stride,
+                        d_nope // 8,
+                        1,
+                        1,
+                        1,
+                        0,
+                        0,
+                        2,
+                        0,
+                    )
+                )
+            q_strided_tensormap = _builder_bind(
+                "q_strided_tensormap",
+                T.tvm_stack_alloca("tensormap", 1),
+                type_annotation=T.TensorMap(),
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    q_strided_tensormap,
+                    "bfloat16",
+                    4,
+                    q.data,
+                    d_qk,
+                    B_H,
+                    s_q,
+                    b,
+                    stride_q_h_q * BF16_BYTES,
+                    stride_q_s_q * BF16_BYTES,
+                    stride_q_b * BF16_BYTES,
+                    64,
+                    B_H,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
+                )
+            )
             if is_v32:
-                T.evaluate(T.ptx.prefetch.tensormap(T.address_of(q_tail_tensormap)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(kv_nope_tensormap)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(kv_rope_tensormap)))
-
-    # config.h:159-193.  Recreate SharedMemoryPlan's two unions.  V32 stores
-    # each NoPE/RoPE stage contiguously as a 576-column SW128 allocation.
-    # Its RoPE member aliases the final 64 columns with an SW64 view.
-    pool = T.SMEMPool()
-    u_base = T.meta_var(pool.offset)
-    if is_v32:
-        k_union = pool.alloc_tcgen05_mma_AB((NUM_BUFS, B_TOPK, D_V + 64), "bfloat16")
-        k_union_end = T.meta_var(pool.offset)
-        k_full = k_union.sub[:, :, :D_V]
-        pool.move_base_to(u_base)
-        k_rope = pool.alloc_tcgen05_mma_AB(
-            (NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle_mode=SwizzleMode.SWIZZLE_64B_ATOM
-        ).sub[:, :, D_V : D_V + 64]
-        pool.move_base_to(k_union_end)
-    else:
-        k_full = pool.alloc_tcgen05_mma_AB((NUM_BUFS, B_TOPK, D_V), "bfloat16")
-        k_union_end = T.meta_var(pool.offset)
-        # MODEL1's RoPE aliases k_full[..., 448:512].
-        pool.move_base_to(u_base)
-        k_rope = pool.alloc_tcgen05_mma_AB(
-            (NUM_BUFS, B_TOPK, 64), "bfloat16", swizzle_mode=SwizzleMode.SWIZZLE_128B_ATOM
-        )
-        pool.move_base_to(k_union_end)
-    # V32's RoPE member has its own interleaved stage layout.  MODEL1's
-    # member aliases the final 64 columns of each 512-column k_full stage;
-    # retain that parent slice so tma_explicit sees the true stage stride.
-    k_rope_tma = T.meta_var(k_rope if is_v32 else k_full.sub[:, :, d_nope : d_nope + 64])
-    raw_nope = pool.alloc((NUM_BUFS, B_TOPK, d_nope // 8), "uint64", align=1024)
-    kv_union_end = T.meta_var(pool.offset)
-
-    pool.move_base_to(u_base)
-    q_sw128 = pool.alloc_tcgen05_mma_AB((B_H, 512), "bfloat16")
-    q_sw128_end = T.meta_var(pool.offset)
-    if is_v32:
-        pool.move_base_to(q_sw128_end)
-        q_sw64 = pool.alloc_tcgen05_mma_AB(
-            (B_H, 64), "bfloat16", swizzle_mode=SwizzleMode.SWIZZLE_64B_ATOM
-        )
-    o_union_base = T.meta_var(pool.offset)
-    o_smem = pool.alloc_tcgen05_mma_AB((B_H, D_V), "bfloat16")
-    o_bf16_end = T.meta_var(pool.offset)
-    pool.move_base_to(o_union_base)
-    o_accum_storage = pool.alloc(((B_H - 1) * (D_V + 8) + D_V,), "float32", align=1024)
-    o_accum_smem = o_accum_storage.view(B_H, D_V, layout=TileLayout(S[(B_H, D_V) : (D_V + 8, 1)]))
-    qo_union_end = T.meta_var(pool.offset)
-    pool.move_base_to(max(kv_union_end, qo_union_end, o_bf16_end))
-
-    sp_union_base = T.meta_var(pool.offset)
-    p_exchange = pool.alloc((4, 32 * (B_TOPK // 2)), "float32", align=16)
-    sp_union_end = T.meta_var(pool.offset)
-    pool.move_base_to(sp_union_base)
-    s_smem_gemm = pool.alloc_tcgen05_mma_AB(
-        (B_H, B_TOPK), "bfloat16", swizzle_mode=SwizzleMode.SWIZZLE_NONE
-    )
-    pool.move_base_to(sp_union_end)
-
-    # Dispatcher-equivalent SMEM descriptors for the two SxV N-halves.
-    # Their bases are identical; separate values keep the two instruction
-    # streams and descriptor lifetimes aligned with the CUDA template.
-    pv_b_lo_desc = SmemDescriptor()
-    pv_b_lo_desc.init(k_full.ptr_to([0, 0, 0]), ldo=512, sdo=64, swizzle=3)
-    pv_b_hi_desc = SmemDescriptor()
-    pv_b_hi_desc.init(k_full.ptr_to([0, 0, 0]), ldo=512, sdo=64, swizzle=3)
-    pv_a_lo_desc = SmemDescriptor()
-    pv_a_lo_desc.init(s_smem_gemm.ptr_to([0, 0]), ldo=64, sdo=8, swizzle=0)
-    pv_a_hi_desc = SmemDescriptor()
-    pv_a_hi_desc.init(s_smem_gemm.ptr_to([0, 0]), ldo=64, sdo=8, swizzle=0)
-    q_main_cp_desc: T.uint64
-    T.cuda.tcgen05.encode_matrix_descriptor(
-        T.address_of(q_main_cp_desc), T.reinterpret(T.handle().ty, T.uint64(0)), 1, 64, 3
-    )
-    if is_v32:
-        q_tail_cp_desc: T.uint64
-        T.cuda.tcgen05.encode_matrix_descriptor(
-            T.address_of(q_tail_cp_desc), T.reinterpret(T.handle().ty, T.uint64(0)), 1, 32, 2
-        )
-
-    rowwise_buf = pool.alloc((128,), "float32", align=16)
-    is_token_valid = pool.alloc((NUM_INDEX_BUFS, B_TOPK // 8), "int8", align=16)
-    tma_coord = pool.alloc((NUM_INDEX_BUFS, B_TOPK), "int32", align=16)
-    scales_e8m0 = pool.alloc((NUM_INDEX_BUFS, B_TOPK * num_scales), "uint8", align=16)
-    # array_aligned<uint32_t,1> occupies a complete 16-byte slot.
-    tmem_start_addr = pool.alloc((4,), "uint32", align=16)
-
-    # kernel.cuh:45-60.  Arrival counts encode the original producer and
-    # consumer roles, including 258 arrivals on valid/coord/scale free.
-    bar_last_store_done = MBarrier(pool, 1)
-    bar_q_tma = TMABar(pool, 1)
-    bar_q_utccp = TCGen05Bar(pool, 1)
-    bar_rope_ready = TMABar(pool, NUM_BUFS)
-    bar_nope_ready = MBarrier(pool, NUM_BUFS)
-    bar_raw_ready = TMABar(pool, NUM_BUFS)
-    bar_raw_free = MBarrier(pool, NUM_BUFS)
-    bar_valid_ready = MBarrier(pool, NUM_INDEX_BUFS)
-    bar_valid_free = MBarrier(pool, NUM_INDEX_BUFS)
-    bar_qk_done = TCGen05Bar(pool, NUM_BUFS)
-    bar_so_ready = MBarrier(pool, NUM_BUFS)
-    bar_sv_done = TCGen05Bar(pool, NUM_BUFS)
-    # sizeof(SharedMemoryPlan), including the final struct-alignment pad.
-    pool.commit(size=source_smem_size)
-
-    # config.h:71-80.  Preserve fixed TMEM columns O=0, Q=256, P=400.
-    tmem_pool = T.TMEMPool(
-        pool, total_cols=512, cta_group=1, tmem_addr=tmem_start_addr, sync_after_alloc=False
-    )
-    o_tmem = tmem_pool.alloc_tcgen05_mma_D(
-        (B_H, D_V), "float32", M=64, cta_group=1, ws=True, group=(2, 2, 128)
-    )
-    tmem_pool.move_base_to(256)
-    q_tmem = tmem_pool.alloc_tcgen05_mma_A(
-        (2, B_H, d_qk // 2), "bfloat16", M=64, cta_group=1, ws=True
-    )
-    tmem_pool.move_base_to(400)
-    p_tmem = tmem_pool.alloc_tcgen05_mma_D((2, B_H, B_TOPK), "float32", M=64, cta_group=1, ws=True)
-
-    @T.inline
-    def load_scheduler_meta(dst):
-        # kernel.cuh:80-88 / KU_LDG_256.  Keep one 32-byte operation,
-        # including its cache operators and L2 prefetch size; the eighth
-        # int32 word is intentionally loaded even though it is reserved.
-        T.ptx["ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v4.u64"](
-            dst[0],
-            dst[1],
-            dst[2],
-            dst[3],
-            tile_scheduler_metadata.view("uint64").ptr_to([partition_idx, 0]),
-        )
-
-    @T.inline
-    def dequant_st128(smem_addr, raw, scale_bits):
-        scale: T.let = T.reinterpret("bfloat16", scale_bits)
-        packed = T.alloc_local((4,), "uint32")
-        for pair_i in T.unroll(4):
-            raw_pair: T.let = T.cast(T.shift_right(raw, T.cast(pair_i * 16, "uint64")), "uint16")
-            rounded_bits = T.local_scalar("uint32")
-            T.ptx.cvt.rn.bf16x2.e4m3x2(rounded_bits, raw_pair)
-            rounded: T.let = T.reinterpret("bfloat16x2", rounded_bits)
-            scaled_lo: T.let = T.Shuffle([rounded], [0]) * scale
-            scaled_hi: T.let = T.Shuffle([rounded], [1]) * scale
-            packed[pair_i] = T.reinterpret("uint32", T.Shuffle([scaled_lo, scaled_hi], [0, 1]))
-        # One 128-bit store: the four packed words are read through a b128 view.
-        T.ptx.st.weak.shared__cta.b128(smem_addr, packed.view("uint128")[0])
-
-    # kernel.cuh:35-67.  Each copy site requests the lowering's ordinary
-    # descriptor prefetch.  tma_explicit deduplicates the two normal KV
-    # descriptors and intentionally does not prefetch src_selector
-    # candidates, matching the source's normal-only KV prefetch.
-    if warp_idx == 0:
-        if T.cuda.elect_sync() != T.uint32(0):
-            T.ptx.mbarrier.init.shared.b64(bar_last_store_done.ptr_to([0]), T.uint32(128))
-            T.ptx.mbarrier.init.shared.b64(bar_q_tma.ptr_to([0]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(bar_q_utccp.ptr_to([0]), T.uint32(1))
-            for stage in T.unroll(NUM_BUFS):
-                T.ptx.mbarrier.init.shared.b64(bar_rope_ready.ptr_to([stage]), T.uint32(1))
-                T.ptx.mbarrier.init.shared.b64(bar_nope_ready.ptr_to([stage]), T.uint32(128))
-                T.ptx.mbarrier.init.shared.b64(bar_raw_ready.ptr_to([stage]), T.uint32(1))
-                T.ptx.mbarrier.init.shared.b64(bar_raw_free.ptr_to([stage]), T.uint32(128))
-                T.ptx.mbarrier.init.shared.b64(bar_qk_done.ptr_to([stage]), T.uint32(1))
-                T.ptx.mbarrier.init.shared.b64(bar_so_ready.ptr_to([stage]), T.uint32(128))
-                T.ptx.mbarrier.init.shared.b64(bar_sv_done.ptr_to([stage]), T.uint32(1))
-            for index_stage in T.unroll(NUM_INDEX_BUFS):
-                T.ptx.mbarrier.init.shared.b64(bar_valid_ready.ptr_to([index_stage]), T.uint32(32))
-                T.ptx.mbarrier.init.shared.b64(bar_valid_free.ptr_to([index_stage]), T.uint32(258))
-            T.ptx.fence.mbarrier_init.release.cluster()
-        T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
-            T.address_of(tmem_start_addr[0]), T.uint32(512)
-        )
-        allocated_tmem_start: T.uint32
-        T.ptx.ld.shared.u32(allocated_tmem_start, tmem_start_addr.ptr_to([0]))
-        T.cuda.trap_when_assert_failed(allocated_tmem_start == T.uint32(0))
-        T.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
-    T.cuda.cta_sync()
-
-    if warpgroup_idx == 0:
-        # kernel.cuh:134-150.  Scale/exp warpgroup and its 224-register
-        # allocation.  The output and S register/shared layouts match the
-        # fixed dual-GEMM TMEM datapath used by the CUDA source.
-        T.ptx.setmaxnreg.inc.sync.aligned.u32(224)
-        rs_buf = PipelineState(NUM_BUFS, phase=0)
-        rs_index = PipelineState(NUM_INDEX_BUFS, phase=0)
-        s_frag_layout = TileLayout(
-            S[(2, 32, 2, 32) : (1 @ wid_in_wg, 1 @ laneid, 2 @ wid_in_wg, 1)]
-        )
-        o_smem_win = o_smem.rearrange("h (a b c) -> (b h) (a c)", a=2, b=2, c=128)
-        scale_pair: T.let = T.cuda.make_float2(sm_scale_div_log2, sm_scale_div_log2)
-        attn_sink_log2: T.float32 = T.float32(-float("inf"))
-        if attn_sink_h is not None:
-            attn_sink_log2 = (
-                T.cuda.ldg(attn_sink.ptr_to([idx_in_warpgroup % B_H]), "float32") * LOG_2_E
+                q_tail_tensormap = _builder_bind(
+                    "q_tail_tensormap",
+                    T.tvm_stack_alloca("tensormap", 1),
+                    type_annotation=T.TensorMap(),
+                )
+                _builder_emit(
+                    T.call_packed(
+                        "runtime.cuTensorMapEncodeTiled",
+                        q_tail_tensormap,
+                        "bfloat16",
+                        5,
+                        q.data,
+                        32,
+                        B_H,
+                        d_qk // 32,
+                        s_q,
+                        b,
+                        stride_q_h_q * BF16_BYTES,
+                        32 * BF16_BYTES,
+                        stride_q_s_q * BF16_BYTES,
+                        stride_q_b * BF16_BYTES,
+                        32,
+                        B_H,
+                        2,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        1,
+                        0,
+                        2,
+                        2,
+                        0,
+                    )
+                )
+            out_tensormap = _builder_bind(
+                "out_tensormap", T.tvm_stack_alloca("tensormap", 1), type_annotation=T.TensorMap()
+            )
+            _builder_emit(
+                T.call_packed(
+                    "runtime.cuTensorMapEncodeTiled",
+                    out_tensormap,
+                    "bfloat16",
+                    4,
+                    out.data,
+                    D_V,
+                    B_H,
+                    s_q,
+                    b,
+                    stride_o_h_q * BF16_BYTES,
+                    stride_o_s_q * BF16_BYTES,
+                    stride_o_b * BF16_BYTES,
+                    64,
+                    B_H,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    3,
+                    2,
+                    0,
+                )
+            )
+            _builder_emit(T.device_entry())
+            _builder_enter(
+                T.attr(
+                    {
+                        "tirx.launch_bounds_min_blocks_per_sm": 1,
+                        "tirx.launch_bounds_max_blocks_per_cluster": 1,
+                    }
+                )
+            )
+            source_smem_size = 232192 if is_v32 else 218848
+            _builder_values_330 = T.cta_id([s_q, num_sm_parts, 1])
+            s_q_idx, partition_idx, _ = _builder_values_330
+            IRBuilder.name("_", _)
+            IRBuilder.name("partition_idx", partition_idx)
+            IRBuilder.name("s_q_idx", s_q_idx)
+            thread_idx = _builder_assign("thread_idx", T.thread_id([NUM_THREADS]))
+            warpgroup_idx = _builder_assign("warpgroup_idx", T.warpgroup_id([3]))
+            warp_idx_in_wg = _builder_assign("warp_idx_in_wg", T.warp_id_in_wg([4]))
+            lane_idx = _builder_assign("lane_idx", T.lane_id([32]))
+            idx_in_warpgroup = _builder_assign("idx_in_warpgroup", T.thread_id_in_wg([128]))
+            warp_idx = _builder_bind("warp_idx", warpgroup_idx * 4 + warp_idx_in_wg)
+            with T.If(warp_idx == 0):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync() != T.uint32(0)):
+                        with T.Then():
+                            with T.unroll(8) as _prefetch_i:
+                                _builder_emit(
+                                    T.evaluate(
+                                        T.ptx.prefetch.tensormap(T.address_of(out_tensormap))
+                                    )
+                                )
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.prefetch.tensormap(T.address_of(q_strided_tensormap))
+                                )
+                            )
+                            if is_v32:
+                                _builder_emit(
+                                    T.evaluate(
+                                        T.ptx.prefetch.tensormap(T.address_of(q_tail_tensormap))
+                                    )
+                                )
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.prefetch.tensormap(T.address_of(kv_nope_tensormap))
+                                )
+                            )
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.prefetch.tensormap(T.address_of(kv_rope_tensormap))
+                                )
+                            )
+            pool = _builder_assign("pool", T.SMEMPool())
+            u_base = pool.offset
+            if is_v32:
+                k_union = _builder_assign(
+                    "k_union", pool.alloc_tcgen05_mma_AB((NUM_BUFS, B_TOPK, D_V + 64), "bfloat16")
+                )
+                k_union_end = pool.offset
+                k_full = _builder_assign("k_full", k_union.sub[:, :, :D_V])
+                _builder_emit(pool.move_base_to(u_base))
+                k_rope = _builder_assign(
+                    "k_rope",
+                    pool.alloc_tcgen05_mma_AB(
+                        (NUM_BUFS, B_TOPK, D_V + 64),
+                        "bfloat16",
+                        swizzle_mode=SwizzleMode.SWIZZLE_64B_ATOM,
+                    ).sub[:, :, D_V : D_V + 64],
+                )
+                _builder_emit(pool.move_base_to(k_union_end))
+            else:
+                k_full = _builder_assign(
+                    "k_full", pool.alloc_tcgen05_mma_AB((NUM_BUFS, B_TOPK, D_V), "bfloat16")
+                )
+                k_union_end = pool.offset
+                _builder_emit(pool.move_base_to(u_base))
+                k_rope = _builder_assign(
+                    "k_rope",
+                    pool.alloc_tcgen05_mma_AB(
+                        (NUM_BUFS, B_TOPK, 64),
+                        "bfloat16",
+                        swizzle_mode=SwizzleMode.SWIZZLE_128B_ATOM,
+                    ),
+                )
+                _builder_emit(pool.move_base_to(k_union_end))
+            k_rope_tma = k_rope if is_v32 else k_full.sub[:, :, d_nope : d_nope + 64]
+            raw_nope = _builder_assign(
+                "raw_nope", pool.alloc((NUM_BUFS, B_TOPK, d_nope // 8), "uint64", align=1024)
+            )
+            kv_union_end = pool.offset
+            _builder_emit(pool.move_base_to(u_base))
+            q_sw128 = _builder_assign("q_sw128", pool.alloc_tcgen05_mma_AB((B_H, 512), "bfloat16"))
+            q_sw128_end = pool.offset
+            if is_v32:
+                _builder_emit(pool.move_base_to(q_sw128_end))
+                q_sw64 = _builder_assign(
+                    "q_sw64",
+                    pool.alloc_tcgen05_mma_AB(
+                        (B_H, 64), "bfloat16", swizzle_mode=SwizzleMode.SWIZZLE_64B_ATOM
+                    ),
+                )
+            o_union_base = pool.offset
+            o_smem = _builder_assign("o_smem", pool.alloc_tcgen05_mma_AB((B_H, D_V), "bfloat16"))
+            o_bf16_end = pool.offset
+            _builder_emit(pool.move_base_to(o_union_base))
+            o_accum_storage = _builder_assign(
+                "o_accum_storage", pool.alloc(((B_H - 1) * (D_V + 8) + D_V,), "float32", align=1024)
+            )
+            o_accum_smem = _builder_assign(
+                "o_accum_smem",
+                o_accum_storage.view(B_H, D_V, layout=TileLayout(S[(B_H, D_V) : (D_V + 8, 1)])),
+            )
+            qo_union_end = pool.offset
+            _builder_emit(pool.move_base_to(max(kv_union_end, qo_union_end, o_bf16_end)))
+            sp_union_base = pool.offset
+            p_exchange = _builder_assign(
+                "p_exchange", pool.alloc((4, 32 * (B_TOPK // 2)), "float32", align=16)
+            )
+            sp_union_end = pool.offset
+            _builder_emit(pool.move_base_to(sp_union_base))
+            s_smem_gemm = _builder_assign(
+                "s_smem_gemm",
+                pool.alloc_tcgen05_mma_AB(
+                    (B_H, B_TOPK), "bfloat16", swizzle_mode=SwizzleMode.SWIZZLE_NONE
+                ),
+            )
+            _builder_emit(pool.move_base_to(sp_union_end))
+            pv_b_lo_desc = _builder_assign("pv_b_lo_desc", SmemDescriptor())
+            _builder_emit(pv_b_lo_desc.init(k_full.ptr_to([0, 0, 0]), ldo=512, sdo=64, swizzle=3))
+            pv_b_hi_desc = _builder_assign("pv_b_hi_desc", SmemDescriptor())
+            _builder_emit(pv_b_hi_desc.init(k_full.ptr_to([0, 0, 0]), ldo=512, sdo=64, swizzle=3))
+            pv_a_lo_desc = _builder_assign("pv_a_lo_desc", SmemDescriptor())
+            _builder_emit(pv_a_lo_desc.init(s_smem_gemm.ptr_to([0, 0]), ldo=64, sdo=8, swizzle=0))
+            pv_a_hi_desc = _builder_assign("pv_a_hi_desc", SmemDescriptor())
+            _builder_emit(pv_a_hi_desc.init(s_smem_gemm.ptr_to([0, 0]), ldo=64, sdo=8, swizzle=0))
+            q_main_cp_desc = _builder_alloc_scalar("q_main_cp_desc", "uint64")
+            _builder_emit(
+                T.cuda.tcgen05.encode_matrix_descriptor(
+                    T.address_of(q_main_cp_desc),
+                    T.reinterpret(T.handle().ty, T.uint64(0)),
+                    1,
+                    64,
+                    3,
+                )
+            )
+            if is_v32:
+                q_tail_cp_desc = _builder_alloc_scalar("q_tail_cp_desc", "uint64")
+                _builder_emit(
+                    T.cuda.tcgen05.encode_matrix_descriptor(
+                        T.address_of(q_tail_cp_desc),
+                        T.reinterpret(T.handle().ty, T.uint64(0)),
+                        1,
+                        32,
+                        2,
+                    )
+                )
+            rowwise_buf = _builder_assign("rowwise_buf", pool.alloc((128,), "float32", align=16))
+            is_token_valid = _builder_assign(
+                "is_token_valid", pool.alloc((NUM_INDEX_BUFS, B_TOPK // 8), "int8", align=16)
+            )
+            tma_coord = _builder_assign(
+                "tma_coord", pool.alloc((NUM_INDEX_BUFS, B_TOPK), "int32", align=16)
+            )
+            scales_e8m0 = _builder_assign(
+                "scales_e8m0", pool.alloc((NUM_INDEX_BUFS, B_TOPK * num_scales), "uint8", align=16)
+            )
+            tmem_start_addr = _builder_assign(
+                "tmem_start_addr", pool.alloc((4,), "uint32", align=16)
+            )
+            bar_last_store_done = _builder_assign("bar_last_store_done", MBarrier(pool, 1))
+            bar_q_tma = _builder_assign("bar_q_tma", TMABar(pool, 1))
+            bar_q_utccp = _builder_assign("bar_q_utccp", TCGen05Bar(pool, 1))
+            bar_rope_ready = _builder_assign("bar_rope_ready", TMABar(pool, NUM_BUFS))
+            bar_nope_ready = _builder_assign("bar_nope_ready", MBarrier(pool, NUM_BUFS))
+            bar_raw_ready = _builder_assign("bar_raw_ready", TMABar(pool, NUM_BUFS))
+            bar_raw_free = _builder_assign("bar_raw_free", MBarrier(pool, NUM_BUFS))
+            bar_valid_ready = _builder_assign("bar_valid_ready", MBarrier(pool, NUM_INDEX_BUFS))
+            bar_valid_free = _builder_assign("bar_valid_free", MBarrier(pool, NUM_INDEX_BUFS))
+            bar_qk_done = _builder_assign("bar_qk_done", TCGen05Bar(pool, NUM_BUFS))
+            bar_so_ready = _builder_assign("bar_so_ready", MBarrier(pool, NUM_BUFS))
+            bar_sv_done = _builder_assign("bar_sv_done", TCGen05Bar(pool, NUM_BUFS))
+            _builder_emit(pool.commit(size=source_smem_size))
+            tmem_pool = _builder_assign(
+                "tmem_pool",
+                T.TMEMPool(
+                    pool,
+                    total_cols=512,
+                    cta_group=1,
+                    tmem_addr=tmem_start_addr,
+                    sync_after_alloc=False,
+                ),
+            )
+            o_tmem = _builder_assign(
+                "o_tmem",
+                tmem_pool.alloc_tcgen05_mma_D(
+                    (B_H, D_V), "float32", M=64, cta_group=1, ws=True, group=(2, 2, 128)
+                ),
+            )
+            _builder_emit(tmem_pool.move_base_to(256))
+            q_tmem = _builder_assign(
+                "q_tmem",
+                tmem_pool.alloc_tcgen05_mma_A(
+                    (2, B_H, d_qk // 2), "bfloat16", M=64, cta_group=1, ws=True
+                ),
+            )
+            _builder_emit(tmem_pool.move_base_to(400))
+            p_tmem = _builder_assign(
+                "p_tmem",
+                tmem_pool.alloc_tcgen05_mma_D(
+                    (2, B_H, B_TOPK), "float32", M=64, cta_group=1, ws=True
+                ),
             )
 
-        # kernel.cuh:77-118 expanded at the role call site to avoid the
-        # register spilling explicitly called out by the CUDA source.
-        sched_words = T.alloc_local((4,), "uint64")
-        load_scheduler_meta(sched_words)
-        sched_i32 = sched_words.view("int32")
-        sched_begin_req: T.let = sched_i32[0]
-        sched_end_req: T.let = sched_i32[1]
-        sched_begin_block: T.let = sched_i32[2]
-        sched_end_block: T.let = sched_i32[3]
-        sched_begin_split: T.let = sched_i32[4]
-        sched_first_split: T.let = sched_i32[5]
-        sched_last_split: T.let = sched_i32[6]
-        batch_bar_phase: T.int32 = 0
-
-        # The CUDA return exits only the local run_main_loop lambda.  Guard
-        # its body so inactive partitions still reach WG0's TMEM dealloc.
-        if sched_begin_req < b:
-            for batch_idx in T.serial(sched_begin_req, sched_end_req + 1, unroll=False):
-                topk_len: T.int32 = topk
-                if topk_length_h is not None:
-                    topk_len = T.cuda.ldg(topk_length.ptr_to([batch_idx]), "int32")
-                orig_topk_padded: T.let = T.max(
-                    ((topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK, B_TOPK
-                )
-                extra_topk_len: T.int32 = extra_topk
-                if extra_topk_length_h is not None:
-                    extra_topk_len = T.cuda.ldg(extra_topk_length.ptr_to([batch_idx]), "int32")
-                total_topk_padded: T.let = (
-                    orig_topk_padded + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
-                )
-                start_block: T.let = T.if_then_else(
-                    batch_idx == sched_begin_req, sched_begin_block, 0
-                )
-                end_block: T.let = T.if_then_else(
-                    batch_idx == sched_end_req, sched_end_block, total_topk_padded // B_TOPK
-                )
-                is_split: T.bool = T.cast(
-                    T.if_then_else(
-                        batch_idx == sched_begin_req,
-                        sched_first_split,
-                        T.if_then_else(batch_idx == sched_end_req, sched_last_split, 0),
-                    ),
-                    "bool",
-                )
-                is_no_split: T.bool = not is_split
-                n_split_idx: T.let = T.if_then_else(
-                    batch_idx == sched_begin_req,
-                    T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32") + sched_begin_split,
-                    T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
-                )
-                num_orig_blocks: T.let = orig_topk_padded // B_TOPK
-                is_last_batch: T.bool = batch_idx == sched_end_req
-
-                # kernel.cuh:151-159.  Retire prior TMA stores before the
-                # aliased Q/O shared region is reused for this batch.
-                T.ptx.cp.async_.bulk.wait_group.read(0)
-                bar_last_store_done.arrive(0)
-                mi: T.float32 = MAX_INIT_VAL
-                li: T.float32 = 0.0
-                real_mi: T.float32 = T.float32(-float("inf"))
-
-                # kernel.cuh:160-299.  P load, dual-warp exchange, mask,
-                # online softmax, S staging, and conditional O rescale.
-                for block_idx in T.serial(start_block, end_block, unroll=False):
-                    T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128)
-                    bar_valid_ready.wait(rs_index.stage, rs_index.phase)
-                    bar_qk_done.wait(rs_buf.stage, rs_buf.phase)
-                    T.ptx.tcgen05.fence__after_thread_sync()
-                    # A later QK commit is ordered after the preceding SxV
-                    # operation from this TCGEN issuer.  Its completion thus
-                    # retires the prior async read of s_smem_gemm; bridge that
-                    # read before p_exchange overwrites the aliased union.
-                    T.ptx.fence.proxy.async_.shared__cta()
-
-                    p_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, B_TOPK // 2), "float32")
-                    p_peer_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, B_TOPK // 2), "float32")
-                    p = p_frag.local()
-                    p_peer = p_peer_frag.local()
-                    if warp_idx < 2:
-                        T.evaluate(_tmem_load(p, T.uint32(400), B_TOPK // 2))
-                        T.evaluate(
-                            _tmem_load(
-                                p_peer,
-                                T.cuda.get_tmem_addr(T.uint32(400), 0, B_TOPK // 2),
-                                B_TOPK // 2,
-                            )
-                        )
-                    else:
-                        T.evaluate(_tmem_load(p_peer, T.uint32(400), B_TOPK // 2))
-                        T.evaluate(
-                            _tmem_load(
-                                p, T.cuda.get_tmem_addr(T.uint32(400), 0, B_TOPK // 2), B_TOPK // 2
-                            )
-                        )
-                    T.ptx.tcgen05.wait__ld.sync.aligned()
-                    T.ptx.tcgen05.fence__before_thread_sync()
-
-                    for exchange_i in T.unroll((B_TOPK // 2) // 4):
-                        exchange_offset: T.let = exchange_i * 32 * 4 + lane_idx * 4
-                        p_peer_words = p_peer.view("uint32")
-                        peer_word: T.let = exchange_i * 4
-                        T.ptx.st.shared.v4.u32(
-                            p_exchange.view("uint32").ptr_to([warp_idx ^ 2, exchange_offset]),
-                            p_peer_words[peer_word],
-                            p_peer_words[peer_word + 1],
-                            p_peer_words[peer_word + 2],
-                            p_peer_words[peer_word + 3],
-                        )
-                    T.ptx.bar.sync(
-                        T.uint32(BAR_WG0_WARP02 + T.bitwise_and(warp_idx, T.int32(1))), 64
+            def load_scheduler_meta(dst):
+                _builder_emit(
+                    T.ptx["ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v4.u64"](
+                        dst[0],
+                        dst[1],
+                        dst[2],
+                        dst[3],
+                        tile_scheduler_metadata.view("uint64").ptr_to([partition_idx, 0]),
                     )
-                    for exchange_i in T.unroll((B_TOPK // 2) // 4):
-                        exchange_offset: T.let = exchange_i * 32 * 4 + lane_idx * 4
-                        peer_tmp = T.alloc_local((4,), "float32")
-                        peer_tmp_words = peer_tmp.view("uint32")
-                        T.ptx.ld.shared.v4.u32(
-                            peer_tmp_words[0],
-                            peer_tmp_words[1],
-                            peer_tmp_words[2],
-                            peer_tmp_words[3],
-                            p_exchange.view("uint32").ptr_to([warp_idx, exchange_offset]),
-                        )
-                        pair0: T.uint64
-                        pair1: T.uint64
-                        T.ptx.add.f32x2(
-                            pair0,
-                            T.cuda.make_float2(p[exchange_i * 4], p[exchange_i * 4 + 1]),
-                            T.cuda.make_float2(peer_tmp[0], peer_tmp[1]),
-                        )
-                        T.ptx.add.f32x2(
-                            pair1,
-                            T.cuda.make_float2(p[exchange_i * 4 + 2], p[exchange_i * 4 + 3]),
-                            T.cuda.make_float2(peer_tmp[2], peer_tmp[3]),
-                        )
-                        p[exchange_i * 4] = T.cuda.float2_x(pair0)
-                        p[exchange_i * 4 + 1] = T.cuda.float2_y(pair0)
-                        p[exchange_i * 4 + 2] = T.cuda.float2_x(pair1)
-                        p[exchange_i * 4 + 3] = T.cuda.float2_y(pair1)
+                )
 
-                    valid_word: T.uint32
-                    T.ptx.ld.shared.u32(
-                        valid_word,
-                        is_token_valid.view("uint32").ptr_to(
-                            [rs_index.stage, T.if_then_else(idx_in_warpgroup >= 64, 1, 0)]
-                        ),
+            def dequant_st128(smem_addr, raw, scale_bits):
+                scale = _builder_bind("scale", T.reinterpret("bfloat16", scale_bits))
+                packed = _builder_assign("packed", T.alloc_local((4,), "uint32"))
+                with T.unroll(4) as pair_i:
+                    raw_pair = _builder_bind(
+                        "raw_pair",
+                        T.cast(T.shift_right(raw, T.cast(pair_i * 16, "uint64")), "uint16"),
                     )
-                    for p_i in T.unroll(B_TOPK // 2):
-                        if T.bitwise_and(
-                            T.shift_right(valid_word, T.cast(p_i, "uint32")), T.uint32(1)
-                        ) == T.uint32(0):
-                            p[p_i] = T.float32(-float("inf"))
-
-                    cur_pi_max: T.float32 = T.float32(-float("inf"))
-                    for p_i in T.unroll(B_TOPK // 2):
-                        cur_pi_max = T.max(cur_pi_max, p[p_i])
-                    cur_pi_max = cur_pi_max * sm_scale_div_log2
-                    T.ptx.st.shared.f32(rowwise_buf.ptr_to([idx_in_warpgroup]), cur_pi_max)
-                    T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128)
-                    bar_valid_free.arrive(rs_index.stage)
-                    peer_pi_max: T.float32
-                    T.ptx.ld.shared.f32(peer_pi_max, rowwise_buf.ptr_to([idx_in_warpgroup ^ 64]))
-                    cur_pi_max = T.max(cur_pi_max, peer_pi_max)
-                    real_mi = T.max(real_mi, cur_pi_max)
-                    should_scale_o: T.let = (
-                        T.cuda.any_sync(T.uint32(0xFFFFFFFF), cur_pi_max - mi > 6.0) != 0
+                    rounded_bits = _builder_assign("rounded_bits", T.local_scalar("uint32"))
+                    _builder_emit(T.ptx.cvt.rn.bf16x2.e4m3x2(rounded_bits, raw_pair))
+                    rounded = _builder_bind("rounded", T.reinterpret("bfloat16x2", rounded_bits))
+                    scaled_lo = _builder_bind("scaled_lo", T.Shuffle([rounded], [0]) * scale)
+                    scaled_hi = _builder_bind("scaled_hi", T.Shuffle([rounded], [1]) * scale)
+                    T.buffer_store(
+                        packed,
+                        T.reinterpret("uint32", T.Shuffle([scaled_lo, scaled_hi], [0, 1])),
+                        [pair_i],
                     )
-                    new_max: T.float32
-                    scale_for_old: T.float32
-                    if not should_scale_o:
-                        scale_for_old = 1.0
-                        new_max = mi
-                    else:
-                        new_max = T.max(cur_pi_max, mi)
-                        T.ptx.ex2.approx.ftz.f32(scale_for_old, mi - new_max)
-                    mi = new_max
+                _builder_emit(T.ptx.st.weak.shared__cta.b128(smem_addr, packed.view("uint128")[0]))
 
-                    s_frag = T.alloc_buffer(
-                        (B_H, B_TOPK), "bfloat16", scope="local", layout=s_frag_layout
-                    )
-                    s_pack = s_frag.local().view("uint32")
-                    cur_sum_pair: T.uint64 = T.cuda.make_float2(0.0, 0.0)
-                    neg_max_pair: T.let = T.cuda.make_float2(-new_max, -new_max)
-                    for s_i in T.unroll((B_TOPK // 2) // 2):
-                        p_pair: T.let = T.cuda.make_float2(p[s_i * 2], p[s_i * 2 + 1])
-                        soft_pair: T.uint64
-                        T.ptx.fma.rn.f32x2(soft_pair, p_pair, scale_pair, neg_max_pair)
-                        sx: T.float32
-                        sy: T.float32
-                        T.ptx.ex2.approx.ftz.f32(sx, T.cuda.float2_x(soft_pair))
-                        T.ptx.ex2.approx.ftz.f32(sy, T.cuda.float2_y(soft_pair))
-                        T.ptx.add.f32x2(cur_sum_pair, cur_sum_pair, T.cuda.make_float2(sx, sy))
-                        s_pack[s_i] = T.cuda.float22bfloat162_rn(sx, sy)
-                    cur_sum: T.let = T.cuda.float2_x(cur_sum_pair) + T.cuda.float2_y(cur_sum_pair)
-                    li_next: T.float32
-                    T.ptx.fma.rn.f32(li_next, li, scale_for_old, cur_sum)
-                    li = li_next
-
-                    s_base: T.let = idx_in_warpgroup // 64 * 2048 + idx_in_warpgroup % 64 * 8
-                    s_words = s_frag.local().view("uint32")
-                    for s_store_i in T.unroll(4):
-                        s_ptr: T.let = T.ptr_byte_offset(
-                            s_smem_gemm.ptr_to([0, 0]),
-                            (s_base + s_store_i * 512) * BF16_BYTES,
-                            "bfloat16",
-                        )
-                        s_word: T.let = s_store_i * 4
-                        T.ptx.st.shared.v4.u32(
-                            s_ptr,
-                            s_words[s_word],
-                            s_words[s_word + 1],
-                            s_words[s_word + 2],
-                            s_words[s_word + 3],
-                        )
-                    if T.And(block_idx != start_block, should_scale_o):
-                        scale_for_old_pair: T.let = T.cuda.make_float2(scale_for_old, scale_for_old)
-                        T.ptx.tcgen05.fence__after_thread_sync()
-                        o_rescale_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, 64), "float32")
-                        o_rescale = o_rescale_frag.local()
-                        for o_chunk in T.unroll((D_V // 2) // 64):
-                            T.evaluate(
-                                _tmem_load(
-                                    o_rescale,
-                                    T.cuda.get_tmem_addr(T.uint32(0), 0, o_chunk * 64),
-                                    64,
+            with T.If(warp_idx == 0):
+                with T.Then():
+                    with T.If(T.cuda.elect_sync() != T.uint32(0)):
+                        with T.Then():
+                            _builder_emit(
+                                T.ptx.mbarrier.init.shared.b64(
+                                    bar_last_store_done.ptr_to([0]), T.uint32(128)
                                 )
                             )
-                            T.ptx.tcgen05.wait__ld.sync.aligned()
-                            scaled_pair: T.uint64
-                            for scale_i in T.unroll(64 // 2):
-                                T.ptx.mul.f32x2(
-                                    scaled_pair,
-                                    T.cuda.make_float2(
-                                        o_rescale[scale_i * 2], o_rescale[scale_i * 2 + 1]
-                                    ),
-                                    scale_for_old_pair,
-                                )
-                                o_rescale[scale_i * 2] = T.cuda.float2_x(scaled_pair)
-                                o_rescale[scale_i * 2 + 1] = T.cuda.float2_y(scaled_pair)
-                            T.evaluate(
-                                _tmem_store(
-                                    o_rescale, T.cuda.get_tmem_addr(T.uint32(0), 0, o_chunk * 64)
-                                )
+                            _builder_emit(
+                                T.ptx.mbarrier.init.shared.b64(bar_q_tma.ptr_to([0]), T.uint32(1))
                             )
-                            T.ptx.tcgen05.wait__st.sync.aligned()
-                        T.ptx.tcgen05.fence__before_thread_sync()
-
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    bar_so_ready.arrive(rs_buf.stage)
-                    if block_idx != end_block - 1:
-                        rs_buf.advance()
-                        rs_index.advance()
-
-                # kernel.cuh:301-333.  Empty-row repair, li exchange, LSE
-                # store, final SV wait, and ring advance.
-                if real_mi == T.float32(-float("inf")):
-                    li = 0.0
-                    mi = T.float32(-float("inf"))
-                # Every WG0 warp read its peer's per-block maximum from this
-                # allocation above.  Do not let a faster warp reuse the same
-                # locations for ``li`` until all of those reads have retired.
-                T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128)
-                T.ptx.st.shared.f32(rowwise_buf.ptr_to([idx_in_warpgroup]), li)
-                T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128)
-                peer_li: T.float32
-                T.ptx.ld.shared.f32(peer_li, rowwise_buf.ptr_to([idx_in_warpgroup ^ 64]))
-                li = li + peer_li
-                if idx_in_warpgroup < B_H:
-                    if is_no_split:
-                        cur_lse: T.float32
-                        T.ptx.fma.rn.f32(cur_lse, mi, T.float32(LN_2), T.log(li))
-                        T.ptx.st.global_.f32(
-                            lse.ptr_to(
-                                [
-                                    batch_idx * stride_lse_b
-                                    + s_q_idx * stride_lse_s_q
-                                    + idx_in_warpgroup
-                                ]
-                            ),
-                            T.if_then_else(
-                                cur_lse == T.float32(-float("inf")),
-                                T.float32(float("inf")),
-                                cur_lse,
-                            ),
-                        )
-                    else:
-                        T.ptx.st.global_.f32(
-                            lse_accum.ptr_to(
-                                [
-                                    n_split_idx * stride_lse_accum_split
-                                    + s_q_idx * stride_lse_accum_s_q
-                                    + idx_in_warpgroup
-                                ]
-                            ),
-                            T.log2(li) + mi,
-                        )
-                bar_sv_done.wait(rs_buf.stage, rs_buf.phase)
-                rs_buf.advance()
-                rs_index.advance()
-                T.ptx.tcgen05.fence__after_thread_sync()
-                if use_pdl and is_last_batch:
-                    T.ptx.griddepcontrol.launch_dependents()
-
-                # kernel.cuh:335-421.  Keep no-split TMA output and split
-                # fp32 bulk output as distinct epilogues; attn_sink is only
-                # applied here for no-split and is deferred to combine for
-                # split output exactly as in the CUDA source.
-                if is_no_split:
-                    sink_exp: T.float32
-                    T.ptx.ex2.approx.ftz.f32(sink_exp, attn_sink_log2 - mi)
-                    output_scale: T.let = T.if_then_else(
-                        li == 0.0, 0.0, T.cuda.fdividef(1.0, li + sink_exp)
-                    )
-                    output_scale_pair: T.let = T.cuda.make_float2(output_scale, output_scale)
-                    o_epi_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, 64), "float32")
-                    o_epi_bf16_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, 64), "bfloat16")
-                    o_epi = o_epi_frag.local()
-
-                    @T.inline
-                    def emit_no_split_epilogue(epi_i: T.constexpr):
-                        T.evaluate(
-                            _tmem_load(o_epi, T.cuda.get_tmem_addr(T.uint32(0), 0, epi_i * 64), 64)
-                        )
-                        T.ptx.tcgen05.wait__ld.sync.aligned()
-                        scaled_pair: T.uint64
-                        for scale_i in T.unroll(64 // 2):
-                            T.ptx.mul.f32x2(
-                                scaled_pair,
-                                T.cuda.make_float2(o_epi[scale_i * 2], o_epi[scale_i * 2 + 1]),
-                                output_scale_pair,
+                            _builder_emit(
+                                T.ptx.mbarrier.init.shared.b64(bar_q_utccp.ptr_to([0]), T.uint32(1))
                             )
-                            o_epi[scale_i * 2] = T.cuda.float2_x(scaled_pair)
-                            o_epi[scale_i * 2 + 1] = T.cuda.float2_y(scaled_pair)
-                        o_epi_bf16 = o_epi_bf16_frag.local()
-                        for cast_i in T.unroll(64 // 2):
-                            T.evaluate(_cast_f32x2_bf16x2(o_epi_bf16, o_epi, cast_i * 2))
-                        col_base = T.meta_var(
-                            (D_V // 2 if epi_i * 64 >= D_V // 4 else 0) + (epi_i * 64) % (D_V // 4)
-                        )
-                        o_epi_words = o_epi_bf16.view("uint32")
-                        for o_store_i in T.unroll(8):
-                            o_smem_offset: T.let = (
-                                col_base * B_H
-                                + idx_in_warpgroup // 64 * 8192
-                                + idx_in_warpgroup % 64 * 64
-                                + T.bitwise_xor(
-                                    o_store_i * 8,
-                                    T.shift_left(
-                                        T.bitwise_and(
-                                            idx_in_warpgroup // 64 * 128 + idx_in_warpgroup % 64, 7
-                                        ),
-                                        3,
-                                    ),
-                                )
-                            )
-                            o_smem_ptr: T.let = T.ptr_byte_offset(
-                                o_smem_win.ptr_to([0, 0]), o_smem_offset * BF16_BYTES, "bfloat16"
-                            )
-                            o_word: T.let = o_store_i * 4
-                            T.ptx.st.shared.v4.u32(
-                                o_smem_ptr,
-                                o_epi_words[o_word],
-                                o_epi_words[o_word + 1],
-                                o_epi_words[o_word + 2],
-                                o_epi_words[o_word + 3],
-                            )
-                        T.ptx.fence.proxy.async_.shared__cta()
-                        T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128)
-                        if warp_idx == 0:
-                            if T.cuda.elect_sync() != T.uint32(0):
-                                T.evaluate(
-                                    T.ptx[_TMA_S2G_4D](
-                                        T.address_of(out_tensormap),
-                                        T.int32(col_base),
-                                        T.int32(0),
-                                        T.cast(s_q_idx, "int32"),
-                                        T.cast(batch_idx, "int32"),
-                                        T.cuda.cvta_generic_to_shared(
-                                            T.ptr_byte_offset(
-                                                o_smem.ptr_to([0, 0]),
-                                                col_base * B_H * BF16_BYTES,
-                                                "bfloat16",
-                                            )
-                                        ),
+                            with T.unroll(NUM_BUFS) as stage:
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_rope_ready.ptr_to([stage]), T.uint32(1)
                                     )
                                 )
-                        warp1_col_base = T.meta_var(col_base + D_V // 4)
-                        if warp_idx == 1:
-                            if T.cuda.elect_sync() != T.uint32(0):
-                                T.evaluate(
-                                    T.ptx[_TMA_S2G_4D](
-                                        T.address_of(out_tensormap),
-                                        T.int32(warp1_col_base),
-                                        T.int32(0),
-                                        T.cast(s_q_idx, "int32"),
-                                        T.cast(batch_idx, "int32"),
-                                        T.cuda.cvta_generic_to_shared(
-                                            T.ptr_byte_offset(
-                                                o_smem.ptr_to([0, 0]),
-                                                warp1_col_base * B_H * BF16_BYTES,
-                                                "bfloat16",
-                                            )
-                                        ),
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_nope_ready.ptr_to([stage]), T.uint32(128)
                                     )
                                 )
-
-                    emit_no_split_epilogue(0)
-                    emit_no_split_epilogue(1)
-                    emit_no_split_epilogue(2)
-                    emit_no_split_epilogue(3)
-                    T.ptx.cp.async_.bulk.commit_group()
-                else:
-                    output_scale: T.let = T.if_then_else(li == 0.0, 0.0, T.cuda.fdividef(1.0, li))
-                    output_scale_pair: T.let = T.cuda.make_float2(output_scale, output_scale)
-                    split_frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, 64), "float32")
-                    split_local = split_frag.local()
-                    for epi_i in T.unroll((D_V // 2) // 64):
-                        T.evaluate(
-                            _tmem_load(
-                                split_local, T.cuda.get_tmem_addr(T.uint32(0), 0, epi_i * 64), 64
-                            )
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_raw_ready.ptr_to([stage]), T.uint32(1)
+                                    )
+                                )
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_raw_free.ptr_to([stage]), T.uint32(128)
+                                    )
+                                )
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_qk_done.ptr_to([stage]), T.uint32(1)
+                                    )
+                                )
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_so_ready.ptr_to([stage]), T.uint32(128)
+                                    )
+                                )
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_sv_done.ptr_to([stage]), T.uint32(1)
+                                    )
+                                )
+                            with T.unroll(NUM_INDEX_BUFS) as index_stage:
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_valid_ready.ptr_to([index_stage]), T.uint32(32)
+                                    )
+                                )
+                                _builder_emit(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        bar_valid_free.ptr_to([index_stage]), T.uint32(258)
+                                    )
+                                )
+                            _builder_emit(T.ptx.fence.mbarrier_init.release.cluster())
+                    _builder_emit(
+                        T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                            T.address_of(tmem_start_addr[0]), T.uint32(512)
                         )
-                        T.ptx.tcgen05.wait__ld.sync.aligned()
-                        scaled_pair: T.uint64
-                        for scale_i in T.unroll(64 // 2):
-                            T.ptx.mul.f32x2(
-                                scaled_pair,
-                                T.cuda.make_float2(
-                                    split_local[scale_i * 2], split_local[scale_i * 2 + 1]
-                                ),
-                                output_scale_pair,
-                            )
-                            split_local[scale_i * 2] = T.cuda.float2_x(scaled_pair)
-                            split_local[scale_i * 2 + 1] = T.cuda.float2_y(scaled_pair)
-                        col_base: T.let = (
-                            (idx_in_warpgroup // 64) * 128
-                            + T.if_then_else(epi_i * 64 >= D_V // 4, D_V // 2, 0)
-                            + (epi_i * 64) % (D_V // 4)
-                        )
-                        split_words = split_local.view("uint32")
-                        for j in T.unroll(64 // 4):
-                            split_word: T.let = j * 4
-                            T.ptx.st.shared.v4.u32(
-                                o_accum_smem.view("uint32").ptr_to(
-                                    [idx_in_warpgroup % 64, col_base + j * 4]
-                                ),
-                                split_words[split_word],
-                                split_words[split_word + 1],
-                                split_words[split_word + 2],
-                                split_words[split_word + 3],
-                            )
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128)
-                    if T.cuda.elect_sync() != T.uint32(0):
-                        for local_row in T.unroll(B_H // 4):
-                            smem_row: T.let = local_row * 4 + warp_idx
-                            T.ptx["cp.async.bulk.global.shared::cta.bulk_group"](
-                                o_accum.ptr_to(
-                                    [
-                                        n_split_idx * stride_o_accum_split
-                                        + s_q_idx * stride_o_accum_s_q
-                                        + smem_row * stride_o_accum_h_q
-                                    ]
-                                ),
-                                o_accum_smem.ptr_to([smem_row, 0]),
-                                T.uint32(D_V * 4),
-                            )
-                        T.ptx.cp.async_.bulk.commit_group()
-
-                # kernel.cuh:116 uses the unaligned spelling because the
-                # elected WG1 producer lanes reach this named barrier via
-                # control flow distinct from the empty-role lanes.
-                T.ptx.barrier.sync(T.uint32(BAR_EVERYONE_SYNC), T.uint32(NUM_THREADS))
-                batch_bar_phase = batch_bar_phase ^ 1
-
-        if warp_idx == 0:
-            T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(T.uint32(0), T.uint32(512))
-
-    elif warpgroup_idx == 1:
-        # kernel.cuh:427-430.  The producer/MMA warpgroup deliberately
-        # gives registers back, then recomputes the synchronized canonical
-        # warp id; retaining the earlier value is known to spill registers.
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(72)
-        wg1_warp_idx: T.let = T.tvm_warp_shuffle(
-            T.uint32(0xFFFFFFFF), T.cuda.thread_rank() // 32, 0, 32, 32
-        )
-
-        # kernel.cuh:431-746.  Mirror each CUDA run_main_loop(lambda)
-        # call as a separate parser-time specialization.  This keeps the
-        # scheduler and its registers inside the selected warp role.
-        @T.inline
-        def run_wg1_role(role: T.constexpr):
-            rs_buf = PipelineState(NUM_BUFS, phase=0)
-            rs_index = PipelineState(NUM_INDEX_BUFS, phase=0)
-            q_sw128_tmem = q_tmem.sub[:, :, 0:256]
-            k_full_tiled = k_full.rearrange("b r (dc h ci) -> b (h r) (dc ci)", dc=4, h=2, ci=64)
-            q_tail_tmem = q_tmem.sub[:, :, q_tail_start : q_tail_start + 32]
-            k_rope_tiled = k_rope.rearrange("b r (h ci) -> b (h r) ci", h=2, ci=32)
-
-            qk_nope_desc = SmemDescriptor()
-            qk_rope_desc = SmemDescriptor()
-            if role == 4:
-                qk_nope_desc.init(k_full_tiled.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-                if is_v32:
-                    qk_rope_desc.init(k_rope_tiled.ptr_to([0, 0, 0]), ldo=0, sdo=32, swizzle=2)
-
-            # kernel.cuh:657-667.  These warp-7 invariants are deliberately
-            # materialized before the scheduler traversal.  Pointer bases are
-            # held as byte addresses so the per-token paths only add offsets.
-            if role == 7:
-                tma_coords_step_per_token: T.let = (656 if is_v32 else 576) // tma_k_stride
-                tma_coords_step_per_block: T.let = stride_kv_block // tma_k_stride
-                tma_coords_step_per_extra_block: T.let = stride_extra_kv_block // tma_k_stride
-                k_scales_ptr_u64: T.let = T.reinterpret(
-                    "uint64",
-                    (
-                        kv.ptr_to([0, d_nope // BF16_BYTES])
-                        if is_v32
-                        else kv.ptr_to([page_block_size, 0])
-                    ),
-                )
-                extra_k_scales_ptr_u64: T.uint64 = T.uint64(0)
-                if extra_kv_h is not None:
-                    extra_k_scales_ptr_u64 = T.reinterpret(
-                        "uint64",
-                        (
-                            extra_kv.ptr_to([0, d_nope // BF16_BYTES])
-                            if is_v32
-                            else extra_kv.ptr_to([extra_page_block_size, 0])
+                    )
+                    allocated_tmem_start = _builder_alloc_scalar("allocated_tmem_start", "uint32")
+                    _builder_emit(
+                        T.ptx.ld.shared.u32(allocated_tmem_start, tmem_start_addr.ptr_to([0]))
+                    )
+                    _builder_emit(
+                        T.cuda.trap_when_assert_failed(allocated_tmem_start == T.uint32(0))
+                    )
+                    _builder_emit(T.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned())
+            _builder_emit(T.cuda.cta_sync())
+            with T.If(warpgroup_idx == 0):
+                with T.Then():
+                    _builder_emit(T.ptx.setmaxnreg.inc.sync.aligned.u32(224))
+                    rs_buf = _builder_assign("rs_buf", PipelineState(NUM_BUFS, phase=0))
+                    rs_index = _builder_assign("rs_index", PipelineState(NUM_INDEX_BUFS, phase=0))
+                    s_frag_layout = _builder_assign(
+                        "s_frag_layout",
+                        TileLayout(
+                            S[(2, 32, 2, 32) : (1 @ wid_in_wg, 1 @ laneid, 2 @ wid_in_wg, 1)]
                         ),
                     )
-            # kernel.cuh:77-118, expanded once for all WG1 threads.  Non-elected
-            # lanes still execute the empty role and participate in the 384-way
-            # per-batch named barrier, matching the CUDA else branch at 744.
-            sched_words = T.alloc_local((4,), "uint64")
-            load_scheduler_meta(sched_words)
-            sched_i32 = sched_words.view("int32")
-            sched_begin_req: T.let = sched_i32[0]
-            sched_end_req: T.let = sched_i32[1]
-            sched_begin_block: T.let = sched_i32[2]
-            sched_end_block: T.let = sched_i32[3]
-            sched_begin_split: T.let = sched_i32[4]
-            sched_first_split: T.let = sched_i32[5]
-            sched_last_split: T.let = sched_i32[6]
-            batch_bar_phase: T.int32 = 0
-
-            # The CUDA return exits only this role's run_main_loop lambda.
-            if sched_begin_req < b:
-                for batch_idx in T.serial(sched_begin_req, sched_end_req + 1, unroll=False):
-                    topk_len: T.int32 = topk
-                    if topk_length_h is not None:
-                        topk_len = T.cuda.ldg(topk_length.ptr_to([batch_idx]), "int32")
-                    orig_topk_padded: T.let = T.max(
-                        ((topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK, B_TOPK
+                    o_smem_win = _builder_assign(
+                        "o_smem_win", o_smem.rearrange("h (a b c) -> (b h) (a c)", a=2, b=2, c=128)
                     )
-                    extra_topk_len: T.int32 = extra_topk
-                    if extra_topk_length_h is not None:
-                        extra_topk_len = T.cuda.ldg(extra_topk_length.ptr_to([batch_idx]), "int32")
-                    total_topk_padded: T.let = (
-                        orig_topk_padded + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
+                    scale_pair = _builder_bind(
+                        "scale_pair", T.cuda.make_float2(sm_scale_div_log2, sm_scale_div_log2)
                     )
-                    start_block: T.let = T.if_then_else(
-                        batch_idx == sched_begin_req, sched_begin_block, 0
+                    attn_sink_log2 = _builder_scalar(
+                        "attn_sink_log2", T.float32(-float("inf")), dtype="float32"
                     )
-                    end_block: T.let = T.if_then_else(
-                        batch_idx == sched_end_req, sched_end_block, total_topk_padded // B_TOPK
-                    )
-                    is_split: T.bool = T.cast(
-                        T.if_then_else(
-                            batch_idx == sched_begin_req,
-                            sched_first_split,
-                            T.if_then_else(batch_idx == sched_end_req, sched_last_split, 0),
-                        ),
-                        "bool",
-                    )
-                    is_no_split: T.bool = not is_split
-                    num_orig_blocks: T.let = orig_topk_padded // B_TOPK
-                    n_split_idx: T.let = T.if_then_else(
-                        batch_idx == sched_begin_req,
-                        T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32") + sched_begin_split,
-                        T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
-                    )
-                    is_last_batch: T.bool = batch_idx == sched_end_req
-
-                    if role == 4:
-                        # kernel.cuh:431-527.  Warp 4 issues both Q TMAs, then
-                        # the same SW128/SW64 UTCCP deposits at TMEM Q=256.
-                        T.cuda.trap_when_assert_failed(start_block < end_block)
-                        # SmemLayoutQ_SW128 is tile_to_shape of a 64x64
-                        # atom.  CuTe therefore partitions the 64x512 Q
-                        # copy into eight source-order TMA boxes instead of
-                        # issuing one monolithic 64 KiB transaction.
-                        for q_tile in T.unroll(512 // 64):
-                            T.evaluate(
-                                T.ptx[_TMA_G2S_4D_CACHE](
-                                    T.ptr_byte_offset(
-                                        q_sw128.ptr_to([0, 0]),
-                                        q_tile * B_H * 64 * BF16_BYTES,
-                                        "bfloat16",
+                    if attn_sink_h is not None:
+                        T.buffer_store(
+                            attn_sink_log2.buffer,
+                            T.cuda.ldg(attn_sink.ptr_to([idx_in_warpgroup % B_H]), "float32")
+                            * LOG_2_E,
+                            [0],
+                        )
+                    sched_words = _builder_assign("sched_words", T.alloc_local((4,), "uint64"))
+                    _builder_emit(load_scheduler_meta(sched_words))
+                    sched_i32 = _builder_assign("sched_i32", sched_words.view("int32"))
+                    sched_begin_req = _builder_bind("sched_begin_req", sched_i32[0])
+                    sched_end_req = _builder_bind("sched_end_req", sched_i32[1])
+                    sched_begin_block = _builder_bind("sched_begin_block", sched_i32[2])
+                    sched_end_block = _builder_bind("sched_end_block", sched_i32[3])
+                    sched_begin_split = _builder_bind("sched_begin_split", sched_i32[4])
+                    sched_first_split = _builder_bind("sched_first_split", sched_i32[5])
+                    sched_last_split = _builder_bind("sched_last_split", sched_i32[6])
+                    batch_bar_phase = _builder_scalar("batch_bar_phase", 0, dtype="int32")
+                    with T.If(sched_begin_req < b):
+                        with T.Then():
+                            with T.serial(
+                                sched_begin_req, sched_end_req + 1, unroll=False
+                            ) as batch_idx:
+                                topk_len = _builder_scalar("topk_len", topk, dtype="int32")
+                                if topk_length_h is not None:
+                                    T.buffer_store(
+                                        topk_len.buffer,
+                                        T.cuda.ldg(topk_length.ptr_to([batch_idx]), "int32"),
+                                        [0],
+                                    )
+                                orig_topk_padded = _builder_bind(
+                                    "orig_topk_padded",
+                                    T.max((topk_len + B_TOPK - 1) // B_TOPK * B_TOPK, B_TOPK),
+                                )
+                                extra_topk_len = _builder_scalar(
+                                    "extra_topk_len", extra_topk, dtype="int32"
+                                )
+                                if extra_topk_length_h is not None:
+                                    T.buffer_store(
+                                        extra_topk_len.buffer,
+                                        T.cuda.ldg(extra_topk_length.ptr_to([batch_idx]), "int32"),
+                                        [0],
+                                    )
+                                total_topk_padded = _builder_bind(
+                                    "total_topk_padded",
+                                    orig_topk_padded
+                                    + (extra_topk_len + B_TOPK - 1) // B_TOPK * B_TOPK,
+                                )
+                                start_block = _builder_bind(
+                                    "start_block",
+                                    T.if_then_else(
+                                        batch_idx == sched_begin_req, sched_begin_block, 0
                                     ),
-                                    T.address_of(q_strided_tensormap),
-                                    T.cast(q_tile * 64, "int32"),
-                                    T.int32(0),
-                                    T.cast(s_q_idx, "int32"),
-                                    T.cast(batch_idx, "int32"),
-                                    T.cuda.cvta_generic_to_shared(bar_q_tma.ptr_to([0])),
-                                    _Q_TMA_CACHE_HINT,
                                 )
-                            )
-                        if is_v32:
-                            T.evaluate(
-                                T.ptx[_TMA_G2S_5D_CACHE](
-                                    q_sw64.ptr_to([0, 0]),
-                                    T.address_of(q_tail_tensormap),
-                                    T.int32(0),
-                                    T.int32(0),
-                                    T.int32(16),
-                                    T.cast(s_q_idx, "int32"),
-                                    T.cast(batch_idx, "int32"),
-                                    T.cuda.cvta_generic_to_shared(bar_q_tma.ptr_to([0])),
-                                    _Q_TMA_CACHE_HINT,
+                                end_block = _builder_bind(
+                                    "end_block",
+                                    T.if_then_else(
+                                        batch_idx == sched_end_req,
+                                        sched_end_block,
+                                        total_topk_padded // B_TOPK,
+                                    ),
                                 )
-                            )
-                        bar_q_tma.arrive(0, tx_count=B_H * d_qk * BF16_BYTES)
-                        bar_q_tma.wait(0, batch_bar_phase)
-                        T.ptx.tcgen05.fence__after_thread_sync()
-                        q_main_cp_view = q_sw128.view(B_H, 4, 2, 64)
-                        for q_main_flat in T.unroll(16):
-                            q_main_src: T.let = T.ptr_byte_offset(
-                                q_main_cp_view.ptr_to([0, 0, 0, 0]),
-                                (q_main_flat % 4 * 1024 + q_main_flat // 4 % 4 * 2) * 16,
-                                "bfloat16",
-                            )
-                            T.evaluate(
-                                T.ptx[_TCGEN_CP_128X256](
+                                is_split = _builder_scalar(
+                                    "is_split",
                                     T.cast(
-                                        256 + q_main_flat % 4 * 32 + q_main_flat // 4 % 4 * 8,
-                                        "uint32",
+                                        T.if_then_else(
+                                            batch_idx == sched_begin_req,
+                                            sched_first_split,
+                                            T.if_then_else(
+                                                batch_idx == sched_end_req, sched_last_split, 0
+                                            ),
+                                        ),
+                                        "bool",
                                     ),
-                                    _replace_smem_desc_addr(q_main_cp_desc, q_main_src),
+                                    dtype="bool",
                                 )
-                            )
-                        if is_v32:
-                            for q_tail_flat in T.unroll(2):
-                                q_tail_src: T.let = T.ptr_byte_offset(
-                                    q_sw64.ptr_to([0, 0]), q_tail_flat % 2 * 2 * 16, "bfloat16"
+                                is_no_split = _builder_scalar(
+                                    "is_no_split", T.Not(is_split), dtype="bool"
                                 )
-                                T.evaluate(
-                                    T.ptx[_TCGEN_CP_128X256](
-                                        T.cast(384 + q_tail_flat % 2 * 8, "uint32"),
-                                        _replace_smem_desc_addr(q_tail_cp_desc, q_tail_src),
+                                n_split_idx = _builder_bind(
+                                    "n_split_idx",
+                                    T.if_then_else(
+                                        batch_idx == sched_begin_req,
+                                        T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32")
+                                        + sched_begin_split,
+                                        T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
+                                    ),
+                                )
+                                num_orig_blocks = _builder_bind(
+                                    "num_orig_blocks", orig_topk_padded // B_TOPK
+                                )
+                                is_last_batch = _builder_scalar(
+                                    "is_last_batch", batch_idx == sched_end_req, dtype="bool"
+                                )
+                                _builder_emit(T.ptx.cp.async_.bulk.wait_group.read(0))
+                                _builder_emit(bar_last_store_done.arrive(0))
+                                mi = _builder_scalar("mi", MAX_INIT_VAL, dtype="float32")
+                                li = _builder_scalar("li", 0.0, dtype="float32")
+                                real_mi = _builder_scalar(
+                                    "real_mi", T.float32(-float("inf")), dtype="float32"
+                                )
+                                with T.serial(start_block, end_block, unroll=False) as block_idx:
+                                    _builder_emit(T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128))
+                                    _builder_emit(
+                                        bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                                     )
-                                )
-                        bar_q_utccp.arrive(0)
-                        bar_q_utccp.wait(0, batch_bar_phase)
-                        T.ptx.tcgen05.fence__after_thread_sync()
-
-                        # kernel.cuh:529-584.  MODEL_TYPE only selects how the
-                        # shared K latent is interpreted; both instances issue
-                        # the same dual-head P and SxV pipelines.
-                        for block_idx in T.serial(start_block, end_block, unroll=False):
-                            k_stage_elems = T.meta_var(
-                                B_TOPK * (D_V + 64) if is_v32 else B_TOPK * D_V
-                            )
-                            if is_v32:
-                                bar_rope_ready.wait(rs_buf.stage, rs_buf.phase)
-                                T.ptx.tcgen05.fence__after_thread_sync()
-                                for qk_rope_ki in T.unroll(2):
-                                    qk_rope_offset: T.let = (
-                                        rs_buf.stage * k_stage_elems + qk_rope_ki * 16
-                                    ) // 8
-                                    T.evaluate(
-                                        T.ptx[_MMA_WS_F16](
-                                            T.uint32(400),
-                                            T.cast(384 + qk_rope_ki * 8, "uint32"),
-                                            qk_rope_desc.add_16B_offset(qk_rope_offset),
-                                            T.uint32(69207184),
-                                            qk_rope_ki != 0,
-                                            T.uint64(0),
+                                    _builder_emit(bar_qk_done.wait(rs_buf.stage, rs_buf.phase))
+                                    _builder_emit(T.ptx.tcgen05.fence__after_thread_sync())
+                                    _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                    p_frag = _builder_assign(
+                                        "p_frag",
+                                        T.alloc_tcgen05_ldst_frag(
+                                            "32x32b", (128, B_TOPK // 2), "float32"
+                                        ),
+                                    )
+                                    p_peer_frag = _builder_assign(
+                                        "p_peer_frag",
+                                        T.alloc_tcgen05_ldst_frag(
+                                            "32x32b", (128, B_TOPK // 2), "float32"
+                                        ),
+                                    )
+                                    p = _builder_assign("p", p_frag.local())
+                                    p_peer = _builder_assign("p_peer", p_peer_frag.local())
+                                    with T.If(warp_idx < 2):
+                                        with T.Then():
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    _tmem_load(p, T.uint32(400), B_TOPK // 2)
+                                                )
+                                            )
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    _tmem_load(
+                                                        p_peer,
+                                                        T.cuda.get_tmem_addr(
+                                                            T.uint32(400), 0, B_TOPK // 2
+                                                        ),
+                                                        B_TOPK // 2,
+                                                    )
+                                                )
+                                            )
+                                        with T.Else():
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    _tmem_load(p_peer, T.uint32(400), B_TOPK // 2)
+                                                )
+                                            )
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    _tmem_load(
+                                                        p,
+                                                        T.cuda.get_tmem_addr(
+                                                            T.uint32(400), 0, B_TOPK // 2
+                                                        ),
+                                                        B_TOPK // 2,
+                                                    )
+                                                )
+                                            )
+                                    _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                    _builder_emit(T.ptx.tcgen05.fence__before_thread_sync())
+                                    with T.unroll(B_TOPK // 2 // 4) as exchange_i:
+                                        exchange_offset = _builder_bind(
+                                            "exchange_offset", exchange_i * 32 * 4 + lane_idx * 4
+                                        )
+                                        p_peer_words = _builder_assign(
+                                            "p_peer_words", p_peer.view("uint32")
+                                        )
+                                        peer_word = _builder_bind("peer_word", exchange_i * 4)
+                                        _builder_emit(
+                                            T.ptx.st.shared.v4.u32(
+                                                p_exchange.view("uint32").ptr_to(
+                                                    [warp_idx ^ 2, exchange_offset]
+                                                ),
+                                                p_peer_words[peer_word],
+                                                p_peer_words[peer_word + 1],
+                                                p_peer_words[peer_word + 2],
+                                                p_peer_words[peer_word + 3],
+                                            )
+                                        )
+                                    _builder_emit(
+                                        T.ptx.bar.sync(
+                                            T.uint32(
+                                                BAR_WG0_WARP02 + T.bitwise_and(warp_idx, T.int32(1))
+                                            ),
+                                            64,
                                         )
                                     )
-                                bar_nope_ready.wait(rs_buf.stage, rs_buf.phase)
-                                T.ptx.tcgen05.fence__after_thread_sync()
-                            else:
-                                bar_rope_ready.wait(rs_buf.stage, rs_buf.phase)
-                                bar_nope_ready.wait(rs_buf.stage, rs_buf.phase)
-                                T.ptx.tcgen05.fence__after_thread_sync()
-
-                            for qk_nope_ki in T.unroll(16):
-                                qk_nope_offset: T.let = (
-                                    qk_nope_ki // 2048 * k_stage_elems
-                                    + rs_buf.stage * k_stage_elems
-                                    + qk_nope_ki % 16 // 4 * 8192
-                                    + qk_nope_ki % 2048 // 16 * 64
-                                    + qk_nope_ki % 4 * 16
-                                ) // 8
-                                T.evaluate(
-                                    T.ptx[_MMA_WS_F16](
-                                        T.uint32(400),
-                                        T.cast(256 + qk_nope_ki * 8, "uint32"),
-                                        qk_nope_desc.add_16B_offset(qk_nope_offset),
-                                        T.uint32(69207184),
-                                        T.Or(
-                                            qk_nope_ki != 0,
-                                            T.cast(T.uint32(1 if is_v32 else 0), "bool"),
+                                    with T.unroll(B_TOPK // 2 // 4) as exchange_i:
+                                        exchange_offset = _builder_bind(
+                                            "exchange_offset", exchange_i * 32 * 4 + lane_idx * 4
+                                        )
+                                        peer_tmp = _builder_assign(
+                                            "peer_tmp", T.alloc_local((4,), "float32")
+                                        )
+                                        peer_tmp_words = _builder_assign(
+                                            "peer_tmp_words", peer_tmp.view("uint32")
+                                        )
+                                        _builder_emit(
+                                            T.ptx.ld.shared.v4.u32(
+                                                peer_tmp_words[0],
+                                                peer_tmp_words[1],
+                                                peer_tmp_words[2],
+                                                peer_tmp_words[3],
+                                                p_exchange.view("uint32").ptr_to(
+                                                    [warp_idx, exchange_offset]
+                                                ),
+                                            )
+                                        )
+                                        pair0 = _builder_alloc_scalar("pair0", "uint64")
+                                        pair1 = _builder_alloc_scalar("pair1", "uint64")
+                                        _builder_emit(
+                                            T.ptx.add.f32x2(
+                                                pair0,
+                                                T.cuda.make_float2(
+                                                    p[exchange_i * 4], p[exchange_i * 4 + 1]
+                                                ),
+                                                T.cuda.make_float2(peer_tmp[0], peer_tmp[1]),
+                                            )
+                                        )
+                                        _builder_emit(
+                                            T.ptx.add.f32x2(
+                                                pair1,
+                                                T.cuda.make_float2(
+                                                    p[exchange_i * 4 + 2], p[exchange_i * 4 + 3]
+                                                ),
+                                                T.cuda.make_float2(peer_tmp[2], peer_tmp[3]),
+                                            )
+                                        )
+                                        T.buffer_store(p, T.cuda.float2_x(pair0), [exchange_i * 4])
+                                        T.buffer_store(
+                                            p, T.cuda.float2_y(pair0), [exchange_i * 4 + 1]
+                                        )
+                                        T.buffer_store(
+                                            p, T.cuda.float2_x(pair1), [exchange_i * 4 + 2]
+                                        )
+                                        T.buffer_store(
+                                            p, T.cuda.float2_y(pair1), [exchange_i * 4 + 3]
+                                        )
+                                    valid_word = _builder_alloc_scalar("valid_word", "uint32")
+                                    _builder_emit(
+                                        T.ptx.ld.shared.u32(
+                                            valid_word,
+                                            is_token_valid.view("uint32").ptr_to(
+                                                [
+                                                    rs_index.stage,
+                                                    T.if_then_else(idx_in_warpgroup >= 64, 1, 0),
+                                                ]
+                                            ),
+                                        )
+                                    )
+                                    with T.unroll(B_TOPK // 2) as p_i:
+                                        with T.If(
+                                            T.bitwise_and(
+                                                T.shift_right(valid_word, T.cast(p_i, "uint32")),
+                                                T.uint32(1),
+                                            )
+                                            == T.uint32(0)
+                                        ):
+                                            with T.Then():
+                                                T.buffer_store(p, T.float32(-float("inf")), [p_i])
+                                    cur_pi_max = _builder_scalar(
+                                        "cur_pi_max", T.float32(-float("inf")), dtype="float32"
+                                    )
+                                    with T.unroll(B_TOPK // 2) as p_i:
+                                        T.buffer_store(
+                                            cur_pi_max.buffer, T.max(cur_pi_max, p[p_i]), [0]
+                                        )
+                                    T.buffer_store(
+                                        cur_pi_max.buffer, cur_pi_max * sm_scale_div_log2, [0]
+                                    )
+                                    _builder_emit(
+                                        T.ptx.st.shared.f32(
+                                            rowwise_buf.ptr_to([idx_in_warpgroup]), cur_pi_max
+                                        )
+                                    )
+                                    _builder_emit(T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128))
+                                    _builder_emit(bar_valid_free.arrive(rs_index.stage))
+                                    peer_pi_max = _builder_alloc_scalar("peer_pi_max", "float32")
+                                    _builder_emit(
+                                        T.ptx.ld.shared.f32(
+                                            peer_pi_max, rowwise_buf.ptr_to([idx_in_warpgroup ^ 64])
+                                        )
+                                    )
+                                    T.buffer_store(
+                                        cur_pi_max.buffer, T.max(cur_pi_max, peer_pi_max), [0]
+                                    )
+                                    T.buffer_store(real_mi.buffer, T.max(real_mi, cur_pi_max), [0])
+                                    should_scale_o = _builder_bind(
+                                        "should_scale_o",
+                                        T.cuda.any_sync(T.uint32(4294967295), cur_pi_max - mi > 6.0)
+                                        != 0,
+                                    )
+                                    new_max = _builder_alloc_scalar("new_max", "float32")
+                                    scale_for_old = _builder_alloc_scalar(
+                                        "scale_for_old", "float32"
+                                    )
+                                    with T.If(T.Not(should_scale_o)):
+                                        with T.Then():
+                                            T.buffer_store(scale_for_old.buffer, 1.0, [0])
+                                            T.buffer_store(new_max.buffer, mi, [0])
+                                        with T.Else():
+                                            T.buffer_store(
+                                                new_max.buffer, T.max(cur_pi_max, mi), [0]
+                                            )
+                                            _builder_emit(
+                                                T.ptx.ex2.approx.ftz.f32(
+                                                    scale_for_old, mi - new_max
+                                                )
+                                            )
+                                    T.buffer_store(mi.buffer, new_max, [0])
+                                    s_frag = _builder_assign(
+                                        "s_frag",
+                                        T.alloc_buffer(
+                                            (B_H, B_TOPK),
+                                            "bfloat16",
+                                            scope="local",
+                                            layout=s_frag_layout,
                                         ),
-                                        T.uint64(0),
+                                    )
+                                    s_pack = _builder_assign(
+                                        "s_pack", s_frag.local().view("uint32")
+                                    )
+                                    cur_sum_pair = _builder_scalar(
+                                        "cur_sum_pair", T.cuda.make_float2(0.0, 0.0), dtype="uint64"
+                                    )
+                                    neg_max_pair = _builder_bind(
+                                        "neg_max_pair", T.cuda.make_float2(-new_max, -new_max)
+                                    )
+                                    with T.unroll(B_TOPK // 2 // 2) as s_i:
+                                        p_pair = _builder_bind(
+                                            "p_pair", T.cuda.make_float2(p[s_i * 2], p[s_i * 2 + 1])
+                                        )
+                                        soft_pair = _builder_alloc_scalar("soft_pair", "uint64")
+                                        _builder_emit(
+                                            T.ptx.fma.rn.f32x2(
+                                                soft_pair, p_pair, scale_pair, neg_max_pair
+                                            )
+                                        )
+                                        sx = _builder_alloc_scalar("sx", "float32")
+                                        sy = _builder_alloc_scalar("sy", "float32")
+                                        _builder_emit(
+                                            T.ptx.ex2.approx.ftz.f32(sx, T.cuda.float2_x(soft_pair))
+                                        )
+                                        _builder_emit(
+                                            T.ptx.ex2.approx.ftz.f32(sy, T.cuda.float2_y(soft_pair))
+                                        )
+                                        _builder_emit(
+                                            T.ptx.add.f32x2(
+                                                cur_sum_pair,
+                                                cur_sum_pair,
+                                                T.cuda.make_float2(sx, sy),
+                                            )
+                                        )
+                                        T.buffer_store(
+                                            s_pack, T.cuda.float22bfloat162_rn(sx, sy), [s_i]
+                                        )
+                                    cur_sum = _builder_bind(
+                                        "cur_sum",
+                                        T.cuda.float2_x(cur_sum_pair)
+                                        + T.cuda.float2_y(cur_sum_pair),
+                                    )
+                                    li_next = _builder_alloc_scalar("li_next", "float32")
+                                    _builder_emit(
+                                        T.ptx.fma.rn.f32(li_next, li, scale_for_old, cur_sum)
+                                    )
+                                    T.buffer_store(li.buffer, li_next, [0])
+                                    s_base = _builder_bind(
+                                        "s_base",
+                                        idx_in_warpgroup // 64 * 2048 + idx_in_warpgroup % 64 * 8,
+                                    )
+                                    s_words = _builder_assign(
+                                        "s_words", s_frag.local().view("uint32")
+                                    )
+                                    with T.unroll(4) as s_store_i:
+                                        s_ptr = _builder_bind(
+                                            "s_ptr",
+                                            T.ptr_byte_offset(
+                                                s_smem_gemm.ptr_to([0, 0]),
+                                                (s_base + s_store_i * 512) * BF16_BYTES,
+                                                "bfloat16",
+                                            ),
+                                        )
+                                        s_word = _builder_bind("s_word", s_store_i * 4)
+                                        _builder_emit(
+                                            T.ptx.st.shared.v4.u32(
+                                                s_ptr,
+                                                s_words[s_word],
+                                                s_words[s_word + 1],
+                                                s_words[s_word + 2],
+                                                s_words[s_word + 3],
+                                            )
+                                        )
+                                    with T.If(T.And(block_idx != start_block, should_scale_o)):
+                                        with T.Then():
+                                            scale_for_old_pair = _builder_bind(
+                                                "scale_for_old_pair",
+                                                T.cuda.make_float2(scale_for_old, scale_for_old),
+                                            )
+                                            _builder_emit(T.ptx.tcgen05.fence__after_thread_sync())
+                                            o_rescale_frag = _builder_assign(
+                                                "o_rescale_frag",
+                                                T.alloc_tcgen05_ldst_frag(
+                                                    "32x32b", (128, 64), "float32"
+                                                ),
+                                            )
+                                            o_rescale = _builder_assign(
+                                                "o_rescale", o_rescale_frag.local()
+                                            )
+                                            with T.unroll(D_V // 2 // 64) as o_chunk:
+                                                _builder_emit(
+                                                    T.evaluate(
+                                                        _tmem_load(
+                                                            o_rescale,
+                                                            T.cuda.get_tmem_addr(
+                                                                T.uint32(0), 0, o_chunk * 64
+                                                            ),
+                                                            64,
+                                                        )
+                                                    )
+                                                )
+                                                _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                                scaled_pair = _builder_alloc_scalar(
+                                                    "scaled_pair", "uint64"
+                                                )
+                                                with T.unroll(64 // 2) as scale_i:
+                                                    _builder_emit(
+                                                        T.ptx.mul.f32x2(
+                                                            scaled_pair,
+                                                            T.cuda.make_float2(
+                                                                o_rescale[scale_i * 2],
+                                                                o_rescale[scale_i * 2 + 1],
+                                                            ),
+                                                            scale_for_old_pair,
+                                                        )
+                                                    )
+                                                    T.buffer_store(
+                                                        o_rescale,
+                                                        T.cuda.float2_x(scaled_pair),
+                                                        [scale_i * 2],
+                                                    )
+                                                    T.buffer_store(
+                                                        o_rescale,
+                                                        T.cuda.float2_y(scaled_pair),
+                                                        [scale_i * 2 + 1],
+                                                    )
+                                                _builder_emit(
+                                                    T.evaluate(
+                                                        _tmem_store(
+                                                            o_rescale,
+                                                            T.cuda.get_tmem_addr(
+                                                                T.uint32(0), 0, o_chunk * 64
+                                                            ),
+                                                        )
+                                                    )
+                                                )
+                                                _builder_emit(T.ptx.tcgen05.wait__st.sync.aligned())
+                                            _builder_emit(T.ptx.tcgen05.fence__before_thread_sync())
+                                    _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                    _builder_emit(bar_so_ready.arrive(rs_buf.stage))
+                                    with T.If(block_idx != end_block - 1):
+                                        with T.Then():
+                                            _builder_emit(rs_buf.advance())
+                                            _builder_emit(rs_index.advance())
+                                with T.If(real_mi == T.float32(-float("inf"))):
+                                    with T.Then():
+                                        T.buffer_store(li.buffer, 0.0, [0])
+                                        T.buffer_store(mi.buffer, T.float32(-float("inf")), [0])
+                                _builder_emit(T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128))
+                                _builder_emit(
+                                    T.ptx.st.shared.f32(rowwise_buf.ptr_to([idx_in_warpgroup]), li)
+                                )
+                                _builder_emit(T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128))
+                                peer_li = _builder_alloc_scalar("peer_li", "float32")
+                                _builder_emit(
+                                    T.ptx.ld.shared.f32(
+                                        peer_li, rowwise_buf.ptr_to([idx_in_warpgroup ^ 64])
                                     )
                                 )
-                            bar_qk_done.arrive(rs_buf.stage)
+                                T.buffer_store(li.buffer, li + peer_li, [0])
+                                with T.If(idx_in_warpgroup < B_H):
+                                    with T.Then():
+                                        with T.If(is_no_split):
+                                            with T.Then():
+                                                cur_lse = _builder_alloc_scalar(
+                                                    "cur_lse", "float32"
+                                                )
+                                                _builder_emit(
+                                                    T.ptx.fma.rn.f32(
+                                                        cur_lse, mi, T.float32(LN_2), T.log(li)
+                                                    )
+                                                )
+                                                _builder_emit(
+                                                    T.ptx.st.global_.f32(
+                                                        lse.ptr_to(
+                                                            [
+                                                                batch_idx * stride_lse_b
+                                                                + s_q_idx * stride_lse_s_q
+                                                                + idx_in_warpgroup
+                                                            ]
+                                                        ),
+                                                        T.if_then_else(
+                                                            cur_lse == T.float32(-float("inf")),
+                                                            T.float32(float("inf")),
+                                                            cur_lse,
+                                                        ),
+                                                    )
+                                                )
+                                            with T.Else():
+                                                _builder_emit(
+                                                    T.ptx.st.global_.f32(
+                                                        lse_accum.ptr_to(
+                                                            [
+                                                                n_split_idx * stride_lse_accum_split
+                                                                + s_q_idx * stride_lse_accum_s_q
+                                                                + idx_in_warpgroup
+                                                            ]
+                                                        ),
+                                                        T.log2(li) + mi,
+                                                    )
+                                                )
+                                _builder_emit(bar_sv_done.wait(rs_buf.stage, rs_buf.phase))
+                                _builder_emit(rs_buf.advance())
+                                _builder_emit(rs_index.advance())
+                                _builder_emit(T.ptx.tcgen05.fence__after_thread_sync())
+                                if use_pdl:
+                                    with T.If(T.And(True, is_last_batch)):
+                                        with T.Then():
+                                            _builder_emit(T.ptx.griddepcontrol.launch_dependents())
+                                with T.If(is_no_split):
+                                    with T.Then():
+                                        sink_exp = _builder_alloc_scalar("sink_exp", "float32")
+                                        _builder_emit(
+                                            T.ptx.ex2.approx.ftz.f32(sink_exp, attn_sink_log2 - mi)
+                                        )
+                                        output_scale = _builder_bind(
+                                            "output_scale",
+                                            T.if_then_else(
+                                                li == 0.0, 0.0, T.cuda.fdividef(1.0, li + sink_exp)
+                                            ),
+                                        )
+                                        output_scale_pair = _builder_bind(
+                                            "output_scale_pair",
+                                            T.cuda.make_float2(output_scale, output_scale),
+                                        )
+                                        o_epi_frag = _builder_assign(
+                                            "o_epi_frag",
+                                            T.alloc_tcgen05_ldst_frag(
+                                                "32x32b", (128, 64), "float32"
+                                            ),
+                                        )
+                                        o_epi_bf16_frag = _builder_assign(
+                                            "o_epi_bf16_frag",
+                                            T.alloc_tcgen05_ldst_frag(
+                                                "32x32b", (128, 64), "bfloat16"
+                                            ),
+                                        )
+                                        o_epi = _builder_assign("o_epi", o_epi_frag.local())
 
-                            bar_so_ready.wait(rs_buf.stage, rs_buf.phase)
-                            T.ptx.tcgen05.fence__after_thread_sync()
-                            mma_o_accum: T.let = T.if_then_else(
-                                block_idx == start_block, T.uint32(0), T.uint32(1)
-                            )
-                            for pv_ki in T.unroll(4):
-                                pv_a_offset: T.let = (pv_ki % 4 * 1024 + pv_ki // 4 * 8) // 8
-                                pv_b_lo_offset: T.let = (
-                                    (pv_ki * 16) // 64 * k_stage_elems
-                                    + rs_buf.stage * k_stage_elems
-                                    + (pv_ki * 16) % 64 * 64
-                                ) // 8
-                                T.evaluate(
-                                    T.ptx[_MMA_WS_F16](
-                                        T.uint32(0),
-                                        pv_a_lo_desc.add_16B_offset(pv_a_offset),
-                                        pv_b_lo_desc.add_16B_offset(pv_b_lo_offset),
-                                        T.uint32(71369872),
-                                        T.Or(pv_ki != 0, T.cast(mma_o_accum, "bool")),
-                                        T.uint64(0),
-                                    )
-                                )
-                            for pv_ki in T.unroll(4):
-                                pv_a_offset: T.let = (pv_ki % 4 * 1024 + pv_ki // 4 * 8) // 8
-                                pv_b_hi_offset: T.let = (
-                                    (pv_ki * 16) // 64 * k_stage_elems
-                                    + rs_buf.stage * k_stage_elems
-                                    + (pv_ki * 16) % 64 * 64
-                                    + 16384
-                                ) // 8
-                                T.evaluate(
-                                    T.ptx[_MMA_WS_F16](
-                                        T.uint32(128),
-                                        pv_a_hi_desc.add_16B_offset(pv_a_offset),
-                                        pv_b_hi_desc.add_16B_offset(pv_b_hi_offset),
-                                        T.uint32(71369872),
-                                        T.Or(pv_ki != 0, T.cast(mma_o_accum, "bool")),
-                                        T.uint64(0),
-                                    )
-                                )
-                            bar_sv_done.arrive(rs_buf.stage)
-                            rs_buf.advance()
-                            rs_index.advance()
+                                        def emit_no_split_epilogue(epi_i: T.constexpr):
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    _tmem_load(
+                                                        o_epi,
+                                                        T.cuda.get_tmem_addr(
+                                                            T.uint32(0), 0, epi_i * 64
+                                                        ),
+                                                        64,
+                                                    )
+                                                )
+                                            )
+                                            _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                            scaled_pair = _builder_alloc_scalar(
+                                                "scaled_pair", "uint64"
+                                            )
+                                            with T.unroll(64 // 2) as scale_i:
+                                                _builder_emit(
+                                                    T.ptx.mul.f32x2(
+                                                        scaled_pair,
+                                                        T.cuda.make_float2(
+                                                            o_epi[scale_i * 2],
+                                                            o_epi[scale_i * 2 + 1],
+                                                        ),
+                                                        output_scale_pair,
+                                                    )
+                                                )
+                                                T.buffer_store(
+                                                    o_epi,
+                                                    T.cuda.float2_x(scaled_pair),
+                                                    [scale_i * 2],
+                                                )
+                                                T.buffer_store(
+                                                    o_epi,
+                                                    T.cuda.float2_y(scaled_pair),
+                                                    [scale_i * 2 + 1],
+                                                )
+                                            o_epi_bf16 = _builder_assign(
+                                                "o_epi_bf16", o_epi_bf16_frag.local()
+                                            )
+                                            with T.unroll(64 // 2) as cast_i:
+                                                _builder_emit(
+                                                    T.evaluate(
+                                                        _cast_f32x2_bf16x2(
+                                                            o_epi_bf16, o_epi, cast_i * 2
+                                                        )
+                                                    )
+                                                )
+                                            col_base = (
+                                                D_V // 2 if epi_i * 64 >= D_V // 4 else 0
+                                            ) + epi_i * 64 % (D_V // 4)
+                                            o_epi_words = _builder_assign(
+                                                "o_epi_words", o_epi_bf16.view("uint32")
+                                            )
+                                            with T.unroll(8) as o_store_i:
+                                                o_smem_offset = _builder_bind(
+                                                    "o_smem_offset",
+                                                    col_base * B_H
+                                                    + idx_in_warpgroup // 64 * 8192
+                                                    + idx_in_warpgroup % 64 * 64
+                                                    + T.bitwise_xor(
+                                                        o_store_i * 8,
+                                                        T.shift_left(
+                                                            T.bitwise_and(
+                                                                idx_in_warpgroup // 64 * 128
+                                                                + idx_in_warpgroup % 64,
+                                                                7,
+                                                            ),
+                                                            3,
+                                                        ),
+                                                    ),
+                                                )
+                                                o_smem_ptr = _builder_bind(
+                                                    "o_smem_ptr",
+                                                    T.ptr_byte_offset(
+                                                        o_smem_win.ptr_to([0, 0]),
+                                                        o_smem_offset * BF16_BYTES,
+                                                        "bfloat16",
+                                                    ),
+                                                )
+                                                o_word = _builder_bind("o_word", o_store_i * 4)
+                                                _builder_emit(
+                                                    T.ptx.st.shared.v4.u32(
+                                                        o_smem_ptr,
+                                                        o_epi_words[o_word],
+                                                        o_epi_words[o_word + 1],
+                                                        o_epi_words[o_word + 2],
+                                                        o_epi_words[o_word + 3],
+                                                    )
+                                                )
+                                            _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                            _builder_emit(
+                                                T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128)
+                                            )
+                                            with T.If(warp_idx == 0):
+                                                with T.Then():
+                                                    with T.If(T.cuda.elect_sync() != T.uint32(0)):
+                                                        with T.Then():
+                                                            _builder_emit(
+                                                                T.evaluate(
+                                                                    T.ptx[_TMA_S2G_4D](
+                                                                        T.address_of(out_tensormap),
+                                                                        T.int32(col_base),
+                                                                        T.int32(0),
+                                                                        T.cast(s_q_idx, "int32"),
+                                                                        T.cast(batch_idx, "int32"),
+                                                                        T.cuda.cvta_generic_to_shared(
+                                                                            T.ptr_byte_offset(
+                                                                                o_smem.ptr_to(
+                                                                                    [0, 0]
+                                                                                ),
+                                                                                col_base
+                                                                                * B_H
+                                                                                * BF16_BYTES,
+                                                                                "bfloat16",
+                                                                            )
+                                                                        ),
+                                                                    )
+                                                                )
+                                                            )
+                                            warp1_col_base = col_base + D_V // 4
+                                            with T.If(warp_idx == 1):
+                                                with T.Then():
+                                                    with T.If(T.cuda.elect_sync() != T.uint32(0)):
+                                                        with T.Then():
+                                                            _builder_emit(
+                                                                T.evaluate(
+                                                                    T.ptx[_TMA_S2G_4D](
+                                                                        T.address_of(out_tensormap),
+                                                                        T.int32(warp1_col_base),
+                                                                        T.int32(0),
+                                                                        T.cast(s_q_idx, "int32"),
+                                                                        T.cast(batch_idx, "int32"),
+                                                                        T.cuda.cvta_generic_to_shared(
+                                                                            T.ptr_byte_offset(
+                                                                                o_smem.ptr_to(
+                                                                                    [0, 0]
+                                                                                ),
+                                                                                warp1_col_base
+                                                                                * B_H
+                                                                                * BF16_BYTES,
+                                                                                "bfloat16",
+                                                                            )
+                                                                        ),
+                                                                    )
+                                                                )
+                                                            )
 
-                    elif role == 5:
-                        # kernel.cuh:586-615.  One gather4 producer loads raw
-                        # fp8 NoPE as int64, retaining the two-stage raw ring.
-                        bar_q_utccp.wait(0, batch_bar_phase)
-                        bar_last_store_done.wait(0, batch_bar_phase)
-                        for block_idx in T.serial(start_block, end_block, unroll=False):
-                            bar_valid_ready.wait(rs_index.stage, rs_index.phase)
-                            bar_raw_free.wait(rs_buf.stage, rs_buf.phase ^ 1)
-                            cur_indices = T.alloc_local((4,), "int32")
-                            next_indices = T.alloc_local((4,), "int32")
-                            cur_index_words = cur_indices.view("uint32")
-                            T.ptx.ld.shared.v4.u32(
-                                cur_index_words[0],
-                                cur_index_words[1],
-                                cur_index_words[2],
-                                cur_index_words[3],
-                                tma_coord.view("uint32").ptr_to([rs_index.stage, 0]),
+                                        _builder_emit(emit_no_split_epilogue(0))
+                                        _builder_emit(emit_no_split_epilogue(1))
+                                        _builder_emit(emit_no_split_epilogue(2))
+                                        _builder_emit(emit_no_split_epilogue(3))
+                                        _builder_emit(T.ptx.cp.async_.bulk.commit_group())
+                                    with T.Else():
+                                        output_scale = _builder_bind(
+                                            "output_scale",
+                                            T.if_then_else(
+                                                li == 0.0, 0.0, T.cuda.fdividef(1.0, li)
+                                            ),
+                                        )
+                                        output_scale_pair = _builder_bind(
+                                            "output_scale_pair",
+                                            T.cuda.make_float2(output_scale, output_scale),
+                                        )
+                                        split_frag = _builder_assign(
+                                            "split_frag",
+                                            T.alloc_tcgen05_ldst_frag(
+                                                "32x32b", (128, 64), "float32"
+                                            ),
+                                        )
+                                        split_local = _builder_assign(
+                                            "split_local", split_frag.local()
+                                        )
+                                        with T.unroll(D_V // 2 // 64) as epi_i:
+                                            _builder_emit(
+                                                T.evaluate(
+                                                    _tmem_load(
+                                                        split_local,
+                                                        T.cuda.get_tmem_addr(
+                                                            T.uint32(0), 0, epi_i * 64
+                                                        ),
+                                                        64,
+                                                    )
+                                                )
+                                            )
+                                            _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                            scaled_pair = _builder_alloc_scalar(
+                                                "scaled_pair", "uint64"
+                                            )
+                                            with T.unroll(64 // 2) as scale_i:
+                                                _builder_emit(
+                                                    T.ptx.mul.f32x2(
+                                                        scaled_pair,
+                                                        T.cuda.make_float2(
+                                                            split_local[scale_i * 2],
+                                                            split_local[scale_i * 2 + 1],
+                                                        ),
+                                                        output_scale_pair,
+                                                    )
+                                                )
+                                                T.buffer_store(
+                                                    split_local,
+                                                    T.cuda.float2_x(scaled_pair),
+                                                    [scale_i * 2],
+                                                )
+                                                T.buffer_store(
+                                                    split_local,
+                                                    T.cuda.float2_y(scaled_pair),
+                                                    [scale_i * 2 + 1],
+                                                )
+                                            col_base = _builder_bind(
+                                                "col_base",
+                                                idx_in_warpgroup // 64 * 128
+                                                + T.if_then_else(
+                                                    epi_i * 64 >= D_V // 4, D_V // 2, 0
+                                                )
+                                                + epi_i * 64 % (D_V // 4),
+                                            )
+                                            split_words = _builder_assign(
+                                                "split_words", split_local.view("uint32")
+                                            )
+                                            with T.unroll(64 // 4) as j:
+                                                split_word = _builder_bind("split_word", j * 4)
+                                                _builder_emit(
+                                                    T.ptx.st.shared.v4.u32(
+                                                        o_accum_smem.view("uint32").ptr_to(
+                                                            [
+                                                                idx_in_warpgroup % 64,
+                                                                col_base + j * 4,
+                                                            ]
+                                                        ),
+                                                        split_words[split_word],
+                                                        split_words[split_word + 1],
+                                                        split_words[split_word + 2],
+                                                        split_words[split_word + 3],
+                                                    )
+                                                )
+                                        _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                        _builder_emit(T.ptx.bar.sync(T.uint32(BAR_WG0_SYNC), 128))
+                                        with T.If(T.cuda.elect_sync() != T.uint32(0)):
+                                            with T.Then():
+                                                with T.unroll(B_H // 4) as local_row:
+                                                    smem_row = _builder_bind(
+                                                        "smem_row", local_row * 4 + warp_idx
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx[
+                                                            "cp.async.bulk.global.shared::cta.bulk_group"
+                                                        ](
+                                                            o_accum.ptr_to(
+                                                                [
+                                                                    n_split_idx
+                                                                    * stride_o_accum_split
+                                                                    + s_q_idx * stride_o_accum_s_q
+                                                                    + smem_row * stride_o_accum_h_q
+                                                                ]
+                                                            ),
+                                                            o_accum_smem.ptr_to([smem_row, 0]),
+                                                            T.uint32(D_V * 4),
+                                                        )
+                                                    )
+                                                _builder_emit(T.ptx.cp.async_.bulk.commit_group())
+                                _builder_emit(
+                                    T.ptx.barrier.sync(
+                                        T.uint32(BAR_EVERYONE_SYNC), T.uint32(NUM_THREADS)
+                                    )
+                                )
+                                T.buffer_store(batch_bar_phase.buffer, batch_bar_phase ^ 1, [0])
+                    with T.If(warp_idx == 0):
+                        with T.Then():
+                            _builder_emit(
+                                T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                                    T.uint32(0), T.uint32(512)
+                                )
                             )
-                            for row4 in T.unroll(B_TOPK // 4):
-                                row: T.let = row4 * 4
-                                if row + 4 < B_TOPK:
-                                    next_index_words = next_indices.view("uint32")
-                                    T.ptx.ld.shared.v4.u32(
-                                        next_index_words[0],
-                                        next_index_words[1],
-                                        next_index_words[2],
-                                        next_index_words[3],
-                                        tma_coord.view("uint32").ptr_to([rs_index.stage, row + 4]),
-                                    )
-                                selected_nope_tensormap: T.uint64 = T.reinterpret(
-                                    "uint64", T.address_of(kv_nope_tensormap)
-                                )
-                                if extra_kv_h is not None:
-                                    selected_nope_tensormap = T.if_then_else(
-                                        block_idx >= num_orig_blocks,
-                                        T.reinterpret(
-                                            "uint64", T.address_of(extra_kv_nope_tensormap)
-                                        ),
-                                        T.reinterpret("uint64", T.address_of(kv_nope_tensormap)),
-                                    )
-                                T.evaluate(
-                                    T.ptx[_TMA_GATHER4_2D_CACHE](
-                                        raw_nope.ptr_to([rs_buf.stage, row, 0]),
-                                        T.reinterpret(T.handle().ty, selected_nope_tensormap),
-                                        T.int32(0),
-                                        cur_indices[0],
-                                        cur_indices[1],
-                                        cur_indices[2],
-                                        cur_indices[3],
-                                        T.cuda.cvta_generic_to_shared(
-                                            bar_raw_ready.ptr_to([rs_buf.stage])
-                                        ),
-                                        _KV_TMA_CACHE_HINT,
-                                    )
-                                )
-                                cur_indices[0] = next_indices[0]
-                                cur_indices[1] = next_indices[1]
-                                cur_indices[2] = next_indices[2]
-                                cur_indices[3] = next_indices[3]
-                            bar_raw_ready.arrive(rs_buf.stage, tx_count=B_TOPK * d_nope)
-                            bar_valid_free.arrive(rs_index.stage)
-                            rs_buf.advance()
-                            rs_index.advance()
+                with T.Else():
+                    with T.If(warpgroup_idx == 1):
+                        with T.Then():
+                            _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(72))
+                            wg1_warp_idx = _builder_bind(
+                                "wg1_warp_idx",
+                                T.tvm_warp_shuffle(
+                                    T.uint32(4294967295), T.cuda.thread_rank() // 32, 0, 32, 32
+                                ),
+                            )
 
-                    elif role == 6:
-                        # kernel.cuh:616-652.  RoPE remains bf16 and uses the
-                        # model-specific SW64 (two 32-col gathers) or SW128
-                        # (one 64-col gather) destination.
-                        bar_q_utccp.wait(0, batch_bar_phase)
-                        bar_last_store_done.wait(0, batch_bar_phase)
-                        for block_idx in T.serial(start_block, end_block, unroll=False):
-                            bar_valid_ready.wait(rs_index.stage, rs_index.phase)
-                            if is_v32:
-                                bar_qk_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
-                            else:
-                                bar_sv_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
-                            cur_indices = T.alloc_local((4,), "int32")
-                            next_indices = T.alloc_local((4,), "int32")
-                            cur_index_words = cur_indices.view("uint32")
-                            T.ptx.ld.shared.v4.u32(
-                                cur_index_words[0],
-                                cur_index_words[1],
-                                cur_index_words[2],
-                                cur_index_words[3],
-                                tma_coord.view("uint32").ptr_to([rs_index.stage, 0]),
-                            )
-                            for row4 in T.unroll(B_TOPK // 4):
-                                row: T.let = row4 * 4
-                                if row + 4 < B_TOPK:
-                                    next_index_words = next_indices.view("uint32")
-                                    T.ptx.ld.shared.v4.u32(
-                                        next_index_words[0],
-                                        next_index_words[1],
-                                        next_index_words[2],
-                                        next_index_words[3],
-                                        tma_coord.view("uint32").ptr_to([rs_index.stage, row + 4]),
+                            def run_wg1_role(role: T.constexpr):
+                                rs_buf = _builder_assign("rs_buf", PipelineState(NUM_BUFS, phase=0))
+                                rs_index = _builder_assign(
+                                    "rs_index", PipelineState(NUM_INDEX_BUFS, phase=0)
+                                )
+                                q_sw128_tmem = _builder_assign(
+                                    "q_sw128_tmem", q_tmem.sub[:, :, 0:256]
+                                )
+                                k_full_tiled = _builder_assign(
+                                    "k_full_tiled",
+                                    k_full.rearrange(
+                                        "b r (dc h ci) -> b (h r) (dc ci)", dc=4, h=2, ci=64
+                                    ),
+                                )
+                                q_tail_tmem = _builder_assign(
+                                    "q_tail_tmem",
+                                    q_tmem.sub[:, :, q_tail_start : q_tail_start + 32],
+                                )
+                                k_rope_tiled = _builder_assign(
+                                    "k_rope_tiled",
+                                    k_rope.rearrange("b r (h ci) -> b (h r) ci", h=2, ci=32),
+                                )
+                                qk_nope_desc = _builder_assign("qk_nope_desc", SmemDescriptor())
+                                qk_rope_desc = _builder_assign("qk_rope_desc", SmemDescriptor())
+                                if role == 4:
+                                    _builder_emit(
+                                        qk_nope_desc.init(
+                                            k_full_tiled.ptr_to([0, 0, 0]),
+                                            ldo=1024,
+                                            sdo=64,
+                                            swizzle=3,
+                                        )
                                     )
-                                for rope_part in T.unroll(64 // rope_tile):
                                     if is_v32:
-                                        rope_tma_dst: T.let = T.ptr_byte_offset(
-                                            k_union.ptr_to([0, 0, 0]),
-                                            (
-                                                rs_buf.stage * B_TOPK * (D_V + 64)
-                                                + (D_V + rope_part * rope_tile) * B_TOPK
-                                                + row * rope_tile
+                                        _builder_emit(
+                                            qk_rope_desc.init(
+                                                k_rope_tiled.ptr_to([0, 0, 0]),
+                                                ldo=0,
+                                                sdo=32,
+                                                swizzle=2,
                                             )
-                                            * BF16_BYTES,
-                                            "bfloat16",
                                         )
-                                    else:
-                                        rope_tma_dst: T.let = T.ptr_byte_offset(
-                                            k_full.ptr_to([0, 0, 0]),
-                                            (
-                                                rs_buf.stage * B_TOPK * D_V
-                                                + d_nope * B_TOPK
-                                                + row * 64
-                                            )
-                                            * BF16_BYTES,
-                                            "bfloat16",
-                                        )
-                                    selected_rope_tensormap: T.uint64 = T.reinterpret(
-                                        "uint64", T.address_of(kv_rope_tensormap)
+                                if role == 7:
+                                    tma_coords_step_per_token = _builder_bind(
+                                        "tma_coords_step_per_token",
+                                        (656 if is_v32 else 576) // tma_k_stride,
+                                    )
+                                    tma_coords_step_per_block = _builder_bind(
+                                        "tma_coords_step_per_block", stride_kv_block // tma_k_stride
+                                    )
+                                    tma_coords_step_per_extra_block = _builder_bind(
+                                        "tma_coords_step_per_extra_block",
+                                        stride_extra_kv_block // tma_k_stride,
+                                    )
+                                    k_scales_ptr_u64 = _builder_bind(
+                                        "k_scales_ptr_u64",
+                                        T.reinterpret(
+                                            "uint64",
+                                            kv.ptr_to([0, d_nope // BF16_BYTES])
+                                            if is_v32
+                                            else kv.ptr_to([page_block_size, 0]),
+                                        ),
+                                    )
+                                    extra_k_scales_ptr_u64 = _builder_scalar(
+                                        "extra_k_scales_ptr_u64", T.uint64(0), dtype="uint64"
                                     )
                                     if extra_kv_h is not None:
-                                        selected_rope_tensormap = T.if_then_else(
-                                            block_idx >= num_orig_blocks,
+                                        T.buffer_store(
+                                            extra_k_scales_ptr_u64.buffer,
                                             T.reinterpret(
-                                                "uint64", T.address_of(extra_kv_rope_tensormap)
+                                                "uint64",
+                                                extra_kv.ptr_to([0, d_nope // BF16_BYTES])
+                                                if is_v32
+                                                else extra_kv.ptr_to([extra_page_block_size, 0]),
                                             ),
-                                            T.reinterpret(
-                                                "uint64", T.address_of(kv_rope_tensormap)
+                                            [0],
+                                        )
+                                sched_words = _builder_assign(
+                                    "sched_words", T.alloc_local((4,), "uint64")
+                                )
+                                _builder_emit(load_scheduler_meta(sched_words))
+                                sched_i32 = _builder_assign("sched_i32", sched_words.view("int32"))
+                                sched_begin_req = _builder_bind("sched_begin_req", sched_i32[0])
+                                sched_end_req = _builder_bind("sched_end_req", sched_i32[1])
+                                sched_begin_block = _builder_bind("sched_begin_block", sched_i32[2])
+                                sched_end_block = _builder_bind("sched_end_block", sched_i32[3])
+                                sched_begin_split = _builder_bind("sched_begin_split", sched_i32[4])
+                                sched_first_split = _builder_bind("sched_first_split", sched_i32[5])
+                                sched_last_split = _builder_bind("sched_last_split", sched_i32[6])
+                                batch_bar_phase = _builder_scalar(
+                                    "batch_bar_phase", 0, dtype="int32"
+                                )
+                                with T.If(sched_begin_req < b):
+                                    with T.Then():
+                                        with T.serial(
+                                            sched_begin_req, sched_end_req + 1, unroll=False
+                                        ) as batch_idx:
+                                            topk_len = _builder_scalar(
+                                                "topk_len", topk, dtype="int32"
+                                            )
+                                            if topk_length_h is not None:
+                                                T.buffer_store(
+                                                    topk_len.buffer,
+                                                    T.cuda.ldg(
+                                                        topk_length.ptr_to([batch_idx]), "int32"
+                                                    ),
+                                                    [0],
+                                                )
+                                            orig_topk_padded = _builder_bind(
+                                                "orig_topk_padded",
+                                                T.max(
+                                                    (topk_len + B_TOPK - 1) // B_TOPK * B_TOPK,
+                                                    B_TOPK,
+                                                ),
+                                            )
+                                            extra_topk_len = _builder_scalar(
+                                                "extra_topk_len", extra_topk, dtype="int32"
+                                            )
+                                            if extra_topk_length_h is not None:
+                                                T.buffer_store(
+                                                    extra_topk_len.buffer,
+                                                    T.cuda.ldg(
+                                                        extra_topk_length.ptr_to([batch_idx]),
+                                                        "int32",
+                                                    ),
+                                                    [0],
+                                                )
+                                            total_topk_padded = _builder_bind(
+                                                "total_topk_padded",
+                                                orig_topk_padded
+                                                + (extra_topk_len + B_TOPK - 1) // B_TOPK * B_TOPK,
+                                            )
+                                            start_block = _builder_bind(
+                                                "start_block",
+                                                T.if_then_else(
+                                                    batch_idx == sched_begin_req,
+                                                    sched_begin_block,
+                                                    0,
+                                                ),
+                                            )
+                                            end_block = _builder_bind(
+                                                "end_block",
+                                                T.if_then_else(
+                                                    batch_idx == sched_end_req,
+                                                    sched_end_block,
+                                                    total_topk_padded // B_TOPK,
+                                                ),
+                                            )
+                                            is_split = _builder_scalar(
+                                                "is_split",
+                                                T.cast(
+                                                    T.if_then_else(
+                                                        batch_idx == sched_begin_req,
+                                                        sched_first_split,
+                                                        T.if_then_else(
+                                                            batch_idx == sched_end_req,
+                                                            sched_last_split,
+                                                            0,
+                                                        ),
+                                                    ),
+                                                    "bool",
+                                                ),
+                                                dtype="bool",
+                                            )
+                                            is_no_split = _builder_scalar(
+                                                "is_no_split", T.Not(is_split), dtype="bool"
+                                            )
+                                            num_orig_blocks = _builder_bind(
+                                                "num_orig_blocks", orig_topk_padded // B_TOPK
+                                            )
+                                            n_split_idx = _builder_bind(
+                                                "n_split_idx",
+                                                T.if_then_else(
+                                                    batch_idx == sched_begin_req,
+                                                    T.cuda.ldg(
+                                                        num_splits.ptr_to([batch_idx]), "int32"
+                                                    )
+                                                    + sched_begin_split,
+                                                    T.cuda.ldg(
+                                                        num_splits.ptr_to([batch_idx]), "int32"
+                                                    ),
+                                                ),
+                                            )
+                                            is_last_batch = _builder_scalar(
+                                                "is_last_batch",
+                                                batch_idx == sched_end_req,
+                                                dtype="bool",
+                                            )
+                                            if role == 4:
+                                                _builder_emit(
+                                                    T.cuda.trap_when_assert_failed(
+                                                        start_block < end_block
+                                                    )
+                                                )
+                                                with T.unroll(512 // 64) as q_tile:
+                                                    _builder_emit(
+                                                        T.evaluate(
+                                                            T.ptx[_TMA_G2S_4D_CACHE](
+                                                                T.ptr_byte_offset(
+                                                                    q_sw128.ptr_to([0, 0]),
+                                                                    q_tile * B_H * 64 * BF16_BYTES,
+                                                                    "bfloat16",
+                                                                ),
+                                                                T.address_of(q_strided_tensormap),
+                                                                T.cast(q_tile * 64, "int32"),
+                                                                T.int32(0),
+                                                                T.cast(s_q_idx, "int32"),
+                                                                T.cast(batch_idx, "int32"),
+                                                                T.cuda.cvta_generic_to_shared(
+                                                                    bar_q_tma.ptr_to([0])
+                                                                ),
+                                                                _Q_TMA_CACHE_HINT,
+                                                            )
+                                                        )
+                                                    )
+                                                if is_v32:
+                                                    _builder_emit(
+                                                        T.evaluate(
+                                                            T.ptx[_TMA_G2S_5D_CACHE](
+                                                                q_sw64.ptr_to([0, 0]),
+                                                                T.address_of(q_tail_tensormap),
+                                                                T.int32(0),
+                                                                T.int32(0),
+                                                                T.int32(16),
+                                                                T.cast(s_q_idx, "int32"),
+                                                                T.cast(batch_idx, "int32"),
+                                                                T.cuda.cvta_generic_to_shared(
+                                                                    bar_q_tma.ptr_to([0])
+                                                                ),
+                                                                _Q_TMA_CACHE_HINT,
+                                                            )
+                                                        )
+                                                    )
+                                                _builder_emit(
+                                                    bar_q_tma.arrive(
+                                                        0, tx_count=B_H * d_qk * BF16_BYTES
+                                                    )
+                                                )
+                                                _builder_emit(bar_q_tma.wait(0, batch_bar_phase))
+                                                _builder_emit(
+                                                    T.ptx.tcgen05.fence__after_thread_sync()
+                                                )
+                                                q_main_cp_view = _builder_assign(
+                                                    "q_main_cp_view", q_sw128.view(B_H, 4, 2, 64)
+                                                )
+                                                with T.unroll(16) as q_main_flat:
+                                                    q_main_src = _builder_bind(
+                                                        "q_main_src",
+                                                        T.ptr_byte_offset(
+                                                            q_main_cp_view.ptr_to([0, 0, 0, 0]),
+                                                            (
+                                                                q_main_flat % 4 * 1024
+                                                                + q_main_flat // 4 % 4 * 2
+                                                            )
+                                                            * 16,
+                                                            "bfloat16",
+                                                        ),
+                                                    )
+                                                    _builder_emit(
+                                                        T.evaluate(
+                                                            T.ptx[_TCGEN_CP_128X256](
+                                                                T.cast(
+                                                                    256
+                                                                    + q_main_flat % 4 * 32
+                                                                    + q_main_flat // 4 % 4 * 8,
+                                                                    "uint32",
+                                                                ),
+                                                                _replace_smem_desc_addr(
+                                                                    q_main_cp_desc, q_main_src
+                                                                ),
+                                                            )
+                                                        )
+                                                    )
+                                                if is_v32:
+                                                    with T.unroll(2) as q_tail_flat:
+                                                        q_tail_src = _builder_bind(
+                                                            "q_tail_src",
+                                                            T.ptr_byte_offset(
+                                                                q_sw64.ptr_to([0, 0]),
+                                                                q_tail_flat % 2 * 2 * 16,
+                                                                "bfloat16",
+                                                            ),
+                                                        )
+                                                        _builder_emit(
+                                                            T.evaluate(
+                                                                T.ptx[_TCGEN_CP_128X256](
+                                                                    T.cast(
+                                                                        384 + q_tail_flat % 2 * 8,
+                                                                        "uint32",
+                                                                    ),
+                                                                    _replace_smem_desc_addr(
+                                                                        q_tail_cp_desc, q_tail_src
+                                                                    ),
+                                                                )
+                                                            )
+                                                        )
+                                                _builder_emit(bar_q_utccp.arrive(0))
+                                                _builder_emit(bar_q_utccp.wait(0, batch_bar_phase))
+                                                _builder_emit(
+                                                    T.ptx.tcgen05.fence__after_thread_sync()
+                                                )
+                                                with T.serial(
+                                                    start_block, end_block, unroll=False
+                                                ) as block_idx:
+                                                    k_stage_elems = (
+                                                        B_TOPK * (D_V + 64)
+                                                        if is_v32
+                                                        else B_TOPK * D_V
+                                                    )
+                                                    if is_v32:
+                                                        _builder_emit(
+                                                            bar_rope_ready.wait(
+                                                                rs_buf.stage, rs_buf.phase
+                                                            )
+                                                        )
+                                                        _builder_emit(
+                                                            T.ptx.tcgen05.fence__after_thread_sync()
+                                                        )
+                                                        with T.unroll(2) as qk_rope_ki:
+                                                            qk_rope_offset = _builder_bind(
+                                                                "qk_rope_offset",
+                                                                (
+                                                                    rs_buf.stage * k_stage_elems
+                                                                    + qk_rope_ki * 16
+                                                                )
+                                                                // 8,
+                                                            )
+                                                            _builder_emit(
+                                                                T.evaluate(
+                                                                    T.ptx[_MMA_WS_F16](
+                                                                        T.uint32(400),
+                                                                        T.cast(
+                                                                            384 + qk_rope_ki * 8,
+                                                                            "uint32",
+                                                                        ),
+                                                                        qk_rope_desc.add_16B_offset(
+                                                                            qk_rope_offset
+                                                                        ),
+                                                                        T.uint32(69207184),
+                                                                        (
+                                                                            qk_rope_ki != 0
+                                                                        ).asobject(),
+                                                                        T.uint64(0),
+                                                                    )
+                                                                )
+                                                            )
+                                                        _builder_emit(
+                                                            bar_nope_ready.wait(
+                                                                rs_buf.stage, rs_buf.phase
+                                                            )
+                                                        )
+                                                        _builder_emit(
+                                                            T.ptx.tcgen05.fence__after_thread_sync()
+                                                        )
+                                                    else:
+                                                        _builder_emit(
+                                                            bar_rope_ready.wait(
+                                                                rs_buf.stage, rs_buf.phase
+                                                            )
+                                                        )
+                                                        _builder_emit(
+                                                            bar_nope_ready.wait(
+                                                                rs_buf.stage, rs_buf.phase
+                                                            )
+                                                        )
+                                                        _builder_emit(
+                                                            T.ptx.tcgen05.fence__after_thread_sync()
+                                                        )
+                                                    with T.unroll(16) as qk_nope_ki:
+                                                        qk_nope_offset = _builder_bind(
+                                                            "qk_nope_offset",
+                                                            (
+                                                                qk_nope_ki // 2048 * k_stage_elems
+                                                                + rs_buf.stage * k_stage_elems
+                                                                + qk_nope_ki % 16 // 4 * 8192
+                                                                + qk_nope_ki % 2048 // 16 * 64
+                                                                + qk_nope_ki % 4 * 16
+                                                            )
+                                                            // 8,
+                                                        )
+                                                        _builder_emit(
+                                                            T.evaluate(
+                                                                T.ptx[_MMA_WS_F16](
+                                                                    T.uint32(400),
+                                                                    T.cast(
+                                                                        256 + qk_nope_ki * 8,
+                                                                        "uint32",
+                                                                    ),
+                                                                    qk_nope_desc.add_16B_offset(
+                                                                        qk_nope_offset
+                                                                    ),
+                                                                    T.uint32(69207184),
+                                                                    T.Or(
+                                                                        qk_nope_ki != 0,
+                                                                        T.cast(
+                                                                            T.uint32(
+                                                                                1 if is_v32 else 0
+                                                                            ),
+                                                                            "bool",
+                                                                        ),
+                                                                    ),
+                                                                    T.uint64(0),
+                                                                )
+                                                            )
+                                                        )
+                                                    _builder_emit(bar_qk_done.arrive(rs_buf.stage))
+                                                    _builder_emit(
+                                                        bar_so_ready.wait(
+                                                            rs_buf.stage, rs_buf.phase
+                                                        )
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.tcgen05.fence__after_thread_sync()
+                                                    )
+                                                    mma_o_accum = _builder_bind(
+                                                        "mma_o_accum",
+                                                        T.if_then_else(
+                                                            block_idx == start_block,
+                                                            T.uint32(0),
+                                                            T.uint32(1),
+                                                        ),
+                                                    )
+                                                    with T.unroll(4) as pv_ki:
+                                                        pv_a_offset = _builder_bind(
+                                                            "pv_a_offset",
+                                                            (pv_ki % 4 * 1024 + pv_ki // 4 * 8)
+                                                            // 8,
+                                                        )
+                                                        pv_b_lo_offset = _builder_bind(
+                                                            "pv_b_lo_offset",
+                                                            (
+                                                                pv_ki * 16 // 64 * k_stage_elems
+                                                                + rs_buf.stage * k_stage_elems
+                                                                + pv_ki * 16 % 64 * 64
+                                                            )
+                                                            // 8,
+                                                        )
+                                                        _builder_emit(
+                                                            T.evaluate(
+                                                                T.ptx[_MMA_WS_F16](
+                                                                    T.uint32(0),
+                                                                    pv_a_lo_desc.add_16B_offset(
+                                                                        pv_a_offset
+                                                                    ),
+                                                                    pv_b_lo_desc.add_16B_offset(
+                                                                        pv_b_lo_offset
+                                                                    ),
+                                                                    T.uint32(71369872),
+                                                                    T.Or(
+                                                                        pv_ki != 0,
+                                                                        T.cast(mma_o_accum, "bool"),
+                                                                    ),
+                                                                    T.uint64(0),
+                                                                )
+                                                            )
+                                                        )
+                                                    with T.unroll(4) as pv_ki:
+                                                        pv_a_offset = _builder_bind(
+                                                            "pv_a_offset",
+                                                            (pv_ki % 4 * 1024 + pv_ki // 4 * 8)
+                                                            // 8,
+                                                        )
+                                                        pv_b_hi_offset = _builder_bind(
+                                                            "pv_b_hi_offset",
+                                                            (
+                                                                pv_ki * 16 // 64 * k_stage_elems
+                                                                + rs_buf.stage * k_stage_elems
+                                                                + pv_ki * 16 % 64 * 64
+                                                                + 16384
+                                                            )
+                                                            // 8,
+                                                        )
+                                                        _builder_emit(
+                                                            T.evaluate(
+                                                                T.ptx[_MMA_WS_F16](
+                                                                    T.uint32(128),
+                                                                    pv_a_hi_desc.add_16B_offset(
+                                                                        pv_a_offset
+                                                                    ),
+                                                                    pv_b_hi_desc.add_16B_offset(
+                                                                        pv_b_hi_offset
+                                                                    ),
+                                                                    T.uint32(71369872),
+                                                                    T.Or(
+                                                                        pv_ki != 0,
+                                                                        T.cast(mma_o_accum, "bool"),
+                                                                    ),
+                                                                    T.uint64(0),
+                                                                )
+                                                            )
+                                                        )
+                                                    _builder_emit(bar_sv_done.arrive(rs_buf.stage))
+                                                    _builder_emit(rs_buf.advance())
+                                                    _builder_emit(rs_index.advance())
+                                            elif role == 5:
+                                                _builder_emit(bar_q_utccp.wait(0, batch_bar_phase))
+                                                _builder_emit(
+                                                    bar_last_store_done.wait(0, batch_bar_phase)
+                                                )
+                                                with T.serial(
+                                                    start_block, end_block, unroll=False
+                                                ) as block_idx:
+                                                    _builder_emit(
+                                                        bar_valid_ready.wait(
+                                                            rs_index.stage, rs_index.phase
+                                                        )
+                                                    )
+                                                    _builder_emit(
+                                                        bar_raw_free.wait(
+                                                            rs_buf.stage, rs_buf.phase ^ 1
+                                                        )
+                                                    )
+                                                    cur_indices = _builder_assign(
+                                                        "cur_indices", T.alloc_local((4,), "int32")
+                                                    )
+                                                    next_indices = _builder_assign(
+                                                        "next_indices", T.alloc_local((4,), "int32")
+                                                    )
+                                                    cur_index_words = _builder_assign(
+                                                        "cur_index_words",
+                                                        cur_indices.view("uint32"),
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.ld.shared.v4.u32(
+                                                            cur_index_words[0],
+                                                            cur_index_words[1],
+                                                            cur_index_words[2],
+                                                            cur_index_words[3],
+                                                            tma_coord.view("uint32").ptr_to(
+                                                                [rs_index.stage, 0]
+                                                            ),
+                                                        )
+                                                    )
+                                                    with T.unroll(B_TOPK // 4) as row4:
+                                                        row = _builder_bind("row", row4 * 4)
+                                                        with T.If(row + 4 < B_TOPK):
+                                                            with T.Then():
+                                                                next_index_words = _builder_assign(
+                                                                    "next_index_words",
+                                                                    next_indices.view("uint32"),
+                                                                )
+                                                                _builder_emit(
+                                                                    T.ptx.ld.shared.v4.u32(
+                                                                        next_index_words[0],
+                                                                        next_index_words[1],
+                                                                        next_index_words[2],
+                                                                        next_index_words[3],
+                                                                        tma_coord.view(
+                                                                            "uint32"
+                                                                        ).ptr_to(
+                                                                            [
+                                                                                rs_index.stage,
+                                                                                row + 4,
+                                                                            ]
+                                                                        ),
+                                                                    )
+                                                                )
+                                                        selected_nope_tensormap = _builder_scalar(
+                                                            "selected_nope_tensormap",
+                                                            T.reinterpret(
+                                                                "uint64",
+                                                                T.address_of(kv_nope_tensormap),
+                                                            ),
+                                                            dtype="uint64",
+                                                        )
+                                                        if extra_kv_h is not None:
+                                                            T.buffer_store(
+                                                                selected_nope_tensormap.buffer,
+                                                                T.if_then_else(
+                                                                    block_idx >= num_orig_blocks,
+                                                                    T.reinterpret(
+                                                                        "uint64",
+                                                                        T.address_of(
+                                                                            extra_kv_nope_tensormap
+                                                                        ),
+                                                                    ),
+                                                                    T.reinterpret(
+                                                                        "uint64",
+                                                                        T.address_of(
+                                                                            kv_nope_tensormap
+                                                                        ),
+                                                                    ),
+                                                                ),
+                                                                [0],
+                                                            )
+                                                        _builder_emit(
+                                                            T.evaluate(
+                                                                T.ptx[_TMA_GATHER4_2D_CACHE](
+                                                                    raw_nope.ptr_to(
+                                                                        [rs_buf.stage, row, 0]
+                                                                    ),
+                                                                    T.reinterpret(
+                                                                        T.handle().ty,
+                                                                        selected_nope_tensormap,
+                                                                    ),
+                                                                    T.int32(0),
+                                                                    cur_indices[0],
+                                                                    cur_indices[1],
+                                                                    cur_indices[2],
+                                                                    cur_indices[3],
+                                                                    T.cuda.cvta_generic_to_shared(
+                                                                        bar_raw_ready.ptr_to(
+                                                                            [rs_buf.stage]
+                                                                        )
+                                                                    ),
+                                                                    _KV_TMA_CACHE_HINT,
+                                                                )
+                                                            )
+                                                        )
+                                                        T.buffer_store(
+                                                            cur_indices, next_indices[0], [0]
+                                                        )
+                                                        T.buffer_store(
+                                                            cur_indices, next_indices[1], [1]
+                                                        )
+                                                        T.buffer_store(
+                                                            cur_indices, next_indices[2], [2]
+                                                        )
+                                                        T.buffer_store(
+                                                            cur_indices, next_indices[3], [3]
+                                                        )
+                                                    _builder_emit(
+                                                        bar_raw_ready.arrive(
+                                                            rs_buf.stage, tx_count=B_TOPK * d_nope
+                                                        )
+                                                    )
+                                                    _builder_emit(
+                                                        bar_valid_free.arrive(rs_index.stage)
+                                                    )
+                                                    _builder_emit(rs_buf.advance())
+                                                    _builder_emit(rs_index.advance())
+                                            elif role == 6:
+                                                _builder_emit(bar_q_utccp.wait(0, batch_bar_phase))
+                                                _builder_emit(
+                                                    bar_last_store_done.wait(0, batch_bar_phase)
+                                                )
+                                                with T.serial(
+                                                    start_block, end_block, unroll=False
+                                                ) as block_idx:
+                                                    _builder_emit(
+                                                        bar_valid_ready.wait(
+                                                            rs_index.stage, rs_index.phase
+                                                        )
+                                                    )
+                                                    if is_v32:
+                                                        _builder_emit(
+                                                            bar_qk_done.wait(
+                                                                rs_buf.stage, rs_buf.phase ^ 1
+                                                            )
+                                                        )
+                                                    else:
+                                                        _builder_emit(
+                                                            bar_sv_done.wait(
+                                                                rs_buf.stage, rs_buf.phase ^ 1
+                                                            )
+                                                        )
+                                                    cur_indices = _builder_assign(
+                                                        "cur_indices", T.alloc_local((4,), "int32")
+                                                    )
+                                                    next_indices = _builder_assign(
+                                                        "next_indices", T.alloc_local((4,), "int32")
+                                                    )
+                                                    cur_index_words = _builder_assign(
+                                                        "cur_index_words",
+                                                        cur_indices.view("uint32"),
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.ld.shared.v4.u32(
+                                                            cur_index_words[0],
+                                                            cur_index_words[1],
+                                                            cur_index_words[2],
+                                                            cur_index_words[3],
+                                                            tma_coord.view("uint32").ptr_to(
+                                                                [rs_index.stage, 0]
+                                                            ),
+                                                        )
+                                                    )
+                                                    with T.unroll(B_TOPK // 4) as row4:
+                                                        row = _builder_bind("row", row4 * 4)
+                                                        with T.If(row + 4 < B_TOPK):
+                                                            with T.Then():
+                                                                next_index_words = _builder_assign(
+                                                                    "next_index_words",
+                                                                    next_indices.view("uint32"),
+                                                                )
+                                                                _builder_emit(
+                                                                    T.ptx.ld.shared.v4.u32(
+                                                                        next_index_words[0],
+                                                                        next_index_words[1],
+                                                                        next_index_words[2],
+                                                                        next_index_words[3],
+                                                                        tma_coord.view(
+                                                                            "uint32"
+                                                                        ).ptr_to(
+                                                                            [
+                                                                                rs_index.stage,
+                                                                                row + 4,
+                                                                            ]
+                                                                        ),
+                                                                    )
+                                                                )
+                                                        with T.unroll(64 // rope_tile) as rope_part:
+                                                            if is_v32:
+                                                                rope_tma_dst = _builder_bind(
+                                                                    "rope_tma_dst",
+                                                                    T.ptr_byte_offset(
+                                                                        k_union.ptr_to([0, 0, 0]),
+                                                                        (
+                                                                            rs_buf.stage
+                                                                            * B_TOPK
+                                                                            * (D_V + 64)
+                                                                            + (
+                                                                                D_V
+                                                                                + rope_part
+                                                                                * rope_tile
+                                                                            )
+                                                                            * B_TOPK
+                                                                            + row * rope_tile
+                                                                        )
+                                                                        * BF16_BYTES,
+                                                                        "bfloat16",
+                                                                    ),
+                                                                )
+                                                            else:
+                                                                rope_tma_dst = _builder_bind(
+                                                                    "rope_tma_dst",
+                                                                    T.ptr_byte_offset(
+                                                                        k_full.ptr_to([0, 0, 0]),
+                                                                        (
+                                                                            rs_buf.stage
+                                                                            * B_TOPK
+                                                                            * D_V
+                                                                            + d_nope * B_TOPK
+                                                                            + row * 64
+                                                                        )
+                                                                        * BF16_BYTES,
+                                                                        "bfloat16",
+                                                                    ),
+                                                                )
+                                                            selected_rope_tensormap = (
+                                                                _builder_scalar(
+                                                                    "selected_rope_tensormap",
+                                                                    T.reinterpret(
+                                                                        "uint64",
+                                                                        T.address_of(
+                                                                            kv_rope_tensormap
+                                                                        ),
+                                                                    ),
+                                                                    dtype="uint64",
+                                                                )
+                                                            )
+                                                            if extra_kv_h is not None:
+                                                                T.buffer_store(
+                                                                    selected_rope_tensormap.buffer,
+                                                                    T.if_then_else(
+                                                                        block_idx
+                                                                        >= num_orig_blocks,
+                                                                        T.reinterpret(
+                                                                            "uint64",
+                                                                            T.address_of(
+                                                                                extra_kv_rope_tensormap
+                                                                            ),
+                                                                        ),
+                                                                        T.reinterpret(
+                                                                            "uint64",
+                                                                            T.address_of(
+                                                                                kv_rope_tensormap
+                                                                            ),
+                                                                        ),
+                                                                    ),
+                                                                    [0],
+                                                                )
+                                                            _builder_emit(
+                                                                T.evaluate(
+                                                                    T.ptx[_TMA_GATHER4_2D_CACHE](
+                                                                        rope_tma_dst,
+                                                                        T.reinterpret(
+                                                                            T.handle().ty,
+                                                                            selected_rope_tensormap,
+                                                                        ),
+                                                                        T.cast(
+                                                                            rope_part * rope_tile,
+                                                                            "int32",
+                                                                        ),
+                                                                        cur_indices[0],
+                                                                        cur_indices[1],
+                                                                        cur_indices[2],
+                                                                        cur_indices[3],
+                                                                        T.cuda.cvta_generic_to_shared(
+                                                                            bar_rope_ready.ptr_to(
+                                                                                [rs_buf.stage]
+                                                                            )
+                                                                        ),
+                                                                        _KV_TMA_CACHE_HINT,
+                                                                    )
+                                                                )
+                                                            )
+                                                        T.buffer_store(
+                                                            cur_indices, next_indices[0], [0]
+                                                        )
+                                                        T.buffer_store(
+                                                            cur_indices, next_indices[1], [1]
+                                                        )
+                                                        T.buffer_store(
+                                                            cur_indices, next_indices[2], [2]
+                                                        )
+                                                        T.buffer_store(
+                                                            cur_indices, next_indices[3], [3]
+                                                        )
+                                                    _builder_emit(
+                                                        bar_rope_ready.arrive(
+                                                            rs_buf.stage,
+                                                            tx_count=B_TOPK * 64 * BF16_BYTES,
+                                                        )
+                                                    )
+                                                    _builder_emit(
+                                                        bar_valid_free.arrive(rs_index.stage)
+                                                    )
+                                                    _builder_emit(rs_buf.advance())
+                                                    _builder_emit(rs_index.advance())
+                                            elif role == 7:
+                                                indices_base = _builder_bind(
+                                                    "indices_base",
+                                                    batch_idx * stride_indices_b
+                                                    + s_q_idx * stride_indices_s_q,
+                                                )
+                                                extra_indices_base = _builder_bind(
+                                                    "extra_indices_base",
+                                                    batch_idx * stride_extra_indices_b
+                                                    + s_q_idx * stride_extra_indices_s_q,
+                                                )
+
+                                                def process_index_block(
+                                                    cur_block, is_extra: T.constexpr
+                                                ):
+                                                    abs_pos = _builder_bind(
+                                                        "abs_pos",
+                                                        T.if_then_else(
+                                                            is_extra,
+                                                            (cur_block - num_orig_blocks) * B_TOPK
+                                                            + lane_idx * 2,
+                                                            cur_block * B_TOPK + lane_idx * 2,
+                                                        ),
+                                                    )
+                                                    cur_page_size = _builder_bind(
+                                                        "cur_page_size",
+                                                        T.if_then_else(
+                                                            is_extra,
+                                                            extra_page_block_size,
+                                                            page_block_size,
+                                                        ),
+                                                    )
+                                                    cur_block_stride = _builder_bind(
+                                                        "cur_block_stride",
+                                                        T.if_then_else(
+                                                            is_extra,
+                                                            stride_extra_kv_block,
+                                                            stride_kv_block,
+                                                        ),
+                                                    )
+                                                    cur_row_stride = _builder_bind(
+                                                        "cur_row_stride",
+                                                        T.if_then_else(
+                                                            is_extra,
+                                                            stride_extra_kv_row,
+                                                            stride_kv_row,
+                                                        ),
+                                                    )
+                                                    cur_length = _builder_bind(
+                                                        "cur_length",
+                                                        T.if_then_else(
+                                                            is_extra, extra_topk_len, topk_len
+                                                        ),
+                                                    )
+                                                    cur_k_scales_ptr_u64 = _builder_bind(
+                                                        "cur_k_scales_ptr_u64",
+                                                        T.if_then_else(
+                                                            is_extra,
+                                                            extra_k_scales_ptr_u64,
+                                                            k_scales_ptr_u64,
+                                                        ),
+                                                    )
+                                                    cur_tma_coords_step_per_block = _builder_bind(
+                                                        "cur_tma_coords_step_per_block",
+                                                        T.if_then_else(
+                                                            is_extra,
+                                                            tma_coords_step_per_extra_block,
+                                                            tma_coords_step_per_block,
+                                                        ),
+                                                    )
+                                                    pair_indices = _builder_assign(
+                                                        "pair_indices", T.alloc_local((2,), "int32")
+                                                    )
+                                                    pair_index_words = _builder_assign(
+                                                        "pair_index_words",
+                                                        pair_indices.view("uint32"),
+                                                    )
+                                                    if is_extra:
+                                                        _builder_emit(
+                                                            T.ptx.ld.global_.nc.v2.u32(
+                                                                pair_index_words[0],
+                                                                pair_index_words[1],
+                                                                extra_indices.view("uint32").ptr_to(
+                                                                    [extra_indices_base + abs_pos]
+                                                                ),
+                                                            )
+                                                        )
+                                                    else:
+                                                        _builder_emit(
+                                                            T.ptx.ld.global_.nc.v2.u32(
+                                                                pair_index_words[0],
+                                                                pair_index_words[1],
+                                                                indices.view("uint32").ptr_to(
+                                                                    [indices_base + abs_pos]
+                                                                ),
+                                                            )
+                                                        )
+                                                    _builder_emit(
+                                                        bar_valid_free.wait(
+                                                            rs_index.stage, rs_index.phase ^ 1
+                                                        )
+                                                    )
+                                                    coords = _builder_assign(
+                                                        "coords", T.alloc_local((2,), "int32")
+                                                    )
+                                                    cache_blocks = _builder_assign(
+                                                        "cache_blocks",
+                                                        T.alloc_local((2,), "uint32"),
+                                                    )
+                                                    indices_in_block = _builder_assign(
+                                                        "indices_in_block",
+                                                        T.alloc_local((2,), "uint32"),
+                                                    )
+                                                    scale_words = _builder_assign(
+                                                        "scale_words", T.alloc_local((2,), "uint64")
+                                                    )
+                                                    pair_token_valid = _builder_assign(
+                                                        "pair_token_valid",
+                                                        T.alloc_local((2,), "bool"),
+                                                    )
+                                                    scale_f32 = _builder_assign(
+                                                        "scale_f32",
+                                                        T.alloc_local((2, 4), "float32"),
+                                                    )
+                                                    scale_byte_offsets = _builder_assign(
+                                                        "scale_byte_offsets",
+                                                        T.alloc_local((2,), "uint64"),
+                                                    )
+
+                                                    def load_token_scales(
+                                                        pair_i: T.constexpr,
+                                                        token_valid,
+                                                        cache_block,
+                                                        index_in_block,
+                                                        block_stride,
+                                                        row_stride,
+                                                        scales_ptr_u64,
+                                                        byte_offsets,
+                                                        words,
+                                                        values,
+                                                    ):
+                                                        if is_v32:
+                                                            T.buffer_store(
+                                                                byte_offsets,
+                                                                T.if_then_else(
+                                                                    token_valid,
+                                                                    T.cast(cache_block, "uint64")
+                                                                    * T.cast(block_stride, "int64")
+                                                                    + T.cast(
+                                                                        index_in_block, "uint64"
+                                                                    )
+                                                                    * T.cast(row_stride, "int64"),
+                                                                    T.uint64(0),
+                                                                ),
+                                                                [pair_i],
+                                                            )
+                                                            _builder_emit(
+                                                                T.cuda.ldg(
+                                                                    T.reinterpret(
+                                                                        PointerType(
+                                                                            PrimType("float32")
+                                                                        ),
+                                                                        scales_ptr_u64
+                                                                        + byte_offsets[pair_i],
+                                                                    ),
+                                                                    "float32",
+                                                                    dst=(
+                                                                        values.ptr_to([pair_i, 0]),
+                                                                        values.ptr_to([pair_i, 1]),
+                                                                        values.ptr_to([pair_i, 2]),
+                                                                        values.ptr_to([pair_i, 3]),
+                                                                    ),
+                                                                    vec="v4",
+                                                                )
+                                                            )
+                                                        else:
+                                                            T.buffer_store(
+                                                                byte_offsets,
+                                                                T.cast(cache_block, "uint64")
+                                                                * T.cast(block_stride, "int64")
+                                                                + T.cast(index_in_block, "uint64")
+                                                                * 8,
+                                                                [pair_i],
+                                                            )
+                                                            T.buffer_store(
+                                                                words,
+                                                                T.if_then_else(
+                                                                    token_valid,
+                                                                    T.cuda.ldg(
+                                                                        T.reinterpret(
+                                                                            PointerType(
+                                                                                PrimType("uint64")
+                                                                            ),
+                                                                            scales_ptr_u64
+                                                                            + byte_offsets[pair_i],
+                                                                        ),
+                                                                        "uint64",
+                                                                    ),
+                                                                    T.uint64(0),
+                                                                ),
+                                                                [pair_i],
+                                                            )
+
+                                                    valid_mask = _builder_scalar(
+                                                        "valid_mask", T.int8(0), dtype="int8"
+                                                    )
+                                                    with T.unroll(2) as pair_i:
+                                                        index_u32 = _builder_bind(
+                                                            "index_u32",
+                                                            T.cast(pair_indices[pair_i], "uint32"),
+                                                        )
+                                                        T.buffer_store(
+                                                            cache_blocks,
+                                                            index_u32
+                                                            // T.cast(cur_page_size, "uint32"),
+                                                            [pair_i],
+                                                        )
+                                                        T.buffer_store(
+                                                            indices_in_block,
+                                                            index_u32
+                                                            % T.cast(cur_page_size, "uint32"),
+                                                            [pair_i],
+                                                        )
+                                                        token_valid = _builder_bind(
+                                                            "token_valid",
+                                                            T.And(
+                                                                pair_indices[pair_i] != -1,
+                                                                abs_pos + pair_i < cur_length,
+                                                            ),
+                                                        )
+                                                        T.buffer_store(
+                                                            pair_token_valid, token_valid, [pair_i]
+                                                        )
+                                                        T.buffer_store(
+                                                            valid_mask.buffer,
+                                                            T.cast(
+                                                                T.bitwise_or(
+                                                                    T.cast(valid_mask, "int32"),
+                                                                    T.shift_left(
+                                                                        T.cast(
+                                                                            token_valid, "int32"
+                                                                        ),
+                                                                        T.cast(pair_i, "int32"),
+                                                                    ),
+                                                                ),
+                                                                "int8",
+                                                            ),
+                                                            [0],
+                                                        )
+                                                        T.buffer_store(
+                                                            coords,
+                                                            T.if_then_else(
+                                                                pair_token_valid[pair_i],
+                                                                T.cast(
+                                                                    cache_blocks[pair_i], "int32"
+                                                                )
+                                                                * cur_tma_coords_step_per_block
+                                                                + T.cast(
+                                                                    indices_in_block[pair_i],
+                                                                    "int32",
+                                                                )
+                                                                * tma_coords_step_per_token,
+                                                                -1,
+                                                            ),
+                                                            [pair_i],
+                                                        )
+                                                        _builder_emit(
+                                                            load_token_scales(
+                                                                pair_i,
+                                                                pair_token_valid[pair_i],
+                                                                cache_blocks[pair_i],
+                                                                indices_in_block[pair_i],
+                                                                cur_block_stride,
+                                                                cur_row_stride,
+                                                                cur_k_scales_ptr_u64,
+                                                                scale_byte_offsets,
+                                                                scale_words,
+                                                                scale_f32,
+                                                            )
+                                                        )
+                                                    if is_v32:
+                                                        with T.unroll(2) as pair_i:
+                                                            lo = _builder_assign(
+                                                                "lo", T.local_scalar("uint16")
+                                                            )
+                                                            _builder_emit(
+                                                                T.ptx.cvt.rz.ue8m0x2.f32(
+                                                                    lo,
+                                                                    scale_f32[pair_i, 1],
+                                                                    scale_f32[pair_i, 0],
+                                                                )
+                                                            )
+                                                            hi = _builder_assign(
+                                                                "hi", T.local_scalar("uint16")
+                                                            )
+                                                            _builder_emit(
+                                                                T.ptx.cvt.rz.ue8m0x2.f32(
+                                                                    hi,
+                                                                    scale_f32[pair_i, 3],
+                                                                    scale_f32[pair_i, 2],
+                                                                )
+                                                            )
+                                                            packed_scale = _builder_bind(
+                                                                "packed_scale",
+                                                                T.bitwise_or(
+                                                                    T.cast(lo, "uint32"),
+                                                                    T.shift_left(
+                                                                        T.cast(hi, "uint32"),
+                                                                        T.uint32(16),
+                                                                    ),
+                                                                ),
+                                                            )
+                                                            T.buffer_store(
+                                                                scale_words,
+                                                                T.if_then_else(
+                                                                    pair_token_valid[pair_i],
+                                                                    T.cast(packed_scale, "uint64"),
+                                                                    T.uint64(0),
+                                                                ),
+                                                                [pair_i],
+                                                            )
+                                                    T.buffer_store(
+                                                        valid_mask.buffer,
+                                                        T.cast(
+                                                            T.shift_left(
+                                                                T.cast(valid_mask, "int32"),
+                                                                T.cast(lane_idx % 4 * 2, "int32"),
+                                                            ),
+                                                            "int8",
+                                                        ),
+                                                        [0],
+                                                    )
+                                                    T.buffer_store(
+                                                        valid_mask.buffer,
+                                                        T.cast(
+                                                            T.bitwise_or(
+                                                                T.cast(valid_mask, "int32"),
+                                                                T.cuda.__shfl_xor_sync(
+                                                                    T.uint32(4294967295),
+                                                                    T.cast(valid_mask, "int32"),
+                                                                    1,
+                                                                    32,
+                                                                ),
+                                                            ),
+                                                            "int8",
+                                                        ),
+                                                        [0],
+                                                    )
+                                                    T.buffer_store(
+                                                        valid_mask.buffer,
+                                                        T.cast(
+                                                            T.bitwise_or(
+                                                                T.cast(valid_mask, "int32"),
+                                                                T.cuda.__shfl_xor_sync(
+                                                                    T.uint32(4294967295),
+                                                                    T.cast(valid_mask, "int32"),
+                                                                    2,
+                                                                    32,
+                                                                ),
+                                                            ),
+                                                            "int8",
+                                                        ),
+                                                        [0],
+                                                    )
+                                                    if is_v32:
+                                                        _builder_emit(
+                                                            T.ptx.st.shared.u64(
+                                                                scales_e8m0.view("uint64").ptr_to(
+                                                                    [rs_index.stage, lane_idx]
+                                                                ),
+                                                                T.bitwise_or(
+                                                                    scale_words[0],
+                                                                    T.shift_left(
+                                                                        scale_words[1], T.uint64(32)
+                                                                    ),
+                                                                ),
+                                                            )
+                                                        )
+                                                    else:
+                                                        scale_word_bits = _builder_assign(
+                                                            "scale_word_bits",
+                                                            scale_words.view("uint32"),
+                                                        )
+                                                        _builder_emit(
+                                                            T.ptx.st.shared.v4.u32(
+                                                                scales_e8m0.view("uint32").ptr_to(
+                                                                    [rs_index.stage, lane_idx * 4]
+                                                                ),
+                                                                scale_word_bits[0],
+                                                                scale_word_bits[1],
+                                                                scale_word_bits[2],
+                                                                scale_word_bits[3],
+                                                            )
+                                                        )
+                                                    coord_words = _builder_assign(
+                                                        "coord_words", coords.view("uint32")
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.st.shared.v2.u32(
+                                                            tma_coord.view("uint32").ptr_to(
+                                                                [rs_index.stage, lane_idx * 2]
+                                                            ),
+                                                            coord_words[0],
+                                                            coord_words[1],
+                                                        )
+                                                    )
+                                                    with T.If(lane_idx % 4 == 0):
+                                                        with T.Then():
+                                                            _builder_emit(
+                                                                T.ptx.st.shared.b8(
+                                                                    is_token_valid.ptr_to(
+                                                                        [
+                                                                            rs_index.stage,
+                                                                            lane_idx // 4,
+                                                                        ]
+                                                                    ),
+                                                                    T.reinterpret(
+                                                                        "uint8", valid_mask
+                                                                    ),
+                                                                )
+                                                            )
+                                                    _builder_emit(
+                                                        bar_valid_ready.arrive(rs_index.stage)
+                                                    )
+                                                    _builder_emit(rs_buf.advance())
+                                                    _builder_emit(rs_index.advance())
+
+                                                with T.serial(
+                                                    start_block,
+                                                    T.min(num_orig_blocks, end_block),
+                                                    unroll=False,
+                                                ) as block_idx:
+                                                    _builder_emit(
+                                                        process_index_block(block_idx, False)
+                                                    )
+                                                if (
+                                                    extra_kv_h is not None
+                                                    and extra_indices_h is not None
+                                                ):
+                                                    with T.serial(
+                                                        T.max(start_block, num_orig_blocks),
+                                                        end_block,
+                                                        unroll=False,
+                                                    ) as block_idx:
+                                                        _builder_emit(
+                                                            process_index_block(block_idx, True)
+                                                        )
+                                            _builder_emit(
+                                                T.ptx.barrier.sync(
+                                                    T.uint32(BAR_EVERYONE_SYNC),
+                                                    T.uint32(NUM_THREADS),
+                                                )
+                                            )
+                                            T.buffer_store(
+                                                batch_bar_phase.buffer, batch_bar_phase ^ 1, [0]
+                                            )
+
+                            selected_wg1_role = _builder_scalar(
+                                "selected_wg1_role", -1, dtype="int32"
+                            )
+                            with T.If(wg1_warp_idx == 4):
+                                with T.Then():
+                                    with T.If(T.cuda.elect_sync() != T.uint32(0)):
+                                        with T.Then():
+                                            T.buffer_store(selected_wg1_role.buffer, 4, [0])
+                                with T.Else():
+                                    with T.If(wg1_warp_idx == 5):
+                                        with T.Then():
+                                            with T.If(T.cuda.elect_sync() != T.uint32(0)):
+                                                with T.Then():
+                                                    T.buffer_store(selected_wg1_role.buffer, 5, [0])
+                                        with T.Else():
+                                            with T.If(wg1_warp_idx == 6):
+                                                with T.Then():
+                                                    with T.If(T.cuda.elect_sync() != T.uint32(0)):
+                                                        with T.Then():
+                                                            T.buffer_store(
+                                                                selected_wg1_role.buffer, 6, [0]
+                                                            )
+                                                with T.Else():
+                                                    with T.If(wg1_warp_idx == 7):
+                                                        with T.Then():
+                                                            T.buffer_store(
+                                                                selected_wg1_role.buffer, 7, [0]
+                                                            )
+                            with T.If(selected_wg1_role == 4):
+                                with T.Then():
+                                    _builder_emit(run_wg1_role(4))
+                                with T.Else():
+                                    with T.If(selected_wg1_role == 5):
+                                        with T.Then():
+                                            _builder_emit(run_wg1_role(5))
+                                        with T.Else():
+                                            with T.If(selected_wg1_role == 6):
+                                                with T.Then():
+                                                    _builder_emit(run_wg1_role(6))
+                                                with T.Else():
+                                                    with T.If(selected_wg1_role == 7):
+                                                        with T.Then():
+                                                            _builder_emit(run_wg1_role(7))
+                                                        with T.Else():
+                                                            _builder_emit(run_wg1_role(-1))
+                        with T.Else():
+                            _builder_emit(T.ptx.setmaxnreg.inc.sync.aligned.u32(208))
+                            rs_buf = _builder_assign("rs_buf", PipelineState(NUM_BUFS, phase=0))
+                            rs_index = _builder_assign(
+                                "rs_index", PipelineState(NUM_INDEX_BUFS, phase=0)
+                            )
+                            group_idx = _builder_bind("group_idx", idx_in_warpgroup // 8)
+                            idx_in_group = _builder_bind("idx_in_group", idx_in_warpgroup % 8)
+                            nope0_base_u64 = _builder_bind(
+                                "nope0_base_u64",
+                                T.reinterpret(
+                                    "uint64", k_full.ptr_to([0, group_idx, idx_in_group * 8])
+                                ),
+                            )
+                            nope1_base_u64 = _builder_bind(
+                                "nope1_base_u64",
+                                T.reinterpret(
+                                    "uint64", k_full.ptr_to([1, group_idx, idx_in_group * 8])
+                                ),
+                            )
+                            raw_nope0_base_u64 = _builder_bind(
+                                "raw_nope0_base_u64",
+                                T.reinterpret(
+                                    "uint64", raw_nope.ptr_to([0, group_idx, idx_in_group])
+                                ),
+                            )
+                            raw_nope1_base_u64 = _builder_bind(
+                                "raw_nope1_base_u64",
+                                T.reinterpret(
+                                    "uint64", raw_nope.ptr_to([1, group_idx, idx_in_group])
+                                ),
+                            )
+                            sched_words = _builder_assign(
+                                "sched_words", T.alloc_local((4,), "uint64")
+                            )
+                            _builder_emit(load_scheduler_meta(sched_words))
+                            sched_i32 = _builder_assign("sched_i32", sched_words.view("int32"))
+                            sched_begin_req = _builder_bind("sched_begin_req", sched_i32[0])
+                            sched_end_req = _builder_bind("sched_end_req", sched_i32[1])
+                            sched_begin_block = _builder_bind("sched_begin_block", sched_i32[2])
+                            sched_end_block = _builder_bind("sched_end_block", sched_i32[3])
+                            sched_begin_split = _builder_bind("sched_begin_split", sched_i32[4])
+                            sched_first_split = _builder_bind("sched_first_split", sched_i32[5])
+                            sched_last_split = _builder_bind("sched_last_split", sched_i32[6])
+                            batch_bar_phase = _builder_scalar("batch_bar_phase", 0, dtype="int32")
+                            with T.If(sched_begin_req < b):
+                                with T.Then():
+                                    with T.serial(
+                                        sched_begin_req, sched_end_req + 1, unroll=False
+                                    ) as batch_idx:
+                                        topk_len = _builder_scalar("topk_len", topk, dtype="int32")
+                                        if topk_length_h is not None:
+                                            T.buffer_store(
+                                                topk_len.buffer,
+                                                T.cuda.ldg(
+                                                    topk_length.ptr_to([batch_idx]), "int32"
+                                                ),
+                                                [0],
+                                            )
+                                        orig_topk_padded = _builder_bind(
+                                            "orig_topk_padded",
+                                            T.max(
+                                                (topk_len + B_TOPK - 1) // B_TOPK * B_TOPK, B_TOPK
                                             ),
                                         )
-                                    T.evaluate(
-                                        T.ptx[_TMA_GATHER4_2D_CACHE](
-                                            rope_tma_dst,
-                                            T.reinterpret(T.handle().ty, selected_rope_tensormap),
-                                            T.cast(rope_part * rope_tile, "int32"),
-                                            cur_indices[0],
-                                            cur_indices[1],
-                                            cur_indices[2],
-                                            cur_indices[3],
-                                            T.cuda.cvta_generic_to_shared(
-                                                bar_rope_ready.ptr_to([rs_buf.stage])
-                                            ),
-                                            _KV_TMA_CACHE_HINT,
+                                        extra_topk_len = _builder_scalar(
+                                            "extra_topk_len", extra_topk, dtype="int32"
                                         )
-                                    )
-                                cur_indices[0] = next_indices[0]
-                                cur_indices[1] = next_indices[1]
-                                cur_indices[2] = next_indices[2]
-                                cur_indices[3] = next_indices[3]
-                            bar_rope_ready.arrive(rs_buf.stage, tx_count=B_TOPK * 64 * BF16_BYTES)
-                            bar_valid_free.arrive(rs_index.stage)
-                            rs_buf.advance()
-                            rs_index.advance()
-
-                    elif role == 7:
-                        # kernel.cuh:653-743.  All 32 lanes transform exactly
-                        # two indices, form TMA coordinates, load/convert the
-                        # model-specific scales, and construct each 8-bit mask.
-                        indices_base: T.let = (
-                            batch_idx * stride_indices_b + s_q_idx * stride_indices_s_q
-                        )
-                        extra_indices_base: T.let = (
-                            batch_idx * stride_extra_indices_b + s_q_idx * stride_extra_indices_s_q
-                        )
-
-                        @T.inline
-                        def process_index_block(cur_block, is_extra: T.constexpr):
-                            abs_pos: T.let = T.if_then_else(
-                                is_extra,
-                                (cur_block - num_orig_blocks) * B_TOPK + lane_idx * 2,
-                                cur_block * B_TOPK + lane_idx * 2,
-                            )
-                            cur_page_size: T.let = T.if_then_else(
-                                is_extra, extra_page_block_size, page_block_size
-                            )
-                            cur_block_stride: T.let = T.if_then_else(
-                                is_extra, stride_extra_kv_block, stride_kv_block
-                            )
-                            cur_row_stride: T.let = T.if_then_else(
-                                is_extra, stride_extra_kv_row, stride_kv_row
-                            )
-                            cur_length: T.let = T.if_then_else(is_extra, extra_topk_len, topk_len)
-                            cur_k_scales_ptr_u64: T.let = T.if_then_else(
-                                is_extra, extra_k_scales_ptr_u64, k_scales_ptr_u64
-                            )
-                            cur_tma_coords_step_per_block: T.let = T.if_then_else(
-                                is_extra, tma_coords_step_per_extra_block, tma_coords_step_per_block
-                            )
-
-                            pair_indices = T.alloc_local((2,), "int32")
-                            pair_index_words = pair_indices.view("uint32")
-                            if is_extra:
-                                T.ptx.ld.global_.nc.v2.u32(
-                                    pair_index_words[0],
-                                    pair_index_words[1],
-                                    extra_indices.view("uint32").ptr_to(
-                                        [extra_indices_base + abs_pos]
-                                    ),
-                                )
-                            else:
-                                T.ptx.ld.global_.nc.v2.u32(
-                                    pair_index_words[0],
-                                    pair_index_words[1],
-                                    indices.view("uint32").ptr_to([indices_base + abs_pos]),
-                                )
-                            bar_valid_free.wait(rs_index.stage, rs_index.phase ^ 1)
-                            coords = T.alloc_local((2,), "int32")
-                            cache_blocks = T.alloc_local((2,), "uint32")
-                            indices_in_block = T.alloc_local((2,), "uint32")
-                            scale_words = T.alloc_local((2,), "uint64")
-                            pair_token_valid = T.alloc_local((2,), "bool")
-                            scale_f32 = T.alloc_local((2, 4), "float32")
-                            scale_byte_offsets = T.alloc_local((2,), "uint64")
-
-                            @T.inline
-                            def load_token_scales(
-                                pair_i: T.constexpr,
-                                token_valid,
-                                cache_block,
-                                index_in_block,
-                                block_stride,
-                                row_stride,
-                                scales_ptr_u64,
-                                byte_offsets,
-                                words,
-                                values,
-                            ):
-                                if is_v32:
-                                    # Invalid V32 entries still issue token-0's
-                                    # float4 load, then zero the converted word.
-                                    byte_offsets[pair_i] = T.if_then_else(
-                                        token_valid,
-                                        T.cast(cache_block, "uint64")
-                                        * T.cast(block_stride, "int64")
-                                        + T.cast(index_in_block, "uint64")
-                                        * T.cast(row_stride, "int64"),
-                                        T.uint64(0),
-                                    )
-                                    T.cuda.ldg(
-                                        T.reinterpret(
-                                            PointerType(PrimType("float32")),
-                                            scales_ptr_u64 + byte_offsets[pair_i],
-                                        ),
-                                        "float32",
-                                        dst=(
-                                            values.ptr_to([pair_i, 0]),
-                                            values.ptr_to([pair_i, 1]),
-                                            values.ptr_to([pair_i, 2]),
-                                            values.ptr_to([pair_i, 3]),
-                                        ),
-                                        vec="v4",
-                                    )
-                                else:
-                                    byte_offsets[pair_i] = (
-                                        T.cast(cache_block, "uint64")
-                                        * T.cast(block_stride, "int64")
-                                        + T.cast(index_in_block, "uint64") * 8
-                                    )
-                                    words[pair_i] = T.if_then_else(
-                                        token_valid,
-                                        T.cuda.ldg(
-                                            T.reinterpret(
-                                                PointerType(PrimType("uint64")),
-                                                scales_ptr_u64 + byte_offsets[pair_i],
+                                        if extra_topk_length_h is not None:
+                                            T.buffer_store(
+                                                extra_topk_len.buffer,
+                                                T.cuda.ldg(
+                                                    extra_topk_length.ptr_to([batch_idx]), "int32"
+                                                ),
+                                                [0],
+                                            )
+                                        total_topk_padded = _builder_bind(
+                                            "total_topk_padded",
+                                            orig_topk_padded
+                                            + (extra_topk_len + B_TOPK - 1) // B_TOPK * B_TOPK,
+                                        )
+                                        start_block = _builder_bind(
+                                            "start_block",
+                                            T.if_then_else(
+                                                batch_idx == sched_begin_req, sched_begin_block, 0
                                             ),
-                                            "uint64",
-                                        ),
-                                        T.uint64(0),
-                                    )
-
-                            valid_mask: T.int8 = T.int8(0)
-                            for pair_i in T.unroll(2):
-                                index_u32: T.let = T.cast(pair_indices[pair_i], "uint32")
-                                cache_blocks[pair_i] = index_u32 // T.cast(cur_page_size, "uint32")
-                                indices_in_block[pair_i] = index_u32 % T.cast(
-                                    cur_page_size, "uint32"
-                                )
-                                token_valid: T.let = T.And(
-                                    pair_indices[pair_i] != -1, abs_pos + pair_i < cur_length
-                                )
-                                pair_token_valid[pair_i] = token_valid
-                                valid_mask = T.cast(
-                                    T.bitwise_or(
-                                        T.cast(valid_mask, "int32"),
-                                        T.shift_left(
-                                            T.cast(token_valid, "int32"), T.cast(pair_i, "int32")
-                                        ),
-                                    ),
-                                    "int8",
-                                )
-                                coords[pair_i] = T.if_then_else(
-                                    pair_token_valid[pair_i],
-                                    T.cast(cache_blocks[pair_i], "int32")
-                                    * cur_tma_coords_step_per_block
-                                    + T.cast(indices_in_block[pair_i], "int32")
-                                    * tma_coords_step_per_token,
-                                    -1,
-                                )
-                                # The source-unrolled loop issues both random
-                                # scale loads before either V32 conversion.
-                                load_token_scales(
-                                    pair_i,
-                                    pair_token_valid[pair_i],
-                                    cache_blocks[pair_i],
-                                    indices_in_block[pair_i],
-                                    cur_block_stride,
-                                    cur_row_stride,
-                                    cur_k_scales_ptr_u64,
-                                    scale_byte_offsets,
-                                    scale_words,
-                                    scale_f32,
-                                )
-
-                            if is_v32:
-                                for pair_i in T.unroll(2):
-                                    lo = T.local_scalar("uint16")
-                                    T.ptx.cvt.rz.ue8m0x2.f32(
-                                        lo, scale_f32[pair_i, 1], scale_f32[pair_i, 0]
-                                    )
-                                    hi = T.local_scalar("uint16")
-                                    T.ptx.cvt.rz.ue8m0x2.f32(
-                                        hi, scale_f32[pair_i, 3], scale_f32[pair_i, 2]
-                                    )
-                                    packed_scale: T.let = T.bitwise_or(
-                                        T.cast(lo, "uint32"),
-                                        T.shift_left(T.cast(hi, "uint32"), T.uint32(16)),
-                                    )
-                                    scale_words[pair_i] = T.if_then_else(
-                                        pair_token_valid[pair_i],
-                                        T.cast(packed_scale, "uint64"),
-                                        T.uint64(0),
-                                    )
-
-                            valid_mask = T.cast(
-                                T.shift_left(
-                                    T.cast(valid_mask, "int32"), T.cast((lane_idx % 4) * 2, "int32")
-                                ),
-                                "int8",
-                            )
-                            valid_mask = T.cast(
-                                T.bitwise_or(
-                                    T.cast(valid_mask, "int32"),
-                                    T.cuda.__shfl_xor_sync(
-                                        T.uint32(0xFFFFFFFF), T.cast(valid_mask, "int32"), 1, 32
-                                    ),
-                                ),
-                                "int8",
-                            )
-                            valid_mask = T.cast(
-                                T.bitwise_or(
-                                    T.cast(valid_mask, "int32"),
-                                    T.cuda.__shfl_xor_sync(
-                                        T.uint32(0xFFFFFFFF), T.cast(valid_mask, "int32"), 2, 32
-                                    ),
-                                ),
-                                "int8",
-                            )
-                            if is_v32:
-                                T.ptx.st.shared.u64(
-                                    scales_e8m0.view("uint64").ptr_to([rs_index.stage, lane_idx]),
-                                    T.bitwise_or(
-                                        scale_words[0], T.shift_left(scale_words[1], T.uint64(32))
-                                    ),
-                                )
-                            else:
-                                scale_word_bits = scale_words.view("uint32")
-                                T.ptx.st.shared.v4.u32(
-                                    scales_e8m0.view("uint32").ptr_to(
-                                        [rs_index.stage, lane_idx * 4]
-                                    ),
-                                    scale_word_bits[0],
-                                    scale_word_bits[1],
-                                    scale_word_bits[2],
-                                    scale_word_bits[3],
-                                )
-                            coord_words = coords.view("uint32")
-                            T.ptx.st.shared.v2.u32(
-                                tma_coord.view("uint32").ptr_to([rs_index.stage, lane_idx * 2]),
-                                coord_words[0],
-                                coord_words[1],
-                            )
-                            if lane_idx % 4 == 0:
-                                T.ptx.st.shared.b8(
-                                    is_token_valid.ptr_to([rs_index.stage, lane_idx // 4]),
-                                    T.reinterpret("uint8", valid_mask),
-                                )
-                            bar_valid_ready.arrive(rs_index.stage)
-                            rs_buf.advance()
-                            rs_index.advance()
-
-                        for block_idx in T.serial(
-                            start_block, T.min(num_orig_blocks, end_block), unroll=False
-                        ):
-                            process_index_block(block_idx, False)
-                        if extra_kv_h is not None and extra_indices_h is not None:
-                            for block_idx in T.serial(
-                                T.max(start_block, num_orig_blocks), end_block, unroll=False
-                            ):
-                                process_index_block(block_idx, True)
-
-                    T.ptx.barrier.sync(T.uint32(BAR_EVERYONE_SYNC), T.uint32(NUM_THREADS))
-                    batch_bar_phase = batch_bar_phase ^ 1
-
-        # kernel.cuh:431/586/616/653/744.  Election is evaluated only in
-        # the matching warp.  Record the selected source branch first so
-        # every non-elected lane reaches the one shared final ``else``
-        # scheduler, rather than cloning that empty scheduler once for
-        # each producer warp.
-        selected_wg1_role: T.int32 = -1
-        if wg1_warp_idx == 4:
-            if T.cuda.elect_sync() != T.uint32(0):
-                selected_wg1_role = 4
-        elif wg1_warp_idx == 5:
-            if T.cuda.elect_sync() != T.uint32(0):
-                selected_wg1_role = 5
-        elif wg1_warp_idx == 6:
-            if T.cuda.elect_sync() != T.uint32(0):
-                selected_wg1_role = 6
-        elif wg1_warp_idx == 7:
-            selected_wg1_role = 7
-
-        if selected_wg1_role == 4:
-            run_wg1_role(4)
-        elif selected_wg1_role == 5:
-            run_wg1_role(5)
-        elif selected_wg1_role == 6:
-            run_wg1_role(6)
-        elif selected_wg1_role == 7:
-            run_wg1_role(7)
-        else:
-            run_wg1_role(-1)
-    else:
-        # kernel.cuh:747-759.  The dequant warpgroup keeps 208 registers
-        # and assigns exactly eight threads per token group.
-        T.ptx.setmaxnreg.inc.sync.aligned.u32(208)
-        rs_buf = PipelineState(NUM_BUFS, phase=0)
-        rs_index = PipelineState(NUM_INDEX_BUFS, phase=0)
-        group_idx: T.let = idx_in_warpgroup // 8
-        idx_in_group: T.let = idx_in_warpgroup % 8
-
-        # kernel.cuh:751-758.  Keep both dequant-stage and raw-stage
-        # per-thread bases live across the scheduler loop.  The source
-        # selects one pointer from each pair once per block.
-        nope0_base_u64: T.let = T.reinterpret(
-            "uint64", k_full.ptr_to([0, group_idx, idx_in_group * 8])
-        )
-        nope1_base_u64: T.let = T.reinterpret(
-            "uint64", k_full.ptr_to([1, group_idx, idx_in_group * 8])
-        )
-        raw_nope0_base_u64: T.let = T.reinterpret(
-            "uint64", raw_nope.ptr_to([0, group_idx, idx_in_group])
-        )
-        raw_nope1_base_u64: T.let = T.reinterpret(
-            "uint64", raw_nope.ptr_to([1, group_idx, idx_in_group])
-        )
-
-        # kernel.cuh:77-118 expanded for WG2, preserving scheduler loads
-        # in this specialization to avoid cross-role register pressure.
-        sched_words = T.alloc_local((4,), "uint64")
-        load_scheduler_meta(sched_words)
-        sched_i32 = sched_words.view("int32")
-        sched_begin_req: T.let = sched_i32[0]
-        sched_end_req: T.let = sched_i32[1]
-        sched_begin_block: T.let = sched_i32[2]
-        sched_end_block: T.let = sched_i32[3]
-        sched_begin_split: T.let = sched_i32[4]
-        sched_first_split: T.let = sched_i32[5]
-        sched_last_split: T.let = sched_i32[6]
-        batch_bar_phase: T.int32 = 0
-
-        # The CUDA return exits only this role's run_main_loop lambda.
-        if sched_begin_req < b:
-            for batch_idx in T.serial(sched_begin_req, sched_end_req + 1, unroll=False):
-                topk_len: T.int32 = topk
-                if topk_length_h is not None:
-                    topk_len = T.cuda.ldg(topk_length.ptr_to([batch_idx]), "int32")
-                orig_topk_padded: T.let = T.max(
-                    ((topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK, B_TOPK
-                )
-                extra_topk_len: T.int32 = extra_topk
-                if extra_topk_length_h is not None:
-                    extra_topk_len = T.cuda.ldg(extra_topk_length.ptr_to([batch_idx]), "int32")
-                total_topk_padded: T.let = (
-                    orig_topk_padded + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
-                )
-                start_block: T.let = T.if_then_else(
-                    batch_idx == sched_begin_req, sched_begin_block, 0
-                )
-                end_block: T.let = T.if_then_else(
-                    batch_idx == sched_end_req, sched_end_block, total_topk_padded // B_TOPK
-                )
-                is_split: T.bool = T.cast(
-                    T.if_then_else(
-                        batch_idx == sched_begin_req,
-                        sched_first_split,
-                        T.if_then_else(batch_idx == sched_end_req, sched_last_split, 0),
-                    ),
-                    "bool",
-                )
-                is_no_split: T.bool = not is_split
-                n_split_idx: T.let = T.if_then_else(
-                    batch_idx == sched_begin_req,
-                    T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32") + sched_begin_split,
-                    T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
-                )
-                num_orig_blocks: T.let = orig_topk_padded // B_TOPK
-                is_last_batch: T.bool = batch_idx == sched_end_req
-
-                # kernel.cuh:760-840.  Wait on Q, raw fp8 and the previous
-                # SxV use, then convert each fp8x8 with the exact ue8m0
-                # scale and weak shared b128 store from the source.
-                bar_q_utccp.wait(0, batch_bar_phase)
-                for block_idx in T.serial(start_block, end_block, unroll=False):
-                    bar_valid_ready.wait(rs_index.stage, rs_index.phase)
-                    bar_raw_ready.wait(rs_buf.stage, rs_buf.phase)
-                    bar_sv_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
-                    # On the first block, bridge the completed UTCCP read of
-                    # q_sw128 before generic stores reuse its k_full alias.  On
-                    # later ring turns, bridge the completed SxV read of this
-                    # stage before the same generic stores overwrite it.
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    cur_nope_base_u64: T.let = T.if_then_else(
-                        rs_buf.stage == 0, nope0_base_u64, nope1_base_u64
-                    )
-                    cur_raw_nope_base_u64: T.let = T.if_then_else(
-                        rs_buf.stage == 0, raw_nope0_base_u64, raw_nope1_base_u64
-                    )
-                    cur_nope_base_uint_addr: T.let = T.cuda.cvta_generic_to_shared(
-                        T.reinterpret(PointerType(PrimType("bfloat16")), cur_nope_base_u64)
-                    )
-                    cur_raw_nope_base_uint_addr: T.let = T.cuda.cvta_generic_to_shared(
-                        T.reinterpret(PointerType(PrimType("uint64")), cur_raw_nope_base_u64)
-                    )
-                    for local_row in T.unroll(rows_per_group):
-                        row_idx: T.let = local_row * (128 // 8) + group_idx
-                        scales_bf16_bits = T.alloc_local((num_scales,), "uint16")
-                        if is_v32:
-                            packed_scales: T.uint32
-                            T.ptx.ld.shared.u32(
-                                packed_scales,
-                                scales_e8m0.view("uint32").ptr_to([rs_index.stage, row_idx]),
-                            )
-                            for scale_pair_idx in T.unroll(2):
-                                converted_pair = T.local_scalar("uint32")
-                                T.ptx.cvt.rn.bf16x2.ue8m0x2(
-                                    converted_pair,
-                                    T.cast(
-                                        T.shift_right(
-                                            packed_scales, T.cast(scale_pair_idx * 16, "uint32")
-                                        ),
-                                        "uint16",
-                                    ),
-                                )
-                                scales_bf16_bits[scale_pair_idx * 2] = T.cast(
-                                    converted_pair, "uint16"
-                                )
-                                scales_bf16_bits[scale_pair_idx * 2 + 1] = T.cast(
-                                    T.shift_right(converted_pair, T.uint32(16)), "uint16"
-                                )
-                        else:
-                            packed_scales: T.uint64
-                            T.ptx.ld.shared.u64(
-                                packed_scales,
-                                scales_e8m0.view("uint64").ptr_to([rs_index.stage, row_idx]),
-                            )
-                            for scale_pair_idx in T.unroll(4):
-                                converted_pair = T.local_scalar("uint32")
-                                T.ptx.cvt.rn.bf16x2.ue8m0x2(
-                                    converted_pair,
-                                    T.cast(
-                                        T.shift_right(
-                                            packed_scales, T.cast(scale_pair_idx * 16, "uint64")
-                                        ),
-                                        "uint16",
-                                    ),
-                                )
-                                scales_bf16_bits[scale_pair_idx * 2] = T.cast(
-                                    converted_pair, "uint16"
-                                )
-                                scales_bf16_bits[scale_pair_idx * 2 + 1] = T.cast(
-                                    T.shift_right(converted_pair, T.uint32(16)), "uint16"
-                                )
-
-                        cur_raw_fp8x8: T.uint64
-                        T.ptx.ld.shared.u64(
-                            cur_raw_fp8x8,
-                            cur_raw_nope_base_uint_addr
-                            + T.cast(local_row * (128 // 8) * d_nope, "uint32"),
-                        )
-                        for local_col in T.unroll(cols_per_group):
-                            raw_fp8x8: T.let = cur_raw_fp8x8
-                            if local_col + 1 < cols_per_group:
-                                T.ptx.ld.shared.u64(
-                                    cur_raw_fp8x8,
-                                    cur_raw_nope_base_uint_addr
-                                    + T.cast(
-                                        local_row * (128 // 8) * d_nope + (local_col + 1) * (8 * 8),
-                                        "uint32",
-                                    ),
-                                )
-                            scale_idx: T.let = (
-                                local_col // (cols_per_group // 4) if is_v32 else local_col
-                            )
-                            dequant_st128(
-                                cur_nope_base_uint_addr
-                                + T.cast(
-                                    BF16_BYTES
-                                    * (local_row * (128 // 8) * 64 + local_col * B_TOPK * 64),
-                                    "uint32",
-                                ),
-                                raw_fp8x8,
-                                scales_bf16_bits[scale_idx],
-                            )
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    bar_nope_ready.arrive(rs_buf.stage)
-                    bar_raw_free.arrive(rs_buf.stage)
-                    bar_valid_free.arrive(rs_index.stage)
-                    rs_buf.advance()
-                    rs_index.advance()
-
-                T.ptx.barrier.sync(T.uint32(BAR_EVERYONE_SYNC), T.uint32(NUM_THREADS))
-                batch_bar_phase = batch_bar_phase ^ 1
+                                        )
+                                        end_block = _builder_bind(
+                                            "end_block",
+                                            T.if_then_else(
+                                                batch_idx == sched_end_req,
+                                                sched_end_block,
+                                                total_topk_padded // B_TOPK,
+                                            ),
+                                        )
+                                        is_split = _builder_scalar(
+                                            "is_split",
+                                            T.cast(
+                                                T.if_then_else(
+                                                    batch_idx == sched_begin_req,
+                                                    sched_first_split,
+                                                    T.if_then_else(
+                                                        batch_idx == sched_end_req,
+                                                        sched_last_split,
+                                                        0,
+                                                    ),
+                                                ),
+                                                "bool",
+                                            ),
+                                            dtype="bool",
+                                        )
+                                        is_no_split = _builder_scalar(
+                                            "is_no_split", T.Not(is_split), dtype="bool"
+                                        )
+                                        n_split_idx = _builder_bind(
+                                            "n_split_idx",
+                                            T.if_then_else(
+                                                batch_idx == sched_begin_req,
+                                                T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32")
+                                                + sched_begin_split,
+                                                T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
+                                            ),
+                                        )
+                                        num_orig_blocks = _builder_bind(
+                                            "num_orig_blocks", orig_topk_padded // B_TOPK
+                                        )
+                                        is_last_batch = _builder_scalar(
+                                            "is_last_batch",
+                                            batch_idx == sched_end_req,
+                                            dtype="bool",
+                                        )
+                                        _builder_emit(bar_q_utccp.wait(0, batch_bar_phase))
+                                        with T.serial(
+                                            start_block, end_block, unroll=False
+                                        ) as block_idx:
+                                            _builder_emit(
+                                                bar_valid_ready.wait(rs_index.stage, rs_index.phase)
+                                            )
+                                            _builder_emit(
+                                                bar_raw_ready.wait(rs_buf.stage, rs_buf.phase)
+                                            )
+                                            _builder_emit(
+                                                bar_sv_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
+                                            )
+                                            _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                            cur_nope_base_u64 = _builder_bind(
+                                                "cur_nope_base_u64",
+                                                T.if_then_else(
+                                                    rs_buf.stage == 0,
+                                                    nope0_base_u64,
+                                                    nope1_base_u64,
+                                                ),
+                                            )
+                                            cur_raw_nope_base_u64 = _builder_bind(
+                                                "cur_raw_nope_base_u64",
+                                                T.if_then_else(
+                                                    rs_buf.stage == 0,
+                                                    raw_nope0_base_u64,
+                                                    raw_nope1_base_u64,
+                                                ),
+                                            )
+                                            cur_nope_base_uint_addr = _builder_bind(
+                                                "cur_nope_base_uint_addr",
+                                                T.cuda.cvta_generic_to_shared(
+                                                    T.reinterpret(
+                                                        PointerType(PrimType("bfloat16")),
+                                                        cur_nope_base_u64,
+                                                    )
+                                                ),
+                                            )
+                                            cur_raw_nope_base_uint_addr = _builder_bind(
+                                                "cur_raw_nope_base_uint_addr",
+                                                T.cuda.cvta_generic_to_shared(
+                                                    T.reinterpret(
+                                                        PointerType(PrimType("uint64")),
+                                                        cur_raw_nope_base_u64,
+                                                    )
+                                                ),
+                                            )
+                                            with T.unroll(rows_per_group) as local_row:
+                                                row_idx = _builder_bind(
+                                                    "row_idx", local_row * (128 // 8) + group_idx
+                                                )
+                                                scales_bf16_bits = _builder_assign(
+                                                    "scales_bf16_bits",
+                                                    T.alloc_local((num_scales,), "uint16"),
+                                                )
+                                                if is_v32:
+                                                    packed_scales = _builder_alloc_scalar(
+                                                        "packed_scales", "uint32"
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.ld.shared.u32(
+                                                            packed_scales,
+                                                            scales_e8m0.view("uint32").ptr_to(
+                                                                [rs_index.stage, row_idx]
+                                                            ),
+                                                        )
+                                                    )
+                                                    with T.unroll(2) as scale_pair_idx:
+                                                        converted_pair = _builder_assign(
+                                                            "converted_pair",
+                                                            T.local_scalar("uint32"),
+                                                        )
+                                                        _builder_emit(
+                                                            T.ptx.cvt.rn.bf16x2.ue8m0x2(
+                                                                converted_pair,
+                                                                T.cast(
+                                                                    T.shift_right(
+                                                                        packed_scales,
+                                                                        T.cast(
+                                                                            scale_pair_idx * 16,
+                                                                            "uint32",
+                                                                        ),
+                                                                    ),
+                                                                    "uint16",
+                                                                ),
+                                                            )
+                                                        )
+                                                        T.buffer_store(
+                                                            scales_bf16_bits,
+                                                            T.cast(converted_pair, "uint16"),
+                                                            [scale_pair_idx * 2],
+                                                        )
+                                                        T.buffer_store(
+                                                            scales_bf16_bits,
+                                                            T.cast(
+                                                                T.shift_right(
+                                                                    converted_pair, T.uint32(16)
+                                                                ),
+                                                                "uint16",
+                                                            ),
+                                                            [scale_pair_idx * 2 + 1],
+                                                        )
+                                                else:
+                                                    packed_scales = _builder_alloc_scalar(
+                                                        "packed_scales", "uint64"
+                                                    )
+                                                    _builder_emit(
+                                                        T.ptx.ld.shared.u64(
+                                                            packed_scales,
+                                                            scales_e8m0.view("uint64").ptr_to(
+                                                                [rs_index.stage, row_idx]
+                                                            ),
+                                                        )
+                                                    )
+                                                    with T.unroll(4) as scale_pair_idx:
+                                                        converted_pair = _builder_assign(
+                                                            "converted_pair",
+                                                            T.local_scalar("uint32"),
+                                                        )
+                                                        _builder_emit(
+                                                            T.ptx.cvt.rn.bf16x2.ue8m0x2(
+                                                                converted_pair,
+                                                                T.cast(
+                                                                    T.shift_right(
+                                                                        packed_scales,
+                                                                        T.cast(
+                                                                            scale_pair_idx * 16,
+                                                                            "uint64",
+                                                                        ),
+                                                                    ),
+                                                                    "uint16",
+                                                                ),
+                                                            )
+                                                        )
+                                                        T.buffer_store(
+                                                            scales_bf16_bits,
+                                                            T.cast(converted_pair, "uint16"),
+                                                            [scale_pair_idx * 2],
+                                                        )
+                                                        T.buffer_store(
+                                                            scales_bf16_bits,
+                                                            T.cast(
+                                                                T.shift_right(
+                                                                    converted_pair, T.uint32(16)
+                                                                ),
+                                                                "uint16",
+                                                            ),
+                                                            [scale_pair_idx * 2 + 1],
+                                                        )
+                                                cur_raw_fp8x8 = _builder_alloc_scalar(
+                                                    "cur_raw_fp8x8", "uint64"
+                                                )
+                                                _builder_emit(
+                                                    T.ptx.ld.shared.u64(
+                                                        cur_raw_fp8x8,
+                                                        cur_raw_nope_base_uint_addr
+                                                        + T.cast(
+                                                            local_row * (128 // 8) * d_nope,
+                                                            "uint32",
+                                                        ),
+                                                    )
+                                                )
+                                                with T.unroll(cols_per_group) as local_col:
+                                                    raw_fp8x8 = _builder_bind(
+                                                        "raw_fp8x8", cur_raw_fp8x8
+                                                    )
+                                                    with T.If(local_col + 1 < cols_per_group):
+                                                        with T.Then():
+                                                            _builder_emit(
+                                                                T.ptx.ld.shared.u64(
+                                                                    cur_raw_fp8x8,
+                                                                    cur_raw_nope_base_uint_addr
+                                                                    + T.cast(
+                                                                        local_row
+                                                                        * (128 // 8)
+                                                                        * d_nope
+                                                                        + (local_col + 1) * (8 * 8),
+                                                                        "uint32",
+                                                                    ),
+                                                                )
+                                                            )
+                                                    scale_idx = _builder_bind(
+                                                        "scale_idx",
+                                                        local_col // (cols_per_group // 4)
+                                                        if is_v32
+                                                        else local_col,
+                                                    )
+                                                    _builder_emit(
+                                                        dequant_st128(
+                                                            cur_nope_base_uint_addr
+                                                            + T.cast(
+                                                                BF16_BYTES
+                                                                * (
+                                                                    local_row * (128 // 8) * 64
+                                                                    + local_col * B_TOPK * 64
+                                                                ),
+                                                                "uint32",
+                                                            ),
+                                                            raw_fp8x8,
+                                                            scales_bf16_bits[scale_idx],
+                                                        )
+                                                    )
+                                            _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                            _builder_emit(bar_nope_ready.arrive(rs_buf.stage))
+                                            _builder_emit(bar_raw_free.arrive(rs_buf.stage))
+                                            _builder_emit(bar_valid_free.arrive(rs_index.stage))
+                                            _builder_emit(rs_buf.advance())
+                                            _builder_emit(rs_index.advance())
+                                        _builder_emit(
+                                            T.ptx.barrier.sync(
+                                                T.uint32(BAR_EVERYONE_SYNC), T.uint32(NUM_THREADS)
+                                            )
+                                        )
+                                        T.buffer_store(
+                                            batch_bar_phase.buffer, batch_bar_phase ^ 1, [0]
+                                        )
+    return builder.get()
 
 
-@T.jit
-def _sparse_decode_head64_combine_kernel(
-    lse_h: T.handle,
-    out_h: T.handle,
-    lse_accum_h: T.handle,
-    o_accum_h: T.handle,
-    num_splits_h: T.handle,
-    attn_sink_h: T.Optional(T.handle),
-    stride_lse_b: T.int32,
-    stride_lse_s_q: T.int32,
-    stride_o_b: T.int32,
-    stride_o_s_q: T.int32,
-    stride_o_h_q: T.int32,
-    stride_lse_accum_split: T.int32,
-    stride_lse_accum_s_q: T.int32,
-    stride_o_accum_split: T.int32,
-    stride_o_accum_s_q: T.int32,
-    stride_o_accum_h_q: T.int32,
-    b: T.int32,
-    s_q: T.int32,
-    h_q: T.int32,
-    d_v: T.int32,
-    num_sm_parts: T.int32,
-    *,
-    max_splits: T.constexpr,
-    use_pdl: T.constexpr,
+def _build_sparse_decode_head64_combine_kernel(
+    *, max_splits: T.constexpr, use_pdl: T.constexpr, _have_attn_sink_h=True
 ):
-    lse = T.match_buffer(lse_h, (b * s_q * h_q,), "float32", scope="global")
-    out = T.match_buffer(out_h, (b * s_q * h_q * d_v,), "bfloat16", scope="global")
-    lse_accum = T.match_buffer(
-        lse_accum_h, ((b + num_sm_parts) * s_q * h_q,), "float32", scope="global"
-    )
-    o_accum = T.match_buffer(
-        o_accum_h, ((b + num_sm_parts) * s_q * h_q * d_v,), "float32", scope="global"
-    )
-    num_splits = T.match_buffer(num_splits_h, (b + 1,), "int32", scope="global")
-    if attn_sink_h is not None:
-        attn_sink = T.match_buffer(attn_sink_h, (h_q,), "float32", scope="global")
-    T.device_entry()
-    # combine.cu:18-43.  Keep one warp per head, eight heads per CTA, the
-    # early no-split return, and the MAX_SPLITS bucket selected by the host.
-    batch_s_q_idx_expr, _, h_block_idx_expr = T.cta_id([b * s_q, 1, (h_q + 7) // 8])
-    thread_idx_expr = T.thread_id([8 * 32])
-    # Keep CUDA's prologue values as registers instead of substituting their
-    # division/modulo expressions into every source-unrolled address.  These
-    # are the exact const-int values at combine.cu:21-32.
-    batch_s_q_idx: T.int32 = batch_s_q_idx_expr
-    h_block_idx: T.int32 = h_block_idx_expr
-    thread_idx: T.int32 = thread_idx_expr
-    warp_idx: T.int32 = thread_idx // 32
-    lane_idx: T.int32 = thread_idx % 32
-    batch_idx: T.int32 = batch_s_q_idx // s_q
-    query_idx: T.int32 = batch_s_q_idx - batch_idx * s_q
-    h_block_base: T.int32 = h_block_idx * 8
-    head_idx: T.int32 = h_block_base + warp_idx
-    num_valid_heads: T.int32 = T.min(8, h_q - h_block_base)
-    if warp_idx >= num_valid_heads:
-        return 0
-
-    start_split: T.int32 = T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32")
-    end_split: T.int32 = T.cuda.ldg(num_splits.ptr_to([batch_idx + 1]), "int32")
-    my_num_splits: T.int32 = end_split - start_split
-    if my_num_splits == 1:
-        return 0
-
-    T.cuda.trap_when_assert_failed(my_num_splits <= max_splits)
-
-    # combine.cu:45-54.  Preserve the source gLseAccum/gLse base views.
-    g_lse_accum_offset: T.int32 = (
-        start_split * stride_lse_accum_split + query_idx * stride_lse_accum_s_q + h_block_base
-    )
-    g_lse_offset: T.int32 = batch_idx * stride_lse_b + query_idx * stride_lse_s_q + h_block_base
-    g_lse_accum = T.decl_buffer(
-        (max_splits, 8),
-        "float32",
-        data=lse_accum.data,
-        scope="global",
-        elem_offset=g_lse_accum_offset,
-        layout=TileLayout(S[(max_splits, 8) : (stride_lse_accum_split, 1)]),
-    )
-    g_lse = T.decl_buffer((8,), "float32", data=lse.data, scope="global", elem_offset=g_lse_offset)
-
-    # combine.cu:56.  This is static shared storage; launch-time dynamic bytes
-    # stay zero.
-    lse_scales = T.alloc_buffer((8, max_splits), "float32", scope="shared")
-
-    # combine.cu:58-69.  The PDL consumer wait remains after both early
-    # returns, followed by the same four float4 prefetches per lane.
-    if use_pdl:
-        T.evaluate(T.ptx.griddepcontrol.wait())
-    oaccum_offset: T.int32 = (
-        start_split * stride_o_accum_split
-        + query_idx * stride_o_accum_s_q
-        + head_idx * stride_o_accum_h_q
-    )
-    oaccum_ptr = T.decl_buffer(
-        (num_sm_parts * stride_o_accum_split + D_V,),
-        "float32",
-        data=o_accum.data,
-        scope="global",
-        elem_offset=oaccum_offset,
-    )
-    datas = T.alloc_local((D_V // (32 * 4), 4), "float32")
-    data_words = datas.view("uint32")
-    for elem_i in T.unroll(D_V // (32 * 4)):
-        T.ptx.ld.global_.v4.u32(
-            data_words[elem_i, 0],
-            data_words[elem_i, 1],
-            data_words[elem_i, 2],
-            data_words[elem_i, 3],
-            oaccum_ptr.view("uint32").ptr_to([lane_idx * 4 + elem_i * 128]),
-        )
-
-    # combine.cu:71-119.  Gather log2 LSE, warp-reduce max/sum, store the
-    # public natural-log LSE, then fold attn_sink only into normalization.
-    local_lse = T.alloc_local(((max_splits + 31) // 32,), "float32")
-    for lse_i in T.unroll((max_splits + 31) // 32):
-        split_idx: T.let = lse_i * 32 + lane_idx
-        local_lse[lse_i] = T.float32(-float("inf"))
-        if split_idx < my_num_splits:
-            T.ptx.ld.global_.f32(local_lse[lse_i], g_lse_accum.ptr_to([split_idx, warp_idx]))
-    max_lse: T.float32 = T.float32(-float("inf"))
-    for lse_i in T.unroll((max_splits + 31) // 32):
-        max_lse = T.max(max_lse, local_lse[lse_i])
-    for reduce_i in T.unroll(5):
-        xor_offset: T.let = 16 >> reduce_i
-        max_lse = T.max(
-            max_lse, T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), max_lse, xor_offset, 32)
-        )
-    max_lse = T.if_then_else(max_lse == T.float32(-float("inf")), 0.0, max_lse)
-    sum_lse: T.float32 = 0.0
-    lse_exp: T.float32
-    for lse_i in T.unroll((max_splits + 31) // 32):
-        T.ptx.ex2.approx.ftz.f32(lse_exp, local_lse[lse_i] - max_lse)
-        sum_lse = sum_lse + lse_exp
-    for reduce_i in T.unroll(5):
-        xor_offset: T.let = 16 >> reduce_i
-        sum_lse = sum_lse + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_lse, xor_offset, 32)
-    global_lse: T.float32 = T.if_then_else(
-        T.Or(sum_lse == 0.0, sum_lse == T.float32(-float("inf"))),
-        T.float32(float("inf")),
-        T.log2(sum_lse) + max_lse,
-    )
-    if lane_idx == 0:
-        T.ptx.st.global_.f32(g_lse.ptr_to([warp_idx]), global_lse / T.float32(LOG_2_E))
-
-    if attn_sink_h is not None:
-        sink: T.let = T.cuda.ldg(attn_sink.ptr_to([head_idx]), "float32")
-        if global_lse != T.float32(float("inf")):
-            sink_lse_exp: T.float32
-            T.ptx.ex2.approx.ftz.f32(sink_lse_exp, sink * LOG_2_E - global_lse)
-            global_lse = global_lse + T.log2(1.0 + sink_lse_exp)
-        else:
-            global_lse = T.if_then_else(
-                sink == T.float32(-float("inf")), T.float32(float("inf")), sink * LOG_2_E
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("_sparse_decode_head64_combine_kernel")
+            lse_h = T.arg("lse_h", T.handle())
+            out_h = T.arg("out_h", T.handle())
+            lse_accum_h = T.arg("lse_accum_h", T.handle())
+            o_accum_h = T.arg("o_accum_h", T.handle())
+            num_splits_h = T.arg("num_splits_h", T.handle())
+            if _have_attn_sink_h:
+                attn_sink_h = T.arg("attn_sink_h", T.handle())
+            else:
+                attn_sink_h = None
+            stride_lse_b = T.arg("stride_lse_b", T.int32())
+            stride_lse_s_q = T.arg("stride_lse_s_q", T.int32())
+            stride_o_b = T.arg("stride_o_b", T.int32())
+            stride_o_s_q = T.arg("stride_o_s_q", T.int32())
+            stride_o_h_q = T.arg("stride_o_h_q", T.int32())
+            stride_lse_accum_split = T.arg("stride_lse_accum_split", T.int32())
+            stride_lse_accum_s_q = T.arg("stride_lse_accum_s_q", T.int32())
+            stride_o_accum_split = T.arg("stride_o_accum_split", T.int32())
+            stride_o_accum_s_q = T.arg("stride_o_accum_s_q", T.int32())
+            stride_o_accum_h_q = T.arg("stride_o_accum_h_q", T.int32())
+            b = T.arg("b", T.int32())
+            s_q = T.arg("s_q", T.int32())
+            h_q = T.arg("h_q", T.int32())
+            d_v = T.arg("d_v", T.int32())
+            num_sm_parts = T.arg("num_sm_parts", T.int32())
+            lse = _builder_assign(
+                "lse", T.match_buffer(lse_h, (b * s_q * h_q,), "float32", scope="global")
             )
-    for lse_i in T.unroll((max_splits + 31) // 32):
-        split_idx: T.let = lse_i * 32 + lane_idx
-        lse_scale_value: T.float32
-        T.ptx.ex2.approx.ftz.f32(lse_scale_value, local_lse[lse_i] - global_lse)
-        T.ptx.st.shared.f32(lse_scales.ptr_to([warp_idx, split_idx]), lse_scale_value)
-    T.cuda.warp_sync()
-
-    # combine.cu:123-160.  Keep the unroll-1 split traversal and the
-    # source's next-split float4 prefetch inside the accumulation loop.
-    result = T.alloc_local((D_V // (32 * 4), 4), "float32")
-    for elem_i in T.unroll(D_V // (32 * 4)):
-        for vec_i in T.unroll(4):
-            result[elem_i, vec_i] = 0.0
-    for split_idx in T.serial(0, my_num_splits, unroll=False):
-        lse_scale: T.float32
-        T.ptx.ld.shared.f32(lse_scale, lse_scales.ptr_to([warp_idx, split_idx]))
-        for elem_i in T.unroll(D_V // (32 * 4)):
-            for vec_i in T.unroll(4):
-                result[elem_i, vec_i] = result[elem_i, vec_i] + lse_scale * datas[elem_i, vec_i]
-            if split_idx != my_num_splits - 1:
-                T.ptx.ld.global_.v4.u32(
-                    data_words[elem_i, 0],
-                    data_words[elem_i, 1],
-                    data_words[elem_i, 2],
-                    data_words[elem_i, 3],
-                    oaccum_ptr.view("uint32").ptr_to(
-                        [(split_idx + 1) * stride_o_accum_split + lane_idx * 4 + elem_i * 128]
-                    ),
+            out = _builder_assign(
+                "out", T.match_buffer(out_h, (b * s_q * h_q * d_v,), "bfloat16", scope="global")
+            )
+            lse_accum = _builder_assign(
+                "lse_accum",
+                T.match_buffer(
+                    lse_accum_h, ((b + num_sm_parts) * s_q * h_q,), "float32", scope="global"
+                ),
+            )
+            o_accum = _builder_assign(
+                "o_accum",
+                T.match_buffer(
+                    o_accum_h, ((b + num_sm_parts) * s_q * h_q * d_v,), "float32", scope="global"
+                ),
+            )
+            num_splits = _builder_assign(
+                "num_splits", T.match_buffer(num_splits_h, (b + 1,), "int32", scope="global")
+            )
+            if attn_sink_h is not None:
+                attn_sink = _builder_assign(
+                    "attn_sink", T.match_buffer(attn_sink_h, (h_q,), "float32", scope="global")
                 )
-
-    out_offset: T.int32 = (
-        batch_idx * stride_o_b + query_idx * stride_o_s_q + head_idx * stride_o_h_q
-    )
-    o_ptr = T.decl_buffer((D_V,), "bfloat16", data=out.data, scope="global", elem_offset=out_offset)
-    for elem_i in T.unroll(D_V // (32 * 4)):
-        data_converted = T.alloc_local((4,), "bfloat16")
-        data_converted[0] = result[elem_i, 0]
-        data_converted[1] = result[elem_i, 1]
-        data_converted[2] = result[elem_i, 2]
-        data_converted[3] = result[elem_i, 3]
-        T.ptx.st.global_.u64(
-            o_ptr.view("uint64").ptr_to([(lane_idx * 4 + elem_i * 128) // 4]),
-            data_converted.view("uint64")[0],
-        )
+            _builder_emit(T.device_entry())
+            _builder_values_41 = T.cta_id([b * s_q, 1, (h_q + 7) // 8])
+            batch_s_q_idx_expr, _, h_block_idx_expr = _builder_values_41
+            IRBuilder.name("_", _)
+            IRBuilder.name("batch_s_q_idx_expr", batch_s_q_idx_expr)
+            IRBuilder.name("h_block_idx_expr", h_block_idx_expr)
+            thread_idx_expr = _builder_assign("thread_idx_expr", T.thread_id([8 * 32]))
+            batch_s_q_idx = _builder_scalar("batch_s_q_idx", batch_s_q_idx_expr, dtype="int32")
+            h_block_idx = _builder_scalar("h_block_idx", h_block_idx_expr, dtype="int32")
+            thread_idx = _builder_scalar("thread_idx", thread_idx_expr, dtype="int32")
+            warp_idx = _builder_scalar("warp_idx", thread_idx // 32, dtype="int32")
+            lane_idx = _builder_scalar("lane_idx", thread_idx % 32, dtype="int32")
+            batch_idx = _builder_scalar("batch_idx", batch_s_q_idx // s_q, dtype="int32")
+            query_idx = _builder_scalar("query_idx", batch_s_q_idx - batch_idx * s_q, dtype="int32")
+            h_block_base = _builder_scalar("h_block_base", h_block_idx * 8, dtype="int32")
+            head_idx = _builder_scalar("head_idx", h_block_base + warp_idx, dtype="int32")
+            num_valid_heads = _builder_scalar(
+                "num_valid_heads", T.min(8, h_q - h_block_base), dtype="int32"
+            )
+            with T.If(warp_idx >= num_valid_heads):
+                with T.Then():
+                    T.Return(0)
+            start_split = _builder_scalar(
+                "start_split", T.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"), dtype="int32"
+            )
+            end_split = _builder_scalar(
+                "end_split", T.cuda.ldg(num_splits.ptr_to([batch_idx + 1]), "int32"), dtype="int32"
+            )
+            my_num_splits = _builder_scalar("my_num_splits", end_split - start_split, dtype="int32")
+            with T.If(my_num_splits == 1):
+                with T.Then():
+                    T.Return(0)
+            _builder_emit(T.cuda.trap_when_assert_failed(my_num_splits <= max_splits))
+            g_lse_accum_offset = _builder_scalar(
+                "g_lse_accum_offset",
+                start_split * stride_lse_accum_split
+                + query_idx * stride_lse_accum_s_q
+                + h_block_base,
+                dtype="int32",
+            )
+            g_lse_offset = _builder_scalar(
+                "g_lse_offset",
+                batch_idx * stride_lse_b + query_idx * stride_lse_s_q + h_block_base,
+                dtype="int32",
+            )
+            g_lse_accum = _builder_assign(
+                "g_lse_accum",
+                T.decl_buffer(
+                    (max_splits, 8),
+                    "float32",
+                    data=lse_accum.data,
+                    scope="global",
+                    elem_offset=g_lse_accum_offset,
+                    layout=TileLayout(S[(max_splits, 8) : (stride_lse_accum_split, 1)]),
+                ),
+            )
+            g_lse = _builder_assign(
+                "g_lse",
+                T.decl_buffer(
+                    (8,), "float32", data=lse.data, scope="global", elem_offset=g_lse_offset
+                ),
+            )
+            lse_scales = _builder_assign(
+                "lse_scales", T.alloc_buffer((8, max_splits), "float32", scope="shared")
+            )
+            if use_pdl:
+                _builder_emit(T.evaluate(T.ptx.griddepcontrol.wait()))
+            oaccum_offset = _builder_scalar(
+                "oaccum_offset",
+                start_split * stride_o_accum_split
+                + query_idx * stride_o_accum_s_q
+                + head_idx * stride_o_accum_h_q,
+                dtype="int32",
+            )
+            oaccum_ptr = _builder_assign(
+                "oaccum_ptr",
+                T.decl_buffer(
+                    (num_sm_parts * stride_o_accum_split + D_V,),
+                    "float32",
+                    data=o_accum.data,
+                    scope="global",
+                    elem_offset=oaccum_offset,
+                ),
+            )
+            datas = _builder_assign("datas", T.alloc_local((D_V // (32 * 4), 4), "float32"))
+            data_words = _builder_assign("data_words", datas.view("uint32"))
+            with T.unroll(D_V // (32 * 4)) as elem_i:
+                _builder_emit(
+                    T.ptx.ld.global_.v4.u32(
+                        data_words[elem_i, 0],
+                        data_words[elem_i, 1],
+                        data_words[elem_i, 2],
+                        data_words[elem_i, 3],
+                        oaccum_ptr.view("uint32").ptr_to([lane_idx * 4 + elem_i * 128]),
+                    )
+                )
+            local_lse = _builder_assign(
+                "local_lse", T.alloc_local(((max_splits + 31) // 32,), "float32")
+            )
+            with T.unroll((max_splits + 31) // 32) as lse_i:
+                split_idx = _builder_bind("split_idx", lse_i * 32 + lane_idx)
+                T.buffer_store(local_lse, T.float32(-float("inf")), [lse_i])
+                with T.If(split_idx < my_num_splits):
+                    with T.Then():
+                        _builder_emit(
+                            T.ptx.ld.global_.f32(
+                                local_lse[lse_i], g_lse_accum.ptr_to([split_idx, warp_idx])
+                            )
+                        )
+            max_lse = _builder_scalar("max_lse", T.float32(-float("inf")), dtype="float32")
+            with T.unroll((max_splits + 31) // 32) as lse_i:
+                T.buffer_store(max_lse.buffer, T.max(max_lse, local_lse[lse_i]), [0])
+            with T.unroll(5) as reduce_i:
+                xor_offset = _builder_bind("xor_offset", 16 >> reduce_i)
+                T.buffer_store(
+                    max_lse.buffer,
+                    T.max(
+                        max_lse,
+                        T.cuda.__shfl_xor_sync(T.uint32(4294967295), max_lse, xor_offset, 32),
+                    ),
+                    [0],
+                )
+            T.buffer_store(
+                max_lse.buffer,
+                T.if_then_else(max_lse == T.float32(-float("inf")), 0.0, max_lse),
+                [0],
+            )
+            sum_lse = _builder_scalar("sum_lse", 0.0, dtype="float32")
+            lse_exp = _builder_alloc_scalar("lse_exp", "float32")
+            with T.unroll((max_splits + 31) // 32) as lse_i:
+                _builder_emit(T.ptx.ex2.approx.ftz.f32(lse_exp, local_lse[lse_i] - max_lse))
+                T.buffer_store(sum_lse.buffer, sum_lse + lse_exp, [0])
+            with T.unroll(5) as reduce_i:
+                xor_offset = _builder_bind("xor_offset", 16 >> reduce_i)
+                T.buffer_store(
+                    sum_lse.buffer,
+                    sum_lse + T.cuda.__shfl_xor_sync(T.uint32(4294967295), sum_lse, xor_offset, 32),
+                    [0],
+                )
+            global_lse = _builder_scalar(
+                "global_lse",
+                T.if_then_else(
+                    T.Or(sum_lse == 0.0, sum_lse == T.float32(-float("inf"))),
+                    T.float32(float("inf")),
+                    T.log2(sum_lse) + max_lse,
+                ),
+                dtype="float32",
+            )
+            with T.If(lane_idx == 0):
+                with T.Then():
+                    _builder_emit(
+                        T.ptx.st.global_.f32(
+                            g_lse.ptr_to([warp_idx]), global_lse / T.float32(LOG_2_E)
+                        )
+                    )
+            if attn_sink_h is not None:
+                sink = _builder_bind("sink", T.cuda.ldg(attn_sink.ptr_to([head_idx]), "float32"))
+                with T.If(global_lse != T.float32(float("inf"))):
+                    with T.Then():
+                        sink_lse_exp = _builder_alloc_scalar("sink_lse_exp", "float32")
+                        _builder_emit(
+                            T.ptx.ex2.approx.ftz.f32(sink_lse_exp, sink * LOG_2_E - global_lse)
+                        )
+                        T.buffer_store(
+                            global_lse.buffer, global_lse + T.log2(1.0 + sink_lse_exp), [0]
+                        )
+                    with T.Else():
+                        T.buffer_store(
+                            global_lse.buffer,
+                            T.if_then_else(
+                                sink == T.float32(-float("inf")),
+                                T.float32(float("inf")),
+                                sink * LOG_2_E,
+                            ),
+                            [0],
+                        )
+            with T.unroll((max_splits + 31) // 32) as lse_i:
+                split_idx = _builder_bind("split_idx", lse_i * 32 + lane_idx)
+                lse_scale_value = _builder_alloc_scalar("lse_scale_value", "float32")
+                _builder_emit(
+                    T.ptx.ex2.approx.ftz.f32(lse_scale_value, local_lse[lse_i] - global_lse)
+                )
+                _builder_emit(
+                    T.ptx.st.shared.f32(lse_scales.ptr_to([warp_idx, split_idx]), lse_scale_value)
+                )
+            _builder_emit(T.cuda.warp_sync())
+            result = _builder_assign("result", T.alloc_local((D_V // (32 * 4), 4), "float32"))
+            with T.unroll(D_V // (32 * 4)) as elem_i:
+                with T.unroll(4) as vec_i:
+                    T.buffer_store(result, 0.0, [elem_i, vec_i])
+            with T.serial(0, my_num_splits, unroll=False) as split_idx:
+                lse_scale = _builder_alloc_scalar("lse_scale", "float32")
+                _builder_emit(
+                    T.ptx.ld.shared.f32(lse_scale, lse_scales.ptr_to([warp_idx, split_idx]))
+                )
+                with T.unroll(D_V // (32 * 4)) as elem_i:
+                    with T.unroll(4) as vec_i:
+                        T.buffer_store(
+                            result,
+                            result[elem_i, vec_i] + lse_scale * datas[elem_i, vec_i],
+                            [elem_i, vec_i],
+                        )
+                    with T.If(split_idx != my_num_splits - 1):
+                        with T.Then():
+                            _builder_emit(
+                                T.ptx.ld.global_.v4.u32(
+                                    data_words[elem_i, 0],
+                                    data_words[elem_i, 1],
+                                    data_words[elem_i, 2],
+                                    data_words[elem_i, 3],
+                                    oaccum_ptr.view("uint32").ptr_to(
+                                        [
+                                            (split_idx + 1) * stride_o_accum_split
+                                            + lane_idx * 4
+                                            + elem_i * 128
+                                        ]
+                                    ),
+                                )
+                            )
+            out_offset = _builder_scalar(
+                "out_offset",
+                batch_idx * stride_o_b + query_idx * stride_o_s_q + head_idx * stride_o_h_q,
+                dtype="int32",
+            )
+            o_ptr = _builder_assign(
+                "o_ptr",
+                T.decl_buffer(
+                    (D_V,), "bfloat16", data=out.data, scope="global", elem_offset=out_offset
+                ),
+            )
+            with T.unroll(D_V // (32 * 4)) as elem_i:
+                data_converted = _builder_assign("data_converted", T.alloc_local((4,), "bfloat16"))
+                T.buffer_store(data_converted, result[elem_i, 0], [0])
+                T.buffer_store(data_converted, result[elem_i, 1], [1])
+                T.buffer_store(data_converted, result[elem_i, 2], [2])
+                T.buffer_store(data_converted, result[elem_i, 3], [3])
+                _builder_emit(
+                    T.ptx.st.global_.u64(
+                        o_ptr.view("uint64").ptr_to([(lane_idx * 4 + elem_i * 128) // 4]),
+                        data_converted.view("uint64")[0],
+                    )
+                )
+    return builder.get()
 
 
 def _kernel_shape_params(
@@ -2615,33 +4078,26 @@ def _main_presence_mask(cfg: SparseFlashMLADecodeHead64Config) -> MainPresenceMa
     )
 
 
-def _absent_specialization_kwargs(
-    optional_names: tuple[str, ...], presence: tuple[bool, ...]
-) -> dict[str, None]:
-    return {
-        name: None
-        for name, is_present in zip(optional_names, presence, strict=True)
-        if not is_present
-    }
-
-
 @lru_cache(maxsize=64)
 def _specialized_main_kernel(
     model_type: ModelType, presence: MainPresenceMask, use_pdl: bool = False
 ):
-    specialization = _absent_specialization_kwargs(MAIN_OPTIONAL_BUFFER_PARAMS, presence)
-    return _kernel.specialize(model_type=model_type, use_pdl=use_pdl, **specialization).with_attr(
+    specialization = {
+        "_have_topk_length_h": presence[0],
+        "_have_attn_sink_h": presence[1],
+        "_have_extra_kv_h": presence[2],
+        "_have_extra_indices_h": presence[3],
+        "_have_extra_topk_length_h": presence[4],
+    }
+    return _build_kernel(model_type=model_type, use_pdl=use_pdl, **specialization).with_attr(
         "tirx.kernel_launch_params", list(LAUNCH_TAGS)
     )
 
 
 @lru_cache(maxsize=20)
 def _specialized_combine_kernel(max_splits: int, have_attn_sink: bool, use_pdl: bool = False):
-    specialization = _absent_specialization_kwargs(
-        COMBINE_OPTIONAL_BUFFER_PARAMS, (have_attn_sink,)
-    )
-    return _sparse_decode_head64_combine_kernel.specialize(
-        max_splits=max_splits, use_pdl=use_pdl, **specialization
+    return _build_sparse_decode_head64_combine_kernel(
+        max_splits=max_splits, use_pdl=use_pdl, _have_attn_sink_h=have_attn_sink
     ).with_attr(
         "tirx.kernel_launch_params",
         list(COMBINE_PDL_LAUNCH_TAGS if use_pdl else COMBINE_LAUNCH_TAGS),

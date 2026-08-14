@@ -17,10 +17,13 @@ import torch.distributed as dist
 
 import tvm
 from tvm.ir.type import PointerType, PrimType
-from tvm.script import tirx as T
 from tvm.script.ir_builder import IRBuilder
-from tvm.tirx.bench import CudaProfiler
+from tvm.script.ir_builder import ir as I
+from tvm.script.ir_builder import tirx as T
+from tvm.script.ir_builder.base import IRBuilderFrame
+from tvm.tirx import IterVar, Layout, is_buffer_var
 from tvm.tirx.layout import TCol, TileLayout, TLane
+from tvm.tirx.script.builder.ir import name_meta_class_value
 
 from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
@@ -42,6 +45,111 @@ from .utils._runtime import (
 )
 from .utils._specialize import load_specialized_module
 
+_BUILDER_MISSING = object()
+
+
+def _builder_enter(frame):
+    frames = frame.frames if hasattr(frame, "frames") else [frame]
+    prim_func = next(
+        candidate
+        for candidate in reversed(IRBuilder.current().frames)
+        if type(candidate).__name__ == "PrimFuncFrame"
+    )
+    for item in frames:
+        prim_func.add_callback(lambda item=item: item.__exit__(None, None, None))
+        item.__enter__()
+
+
+def _builder_emit(value):
+    if value is None or isinstance(value, tvm.ir.Var):
+        return
+    if isinstance(value, IRBuilderFrame) or (
+        hasattr(value, "frames") and hasattr(value, "__enter__")
+    ):
+        _builder_enter(value)
+    elif tvm.ir.is_prim_expr(value) or isinstance(value, tvm.ir.Call):
+        T.evaluate(value)
+    elif isinstance(value, int | bool):
+        T.evaluate(tvm.tirx.const(value))
+
+
+def _builder_alloc_scalar(name, dtype):
+    scalar = T.local_scalar(dtype)
+    IRBuilder.name(name, scalar.scalar.buffer)
+    return scalar.scalar
+
+
+def _builder_scalar(name, value, dtype):
+    scalar = _builder_alloc_scalar(name, dtype)
+    T.buffer_store(scalar.buffer, value, scalar.indices)
+    return scalar
+
+
+def _builder_bind(name, value, type_annotation=None):
+    result = T.Bind(value, type_annotation)
+    IRBuilder.name(name, result)
+    return result
+
+
+def _builder_const(name, value):
+    return _builder_bind(name, value)
+
+
+def _builder_assign(name, value, previous=_BUILDER_MISSING):
+    if isinstance(value, I.meta_var):
+        return value.value
+    if previous is not _BUILDER_MISSING:
+        if isinstance(previous, T.scalar_wrapper | tvm.tirx.expr.BufferLoad):
+            target = previous.scalar if isinstance(previous, T.scalar_wrapper) else previous
+            T.buffer_store(target.buffer, value, target.indices)
+            return target
+        if (
+            is_buffer_var(previous)
+            and len(previous.ty.shape) == 1
+            and bool(previous.ty.shape[0] == 1)
+        ):
+            try:
+                T.buffer_store(previous, value, [0])
+                return previous
+            except TypeError:
+                pass
+    if getattr(type(value), "_is_meta_class", False):
+        name_meta_class_value(name, value)
+        return value
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _builder_assign(f"{name}_{index}", item)
+        return value
+    if is_buffer_var(value) or isinstance(value, IterVar | Layout):
+        IRBuilder.name(name, value)
+        return value
+    if isinstance(value, tvm.ir.Var):
+        if isinstance(value.ty, PointerType):
+            return _builder_bind(name, value, value.ty)
+        IRBuilder.name(name, value)
+        return value
+    if isinstance(value, tvm.ir.Expr) and isinstance(getattr(value, "ty", None), PointerType):
+        return _builder_bind(name, value, value.ty)
+    if isinstance(value, tvm.ir.Expr) and tvm.ir.is_prim_expr(value):
+        return _builder_scalar(name, value, str(value.ty.dtype))
+    return value
+
+
+def _builder_assign_many(names, values, previous):
+    return tuple(
+        _builder_assign(name, value, old) for name, value, old in zip(names, values, previous)
+    )
+
+
+def _builder_setattr(owner, name, value):
+    previous = getattr(owner, name, _BUILDER_MISSING)
+    if isinstance(previous, T.scalar_wrapper | tvm.tirx.expr.BufferLoad):
+        target = previous.scalar if isinstance(previous, T.scalar_wrapper) else previous
+        T.buffer_store(target.buffer, value, target.indices)
+        return target
+    setattr(owner, name, value)
+    return getattr(owner, name)
+
 
 class TaskType(Enum):
     GEMM = 0
@@ -52,6 +160,67 @@ class ProfileEventType(Enum):
     GEMM = 0
     AG = 1
     FETCH = 2
+
+
+@T.meta_class
+class CudaProfiler:
+    def __init__(self, profiler_buffer, write_stride, num_groups, profiler_enabled=True):
+        self.buffer = profiler_buffer
+        self.write_stride = write_stride
+        self.num_groups = num_groups
+        self.profiler_enabled = (
+            T.bool(bool(profiler_enabled))
+            if isinstance(profiler_enabled, bool | np.bool_)
+            else profiler_enabled
+        )
+        self.profiler_tag = T.alloc_buffer([1], "uint64", scope="local", align=8)
+        self.profiler_write_offset = T.alloc_buffer([1], "uint32", scope="local", align=8)
+
+    def init(self, group_id):
+        with T.If(self.profiler_enabled):
+            with T.Then():
+                T.evaluate(
+                    T.cuda.timer_init(
+                        self.buffer.data,
+                        self.profiler_tag.data,
+                        self.profiler_write_offset.data,
+                        self.num_groups,
+                        group_id,
+                    )
+                )
+
+    def _leader(self, leader):
+        if isinstance(leader, bool | np.bool_):
+            return T.bool(bool(leader))
+        return T.bool(True) if leader is None else leader
+
+    def start(self, event_type, leader=None):
+        with T.If(self.profiler_enabled):
+            with T.Then():
+                T.evaluate(
+                    T.cuda.timer_start(
+                        event_type,
+                        self.buffer.data,
+                        self.profiler_tag.data,
+                        self.profiler_write_offset.data,
+                        self.write_stride,
+                        self._leader(leader),
+                    )
+                )
+
+    def end(self, event_type, leader=None):
+        with T.If(self.profiler_enabled):
+            with T.Then():
+                T.evaluate(
+                    T.cuda.timer_end(
+                        event_type,
+                        self.buffer.data,
+                        self.profiler_tag.data,
+                        self.profiler_write_offset.data,
+                        self.write_stride,
+                        self._leader(leader),
+                    )
+                )
 
 
 event_type_names = ["gemm", "ag", "fetch"]
@@ -274,54 +443,64 @@ class Barriers:
         self.pipe_depth = pipe_depth
         self.pipe_width = pipe_width
 
-    @T.inline
     def init(self, threads_num_wait, initializer):
-        if initializer:
-            for i in T.serial(self.pipe_depth):
-                for j in T.serial(self.pipe_width):
-                    T.ptx.mbarrier.init.shared.b64(
-                        self.mbar.ptr_to([i, j]), T.uint32(threads_num_wait)
-                    )
+        with T.If(initializer):
+            with T.Then():
+                with T.serial(self.pipe_depth) as i:
+                    IRBuilder.name("i", i)
+                    with T.serial(self.pipe_width) as j:
+                        IRBuilder.name("j", j)
+                        _builder_emit(
+                            T.ptx.mbarrier.init.shared.b64(
+                                self.mbar.ptr_to([i, j]), T.uint32(threads_num_wait)
+                            )
+                        )
 
-    @T.inline
     def wait(self, idx_d, idx_w, phase):
-        T.cuda.mbarrier_wait(self.mbar.ptr_to([idx_d, idx_w]), self.init_phase ^ phase)
+        _builder_emit(
+            T.cuda.mbarrier_wait(self.mbar.ptr_to([idx_d, idx_w]), self.init_phase ^ phase)
+        )
 
 
 class BarTMA2MMA(Barriers):
-    @T.inline
     def arrive(self, idx, expected_bytes):
-        T.ptx.mbarrier.arrive.expect_tx.shared.b64(
-            self.mbar.ptr_to([idx, 0]), T.uint32(expected_bytes)
+        _builder_emit(
+            T.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                self.mbar.ptr_to([idx, 0]), T.uint32(expected_bytes)
+            )
         )
 
-    @T.inline
     def arrive_only(self, idx):
-        T.ptx.mbarrier.arrive.shared.b64(self.mbar.ptr_to([idx, 0]), T.uint32(1))
+        _builder_emit(T.ptx.mbarrier.arrive.shared.b64(self.mbar.ptr_to([idx, 0]), T.uint32(1)))
 
 
 class BarMMA2LD(Barriers):
-    @T.inline
     def arrive(self, idx):
-        T.ptx[
-            f"tcgen05.commit.cta_group::{CTA_GROUP}.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
-        ](self.mbar.ptr_to([0, idx]), T.uint16(3))
+        _builder_emit(
+            T.ptx[
+                f"tcgen05.commit.cta_group::{CTA_GROUP}.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
+            ](self.mbar.ptr_to([0, idx]), T.uint16(3))
+        )
 
 
 class BarMMA2TMA(Barriers):
-    @T.inline
     def arrive(self, idx):
-        T.ptx[
-            f"tcgen05.commit.cta_group::{CTA_GROUP}.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
-        ](self.mbar.ptr_to([idx, 0]), T.uint16(3))
+        _builder_emit(
+            T.ptx[
+                f"tcgen05.commit.cta_group::{CTA_GROUP}.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
+            ](self.mbar.ptr_to([idx, 0]), T.uint16(3))
+        )
 
 
 class BarLD2MMA(Barriers):
-    @T.inline
     def arrive(self, idx):
-        _rem1 = T.alloc_local([1], "uint64")
-        T.ptx.mapa.shared__cluster.u64(_rem1[0], self.mbar.ptr_to([0, idx]), T.uint32(0))
-        T.ptx.mbarrier.arrive.b64(_rem1[0], T.uint32(1), pred=T.bool(True))
+        _rem1 = _builder_assign(
+            "_rem1", T.alloc_local([1], "uint64"), locals().get("_rem1", _BUILDER_MISSING)
+        )
+        _builder_emit(
+            T.ptx.mapa.shared__cluster.u64(_rem1[0], self.mbar.ptr_to([0, idx]), T.uint32(0))
+        )
+        _builder_emit(T.ptx.mbarrier.arrive.b64(_rem1[0], T.uint32(1), pred=T.bool(True)))
 
 
 @T.meta_class
@@ -352,43 +531,56 @@ class Pipeline:
         self.p_single_cta = p_single_cta
         self.c_single_cta = c_single_cta
 
-    @T.inline
     def init(self, initializer, p2c_thread_count: int = 1, c2p_thread_count: int = 1):
-        self.idx = 0
-        self.p2c_phase = 0
-        self.c2p_phase = 1
-        if initializer:
-            for cbx in T.thread_binding(M_CLUSTER, "clusterCtaIdx.x"):
-                for i in T.serial(0, self.pipeline_depth):
-                    for j in T.serial(0, self.pipeline_num):
-                        if not self.c_single_cta or cbx == 0:
-                            T.ptx.mbarrier.init.shared.b64(
-                                self.mbar_p2c.ptr_to([i, j]), T.uint32(p2c_thread_count)
+        _builder_setattr(self, "idx", 0)
+        _builder_setattr(self, "p2c_phase", 0)
+        _builder_setattr(self, "c2p_phase", 1)
+        with T.If(initializer):
+            with T.Then():
+                with T.thread_binding(M_CLUSTER, "clusterCtaIdx.x") as cbx:
+                    IRBuilder.name("cbx", cbx)
+                    with T.serial(0, self.pipeline_depth) as i:
+                        IRBuilder.name("i", i)
+                        with T.serial(0, self.pipeline_num) as j:
+                            IRBuilder.name("j", j)
+                            _builder_emit(
+                                T.ptx.mbarrier.init.shared.b64(
+                                    self.mbar_p2c.ptr_to([i, j]), T.uint32(p2c_thread_count)
+                                )
                             )
-                        if not self.p_single_cta or cbx == 0:
-                            T.ptx.mbarrier.init.shared.b64(
-                                self.mbar_c2p.ptr_to([i, j]), T.uint32(c2p_thread_count)
-                            )
-        T.ptx.fence.proxy.async_.shared__cta()
+                            with T.If(T.Or(T.bool(False), cbx == 0)):
+                                with T.Then():
+                                    _builder_emit(
+                                        T.ptx.mbarrier.init.shared.b64(
+                                            self.mbar_c2p.ptr_to([i, j]), T.uint32(c2p_thread_count)
+                                        )
+                                    )
+        _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
 
-    @T.inline
     def advance(self):
-        self.idx = (self.idx + 1) % self.pipeline_depth
-        if self.idx == 0:
-            self.p2c_phase = self.p2c_phase ^ 1
-            self.c2p_phase = self.c2p_phase ^ 1
+        _builder_setattr(self, "idx", (self.idx + 1) % self.pipeline_depth)
+        with T.If(self.idx == 0):
+            with T.Then():
+                _builder_setattr(self, "p2c_phase", self.p2c_phase ^ 1)
+                _builder_setattr(self, "c2p_phase", self.c2p_phase ^ 1)
 
-    @T.inline
     def producer_wait(self, pipeline_idx):
-        for cbx in T.thread_binding(M_CLUSTER, "clusterCtaIdx.x"):
-            if not self.p_single_cta or cbx == 0:
-                T.cuda.mbarrier_wait(self.mbar_c2p.ptr_to([self.idx, pipeline_idx]), self.c2p_phase)
+        with T.thread_binding(M_CLUSTER, "clusterCtaIdx.x") as cbx:
+            IRBuilder.name("cbx", cbx)
+            with T.If(T.Or(T.bool(False), cbx == 0)):
+                with T.Then():
+                    _builder_emit(
+                        T.cuda.mbarrier_wait(
+                            self.mbar_c2p.ptr_to([self.idx, pipeline_idx]), self.c2p_phase
+                        )
+                    )
 
-    @T.inline
     def consumer_wait(self, pipeline_idx):
-        for cbx in T.thread_binding(M_CLUSTER, "clusterCtaIdx.x"):
-            if not self.c_single_cta or cbx == 0:
+        with T.thread_binding(M_CLUSTER, "clusterCtaIdx.x") as cbx:
+            IRBuilder.name("cbx", cbx)
+            _builder_emit(
                 T.cuda.mbarrier_wait(self.mbar_p2c.ptr_to([self.idx, pipeline_idx]), self.p2c_phase)
+            )
 
 
 def int_var(name: str, scope="local", dtype="int32", align=4):
@@ -403,13 +595,15 @@ class Semaphore:
         self.sem = buffer
         self.state = T.alloc_buffer([1], "uint64", scope="local", align=8)
 
-    @T.inline
     def semaphore_wait(self, *coord):
-        while 1:
-            T.ptx.ld.acquire.gpu.global_.b64(self.state[0], self.sem.ptr_to(list(coord)))
-            if self.state[0] == self.cnt:
-                break
-            T.cuda.nano_sleep(40)
+        with T.While(1):
+            _builder_emit(
+                T.ptx.ld.acquire.gpu.global_.b64(self.state[0], self.sem.ptr_to(list(coord)))
+            )
+            with T.If(self.state[0] == self.cnt):
+                with T.Then():
+                    T.evaluate(T.break_loop())
+            _builder_emit(T.cuda.nano_sleep(40))
 
 
 @T.meta_class
@@ -437,23 +631,23 @@ class MPMCQueue:
         self.masked_pos = int_var("masked_pos")
         self.num_tot_tasks = num_tot_tasks
 
-    @T.inline
     def enqueue(self, signal_rank: int, task_type: int, *task_idx: int):
-        T.cuda.func_call(
-            "enqueue_remote",
-            self.task_types.ptr_to([0]),
-            self.task_idxs.ptr_to([0, 0]),
-            self.tail.ptr_to([0]),
-            self.mask,
-            signal_rank,
-            task_type,
-            *task_idx,
-            source_code=enqueue_remote,
+        _builder_emit(
+            T.cuda.func_call(
+                "enqueue_remote",
+                self.task_types.ptr_to([0]),
+                self.task_idxs.ptr_to([0, 0]),
+                self.tail.ptr_to([0]),
+                self.mask,
+                signal_rank,
+                task_type,
+                *task_idx,
+                source_code=enqueue_remote,
+            )
         )
 
 
 class GEMMMPMCQueue(MPMCQueue):
-    @T.inline
     def dequeue(
         self,
         fetched_task_type: T.Buffer,
@@ -464,37 +658,49 @@ class GEMMMPMCQueue(MPMCQueue):
         bx,
         rank,
     ):
-        T.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), T.int32(1))
-        if self.head_r[0] < self.num_tot_tasks:
-            # TODO: modify the wait logic to make it faster
-            remote_rank = (
-                rank + (self.head_r[0] // (LOCAL_GEMM_M_CLUSTERS * GEMM_N_CLUSTERS))
-            ) % WORLD_SIZE
-            if remote_rank != rank:
-                sem.semaphore_wait(remote_rank)
-
-            self.masked_pos[0] = self.head_r[0] & self.mask
-            T.ptx.ld.global_.acquire.gpu.b32(
-                fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
-            )
-            while fetched_task_type[0] < 0:
-                T.cuda.nano_sleep(40)
-                T.ptx.ld.global_.acquire.gpu.b32(
-                    fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+        _builder_emit(T.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), T.int32(1)))
+        with T.If(self.head_r[0] < self.num_tot_tasks):
+            with T.Then():
+                remote_rank = _builder_assign(
+                    "remote_rank",
+                    (rank + self.head_r[0] // (LOCAL_GEMM_M_CLUSTERS * GEMM_N_CLUSTERS))
+                    % WORLD_SIZE,
+                    locals().get("remote_rank", _BUILDER_MISSING),
                 )
-            T.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), T.int32(-1))
-            T.ptx.ld.global_.s32(
-                fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
-            )
-            T.ptx.ld.global_.s32(
-                fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
-            )
-        else:
-            fetched_task_type[0] = -1
+                with T.If(remote_rank != rank):
+                    with T.Then():
+                        _builder_emit(sem.semaphore_wait(remote_rank))
+                T.buffer_store(self.masked_pos, self.head_r[0] & self.mask, [0])
+                _builder_emit(
+                    T.ptx.ld.global_.acquire.gpu.b32(
+                        fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+                    )
+                )
+                with T.While(fetched_task_type[0] < 0):
+                    _builder_emit(T.cuda.nano_sleep(40))
+                    _builder_emit(
+                        T.ptx.ld.global_.acquire.gpu.b32(
+                            fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+                        )
+                    )
+                _builder_emit(
+                    T.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), T.int32(-1))
+                )
+                _builder_emit(
+                    T.ptx.ld.global_.s32(
+                        fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
+                    )
+                )
+                _builder_emit(
+                    T.ptx.ld.global_.s32(
+                        fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
+                    )
+                )
+            with T.Else():
+                T.buffer_store(fetched_task_type, -1, [0])
 
 
 # fmt: off
-@T.inline
 def consumer_fetch(
     sch_pipe,
     packed_value,
@@ -503,18 +709,12 @@ def consumer_fetch(
     fetched_task_idx0,
     fetched_task_idx1,
 ):
-    sch_pipe.consumer_wait(0)
-    T.ptx.ld.shared__cluster.v4.b32(
-        rs_rem[0],
-        fetched_task_type[0],
-        fetched_task_idx0[0],
-        fetched_task_idx1[0],
-        packed_value.ptr_to([0]),
-    )
-    _rem2 = T.alloc_local([1], "uint64")
-    T.ptx.mapa.shared__cluster.u64(_rem2[0], sch_pipe.mbar_c2p.ptr_to([sch_pipe.idx, 0]), T.uint32(0))
-    T.ptx.mbarrier.arrive.b64(_rem2[0], T.uint32(1), pred=T.bool(True))
-    sch_pipe.p2c_phase = sch_pipe.p2c_phase ^ 1
+    _builder_emit(sch_pipe.consumer_wait(0))
+    _builder_emit(T.ptx.ld.shared__cluster.v4.b32(rs_rem[0], fetched_task_type[0], fetched_task_idx0[0], fetched_task_idx1[0], packed_value.ptr_to([0])))
+    _rem2 = _builder_assign("_rem2", T.alloc_local([1], 'uint64'), locals().get("_rem2", _BUILDER_MISSING))
+    _builder_emit(T.ptx.mapa.shared__cluster.u64(_rem2[0], sch_pipe.mbar_c2p.ptr_to([sch_pipe.idx, 0]), T.uint32(0)))
+    _builder_emit(T.ptx.mbarrier.arrive.b64(_rem2[0], T.uint32(1), pred=T.bool(True)))
+    _builder_setattr(sch_pipe, "p2c_phase", sch_pipe.p2c_phase ^ 1)
 # fmt: on
 
 
@@ -534,7 +734,6 @@ class SingleDynamicTileScheduler:
         IRBuilder.current().name("packed_value", self.packed_value)
 
     # fmt: off
-    @T.inline
     def _fetch_from_queue(
         self,
         cbx,
@@ -544,74 +743,43 @@ class SingleDynamicTileScheduler:
         lane_id,
     ):
         # fetch from GEMM queue
-        if warp_id_in_cta == 11 and lane_id == 0:
-            if cbx == 0:
-                self.sch_pipe.producer_wait(0)
-                self.queue.dequeue(self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1, self.sem, cbx, bx, rank)
-                T.ptx.st.shared__cluster.v4.b32(
-                    self.packed_value.ptr_to([0]),
-                    self.rs_rem[0],
-                    self.fetched_task_type[0],
-                    self.fetched_task_idx0[0],
-                    self.fetched_task_idx1[0],
-                )
-                # T.cuda.thread_fence()
-                _rem3 = T.alloc_local([1], "uint64")
-                T.ptx.mapa.shared__cluster.u64(_rem3[0], self.sch_pipe.mbar_p2c.ptr_to([self.sch_pipe.idx, 0]), T.uint32(0))
-                T.ptx.mbarrier.arrive.b64(_rem3[0], T.uint32(1), pred=T.bool(True))
-                _rem4 = T.alloc_local([1], "uint64")
-                T.ptx.mapa.shared__cluster.u64(_rem4[0], self.sch_pipe.mbar_p2c.ptr_to([self.sch_pipe.idx, 0]), T.uint32(1))
-                T.ptx.mbarrier.arrive.b64(_rem4[0], T.uint32(1), pred=T.bool(True))
-                self.sch_pipe.c2p_phase = self.sch_pipe.c2p_phase ^ 1
+        with T.If(T.And(warp_id_in_cta == 11, lane_id == 0)):
+            with T.Then():
+                with T.If(cbx == 0):
+                    with T.Then():
+                        _builder_emit(self.sch_pipe.producer_wait(0))
+                        _builder_emit(self.queue.dequeue(self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1, self.sem, cbx, bx, rank))
+                        _builder_emit(T.ptx.st.shared__cluster.v4.b32(self.packed_value.ptr_to([0]), self.rs_rem[0], self.fetched_task_type[0], self.fetched_task_idx0[0], self.fetched_task_idx1[0]))
+                        _rem3 = _builder_assign("_rem3", T.alloc_local([1], 'uint64'), locals().get("_rem3", _BUILDER_MISSING))
+                        _builder_emit(T.ptx.mapa.shared__cluster.u64(_rem3[0], self.sch_pipe.mbar_p2c.ptr_to([self.sch_pipe.idx, 0]), T.uint32(0)))
+                        _builder_emit(T.ptx.mbarrier.arrive.b64(_rem3[0], T.uint32(1), pred=T.bool(True)))
+                        _rem4 = _builder_assign("_rem4", T.alloc_local([1], 'uint64'), locals().get("_rem4", _BUILDER_MISSING))
+                        _builder_emit(T.ptx.mapa.shared__cluster.u64(_rem4[0], self.sch_pipe.mbar_p2c.ptr_to([self.sch_pipe.idx, 0]), T.uint32(1)))
+                        _builder_emit(T.ptx.mbarrier.arrive.b64(_rem4[0], T.uint32(1), pred=T.bool(True)))
+                        _builder_setattr(self.sch_pipe, "c2p_phase", self.sch_pipe.c2p_phase ^ 1)
         if ENABLE_WARP_BROADCAST:
-            if lane_id == 0:
-                consumer_fetch(self.sch_pipe, self.packed_value, self.rs_rem, self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1)
-            T.ptx.shfl_sync.idx.b32(
-                self.rs_rem[0],
-                self.rs_rem[0],
-                T.uint32(0),
-                T.uint32(31),
-                T.uint32(0xFFFFFFFF),
-            )
-            T.ptx.shfl_sync.idx.b32(
-                self.fetched_task_type[0],
-                self.fetched_task_type[0],
-                T.uint32(0),
-                T.uint32(31),
-                T.uint32(0xFFFFFFFF),
-            )
-            T.ptx.shfl_sync.idx.b32(
-                self.fetched_task_idx0[0],
-                self.fetched_task_idx0[0],
-                T.uint32(0),
-                T.uint32(31),
-                T.uint32(0xFFFFFFFF),
-            )
-            T.ptx.shfl_sync.idx.b32(
-                self.fetched_task_idx1[0],
-                self.fetched_task_idx1[0],
-                T.uint32(0),
-                T.uint32(31),
-                T.uint32(0xFFFFFFFF),
-            )
+            with T.If(lane_id == 0):
+                with T.Then():
+                    _builder_emit(consumer_fetch(self.sch_pipe, self.packed_value, self.rs_rem, self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1))
+            _builder_emit(T.ptx.shfl_sync.idx.b32(self.rs_rem[0], self.rs_rem[0], T.uint32(0), T.uint32(31), T.uint32(4294967295)))
+            _builder_emit(T.ptx.shfl_sync.idx.b32(self.fetched_task_type[0], self.fetched_task_type[0], T.uint32(0), T.uint32(31), T.uint32(4294967295)))
+            _builder_emit(T.ptx.shfl_sync.idx.b32(self.fetched_task_idx0[0], self.fetched_task_idx0[0], T.uint32(0), T.uint32(31), T.uint32(4294967295)))
+            _builder_emit(T.ptx.shfl_sync.idx.b32(self.fetched_task_idx1[0], self.fetched_task_idx1[0], T.uint32(0), T.uint32(31), T.uint32(4294967295)))
         else:
-            consumer_fetch(self.sch_pipe, self.packed_value, self.rs_rem, self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1)
+            _builder_emit(consumer_fetch(self.sch_pipe, self.packed_value, self.rs_rem, self.fetched_task_type, self.fetched_task_idx0, self.fetched_task_idx1))
 
-    @T.inline
     def init(self, cbx, bx, rank, warp_id_in_cta, lane_id):
-        self.rs_rem[0] = -1
-        self._fetch_from_queue(cbx, bx, rank, warp_id_in_cta, lane_id)
+        T.buffer_store(self.rs_rem, -1, [0])
+        _builder_emit(self._fetch_from_queue(cbx, bx, rank, warp_id_in_cta, lane_id))
 
-    @T.inline
     def next_tile(self, cbx, bx, rank, warp_id_in_cta, lane_id):
-        self._fetch_from_queue(cbx, bx, rank, warp_id_in_cta, lane_id)
+        _builder_emit(self._fetch_from_queue(cbx, bx, rank, warp_id_in_cta, lane_id))
 
     def valid(self):
         return (self.fetched_task_type[0] >= 0) | (self.rs_rem[0] >= 0)
     # fmt: on
 
 
-@T.inline
 def skip():
     pass
 
@@ -643,427 +811,229 @@ def _build_kernel():
     )
 
     # fmt: off
-    @T.prim_func
-    def test_mma_ss_tma_2sm_persistent(A: T.Buffer((LOCAL_M, K), a_type), B: T.Buffer((LOCAL_N, K), b_type), ag_out: T.Buffer((M, K), a_type),
-                                       semaphore: T.Buffer((WORLD_SIZE,), "uint64"), out: T.Buffer((M, LOCAL_N), d_type), profiler_buffer: T.Buffer((PROFILER_BUFFER_SIZE,), "uint64"),
-                                       gemm_task_types: T.Buffer((CAPACITY,), "int32"), gemm_task_idxs: T.Buffer((CAPACITY, 2), "int32"), gemm_head: T.Buffer((1,), "int32"), gemm_tail: T.Buffer((1,), "int32")):
-        A_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        A_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        ag_out_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        ag_out_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        B_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        out_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            A_tensor_map,
-            a_type,
-            2,
-            A.data,
-            K,
-            LOCAL_M,
-            K * F16_BYTES,
-            BLK_K,
-            BLK_M,
-            1,
-            1,
-            0,
-            SWIZZLE,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            A_tensor_map_1,
-            a_type,
-            2,
-            A.data,
-            K,
-            LOCAL_M,
-            K * F16_BYTES,
-            BLK_K,
-            BLK_M,
-            1,
-            1,
-            0,
-            SWIZZLE,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            ag_out_tensor_map,
-            a_type,
-            2,
-            ag_out.data,
-            K,
-            M,
-            K * F16_BYTES,
-            BLK_K,
-            BLK_M,
-            1,
-            1,
-            0,
-            SWIZZLE,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            ag_out_tensor_map_1,
-            a_type,
-            2,
-            ag_out.data,
-            K,
-            M,
-            K * F16_BYTES,
-            BLK_K,
-            BLK_M,
-            1,
-            1,
-            0,
-            SWIZZLE,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            B_tensor_map,
-            b_type,
-            2,
-            B.data,
-            K,
-            LOCAL_N,
-            K * F16_BYTES,
-            BLK_K,
-            BLK_N,
-            1,
-            1,
-            0,
-            SWIZZLE,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            out_tensor_map,
-            d_type,
-            2,
-            out.data,
-            LOCAL_N,
-            M,
-            LOCAL_N * F16_BYTES,
-            EPI_TILE,
-            BLK_M,
-            1,
-            1,
-            0,
-            SWIZZLE,
-            2,
-            0,
-        )
-        T.device_entry()
-        cbx, cby = T.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
-        bx = T.cta_id([SM_NUMBER])
-        wg_id = T.warpgroup_id([WG_NUMBER])
-        warp_id = T.warp_id_in_wg([WARP_NUMBER])
-        warp_id_in_cta = T.warp_id([WG_NUMBER * WARP_NUMBER])
-        lane_id = T.lane_id([32])
-        tid = T.thread_id([NUM_THREADS])
-        rank = T.nvshmem.my_pe()
-        # alloc shared memory
-        buf = T.alloc_buffer([SMEM_SIZE], "uint8", scope="shared.dyn")
-        T.attr({"tirx.dyn_smem_bytes": SMEM_SIZE})
-        tmem_addr = T.decl_buffer((1,), "uint32", buf.data, scope="shared.dyn", elem_offset=0)
-        A_smem = T.decl_buffer((PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type, buf.data, layout=A_layout,
-                                elem_offset=1024 // F16_BYTES)
-        B_smem = T.decl_buffer((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, buf.data, layout=B_layout,
-                                elem_offset=1024 // F16_BYTES + PIPELINE_DEPTH * NUM_CONSUMER * BLK_M * BLK_K)
-        D_smem = T.decl_buffer((NUM_CONSUMER, BLK_M, EPI_TILE), d_type, buf.data, layout=D_layout,
-                                elem_offset=1024 // F16_BYTES + PIPELINE_DEPTH * (NUM_CONSUMER * BLK_M + BLK_N) * BLK_K)
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("test_mma_ss_tma_2sm_persistent")
+            A = T.arg("A", T.Buffer((LOCAL_M, K), a_type))
+            B = T.arg("B", T.Buffer((LOCAL_N, K), b_type))
+            ag_out = T.arg("ag_out", T.Buffer((M, K), a_type))
+            semaphore = T.arg("semaphore", T.Buffer((WORLD_SIZE,), 'uint64'))
+            out = T.arg("out", T.Buffer((M, LOCAL_N), d_type))
+            profiler_buffer = T.arg("profiler_buffer", T.Buffer((PROFILER_BUFFER_SIZE,), 'uint64'))
+            gemm_task_types = T.arg("gemm_task_types", T.Buffer((CAPACITY,), 'int32'))
+            gemm_task_idxs = T.arg("gemm_task_idxs", T.Buffer((CAPACITY, 2), 'int32'))
+            gemm_head = T.arg("gemm_head", T.Buffer((1,), 'int32'))
+            gemm_tail = T.arg("gemm_tail", T.Buffer((1,), 'int32'))
+            A_tensor_map = _builder_bind("A_tensor_map", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            A_tensor_map_1 = _builder_bind("A_tensor_map_1", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            ag_out_tensor_map = _builder_bind("ag_out_tensor_map", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            ag_out_tensor_map_1 = _builder_bind("ag_out_tensor_map_1", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            B_tensor_map = _builder_bind("B_tensor_map", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            out_tensor_map = _builder_bind("out_tensor_map", T.tvm_stack_alloca('tensormap', 1), T.TensorMap())
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', A_tensor_map, a_type, 2, A.data, K, LOCAL_M, K * F16_BYTES, BLK_K, BLK_M, 1, 1, 0, SWIZZLE, 2, 0))
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', A_tensor_map_1, a_type, 2, A.data, K, LOCAL_M, K * F16_BYTES, BLK_K, BLK_M, 1, 1, 0, SWIZZLE, 2, 0))
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', ag_out_tensor_map, a_type, 2, ag_out.data, K, M, K * F16_BYTES, BLK_K, BLK_M, 1, 1, 0, SWIZZLE, 2, 0))
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', ag_out_tensor_map_1, a_type, 2, ag_out.data, K, M, K * F16_BYTES, BLK_K, BLK_M, 1, 1, 0, SWIZZLE, 2, 0))
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', B_tensor_map, b_type, 2, B.data, K, LOCAL_N, K * F16_BYTES, BLK_K, BLK_N, 1, 1, 0, SWIZZLE, 2, 0))
+            _builder_emit(T.call_packed('runtime.cuTensorMapEncodeTiled', out_tensor_map, d_type, 2, out.data, LOCAL_N, M, LOCAL_N * F16_BYTES, EPI_TILE, BLK_M, 1, 1, 0, SWIZZLE, 2, 0))
+            _builder_emit(T.device_entry())
+            cbx, cby = _builder_assign_many(('cbx', 'cby'), T.cta_id_in_cluster([M_CLUSTER, N_CLUSTER]), (locals().get("cbx", _BUILDER_MISSING), locals().get("cby", _BUILDER_MISSING),))
+            bx = _builder_assign("bx", T.cta_id([SM_NUMBER]), locals().get("bx", _BUILDER_MISSING))
+            wg_id = _builder_assign("wg_id", T.warpgroup_id([WG_NUMBER]), locals().get("wg_id", _BUILDER_MISSING))
+            warp_id = _builder_assign("warp_id", T.warp_id_in_wg([WARP_NUMBER]), locals().get("warp_id", _BUILDER_MISSING))
+            warp_id_in_cta = _builder_assign("warp_id_in_cta", T.warp_id([WG_NUMBER * WARP_NUMBER]), locals().get("warp_id_in_cta", _BUILDER_MISSING))
+            lane_id = _builder_assign("lane_id", T.lane_id([32]), locals().get("lane_id", _BUILDER_MISSING))
+            tid = _builder_assign("tid", T.thread_id([NUM_THREADS]), locals().get("tid", _BUILDER_MISSING))
+            rank = _builder_scalar("rank", T.nvshmem.my_pe(), "int32")
+            buf = _builder_assign("buf", T.alloc_buffer([SMEM_SIZE], 'uint8', scope='shared.dyn'), locals().get("buf", _BUILDER_MISSING))
+            _builder_emit(T.attr({'tirx.dyn_smem_bytes': SMEM_SIZE}))
+            tmem_addr = _builder_assign("tmem_addr", T.decl_buffer((1,), 'uint32', buf.data, scope='shared.dyn', elem_offset=0), locals().get("tmem_addr", _BUILDER_MISSING))
+            A_smem = _builder_assign("A_smem", T.decl_buffer((PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type, buf.data, layout=A_layout, elem_offset=1024 // F16_BYTES), locals().get("A_smem", _BUILDER_MISSING))
+            B_smem = _builder_assign("B_smem", T.decl_buffer((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, buf.data, layout=B_layout, elem_offset=1024 // F16_BYTES + PIPELINE_DEPTH * NUM_CONSUMER * BLK_M * BLK_K), locals().get("B_smem", _BUILDER_MISSING))
+            D_smem = _builder_assign("D_smem", T.decl_buffer((NUM_CONSUMER, BLK_M, EPI_TILE), d_type, buf.data, layout=D_layout, elem_offset=1024 // F16_BYTES + PIPELINE_DEPTH * (NUM_CONSUMER * BLK_M + BLK_N) * BLK_K), locals().get("D_smem", _BUILDER_MISSING))
+            descA = _builder_alloc_scalar("descA", "uint64")
+            descB = _builder_alloc_scalar("descB", "uint64")
+            descI = _builder_alloc_scalar("descI", "uint32")
+            phase = _builder_assign("phase", T.alloc_buffer((1,), 'int32', scope='local'), locals().get("phase", _BUILDER_MISSING))
+            phase_tmem = _builder_assign("phase_tmem", T.alloc_buffer((1,), 'int32', scope='local'), locals().get("phase_tmem", _BUILDER_MISSING))
+            stage = _builder_alloc_scalar("stage", "int32")
+            tmem_addr_local = _builder_alloc_scalar("tmem_addr_local", "uint32")
+            sem = Semaphore(cnt=1, buffer=semaphore)
+            gemm_queue = GEMMMPMCQueue(CAPACITY, gemm_task_types, gemm_task_idxs, gemm_head, gemm_tail, GEMM_M_CLUSTERS * GEMM_N_CLUSTERS)
+            packed_buf = _builder_assign("packed_buf", T.decl_buffer((1,), 'uint64', buf.data, elem_offset=64), locals().get("packed_buf", _BUILDER_MISSING))
+            packed_ptr = _builder_bind("packed_ptr", T.reinterpret(PointerType(PrimType('uint64')), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)), T.Var(name='packed_ptr', ty=PointerType(PrimType('uint64'))))
+            packed_value = _builder_assign("packed_value", T.decl_buffer([1], 'uint64', data=packed_ptr, scope='shared'), locals().get("packed_value", _BUILDER_MISSING))
+            sch_pipe = Pipeline(buf.data, 64 + 4, pipeline_depth=1, pipeline_num=1, p_single_cta=True, c_single_cta=False)
+            tile_scheduler = SingleDynamicTileScheduler(gemm_queue, packed_value, sch_pipe, sem)
+            profiler = CudaProfiler(profiler_buffer, write_stride=PROFILER_WRITE_STRIDE, num_groups=NUM_GROUPS, profiler_enabled=PROFILER_ON)
+            _builder_emit(profiler.init(warp_id_in_cta))
+            tma2mma = BarTMA2MMA(buf.data, 4, PIPELINE_DEPTH, 1, is_p2c=True)
+            mma2tma = BarMMA2TMA(buf.data, 4 + PIPELINE_DEPTH, PIPELINE_DEPTH, 1, is_p2c=False)
+            mma2ld = BarMMA2LD(buf.data, 4 + 2 * PIPELINE_DEPTH, 1, NUM_CONSUMER, is_p2c=True)
+            ld2mma = BarLD2MMA(buf.data, 4 + 2 * PIPELINE_DEPTH + NUM_CONSUMER, 1, NUM_CONSUMER, is_p2c=False)
+            _builder_emit(tma2mma.init(1, tid == 0))
+            _builder_emit(mma2tma.init(NUM_CONSUMER, tid == 0))
+            _builder_emit(mma2ld.init(1, tid == 0))
+            _builder_emit(ld2mma.init(128 * NUM_CONSUMER, tid == 0))
+            ptr = _builder_bind("ptr", T.reinterpret(PointerType(PrimType('uint64')), _mapa_u64_tx(tma2mma.mbar.ptr_to([0, 0]), 0)), T.Var(name='ptr', ty=PointerType(PrimType('uint64'))))
+            tma_finished = _builder_assign("tma_finished", T.decl_buffer([PIPELINE_DEPTH], 'uint64', data=ptr, scope='shared'), locals().get("tma_finished", _BUILDER_MISSING))
+            T.buffer_store(phase, 0, [0])
+            T.buffer_store(phase_tmem, 0, [0])
+            _builder_emit(sch_pipe.init(tid == 0, c2p_thread_count=C2P_THREAD_COUNT, p2c_thread_count=1))
+            _builder_emit(T.cuda.tcgen05.encode_instr_descriptor(T.address_of(descI), d_dtype='float32', a_dtype=a_type, b_dtype=b_type, M=MMA_M, N=MMA_N, K=MMA_K, trans_a=False, trans_b=False, n_cta_groups=CTA_GROUP))
+            with T.If((wg_id == 0) & (warp_id == 0)):
+                with T.Then():
+                    _builder_emit(T.ptx[f'tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32'](tmem_addr.ptr_to([0]), T.uint32(N_COLS)))
+            _builder_emit(T.ptx.barrier.cluster.arrive())
+            _builder_emit(T.ptx.barrier.cluster.wait())
+            _builder_emit(T.cuda.cta_sync())
+            _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+            _builder_emit(T.ptx.fence.mbarrier_init.release.cluster())
+            _builder_emit(tile_scheduler.init(cbx, bx, rank, warp_id_in_cta, lane_id))
+            _builder_emit(T.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0])))
+            _builder_emit(T.cuda.trap_when_assert_failed(tmem_addr_local == 0))
+            tmem = _builder_assign("tmem", T.decl_buffer((128, N_COLS), 'float32', scope='tmem', allocated_addr=0, layout=TileLayout(T.S[(128, N_COLS):(1 @ TLane, 1 @ TCol)])), locals().get("tmem", _BUILDER_MISSING))
 
-        # alloc local memory
-        descA = T.local_scalar("uint64")
-        descB = T.local_scalar("uint64")
-        descI = T.local_scalar("uint32")
-        phase = T.alloc_buffer((1,), "int32", scope="local")
-        phase_tmem = T.alloc_buffer((1,), "int32", scope="local")
-        stage = T.local_scalar("int32")
-        tmem_addr_local = T.local_scalar("uint32")
+            def paritioned_loop(main_loop, epilogue1, epilogue2):
+                with T.serial(PIPE_CYCLE) as ko:
+                    IRBuilder.name("ko", ko)
+                    with T.unroll(PIPELINE_DEPTH) as ks:
+                        IRBuilder.name("ks", ks)
+                        T.buffer_store(stage.buffer, ko * PIPELINE_DEPTH + ks, [0])
+                        _builder_emit(main_loop(False, ks))
+                    T.buffer_store(phase, phase[0] ^ 1, [0])
+                if PIPE_REMAIN_NUM > 0:
+                    with T.unroll(PIPE_REMAIN_NUM) as ks:
+                        IRBuilder.name("ks", ks)
+                        T.buffer_store(stage.buffer, PIPE_CYCLE * PIPELINE_DEPTH + ks, [0])
+                        _builder_emit(main_loop(True, ks))
+                    _builder_emit(epilogue1())
+                    with T.unroll(PIPE_REMAIN_NUM, PIPELINE_DEPTH) as ks:
+                        IRBuilder.name("ks", ks)
+                        _builder_emit(epilogue2(ks))
+                    T.buffer_store(phase, phase[0] ^ 1, [0])
+                else:
+                    _builder_emit(epilogue1())
+            with T.While(tile_scheduler.valid()):
+                with T.If(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value):
+                    with T.Then():
+                        _builder_emit(profiler.start(ProfileEventType.GEMM, tid == 0))
+                        m_idx = tile_scheduler.fetched_task_idx0[0]
+                        n_idx = tile_scheduler.fetched_task_idx1[0]
+                        with T.If(wg_id == NUM_CONSUMER):
+                            with T.Then():
+                                _builder_emit(T.ptx.setmaxnreg.dec.sync.aligned.u32(56))
+                                with T.If(warp_id == 3):
+                                    with T.Then():
+                                        with T.If(T.cuda.elect_sync()):
+                                            with T.Then():
+                                                n_start = (n_idx * CTA_GROUP + cbx) * BLK_N
 
-        # ag + gemm
-        sem = T.meta_var(Semaphore(cnt=1, buffer=semaphore))
-        gemm_queue = T.meta_var(GEMMMPMCQueue(CAPACITY, gemm_task_types, gemm_task_idxs, gemm_head, gemm_tail, GEMM_M_CLUSTERS * GEMM_N_CLUSTERS))
-        packed_buf = T.decl_buffer((1,), "uint64", buf.data, elem_offset=64)
-        packed_ptr: T.let[T.Var(name="packed_ptr", ty=PointerType(PrimType("uint64")))] = T.reinterpret(PointerType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)) # rank: 0
-        packed_value = T.decl_buffer([1,], "uint64", data=packed_ptr, scope="shared")
-        sch_pipe = T.meta_var(Pipeline(buf.data, 64 + 4, pipeline_depth=1, pipeline_num=1, p_single_cta=True, c_single_cta=False))
-        tile_scheduler = T.meta_var(SingleDynamicTileScheduler(gemm_queue, packed_value, sch_pipe, sem))
-        profiler = T.meta_var(CudaProfiler(profiler_buffer, write_stride=PROFILER_WRITE_STRIDE, num_groups=NUM_GROUPS, profiler_enabled=PROFILER_ON))
+                                                def tma_load(is_remain, ks):
+                                                    stage_k = stage * BLK_K
+                                                    _builder_emit(mma2tma.wait(ks, 0, phase[0]))
+                                                    with T.If(T.And(rank * LOCAL_GEMM_M_CLUSTERS <= m_idx, m_idx < (rank + 1) * LOCAL_GEMM_M_CLUSTERS)):
+                                                        with T.Then():
+                                                            m_start0 = (m_idx % LOCAL_GEMM_M_CLUSTERS * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M
+                                                            m_start1 = (m_idx % LOCAL_GEMM_M_CLUSTERS * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M
+                                                            _builder_emit(T.ptx[_TMA_G2S_CG2](A_smem.ptr_to([ks, 0, 0, 0]), T.address_of(A_tensor_map), T.cast(stage_k, 'int32'), T.cast(m_start0, 'int32'), T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks]))))
+                                                            _builder_emit(T.ptx[_TMA_G2S_CG2](A_smem.ptr_to([ks, 1, 0, 0]), T.address_of(A_tensor_map_1), T.cast(stage_k, 'int32'), T.cast(m_start1, 'int32'), T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks]))))
+                                                        with T.Else():
+                                                            m_start0 = (m_idx * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M
+                                                            m_start1 = (m_idx * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M
+                                                            _builder_emit(T.ptx[_TMA_G2S_CG2](A_smem.ptr_to([ks, 0, 0, 0]), T.address_of(ag_out_tensor_map), T.cast(stage_k, 'int32'), T.cast(m_start0, 'int32'), T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks]))))
+                                                            _builder_emit(T.ptx[_TMA_G2S_CG2](A_smem.ptr_to([ks, 1, 0, 0]), T.address_of(ag_out_tensor_map_1), T.cast(stage_k, 'int32'), T.cast(m_start1, 'int32'), T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks]))))
+                                                    _builder_emit(T.ptx[_TMA_G2S_CG2](B_smem.ptr_to([ks, 0, 0]), T.address_of(B_tensor_map), T.cast(stage_k, 'int32'), T.cast(n_start, 'int32'), T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks]))))
+                                                    with T.If(cbx == 0):
+                                                        with T.Then():
+                                                            _builder_emit(tma2mma.arrive(ks, NUM_CONSUMER * BLK_K * (BLK_M * NUM_CONSUMER + BLK_N) * F16_BYTES))
 
-        # initialize
-        profiler.init(warp_id_in_cta)
-        tma2mma = T.meta_var(BarTMA2MMA(buf.data, 4, PIPELINE_DEPTH, 1, is_p2c=True))
-        mma2tma = T.meta_var(BarMMA2TMA(buf.data, 4 + PIPELINE_DEPTH, PIPELINE_DEPTH, 1, is_p2c=False))
-        mma2ld = T.meta_var(BarMMA2LD(buf.data, 4 + 2 * PIPELINE_DEPTH, 1, NUM_CONSUMER, is_p2c=True))
-        ld2mma = T.meta_var(BarLD2MMA(buf.data, 4 + 2 * PIPELINE_DEPTH + NUM_CONSUMER, 1, NUM_CONSUMER, is_p2c=False))
-        tma2mma.init(1, tid == 0)
-        mma2tma.init(NUM_CONSUMER, tid == 0)
-        mma2ld.init(1, tid == 0)
-        ld2mma.init(128 * NUM_CONSUMER, tid == 0)
-        ptr: T.let[T.Var(name="ptr", ty=PointerType(PrimType("uint64")))] = T.reinterpret(PointerType(PrimType("uint64")), _mapa_u64_tx(tma2mma.mbar.ptr_to([0, 0]), 0))
-        tma_finished = T.decl_buffer([PIPELINE_DEPTH], "uint64", data=ptr, scope="shared")
-        phase[0] = 0
-        phase_tmem[0] = 0
-        sch_pipe.init(tid == 0, c2p_thread_count=C2P_THREAD_COUNT, p2c_thread_count=1)
-        T.cuda.tcgen05.encode_instr_descriptor(
-            T.address_of(descI),
-            d_dtype="float32",
-            a_dtype=a_type,
-            b_dtype=b_type,
-            M=MMA_M,
-            N=MMA_N,
-            K=MMA_K,
-            trans_a=False,
-            trans_b=False,
-            n_cta_groups=CTA_GROUP,
-        )
+                                                def tma_load_epilogue(ks):
+                                                    _builder_emit(mma2tma.wait(ks, 0, phase[0]))
+                                                    with T.If(cbx == 0):
+                                                        with T.Then():
+                                                            _builder_emit(tma2mma.arrive_only(ks))
+                                                _builder_emit(paritioned_loop(tma_load, skip, tma_load_epilogue))
+                                    with T.Else():
+                                        with T.If(T.And(warp_id < 2, cbx == 0)):
+                                            with T.Then():
+                                                with T.If(T.cuda.elect_sync()):
+                                                    with T.Then():
+                                                        _builder_emit(ld2mma.wait(0, warp_id, phase_tmem[0]))
+                                                        _builder_emit(T.ptx.tcgen05.fence__after_thread_sync())
 
-        # alloc TMEM
-        if (wg_id == 0) & (warp_id == 0):
-            T.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](tmem_addr.ptr_to([0]), T.uint32(N_COLS))
+                                                        def mma(is_remain, ks):
+                                                            _builder_emit(tma2mma.wait(ks, 0, phase[0]))
+                                                            with T.unroll(BLK_K // MMA_K) as ki:
+                                                                IRBuilder.name("ki", ki)
+                                                                _builder_emit(T.cuda.tcgen05.encode_matrix_descriptor(T.address_of(descA), A_smem.ptr_to([ks, warp_id, 0, ki * MMA_K]), ldo=1, sdo=8 * BLK_K * F16_BYTES // F128_BYTES, swizzle=SWIZZLE))
+                                                                _builder_emit(T.cuda.tcgen05.encode_matrix_descriptor(T.address_of(descB), B_smem.ptr_to([ks, 0, ki * MMA_K]), ldo=1, sdo=8 * BLK_K * F16_BYTES // F128_BYTES, swizzle=SWIZZLE))
+                                                                with T.If(T.And(T.And(stage == 0, ki == 0), T.bool(True))):
+                                                                    with T.Then():
+                                                                        _builder_emit(T.ptx[_MMA_CHAIN](T.cast(warp_id * MMA_N, 'uint32'), descA, descB, descI, *_MMA_ZERO_MASKS, False))
+                                                                    with T.Else():
+                                                                        _builder_emit(T.ptx[_MMA_CHAIN](T.cast(warp_id * MMA_N, 'uint32'), descA, descB, descI, *_MMA_ZERO_MASKS, True))
+                                                            _builder_emit(mma2tma.arrive(ks))
 
-        T.ptx.barrier.cluster.arrive()
-        T.ptx.barrier.cluster.wait()
-        T.cuda.cta_sync()
-        T.ptx.fence.proxy.async_.shared__cta()
-        T.ptx.fence.mbarrier_init.release.cluster()
-        tile_scheduler.init(cbx, bx, rank, warp_id_in_cta, lane_id)
+                                                        def mma_epilogue1():
+                                                            _builder_emit(mma2ld.arrive(warp_id))
 
-        T.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0]))
-        T.cuda.trap_when_assert_failed(tmem_addr_local == 0)
-        tmem = T.decl_buffer((128, N_COLS), "float32", scope="tmem", allocated_addr=0, layout=TileLayout(T.S[(128, N_COLS) : (1@TLane, 1@TCol)]))
-
-        @T.inline
-        def paritioned_loop(main_loop, epilogue1, epilogue2):
-            for ko in T.serial(PIPE_CYCLE):
-                for ks in T.unroll(PIPELINE_DEPTH):
-                    stage = ko * PIPELINE_DEPTH + ks
-                    main_loop(False, ks)
-                phase[0] = phase[0] ^ 1
-            if PIPE_REMAIN_NUM > 0:
-                # last remained loop
-                for ks in T.unroll(PIPE_REMAIN_NUM):
-                    stage = PIPE_CYCLE * PIPELINE_DEPTH + ks
-                    main_loop(True, ks)
-                epilogue1()
-                # for unaligned cases
-                for ks in T.unroll(PIPE_REMAIN_NUM, PIPELINE_DEPTH):
-                    epilogue2(ks)
-                phase[0] = phase[0] ^ 1
-            else:
-                epilogue1()
-
-        while tile_scheduler.valid():
-            if tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value:
-                profiler.start(ProfileEventType.GEMM, tid == 0)
-                m_idx = T.meta_var(tile_scheduler.fetched_task_idx0[0])
-                n_idx = T.meta_var(tile_scheduler.fetched_task_idx1[0])
-
-                if wg_id == NUM_CONSUMER:
-                    T.ptx.setmaxnreg.dec.sync.aligned.u32(56)
-                    if warp_id == 3:
-                        # GMEM -> SMEM  (tma)
-                        if T.cuda.elect_sync():
-                            n_start = T.meta_var((n_idx * CTA_GROUP + cbx) * BLK_N)
-
-                            @T.inline
-                            def tma_load(is_remain, ks):
-                                stage_k = T.meta_var(stage * BLK_K)
-                                mma2tma.wait(ks, 0, phase[0])
-                                if rank * LOCAL_GEMM_M_CLUSTERS <= m_idx and m_idx < (rank + 1) * LOCAL_GEMM_M_CLUSTERS:
-                                    m_start0 = T.meta_var(((m_idx % LOCAL_GEMM_M_CLUSTERS) * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M)
-                                    m_start1 = T.meta_var(((m_idx % LOCAL_GEMM_M_CLUSTERS) * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M)
-                                    T.ptx[_TMA_G2S_CG2](
-                                        A_smem.ptr_to([ks, 0, 0, 0]),
-                                        T.address_of(A_tensor_map),
-                                        T.cast(stage_k, "int32"),
-                                        T.cast(m_start0, "int32"),
-                                        T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
-                                    )
-                                    T.ptx[_TMA_G2S_CG2](
-                                        A_smem.ptr_to([ks, 1, 0, 0]),
-                                        T.address_of(A_tensor_map_1),
-                                        T.cast(stage_k, "int32"),
-                                        T.cast(m_start1, "int32"),
-                                        T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
-                                    )
-                                else:
-                                    m_start0 = T.meta_var((m_idx * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M)
-                                    m_start1 = T.meta_var((m_idx * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M)
-                                    T.ptx[_TMA_G2S_CG2](
-                                        A_smem.ptr_to([ks, 0, 0, 0]),
-                                        T.address_of(ag_out_tensor_map),
-                                        T.cast(stage_k, "int32"),
-                                        T.cast(m_start0, "int32"),
-                                        T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
-                                    )
-                                    T.ptx[_TMA_G2S_CG2](
-                                        A_smem.ptr_to([ks, 1, 0, 0]),
-                                        T.address_of(ag_out_tensor_map_1),
-                                        T.cast(stage_k, "int32"),
-                                        T.cast(m_start1, "int32"),
-                                        T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
-                                    )
-                                T.ptx[_TMA_G2S_CG2](
-                                    B_smem.ptr_to([ks, 0, 0]),
-                                    T.address_of(B_tensor_map),
-                                    T.cast(stage_k, "int32"),
-                                    T.cast(n_start, "int32"),
-                                    T.cuda.cvta_generic_to_shared(tma_finished.ptr_to([ks])),
-                                )
-                                if cbx == 0:
-                                    tma2mma.arrive(ks, NUM_CONSUMER * BLK_K * (BLK_M * NUM_CONSUMER + BLK_N) * F16_BYTES)
-
-                            @T.inline
-                            def tma_load_epilogue(ks):
-                                mma2tma.wait(ks, 0, phase[0])
-                                if cbx == 0:
-                                    tma2mma.arrive_only(ks)
-
-                            paritioned_loop(tma_load, skip, tma_load_epilogue)
-
-                    elif warp_id < 2 and cbx == 0:
-                        if T.cuda.elect_sync():
-                            ld2mma.wait(0, warp_id, phase_tmem[0])
-                            T.ptx.tcgen05.fence__after_thread_sync()
-
-                            @T.inline
-                            def mma(is_remain, ks):
-                                # wait tma
-                                tma2mma.wait(ks, 0, phase[0])
-                                for ki in T.unroll(BLK_K // MMA_K):
-                                    T.cuda.tcgen05.encode_matrix_descriptor(T.address_of(descA), A_smem.ptr_to([ks, warp_id, 0, ki * MMA_K]),
-                                                                            ldo=1, sdo=8 * BLK_K * F16_BYTES // F128_BYTES, swizzle=SWIZZLE)
-                                    T.cuda.tcgen05.encode_matrix_descriptor(T.address_of(descB), B_smem.ptr_to([ks, 0, ki * MMA_K]),
-                                                                            ldo=1, sdo=8 * BLK_K * F16_BYTES // F128_BYTES, swizzle=SWIZZLE)
-
-                                    if (stage == 0 and ki == 0) and ((not is_remain) or (is_remain and PIPE_CYCLE == 0)):
-                                        T.ptx[_MMA_CHAIN](
-                                            T.cast(warp_id * MMA_N, "uint32"),
-                                            descA,
-                                            descB,
-                                            descI,
-                                            *_MMA_ZERO_MASKS,
-                                            False,
-                                        )
-                                    else:
-                                        T.ptx[_MMA_CHAIN](
-                                            T.cast(warp_id * MMA_N, "uint32"),
-                                            descA,
-                                            descB,
-                                            descI,
-                                            *_MMA_ZERO_MASKS,
-                                            True,
-                                        )
-                                mma2tma.arrive(ks)
-
-                            @T.inline
-                            def mma_epilogue1():
-                                mma2ld.arrive(warp_id)
-
-                            @T.inline
-                            def mma_epilogue2(ks):
-                                tma2mma.wait(ks, 0, phase[0])
-                                mma2tma.arrive(ks)
-
-                            paritioned_loop(mma, mma_epilogue1, mma_epilogue2)
-                            phase_tmem[0] = phase_tmem[0] ^ 1
-
-                if wg_id < NUM_CONSUMER:
-                    T.ptx.setmaxnreg.inc.sync.aligned.u32(224)
-
-                    reg = T.alloc_buffer((TMEM_LD_SIZE,), "float32", scope="local")
-                    reg_fp16 = T.alloc_buffer((TMEM_LD_SIZE // 2,), "uint32", scope="local", align=16)
-
-                    mma2ld.wait(0, wg_id, phase_tmem[0])
-                    phase_tmem[0] = phase_tmem[0] ^ 1
-                    T.ptx.tcgen05.fence__after_thread_sync()
-                    # TMEM -> RF (ld)
-                    for i in T.unroll(MMA_N // TMEM_LD_SIZE): # load (MMA_M // 2, MMA_N)
-                        col_st = T.meta_var(wg_id * MMA_N + i * TMEM_LD_SIZE)
-                        T.ptx[_TMEM_LD_64](
-                            *[reg[j] for j in range(TMEM_LD_SIZE)],
-                            T.cast(col_st, "uint32"),
-                        )
-                        T.ptx.tcgen05.wait__ld.sync.aligned()
-
-                        # Once the final asynchronous load has completed, no
-                        # later instruction consumes TMEM: conversion and
-                        # output staging read only the register payload.  Let
-                        # the producer reuse TMEM while that tail executes.
-                        if i == MMA_N // TMEM_LD_SIZE - 1:
-                            ld2mma.arrive(wg_id)
-
-                        for j in T.unroll(TMEM_LD_SIZE // 2):
-                            T.ptx[_CVT_F32X2](
-                                reg_fp16[j],
-                                reg[j * 2 + 1],
-                                reg[j * 2],
-                            )
-
-                        # Keep the preceding TMA store in flight while this
-                        # independent TMEM chunk is loaded and converted.  The
-                        # staging buffer is not overwritten until the elected
-                        # thread has observed completion and the warpgroup has
-                        # rendezvoused.
-                        if i > 0:
-                            if lane_id == 0 and warp_id == 0:
-                                T.ptx.cp.async_.bulk.wait_group(0)
-                            T.cuda.warpgroup_sync(wg_id)
-
-                        for jv in T.unroll(EPI_TILE // 8):
-                            r0 = T.meta_var(jv * 4)
-                            T.ptx.st.shared.v4.u32(
-                                D_smem.ptr_to([wg_id, warp_id * 32 + lane_id, jv * 8]),
-                                reg_fp16[r0],
-                                reg_fp16[r0 + 1],
-                                reg_fp16[r0 + 2],
-                                reg_fp16[r0 + 3],
-                            )
-                        T.cuda.warpgroup_sync(wg_id)
-                        T.ptx.fence.proxy.async_.shared__cta()
-                        # st to gmem
-                        if lane_id == 0 and warp_id == 0:
-                            m_st = T.meta_var((m_idx * NUM_CONSUMER * CTA_GROUP + wg_id * CTA_GROUP + cbx) * BLK_M)
-                            n_st = T.meta_var(n_idx * BLK_N * CTA_GROUP + i * EPI_TILE)
-                            T.ptx[_TMA_S2G](
-                                T.address_of(out_tensor_map),
-                                T.cast(n_st, "int32"),
-                                T.cast(m_st, "int32"),
-                                D_smem.ptr_to([wg_id, 0, 0]),
-                            )
-                            T.ptx.cp.async_.bulk.commit_group()
-
-                    # The last store has no following TMEM load to hide its
-                    # latency, but it still must complete before this staging
-                    # buffer is reused by the next scheduled tile.
-                    if lane_id == 0 and warp_id == 0:
-                        T.ptx.cp.async_.bulk.wait_group(0)
-                    T.cuda.warpgroup_sync(wg_id)
-
-                profiler.end(ProfileEventType.GEMM, tid == 0)
-
-            tile_scheduler.next_tile(cbx, bx, rank, warp_id_in_cta, lane_id)
-
-        # All local and peer-CTA TMEM users must finish before collective deallocation.
-        T.ptx.barrier.cluster.arrive()
-        T.ptx.barrier.cluster.wait()
-
-        # dealloc TMEM
-        if (wg_id == 0) & (warp_id == 0):
-            T.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
-            T.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0]))
-            T.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](tmem_addr_local, T.uint32(N_COLS))
+                                                        def mma_epilogue2(ks):
+                                                            _builder_emit(tma2mma.wait(ks, 0, phase[0]))
+                                                            _builder_emit(mma2tma.arrive(ks))
+                                                        _builder_emit(paritioned_loop(mma, mma_epilogue1, mma_epilogue2))
+                                                        T.buffer_store(phase_tmem, phase_tmem[0] ^ 1, [0])
+                        with T.If(wg_id < NUM_CONSUMER):
+                            with T.Then():
+                                _builder_emit(T.ptx.setmaxnreg.inc.sync.aligned.u32(224))
+                                reg = _builder_assign("reg", T.alloc_buffer((TMEM_LD_SIZE,), 'float32', scope='local'), locals().get("reg", _BUILDER_MISSING))
+                                reg_fp16 = _builder_assign("reg_fp16", T.alloc_buffer((TMEM_LD_SIZE // 2,), 'uint32', scope='local', align=16), locals().get("reg_fp16", _BUILDER_MISSING))
+                                _builder_emit(mma2ld.wait(0, wg_id, phase_tmem[0]))
+                                T.buffer_store(phase_tmem, phase_tmem[0] ^ 1, [0])
+                                _builder_emit(T.ptx.tcgen05.fence__after_thread_sync())
+                                with T.unroll(MMA_N // TMEM_LD_SIZE) as i:
+                                    IRBuilder.name("i", i)
+                                    col_st = wg_id * MMA_N + i * TMEM_LD_SIZE
+                                    _builder_emit(T.ptx[_TMEM_LD_64](*[reg[j] for j in range(TMEM_LD_SIZE)], T.cast(col_st, 'uint32')))
+                                    _builder_emit(T.ptx.tcgen05.wait__ld.sync.aligned())
+                                    with T.If(i == MMA_N // TMEM_LD_SIZE - 1):
+                                        with T.Then():
+                                            _builder_emit(ld2mma.arrive(wg_id))
+                                    with T.unroll(TMEM_LD_SIZE // 2) as j:
+                                        IRBuilder.name("j", j)
+                                        _builder_emit(T.ptx[_CVT_F32X2](reg_fp16[j], reg[j * 2 + 1], reg[j * 2]))
+                                    with T.If(i > 0):
+                                        with T.Then():
+                                            with T.If(T.And(lane_id == 0, warp_id == 0)):
+                                                with T.Then():
+                                                    _builder_emit(T.ptx.cp.async_.bulk.wait_group(0))
+                                            _builder_emit(T.cuda.warpgroup_sync(wg_id))
+                                    with T.unroll(EPI_TILE // 8) as jv:
+                                        IRBuilder.name("jv", jv)
+                                        r0 = jv * 4
+                                        _builder_emit(T.ptx.st.shared.v4.u32(D_smem.ptr_to([wg_id, warp_id * 32 + lane_id, jv * 8]), reg_fp16[r0], reg_fp16[r0 + 1], reg_fp16[r0 + 2], reg_fp16[r0 + 3]))
+                                    _builder_emit(T.cuda.warpgroup_sync(wg_id))
+                                    _builder_emit(T.ptx.fence.proxy.async_.shared__cta())
+                                    with T.If(T.And(lane_id == 0, warp_id == 0)):
+                                        with T.Then():
+                                            m_st = (m_idx * NUM_CONSUMER * CTA_GROUP + wg_id * CTA_GROUP + cbx) * BLK_M
+                                            n_st = n_idx * BLK_N * CTA_GROUP + i * EPI_TILE
+                                            _builder_emit(T.ptx[_TMA_S2G](T.address_of(out_tensor_map), T.cast(n_st, 'int32'), T.cast(m_st, 'int32'), D_smem.ptr_to([wg_id, 0, 0])))
+                                            _builder_emit(T.ptx.cp.async_.bulk.commit_group())
+                                with T.If(T.And(lane_id == 0, warp_id == 0)):
+                                    with T.Then():
+                                        _builder_emit(T.ptx.cp.async_.bulk.wait_group(0))
+                                _builder_emit(T.cuda.warpgroup_sync(wg_id))
+                        _builder_emit(profiler.end(ProfileEventType.GEMM, tid == 0))
+                _builder_emit(tile_scheduler.next_tile(cbx, bx, rank, warp_id_in_cta, lane_id))
+            _builder_emit(T.ptx.barrier.cluster.arrive())
+            _builder_emit(T.ptx.barrier.cluster.wait())
+            with T.If((wg_id == 0) & (warp_id == 0)):
+                with T.Then():
+                    _builder_emit(T.ptx[f'tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned']())
+                    _builder_emit(T.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0])))
+                    _builder_emit(T.ptx[f'tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32'](tmem_addr_local, T.uint32(N_COLS)))
+    return builder.get()
 
     # fmt: on
 

@@ -9,9 +9,151 @@ import numpy as np
 import tvm
 from tirx_kernels.runner import bench
 from tvm.ir.type import PointerType, PrimType
-from tvm.script import tirx as T
-from tvm.script.tirx import tile as Tx
-from tvm.tirx.lang.pipeline import MBarrier, TMABar
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
+from tvm.script.ir_builder.tirx import tile as Tx
+
+
+def _named(obj, name):
+    """Give a builder-created IR object its parser-compatible name."""
+    IRBuilder.current().name(name, obj)
+    return obj
+
+
+def _scalar(name, dtype, value=None):
+    """Allocate a named mutable local scalar and optionally initialize it."""
+    result = T.local_scalar(dtype)
+    _named(result.scalar.buffer, name)
+    if value is not None:
+        T.buffer_store(result.scalar.buffer, value, [0])
+    return result
+
+
+def _store(lhs, value):
+    T.buffer_store(lhs.scalar.buffer, value, [0])
+
+
+def _bind(name, value, type_annotation=None):
+    return _named(T.Bind(value, type_annotation), name)
+
+
+def _expr(value):
+    """Unwrap an IRBuilder mutable scalar where an exact PrimExpr is required."""
+    return value.scalar if hasattr(value, "scalar") else value
+
+
+def _match_global_buffers(input_ptr, weight_ptr, output_ptr, batch_size, dim):
+    input_global = _named(
+        T.match_buffer(input_ptr, [batch_size, dim], "float16", scope="global"), "input_global"
+    )
+    weight_global = _named(
+        T.match_buffer(weight_ptr, [dim], "float16", scope="global"), "weight_global"
+    )
+    output_global = _named(
+        T.match_buffer(output_ptr, [batch_size, dim], "float16", scope="global"), "output_global"
+    )
+    return input_global, weight_global, output_global
+
+
+def _cluster_and_thread_ids(cluster_n, num_clusters, b_dx, b_dy, bind_cluster_id):
+    cbx = _scalar("cbx", "int32", 0)
+    if cluster_n > 1:
+        cta_rank = _named(T.cta_id_in_cluster([cluster_n]), "v")
+        _store(cbx, cta_rank)
+    b_id = _named(T.cta_id([num_clusters * cluster_n]), "b_id")
+    cluster_id_value = b_id // cluster_n
+    cluster_id = (
+        _scalar("cluster_id", "int32", cluster_id_value) if bind_cluster_id else cluster_id_value
+    )
+    t_idx, t_idy = T.thread_id([b_dx, b_dy])
+    _named(t_idx, "t_idx")
+    _named(t_idy, "t_idy")
+    return cbx, b_id, cluster_id, t_idx, t_idy
+
+
+def _rmsnorm_vectors(vector_size):
+    return (
+        _named(T.alloc_local([vector_size], "float16"), "input_vec"),
+        _named(T.alloc_local([vector_size], "float16"), "weight_vec"),
+        _named(T.alloc_local([vector_size], "float32"), "x_vec"),
+        _named(T.alloc_local([vector_size], "float32"), "weight_vec_f32"),
+        _named(T.alloc_local([vector_size], "float32"), "mul_result"),
+    )
+
+
+def _emit_cluster_reduce(
+    cluster_n, b_dx, b_dy, t_idx, t_idy, cluster_reduce_smem, sum_sq_smem, sum_sq, norm_factor, dim
+):
+    if cluster_n > 1:
+        with T.If(T.And(t_idy == 0, t_idx == 0)), T.Then():
+            T.buffer_store(cluster_reduce_smem, sum_sq_smem[0], [0])
+        T.evaluate(T.cuda.cluster_sync())
+        with T.If(t_idy == 0), T.Then():
+            with T.If(t_idx < cluster_n):
+                with T.Then():
+                    remote_ptr = _bind(
+                        "remote_ptr",
+                        T.reinterpret(
+                            PointerType(PrimType("float32")),
+                            _mapa_u64(cluster_reduce_smem.ptr_to([0]), t_idx),
+                        ),
+                        PointerType(PrimType("float32")),
+                    )
+                    remote_buf = _named(
+                        T.decl_buffer([1], "float32", scope="shared", data=remote_ptr), "remote_buf"
+                    )
+                    _store(sum_sq, remote_buf[0])
+                with T.Else():
+                    _store(sum_sq, T.float32(0))
+            _store(sum_sq, T.cuda.warp_sum(_expr(sum_sq), width=cluster_n))
+            with T.If(t_idx == 0), T.Then():
+                T.buffer_store(sum_sq_smem, _expr(sum_sq), [0])
+        T.evaluate(T.ptx.bar.sync(1, T.uint32(b_dx * b_dy)))
+        T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
+        _store(norm_factor, T.rsqrt(sum_sq_smem[0] / dim + eps))
+    else:
+        _store(norm_factor, T.rsqrt(sum_sq / dim + eps))
+
+
+def _emit_output(
+    dim_per_cta,
+    vector_size,
+    b_dx,
+    b_dy,
+    t_idx,
+    t_idy,
+    col_offset,
+    batch_idx,
+    input_smem,
+    weight_global,
+    output_global,
+    input_vec,
+    weight_vec,
+    x_vec,
+    weight_vec_f32,
+    mul_result,
+    norm_factor,
+):
+    with T.serial(ceildiv(dim_per_cta, vector_size * b_dx * b_dy)) as ki:
+        _named(ki, "ki")
+        st = (ki * b_dx * b_dy + b_dx * t_idy + t_idx) * vector_size
+        with T.If(st < dim_per_cta), T.Then():
+            Tx.copy(
+                weight_vec[0:vector_size],
+                weight_global[col_offset + st : col_offset + st + vector_size],
+            )
+            Tx.cast(weight_vec_f32[0:vector_size], weight_vec[0:vector_size])
+            Tx.copy(input_vec[0:vector_size], input_smem[st : st + vector_size])
+            Tx.cast(x_vec[0:vector_size], input_vec[0:vector_size])
+            Tx.mul(mul_result[0:vector_size], x_vec[0:vector_size], _expr(norm_factor))
+            Tx.mul(
+                mul_result[0:vector_size], mul_result[0:vector_size], weight_vec_f32[0:vector_size]
+            )
+            Tx.cast(input_vec[0:vector_size], mul_result[0:vector_size])
+            Tx.copy(
+                output_global[batch_idx, col_offset + st : col_offset + st + vector_size],
+                input_vec[0:vector_size],
+            )
 
 
 def _mapa_u64(ptr, rank):
@@ -150,213 +292,145 @@ def tirx_dispatch_rmsnorm(dim: int, batch_size: int, SMEM_PER_CTA=220, MAX_THREA
     NUM_TMA_CHUNKS = dim_per_cta // TMA_TILE
     NUM_INPUT_BARS = 1
 
-    @T.prim_func
-    def input_SMEM_TMA(input_ptr: T.handle, weight_ptr: T.handle, output_ptr: T.handle):
+    def build_dispatch_kernel(use_tma):
         """
         RMSNorm: output = x * rsqrt(mean(x^2) + eps) * weight
         Uses TMA to load input/weight from GMEM to SMEM.
         For large dim, shards N across a cluster of CTAs with cross-CTA reduction.
         """
-        input_global = T.match_buffer(
-            input_ptr, shape=[batch_size, dim], dtype="float16", scope="global"
-        )
-        weight_global = T.match_buffer(weight_ptr, shape=[dim], dtype="float16", scope="global")
-        output_global = T.match_buffer(
-            output_ptr, shape=[batch_size, dim], dtype="float16", scope="global"
-        )
-        cbx = T.local_cell("int32")
-        cbx = 0
-        if CLUSTER_N > 1:
-            cbx = T.cta_id_in_cluster([CLUSTER_N])
-        b_id = T.cta_id([num_clusters * CLUSTER_N])
-        cluster_id = b_id // CLUSTER_N
-        t_idx, t_idy = T.thread_id([b_dx, b_dy])
-        cta_rank = T.meta_var(cbx)
-        col_offset = T.meta_var(cbx * dim_per_cta)
-        curr_dim = T.meta_var(dim_per_cta)
-        INPUT_SMEM_BYTES = T.meta_var(curr_dim * F16_BYTES)
-        CLUSTER_REDUCE_BYTES = T.meta_var(1 * F32_BYTES)
-        SMEM_TOTAL = T.meta_var(128 + INPUT_SMEM_BYTES + b_dy * F32_BYTES + CLUSTER_REDUCE_BYTES)
-        buf = T.alloc_buffer([SMEM_TOTAL], "uint8", scope="shared.dyn")
-        T.attr({"tirx.dyn_smem_bytes": SMEM_TOTAL})
-        pool = T.meta_var(T.SMEMPool(buf.data))
-        input_bar = TMABar(pool, NUM_INPUT_BARS)
-        pool.move_base_to(128)
-        input_smem = pool.alloc([curr_dim], "float16", align=128)
-        sum_sq_smem = pool.alloc([b_dy], "float32")
-        cluster_reduce_smem = pool.alloc([1], "float32")
-        input_bar.init(1)
-        if CLUSTER_N > 1:
-            T.cuda.cluster_sync()
-        else:
-            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
-        input_vec: T.f16[VECTOR_SIZE]
-        weight_vec: T.f16[VECTOR_SIZE]
-        x_vec: T.f32[VECTOR_SIZE]
-        weight_vec_f32: T.f32[VECTOR_SIZE]
-        mul_result: T.f32[VECTOR_SIZE]
-        sum_sq: T.f32
-        norm_factor: T.f32
-        batch_idx = cluster_id
-        if t_idx == 0 & t_idy == 0:
-            tma_copy_in = T.meta_var({"dispatch": "tma_auto", "mbar": input_bar.ptr_to([0])})
-            for tma_chunk in T.serial(NUM_TMA_CHUNKS):
-                tma_off = T.meta_var(tma_chunk * TMA_TILE)
-                Tx.copy_async(
-                    input_smem[tma_off : tma_off + TMA_TILE],
-                    input_global[batch_idx, col_offset + tma_off : col_offset + tma_off + TMA_TILE],
-                    **tma_copy_in,
+        with IRBuilder() as ib:
+            with T.prim_func():
+                T.func_name("input_SMEM_TMA" if use_tma else "input_SMEM_sync")
+                input_ptr = T.arg("input_ptr", T.handle())
+                weight_ptr = T.arg("weight_ptr", T.handle())
+                output_ptr = T.arg("output_ptr", T.handle())
+                input_global, weight_global, output_global = _match_global_buffers(
+                    input_ptr, weight_ptr, output_ptr, batch_size, dim
                 )
-            input_bar.arrive(0, INPUT_SMEM_BYTES)
-        input_bar.wait(0, 0)
-        sum_sq = T.float32(0.0)
-        for ki in T.serial(ceildiv(curr_dim, VECTOR_SIZE * b_dx * b_dy)):
-            st = T.meta_var((ki * b_dx * b_dy + b_dx * t_idy + t_idx) * VECTOR_SIZE)
-            if st < curr_dim:
-                Tx.copy(input_vec[:], input_smem[st : st + VECTOR_SIZE])
-                Tx.cast(x_vec[:], input_vec[:])
-                for v_id in T.unroll(VECTOR_SIZE):
-                    weight_vec_f32[v_id] = x_vec[v_id] * x_vec[v_id]
-                for v_id in T.unroll(VECTOR_SIZE):
-                    sum_sq = sum_sq + weight_vec_f32[v_id]
-        sum_sq = T.cuda.cta_sum(sum_sq, b_dy, sum_sq_smem.ptr_to([0]))
-        if CLUSTER_N > 1:
-            if t_idy == 0 and t_idx == 0:
-                cluster_reduce_smem[0] = sum_sq_smem[0]
-            T.cuda.cluster_sync()
-            if t_idy == 0:
-                if t_idx < CLUSTER_N:
-                    remote_ptr: T.let = T.reinterpret(
-                        PointerType(PrimType("float32")),
-                        _mapa_u64(cluster_reduce_smem.ptr_to([0]), t_idx),
+                cbx, b_id, cluster_id, t_idx, t_idy = _cluster_and_thread_ids(
+                    CLUSTER_N, num_clusters, b_dx, b_dy, bind_cluster_id=use_tma
+                )
+                col_offset = _expr(cbx) * dim_per_cta
+                input_smem_bytes = dim_per_cta * F16_BYTES
+                smem_total = 128 + input_smem_bytes + b_dy * F32_BYTES + F32_BYTES
+                buf = _named(T.alloc_buffer([smem_total], "uint8", scope="shared.dyn"), "buf")
+                with T.attr({"tirx.dyn_smem_bytes": smem_total}):
+                    pool = T.SMEMPool(buf.data)
+                    input_bar = (
+                        _named(pool.alloc([NUM_INPUT_BARS], "uint64", align=8), "buffer")
+                        if use_tma
+                        else None
                     )
-                    remote_buf = T.decl_buffer([1], "float32", scope="shared", data=remote_ptr)
-                    sum_sq = remote_buf[0]
-                else:
-                    sum_sq = T.float32(0)
-                sum_sq = T.cuda.warp_sum(sum_sq, width=CLUSTER_N)
-                if t_idx == 0:
-                    sum_sq_smem[0] = sum_sq
-            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
-            T.ptx.fence.proxy.async_.shared__cta()
-            norm_factor = T.rsqrt(sum_sq_smem[0] / dim + eps)
-        else:
-            norm_factor = T.rsqrt(sum_sq / dim + eps)
-        for ki in T.serial(ceildiv(dim_per_cta, VECTOR_SIZE * b_dx * b_dy)):
-            st = T.meta_var((ki * b_dx * b_dy + b_dx * t_idy + t_idx) * VECTOR_SIZE)
-            if st < dim_per_cta:
-                Tx.copy(
-                    weight_vec[:], weight_global[col_offset + st : col_offset + st + VECTOR_SIZE]
-                )
-                Tx.cast(weight_vec_f32[:], weight_vec[:])
-                Tx.copy(input_vec[:], input_smem[st : st + VECTOR_SIZE])
-                Tx.cast(x_vec[:], input_vec[:])
-                Tx.mul(mul_result[:], x_vec[:], norm_factor)
-                Tx.mul(mul_result[:], mul_result[:], weight_vec_f32[:])
-                Tx.cast(input_vec[:], mul_result[:])
-                Tx.copy(
-                    output_global[batch_idx, col_offset + st : col_offset + st + VECTOR_SIZE],
-                    input_vec[:],
-                )
-
-    @T.prim_func
-    def input_SMEM_sync(input_ptr: T.handle, weight_ptr: T.handle, output_ptr: T.handle):
-        """
-        RMSNorm: output = x * rsqrt(mean(x^2) + eps) * weight
-        Uses TMA to load input/weight from GMEM to SMEM.
-        For large dim, shards N across a cluster of CTAs with cross-CTA reduction.
-        """
-        input_global = T.match_buffer(
-            input_ptr, shape=[batch_size, dim], dtype="float16", scope="global"
-        )
-        weight_global = T.match_buffer(weight_ptr, shape=[dim], dtype="float16", scope="global")
-        output_global = T.match_buffer(
-            output_ptr, shape=[batch_size, dim], dtype="float16", scope="global"
-        )
-        cbx = T.local_cell("int32")
-        cbx = 0
-        if CLUSTER_N > 1:
-            cbx = T.cta_id_in_cluster([CLUSTER_N])
-        b_id = T.cta_id([num_clusters * CLUSTER_N])
-        cluster_id = T.meta_var(b_id // CLUSTER_N)
-        t_idx, t_idy = T.thread_id([b_dx, b_dy])
-        cta_rank = T.meta_var(cbx)
-        col_offset = T.meta_var(cbx * dim_per_cta)
-        curr_dim = T.meta_var(dim_per_cta)
-        INPUT_SMEM_BYTES = T.meta_var(curr_dim * F16_BYTES)
-        CLUSTER_REDUCE_BYTES = T.meta_var(1 * F32_BYTES)
-        SMEM_TOTAL = T.meta_var(128 + INPUT_SMEM_BYTES + b_dy * F32_BYTES + CLUSTER_REDUCE_BYTES)
-        buf = T.alloc_buffer([SMEM_TOTAL], "uint8", scope="shared.dyn")
-        T.attr({"tirx.dyn_smem_bytes": SMEM_TOTAL})
-        pool = T.meta_var(T.SMEMPool(buf.data))
-        pool.move_base_to(128)
-        input_smem = pool.alloc([curr_dim], "float16", align=128)
-        sum_sq_smem = pool.alloc([b_dy], "float32")
-        cluster_reduce_smem = pool.alloc([1], "float32")
-        input_vec: T.f16[VECTOR_SIZE]
-        weight_vec: T.f16[VECTOR_SIZE]
-        x_vec: T.f32[VECTOR_SIZE]
-        weight_vec_f32: T.f32[VECTOR_SIZE]
-        mul_result: T.f32[VECTOR_SIZE]
-        sum_sq: T.f32
-        norm_factor: T.f32
-        batch_idx = T.meta_var(cluster_id)
-        sum_sq = T.float32(0.0)
-        for ki in T.serial(ceildiv(curr_dim, VECTOR_SIZE * b_dx * b_dy)):
-            st = T.meta_var((ki * b_dx * b_dy + b_dx * t_idy + t_idx) * VECTOR_SIZE)
-            if st < curr_dim:
-                Tx.copy(
-                    input_smem[st : st + VECTOR_SIZE],
-                    input_global[batch_idx, col_offset + st : col_offset + st + VECTOR_SIZE],
-                )
-                Tx.copy(input_vec[:], input_smem[st : st + VECTOR_SIZE])
-                Tx.cast(x_vec[:], input_vec[:])
-                for v_id in T.unroll(VECTOR_SIZE):
-                    sum_sq = sum_sq + x_vec[v_id] * x_vec[v_id]
-        sum_sq = T.cuda.cta_sum(sum_sq, b_dy, sum_sq_smem.ptr_to([0]))
-        if CLUSTER_N > 1:
-            if t_idy == 0 and t_idx == 0:
-                cluster_reduce_smem[0] = sum_sq_smem[0]
-            T.cuda.cluster_sync()
-            if t_idy == 0:
-                if t_idx < CLUSTER_N:
-                    remote_ptr: T.let = T.reinterpret(
-                        PointerType(PrimType("float32")),
-                        _mapa_u64(cluster_reduce_smem.ptr_to([0]), t_idx),
+                    pool.move_base_to(128)
+                    input_smem = _named(
+                        pool.alloc([dim_per_cta], "float16", align=128), "input_smem"
                     )
-                    remote_buf = T.decl_buffer([1], "float32", scope="shared", data=remote_ptr)
-                    sum_sq = remote_buf[0]
-                else:
-                    sum_sq = T.float32(0)
-                sum_sq = T.cuda.warp_sum(sum_sq, width=CLUSTER_N)
-                if t_idx == 0:
-                    sum_sq_smem[0] = sum_sq
-            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
-            T.ptx.fence.proxy.async_.shared__cta()
-            norm_factor = T.rsqrt(sum_sq_smem[0] / dim + eps)
-        else:
-            norm_factor = T.rsqrt(sum_sq / dim + eps)
-        for ki in T.serial(ceildiv(dim_per_cta, VECTOR_SIZE * b_dx * b_dy)):
-            st = T.meta_var((ki * b_dx * b_dy + b_dx * t_idy + t_idx) * VECTOR_SIZE)
-            if st < dim_per_cta:
-                Tx.copy(
-                    weight_vec[:], weight_global[col_offset + st : col_offset + st + VECTOR_SIZE]
-                )
-                Tx.cast(weight_vec_f32[:], weight_vec[:])
-                Tx.copy(input_vec[:], input_smem[st : st + VECTOR_SIZE])
-                Tx.cast(x_vec[:], input_vec[:])
-                Tx.mul(mul_result[:], x_vec[:], norm_factor)
-                Tx.mul(mul_result[:], mul_result[:], weight_vec_f32[:])
-                Tx.cast(input_vec[:], mul_result[:])
-                Tx.copy(
-                    output_global[batch_idx, col_offset + st : col_offset + st + VECTOR_SIZE],
-                    input_vec[:],
-                )
+                    sum_sq_smem = _named(pool.alloc([b_dy], "float32"), "sum_sq_smem")
+                    cluster_reduce_smem = _named(pool.alloc([1], "float32"), "cluster_reduce_smem")
+                    if use_tma:
+                        with T.If(T.cuda.thread_rank() == 0), T.Then():
+                            with T.unroll(NUM_INPUT_BARS) as i:
+                                _named(i, "i")
+                                T.evaluate(
+                                    T.ptx.mbarrier.init.shared.b64(
+                                        input_bar.ptr_to([i]), T.uint32(1)
+                                    )
+                                )
+                        if CLUSTER_N > 1:
+                            T.evaluate(T.cuda.cluster_sync())
+                        else:
+                            T.evaluate(T.ptx.bar.sync(1, T.uint32(b_dx * b_dy)))
+                    input_vec, weight_vec, x_vec, weight_vec_f32, mul_result = _rmsnorm_vectors(
+                        VECTOR_SIZE
+                    )
+                    sum_sq = _scalar("sum_sq", "float32")
+                    norm_factor = _scalar("norm_factor", "float32")
+                    batch_idx = (
+                        _scalar("batch_idx", "int32", _expr(cluster_id)) if use_tma else cluster_id
+                    )
+                    if use_tma:
+                        zero_and_tidy = T.bitwise_and(0, t_idy)
+                        with T.If(T.And(t_idx == zero_and_tidy, zero_and_tidy == 0)), T.Then():
+                            with T.serial(NUM_TMA_CHUNKS) as tma_chunk:
+                                _named(tma_chunk, "tma_chunk")
+                                tma_off = tma_chunk * TMA_TILE
+                                Tx.copy_async(
+                                    input_smem[tma_off : tma_off + TMA_TILE],
+                                    input_global[
+                                        _expr(batch_idx),
+                                        col_offset + tma_off : col_offset + tma_off + TMA_TILE,
+                                    ],
+                                    dispatch="tma_auto",
+                                    mbar=input_bar.ptr_to([0]),
+                                )
+                            T.evaluate(
+                                T.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                                    input_bar.ptr_to([0]), T.uint32(input_smem_bytes)
+                                )
+                            )
+                        T.evaluate(T.cuda.mbarrier_wait(input_bar.ptr_to([0]), 0))
+                    _store(sum_sq, T.float32(0.0))
+                    with T.serial(ceildiv(dim_per_cta, VECTOR_SIZE * b_dx * b_dy)) as ki:
+                        _named(ki, "ki")
+                        st = (ki * b_dx * b_dy + b_dx * t_idy + t_idx) * VECTOR_SIZE
+                        with T.If(st < dim_per_cta), T.Then():
+                            if not use_tma:
+                                Tx.copy(
+                                    input_smem[st : st + VECTOR_SIZE],
+                                    input_global[
+                                        batch_idx, col_offset + st : col_offset + st + VECTOR_SIZE
+                                    ],
+                                )
+                            Tx.copy(input_vec[0:VECTOR_SIZE], input_smem[st : st + VECTOR_SIZE])
+                            Tx.cast(x_vec[0:VECTOR_SIZE], input_vec[0:VECTOR_SIZE])
+                            if use_tma:
+                                with T.unroll(VECTOR_SIZE) as v_id:
+                                    _named(v_id, "v_id")
+                                    T.buffer_store(
+                                        weight_vec_f32, x_vec[v_id] * x_vec[v_id], [v_id]
+                                    )
+                                with T.unroll(VECTOR_SIZE) as v_id:
+                                    _named(v_id, "v_id")
+                                    _store(sum_sq, sum_sq + weight_vec_f32[v_id])
+                            else:
+                                with T.unroll(VECTOR_SIZE) as v_id:
+                                    _named(v_id, "v_id")
+                                    _store(sum_sq, sum_sq + x_vec[v_id] * x_vec[v_id])
+                    _store(sum_sq, T.cuda.cta_sum(_expr(sum_sq), b_dy, sum_sq_smem.ptr_to([0])))
+                    _emit_cluster_reduce(
+                        CLUSTER_N,
+                        b_dx,
+                        b_dy,
+                        t_idx,
+                        t_idy,
+                        cluster_reduce_smem,
+                        sum_sq_smem,
+                        sum_sq,
+                        norm_factor,
+                        dim,
+                    )
+                    _emit_output(
+                        dim_per_cta,
+                        VECTOR_SIZE,
+                        b_dx,
+                        b_dy,
+                        t_idx,
+                        t_idy,
+                        col_offset,
+                        _expr(batch_idx),
+                        input_smem,
+                        weight_global,
+                        output_global,
+                        input_vec,
+                        weight_vec,
+                        x_vec,
+                        weight_vec_f32,
+                        mul_result,
+                        norm_factor,
+                    )
+        return ib.get()
 
-    if useTMA:
-        return input_SMEM_TMA
-    else:
-        return input_SMEM_sync
+    return build_dispatch_kernel(bool(useTMA))
 
 
 def tirx_original_impl(hidden_size, batch_size, SMEM_PER_CTA=220, MAX_THREADS=256):
@@ -370,79 +444,105 @@ def tirx_original_impl(hidden_size, batch_size, SMEM_PER_CTA=220, MAX_THREADS=25
             f"SMEM usage for this dim exceeds limit of {SMEM_SIZE} bytes. Consider using a smaller dim."
         )
 
-    @T.prim_func
-    def rmsnorm(input_ptr: T.handle, weight_ptr: T.handle, out_ptr: T.handle):
-        input_global = T.match_buffer(
-            input_ptr, [batch_size, hidden_size], "float16", scope="global"
-        )
-        weight_global = T.match_buffer(weight_ptr, [hidden_size], "float16", scope="global")
-        out_global = T.match_buffer(out_ptr, [batch_size, hidden_size], "float16", scope="global")
-        bx = T.cta_id([SM_COUNT])
-        tx, ty = T.thread_id([bdx, bdy])
-        thread_id = T.meta_var(ty * bdx + tx)
-        buf = T.alloc_buffer([smem_size], "uint8", scope="shared.dyn")
-        T.attr({"tirx.dyn_smem_bytes": smem_size})
-        pool = T.meta_var(T.SMEMPool(buf.data))
-        x_smem = pool.alloc([hidden_size], "float32")
-        sum_sq_smem = pool.alloc([bdy], "float32")
-        input_vec: T.f16[vec_size]
-        weight_vec: T.f16[vec_size]
-        input_vec_f32: T.f32[vec_size]
-        weight_vec_f32: T.f32[vec_size]
-        x_vec: T.f32[vec_size]
-        x_tmp: T.f32
-        sum_sq: T.f32
-        rms_norm: T.f32
-        idx: T.i32
-        idx = bx
-        while idx < batch_size:
-            sum_sq = T.float32(0.0)
-            for ki in T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)):
-                for kv in T.unroll(vec_size):
-                    input_vec[kv] = 0.0
-                    x_vec[kv] = 0.0
-                st = T.meta_var((ki * bdx * bdy + thread_id) * vec_size)
-                if st < hidden_size:
-                    Tx.copy(input_vec[:], input_global[idx, st : st + vec_size])
-                    Tx.cast(input_vec_f32[:], input_vec[:])
-                    for kv in T.unroll(vec_size):
-                        x_tmp = input_vec_f32[kv]
-                        sum_sq = sum_sq + x_tmp * x_tmp
-                        x_vec[kv] = x_tmp
-                    Tx.copy(x_smem[st : st + vec_size], x_vec[:])
-            sum_sq = T.cuda.warp_sum(sum_sq)
-            sum_sq_smem[ty] = sum_sq
-            T.ptx.bar.sync(1, T.uint32(bdx * bdy))
-            T.ptx.fence.proxy.async_.shared__cta()
-            if ty == 0:
-                if tx < bdy:
-                    sum_sq = sum_sq_smem[tx]
-                else:
-                    sum_sq = T.float32(0.0)
-                sum_sq = T.cuda.warp_sum(sum_sq)
-                sum_sq_smem[0] = sum_sq
-            T.ptx.bar.sync(1, T.uint32(bdx * bdy))
-            T.ptx.fence.proxy.async_.shared__cta()
-            rms_norm = T.rsqrt(sum_sq_smem[0] / hidden_size + eps)
-            for ki in T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)):
-                for kv in T.unroll(vec_size):
-                    input_vec[kv] = 0.0
-                    weight_vec_f32[kv] = 0.0
-                    x_vec[kv] = 0.0
-                st = T.meta_var((ki * bdx * bdy + thread_id) * vec_size)
-                if st < hidden_size:
-                    Tx.copy(weight_vec[:], weight_global[st : st + vec_size])
-                    Tx.copy(x_vec[:], x_smem[st : st + vec_size])
-                    Tx.cast(weight_vec_f32[:], weight_vec[:])
-                Tx.mul(input_vec_f32[:], x_vec[:], rms_norm)
-                Tx.mul(input_vec_f32[:], input_vec_f32[:], weight_vec_f32[:])
-                if st < hidden_size:
-                    Tx.cast(input_vec[:], input_vec_f32[:])
-                    Tx.copy(out_global[idx, st : st + vec_size], input_vec[:])
-            T.ptx.bar.sync(1, T.uint32(bdx * bdy))
-            idx = idx + SM_COUNT
+    with IRBuilder() as ib:
+        with T.prim_func():
+            T.func_name("rmsnorm")
+            input_ptr = T.arg("input_ptr", T.handle())
+            weight_ptr = T.arg("weight_ptr", T.handle())
+            out_ptr = T.arg("out_ptr", T.handle())
+            input_global = _named(
+                T.match_buffer(input_ptr, [batch_size, hidden_size], "float16", scope="global"),
+                "input_global",
+            )
+            weight_global = _named(
+                T.match_buffer(weight_ptr, [hidden_size], "float16", scope="global"),
+                "weight_global",
+            )
+            out_global = _named(
+                T.match_buffer(out_ptr, [batch_size, hidden_size], "float16", scope="global"),
+                "out_global",
+            )
+            bx = _named(T.cta_id([SM_COUNT]), "bx")
+            tx, ty = T.thread_id([bdx, bdy])
+            _named(tx, "tx")
+            _named(ty, "ty")
+            thread_id = ty * bdx + tx
+            buf = _named(T.alloc_buffer([smem_size], "uint8", scope="shared.dyn"), "buf")
+            with T.attr({"tirx.dyn_smem_bytes": smem_size}):
+                pool = T.SMEMPool(buf.data)
+                x_smem = _named(pool.alloc([hidden_size], "float32"), "x_smem")
+                sum_sq_smem = _named(pool.alloc([bdy], "float32"), "sum_sq_smem")
+                input_vec = _named(T.alloc_local([vec_size], "float16"), "input_vec")
+                weight_vec = _named(T.alloc_local([vec_size], "float16"), "weight_vec")
+                input_vec_f32 = _named(T.alloc_local([vec_size], "float32"), "input_vec_f32")
+                weight_vec_f32 = _named(T.alloc_local([vec_size], "float32"), "weight_vec_f32")
+                x_vec = _named(T.alloc_local([vec_size], "float32"), "x_vec")
+                x_tmp = _scalar("x_tmp", "float32")
+                sum_sq = _scalar("sum_sq", "float32")
+                rms_norm = _scalar("rms_norm", "float32")
+                idx = _scalar("idx", "int32", bx)
+                with T.While(idx < batch_size):
+                    _store(sum_sq, T.float32(0.0))
+                    with T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)) as ki:
+                        _named(ki, "ki")
+                        with T.unroll(vec_size) as kv:
+                            _named(kv, "kv")
+                            T.buffer_store(input_vec, T.float16(0.0), [kv])
+                            T.buffer_store(x_vec, T.float32(0.0), [kv])
+                        st = (ki * bdx * bdy + thread_id) * vec_size
+                        with T.If(st < hidden_size), T.Then():
+                            Tx.copy(
+                                input_vec[0:vec_size], input_global[_expr(idx), st : st + vec_size]
+                            )
+                            Tx.cast(input_vec_f32[0:vec_size], input_vec[0:vec_size])
+                            with T.unroll(vec_size) as kv:
+                                _named(kv, "kv")
+                                _store(x_tmp, input_vec_f32[kv])
+                                _store(sum_sq, sum_sq + x_tmp * x_tmp)
+                                T.buffer_store(x_vec, _expr(x_tmp), [kv])
+                            Tx.copy(x_smem[st : st + vec_size], x_vec[0:vec_size])
+                    _store(sum_sq, T.cuda.warp_sum(_expr(sum_sq)))
+                    T.buffer_store(sum_sq_smem, _expr(sum_sq), [ty])
+                    T.evaluate(T.ptx.bar.sync(1, T.uint32(bdx * bdy)))
+                    T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
+                    with T.If(ty == 0), T.Then():
+                        with T.If(tx < bdy):
+                            with T.Then():
+                                _store(sum_sq, sum_sq_smem[tx])
+                            with T.Else():
+                                _store(sum_sq, T.float32(0.0))
+                        _store(sum_sq, T.cuda.warp_sum(_expr(sum_sq)))
+                        T.buffer_store(sum_sq_smem, _expr(sum_sq), [0])
+                    T.evaluate(T.ptx.bar.sync(1, T.uint32(bdx * bdy)))
+                    T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
+                    _store(rms_norm, T.rsqrt(sum_sq_smem[0] / hidden_size + eps))
+                    with T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)) as ki:
+                        _named(ki, "ki")
+                        with T.unroll(vec_size) as kv:
+                            _named(kv, "kv")
+                            T.buffer_store(input_vec, T.float16(0.0), [kv])
+                            T.buffer_store(weight_vec_f32, T.float32(0.0), [kv])
+                            T.buffer_store(x_vec, T.float32(0.0), [kv])
+                        st = (ki * bdx * bdy + thread_id) * vec_size
+                        with T.If(st < hidden_size), T.Then():
+                            Tx.copy(weight_vec[0:vec_size], weight_global[st : st + vec_size])
+                            Tx.copy(x_vec[0:vec_size], x_smem[st : st + vec_size])
+                            Tx.cast(weight_vec_f32[0:vec_size], weight_vec[0:vec_size])
+                        Tx.mul(input_vec_f32[0:vec_size], x_vec[0:vec_size], _expr(rms_norm))
+                        Tx.mul(
+                            input_vec_f32[0:vec_size],
+                            input_vec_f32[0:vec_size],
+                            weight_vec_f32[0:vec_size],
+                        )
+                        with T.If(st < hidden_size), T.Then():
+                            Tx.cast(input_vec[0:vec_size], input_vec_f32[0:vec_size])
+                            Tx.copy(
+                                out_global[_expr(idx), st : st + vec_size], input_vec[0:vec_size]
+                            )
+                    T.evaluate(T.ptx.bar.sync(1, T.uint32(bdx * bdy)))
+                    _store(idx, idx + SM_COUNT)
 
-    return rmsnorm
+    return ib.get()
 
 
 def tirx_input_DSMEM_write_TMA_wts_GMEM(
@@ -464,138 +564,164 @@ def tirx_input_DSMEM_write_TMA_wts_GMEM(
     NUM_TMA_CHUNKS = dim_per_cta // TMA_TILE
     NUM_INPUT_BARS = 1
     NUM_CLUSTER_BARS = 1
-    TOTAL_BARS = NUM_INPUT_BARS + NUM_CLUSTER_BARS
 
-    @T.prim_func
-    def rms_norm(input_ptr: T.handle, weight_ptr: T.handle, output_ptr: T.handle):
-        """
-        RMSNorm: output = x * rsqrt(mean(x^2) + eps) * weight
-        Uses TMA to load input/weight from GMEM to SMEM.
-        For large dim, shards N across a cluster of CTAs with cross-CTA reduction.
-        """
-        input_global = T.match_buffer(
-            input_ptr, shape=[batch_size, dim], dtype="float16", scope="global"
-        )
-        weight_global = T.match_buffer(weight_ptr, shape=[dim], dtype="float16", scope="global")
-        output_global = T.match_buffer(
-            output_ptr, shape=[batch_size, dim], dtype="float16", scope="global"
-        )
-        cbx = T.local_cell("int32")
-        cbx = 0
-        if CLUSTER_N > 1:
-            cbx = T.cta_id_in_cluster([CLUSTER_N])
-        b_id = T.cta_id([num_clusters * CLUSTER_N])
-        cluster_id = b_id // CLUSTER_N
-        t_idx, t_idy = T.thread_id([b_dx, b_dy])
-        cta_rank = T.meta_var(cbx)
-        col_offset = T.meta_var(cbx * dim_per_cta)
-        curr_dim = T.meta_var(dim_per_cta)
-        INPUT_SMEM_BYTES = T.meta_var(curr_dim * F16_BYTES)
-        CLUSTER_REDUCE_BYTES = T.meta_var(CLUSTER_N * F32_BYTES)
-        SMEM_TOTAL = T.meta_var(128 + INPUT_SMEM_BYTES + b_dy * F32_BYTES + CLUSTER_REDUCE_BYTES)
-        buf = T.alloc_buffer([SMEM_TOTAL], "uint8", scope="shared.dyn")
-        T.attr({"tirx.dyn_smem_bytes": SMEM_TOTAL})
-        pool = T.meta_var(T.SMEMPool(buf.data))
-        input_bar = TMABar(pool, NUM_INPUT_BARS)
-        cluster_bar = MBarrier(pool, NUM_CLUSTER_BARS)
-        pool.move_base_to(128)
-        input_smem = pool.alloc([curr_dim], "float16", align=128)
-        sum_sq_smem = pool.alloc([b_dy], "float32")
-        cluster_reduce_smem = pool.alloc([CLUSTER_N], "float32")
-        input_bar.init(1)
-        if CLUSTER_N > 1:
-            cluster_bar.init(CLUSTER_N)
-            T.ptx.fence.mbarrier_init.release.cluster()
-        if CLUSTER_N > 1:
-            T.cuda.cluster_sync()
-        else:
-            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
-        input_vec: T.f16[VECTOR_SIZE]
-        weight_vec: T.f16[VECTOR_SIZE]
-        x_vec: T.f32[VECTOR_SIZE]
-        weight_vec_f32: T.f32[VECTOR_SIZE]
-        mul_result: T.f32[VECTOR_SIZE]
-        sum_sq: T.f32
-        norm_factor: T.f32
-        batch_idx = cluster_id
-        if t_idx == 0 & t_idy == 0:
-            tma_copy_in = T.meta_var({"dispatch": "tma_auto", "mbar": input_bar.ptr_to([0])})
-            for tma_chunk in T.serial(NUM_TMA_CHUNKS):
-                tma_off = T.meta_var(tma_chunk * TMA_TILE)
-                Tx.copy_async(
-                    input_smem[tma_off : tma_off + TMA_TILE],
-                    input_global[batch_idx, col_offset + tma_off : col_offset + tma_off + TMA_TILE],
-                    **tma_copy_in,
+    with IRBuilder() as ib:
+        with T.prim_func():
+            T.func_name("rms_norm")
+            input_ptr = T.arg("input_ptr", T.handle())
+            weight_ptr = T.arg("weight_ptr", T.handle())
+            output_ptr = T.arg("output_ptr", T.handle())
+            input_global, weight_global, output_global = _match_global_buffers(
+                input_ptr, weight_ptr, output_ptr, batch_size, dim
+            )
+            cbx, b_id, cluster_id, t_idx, t_idy = _cluster_and_thread_ids(
+                CLUSTER_N, num_clusters, b_dx, b_dy, bind_cluster_id=True
+            )
+            cta_rank = _expr(cbx)
+            col_offset = _expr(cbx) * dim_per_cta
+            input_smem_bytes = dim_per_cta * F16_BYTES
+            smem_total = 128 + input_smem_bytes + b_dy * F32_BYTES + CLUSTER_N * F32_BYTES
+            buf = _named(T.alloc_buffer([smem_total], "uint8", scope="shared.dyn"), "buf")
+            with T.attr({"tirx.dyn_smem_bytes": smem_total}):
+                pool = T.SMEMPool(buf.data)
+                input_bar_buf = _named(pool.alloc([NUM_INPUT_BARS], "uint64", align=8), "buffer")
+                cluster_bar_buf = _named(
+                    pool.alloc([NUM_CLUSTER_BARS], "uint64", align=8), "cluster_bar_buf"
                 )
-            input_bar.arrive(0, INPUT_SMEM_BYTES)
-        input_bar.wait(0, 0)
-        sum_sq = T.float32(0.0)
-        for ki in T.serial(ceildiv(curr_dim, VECTOR_SIZE * b_dx * b_dy)):
-            st = T.meta_var((ki * b_dx * b_dy + b_dx * t_idy + t_idx) * VECTOR_SIZE)
-            if st < curr_dim:
-                Tx.copy(input_vec[:], input_smem[st : st + VECTOR_SIZE])
-                Tx.cast(x_vec[:], input_vec[:])
-                for v_id in T.unroll(VECTOR_SIZE):
-                    sum_sq = sum_sq + x_vec[v_id] * x_vec[v_id]
-        sum_sq = T.cuda.warp_sum(sum_sq)
-        sum_sq_smem[t_idy] = sum_sq
-        T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
-        T.ptx.fence.proxy.async_.shared__cta()
-        if t_idy == 0:
-            if t_idx < b_dy:
-                sum_sq = sum_sq_smem[t_idx]
-            else:
-                sum_sq = T.float32(0.0)
-            sum_sq = T.cuda.warp_sum(sum_sq)
-            sum_sq_smem[0] = sum_sq
-        T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
-        T.ptx.fence.proxy.async_.shared__cta()
-        if CLUSTER_N > 1:
-            if t_idy == 0:
-                if t_idx < CLUSTER_N:
-                    remote_ptr: T.let = T.reinterpret(
-                        PointerType(PrimType("float32")),
-                        _mapa_u64(cluster_reduce_smem.ptr_to([cta_rank]), t_idx),
-                    )
-                    remote_buf = T.decl_buffer([1], "float32", scope="shared", data=remote_ptr)
-                    remote_buf[0] = sum_sq_smem[0]
-                    _rem1 = T.alloc_local([1], "uint64")
-                    T.ptx.mapa.shared__cluster.u64(
-                        _rem1[0], cluster_bar.ptr_to([0]), T.uint32(t_idx)
-                    )
-                    T.ptx.mbarrier.arrive.b64(_rem1[0], T.uint32(1), pred=T.bool(True))
-            cluster_bar.wait(0, 0)
-            if t_idy == 0:
-                if t_idx < CLUSTER_N:
-                    sum_sq = cluster_reduce_smem[t_idx]
+                pool.move_base_to(128)
+                input_smem = _named(pool.alloc([dim_per_cta], "float16", align=128), "input_smem")
+                sum_sq_smem = _named(pool.alloc([b_dy], "float32"), "sum_sq_smem")
+                cluster_reduce_smem = _named(
+                    pool.alloc([CLUSTER_N], "float32"), "cluster_reduce_smem"
+                )
+                with T.If(T.cuda.thread_rank() == 0), T.Then():
+                    with T.unroll(NUM_INPUT_BARS) as i:
+                        _named(i, "i")
+                        T.evaluate(
+                            T.ptx.mbarrier.init.shared.b64(input_bar_buf.ptr_to([i]), T.uint32(1))
+                        )
+                if CLUSTER_N > 1:
+                    with T.If(T.cuda.thread_rank() == 0), T.Then():
+                        with T.unroll(NUM_CLUSTER_BARS) as i:
+                            _named(i, "i")
+                            T.evaluate(
+                                T.ptx.mbarrier.init.shared.b64(
+                                    cluster_bar_buf.ptr_to([i]), T.uint32(CLUSTER_N)
+                                )
+                            )
+                    T.evaluate(T.ptx.fence.mbarrier_init.release.cluster())
+                    T.evaluate(T.cuda.cluster_sync())
                 else:
-                    sum_sq = T.float32(0)
-                sum_sq = T.cuda.warp_sum(sum_sq, width=CLUSTER_N)
-                if t_idx == 0:
-                    sum_sq_smem[0] = sum_sq
-            T.ptx.bar.sync(1, T.uint32(b_dx * b_dy))
-            T.ptx.fence.proxy.async_.shared__cta()
-            norm_factor = T.rsqrt(sum_sq_smem[0] / dim + eps)
-        else:
-            norm_factor = T.rsqrt(sum_sq_smem[0] / dim + eps)
-        for ki in T.serial(ceildiv(dim_per_cta, VECTOR_SIZE * b_dx * b_dy)):
-            st = T.meta_var((ki * b_dx * b_dy + b_dx * t_idy + t_idx) * VECTOR_SIZE)
-            if st < dim_per_cta:
-                Tx.copy(
-                    weight_vec[:], weight_global[col_offset + st : col_offset + st + VECTOR_SIZE]
+                    T.evaluate(T.ptx.bar.sync(1, T.uint32(b_dx * b_dy)))
+                input_vec, weight_vec, x_vec, weight_vec_f32, mul_result = _rmsnorm_vectors(
+                    VECTOR_SIZE
                 )
-                Tx.cast(weight_vec_f32[:], weight_vec[:])
-                Tx.copy(input_vec[:], input_smem[st : st + VECTOR_SIZE])
-                Tx.cast(x_vec[:], input_vec[:])
-                Tx.mul(mul_result[:], x_vec[:], norm_factor)
-                Tx.mul(mul_result[:], mul_result[:], weight_vec_f32[:])
-                Tx.cast(input_vec[:], mul_result[:])
-                Tx.copy(
-                    output_global[batch_idx, col_offset + st : col_offset + st + VECTOR_SIZE],
-                    input_vec[:],
+                sum_sq = _scalar("sum_sq", "float32")
+                norm_factor = _scalar("norm_factor", "float32")
+                batch_idx = _scalar("batch_idx", "int32", _expr(cluster_id))
+                zero_and_tidy = T.bitwise_and(0, t_idy)
+                with T.If(T.And(t_idx == zero_and_tidy, zero_and_tidy == 0)), T.Then():
+                    with T.serial(NUM_TMA_CHUNKS) as tma_chunk:
+                        _named(tma_chunk, "tma_chunk")
+                        tma_off = tma_chunk * TMA_TILE
+                        Tx.copy_async(
+                            input_smem[tma_off : tma_off + TMA_TILE],
+                            input_global[
+                                _expr(batch_idx),
+                                col_offset + tma_off : col_offset + tma_off + TMA_TILE,
+                            ],
+                            dispatch="tma_auto",
+                            mbar=input_bar_buf.ptr_to([0]),
+                        )
+                    T.evaluate(
+                        T.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                            input_bar_buf.ptr_to([0]), T.uint32(input_smem_bytes)
+                        )
+                    )
+                T.evaluate(T.cuda.mbarrier_wait(input_bar_buf.ptr_to([0]), 0))
+                _store(sum_sq, T.float32(0.0))
+                with T.serial(ceildiv(dim_per_cta, VECTOR_SIZE * b_dx * b_dy)) as ki:
+                    _named(ki, "ki")
+                    st = (ki * b_dx * b_dy + b_dx * t_idy + t_idx) * VECTOR_SIZE
+                    with T.If(st < dim_per_cta), T.Then():
+                        Tx.copy(input_vec[0:VECTOR_SIZE], input_smem[st : st + VECTOR_SIZE])
+                        Tx.cast(x_vec[0:VECTOR_SIZE], input_vec[0:VECTOR_SIZE])
+                        with T.unroll(VECTOR_SIZE) as v_id:
+                            _named(v_id, "v_id")
+                            _store(sum_sq, sum_sq + x_vec[v_id] * x_vec[v_id])
+                _store(sum_sq, T.cuda.warp_sum(_expr(sum_sq)))
+                T.buffer_store(sum_sq_smem, _expr(sum_sq), [t_idy])
+                T.evaluate(T.ptx.bar.sync(1, T.uint32(b_dx * b_dy)))
+                T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
+                with T.If(t_idy == 0), T.Then():
+                    with T.If(t_idx < b_dy):
+                        with T.Then():
+                            _store(sum_sq, sum_sq_smem[t_idx])
+                        with T.Else():
+                            _store(sum_sq, T.float32(0.0))
+                    _store(sum_sq, T.cuda.warp_sum(_expr(sum_sq)))
+                    T.buffer_store(sum_sq_smem, _expr(sum_sq), [0])
+                T.evaluate(T.ptx.bar.sync(1, T.uint32(b_dx * b_dy)))
+                T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
+                if CLUSTER_N > 1:
+                    with T.If(t_idy == 0), T.Then():
+                        with T.If(t_idx < CLUSTER_N), T.Then():
+                            remote_ptr = _bind(
+                                "remote_ptr",
+                                T.reinterpret(
+                                    PointerType(PrimType("float32")),
+                                    _mapa_u64(cluster_reduce_smem.ptr_to([cta_rank]), t_idx),
+                                ),
+                                PointerType(PrimType("float32")),
+                            )
+                            remote_buf = _named(
+                                T.decl_buffer([1], "float32", scope="shared", data=remote_ptr),
+                                "remote_buf",
+                            )
+                            T.buffer_store(remote_buf, sum_sq_smem[0], [0])
+                            rem1 = _named(T.alloc_local([1], "uint64"), "_rem1")
+                            T.evaluate(
+                                T.ptx.mapa.shared__cluster.u64(
+                                    rem1[0], cluster_bar_buf.ptr_to([0]), T.uint32(t_idx)
+                                )
+                            )
+                            T.evaluate(
+                                T.ptx.mbarrier.arrive.b64(rem1[0], T.uint32(1), pred=T.bool(True))
+                            )
+                    T.evaluate(T.cuda.mbarrier_wait(cluster_bar_buf.ptr_to([0]), 0))
+                    with T.If(t_idy == 0), T.Then():
+                        with T.If(t_idx < CLUSTER_N):
+                            with T.Then():
+                                _store(sum_sq, cluster_reduce_smem[t_idx])
+                            with T.Else():
+                                _store(sum_sq, T.float32(0))
+                        _store(sum_sq, T.cuda.warp_sum(_expr(sum_sq), width=CLUSTER_N))
+                        with T.If(t_idx == 0), T.Then():
+                            T.buffer_store(sum_sq_smem, _expr(sum_sq), [0])
+                    T.evaluate(T.ptx.bar.sync(1, T.uint32(b_dx * b_dy)))
+                    T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
+                _store(norm_factor, T.rsqrt(sum_sq_smem[0] / dim + eps))
+                _emit_output(
+                    dim_per_cta,
+                    VECTOR_SIZE,
+                    b_dx,
+                    b_dy,
+                    t_idx,
+                    t_idy,
+                    col_offset,
+                    _expr(batch_idx),
+                    input_smem,
+                    weight_global,
+                    output_global,
+                    input_vec,
+                    weight_vec,
+                    x_vec,
+                    weight_vec_f32,
+                    mul_result,
+                    norm_factor,
                 )
 
-    return rms_norm
+    return ib.get()
 
 
 def build_tirx_soln(
@@ -657,168 +783,251 @@ def _get_rmsnorm_kernel(hidden_size):
     block_size = min(256, hidden_size // vec_size)
     bdx = 32
     bdy = ceildiv(block_size, 32)
-
-    @T.prim_func
-    def rmsnorm(input_ptr: T.handle, weight_ptr: T.handle, out_ptr: T.handle):
-        batch_size = T.int32()
-        input_global = T.match_buffer(
-            input_ptr, [batch_size, hidden_size], "float16", scope="global"
-        )
-        weight_global = T.match_buffer(weight_ptr, [hidden_size], "float16", scope="global")
-        out_global = T.match_buffer(out_ptr, [batch_size, hidden_size], "float16", scope="global")
-        T.device_entry()
-        bx = T.cta_id([SM_COUNT])
-        tx, ty = T.thread_id([bdx, bdy])
-        thread_id = T.meta_var(ty * bdx + tx)
-        pool = T.SMEMPool()
-        x_smem = pool.alloc([hidden_size], "float32")
-        sum_sq_smem = pool.alloc([bdy], "float32")
-        pool.commit()
-        input_words: T.uint32[vec_size // 2]
-        weight_words: T.uint32[vec_size // 2]
-        output_words: T.uint32[vec_size // 2]
-        input_vec_f32: T.f32[vec_size]
-        weight_vec_f32: T.f32[vec_size]
-        x_vec: T.f32[vec_size]
-        packed_mul: T.uint64
-        x_tmp: T.f32
-        sum_sq: T.f32
-        rms_norm: T.f32
-        idx: T.i32
-        idx = bx
-        while idx < batch_size:
-            sum_sq = 0.0
-            for ki in T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)):
-                for kv in T.unroll(vec_size):
-                    x_vec[kv] = 0.0
-                st = T.meta_var((ki * bdx * bdy + thread_id) * vec_size)
-                if st < hidden_size:
-                    T.ptx.ld.global_.v4.b32(
-                        input_words[0],
-                        input_words[1],
-                        input_words[2],
-                        input_words[3],
-                        input_global.ptr_to([idx, st]),
-                    )
-                    for pair in T.unroll(vec_size // 2):
-                        input_vec_f32[pair * 2] = T.cast(
-                            T.reinterpret(
-                                "float16",
+    with IRBuilder() as ib:
+        with T.prim_func():
+            T.func_name("rmsnorm")
+            input_ptr = T.arg("input_ptr", T.handle())
+            weight_ptr = T.arg("weight_ptr", T.handle())
+            out_ptr = T.arg("out_ptr", T.handle())
+            batch_size = _named(T.int32(), "batch_size")
+            input_global = _named(
+                T.match_buffer(input_ptr, [batch_size, hidden_size], "float16", scope="global"),
+                "input_global",
+            )
+            weight_global = _named(
+                T.match_buffer(weight_ptr, [hidden_size], "float16", scope="global"),
+                "weight_global",
+            )
+            out_global = _named(
+                T.match_buffer(out_ptr, [batch_size, hidden_size], "float16", scope="global"),
+                "out_global",
+            )
+            T.device_entry()
+            bx = _named(T.cta_id([SM_COUNT]), "bx")
+            tx, ty = T.thread_id([bdx, bdy])
+            _named(tx, "tx")
+            _named(ty, "ty")
+            thread_id = ty * bdx + tx
+            pool = T.SMEMPool()
+            x_smem = _named(pool.alloc([hidden_size], "float32"), "x_smem")
+            sum_sq_smem = _named(pool.alloc([bdy], "float32"), "sum_sq_smem")
+            pool.commit()
+            input_words = _named(T.alloc_local([vec_size // 2], "uint32"), "input_words")
+            weight_words = _named(T.alloc_local([vec_size // 2], "uint32"), "weight_words")
+            output_words = _named(T.alloc_local([vec_size // 2], "uint32"), "output_words")
+            input_vec_f32 = _named(T.alloc_local([vec_size], "float32"), "input_vec_f32")
+            weight_vec_f32 = _named(T.alloc_local([vec_size], "float32"), "weight_vec_f32")
+            x_vec = _named(T.alloc_local([vec_size], "float32"), "x_vec")
+            packed_mul = _scalar("packed_mul", "uint64")
+            x_tmp = _scalar("x_tmp", "float32")
+            sum_sq = _scalar("sum_sq", "float32")
+            rms_norm = _scalar("rms_norm", "float32")
+            idx = _scalar("idx", "int32", bx)
+            with T.While(idx < batch_size):
+                _store(sum_sq, T.float32(0.0))
+                with T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)) as ki:
+                    _named(ki, "ki")
+                    with T.unroll(vec_size) as kv:
+                        _named(kv, "kv")
+                        T.buffer_store(x_vec, T.float32(0.0), [kv])
+                    st = (ki * bdx * bdy + thread_id) * vec_size
+                    with T.If(st < hidden_size), T.Then():
+                        T.evaluate(
+                            T.ptx.ld.global_.v4.b32(
+                                input_words[0],
+                                input_words[1],
+                                input_words[2],
+                                input_words[3],
+                                input_global.ptr_to([_expr(idx), st]),
+                            )
+                        )
+                        with T.unroll(vec_size // 2) as pair:
+                            _named(pair, "pair")
+                            T.buffer_store(
+                                input_vec_f32,
                                 T.cast(
-                                    T.bitwise_and(input_words[pair], T.uint32(0xFFFF)), "uint16"
+                                    T.reinterpret(
+                                        "float16",
+                                        T.cast(
+                                            T.bitwise_and(input_words[pair], T.uint32(0xFFFF)),
+                                            "uint16",
+                                        ),
+                                    ),
+                                    "float32",
                                 ),
-                            ),
-                            "float32",
-                        )
-                        input_vec_f32[pair * 2 + 1] = T.cast(
-                            T.reinterpret(
-                                "float16",
-                                T.cast(T.shift_right(input_words[pair], T.uint32(16)), "uint16"),
-                            ),
-                            "float32",
-                        )
-                    for kv in T.unroll(vec_size):
-                        x_tmp = input_vec_f32[kv]
-                        sum_sq = sum_sq + x_tmp * x_tmp
-                        x_vec[kv] = x_tmp
-                    T.ptx.st.shared.v4.f32(
-                        x_smem.ptr_to([st]), x_vec[0], x_vec[1], x_vec[2], x_vec[3]
-                    )
-                    T.ptx.st.shared.v4.f32(
-                        x_smem.ptr_to([st + 4]), x_vec[4], x_vec[5], x_vec[6], x_vec[7]
-                    )
-
-            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 16, bdx)
-            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 8, bdx)
-            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 4, bdx)
-            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 2, bdx)
-            sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 1, bdx)
-            if tx == 0:
-                T.ptx.st.shared.f32(sum_sq_smem.ptr_to([ty]), sum_sq)
-            T.ptx.bar.sync(0, T.uint32(bdx * bdy))
-            if ty == 0:
-                if tx < bdy:
-                    T.ptx.ld.shared.f32(sum_sq, sum_sq_smem.ptr_to([tx]))
-                else:
-                    sum_sq = 0.0
-                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 16, bdx)
-                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 8, bdx)
-                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 4, bdx)
-                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 2, bdx)
-                sum_sq = sum_sq + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_sq, 1, bdx)
-                if tx == 0:
-                    T.ptx.st.shared.f32(sum_sq_smem.ptr_to([0]), sum_sq)
-            T.ptx.bar.sync(0, T.uint32(bdx * bdy))
-            T.ptx.ld.shared.f32(sum_sq, sum_sq_smem.ptr_to([0]))
-            rms_norm = T.rsqrt(sum_sq / hidden_size + eps)
-            for ki in T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)):
-                for kv in T.unroll(vec_size):
-                    weight_vec_f32[kv] = 0.0
-                    x_vec[kv] = 0.0
-                st = T.meta_var((ki * bdx * bdy + thread_id) * vec_size)
-                if st < hidden_size:
-                    T.ptx.ld.global_.v4.b32(
-                        weight_words[0],
-                        weight_words[1],
-                        weight_words[2],
-                        weight_words[3],
-                        weight_global.ptr_to([st]),
-                    )
-                    T.ptx.ld.shared.v4.f32(
-                        x_vec[0], x_vec[1], x_vec[2], x_vec[3], x_smem.ptr_to([st])
-                    )
-                    T.ptx.ld.shared.v4.f32(
-                        x_vec[4], x_vec[5], x_vec[6], x_vec[7], x_smem.ptr_to([st + 4])
-                    )
-                    for pair in T.unroll(vec_size // 2):
-                        weight_vec_f32[pair * 2] = T.cast(
-                            T.reinterpret(
-                                "float16",
+                                [pair * 2],
+                            )
+                            T.buffer_store(
+                                input_vec_f32,
                                 T.cast(
-                                    T.bitwise_and(weight_words[pair], T.uint32(0xFFFF)), "uint16"
+                                    T.reinterpret(
+                                        "float16",
+                                        T.cast(
+                                            T.shift_right(input_words[pair], T.uint32(16)), "uint16"
+                                        ),
+                                    ),
+                                    "float32",
                                 ),
-                            ),
-                            "float32",
+                                [pair * 2 + 1],
+                            )
+                        with T.unroll(vec_size) as kv:
+                            _named(kv, "kv")
+                            _store(x_tmp, input_vec_f32[kv])
+                            _store(sum_sq, sum_sq + x_tmp * x_tmp)
+                            T.buffer_store(x_vec, _expr(x_tmp), [kv])
+                        T.evaluate(
+                            T.ptx.st.shared.v4.f32(
+                                x_smem.ptr_to([st]), x_vec[0], x_vec[1], x_vec[2], x_vec[3]
+                            )
                         )
-                        weight_vec_f32[pair * 2 + 1] = T.cast(
-                            T.reinterpret(
-                                "float16",
-                                T.cast(T.shift_right(weight_words[pair], T.uint32(16)), "uint16"),
-                            ),
-                            "float32",
+                        T.evaluate(
+                            T.ptx.st.shared.v4.f32(
+                                x_smem.ptr_to([st + 4]), x_vec[4], x_vec[5], x_vec[6], x_vec[7]
+                            )
                         )
-                for pair in T.unroll(vec_size // 2):
-                    T.ptx.mul.rz.ftz.f32x2(
-                        packed_mul,
-                        T.cuda.make_float2(x_vec[pair * 2], x_vec[pair * 2 + 1]),
-                        T.cuda.make_float2(rms_norm, rms_norm),
-                    )
-                    input_vec_f32[pair * 2] = T.cuda.float2_x(packed_mul)
-                    input_vec_f32[pair * 2 + 1] = T.cuda.float2_y(packed_mul)
-                for pair in T.unroll(vec_size // 2):
-                    T.ptx.mul.rz.ftz.f32x2(
-                        packed_mul,
-                        T.cuda.make_float2(input_vec_f32[pair * 2], input_vec_f32[pair * 2 + 1]),
-                        T.cuda.make_float2(weight_vec_f32[pair * 2], weight_vec_f32[pair * 2 + 1]),
-                    )
-                    input_vec_f32[pair * 2] = T.cuda.float2_x(packed_mul)
-                    input_vec_f32[pair * 2 + 1] = T.cuda.float2_y(packed_mul)
-                if st < hidden_size:
-                    for pair in T.unroll(vec_size // 2):
-                        T.ptx.cvt.rn.f16x2.f32(
-                            output_words[pair], input_vec_f32[pair * 2 + 1], input_vec_f32[pair * 2]
-                        )
-                    T.ptx.st.global_.v4.b32(
-                        out_global.ptr_to([idx, st]),
-                        output_words[0],
-                        output_words[1],
-                        output_words[2],
-                        output_words[3],
-                    )
-            T.ptx.bar.sync(1, T.uint32(bdx * bdy))
-            idx = idx + SM_COUNT
 
-    return rmsnorm
+                for delta in (16, 8, 4, 2, 1):
+                    _store(
+                        sum_sq,
+                        sum_sq
+                        + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), _expr(sum_sq), delta, bdx),
+                    )
+                with T.If(tx == 0), T.Then():
+                    T.evaluate(T.ptx.st.shared.f32(sum_sq_smem.ptr_to([ty]), _expr(sum_sq)))
+                T.evaluate(T.ptx.bar.sync(0, T.uint32(bdx * bdy)))
+                with T.If(ty == 0), T.Then():
+                    with T.If(tx < bdy):
+                        with T.Then():
+                            T.evaluate(T.ptx.ld.shared.f32(_expr(sum_sq), sum_sq_smem.ptr_to([tx])))
+                        with T.Else():
+                            _store(sum_sq, T.float32(0.0))
+                    for delta in (16, 8, 4, 2, 1):
+                        _store(
+                            sum_sq,
+                            sum_sq
+                            + T.cuda.__shfl_xor_sync(
+                                T.uint32(0xFFFFFFFF), _expr(sum_sq), delta, bdx
+                            ),
+                        )
+                    with T.If(tx == 0), T.Then():
+                        T.evaluate(T.ptx.st.shared.f32(sum_sq_smem.ptr_to([0]), _expr(sum_sq)))
+                T.evaluate(T.ptx.bar.sync(0, T.uint32(bdx * bdy)))
+                T.evaluate(T.ptx.ld.shared.f32(_expr(sum_sq), sum_sq_smem.ptr_to([0])))
+                _store(rms_norm, T.rsqrt(sum_sq / hidden_size + eps))
+                with T.serial(ceildiv(hidden_size, vec_size * bdx * bdy)) as ki:
+                    _named(ki, "ki")
+                    with T.unroll(vec_size) as kv:
+                        _named(kv, "kv")
+                        T.buffer_store(weight_vec_f32, T.float32(0.0), [kv])
+                        T.buffer_store(x_vec, T.float32(0.0), [kv])
+                    st = (ki * bdx * bdy + thread_id) * vec_size
+                    with T.If(st < hidden_size), T.Then():
+                        T.evaluate(
+                            T.ptx.ld.global_.v4.b32(
+                                weight_words[0],
+                                weight_words[1],
+                                weight_words[2],
+                                weight_words[3],
+                                weight_global.ptr_to([st]),
+                            )
+                        )
+                        T.evaluate(
+                            T.ptx.ld.shared.v4.f32(
+                                x_vec[0], x_vec[1], x_vec[2], x_vec[3], x_smem.ptr_to([st])
+                            )
+                        )
+                        T.evaluate(
+                            T.ptx.ld.shared.v4.f32(
+                                x_vec[4], x_vec[5], x_vec[6], x_vec[7], x_smem.ptr_to([st + 4])
+                            )
+                        )
+                        with T.unroll(vec_size // 2) as pair:
+                            _named(pair, "pair")
+                            T.buffer_store(
+                                weight_vec_f32,
+                                T.cast(
+                                    T.reinterpret(
+                                        "float16",
+                                        T.cast(
+                                            T.bitwise_and(weight_words[pair], T.uint32(0xFFFF)),
+                                            "uint16",
+                                        ),
+                                    ),
+                                    "float32",
+                                ),
+                                [pair * 2],
+                            )
+                            T.buffer_store(
+                                weight_vec_f32,
+                                T.cast(
+                                    T.reinterpret(
+                                        "float16",
+                                        T.cast(
+                                            T.shift_right(weight_words[pair], T.uint32(16)),
+                                            "uint16",
+                                        ),
+                                    ),
+                                    "float32",
+                                ),
+                                [pair * 2 + 1],
+                            )
+                    with T.unroll(vec_size // 2) as pair:
+                        _named(pair, "pair")
+                        T.evaluate(
+                            T.ptx.mul.rz.ftz.f32x2(
+                                _expr(packed_mul),
+                                T.cuda.make_float2(x_vec[pair * 2], x_vec[pair * 2 + 1]),
+                                T.cuda.make_float2(_expr(rms_norm), _expr(rms_norm)),
+                            )
+                        )
+                        T.buffer_store(
+                            input_vec_f32, T.cuda.float2_x(_expr(packed_mul)), [pair * 2]
+                        )
+                        T.buffer_store(
+                            input_vec_f32, T.cuda.float2_y(_expr(packed_mul)), [pair * 2 + 1]
+                        )
+                    with T.unroll(vec_size // 2) as pair:
+                        _named(pair, "pair")
+                        T.evaluate(
+                            T.ptx.mul.rz.ftz.f32x2(
+                                _expr(packed_mul),
+                                T.cuda.make_float2(
+                                    input_vec_f32[pair * 2], input_vec_f32[pair * 2 + 1]
+                                ),
+                                T.cuda.make_float2(
+                                    weight_vec_f32[pair * 2], weight_vec_f32[pair * 2 + 1]
+                                ),
+                            )
+                        )
+                        T.buffer_store(
+                            input_vec_f32, T.cuda.float2_x(_expr(packed_mul)), [pair * 2]
+                        )
+                        T.buffer_store(
+                            input_vec_f32, T.cuda.float2_y(_expr(packed_mul)), [pair * 2 + 1]
+                        )
+                    with T.If(st < hidden_size), T.Then():
+                        with T.unroll(vec_size // 2) as pair:
+                            _named(pair, "pair")
+                            T.evaluate(
+                                T.ptx.cvt.rn.f16x2.f32(
+                                    output_words[pair],
+                                    input_vec_f32[pair * 2 + 1],
+                                    input_vec_f32[pair * 2],
+                                )
+                            )
+                        T.evaluate(
+                            T.ptx.st.global_.v4.b32(
+                                out_global.ptr_to([_expr(idx), st]),
+                                output_words[0],
+                                output_words[1],
+                                output_words[2],
+                                output_words[3],
+                            )
+                        )
+                T.evaluate(T.ptx.bar.sync(1, T.uint32(bdx * bdy)))
+                _store(idx, idx + SM_COUNT)
+
+    return ib.get()
 
 
 def get_kernel(hidden_size, **kwargs):

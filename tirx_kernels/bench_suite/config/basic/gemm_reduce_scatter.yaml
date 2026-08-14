@@ -2,6 +2,7 @@ kernel: gemm_reduce_scatter
 defaults:
   num_gpus: 1
   timer: kineto
+  exclusive_resource: nvshmem
 configs:
 - config: tp1_m8192_n4096_k12288_fp16_dynamic
   default: false

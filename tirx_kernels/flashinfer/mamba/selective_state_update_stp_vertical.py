@@ -15,9 +15,59 @@ from typing import Any
 
 import torch
 
-from tvm.script import tirx as T
+import tvm
+from tvm.script.ir_builder import IRBuilder
+from tvm.script.ir_builder import tirx as T
 
 from . import selective_state_update_stp_simple as _simple
+
+
+def _builder_name(name: str, value):
+    """Name a directly constructed builder value and return it."""
+    try:
+        return IRBuilder.name(name, value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _builder_meta(name: str, value):
+    """Name resources owned by an IR-builder meta-class instance."""
+    from tvm.tirx.script.builder.ir import name_meta_class_value
+
+    name_meta_class_value(name, value)
+    return value
+
+
+def _builder_scalar(name: str, value, dtype: str | None = None):
+    """Materialize the mutable scalar semantics used by the former parser."""
+    if dtype is None:
+        dtype = str(value.ty.dtype)
+    scalar = T.alloc_scalar(dtype=dtype, scope="local")
+    IRBuilder.name(name, scalar.scalar.buffer)
+    T.buffer_store(scalar.scalar.buffer, value, [0])
+    return scalar.scalar
+
+
+def _builder_alloc_scalar(name: str, dtype: str):
+    """Allocate a mutable scalar without inventing an initializer."""
+    scalar = T.alloc_scalar(dtype=dtype, scope="local")
+    IRBuilder.name(name, scalar.scalar.buffer)
+    return scalar.scalar
+
+
+def _builder_enter(frame):
+    """Enter a flat builder frame until its enclosing PrimFunc completes."""
+    frame.add_callback(lambda: frame.__exit__(None, None, None))
+    frame.__enter__()
+
+
+def _builder_emit(value):
+    """Match TVMScript expression-statement emission in direct builder code."""
+    if value is None or isinstance(value, tvm.ir.Var):
+        return
+    if tvm.ir.is_prim_expr(value) or isinstance(value, tvm.ir.Call):
+        T.evaluate(value)
+
 
 KERNEL_META = {
     "name": "selective_state_update_stp_vertical",
@@ -90,19 +140,25 @@ def _load_weight_nc(buffer, index, dtype: str):
     return _bf16_to_f32(_global_load_nc_u16(buffer, index))
 
 
-@T.inline
 def _mbarrier_arrive_wait(bar_addr):
-    token = T.alloc_local((1,), "uint64")
-    done = T.alloc_local((1,), "uint32")
-    T.evaluate(
-        T.ptx.mbarrier.arrive.shared__cta.b64(token[0], T.cast(bar_addr, "uint32"), T.uint32(1))
-    )
-    while True:
+    token = _builder_name("token", T.alloc_local((1,), "uint64"))
+    done = _builder_name("done", T.alloc_local((1,), "uint32"))
+    _builder_emit(
         T.evaluate(
-            T.ptx.mbarrier.try_wait.shared__cta.b64(done[0], T.cast(bar_addr, "uint32"), token[0])
+            T.ptx.mbarrier.arrive.shared__cta.b64(token[0], T.cast(bar_addr, "uint32"), T.uint32(1))
         )
-        if done[0] != T.uint32(0):
-            break
+    )
+    with T.While(True):
+        _builder_emit(
+            T.evaluate(
+                T.ptx.mbarrier.try_wait.shared__cta.b64(
+                    done[0], T.cast(bar_addr, "uint32"), token[0]
+                )
+            )
+        )
+        with T.If(done[0] != T.uint32(0)):
+            with T.Then():
+                T.evaluate(T.break_loop())
 
 
 def _mbarrier_arrive(smem_raw, offset):
@@ -255,7 +311,6 @@ CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
 ]
 
 
-@T.inline
 def _producer_vertical(
     smem_raw,
     tensor_state,
@@ -293,164 +348,206 @@ def _producer_vertical(
     OFF_EMPTY,
     OFF_FULL,
 ):
-    # Phase 1, stage 0: vector inputs and the first optional state tile share
-    # one full barrier transaction, exactly as in producer_func_vertical.
-    _mbarrier_arrive_wait(smem_addr + T.uint32(OFF_EMPTY))
-    _bulk_g2s(
-        smem_raw,
-        OFF_X,
-        x,
-        T.cast(batch_i, "int64") * x_stride_batch + head * DIM,
-        DIM * 2,
-        OFF_FULL,
-    )
-    _bulk_g2s(
-        smem_raw,
-        OFF_B,
-        matrix_b,
-        T.cast(batch_i, "int64") * b_stride_batch + group * DSTATE,
-        DSTATE * 2,
-        OFF_FULL,
-    )
-    _bulk_g2s(
-        smem_raw,
-        OFF_C,
-        matrix_c,
-        T.cast(batch_i, "int64") * c_stride_batch + group * DSTATE,
-        DSTATE * 2,
-        OFF_FULL,
-    )
-    if HAS_Z:
+    _builder_emit(_mbarrier_arrive_wait(smem_addr + T.uint32(OFF_EMPTY)))
+    _builder_emit(
         _bulk_g2s(
             smem_raw,
-            OFF_Z,
-            z,
-            T.cast(batch_i, "int64") * z_stride_batch + head * DIM,
+            OFF_X,
+            x,
+            T.cast(batch_i, "int64") * x_stride_batch + head * DIM,
             DIM * 2,
             OFF_FULL,
         )
-    if SCALE_STATE:
+    )
+    _builder_emit(
         _bulk_g2s(
             smem_raw,
-            OFF_SCALE,
-            state_scale,
-            state_batch * state_scale_stride_batch + head * DIM,
-            DIM * 4,
+            OFF_B,
+            matrix_b,
+            T.cast(batch_i, "int64") * b_stride_batch + group * DSTATE,
+            DSTATE * 2,
             OFF_FULL,
         )
-    if READ_STATE:
-        _tma_g2s(smem_raw, OFF_STATE, tensor_state, 0, head, state_batch, OFF_FULL)
-        _mbarrier_expect_tx(smem_raw, OFF_FULL, STATE_STAGE_BYTES + INPUT_BYTES)
-    else:
-        _mbarrier_expect_tx(smem_raw, OFF_FULL, INPUT_BYTES)
-
-    # Phase 1, stages 1 and 2: state-only fill.
-    for fill_iter in T.unroll(1, 3):
-        fill_stage: T.int32 = fill_iter
-        fill_d: T.int32 = fill_iter * 16
-        _mbarrier_arrive_wait(smem_addr + T.cast(OFF_EMPTY + fill_stage * 8, "uint32"))
-        if READ_STATE:
-            _tma_g2s(
+    )
+    _builder_emit(
+        _bulk_g2s(
+            smem_raw,
+            OFF_C,
+            matrix_c,
+            T.cast(batch_i, "int64") * c_stride_batch + group * DSTATE,
+            DSTATE * 2,
+            OFF_FULL,
+        )
+    )
+    if HAS_Z:
+        _builder_emit(
+            _bulk_g2s(
                 smem_raw,
-                OFF_STATE + fill_stage * STATE_STAGE_BYTES,
-                tensor_state,
-                fill_d,
-                head,
-                state_batch,
-                OFF_FULL + fill_stage * 8,
+                OFF_Z,
+                z,
+                T.cast(batch_i, "int64") * z_stride_batch + head * DIM,
+                DIM * 2,
+                OFF_FULL,
             )
-            _mbarrier_expect_tx(smem_raw, OFF_FULL + fill_stage * 8, STATE_STAGE_BYTES)
+        )
+    if SCALE_STATE:
+        _builder_emit(
+            _bulk_g2s(
+                smem_raw,
+                OFF_SCALE,
+                state_scale,
+                state_batch * state_scale_stride_batch + head * DIM,
+                DIM * 4,
+                OFF_FULL,
+            )
+        )
+    if READ_STATE:
+        _builder_emit(_tma_g2s(smem_raw, OFF_STATE, tensor_state, 0, head, state_batch, OFF_FULL))
+        _builder_emit(_mbarrier_expect_tx(smem_raw, OFF_FULL, STATE_STAGE_BYTES + INPUT_BYTES))
+    else:
+        _builder_emit(_mbarrier_expect_tx(smem_raw, OFF_FULL, INPUT_BYTES))
+    with T.unroll(1, 3) as fill_iter:
+        fill_stage = _builder_scalar("fill_stage", fill_iter, dtype="int32")
+        fill_d = _builder_scalar("fill_d", fill_iter * 16, dtype="int32")
+        _builder_emit(
+            _mbarrier_arrive_wait(smem_addr + T.cast(OFF_EMPTY + fill_stage * 8, "uint32"))
+        )
+        if READ_STATE:
+            _builder_emit(
+                _tma_g2s(
+                    smem_raw,
+                    OFF_STATE + fill_stage * STATE_STAGE_BYTES,
+                    tensor_state,
+                    fill_d,
+                    head,
+                    state_batch,
+                    OFF_FULL + fill_stage * 8,
+                )
+            )
+            _builder_emit(
+                _mbarrier_expect_tx(smem_raw, OFF_FULL + fill_stage * 8, STATE_STAGE_BYTES)
+            )
         else:
-            _mbarrier_arrive(smem_raw, OFF_FULL + fill_stage * 8)
-
-    # Phase 2: every reused stage is stored before its next load.
-    for steady_iter in T.unroll(DIM // 16 - 3):
-        steady_stage: T.int32 = (3 + steady_iter) % 3
-        d_read: T.int32 = (3 + steady_iter) * 16
-        d_write: T.int32 = steady_iter * 16
-        _mbarrier_arrive_wait(smem_addr + T.cast(OFF_EMPTY + steady_stage * 8, "uint32"))
+            _builder_emit(_mbarrier_arrive(smem_raw, OFF_FULL + fill_stage * 8))
+    with T.unroll(DIM // 16 - 3) as steady_iter:
+        steady_stage = _builder_scalar("steady_stage", (3 + steady_iter) % 3, dtype="int32")
+        d_read = _builder_scalar("d_read", (3 + steady_iter) * 16, dtype="int32")
+        d_write = _builder_scalar("d_write", steady_iter * 16, dtype="int32")
+        _builder_emit(
+            _mbarrier_arrive_wait(smem_addr + T.cast(OFF_EMPTY + steady_stage * 8, "uint32"))
+        )
         if READ_STATE or WRITE_STATE:
-            T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
+            _builder_emit(T.evaluate(T.ptx.fence.proxy.async_.shared__cta()))
             if WRITE_STATE:
+                _builder_emit(
+                    _tma_s2g(
+                        smem_raw,
+                        OFF_STATE + steady_stage * STATE_STAGE_BYTES,
+                        tensor_state,
+                        d_write,
+                        head,
+                        dst_state_batch,
+                    )
+                )
+                _builder_emit(T.evaluate(T.ptx.cp.async_.bulk.commit_group()))
+                _builder_emit(T.evaluate(T.ptx.cp.async_.bulk.wait_group.read(0)))
+            if READ_STATE:
+                _builder_emit(
+                    _tma_g2s(
+                        smem_raw,
+                        OFF_STATE + steady_stage * STATE_STAGE_BYTES,
+                        tensor_state,
+                        d_read,
+                        head,
+                        state_batch,
+                        OFF_FULL + steady_stage * 8,
+                    )
+                )
+                _builder_emit(
+                    _mbarrier_expect_tx(smem_raw, OFF_FULL + steady_stage * 8, STATE_STAGE_BYTES)
+                )
+            else:
+                _builder_emit(_mbarrier_arrive(smem_raw, OFF_FULL + steady_stage * 8))
+        else:
+            _builder_emit(_mbarrier_arrive(smem_raw, OFF_FULL + steady_stage * 8))
+    with T.unroll(3) as drain_iter:
+        drain_stage = _builder_scalar("drain_stage", (DIM // 16 + drain_iter) % 3, dtype="int32")
+        drain_d = _builder_scalar("drain_d", (DIM // 16 - 3 + drain_iter) * 16, dtype="int32")
+        _builder_emit(
+            _mbarrier_arrive_wait(smem_addr + T.cast(OFF_EMPTY + drain_stage * 8, "uint32"))
+        )
+        if WRITE_STATE:
+            _builder_emit(T.evaluate(T.ptx.fence.proxy.async_.shared__cta()))
+            _builder_emit(
                 _tma_s2g(
                     smem_raw,
-                    OFF_STATE + steady_stage * STATE_STAGE_BYTES,
+                    OFF_STATE + drain_stage * STATE_STAGE_BYTES,
                     tensor_state,
-                    d_write,
+                    drain_d,
                     head,
                     dst_state_batch,
                 )
-                T.evaluate(T.ptx.cp.async_.bulk.commit_group())
-                T.evaluate(T.ptx.cp.async_.bulk.wait_group.read(0))
-            if READ_STATE:
-                _tma_g2s(
-                    smem_raw,
-                    OFF_STATE + steady_stage * STATE_STAGE_BYTES,
-                    tensor_state,
-                    d_read,
-                    head,
-                    state_batch,
-                    OFF_FULL + steady_stage * 8,
-                )
-                _mbarrier_expect_tx(smem_raw, OFF_FULL + steady_stage * 8, STATE_STAGE_BYTES)
-            else:
-                _mbarrier_arrive(smem_raw, OFF_FULL + steady_stage * 8)
-        else:
-            _mbarrier_arrive(smem_raw, OFF_FULL + steady_stage * 8)
-
-    # Phase 3: wait for and drain the final three shared state tiles.
-    for drain_iter in T.unroll(3):
-        drain_stage: T.int32 = (DIM // 16 + drain_iter) % 3
-        drain_d: T.int32 = (DIM // 16 - 3 + drain_iter) * 16
-        _mbarrier_arrive_wait(smem_addr + T.cast(OFF_EMPTY + drain_stage * 8, "uint32"))
-        if WRITE_STATE:
-            T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
-            _tma_s2g(
-                smem_raw,
-                OFF_STATE + drain_stage * STATE_STAGE_BYTES,
-                tensor_state,
-                drain_d,
-                head,
-                dst_state_batch,
             )
-            T.evaluate(T.ptx.cp.async_.bulk.commit_group())
-            T.evaluate(T.ptx.cp.async_.bulk.wait_group.read(0))
+            _builder_emit(T.evaluate(T.ptx.cp.async_.bulk.commit_group()))
+            _builder_emit(T.evaluate(T.ptx.cp.async_.bulk.wait_group.read(0)))
 
 
-@T.inline
 def _philox4x32(random_words, random_seed, random_offset, *, PHILOX_ROUNDS):
-    c0: T.uint32 = T.cast(random_offset, "uint32")
-    c1: T.uint32 = T.cast(T.shift_right(T.cast(random_offset, "uint64"), T.uint64(32)), "uint32")
-    c2: T.uint32 = 0
-    c3: T.uint32 = 0
-    k0: T.uint32 = T.cast(T.reinterpret("uint64", random_seed), "uint32")
-    k1: T.uint32 = T.cast(
-        T.shift_right(T.reinterpret("uint64", random_seed), T.uint64(32)), "uint32"
+    c0 = _builder_scalar("c0", T.cast(random_offset, "uint32"), dtype="uint32")
+    c1 = _builder_scalar(
+        "c1",
+        T.cast(T.shift_right(T.cast(random_offset, "uint64"), T.uint64(32)), "uint32"),
+        dtype="uint32",
     )
-    for _round in T.unroll(PHILOX_ROUNDS):
-        old_c0: T.uint32 = c0
-        old_c2: T.uint32 = c2
-        hi_b: T.uint32 = _mul_hi_u32(T.uint32(0xCD9E8D57), old_c2)
-        next_c0: T.uint32 = T.bitwise_xor(T.bitwise_xor(hi_b, c1), k0)
-        hi_a: T.uint32 = _mul_hi_u32(T.uint32(0xD2511F53), old_c0)
-        next_c2: T.uint32 = T.bitwise_xor(T.bitwise_xor(hi_a, c3), k1)
-        next_c1_s: T.int32 = _mul_lo_s32(T.int32(-845247145), T.reinterpret("int32", old_c2))
-        next_c3_s: T.int32 = _mul_lo_s32(T.int32(-766435501), T.reinterpret("int32", old_c0))
-        next_k0_s: T.int32 = _add_s32(T.reinterpret("int32", k0), T.int32(-1640531527))
-        next_k1_s: T.int32 = _add_s32(T.reinterpret("int32", k1), T.int32(-1150833019))
-        c0 = next_c0
-        c1 = T.reinterpret("uint32", next_c1_s)
-        c2 = next_c2
-        c3 = T.reinterpret("uint32", next_c3_s)
-        k0 = T.reinterpret("uint32", next_k0_s)
-        k1 = T.reinterpret("uint32", next_k1_s)
-    random_words[0] = c0
-    random_words[1] = c1
-    random_words[2] = c2
-    random_words[3] = c3
+    c2 = _builder_scalar("c2", 0, dtype="uint32")
+    c3 = _builder_scalar("c3", 0, dtype="uint32")
+    k0 = _builder_scalar(
+        "k0", T.cast(T.reinterpret("uint64", random_seed), "uint32"), dtype="uint32"
+    )
+    k1 = _builder_scalar(
+        "k1",
+        T.cast(T.shift_right(T.reinterpret("uint64", random_seed), T.uint64(32)), "uint32"),
+        dtype="uint32",
+    )
+    with T.unroll(PHILOX_ROUNDS) as _round:
+        old_c0 = _builder_scalar("old_c0", c0, dtype="uint32")
+        old_c2 = _builder_scalar("old_c2", c2, dtype="uint32")
+        hi_b = _builder_scalar("hi_b", _mul_hi_u32(T.uint32(3449720151), old_c2), dtype="uint32")
+        next_c0 = _builder_scalar(
+            "next_c0", T.bitwise_xor(T.bitwise_xor(hi_b, c1), k0), dtype="uint32"
+        )
+        hi_a = _builder_scalar("hi_a", _mul_hi_u32(T.uint32(3528531795), old_c0), dtype="uint32")
+        next_c2 = _builder_scalar(
+            "next_c2", T.bitwise_xor(T.bitwise_xor(hi_a, c3), k1), dtype="uint32"
+        )
+        next_c1_s = _builder_scalar(
+            "next_c1_s",
+            _mul_lo_s32(T.int32(-845247145), T.reinterpret("int32", old_c2)),
+            dtype="int32",
+        )
+        next_c3_s = _builder_scalar(
+            "next_c3_s",
+            _mul_lo_s32(T.int32(-766435501), T.reinterpret("int32", old_c0)),
+            dtype="int32",
+        )
+        next_k0_s = _builder_scalar(
+            "next_k0_s", _add_s32(T.reinterpret("int32", k0), T.int32(-1640531527)), dtype="int32"
+        )
+        next_k1_s = _builder_scalar(
+            "next_k1_s", _add_s32(T.reinterpret("int32", k1), T.int32(-1150833019)), dtype="int32"
+        )
+        T.buffer_store(c0.buffer, next_c0, [0])
+        T.buffer_store(c1.buffer, T.reinterpret("uint32", next_c1_s), [0])
+        T.buffer_store(c2.buffer, next_c2, [0])
+        T.buffer_store(c3.buffer, T.reinterpret("uint32", next_c3_s), [0])
+        T.buffer_store(k0.buffer, T.reinterpret("uint32", next_k0_s), [0])
+        T.buffer_store(k1.buffer, T.reinterpret("uint32", next_k1_s), [0])
+    T.buffer_store(random_words, c0, [0])
+    T.buffer_store(random_words, c1, [1])
+    T.buffer_store(random_words, c2, [2])
+    T.buffer_store(random_words, c3, [3])
 
 
-@T.inline
 def _consumer_vertical(
     smem_raw,
     s_state,
@@ -483,190 +580,309 @@ def _consumer_vertical(
     OFF_EMPTY,
     OFF_FULL,
 ):
-    d_begin: T.int32 = 0
-    stage: T.int32 = 0
-    while d_begin < DIM:
-        _mbarrier_arrive_wait(smem_addr + T.cast(OFF_FULL + stage * 8, "uint32"))
-        for row_iter in T.unroll(4):
-            dd: T.int32 = warp + row_iter * 4
-            row_d: T.int32 = d_begin + dd
-            x_value: T.float32 = _bf16_to_f32(_shared_load_u16(s_x, row_d))
-            d_times_x: T.float32 = _mul(d_value, x_value)
-            out_value: T.float32 = _mul(d_times_x, lane_indicator)
-            decode_scale: T.float32 = 1.0
-            new_state_max: T.float32 = T.float32(_FLT_LOWEST)
+    d_begin = _builder_scalar("d_begin", 0, dtype="int32")
+    stage = _builder_scalar("stage", 0, dtype="int32")
+    with T.While(d_begin < DIM):
+        _builder_emit(_mbarrier_arrive_wait(smem_addr + T.cast(OFF_FULL + stage * 8, "uint32")))
+        with T.unroll(4) as row_iter:
+            dd = _builder_scalar("dd", warp + row_iter * 4, dtype="int32")
+            row_d = _builder_scalar("row_d", d_begin + dd, dtype="int32")
+            x_value = _builder_scalar(
+                "x_value", _bf16_to_f32(_shared_load_u16(s_x, row_d)), dtype="float32"
+            )
+            d_times_x = _builder_scalar("d_times_x", _mul(d_value, x_value), dtype="float32")
+            out_value = _builder_scalar(
+                "out_value", _mul(d_times_x, lane_indicator), dtype="float32"
+            )
+            decode_scale = _builder_scalar("decode_scale", 1.0, dtype="float32")
+            new_state_max = _builder_scalar(
+                "new_state_max", T.float32(_FLT_LOWEST), dtype="float32"
+            )
             if SCALE_STATE:
-                decode_scale = T.reinterpret("float32", _shared_load_u32(s_scale, row_d))
-            new_states = T.alloc_local((NEW_STATE_COUNT,), "float32")
-
-            for state_iter in T.serial(STATE_ITERATIONS):
-                state_i: T.int32 = (state_iter * 32 + lane) * STATE_VALUES_PER_BANK
-                if state_i < DSTATE:
-                    state_index: T.int32 = stage * STATE_STAGE_VALUES + dd * DSTATE + state_i
-                    if STATE_BYTES == 2:
-                        r_state = _load_two_byte_vector(
-                            s_state, state_index, STATE_VALUES_PER_BANK, "shared"
+                T.buffer_store(
+                    decode_scale.buffer,
+                    T.reinterpret("float32", _shared_load_u32(s_scale, row_d)),
+                    [0],
+                )
+            new_states = _builder_name("new_states", T.alloc_local((NEW_STATE_COUNT,), "float32"))
+            with T.serial(STATE_ITERATIONS) as state_iter:
+                state_i = _builder_scalar(
+                    "state_i", (state_iter * 32 + lane) * STATE_VALUES_PER_BANK, dtype="int32"
+                )
+                with T.If(state_i < DSTATE):
+                    with T.Then():
+                        state_index = _builder_scalar(
+                            "state_index",
+                            stage * STATE_STAGE_VALUES + dd * DSTATE + state_i,
+                            dtype="int32",
                         )
-                        b_bits = _load_two_byte_vector(
-                            s_b, state_i, STATE_VALUES_PER_BANK, "shared"
-                        )
-                        c_bits = _load_two_byte_vector(
-                            s_c, state_i, STATE_VALUES_PER_BANK, "shared"
-                        )
-                        random_words = T.alloc_local((4,), "uint32")
-                        sr_raw = T.alloc_local((STATE_VALUES_PER_BANK,), "uint32")
-                        if PHILOX_ROUNDS > 0 and not SCALE_STATE:
-                            random_offset: T.uint64 = T.cast(
-                                state_ptr_offset + row_d * DSTATE + state_i, "uint64"
+                        if STATE_BYTES == 2:
+                            r_state = _builder_name(
+                                "r_state",
+                                _load_two_byte_vector(
+                                    s_state, state_index, STATE_VALUES_PER_BANK, "shared"
+                                ),
                             )
-                            _philox4x32(
-                                random_words,
-                                random_seed,
-                                random_offset,
-                                PHILOX_ROUNDS=PHILOX_ROUNDS,
+                            b_bits = _builder_name(
+                                "b_bits",
+                                _load_two_byte_vector(
+                                    s_b, state_i, STATE_VALUES_PER_BANK, "shared"
+                                ),
                             )
-                        for e in T.unroll(STATE_VALUES_PER_BANK):
-                            state_value: T.float32 = 0.0
-                            if USE_STATE_CACHE:
-                                state_value = _state_bits_to_f32(r_state[e], STATE_DTYPE)
-                                if SCALE_STATE:
-                                    state_value = _mul(state_value, decode_scale)
-                            b_value: T.float32 = _bf16_to_f32(b_bits[e])
-                            c_value: T.float32 = _bf16_to_f32(c_bits[e])
-                            db_value: T.float32 = _mul(b_value, dt_value)
-                            db_x: T.float32 = _mul(db_value, x_value)
-                            new_state: T.float32 = _fma(state_value, da_value, db_x)
-                            if SCALE_STATE:
-                                magnitude: T.float32 = _abs(new_state)
-                                new_state_max = _max(new_state_max, magnitude)
-                                new_states[state_iter * STATE_VALUES_PER_BANK + e] = new_state
-                            elif PHILOX_ROUNDS > 0:
-                                random13: T.uint32 = T.bitwise_and(
-                                    random_words[e], T.uint32(0x1FFF)
+                            c_bits = _builder_name(
+                                "c_bits",
+                                _load_two_byte_vector(
+                                    s_c, state_i, STATE_VALUES_PER_BANK, "shared"
+                                ),
+                            )
+                            random_words = _builder_name(
+                                "random_words", T.alloc_local((4,), "uint32")
+                            )
+                            sr_raw = _builder_name(
+                                "sr_raw", T.alloc_local((STATE_VALUES_PER_BANK,), "uint32")
+                            )
+                            if PHILOX_ROUNDS > 0 and (not SCALE_STATE):
+                                random_offset = _builder_scalar(
+                                    "random_offset",
+                                    T.cast(state_ptr_offset + row_d * DSTATE + state_i, "uint64"),
+                                    dtype="uint64",
                                 )
-                                T.evaluate(
-                                    T.ptx.cvt.rs.f16x2.f32(
-                                        sr_raw[e], T.float32(0.0), new_state, random13
+                                _builder_emit(
+                                    _philox4x32(
+                                        random_words,
+                                        random_seed,
+                                        random_offset,
+                                        PHILOX_ROUNDS=PHILOX_ROUNDS,
                                     )
                                 )
-                            else:
-                                r_state[e] = _f32_to_state_bits(new_state, STATE_DTYPE)
-                            out_value = _fma(new_state, c_value, out_value)
-
-                        if not SCALE_STATE:
-                            if PHILOX_ROUNDS > 0:
-                                packed_sr: T.uint32 = _prmt_5410(sr_raw[0], sr_raw[1])
+                            with T.unroll(STATE_VALUES_PER_BANK) as e:
+                                state_value = _builder_scalar("state_value", 0.0, dtype="float32")
+                                if USE_STATE_CACHE:
+                                    T.buffer_store(
+                                        state_value.buffer,
+                                        _state_bits_to_f32(r_state[e], STATE_DTYPE),
+                                        [0],
+                                    )
+                                    if SCALE_STATE:
+                                        T.buffer_store(
+                                            state_value.buffer, _mul(state_value, decode_scale), [0]
+                                        )
+                                b_value = _builder_scalar(
+                                    "b_value", _bf16_to_f32(b_bits[e]), dtype="float32"
+                                )
+                                c_value = _builder_scalar(
+                                    "c_value", _bf16_to_f32(c_bits[e]), dtype="float32"
+                                )
+                                db_value = _builder_scalar(
+                                    "db_value", _mul(b_value, dt_value), dtype="float32"
+                                )
+                                db_x = _builder_scalar(
+                                    "db_x", _mul(db_value, x_value), dtype="float32"
+                                )
+                                new_state = _builder_scalar(
+                                    "new_state", _fma(state_value, da_value, db_x), dtype="float32"
+                                )
+                                if SCALE_STATE:
+                                    magnitude = _builder_scalar(
+                                        "magnitude", _abs(new_state), dtype="float32"
+                                    )
+                                    T.buffer_store(
+                                        new_state_max.buffer, _max(new_state_max, magnitude), [0]
+                                    )
+                                    T.buffer_store(
+                                        new_states,
+                                        new_state,
+                                        [state_iter * STATE_VALUES_PER_BANK + e],
+                                    )
+                                elif PHILOX_ROUNDS > 0:
+                                    random13 = _builder_scalar(
+                                        "random13",
+                                        T.bitwise_and(random_words[e], T.uint32(8191)),
+                                        dtype="uint32",
+                                    )
+                                    _builder_emit(
+                                        T.evaluate(
+                                            T.ptx.cvt.rs.f16x2.f32(
+                                                sr_raw[e], T.float32(0.0), new_state, random13
+                                            )
+                                        )
+                                    )
+                                else:
+                                    T.buffer_store(
+                                        r_state, _f32_to_state_bits(new_state, STATE_DTYPE), [e]
+                                    )
+                                T.buffer_store(
+                                    out_value.buffer, _fma(new_state, c_value, out_value), [0]
+                                )
+                            if not SCALE_STATE:
+                                if PHILOX_ROUNDS > 0:
+                                    packed_sr = _builder_scalar(
+                                        "packed_sr",
+                                        _prmt_5410(sr_raw[0], sr_raw[1]),
+                                        dtype="uint32",
+                                    )
+                                    _builder_emit(
+                                        T.evaluate(
+                                            T.ptx.st.shared.b32(
+                                                s_state.ptr_to([state_index]), packed_sr
+                                            )
+                                        )
+                                    )
+                                else:
+                                    _builder_emit(
+                                        _store_two_byte_vector(
+                                            s_state,
+                                            state_index,
+                                            r_state,
+                                            STATE_VALUES_PER_BANK,
+                                            "shared",
+                                        )
+                                    )
+                        else:
+                            state_word = _builder_scalar(
+                                "state_word", _shared_load_u32(s_state, state_index), dtype="uint32"
+                            )
+                            state_value = _builder_scalar("state_value", 0.0, dtype="float32")
+                            if USE_STATE_CACHE:
+                                T.buffer_store(
+                                    state_value.buffer, T.reinterpret("float32", state_word), [0]
+                                )
+                            b_value = _builder_scalar(
+                                "b_value",
+                                _bf16_to_f32(_shared_load_u16(s_b, state_i)),
+                                dtype="float32",
+                            )
+                            c_value = _builder_scalar(
+                                "c_value",
+                                _bf16_to_f32(_shared_load_u16(s_c, state_i)),
+                                dtype="float32",
+                            )
+                            db_value = _builder_scalar(
+                                "db_value", _mul(b_value, dt_value), dtype="float32"
+                            )
+                            db_x = _builder_scalar("db_x", _mul(db_value, x_value), dtype="float32")
+                            new_state = _builder_scalar(
+                                "new_state", _fma(state_value, da_value, db_x), dtype="float32"
+                            )
+                            T.buffer_store(
+                                out_value.buffer, _fma(new_state, c_value, out_value), [0]
+                            )
+                            _builder_emit(
                                 T.evaluate(
-                                    T.ptx.st.shared.b32(s_state.ptr_to([state_index]), packed_sr)
+                                    T.ptx.st.shared.b32(
+                                        s_state.ptr_to([state_index]),
+                                        T.reinterpret("uint32", new_state),
+                                    )
                                 )
-                            else:
-                                _store_two_byte_vector(
-                                    s_state, state_index, r_state, STATE_VALUES_PER_BANK, "shared"
-                                )
-                    else:
-                        state_word: T.uint32 = _shared_load_u32(s_state, state_index)
-                        state_value: T.float32 = 0.0
-                        if USE_STATE_CACHE:
-                            state_value = T.reinterpret("float32", state_word)
-                        b_value: T.float32 = _bf16_to_f32(_shared_load_u16(s_b, state_i))
-                        c_value: T.float32 = _bf16_to_f32(_shared_load_u16(s_c, state_i))
-                        db_value: T.float32 = _mul(b_value, dt_value)
-                        db_x: T.float32 = _mul(db_value, x_value)
-                        new_state: T.float32 = _fma(state_value, da_value, db_x)
-                        out_value = _fma(new_state, c_value, out_value)
+                            )
+            with T.unroll(5) as delta_i:
+                delta = _builder_scalar("delta", T.shift_right(T.int32(16), delta_i), dtype="int32")
+                peer_out = _builder_scalar(
+                    "peer_out",
+                    T.cuda.__shfl_down_sync(T.uint32(4294967295), out_value, delta, 32),
+                    dtype="float32",
+                )
+                T.buffer_store(out_value.buffer, _add(out_value, peer_out), [0])
+            with T.If(lane == 0):
+                with T.Then():
+                    _builder_emit(
                         T.evaluate(
                             T.ptx.st.shared.b32(
-                                s_state.ptr_to([state_index]), T.reinterpret("uint32", new_state)
+                                s_out.ptr_to([row_d]), T.reinterpret("uint32", out_value)
                             )
                         )
-
-            for delta_i in T.unroll(5):
-                delta: T.int32 = T.shift_right(T.int32(16), delta_i)
-                peer_out: T.float32 = T.cuda.__shfl_down_sync(
-                    T.uint32(0xFFFFFFFF), out_value, delta, 32
-                )
-                out_value = _add(out_value, peer_out)
-            if lane == 0:
-                T.evaluate(
-                    T.ptx.st.shared.b32(s_out.ptr_to([row_d]), T.reinterpret("uint32", out_value))
-                )
-
+                    )
             if SCALE_STATE and USE_STATE_CACHE:
-                for delta_i in T.unroll(5):
-                    delta: T.int32 = T.shift_right(T.int32(16), delta_i)
-                    peer_max: T.float32 = T.cuda.__shfl_down_sync(
-                        T.uint32(0xFFFFFFFF), new_state_max, delta, 32
+                with T.unroll(5) as delta_i:
+                    delta = _builder_scalar(
+                        "delta", T.shift_right(T.int32(16), delta_i), dtype="int32"
                     )
-                    new_state_max = _max(new_state_max, peer_max)
-                # Unlike the simple kernel, the frozen vertical source has no
-                # standalone __syncwarp between max reduction and broadcast.
-                new_state_max = T.cuda.__shfl_sync(T.uint32(0xFFFFFFFF), new_state_max, 0, 32)
-                encode_scale: T.float32 = 1.0
-                if new_state_max != T.float32(0.0):
-                    encode_scale = _div(T.float32(32767.0), new_state_max)
-                new_decode_scale: T.float32 = _rcp(encode_scale)
-                for state_iter in T.serial(STATE_ITERATIONS):
-                    state_i: T.int32 = (state_iter * 32 + lane) * STATE_VALUES_PER_BANK
-                    if state_i < DSTATE:
-                        quantized = T.alloc_local((STATE_VALUES_PER_BANK,), "int32")
-                        for e in T.unroll(STATE_VALUES_PER_BANK):
-                            scaled: T.float32 = _mul(
-                                new_states[state_iter * STATE_VALUES_PER_BANK + e], encode_scale
+                    peer_max = _builder_scalar(
+                        "peer_max",
+                        T.cuda.__shfl_down_sync(T.uint32(4294967295), new_state_max, delta, 32),
+                        dtype="float32",
+                    )
+                    T.buffer_store(new_state_max.buffer, _max(new_state_max, peer_max), [0])
+                T.buffer_store(
+                    new_state_max.buffer,
+                    T.cuda.__shfl_sync(T.uint32(4294967295), new_state_max, 0, 32),
+                    [0],
+                )
+                encode_scale = _builder_scalar("encode_scale", 1.0, dtype="float32")
+                with T.If(new_state_max != T.float32(0.0)):
+                    with T.Then():
+                        T.buffer_store(
+                            encode_scale.buffer, _div(T.float32(32767.0), new_state_max), [0]
+                        )
+                new_decode_scale = _builder_scalar(
+                    "new_decode_scale", _rcp(encode_scale), dtype="float32"
+                )
+                with T.serial(STATE_ITERATIONS) as state_iter:
+                    state_i = _builder_scalar(
+                        "state_i", (state_iter * 32 + lane) * STATE_VALUES_PER_BANK, dtype="int32"
+                    )
+                    with T.If(state_i < DSTATE):
+                        with T.Then():
+                            quantized = _builder_name(
+                                "quantized", T.alloc_local((STATE_VALUES_PER_BANK,), "int32")
                             )
-                            clipped_low: T.float32 = _max(scaled, T.float32(-32767.0))
-                            clipped: T.float32 = _min(clipped_low, T.float32(32767.0))
-                            T.evaluate(T.ptx.cvt.rni.ftz.s32.f32(quantized[e], clipped))
-                        packed_i16: T.uint32 = _prmt_5410(
-                            T.reinterpret("uint32", quantized[0]),
-                            T.reinterpret("uint32", quantized[1]),
+                            with T.unroll(STATE_VALUES_PER_BANK) as e:
+                                scaled = _builder_scalar(
+                                    "scaled",
+                                    _mul(
+                                        new_states[state_iter * STATE_VALUES_PER_BANK + e],
+                                        encode_scale,
+                                    ),
+                                    dtype="float32",
+                                )
+                                clipped_low = _builder_scalar(
+                                    "clipped_low",
+                                    _max(scaled, T.float32(-32767.0)),
+                                    dtype="float32",
+                                )
+                                clipped = _builder_scalar(
+                                    "clipped",
+                                    _min(clipped_low, T.float32(32767.0)),
+                                    dtype="float32",
+                                )
+                                _builder_emit(
+                                    T.evaluate(T.ptx.cvt.rni.ftz.s32.f32(quantized[e], clipped))
+                                )
+                            packed_i16 = _builder_scalar(
+                                "packed_i16",
+                                _prmt_5410(
+                                    T.reinterpret("uint32", quantized[0]),
+                                    T.reinterpret("uint32", quantized[1]),
+                                ),
+                                dtype="uint32",
+                            )
+                            state_index = _builder_scalar(
+                                "state_index",
+                                stage * STATE_STAGE_VALUES + dd * DSTATE + state_i,
+                                dtype="int32",
+                            )
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.st.shared.b32(s_state.ptr_to([state_index]), packed_i16)
+                                )
+                            )
+                with T.If(lane == 0):
+                    with T.Then():
+                        _builder_emit(
+                            T.evaluate(
+                                T.ptx.st.shared.b32(
+                                    s_scale.ptr_to([row_d]),
+                                    T.reinterpret("uint32", new_decode_scale),
+                                )
+                            )
                         )
-                        state_index: T.int32 = stage * STATE_STAGE_VALUES + dd * DSTATE + state_i
-                        T.evaluate(T.ptx.st.shared.b32(s_state.ptr_to([state_index]), packed_i16))
-                if lane == 0:
-                    T.evaluate(
-                        T.ptx.st.shared.b32(
-                            s_scale.ptr_to([row_d]), T.reinterpret("uint32", new_decode_scale)
-                        )
-                    )
-
-        T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
-        _mbarrier_arrive(smem_raw, OFF_EMPTY + stage * 8)
-        d_begin = d_begin + 16
-        stage = (stage + 1) % 3
+        _builder_emit(T.evaluate(T.ptx.fence.proxy.async_.shared__cta()))
+        _builder_emit(_mbarrier_arrive(smem_raw, OFF_EMPTY + stage * 8))
+        T.buffer_store(d_begin.buffer, d_begin + 16, [0])
+        T.buffer_store(stage.buffer, (stage + 1) % 3, [0])
 
 
-@T.jit
-def _selective_state_update_stp_vertical(
-    tensor_state: T.TensorMap(),
-    state_h: T.handle,
-    state_scale_h: T.handle,
-    x_h: T.handle,
-    dt_h: T.handle,
-    matrix_a_h: T.handle,
-    matrix_b_h: T.handle,
-    matrix_c_h: T.handle,
-    d_h: T.handle,
-    z_h: T.handle,
-    dt_bias_h: T.handle,
-    state_indices_h: T.handle,
-    dst_indices_h: T.handle,
-    rand_seed_h: T.handle,
-    output_h: T.handle,
-    state_stride_batch: T.int64,
-    state_scale_stride_batch: T.int64,
-    x_stride_batch: T.int64,
-    dt_stride_batch: T.int64,
-    b_stride_batch: T.int64,
-    c_stride_batch: T.int64,
-    z_stride_batch: T.int64,
-    out_stride_batch: T.int64,
-    state_indices_stride_batch: T.int64,
-    dst_indices_stride_batch: T.int64,
-    nheads_runtime: T.int32,
-    ngroups_runtime: T.int32,
-    dt_softplus: T.int32,
-    update_state: T.int32,
-    pad_slot_id: T.int32,
+def _build_selective_state_update_stp_vertical(
     *,
     BATCH: T.constexpr,
     NHEADS: T.constexpr,
@@ -707,350 +923,599 @@ def _selective_state_update_stp_vertical(
     OFF_CONSUMERS: T.constexpr,
     SHARED_BYTES: T.constexpr,
 ):
-    state = T.match_buffer(state_h, (STATE_ELEMENTS,), STATE_DTYPE, scope="global")
-    state_scale = T.match_buffer(state_scale_h, (SCALE_ELEMENTS,), "float32", scope="global")
-    x = T.match_buffer(x_h, (X_ELEMENTS,), "bfloat16", scope="global")
-    dt = T.match_buffer(dt_h, (DT_ELEMENTS,), WEIGHT_DTYPE, scope="global")
-    matrix_a = T.match_buffer(matrix_a_h, (NHEADS,), "float32", scope="global")
-    matrix_b = T.match_buffer(matrix_b_h, (BC_ELEMENTS,), "bfloat16", scope="global")
-    matrix_c = T.match_buffer(matrix_c_h, (BC_ELEMENTS,), "bfloat16", scope="global")
-    d_weight = T.match_buffer(d_h, (NHEADS,), WEIGHT_DTYPE, scope="global")
-    z = T.match_buffer(z_h, (X_ELEMENTS,), "bfloat16", scope="global")
-    dt_bias = T.match_buffer(dt_bias_h, (NHEADS,), WEIGHT_DTYPE, scope="global")
-    state_indices = T.match_buffer(state_indices_h, (INDEX_ELEMENTS,), INDEX_DTYPE, scope="global")
-    dst_indices = T.match_buffer(dst_indices_h, (INDEX_ELEMENTS,), INDEX_DTYPE, scope="global")
-    rand_seed = T.match_buffer(rand_seed_h, (1,), "int64", scope="global")
-    output = T.match_buffer(output_h, (X_ELEMENTS,), "bfloat16", scope="global")
-    T.device_entry()
-    # TIRX_TRANSCRIBE_START selective_state_update_stp_vertical
-
-    random_seed: T.int64 = 0
-    if PHILOX_ROUNDS > 0 and not SCALE_STATE:
-        random_seed = rand_seed[0]
-
-    batch_i, head = T.cta_id([BATCH, NHEADS])
-    lane_axis, warp = T.thread_id([32, 5])
-    lane: T.int32 = _lane_mask(lane_axis)
-    group: T.int32 = head // (nheads_runtime // ngroups_runtime)
-
-    state_batch: T.int64
-    if HAS_STATE_INDICES:
-        if INDEX_DTYPE == "int32":
-            state_batch = T.cast(
-                _global_load_nc_s32(state_indices, batch_i * state_indices_stride_batch), "int64"
+    with IRBuilder() as builder:
+        with T.prim_func():
+            T.func_name("_selective_state_update_stp_vertical")
+            tensor_state = T.arg("tensor_state", T.TensorMap())
+            state_h = T.arg("state_h", T.handle())
+            state_scale_h = T.arg("state_scale_h", T.handle())
+            x_h = T.arg("x_h", T.handle())
+            dt_h = T.arg("dt_h", T.handle())
+            matrix_a_h = T.arg("matrix_a_h", T.handle())
+            matrix_b_h = T.arg("matrix_b_h", T.handle())
+            matrix_c_h = T.arg("matrix_c_h", T.handle())
+            d_h = T.arg("d_h", T.handle())
+            z_h = T.arg("z_h", T.handle())
+            dt_bias_h = T.arg("dt_bias_h", T.handle())
+            state_indices_h = T.arg("state_indices_h", T.handle())
+            dst_indices_h = T.arg("dst_indices_h", T.handle())
+            rand_seed_h = T.arg("rand_seed_h", T.handle())
+            output_h = T.arg("output_h", T.handle())
+            state_stride_batch = T.arg("state_stride_batch", T.int64())
+            state_scale_stride_batch = T.arg("state_scale_stride_batch", T.int64())
+            x_stride_batch = T.arg("x_stride_batch", T.int64())
+            dt_stride_batch = T.arg("dt_stride_batch", T.int64())
+            b_stride_batch = T.arg("b_stride_batch", T.int64())
+            c_stride_batch = T.arg("c_stride_batch", T.int64())
+            z_stride_batch = T.arg("z_stride_batch", T.int64())
+            out_stride_batch = T.arg("out_stride_batch", T.int64())
+            state_indices_stride_batch = T.arg("state_indices_stride_batch", T.int64())
+            dst_indices_stride_batch = T.arg("dst_indices_stride_batch", T.int64())
+            nheads_runtime = T.arg("nheads_runtime", T.int32())
+            ngroups_runtime = T.arg("ngroups_runtime", T.int32())
+            dt_softplus = T.arg("dt_softplus", T.int32())
+            update_state = T.arg("update_state", T.int32())
+            pad_slot_id = T.arg("pad_slot_id", T.int32())
+            state = _builder_name(
+                "state", T.match_buffer(state_h, (STATE_ELEMENTS,), STATE_DTYPE, scope="global")
             )
-        else:
-            state_batch = _global_load_nc_s64(state_indices, batch_i * state_indices_stride_batch)
-    else:
-        state_batch = T.cast(batch_i, "int64")
-
-    dst_state_batch: T.int64
-    if HAS_DST_INDICES:
-        if INDEX_DTYPE == "int32":
-            dst_state_batch = T.cast(
-                _global_load_nc_s32(dst_indices, batch_i * dst_indices_stride_batch), "int64"
+            state_scale = _builder_name(
+                "state_scale",
+                T.match_buffer(state_scale_h, (SCALE_ELEMENTS,), "float32", scope="global"),
             )
-        else:
-            dst_state_batch = _global_load_nc_s64(dst_indices, batch_i * dst_indices_stride_batch)
-    else:
-        dst_state_batch = state_batch
-
-    state_ptr_offset: T.int64 = state_batch * state_stride_batch + T.cast(
-        head * DIM * DSTATE, "int64"
-    )
-    scale_head_offset: T.int64 = state_batch * state_scale_stride_batch + T.cast(
-        head * DIM, "int64"
-    )
-    dst_scale_head_offset: T.int64 = dst_state_batch * state_scale_stride_batch + T.cast(
-        head * DIM, "int64"
-    )
-
-    pool = T.SMEMPool()
-    smem_raw = pool.alloc((SHARED_BYTES,), "uint8", align=128)
-    s_state = T.decl_buffer(
-        (3 * STATE_STAGE_VALUES,),
-        STATE_DTYPE,
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=OFF_STATE,
-        align=128,
-    )
-    s_x = T.decl_buffer(
-        (DIM,), "bfloat16", data=smem_raw.data, scope="shared.dyn", byte_offset=OFF_X, align=16
-    )
-    s_z = T.decl_buffer(
-        (DIM,), "bfloat16", data=smem_raw.data, scope="shared.dyn", byte_offset=OFF_Z, align=16
-    )
-    s_b = T.decl_buffer(
-        (DSTATE,), "bfloat16", data=smem_raw.data, scope="shared.dyn", byte_offset=OFF_B, align=16
-    )
-    s_c = T.decl_buffer(
-        (DSTATE,), "bfloat16", data=smem_raw.data, scope="shared.dyn", byte_offset=OFF_C, align=16
-    )
-    s_out = T.decl_buffer(
-        (DIM,), "float32", data=smem_raw.data, scope="shared.dyn", byte_offset=OFF_OUT, align=4
-    )
-    s_scale = T.decl_buffer(
-        (DIM,), "float32", data=smem_raw.data, scope="shared.dyn", byte_offset=OFF_SCALE, align=128
-    )
-    pool.commit()
-    smem_addr: T.uint32 = T.cuda.cvta_generic_to_shared(smem_raw.ptr_to([0]))
-    T.evaluate(state.data)
-
-    if warp < 3 and lane == 0:
-        init_stage: T.int32 = warp
-        T.evaluate(
-            T.ptx.mbarrier.init.shared.b64(
-                smem_raw.ptr_to([OFF_EMPTY + init_stage * 8]), T.uint32(129)
+            x = _builder_name("x", T.match_buffer(x_h, (X_ELEMENTS,), "bfloat16", scope="global"))
+            dt = _builder_name(
+                "dt", T.match_buffer(dt_h, (DT_ELEMENTS,), WEIGHT_DTYPE, scope="global")
             )
-        )
-        T.evaluate(
-            T.ptx.mbarrier.init.shared.b64(
-                smem_raw.ptr_to([OFF_FULL + init_stage * 8]), T.uint32(129)
+            matrix_a = _builder_name(
+                "matrix_a", T.match_buffer(matrix_a_h, (NHEADS,), "float32", scope="global")
             )
-        )
-        T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
-    if warp == 0 and lane == 0:
-        T.evaluate(T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([OFF_CONSUMERS]), T.uint32(128)))
-    T.cuda.cta_sync()
-
-    if warp == 4:
-        read_state: T.bool = state_batch != T.cast(pad_slot_id, "int64")
-        write_state: T.bool = read_state and update_state != 0
-        if lane == 0:
-            if read_state:
-                if write_state:
-                    _producer_vertical(
-                        smem_raw,
-                        tensor_state,
-                        x,
-                        matrix_b,
-                        matrix_c,
-                        z,
-                        state_scale,
-                        smem_addr,
-                        batch_i,
-                        head,
-                        group,
-                        state_batch,
-                        dst_state_batch,
-                        x_stride_batch,
-                        b_stride_batch,
-                        c_stride_batch,
-                        z_stride_batch,
-                        state_scale_stride_batch,
-                        DIM=DIM,
-                        DSTATE=DSTATE,
-                        READ_STATE=True,
-                        WRITE_STATE=True,
-                        HAS_Z=HAS_Z,
-                        SCALE_STATE=SCALE_STATE,
-                        STATE_STAGE_BYTES=STATE_STAGE_BYTES,
-                        INPUT_BYTES=INPUT_BYTES,
-                        OFF_STATE=OFF_STATE,
-                        OFF_X=OFF_X,
-                        OFF_Z=OFF_Z,
-                        OFF_B=OFF_B,
-                        OFF_C=OFF_C,
-                        OFF_SCALE=OFF_SCALE,
-                        OFF_EMPTY=OFF_EMPTY,
-                        OFF_FULL=OFF_FULL,
+            matrix_b = _builder_name(
+                "matrix_b", T.match_buffer(matrix_b_h, (BC_ELEMENTS,), "bfloat16", scope="global")
+            )
+            matrix_c = _builder_name(
+                "matrix_c", T.match_buffer(matrix_c_h, (BC_ELEMENTS,), "bfloat16", scope="global")
+            )
+            d_weight = _builder_name(
+                "d_weight", T.match_buffer(d_h, (NHEADS,), WEIGHT_DTYPE, scope="global")
+            )
+            z = _builder_name("z", T.match_buffer(z_h, (X_ELEMENTS,), "bfloat16", scope="global"))
+            dt_bias = _builder_name(
+                "dt_bias", T.match_buffer(dt_bias_h, (NHEADS,), WEIGHT_DTYPE, scope="global")
+            )
+            state_indices = _builder_name(
+                "state_indices",
+                T.match_buffer(state_indices_h, (INDEX_ELEMENTS,), INDEX_DTYPE, scope="global"),
+            )
+            dst_indices = _builder_name(
+                "dst_indices",
+                T.match_buffer(dst_indices_h, (INDEX_ELEMENTS,), INDEX_DTYPE, scope="global"),
+            )
+            rand_seed = _builder_name(
+                "rand_seed", T.match_buffer(rand_seed_h, (1,), "int64", scope="global")
+            )
+            output = _builder_name(
+                "output", T.match_buffer(output_h, (X_ELEMENTS,), "bfloat16", scope="global")
+            )
+            _builder_emit(T.device_entry())
+            random_seed = _builder_scalar("random_seed", 0, dtype="int64")
+            if PHILOX_ROUNDS > 0 and (not SCALE_STATE):
+                T.buffer_store(random_seed.buffer, rand_seed[0], [0])
+            _builder_values_93 = T.cta_id([BATCH, NHEADS])
+            batch_i, head = _builder_values_93
+            IRBuilder.name("batch_i", batch_i)
+            IRBuilder.name("head", head)
+            _builder_values_94 = T.thread_id([32, 5])
+            lane_axis, warp = _builder_values_94
+            IRBuilder.name("lane_axis", lane_axis)
+            IRBuilder.name("warp", warp)
+            lane = _builder_scalar("lane", _lane_mask(lane_axis), dtype="int32")
+            group = _builder_scalar(
+                "group", head // (nheads_runtime // ngroups_runtime), dtype="int32"
+            )
+            state_batch = _builder_alloc_scalar("state_batch", "int64")
+            if HAS_STATE_INDICES:
+                if INDEX_DTYPE == "int32":
+                    T.buffer_store(
+                        state_batch.buffer,
+                        T.cast(
+                            _global_load_nc_s32(
+                                state_indices, batch_i * state_indices_stride_batch
+                            ),
+                            "int64",
+                        ),
+                        [0],
                     )
                 else:
-                    _producer_vertical(
-                        smem_raw,
-                        tensor_state,
-                        x,
-                        matrix_b,
-                        matrix_c,
-                        z,
-                        state_scale,
-                        smem_addr,
-                        batch_i,
-                        head,
-                        group,
-                        state_batch,
-                        dst_state_batch,
-                        x_stride_batch,
-                        b_stride_batch,
-                        c_stride_batch,
-                        z_stride_batch,
-                        state_scale_stride_batch,
-                        DIM=DIM,
-                        DSTATE=DSTATE,
-                        READ_STATE=True,
-                        WRITE_STATE=False,
-                        HAS_Z=HAS_Z,
-                        SCALE_STATE=SCALE_STATE,
-                        STATE_STAGE_BYTES=STATE_STAGE_BYTES,
-                        INPUT_BYTES=INPUT_BYTES,
-                        OFF_STATE=OFF_STATE,
-                        OFF_X=OFF_X,
-                        OFF_Z=OFF_Z,
-                        OFF_B=OFF_B,
-                        OFF_C=OFF_C,
-                        OFF_SCALE=OFF_SCALE,
-                        OFF_EMPTY=OFF_EMPTY,
-                        OFF_FULL=OFF_FULL,
+                    T.buffer_store(
+                        state_batch.buffer,
+                        _global_load_nc_s64(state_indices, batch_i * state_indices_stride_batch),
+                        [0],
                     )
             else:
-                _producer_vertical(
-                    smem_raw,
-                    tensor_state,
-                    x,
-                    matrix_b,
-                    matrix_c,
-                    z,
-                    state_scale,
-                    smem_addr,
-                    batch_i,
-                    head,
-                    group,
-                    state_batch,
-                    dst_state_batch,
-                    x_stride_batch,
-                    b_stride_batch,
-                    c_stride_batch,
-                    z_stride_batch,
-                    state_scale_stride_batch,
-                    DIM=DIM,
-                    DSTATE=DSTATE,
-                    READ_STATE=False,
-                    WRITE_STATE=False,
-                    HAS_Z=HAS_Z,
-                    SCALE_STATE=SCALE_STATE,
-                    STATE_STAGE_BYTES=STATE_STAGE_BYTES,
-                    INPUT_BYTES=INPUT_BYTES,
-                    OFF_STATE=OFF_STATE,
-                    OFF_X=OFF_X,
-                    OFF_Z=OFF_Z,
-                    OFF_B=OFF_B,
-                    OFF_C=OFF_C,
-                    OFF_SCALE=OFF_SCALE,
-                    OFF_EMPTY=OFF_EMPTY,
-                    OFF_FULL=OFF_FULL,
-                )
-    else:
-        for arrive_stage in T.unroll(3):
-            _mbarrier_arrive(smem_raw, OFF_EMPTY + arrive_stage * 8)
-
-        a_value: T.float32 = T.reinterpret("float32", _global_load_nc_u32(matrix_a, head))
-        d_value: T.float32 = 0.0
-        if HAS_D:
-            d_value = _load_weight_nc(d_weight, head, WEIGHT_DTYPE)
-        dt_value: T.float32 = _load_weight_nc(
-            dt, T.cast(batch_i, "int64") * dt_stride_batch + head, WEIGHT_DTYPE
-        )
-        if HAS_DT_BIAS:
-            bias_value: T.float32 = _load_weight_nc(dt_bias, head, WEIGHT_DTYPE)
-            dt_value = _add(dt_value, bias_value)
-        if dt_softplus != 0:
-            if dt_value <= T.float32(20.0):
-                exp_arg: T.float32 = _mul(dt_value, T.float32(_LOG2_E))
-                exp_value: T.float32 = _exp2(exp_arg)
-                one_plus_exp: T.float32 = _add(T.float32(1.0), exp_value)
-                log_value: T.float32 = _log2(one_plus_exp)
-                dt_value = _mul(log_value, T.float32(_LN_2))
-        da_arg: T.float32 = _mul(a_value, dt_value)
-        da_exp_arg: T.float32 = _mul(da_arg, T.float32(_LOG2_E))
-        da_value: T.float32 = _exp2(da_exp_arg)
-        lane_indicator: T.float32 = T.if_then_else(lane == 0, T.float32(1.0), T.float32(0.0))
-
-        if state_batch != T.cast(pad_slot_id, "int64"):
-            _consumer_vertical(
-                smem_raw,
-                s_state,
-                s_x,
-                s_b,
-                s_c,
-                s_out,
-                s_scale,
-                smem_addr,
-                lane,
-                warp,
-                d_value,
-                dt_value,
-                da_value,
-                lane_indicator,
-                random_seed,
-                state_ptr_offset,
-                DIM=DIM,
-                DSTATE=DSTATE,
-                STATE_DTYPE=STATE_DTYPE,
-                STATE_BYTES=STATE_BYTES,
-                STATE_VALUES_PER_BANK=STATE_VALUES_PER_BANK,
-                STATE_ITERATIONS=STATE_ITERATIONS,
-                NEW_STATE_COUNT=NEW_STATE_COUNT,
-                SCALE_STATE=SCALE_STATE,
-                PHILOX_ROUNDS=PHILOX_ROUNDS,
-                USE_STATE_CACHE=True,
-                STATE_STAGE_VALUES=STATE_STAGE_VALUES,
-                OFF_EMPTY=OFF_EMPTY,
-                OFF_FULL=OFF_FULL,
-            )
-        else:
-            _consumer_vertical(
-                smem_raw,
-                s_state,
-                s_x,
-                s_b,
-                s_c,
-                s_out,
-                s_scale,
-                smem_addr,
-                lane,
-                warp,
-                d_value,
-                dt_value,
-                da_value,
-                lane_indicator,
-                random_seed,
-                state_ptr_offset,
-                DIM=DIM,
-                DSTATE=DSTATE,
-                STATE_DTYPE=STATE_DTYPE,
-                STATE_BYTES=STATE_BYTES,
-                STATE_VALUES_PER_BANK=STATE_VALUES_PER_BANK,
-                STATE_ITERATIONS=STATE_ITERATIONS,
-                NEW_STATE_COUNT=NEW_STATE_COUNT,
-                SCALE_STATE=SCALE_STATE,
-                PHILOX_ROUNDS=PHILOX_ROUNDS,
-                USE_STATE_CACHE=False,
-                STATE_STAGE_VALUES=STATE_STAGE_VALUES,
-                OFF_EMPTY=OFF_EMPTY,
-                OFF_FULL=OFF_FULL,
-            )
-
-        _mbarrier_arrive_wait(smem_addr + T.uint32(OFF_CONSUMERS))
-        row_d: T.int32 = warp * 32 + lane
-        if row_d < DIM:
-            out_value: T.float32 = T.reinterpret("float32", _shared_load_u32(s_out, row_d))
-            if HAS_Z:
-                z_value: T.float32 = _bf16_to_f32(_shared_load_u16(s_z, row_d))
-                neg_z: T.float32 = _sub(T.float32(0.0), z_value)
-                z_exp_arg: T.float32 = _mul(neg_z, T.float32(_LOG2_E))
-                exp_neg_z: T.float32 = _exp2(z_exp_arg)
-                denominator: T.float32 = _add(T.float32(1.0), exp_neg_z)
-                sigmoid_z: T.float32 = _div(T.float32(1.0), denominator)
-                silu_z: T.float32 = _mul(z_value, sigmoid_z)
-                out_value = _mul(out_value, silu_z)
-            output_bits: T.uint16 = _f32_to_bf16(out_value)
-            T.evaluate(
-                T.ptx.st.global_.b16(
-                    output.ptr_to(
-                        [T.cast(batch_i, "int64") * out_stride_batch + head * DIM + row_d]
-                    ),
-                    output_bits,
-                )
-            )
-        if SCALE_STATE and update_state != 0 and state_batch != T.cast(pad_slot_id, "int64"):
-            if row_d < DIM:
-                scale_bits: T.uint32 = _shared_load_u32(s_scale, row_d)
-                T.evaluate(
-                    T.ptx.st.global_.b32(
-                        state_scale.ptr_to([dst_scale_head_offset + row_d]), scale_bits
+                T.buffer_store(state_batch.buffer, T.cast(batch_i, "int64"), [0])
+            dst_state_batch = _builder_alloc_scalar("dst_state_batch", "int64")
+            if HAS_DST_INDICES:
+                if INDEX_DTYPE == "int32":
+                    T.buffer_store(
+                        dst_state_batch.buffer,
+                        T.cast(
+                            _global_load_nc_s32(dst_indices, batch_i * dst_indices_stride_batch),
+                            "int64",
+                        ),
+                        [0],
                     )
-                )
+                else:
+                    T.buffer_store(
+                        dst_state_batch.buffer,
+                        _global_load_nc_s64(dst_indices, batch_i * dst_indices_stride_batch),
+                        [0],
+                    )
+            else:
+                T.buffer_store(dst_state_batch.buffer, state_batch, [0])
+            state_ptr_offset = _builder_scalar(
+                "state_ptr_offset",
+                state_batch * state_stride_batch + T.cast(head * DIM * DSTATE, "int64"),
+                dtype="int64",
+            )
+            scale_head_offset = _builder_scalar(
+                "scale_head_offset",
+                state_batch * state_scale_stride_batch + T.cast(head * DIM, "int64"),
+                dtype="int64",
+            )
+            dst_scale_head_offset = _builder_scalar(
+                "dst_scale_head_offset",
+                dst_state_batch * state_scale_stride_batch + T.cast(head * DIM, "int64"),
+                dtype="int64",
+            )
+            pool = _builder_meta("pool", T.SMEMPool())
+            smem_raw = _builder_name("smem_raw", pool.alloc((SHARED_BYTES,), "uint8", align=128))
+            s_state = _builder_name(
+                "s_state",
+                T.decl_buffer(
+                    (3 * STATE_STAGE_VALUES,),
+                    STATE_DTYPE,
+                    data=smem_raw.data,
+                    scope="shared.dyn",
+                    byte_offset=OFF_STATE,
+                    align=128,
+                ),
+            )
+            s_x = _builder_name(
+                "s_x",
+                T.decl_buffer(
+                    (DIM,),
+                    "bfloat16",
+                    data=smem_raw.data,
+                    scope="shared.dyn",
+                    byte_offset=OFF_X,
+                    align=16,
+                ),
+            )
+            s_z = _builder_name(
+                "s_z",
+                T.decl_buffer(
+                    (DIM,),
+                    "bfloat16",
+                    data=smem_raw.data,
+                    scope="shared.dyn",
+                    byte_offset=OFF_Z,
+                    align=16,
+                ),
+            )
+            s_b = _builder_name(
+                "s_b",
+                T.decl_buffer(
+                    (DSTATE,),
+                    "bfloat16",
+                    data=smem_raw.data,
+                    scope="shared.dyn",
+                    byte_offset=OFF_B,
+                    align=16,
+                ),
+            )
+            s_c = _builder_name(
+                "s_c",
+                T.decl_buffer(
+                    (DSTATE,),
+                    "bfloat16",
+                    data=smem_raw.data,
+                    scope="shared.dyn",
+                    byte_offset=OFF_C,
+                    align=16,
+                ),
+            )
+            s_out = _builder_name(
+                "s_out",
+                T.decl_buffer(
+                    (DIM,),
+                    "float32",
+                    data=smem_raw.data,
+                    scope="shared.dyn",
+                    byte_offset=OFF_OUT,
+                    align=4,
+                ),
+            )
+            s_scale = _builder_name(
+                "s_scale",
+                T.decl_buffer(
+                    (DIM,),
+                    "float32",
+                    data=smem_raw.data,
+                    scope="shared.dyn",
+                    byte_offset=OFF_SCALE,
+                    align=128,
+                ),
+            )
+            _builder_emit(pool.commit())
+            smem_addr = _builder_scalar(
+                "smem_addr", T.cuda.cvta_generic_to_shared(smem_raw.ptr_to([0])), dtype="uint32"
+            )
+            _builder_emit(T.evaluate(state.data))
+            with T.If(T.And(warp < 3, lane == 0)):
+                with T.Then():
+                    init_stage = _builder_scalar("init_stage", warp, dtype="int32")
+                    _builder_emit(
+                        T.evaluate(
+                            T.ptx.mbarrier.init.shared.b64(
+                                smem_raw.ptr_to([OFF_EMPTY + init_stage * 8]), T.uint32(129)
+                            )
+                        )
+                    )
+                    _builder_emit(
+                        T.evaluate(
+                            T.ptx.mbarrier.init.shared.b64(
+                                smem_raw.ptr_to([OFF_FULL + init_stage * 8]), T.uint32(129)
+                            )
+                        )
+                    )
+                    _builder_emit(T.evaluate(T.ptx.fence.proxy.async_.shared__cta()))
+            with T.If(T.And(warp == 0, lane == 0)):
+                with T.Then():
+                    _builder_emit(
+                        T.evaluate(
+                            T.ptx.mbarrier.init.shared.b64(
+                                smem_raw.ptr_to([OFF_CONSUMERS]), T.uint32(128)
+                            )
+                        )
+                    )
+            _builder_emit(T.cuda.cta_sync())
+            with T.If(warp == 4):
+                with T.Then():
+                    read_state = _builder_scalar(
+                        "read_state", state_batch != T.cast(pad_slot_id, "int64"), dtype="bool"
+                    )
+                    write_state = _builder_scalar(
+                        "write_state", T.And(read_state, update_state != 0), dtype="bool"
+                    )
+                    with T.If(lane == 0):
+                        with T.Then():
+                            with T.If(read_state):
+                                with T.Then():
+                                    with T.If(write_state):
+                                        with T.Then():
+                                            _builder_emit(
+                                                _producer_vertical(
+                                                    smem_raw,
+                                                    tensor_state,
+                                                    x,
+                                                    matrix_b,
+                                                    matrix_c,
+                                                    z,
+                                                    state_scale,
+                                                    smem_addr,
+                                                    batch_i,
+                                                    head,
+                                                    group,
+                                                    state_batch,
+                                                    dst_state_batch,
+                                                    x_stride_batch,
+                                                    b_stride_batch,
+                                                    c_stride_batch,
+                                                    z_stride_batch,
+                                                    state_scale_stride_batch,
+                                                    DIM=DIM,
+                                                    DSTATE=DSTATE,
+                                                    READ_STATE=True,
+                                                    WRITE_STATE=True,
+                                                    HAS_Z=HAS_Z,
+                                                    SCALE_STATE=SCALE_STATE,
+                                                    STATE_STAGE_BYTES=STATE_STAGE_BYTES,
+                                                    INPUT_BYTES=INPUT_BYTES,
+                                                    OFF_STATE=OFF_STATE,
+                                                    OFF_X=OFF_X,
+                                                    OFF_Z=OFF_Z,
+                                                    OFF_B=OFF_B,
+                                                    OFF_C=OFF_C,
+                                                    OFF_SCALE=OFF_SCALE,
+                                                    OFF_EMPTY=OFF_EMPTY,
+                                                    OFF_FULL=OFF_FULL,
+                                                )
+                                            )
+                                        with T.Else():
+                                            _builder_emit(
+                                                _producer_vertical(
+                                                    smem_raw,
+                                                    tensor_state,
+                                                    x,
+                                                    matrix_b,
+                                                    matrix_c,
+                                                    z,
+                                                    state_scale,
+                                                    smem_addr,
+                                                    batch_i,
+                                                    head,
+                                                    group,
+                                                    state_batch,
+                                                    dst_state_batch,
+                                                    x_stride_batch,
+                                                    b_stride_batch,
+                                                    c_stride_batch,
+                                                    z_stride_batch,
+                                                    state_scale_stride_batch,
+                                                    DIM=DIM,
+                                                    DSTATE=DSTATE,
+                                                    READ_STATE=True,
+                                                    WRITE_STATE=False,
+                                                    HAS_Z=HAS_Z,
+                                                    SCALE_STATE=SCALE_STATE,
+                                                    STATE_STAGE_BYTES=STATE_STAGE_BYTES,
+                                                    INPUT_BYTES=INPUT_BYTES,
+                                                    OFF_STATE=OFF_STATE,
+                                                    OFF_X=OFF_X,
+                                                    OFF_Z=OFF_Z,
+                                                    OFF_B=OFF_B,
+                                                    OFF_C=OFF_C,
+                                                    OFF_SCALE=OFF_SCALE,
+                                                    OFF_EMPTY=OFF_EMPTY,
+                                                    OFF_FULL=OFF_FULL,
+                                                )
+                                            )
+                                with T.Else():
+                                    _builder_emit(
+                                        _producer_vertical(
+                                            smem_raw,
+                                            tensor_state,
+                                            x,
+                                            matrix_b,
+                                            matrix_c,
+                                            z,
+                                            state_scale,
+                                            smem_addr,
+                                            batch_i,
+                                            head,
+                                            group,
+                                            state_batch,
+                                            dst_state_batch,
+                                            x_stride_batch,
+                                            b_stride_batch,
+                                            c_stride_batch,
+                                            z_stride_batch,
+                                            state_scale_stride_batch,
+                                            DIM=DIM,
+                                            DSTATE=DSTATE,
+                                            READ_STATE=False,
+                                            WRITE_STATE=False,
+                                            HAS_Z=HAS_Z,
+                                            SCALE_STATE=SCALE_STATE,
+                                            STATE_STAGE_BYTES=STATE_STAGE_BYTES,
+                                            INPUT_BYTES=INPUT_BYTES,
+                                            OFF_STATE=OFF_STATE,
+                                            OFF_X=OFF_X,
+                                            OFF_Z=OFF_Z,
+                                            OFF_B=OFF_B,
+                                            OFF_C=OFF_C,
+                                            OFF_SCALE=OFF_SCALE,
+                                            OFF_EMPTY=OFF_EMPTY,
+                                            OFF_FULL=OFF_FULL,
+                                        )
+                                    )
+                with T.Else():
+                    with T.unroll(3) as arrive_stage:
+                        _builder_emit(_mbarrier_arrive(smem_raw, OFF_EMPTY + arrive_stage * 8))
+                    a_value = _builder_scalar(
+                        "a_value",
+                        T.reinterpret("float32", _global_load_nc_u32(matrix_a, head)),
+                        dtype="float32",
+                    )
+                    d_value = _builder_scalar("d_value", 0.0, dtype="float32")
+                    if HAS_D:
+                        T.buffer_store(
+                            d_value.buffer, _load_weight_nc(d_weight, head, WEIGHT_DTYPE), [0]
+                        )
+                    dt_value = _builder_scalar(
+                        "dt_value",
+                        _load_weight_nc(
+                            dt, T.cast(batch_i, "int64") * dt_stride_batch + head, WEIGHT_DTYPE
+                        ),
+                        dtype="float32",
+                    )
+                    if HAS_DT_BIAS:
+                        bias_value = _builder_scalar(
+                            "bias_value",
+                            _load_weight_nc(dt_bias, head, WEIGHT_DTYPE),
+                            dtype="float32",
+                        )
+                        T.buffer_store(dt_value.buffer, _add(dt_value, bias_value), [0])
+                    with T.If(dt_softplus != 0):
+                        with T.Then():
+                            with T.If(dt_value <= T.float32(20.0)):
+                                with T.Then():
+                                    exp_arg = _builder_scalar(
+                                        "exp_arg",
+                                        _mul(dt_value, T.float32(_LOG2_E)),
+                                        dtype="float32",
+                                    )
+                                    exp_value = _builder_scalar(
+                                        "exp_value", _exp2(exp_arg), dtype="float32"
+                                    )
+                                    one_plus_exp = _builder_scalar(
+                                        "one_plus_exp",
+                                        _add(T.float32(1.0), exp_value),
+                                        dtype="float32",
+                                    )
+                                    log_value = _builder_scalar(
+                                        "log_value", _log2(one_plus_exp), dtype="float32"
+                                    )
+                                    T.buffer_store(
+                                        dt_value.buffer, _mul(log_value, T.float32(_LN_2)), [0]
+                                    )
+                    da_arg = _builder_scalar("da_arg", _mul(a_value, dt_value), dtype="float32")
+                    da_exp_arg = _builder_scalar(
+                        "da_exp_arg", _mul(da_arg, T.float32(_LOG2_E)), dtype="float32"
+                    )
+                    da_value = _builder_scalar("da_value", _exp2(da_exp_arg), dtype="float32")
+                    lane_indicator = _builder_scalar(
+                        "lane_indicator",
+                        T.if_then_else(lane == 0, T.float32(1.0), T.float32(0.0)),
+                        dtype="float32",
+                    )
+                    with T.If(state_batch != T.cast(pad_slot_id, "int64")):
+                        with T.Then():
+                            _builder_emit(
+                                _consumer_vertical(
+                                    smem_raw,
+                                    s_state,
+                                    s_x,
+                                    s_b,
+                                    s_c,
+                                    s_out,
+                                    s_scale,
+                                    smem_addr,
+                                    lane,
+                                    warp,
+                                    d_value,
+                                    dt_value,
+                                    da_value,
+                                    lane_indicator,
+                                    random_seed,
+                                    state_ptr_offset,
+                                    DIM=DIM,
+                                    DSTATE=DSTATE,
+                                    STATE_DTYPE=STATE_DTYPE,
+                                    STATE_BYTES=STATE_BYTES,
+                                    STATE_VALUES_PER_BANK=STATE_VALUES_PER_BANK,
+                                    STATE_ITERATIONS=STATE_ITERATIONS,
+                                    NEW_STATE_COUNT=NEW_STATE_COUNT,
+                                    SCALE_STATE=SCALE_STATE,
+                                    PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                    USE_STATE_CACHE=True,
+                                    STATE_STAGE_VALUES=STATE_STAGE_VALUES,
+                                    OFF_EMPTY=OFF_EMPTY,
+                                    OFF_FULL=OFF_FULL,
+                                )
+                            )
+                        with T.Else():
+                            _builder_emit(
+                                _consumer_vertical(
+                                    smem_raw,
+                                    s_state,
+                                    s_x,
+                                    s_b,
+                                    s_c,
+                                    s_out,
+                                    s_scale,
+                                    smem_addr,
+                                    lane,
+                                    warp,
+                                    d_value,
+                                    dt_value,
+                                    da_value,
+                                    lane_indicator,
+                                    random_seed,
+                                    state_ptr_offset,
+                                    DIM=DIM,
+                                    DSTATE=DSTATE,
+                                    STATE_DTYPE=STATE_DTYPE,
+                                    STATE_BYTES=STATE_BYTES,
+                                    STATE_VALUES_PER_BANK=STATE_VALUES_PER_BANK,
+                                    STATE_ITERATIONS=STATE_ITERATIONS,
+                                    NEW_STATE_COUNT=NEW_STATE_COUNT,
+                                    SCALE_STATE=SCALE_STATE,
+                                    PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                    USE_STATE_CACHE=False,
+                                    STATE_STAGE_VALUES=STATE_STAGE_VALUES,
+                                    OFF_EMPTY=OFF_EMPTY,
+                                    OFF_FULL=OFF_FULL,
+                                )
+                            )
+                    _builder_emit(_mbarrier_arrive_wait(smem_addr + T.uint32(OFF_CONSUMERS)))
+                    row_d = _builder_scalar("row_d", warp * 32 + lane, dtype="int32")
+                    with T.If(row_d < DIM):
+                        with T.Then():
+                            out_value = _builder_scalar(
+                                "out_value",
+                                T.reinterpret("float32", _shared_load_u32(s_out, row_d)),
+                                dtype="float32",
+                            )
+                            if HAS_Z:
+                                z_value = _builder_scalar(
+                                    "z_value",
+                                    _bf16_to_f32(_shared_load_u16(s_z, row_d)),
+                                    dtype="float32",
+                                )
+                                neg_z = _builder_scalar(
+                                    "neg_z", _sub(T.float32(0.0), z_value), dtype="float32"
+                                )
+                                z_exp_arg = _builder_scalar(
+                                    "z_exp_arg", _mul(neg_z, T.float32(_LOG2_E)), dtype="float32"
+                                )
+                                exp_neg_z = _builder_scalar(
+                                    "exp_neg_z", _exp2(z_exp_arg), dtype="float32"
+                                )
+                                denominator = _builder_scalar(
+                                    "denominator", _add(T.float32(1.0), exp_neg_z), dtype="float32"
+                                )
+                                sigmoid_z = _builder_scalar(
+                                    "sigmoid_z", _div(T.float32(1.0), denominator), dtype="float32"
+                                )
+                                silu_z = _builder_scalar(
+                                    "silu_z", _mul(z_value, sigmoid_z), dtype="float32"
+                                )
+                                T.buffer_store(out_value.buffer, _mul(out_value, silu_z), [0])
+                            output_bits = _builder_scalar(
+                                "output_bits", _f32_to_bf16(out_value), dtype="uint16"
+                            )
+                            _builder_emit(
+                                T.evaluate(
+                                    T.ptx.st.global_.b16(
+                                        output.ptr_to(
+                                            [
+                                                T.cast(batch_i, "int64") * out_stride_batch
+                                                + head * DIM
+                                                + row_d
+                                            ]
+                                        ),
+                                        output_bits,
+                                    )
+                                )
+                            )
+                    if SCALE_STATE:
+                        with T.If(
+                            T.And(
+                                T.And(T.bool(True), update_state != 0),
+                                state_batch != T.cast(pad_slot_id, "int64"),
+                            )
+                        ):
+                            with T.Then():
+                                with T.If(row_d < DIM):
+                                    with T.Then():
+                                        scale_bits = _builder_scalar(
+                                            "scale_bits",
+                                            _shared_load_u32(s_scale, row_d),
+                                            dtype="uint32",
+                                        )
+                                        _builder_emit(
+                                            T.evaluate(
+                                                T.ptx.st.global_.b32(
+                                                    state_scale.ptr_to(
+                                                        [dst_scale_head_offset + row_d]
+                                                    ),
+                                                    scale_bits,
+                                                )
+                                            )
+                                        )
+    return builder.get()
 
 
 def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -1168,7 +1633,7 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 def get_kernel(**kwargs: Any):
     """Return the reviewed source-shaped plain-TIRx vertical specialization."""
-    kernel = _selective_state_update_stp_vertical.specialize(**_specialization(kwargs))
+    kernel = _build_selective_state_update_stp_vertical(**_specialization(kwargs))
     return kernel.with_attr(
         "tirx.kernel_launch_params",
         ["blockIdx.x", "blockIdx.y", "threadIdx.x", "threadIdx.y", "tirx.use_dyn_shared_memory"],
