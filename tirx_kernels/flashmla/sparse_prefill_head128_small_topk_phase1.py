@@ -324,6 +324,7 @@ def _make_low_level_kernel(
                 bar_valid_coord_scales_empty_buf = T.decl_buffer((4,), "uint64", data=pool_buf.data, elem_offset=27803, scope="shared.dyn", align=8)
                 buffer_8 = T.decl_buffer((1,), "uint64", data=pool_buf.data, elem_offset=27807, scope="shared.dyn", align=8)
                 bar_clc_empty_buf = T.decl_buffer((1,), "uint64", data=pool_buf.data, elem_offset=27808, scope="shared.dyn", align=8)
+                bar_tQ_consumed_buf = T.decl_buffer((1,), "uint64", data=pool_buf.data, elem_offset=27809, scope="shared.dyn", align=8)
                 clc_response = T.decl_buffer((4,), "uint32", data=pool_buf.data, elem_offset=55620, scope="shared.dyn", align=16)
                 tmem_start_addr = T.decl_buffer((1,), "uint32", data=pool_buf.data, elem_offset=55624, scope="shared.dyn", align=4)
                 with T.attr({"tirx.dyn_smem_bytes": T.int64(222500)}):
@@ -365,6 +366,9 @@ def _make_low_level_kernel(
                             T.ptx.mbarrier(T.cuda.cvta_generic_to_shared(T.address_of(buffer_8[i])), T.uint32(1), "init", "shared", "b64", "")
                         for i in T.unroll(1):
                             T.ptx.mbarrier(T.cuda.cvta_generic_to_shared(T.address_of(bar_clc_empty_buf[i])), T.uint32(539), "init", "shared", "b64", "")
+                        # One elected arrival from each WG0 warp in both CTAs.
+                        for i in T.unroll(1):
+                            T.ptx.mbarrier(T.cuda.cvta_generic_to_shared(T.address_of(bar_tQ_consumed_buf[i])), T.uint32(8), "init", "shared", "b64", "")
                         T.ptx.fence("mbarrier_init", "release", "cluster", "")
                 else:
                     if warp_idx == 2:
@@ -409,6 +413,9 @@ def _make_low_level_kernel(
                                 buffer_18 = T.decl_scalar(T.bfloat16, data=q_smem_tma.data, elem_offset=0, scope="shared.dyn")
                                 T.ptx.cp(T.cuda.cvta_generic_to_shared(T.address_of(buffer_18)), T.reinterpret(T.handle().ty, T.address_of(q_tma_tensormap)), 0, block_idx % 2 * 64, 0, 0, wg0_job_block_idx // 2, T.cuda.cvta_generic_to_shared(T.reinterpret(T.handle().ty, buffer_17)), T.uint64(1364590687093260288), "async", "bulk", "tensor", "5d", "shared::cluster", "global", "", "mbarrier::complete_tx::bytes", "", "cta_group::2", "L2::cache_hint", "")
                                 if cta_idx == 0:
+                                    # Do not republish tQ-full until both CTAs consumed its prior phase.
+                                    if last_valid != 0:
+                                        T.cuda.mbarrier_wait(T.address_of(bar_tQ_consumed_buf[0]), T.bitwise_xor(last_outer_loop_phase, 0))
                                     T.ptx.mbarrier(T.cuda.cvta_generic_to_shared(T.address_of(buffer[0])), T.uint32(131072), "arrive", "expect_tx", "", "", "shared", "b64", "")
                                     T.cuda.mbarrier_wait(T.address_of(buffer[0]), T.bitwise_xor(wg0_outer_loop_phase, 0))
                                     T.cuda.mbarrier_wait(T.address_of(buffer_1[0]), T.bitwise_xor(T.bitwise_xor(wg0_outer_loop_phase, 1), 0))
@@ -443,6 +450,10 @@ def _make_low_level_kernel(
                                 if epi_k == 0:
                                     T.cuda.mbarrier_wait(T.address_of(buffer_2[0]), T.bitwise_xor(T.bitwise_xor(last_outer_loop_phase, 1), 0))
                                     T.ptx.fence("proxy", "async", "shared::cta", "")
+                                    if T.cuda.elect_sync():
+                                        buffer_22: T.uint32
+                                        T.ptx.mapa(buffer_22, T.cuda.cvta_generic_to_shared(T.address_of(bar_tQ_consumed_buf[0])), T.uint32(0), "shared::cluster", "u32", "")
+                                        T.ptx.mbarrier(buffer_22, "arrive", "", "", "shared::cluster", "b64", "")
                                 if epi_k == 3:
                                     buffer_17: T.uint32
                                     T.ptx.mapa(buffer_17, T.cuda.cvta_generic_to_shared(T.address_of(bar_tOut_empty_buf[0])), T.uint32(0), "shared::cluster", "u32", "")
@@ -487,6 +498,10 @@ def _make_low_level_kernel(
                                     T.ptx.cp("async", "bulk", "commit_group", "")
                         else:
                             T.cuda.mbarrier_wait(T.address_of(buffer_2[0]), T.bitwise_xor(wg0_outer_loop_phase, 0))
+                            if T.cuda.elect_sync():
+                                buffer_13: T.uint32
+                                T.ptx.mapa(buffer_13, T.cuda.cvta_generic_to_shared(T.address_of(bar_tQ_consumed_buf[0])), T.uint32(0), "shared::cluster", "u32", "")
+                                T.ptx.mbarrier(buffer_13, "arrive", "", "", "shared::cluster", "b64", "")
                         last_valid = 1
                         last_s_q_idx = wg0_s_q_idx
                         last_outer_loop_phase = wg0_outer_loop_phase
