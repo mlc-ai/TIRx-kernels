@@ -44,6 +44,7 @@ class MegaMoeConfig:
     intermediate_hidden: int = 512
     num_experts: int = 8
     num_topk: int = 2
+    num_shared_experts: int = 0
     activation_clamp: float = 10.0
     fast_math: int = 1
 
@@ -64,10 +65,29 @@ class MegaMoeConfig:
             raise ValueError("num_experts must be divisible by num_processes")
         if self.num_topk <= 0 or self.num_topk > self.num_experts:
             raise ValueError("num_topk must be in [1, num_experts]")
+        if self.num_shared_experts < 0:
+            raise ValueError("num_shared_experts must be non-negative")
+        if self.num_shared_experts > 0:
+            # Mirrors the host assert in DeepGEMM `csrc/apis/mega.hpp` and the
+            # combine-loop static assert in the kernel (one extra slot per token).
+            if self.shared_intermediate_hidden % 128 != 0:
+                raise ValueError(
+                    "num_shared_experts * intermediate_hidden must be a multiple of 128"
+                )
+            if self.num_topk + 1 > 32:
+                raise ValueError("num_topk + 1 must not exceed the 32-lane combine ballot width")
 
     @property
     def num_experts_per_rank(self) -> int:
         return self.num_experts // self.num_processes
+
+    @property
+    def shared_intermediate_hidden(self) -> int:
+        return self.intermediate_hidden * self.num_shared_experts
+
+    @property
+    def has_shared_experts(self) -> bool:
+        return self.num_shared_experts > 0
 
 
 @dataclass
@@ -86,6 +106,13 @@ class MegaMoeCase:
     workspace_layout: DeepGemmWorkspaceLayout
     symm_buffer_layout: DeepGemmSymmBufferLayout
     cumulative_local_expert_recv_stats: torch.Tensor | None = None
+    # Shared-expert weights, already through `transform_weights_for_mega_moe`.
+    # 2-D (no expert-group dim) and FP8 e4m3; `None` when num_shared_experts == 0.
+    transformed_shared_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
+    transformed_shared_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
+    # Host-built shared L1 input SF plane in the UTCCP-transposed, BLOCK_M-dependent
+    # layout; the kernel never writes it.
+    shared_l1_acts_sf: torch.Tensor | None = None
 
 
 @dataclass
@@ -99,6 +126,8 @@ class TirxMegaMoeLaunchContext:
     cumulative_local_expert_recv_stats: torch.Tensor | None
     workspace_layout: DeepGemmWorkspaceLayout
     symm_buffer_layout: DeepGemmSymmBufferLayout
+    transformed_shared_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
+    transformed_shared_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +273,11 @@ class DeepGemmSymmBufferLayout:
     input_sf_offset: int
     input_topk_idx_offset: int
     input_topk_weights_offset: int
+    shared_l1_token_offset: int
+    shared_l1_sf_offset: int
+    shared_l2_token_offset: int
+    shared_l2_sf_offset: int
+    num_max_shared_sf_tokens: int
     l1_token_offset: int
     l1_sf_offset: int
     l1_topk_weights_offset: int
@@ -494,6 +528,32 @@ def get_deepgemm_symm_buffer_layout(config: MegaMoeConfig) -> DeepGemmSymmBuffer
     input_topk_weights_offset = cursor
     cursor += aligned_num_max_tokens_per_rank * config.num_topk * 4
 
+    # Shared-expert regions (empty at `num_shared_experts == 0`, so the routed
+    # ring buffers keep their zero-shared offsets). The shared L1 activations
+    # alias the input tokens in place; only the SF plane is a separate region,
+    # and it is written by the host, never by the kernel.
+    shared_intermediate_hidden = config.shared_intermediate_hidden
+    num_max_shared_sf_tokens = (
+        _ceil_div(aligned_num_max_tokens_per_rank, _K_MIN_CANDIDATE_BLOCK_M) * 128
+        if config.has_shared_experts
+        else 0
+    )
+
+    shared_l1_token_offset = input_token_offset
+
+    shared_l1_sf_offset = cursor
+    cursor += num_max_shared_sf_tokens * (config.hidden // 32)
+
+    shared_l2_token_offset = cursor
+    cursor += (
+        aligned_num_max_tokens_per_rank * shared_intermediate_hidden
+        if config.has_shared_experts
+        else 0
+    )
+
+    shared_l2_sf_offset = cursor
+    cursor += num_max_shared_sf_tokens * (shared_intermediate_hidden // 32)
+
     l1_token_offset = cursor
     cursor += workspace.num_ring_tokens * config.hidden
 
@@ -510,7 +570,9 @@ def get_deepgemm_symm_buffer_layout(config: MegaMoeConfig) -> DeepGemmSymmBuffer
     cursor += workspace.num_sf_ring_tokens * (config.intermediate_hidden // 32)
 
     combine_token_offset = cursor
-    cursor += config.num_topk * aligned_num_max_tokens_per_rank * config.hidden * 2
+    # Shared experts add one combine slot per token, written locally (no NVLink).
+    num_combine_slots = config.num_topk + (1 if config.has_shared_experts else 0)
+    cursor += num_combine_slots * aligned_num_max_tokens_per_rank * config.hidden * 2
 
     return DeepGemmSymmBufferLayout(
         workspace_bytes=workspace.total_bytes,
@@ -518,6 +580,11 @@ def get_deepgemm_symm_buffer_layout(config: MegaMoeConfig) -> DeepGemmSymmBuffer
         input_sf_offset=input_sf_offset,
         input_topk_idx_offset=input_topk_idx_offset,
         input_topk_weights_offset=input_topk_weights_offset,
+        shared_l1_token_offset=shared_l1_token_offset,
+        shared_l1_sf_offset=shared_l1_sf_offset,
+        shared_l2_token_offset=shared_l2_token_offset,
+        shared_l2_sf_offset=shared_l2_sf_offset,
+        num_max_shared_sf_tokens=num_max_shared_sf_tokens,
         l1_token_offset=l1_token_offset,
         l1_sf_offset=l1_sf_offset,
         l1_topk_weights_offset=l1_topk_weights_offset,
@@ -558,6 +625,31 @@ def validate_runtime_symm_buffer_layout(
         "l2_token_offset": layout.l2_token_offset,
         "l2_sf_offset": layout.l2_sf_offset,
     }
+    if config.has_shared_experts:
+        actual_offsets.update(
+            {
+                "shared_l1_token_offset": _tensor_offset_bytes(
+                    symm_buffer.buffer, symm_buffer.shared_l1_acts
+                ),
+                "shared_l1_sf_offset": _tensor_offset_bytes(
+                    symm_buffer.buffer, symm_buffer.shared_l1_acts_sf
+                ),
+                "shared_l2_token_offset": _tensor_offset_bytes(
+                    symm_buffer.buffer, symm_buffer.shared_l2_acts
+                ),
+                "shared_l2_sf_offset": _tensor_offset_bytes(
+                    symm_buffer.buffer, symm_buffer.shared_l2_acts_sf
+                ),
+            }
+        )
+        expected_offsets.update(
+            {
+                "shared_l1_token_offset": layout.shared_l1_token_offset,
+                "shared_l1_sf_offset": layout.shared_l1_sf_offset,
+                "shared_l2_token_offset": layout.shared_l2_token_offset,
+                "shared_l2_sf_offset": layout.shared_l2_sf_offset,
+            }
+        )
     for key, expected in expected_offsets.items():
         actual = actual_offsets[key]
         if actual != expected:
@@ -575,6 +667,27 @@ def validate_runtime_symm_buffer_layout(
         "l2_acts": (workspace.num_ring_tokens, config.intermediate_hidden),
         "l2_acts_sf": (workspace.num_sf_ring_tokens, config.intermediate_hidden // 128),
     }
+    if config.has_shared_experts:
+        num_shared_sf = layout.num_max_shared_sf_tokens
+        expected_shapes.update(
+            {
+                "shared_l1_acts": (workspace.num_max_tokens_per_rank, config.hidden),
+                "shared_l1_acts_sf": (num_shared_sf, config.hidden // 128),
+                "shared_l2_acts": (
+                    workspace.num_max_tokens_per_rank,
+                    config.shared_intermediate_hidden,
+                ),
+                "shared_l2_acts_sf": (num_shared_sf, config.shared_intermediate_hidden // 128),
+            }
+        )
+        # Both shared SF planes are MN-major with the shared-SF-token stride.
+        for name in ("shared_l1_acts_sf", "shared_l2_acts_sf"):
+            actual_stride = tuple(getattr(symm_buffer, name).stride())
+            if actual_stride != (1, num_shared_sf):
+                raise ValueError(
+                    f"DeepGEMM symm buffer stride mismatch for {name}: "
+                    f"expected {(1, num_shared_sf)}, got {actual_stride}"
+                )
     for name, expected_shape in expected_shapes.items():
         actual_shape = tuple(getattr(symm_buffer, name).shape)
         if actual_shape != expected_shape:
@@ -701,6 +814,14 @@ def get_deepgemm_launch_config(config: MegaMoeConfig) -> DeepGemmLaunchConfig:
         raise ValueError("MegaMoE launch must satisfy kNumL1BlockNs % 2 == 0")
     if (config.hidden // launch.block_n) % 2 != 0:
         raise ValueError("MegaMoE launch must satisfy kNumL2BlockNs % 2 == 0")
+    # Shared-expert shape asserts from `MegaMoEScheduler` (scheduler/mega_moe.cuh:164-167).
+    # The other two are redundant: SHARED_L1_SHAPE_K == L1_SHAPE_K and
+    # SHARED_L2_SHAPE_N == L2_SHAPE_N, both already covered above.
+    shared_intermediate_hidden = config.shared_intermediate_hidden
+    if (shared_intermediate_hidden * 2) % (launch.block_n * 2) != 0:
+        raise ValueError("MegaMoE launch must satisfy SHARED_L1_SHAPE_N % (BLOCK_N * 2) == 0")
+    if shared_intermediate_hidden % launch.block_k != 0:
+        raise ValueError("MegaMoE launch must satisfy SHARED_L2_SHAPE_K % BLOCK_K == 0")
     return launch
 
 
@@ -910,6 +1031,12 @@ def _build_tirx_tensor_maps(
     l1_weights_sf: torch.Tensor,
     l2_weights: torch.Tensor,
     l2_weights_sf: torch.Tensor,
+    shared_l1_acts: torch.Tensor | None = None,
+    shared_l2_acts: torch.Tensor | None = None,
+    shared_l1_weights: torch.Tensor | None = None,
+    shared_l1_weights_sf: torch.Tensor | None = None,
+    shared_l2_weights: torch.Tensor | None = None,
+    shared_l2_weights_sf: torch.Tensor | None = None,
 ) -> dict[str, _AlignedTensorMap]:
     import tvm
 
@@ -922,7 +1049,7 @@ def _build_tirx_tensor_maps(
     num_experts_per_rank = case.config.num_experts_per_rank
     sf_block_m = _align_up(launch.block_m, 128)
 
-    return {
+    tensor_maps = {
         "tensor_map_l1_acts": _encode_tma_2d_desc(
             encode_tensormap=encode_tensormap,
             tensor=l1_acts,
@@ -1020,6 +1147,133 @@ def _build_tirx_tensor_maps(
         ),
     }
 
+    # Shared-expert descriptors. Mirrors the upstream launcher
+    # (csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp:216-269): the nine slots
+    # always exist in the ABI, and at `num_shared_experts == 0` the host binds the
+    # corresponding routed descriptor into each so the signature never changes.
+    shared_names = (
+        "tensor_map_shared_l1_acts",
+        "tensor_map_shared_l1_acts_sf",
+        "tensor_map_shared_l1_weights",
+        "tensor_map_shared_l1_weights_sf",
+        "tensor_map_shared_l1_output",
+        "tensor_map_shared_l2_acts",
+        "tensor_map_shared_l2_acts_sf",
+        "tensor_map_shared_l2_weights",
+        "tensor_map_shared_l2_weights_sf",
+    )
+    if not case.config.has_shared_experts:
+        for name in shared_names:
+            tensor_maps[name] = tensor_maps[name.replace("_shared", "", 1)]
+        return tensor_maps
+
+    shared_intermediate_hidden = case.config.shared_intermediate_hidden
+    num_max_shared_sf_tokens = case.symm_buffer_layout.num_max_shared_sf_tokens
+    num_max_tokens_per_rank = workspace.num_max_tokens_per_rank
+    tensor_maps.update(
+        {
+            # The shared L1 activations alias the input tokens in place.
+            "tensor_map_shared_l1_acts": _encode_tma_2d_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=shared_l1_acts,
+                gmem_inner_dim=case.config.hidden,
+                gmem_outer_dim=num_max_tokens_per_rank,
+                smem_inner_dim=launch.block_k,
+                smem_outer_dim=launch.load_block_m,
+                gmem_outer_stride=int(shared_l1_acts.stride(-2)),
+                swizzle_mode=swizzle_acts_mode,
+                tensor_dtype="float8_e4m3fn",
+            ),
+            "tensor_map_shared_l1_acts_sf": _encode_tma_sf_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=case.symm_buffer.shared_l1_acts_sf,
+                shape_mn=num_max_shared_sf_tokens,
+                shape_k=case.config.hidden,
+                block_mn=sf_block_m,
+                gran_k=gran_k,
+                num_groups=1,
+                smem_outer_dim=launch.block_k // 128,
+            ),
+            # Shared weights are plain FP8 e4m3, not packed FP4, and carry no
+            # expert-group dimension.
+            "tensor_map_shared_l1_weights": _encode_tma_2d_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=shared_l1_weights,
+                gmem_inner_dim=case.config.hidden,
+                gmem_outer_dim=shared_intermediate_hidden * 2,
+                smem_inner_dim=launch.block_k,
+                smem_outer_dim=launch.load_block_n,
+                gmem_outer_stride=int(shared_l1_weights.stride(-2)),
+                swizzle_mode=swizzle_weights_mode,
+                tensor_dtype="float8_e4m3fn",
+            ),
+            "tensor_map_shared_l1_weights_sf": _encode_tma_sf_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=shared_l1_weights_sf,
+                shape_mn=shared_intermediate_hidden * 2,
+                shape_k=case.config.hidden,
+                block_mn=launch.block_n,
+                gran_k=gran_k,
+                num_groups=1,
+                smem_outer_dim=launch.block_k // 128,
+            ),
+            "tensor_map_shared_l1_output": _encode_tma_2d_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=shared_l2_acts,
+                gmem_inner_dim=shared_intermediate_hidden,
+                gmem_outer_dim=num_max_tokens_per_rank,
+                smem_inner_dim=launch.block_n // 2,
+                smem_outer_dim=launch.store_block_m,
+                gmem_outer_stride=int(shared_l2_acts.stride(-2)),
+                swizzle_mode=swizzle_acts_mode // 2,
+                tensor_dtype="float8_e4m3fn",
+            ),
+            "tensor_map_shared_l2_acts": _encode_tma_2d_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=shared_l2_acts,
+                gmem_inner_dim=shared_intermediate_hidden,
+                gmem_outer_dim=num_max_tokens_per_rank,
+                smem_inner_dim=launch.block_k,
+                smem_outer_dim=launch.load_block_m,
+                gmem_outer_stride=int(shared_l2_acts.stride(-2)),
+                swizzle_mode=swizzle_acts_mode,
+                tensor_dtype="float8_e4m3fn",
+            ),
+            "tensor_map_shared_l2_acts_sf": _encode_tma_sf_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=case.symm_buffer.shared_l2_acts_sf,
+                shape_mn=num_max_shared_sf_tokens,
+                shape_k=shared_intermediate_hidden,
+                block_mn=sf_block_m,
+                gran_k=gran_k,
+                num_groups=1,
+                smem_outer_dim=launch.block_k // 128,
+            ),
+            "tensor_map_shared_l2_weights": _encode_tma_2d_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=shared_l2_weights,
+                gmem_inner_dim=shared_intermediate_hidden,
+                gmem_outer_dim=case.config.hidden,
+                smem_inner_dim=launch.block_k,
+                smem_outer_dim=launch.load_block_n,
+                gmem_outer_stride=int(shared_l2_weights.stride(-2)),
+                swizzle_mode=swizzle_weights_mode,
+                tensor_dtype="float8_e4m3fn",
+            ),
+            "tensor_map_shared_l2_weights_sf": _encode_tma_sf_desc(
+                encode_tensormap=encode_tensormap,
+                tensor=shared_l2_weights_sf,
+                shape_mn=case.config.hidden,
+                shape_k=shared_intermediate_hidden,
+                block_mn=launch.block_n,
+                gran_k=gran_k,
+                num_groups=1,
+                smem_outer_dim=launch.block_k // 128,
+            ),
+        }
+    )
+    return tensor_maps
+
 
 def _view_symm_matrix(
     case: MegaMoeCase | TirxMegaMoeLaunchContext, offset: int, rows: int, cols: int
@@ -1061,6 +1315,7 @@ def _compile_tirx_mega_moe_for_config(
     intermediate_hidden: int,
     num_experts: int,
     num_topk: int,
+    num_shared_experts: int,
     activation_clamp: float,
     fast_math: int,
     collect_stats: bool,
@@ -1081,6 +1336,7 @@ def _compile_tirx_mega_moe_for_config(
         intermediate_hidden=intermediate_hidden,
         num_experts=num_experts,
         num_topk=num_topk,
+        num_shared_experts=num_shared_experts,
         activation_clamp=activation_clamp,
         fast_math=fast_math,
         collect_stats=collect_stats,
@@ -1109,6 +1365,7 @@ def _compile_tirx_mega_moe(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> Any:
         intermediate_hidden=config.intermediate_hidden,
         num_experts=config.num_experts,
         num_topk=config.num_topk,
+        num_shared_experts=config.num_shared_experts,
         activation_clamp=config.activation_clamp,
         fast_math=config.fast_math,
         collect_stats=collect_stats,
@@ -1161,6 +1418,8 @@ def _make_tirx_mega_moe_launch_context(
     activation: str,
     activation_clamp: float | None,
     fast_math: bool,
+    shared_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None,
+    shared_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> TirxMegaMoeLaunchContext:
     if tuple(recipe) != (1, 1, 32):
         raise NotImplementedError("TIRx MegaMoE currently supports recipe=(1, 1, 32) only")
@@ -1185,6 +1444,50 @@ def _make_tirx_mega_moe_launch_context(
     ):
         if not tensor.is_cuda:
             raise ValueError(f"{tensor_name} must be a CUDA tensor")
+    # Mirrors `csrc/apis/mega.hpp:210-232`: the shared-expert count is derived
+    # from the L2 weight width, and both shared pairs are 2-D FP8 e4m3.
+    num_shared_experts = 0
+    if (shared_l1_weights is None) != (shared_l2_weights is None):
+        raise ValueError("shared_l1_weights and shared_l2_weights must be supplied together")
+    if shared_l1_weights is not None:
+        shared_l1_weights = _require_mega_moe_tuple("shared_l1_weights", shared_l1_weights)
+        shared_l2_weights = _require_mega_moe_tuple("shared_l2_weights", shared_l2_weights)
+        intermediate_hidden = int(sym_buffer.intermediate_hidden)
+        shared_intermediate_hidden = int(shared_l2_weights[0].shape[1])
+        if shared_intermediate_hidden % intermediate_hidden != 0:
+            raise ValueError(
+                "shared_l2_weights width must be a multiple of intermediate_hidden, got "
+                f"{shared_intermediate_hidden} vs {intermediate_hidden}"
+            )
+        num_shared_experts = shared_intermediate_hidden // intermediate_hidden
+        for tensor_name, tensor in (
+            ("shared_l1_weights[0]", shared_l1_weights[0]),
+            ("shared_l1_weights[1]", shared_l1_weights[1]),
+            ("shared_l2_weights[0]", shared_l2_weights[0]),
+            ("shared_l2_weights[1]", shared_l2_weights[1]),
+        ):
+            if not tensor.is_cuda:
+                raise ValueError(f"{tensor_name} must be a CUDA tensor")
+        if shared_l1_weights[0].dim() != 2 or shared_l2_weights[0].dim() != 2:
+            raise ValueError("shared weights must be 2D (no expert-group dimension)")
+        if shared_l1_weights[0].shape[0] != shared_intermediate_hidden * 2:
+            raise ValueError(
+                "shared_l1_weights must have 2 * shared_intermediate_hidden rows, got "
+                f"{shared_l1_weights[0].shape[0]}"
+            )
+        if shared_l1_weights[0].shape[1] != int(y.shape[1]):
+            raise ValueError("shared_l1_weights must have `hidden` columns")
+        if shared_l2_weights[0].shape[0] != int(y.shape[1]):
+            raise ValueError("shared_l2_weights must have `hidden` rows")
+        for tensor_name, tensor in (
+            ("shared_l1_weights[0]", shared_l1_weights[0]),
+            ("shared_l2_weights[0]", shared_l2_weights[0]),
+        ):
+            if tensor.dtype != torch.float8_e4m3fn:
+                raise TypeError(f"{tensor_name} must have dtype torch.float8_e4m3fn")
+            if not tensor.is_contiguous():
+                raise ValueError(f"{tensor_name} must be contiguous")
+
     num_ranks = int(sym_buffer.group.size())
     rank_idx = int(sym_buffer.group.rank())
     config = MegaMoeConfig(
@@ -1195,6 +1498,7 @@ def _make_tirx_mega_moe_launch_context(
         intermediate_hidden=int(sym_buffer.intermediate_hidden),
         num_experts=int(sym_buffer.num_experts),
         num_topk=int(sym_buffer.num_topk),
+        num_shared_experts=num_shared_experts,
         activation_clamp=math.inf if activation_clamp is None else float(activation_clamp),
         fast_math=int(bool(fast_math)),
     )
@@ -1237,6 +1541,8 @@ def _make_tirx_mega_moe_launch_context(
         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
         workspace_layout=workspace_layout,
         symm_buffer_layout=symm_buffer_layout,
+        transformed_shared_l1_weights=shared_l1_weights,
+        transformed_shared_l2_weights=shared_l2_weights,
     )
 
 
@@ -1259,6 +1565,29 @@ def _prepare_tirx_invocation(
         case.config.intermediate_hidden,
     )
     l2_acts_sf = case.symm_buffer.l2_acts_sf.transpose(0, 1)
+    shared_kwargs: dict[str, torch.Tensor] = {}
+    if case.config.has_shared_experts:
+        shared_l1_weights, shared_l1_weights_sf = case.transformed_shared_l1_weights
+        shared_l2_weights, shared_l2_weights_sf = case.transformed_shared_l2_weights
+        shared_kwargs = {
+            # Shared L1 activations alias the input token buffer in place.
+            "shared_l1_acts": _view_symm_matrix(
+                case,
+                symm_layout.input_token_offset,
+                case.workspace_layout.num_max_tokens_per_rank,
+                case.config.hidden,
+            ),
+            "shared_l2_acts": _view_symm_matrix(
+                case,
+                symm_layout.shared_l2_token_offset,
+                case.workspace_layout.num_max_tokens_per_rank,
+                case.config.shared_intermediate_hidden,
+            ),
+            "shared_l1_weights": shared_l1_weights,
+            "shared_l1_weights_sf": shared_l1_weights_sf,
+            "shared_l2_weights": shared_l2_weights,
+            "shared_l2_weights_sf": shared_l2_weights_sf,
+        }
     tensor_maps = _build_tirx_tensor_maps(
         case=case,
         l1_acts=l1_acts,
@@ -1267,6 +1596,7 @@ def _prepare_tirx_invocation(
         l1_weights_sf=l1_weights_sf,
         l2_weights=l2_weights,
         l2_weights_sf=l2_weights_sf,
+        **shared_kwargs,
     )
     if y is None:
         y = torch.empty(
@@ -1316,6 +1646,15 @@ def _launch_tirx_mega_moe(
         tensor_maps["tensor_map_l2_acts_sf"].ptr,
         tensor_maps["tensor_map_l2_weights"].ptr,
         tensor_maps["tensor_map_l2_weights_sf"].ptr,
+        tensor_maps["tensor_map_shared_l1_acts"].ptr,
+        tensor_maps["tensor_map_shared_l1_acts_sf"].ptr,
+        tensor_maps["tensor_map_shared_l1_weights"].ptr,
+        tensor_maps["tensor_map_shared_l1_weights_sf"].ptr,
+        tensor_maps["tensor_map_shared_l1_output"].ptr,
+        tensor_maps["tensor_map_shared_l2_acts"].ptr,
+        tensor_maps["tensor_map_shared_l2_acts_sf"].ptr,
+        tensor_maps["tensor_map_shared_l2_weights"].ptr,
+        tensor_maps["tensor_map_shared_l2_weights_sf"].ptr,
         case.config.num_tokens,
         case.rank_idx,
     )
@@ -1326,6 +1665,8 @@ def prepare_tirx_fp8_fp4_mega_moe(
     l1_weights: tuple[torch.Tensor, torch.Tensor],
     l2_weights: tuple[torch.Tensor, torch.Tensor],
     sym_buffer: Any,
+    shared_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None,
+    shared_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None,
     cumulative_local_expert_recv_stats: torch.Tensor | None = None,
     recipe: tuple[int, int, int] = (1, 1, 32),
     activation: str = "swiglu",
@@ -1337,6 +1678,8 @@ def prepare_tirx_fp8_fp4_mega_moe(
         l1_weights=l1_weights,
         l2_weights=l2_weights,
         sym_buffer=sym_buffer,
+        shared_l1_weights=shared_l1_weights,
+        shared_l2_weights=shared_l2_weights,
         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
         recipe=recipe,
         activation=activation,
@@ -1355,6 +1698,8 @@ def fp8_fp4_mega_moe(
     l1_weights: tuple[torch.Tensor, torch.Tensor],
     l2_weights: tuple[torch.Tensor, torch.Tensor],
     sym_buffer: Any,
+    shared_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None,
+    shared_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None,
     cumulative_local_expert_recv_stats: torch.Tensor | None = None,
     recipe: tuple[int, int, int] = (1, 1, 32),
     activation: str = "swiglu",
@@ -1366,6 +1711,8 @@ def fp8_fp4_mega_moe(
         l1_weights,
         l2_weights,
         sym_buffer,
+        shared_l1_weights=shared_l1_weights,
+        shared_l2_weights=shared_l2_weights,
         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
         recipe=recipe,
         activation=activation,

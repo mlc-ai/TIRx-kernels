@@ -104,11 +104,23 @@ def run_gpu(prepared: PreparedMegaMoeBench, **kwargs: Any) -> dict[str, Any]:
 
 
 def _case(
-    label: str, *, tok: int, h: int, i: int, e: int, k: int, g: int = 1, max_tok: int | None = None
+    label: str,
+    *,
+    tok: int,
+    h: int,
+    i: int,
+    e: int,
+    k: int,
+    g: int = 1,
+    max_tok: int | None = None,
+    s: int = 0,
 ) -> dict:
     """One config: `g` ranks routing `tok` tokens over `e` experts, top-`k`.
 
     `max_tok` is the per-rank capacity when it differs from the token count.
+    `s` is the shared-expert count: a width multiplier adding one fused
+    rank-local FFN of intermediate width `s * i` whose unweighted output folds
+    into every token's combine sum.
     Every case runs with the upstream default clamp and fast-math setting.
     """
     return {
@@ -119,6 +131,7 @@ def _case(
         "intermediate_hidden": i,
         "num_experts": e,
         "num_topk": k,
+        "num_shared_experts": s,
         "activation_clamp": 10.0,
         "fast_math": 1,
         "label": label,
@@ -155,6 +168,22 @@ CONFIGS = [
     _case("t256_h7168_i3072_e384_k6_g4", g=4, tok=256, h=7168, i=3072, e=384, k=6),
     _case("t1024_h7168_i3072_e384_k6_g4", g=4, tok=1024, h=7168, i=3072, e=384, k=6),
     _case("t8192_m8192_h7168_i3072_e384_k6_g6", g=6, tok=8192, h=7168, i=3072, e=384, k=6),
+    # Shared experts (`s > 0`). The block-config heuristic has no `S` term, so
+    # each case lands in the same block_m bucket as its `s=0` twin; together
+    # these re-cover all six buckets with the shared path enabled.
+    _case("p1_tok2_h1024_i512_e2_k1_bm16_s1", tok=2, max_tok=4, h=1024, i=512, e=2, k=1, s=1),
+    _case("p1_tok2_h1024_i512_e2_k1_bm16_s2", tok=2, max_tok=4, h=1024, i=512, e=2, k=1, s=2),
+    _case("p1_tok16_h1024_i512_e2_k2_bm32_s1", tok=16, h=1024, i=512, e=2, k=2, s=1),
+    _case("p1_tok32_h1024_i512_e2_k2_bm64_s1", tok=32, h=1024, i=512, e=2, k=2, s=1),
+    _case("p1_tok64_h1024_i512_e2_k2_bm96_s1", tok=64, h=1024, i=512, e=2, k=2, s=1),
+    _case("p1_tok96_h1024_i512_e2_k2_bm128_s1", tok=96, h=1024, i=512, e=2, k=2, s=1),
+    _case("p1_tok192_h1024_i512_e2_k2_bm192_s1", tok=192, h=1024, i=512, e=2, k=2, s=1),
+    _case("p2_tok2_h1024_i512_e4_k1_bm16_s1", g=2, tok=2, max_tok=4, h=1024, i=512, e=4, k=1, s=1),
+    _case("t64_m64_h7168_i3072_e384_k6_g1_s1", tok=64, h=7168, i=3072, e=384, k=6, s=1),
+    _case("t8192_m8192_h7168_i3072_e384_k6_g1_s1", tok=8192, h=7168, i=3072, e=384, k=6, s=1),
+    _case("t8192_m8192_h7168_i3072_e384_k6_g2_s1", g=2, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
+    _case("t8192_m8192_h7168_i3072_e384_k6_g4_s1", g=4, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
+    _case("t8192_m8192_h7168_i3072_e384_k6_g6_s1", g=6, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
 ]
 
 
@@ -166,6 +195,7 @@ def _make_config(
     intermediate_hidden=512,
     num_experts=2,
     num_topk=1,
+    num_shared_experts=0,
     activation_clamp=10.0,
     fast_math=1,
 ) -> MegaMoeConfig:
@@ -177,6 +207,7 @@ def _make_config(
         intermediate_hidden=intermediate_hidden,
         num_experts=num_experts,
         num_topk=num_topk,
+        num_shared_experts=num_shared_experts,
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )
@@ -192,6 +223,7 @@ def prepare_data(
     intermediate_hidden=512,
     num_experts=2,
     num_topk=1,
+    num_shared_experts=0,
     activation_clamp=10.0,
     fast_math=1,
 ) -> dict[str, Any]:
@@ -204,6 +236,7 @@ def prepare_data(
             intermediate_hidden=intermediate_hidden,
             num_experts=num_experts,
             num_topk=num_topk,
+            num_shared_experts=num_shared_experts,
             activation_clamp=activation_clamp,
             fast_math=fast_math,
         )
@@ -235,6 +268,7 @@ def check_correctness(
     intermediate_hidden=512,
     num_experts=2,
     num_topk=1,
+    num_shared_experts=0,
     activation_clamp=10.0,
     fast_math=1,
 ) -> None:
@@ -265,6 +299,7 @@ def run_test(
     intermediate_hidden=512,
     num_experts=2,
     num_topk=1,
+    num_shared_experts=0,
     activation_clamp=10.0,
     fast_math=1,
 ):
@@ -276,6 +311,7 @@ def run_test(
         intermediate_hidden=intermediate_hidden,
         num_experts=num_experts,
         num_topk=num_topk,
+        num_shared_experts=num_shared_experts,
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )
@@ -291,6 +327,7 @@ def run_bench(
     intermediate_hidden=512,
     num_experts=8,
     num_topk=2,
+    num_shared_experts=0,
     activation_clamp=10.0,
     fast_math=1,
     *,
@@ -307,6 +344,7 @@ def run_bench(
         intermediate_hidden=intermediate_hidden,
         num_experts=num_experts,
         num_topk=num_topk,
+        num_shared_experts=num_shared_experts,
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )
