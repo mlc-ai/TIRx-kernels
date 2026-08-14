@@ -31,6 +31,15 @@ CACHE_ENV_KEYS = (
     "FLASHINFER_WORKSPACE_BASE",
     "TRTLLM_DG_CACHE_DIR",
 )
+RUNTIME_ENV_KEYS = (
+    "PYTHONPATH",
+    "LD_LIBRARY_PATH",
+    "NVSHMEM_HOME",
+    "TIRX_NCCL_LIBRARY",
+    "TIRX_CUBLAS_LIBRARY",
+    "TIRX_CUBLASMP_LIBRARY",
+    "TIRX_NVSHMEM_LIBRARY",
+)
 
 
 def _utc_now() -> str:
@@ -238,6 +247,7 @@ def main() -> int:
         "stderr_log": str(stderr_log),
         "cuda_visible_devices_at_wrapper_start": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "cache_environment": {key: os.environ.get(key) for key in CACHE_ENV_KEYS},
+        "runtime_environment": {key: os.environ.get(key) for key in RUNTIME_ENV_KEYS},
     }
     if args.monitor_all_gpus_interval is not None and args.monitor_all_gpus_interval <= 0:
         parser.error("--monitor-all-gpus-interval must be positive")
