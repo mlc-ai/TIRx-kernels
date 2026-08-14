@@ -367,13 +367,6 @@ def _rank_entry(
         module = None
         gc.collect()
         if nvshmem_initialized:
-            # Runtime cleanup and module destructors are external CUDA call sites
-            # and may change the process's current device.  NVSHMEM finalization
-            # is context-sensitive, so restore and prove the scheduler-owned
-            # physical assignment after those calls, immediately before finalize.
-            validate_current_cuda_assignment(
-                "before distributed NVSHMEM finalize", restore=True
-            )
             tvm.get_global_func("runtime.disco.nvshmem.finalize_nvshmem")()
         if dist.is_available() and dist.is_initialized():
             dist.destroy_process_group()
