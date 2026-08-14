@@ -253,7 +253,7 @@
       }
     },
     {
-      "kernel": "deepgemm_fp8_fp4_mega_moe",
+      "kernel": "sm100_fp8_fp4_mega_moe",
       "config": "t64_m64_h7168_i3072_e384_k6_g1",
       "label": "t64_m64_h7168_i3072_e384_k6_g1",
       "status": "ok",
@@ -267,7 +267,7 @@
       }
     },
     {
-      "kernel": "deepgemm_fp8_fp4_mega_moe",
+      "kernel": "sm100_fp8_fp4_mega_moe",
       "config": "t8192_m8192_h7168_i3072_e384_k6_g1",
       "label": "t8192_m8192_h7168_i3072_e384_k6_g1",
       "status": "ok",

@@ -29,7 +29,7 @@ Grouped workloads show one row per config and one timing column per implementati
 | `tp1_m8192_n51200_k5120_fp16_dynamic` | tirx | 2876.2938 | cublas_nccl_cudagraph | 2717.1455 | 0.945 | cublasmp_split_p2p=2772.5312 |
 | `tp1_m8192_n57344_k8192_fp16_dynamic` | tirx | 6103.6119 | cublas_nccl_cudagraph | 5984.3328 | 0.980 | cublasmp_split_p2p=6148.8383 |
 
-## deepgemm_fp8_fp4_mega_moe
+## sm100_fp8_fp4_mega_moe
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|

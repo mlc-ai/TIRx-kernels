@@ -5947,11 +5947,7 @@ def _run_distributed(config: MegaMoeConfig, mode: str, **kwargs) -> dict[str, An
         return _aggregate_rank_results(rank_results)
 
 
-KERNEL_META = {
-    "name": "deepgemm_fp8_fp4_mega_moe",
-    "category": "deepgemm",
-    "compute_capability": 10,
-}
+KERNEL_META = {"name": "sm100_fp8_fp4_mega_moe", "category": "deepgemm", "compute_capability": 10}
 
 # One case per block_m bucket in `_get_block_config_for_mega_moe` so a per-PR
 # sm100a run covers all heuristic-selected block_m paths (16, 32, 64, 96, 128, 192).

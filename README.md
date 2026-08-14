@@ -106,7 +106,7 @@ point each port backs:
 | `deepgemm_sm100_fp4_paged_mqa_logits` | fp4 / bf16 | Paged-KV MQA attention logits |
 | `deepgemm_sm100_fp8_paged_mqa_logits` | fp8 / bf16 | Paged-KV MQA attention logits |
 | `deepgemm_sm100_tf32_hc_prenorm_gemm` | tf32 / bf16 | Prenorm GEMM |
-| `deepgemm_fp8_fp4_mega_moe` | fp8 + fp4 | Fused MoE megakernel (MegaMoE) |
+| `sm100_fp8_fp4_mega_moe` | fp8 + fp4 | Fused MoE megakernel (MegaMoE) |
 
 ## Performance
 
