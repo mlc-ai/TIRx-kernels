@@ -172,26 +172,12 @@ Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and 
    is retried in the same child without repeating CPU prepare; `SKIP` is accepted
    without retry. The old claim is released before reassignment, and the child
    rebuilds all GPU tensors, references, workspaces, and timer state on the newly
-   assigned card. Every interference retry is retained as a structured ledger
-   entry with the PID, intruder PIDs, assignments, UUIDs, and attempt identities.
-   Artifacts mark `retry_in_place: true` so retried and first-attempt results can
-   be compared later. The marker does not change evidence eligibility; retried
-   results otherwise follow the ordinary measurement and AC-10 path.
+   assigned card. Every interference retry records the workload, attempt,
+   intruder PIDs, and `retry_in_place: true`; retried results otherwise follow
+   the ordinary measurement path.
 6. **Ratio regression report** compares current ref/ours ratio vs the pinned
    `baseline.json` ratio (computed from its ours + ref impls). Promote a run over
    the baseline with `promote_baseline.py`.
-
-The target critical path is first-READY latency plus the eligibility-constrained
-GPU list schedule. Run JSON and `summary.md` break this into first child spawn,
-process startup, CLI bootstrap, common framework import, exact module import,
-config resolution, specialization/generation/compile, READY wait, assignment
-handoff, GPU stage, result handoff, and final reap tail. Foreign GPU wait, READY
-starvation, dispatch latency, and unexplained residual are reported separately.
-Each run also records peak owned process-tree size, aggregate RSS, and open file
-descriptors so one-shot process concurrency remains an observable bounded resource.
-If any workload lacks an `ok` result, complete timeline, or valid GPU assignment,
-the run-level cost model is explicitly `missing` and does not publish expected
-wall time, residuals, starvation, foreign-wait, or latency values as zero.
 
 ## Baseline files (git-tracked)
 
@@ -213,9 +199,8 @@ python tirx_kernels/bench_suite/promote_baseline.py \
 ```
 
 The default is already five independent rounds. Use `--rounds 1` only for a quick
-diagnostic run that will not be promoted. `summary.md` prominently watermarks any
-non-default rounds/cooldown combination as diagnostic; this is also derived for
-older run JSON that predates the run-level protocol field.
+diagnostic run that will not be promoted. The requested protocol remains recorded
+in the run JSON.
 
 ### Refresh the pinned baseline (rare)
 
@@ -268,27 +253,11 @@ The approved implementation preserves `init_dist()` and its process group, then
 restores the assigned physical device and revalidates its UUID before case
 construction and timing. This is one instance of the general position invariant:
 after any reachable external call that may change current device, restore and
-prove the assigned device before allocation or launch. The two default single-GPU
-MegaMoE configs are therefore covered by the ordinary 109-workload path. External
+prove the assigned device before allocation or launch. The default single-GPU
+MegaMoE configs are therefore covered by the ordinary default sweep. External
 source edits, monkey-patches, and fallback to masking remain prohibited. The
 one-rank MegaMoE path also retains its TCP rendezvous/process-group setup and
 32-attempt EADDRINUSE handling as a known deferred overhead.
-
-Targeted set-device evidence is tracked in
-`bench_pipeline_set_device_evidence.json`. It contains one fresh default-protocol
-single-GPU run and one controlled same-child card-switch retry, including exact
-UUIDs, per-attempt ownership, `retry_in_place`, and the measured 616 MiB residual
-primary context on the abandoned card. These runs validate the implementation;
-they are not a migration-before AC-10 A/B.
-
-Release-quality AC-10 A/B evidence must retain the raw before/after run JSONs,
-independent outer-timer JSONs, and their stdout/stderr logs. Build its derived
-summary with `scripts/build_bench_pipeline_ac10_evidence.py`; the builder hashes
-and opens every source, verifies the same physical UUID, default 5-round/1.0s
-protocol, raw-sample means, retry provenance, and pipeline cost model, and emits
-nothing when evidence is missing or inconsistent. The fixed targeted workload
-files are named `bench_pipeline_ac10_*_workload.yaml`, with the three-GEMM Proton
-matrix in `bench_pipeline_ac10_workloads.yaml`.
 
 MegaMoE entries use `timer: megamoe`, which invokes the dedicated DeepGEMM
 `bench_kineto` protocol. Do not set `warmup` or `repeat` for this timer because
@@ -298,7 +267,8 @@ span used by a full-span measurement. GemmComm entries use `timer: kineto`, whic
 measures the complete correlated GPU activity span across all streams after
 preparation and applies the same cold-cache setup before every sample.
 
-The suite exports an absolute `TIRX_BENCH_CACHE_DIR` under `.bench-suite/cache/`.
+The suite exports an absolute, report-directory-independent `TIRX_BENCH_CACHE_DIR`
+under `${XDG_CACHE_HOME:-~/.cache}/tirx-kernels/bench-suite/`.
 Reference adapters may use it for version/GPU-qualified autotune caches, but must
 finish cache loading, tuning, workspace setup, and validation before returning their
 timed launch closure. The NVFP4 FlashInfer adapter uses one cache file per shape and
@@ -316,7 +286,7 @@ defaults to FlashInfer's `auto` backend; set
 | `--mem-threshold` | `0` | Skip GPUs with compute-app memory-used percent above this percent |
 | `--max-prepare-processes N` | host/GPU-derived | Maximum concurrent one-shot CPU prepare children |
 | `--ready-backlog N` | at least prepare bound and 2× visible GPUs | Maximum PREPARING+READY children awaiting assignment |
-| `--check-imports` | off | Run the no-GPU all-config pipeline capability audit and exit |
+| `--check-imports` | off | Import every kernel selected by the workload file and exit |
 
 Round aggregation is always the arithmetic mean. The raw five-element sample arrays
 remain in the run JSON for variance and outlier inspection.
@@ -332,8 +302,8 @@ remain in the run JSON for variance and outlier inspection.
 
 | Path | Description |
 |------|-------------|
-| `.bench-suite/runs/<id>.json` | Aggregated results, phase timestamps, pipeline cost model, and raw samples |
-| `.bench-suite/reports/<id>/summary.md` | Critical-path/phase breakdown, multi-GPU exemption, provenance, and per-row times |
+| `.bench-suite/runs/<id>.json` | Aggregated results, raw samples, GPU assignment, and retry metadata |
+| `.bench-suite/reports/<id>/summary.md` | Provenance and per-row times |
 | `.bench-suite/reports/<id>/bench.md` | Main diff report (ratio Δ vs pinned baseline) |
 | `.bench-suite/logs/*__a<N>.log` | Benchmark subprocess stdout for each attempt |
 
