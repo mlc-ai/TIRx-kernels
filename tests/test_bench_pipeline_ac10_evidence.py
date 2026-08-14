@@ -491,6 +491,18 @@ def test_tracked_ac10_kineto_evidence_is_explicitly_missing():
     else:
         assert external["availability"] == "host_local_pinned_tir_worktree"
         assert external_path.is_absolute()
+    for header in sources["external_nvshmem_headers"]:
+        header_path = Path(header["path"])
+        if header_path.is_file():
+            _assert_source_matches(repo_root, header)
+        else:
+            assert header["availability"] == "host_local_runtime_layout"
+            assert header_path.is_absolute()
+
+    alternative_audit = evidence["call_site_alternative_audit"]
+    assert "myrank=2,nranks=1" in alternative_audit["worker_id_start"]
+    assert "LOCAL" in alternative_audit["direct_nvshmem_full_init"]
+    assert "No existing full-device-init API" in alternative_audit["conclusion"]
 
     before_outer = json.loads(
         (repo_root / sources["before"]["outer_timer"]["path"]).read_text()

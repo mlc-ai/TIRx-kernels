@@ -1,6 +1,13 @@
 {
   "acceptance_use": "ac_10_performance_evidence",
   "blocked_change": "The pinned external TVM NVSHMEM runtime must separate the distributed PE/rank from the physical CUDA device ordinal. Modifying that source, monkey-patching it, or restoring CUDA_VISIBLE_DEVICES masking is outside the authorized implementation boundary.",
+  "call_site_alternative_audit": {
+    "conclusion": "No existing full-device-init API in the pinned runtime can be called from this repository with separate PE rank and physical CUDA ordinal.",
+    "direct_nvshmem_full_init": "nvshmemx_init_attr is a header-inline function that calls nvshmemi_init_thread. The installed shared library marks nvshmemi_init_thread LOCAL, so it is not available through dlsym/ctypes; nvshmemx_hostlib_init_attr is exported but is not the complete device initialization used by the TVM runtime.",
+    "disco_default_device": "Setting a Disco worker default_device cannot help because InitNVSHMEM calls cudaSetDevice(worker_id) before consulting default_device and later requires default_device to equal mype_node.",
+    "registered_tvm_functions": "The pinned TVM runtime registers only init_nvshmem_uid, init_nvshmem, and init_nvshmem_wrapper for this lifecycle; both full-init entry points call the same rank-coupled implementation.",
+    "worker_id_start": "worker_id_start cannot carry a physical device ordinal because the same value is passed to nvshmemx_set_attr_uniqueid_args as myrank; for one rank, physical index 2 would produce invalid myrank=2,nranks=1. After initialization, cudaSetDevice(mype_node) would still select 0."
+  },
   "fixed_conditions": {
     "cooldown_s": 1.0,
     "multi_gpu_runtime_validation": "exempted_by_human_unmeasured",
@@ -92,6 +99,23 @@
       "sha256": "2a3f0d2956c171a994f8f302974d0859fd0401979bb1b6c2f5c276396b4be973",
       "tir_commit": "ea0950ab"
     },
+    "external_nvshmem_headers": [
+      {
+        "availability": "host_local_runtime_layout",
+        "path": "/tmp/tirx-nvshmem-layout.DlC1C7/include/host/nvshmemx_api.h",
+        "sha256": "23452c214b04f112a83e514bad20a8acb8ececb69f51c5a2dd285a9afe9b35e4"
+      },
+      {
+        "availability": "host_local_runtime_layout",
+        "path": "/tmp/tirx-nvshmem-layout.DlC1C7/include/bootstrap_device_host/nvshmem_uniqueid.h",
+        "sha256": "7649f530e830c8e5823749e3c5803bd2f7f84f7108b4b5b938ed66d1e2fcc176"
+      },
+      {
+        "availability": "host_local_runtime_layout",
+        "path": "/tmp/tirx-nvshmem-layout.DlC1C7/include/device_host/nvshmem_types.h",
+        "sha256": "be193ef44cc527f55ecff88bc85aad876c33ab5d93bd061a67832d74e957fb26"
+      }
+    ],
     "workloads": {
       "path": "bench_pipeline_ac10_kineto_workload.yaml",
       "sha256": "010a2b7b00b352c1ed48713c82b91b0c50246901068b53189451abe48643b759"

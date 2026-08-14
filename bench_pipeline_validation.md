@@ -497,6 +497,11 @@ Kineto's explicit missing record is
 successful migration-before sources, both pipeline failure attempts, and the
 host-local pinned TVM source that couples rank 0 to CUDA device 0. It contains no
 wall-speedup, residual, latency percentile, or expected-wall value.
+The same record preserves the second API audit: no registered TVM full-init
+entry point separates PE rank from device ordinal; `worker_id_start` is also
+`myrank`; `mype_node` restores device 0; and NVSHMEM's public full-init wrapper is
+header-inline over a non-exported implementation symbol. The exported hostlib
+initializer is not the complete device initialization required by these kernels.
 
 The earlier GPU-1 pair remains in `evidence-attempt-1.json` because it exposed two
 cost-model defects rather than passing them silently. It is not the Proton
