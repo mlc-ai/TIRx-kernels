@@ -16,6 +16,14 @@ tools/cpusim/examples/bench_gen/
 /.bench-suite/
 /.tir-bench/
 /bench_pipeline_ac10_artifacts/**/suite/cache/
+/bench_pipeline_suite_speedup_106_artifacts/**/cold-cache/
+/bench_pipeline_suite_speedup_106_artifacts/**/workspace/
+/bench_pipeline_suite_speedup_106_artifacts/**/suite/cache/
+/bench_pipeline_suite_speedup_106_artifacts/**/suite/latest.json
+/bench_pipeline_suite_speedup_106_artifacts/**/suite/latest.log
+/bench_pipeline_suite_speedup_106_artifacts/**/suite/logs/
+/bench_pipeline_suite_speedup_106_artifacts/**/suite/reports/
+/bench_pipeline_suite_speedup_106_artifacts/**/suite/runs/*.log
 
 # /file-bug skill backlog — transient per-machine bug folders
 /bugs/
