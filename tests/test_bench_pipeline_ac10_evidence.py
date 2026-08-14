@@ -48,26 +48,46 @@ def _write_outer(path: Path, *, uuid: str, command_wall_ns: int) -> None:
     )
 
 
-def _record(*, pipeline: bool) -> dict:
+def _record(*, pipeline: bool, timer: str = "proton") -> dict:
+    if timer == "megamoe":
+        samples = {
+            "tirx": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "deepgemm": [2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+        protocol = {
+            "rounds": 5,
+            "round_cooldown_s": 1.0,
+            "round_aggregate": "mean",
+            "round_orders": [
+                ["tirx", "deepgemm"] if round_index % 2 == 0 else ["deepgemm", "tirx"]
+                for round_index in range(5)
+            ],
+        }
+    else:
+        samples = {"tir": [1.0, 2.0, 3.0, 4.0, 5.0]}
+        protocol = {
+            "rounds": 5,
+            "cooldown_s": 1.0,
+            "round_aggregate": "mean",
+            "order": ["tir"],
+        }
     record = {
         "kernel": "kernel",
         "config": "config",
         "label": "config",
         "status": "ok",
         "errors": {},
-        "timer": "proton",
+        "timer": timer,
         "num_gpus": 1,
         "gpus": ["1"],
         "attempt": 1,
-        "benchmark_protocol": {
-            "rounds": 5,
-            "cooldown_s": 1.0,
-            "round_aggregate": "mean",
-            "order": ["tir"],
-        },
+        "benchmark_protocol": protocol,
         "aggregated": {"rounds": 5, "method": "mean"},
-        "impls": {"tir": 3.0},
-        "round_samples": {"tir": [1.0, 2.0, 3.0, 4.0, 5.0]},
+        "impls": {
+            implementation: statistics.fmean(values)
+            for implementation, values in samples.items()
+        },
+        "round_samples": samples,
     }
     if pipeline:
         record.update(
@@ -78,12 +98,12 @@ def _record(*, pipeline: bool) -> dict:
     return record
 
 
-def _write_run(path: Path, *, pipeline: bool) -> None:
+def _write_run(path: Path, *, pipeline: bool, timer: str = "proton") -> None:
     run = {
         "git": {"tir": "tir-sha", "tirx-kernels": "after" if pipeline else "before"},
         "baselines": {"torch": {"version": "test"}},
         "kernel_tree": {"tirx-kernels:tirx_kernels": "tree"},
-        "results": [_record(pipeline=pipeline)],
+        "results": [_record(pipeline=pipeline, timer=timer)],
     }
     if pipeline:
         run["pipeline"] = {
@@ -121,12 +141,12 @@ def _write_run(path: Path, *, pipeline: bool) -> None:
     path.write_text(json.dumps(run))
 
 
-def _command(repo_root: Path, tmp_path: Path) -> list[str]:
+def _command(repo_root: Path, tmp_path: Path, *, timer_family: str = "proton") -> list[str]:
     return [
         sys.executable,
         str(repo_root / "scripts/build_bench_pipeline_ac10_evidence.py"),
         "--timer-family",
-        "proton",
+        timer_family,
         "--workloads",
         str(tmp_path / "workloads.yaml"),
         "--before-run",
@@ -385,6 +405,32 @@ def test_ac10_evidence_builder_recomputes_complete_raw_artifacts(tmp_path: Path)
     )
     assert stdout_source["declared_path"].startswith("/unavailable/original/")
     assert Path(stdout_source["path"]).name == "before-outer-stdout.log"
+
+
+def test_ac10_evidence_builder_accepts_megamoe_alternating_round_protocol(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    (tmp_path / "workloads.yaml").write_text(
+        "defaults:\n  timer: megamoe\n"
+        "workloads:\n  - kernel: kernel\n    config: config\n"
+    )
+    _write_outer(tmp_path / "before-outer.json", uuid="GPU-test", command_wall_ns=2_000_000_000)
+    _write_outer(tmp_path / "after-outer.json", uuid="GPU-test", command_wall_ns=1_500_000_000)
+    _write_run(tmp_path / "before-run.json", pipeline=False, timer="megamoe")
+    _write_run(tmp_path / "after-run.json", pipeline=True, timer="megamoe")
+
+    completed = subprocess.run(
+        _command(repo_root, tmp_path, timer_family="megamoe"),
+        check=False,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode()
+    evidence = json.loads((tmp_path / "evidence.json").read_text())
+    assert evidence["timer_family"] == "megamoe"
+    assert evidence["before"]["results"][0]["implementation_order"] == [
+        "tirx",
+        "deepgemm",
+    ]
 
 
 def test_ac10_evidence_builder_preserves_measured_acceptance_failures(tmp_path: Path):

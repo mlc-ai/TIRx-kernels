@@ -170,8 +170,11 @@ def _validate_record(record: dict, workload: dict, path: Path, gpu_index: str) -
     protocol = record.get("benchmark_protocol")
     if not isinstance(protocol, dict):
         raise ValueError(f"{identity} has no benchmark protocol in {path}")
-    if protocol.get("rounds") != DEFAULT_ROUNDS or not math.isclose(
-        protocol.get("cooldown_s", -1), DEFAULT_COOLDOWN_S, rel_tol=0.0, abs_tol=1e-12
+    protocol_cooldown = protocol.get("cooldown_s", protocol.get("round_cooldown_s"))
+    if protocol.get("rounds") != DEFAULT_ROUNDS or not isinstance(
+        protocol_cooldown, (int, float)
+    ) or isinstance(protocol_cooldown, bool) or not math.isclose(
+        protocol_cooldown, DEFAULT_COOLDOWN_S, rel_tol=0.0, abs_tol=1e-12
     ):
         raise ValueError(f"{identity} did not use the default 5/1.0 protocol in {path}")
     if protocol.get("round_aggregate") != "mean":
@@ -186,8 +189,27 @@ def _validate_record(record: dict, workload: dict, path: Path, gpu_index: str) -
         raise ValueError(f"{identity} has incomplete implementation samples in {path}")
     if set(impls) != set(samples):
         raise ValueError(f"{identity} implementation/sample keys differ in {path}")
-    if protocol.get("order") != list(impls):
-        raise ValueError(f"{identity} implementation order differs from result order in {path}")
+    implementation_order = list(impls)
+    if "order" in protocol:
+        if protocol["order"] != implementation_order:
+            raise ValueError(
+                f"{identity} implementation order differs from result order in {path}"
+            )
+    else:
+        round_orders = protocol.get("round_orders")
+        if (
+            not isinstance(round_orders, list)
+            or len(round_orders) != DEFAULT_ROUNDS
+            or any(
+                not isinstance(order, list)
+                or len(order) != len(implementation_order)
+                or set(order) != set(implementation_order)
+                for order in round_orders
+            )
+        ):
+            raise ValueError(
+                f"{identity} has invalid per-round implementation orders in {path}"
+            )
     for implementation, values in samples.items():
         if not isinstance(values, list) or len(values) != DEFAULT_ROUNDS:
             raise ValueError(f"{identity}/{implementation} lacks five raw samples in {path}")
@@ -201,7 +223,7 @@ def _validate_record(record: dict, workload: dict, path: Path, gpu_index: str) -
         "kernel": workload["kernel"],
         "config": workload["config"],
         "timer": workload["timer"],
-        "implementation_order": list(impls),
+        "implementation_order": implementation_order,
         "impls_us": impls,
     }
 
