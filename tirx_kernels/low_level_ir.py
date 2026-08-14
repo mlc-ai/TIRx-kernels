@@ -191,22 +191,29 @@ def _module_name(package_root: Path, path: Path) -> str:
     return ".".join([package_root.name, *parts])
 
 
-def _resolve_import(module: str, imported: str | None, level: int) -> str:
+def _resolve_import(
+    module: str, imported: str | None, level: int, *, module_is_package: bool = False
+) -> str:
     if level == 0:
         return imported or ""
-    package = module.rpartition(".")[0]
+    package = module if module_is_package else module.rpartition(".")[0]
     request = "." * level + (imported or "")
     return importlib.util.resolve_name(request, package)
 
 
-def _imports_for(module: str, tree: ast.Module) -> dict[str, str]:
+def _imports_for(module: str, tree: ast.Module, *, module_is_package: bool = False) -> dict[str, str]:
     imports: dict[str, str] = {}
     for statement in tree.body:
         if isinstance(statement, ast.Import):
             for alias in statement.names:
                 imports[alias.asname or alias.name.split(".")[0]] = alias.name
         elif isinstance(statement, ast.ImportFrom):
-            base = _resolve_import(module, statement.module, statement.level)
+            base = _resolve_import(
+                module,
+                statement.module,
+                statement.level,
+                module_is_package=module_is_package,
+            )
             for alias in statement.names:
                 if alias.name == "*":
                     continue
@@ -244,7 +251,7 @@ def _load_source_modules(package_root: Path) -> dict[str, _SourceModule]:
             continue
         module = _module_name(package_root, path)
         tree = ast.parse(path.read_text(), filename=str(path))
-        imports = _imports_for(module, tree)
+        imports = _imports_for(module, tree, module_is_package=path.name == "__init__.py")
         functions = {
             statement.name: _SourceFunction(module, statement.name, statement, path)
             for statement in tree.body
@@ -280,7 +287,12 @@ def _visible_imports(function: _SourceFunction, source: _SourceModule) -> dict[s
             for alias in node.names:
                 imports[alias.asname or alias.name.split(".")[0]] = alias.name
         elif isinstance(node, ast.ImportFrom):
-            base = _resolve_import(function.module, node.module, node.level)
+            base = _resolve_import(
+                function.module,
+                node.module,
+                node.level,
+                module_is_package=source.path.name == "__init__.py",
+            )
             for alias in node.names:
                 if alias.name != "*":
                     imports[alias.asname or alias.name] = (
@@ -321,22 +333,51 @@ def _resolve_source_function(
         return None
     module, _, name = qualified.rpartition(".")
     target = modules.get(module)
-    return target.functions.get(name) if target is not None else None
+    return _source_entrypoint(target, modules, name) if target is not None else None
 
 
 def _source_entrypoint(
-    source: _SourceModule, modules: Mapping[str, _SourceModule], name: str
+    source: _SourceModule,
+    modules: Mapping[str, _SourceModule],
+    name: str,
+    seen: frozenset[tuple[str, str]] = frozenset(),
 ) -> _SourceFunction | None:
-    """Resolve a public function defined locally or explicitly re-exported."""
+    """Resolve a function defined locally or through an unambiguous re-export chain."""
+    key = (source.name, name)
+    if key in seen:
+        return None
+    seen = seen | {key}
     local = source.functions.get(name)
     if local is not None:
         return local
     qualified = source.imports.get(name)
-    if not qualified or "." not in qualified:
-        return None
-    module, _, imported_name = qualified.rpartition(".")
-    target = modules.get(module)
-    return target.functions.get(imported_name) if target is not None else None
+    if qualified and "." in qualified:
+        module, _, imported_name = qualified.rpartition(".")
+        target = modules.get(module)
+        if target is not None:
+            resolved = _source_entrypoint(target, modules, imported_name, seen)
+            if resolved is not None:
+                return resolved
+
+    candidates: set[_SourceFunction] = set()
+    for statement in source.tree.body:
+        if not isinstance(statement, ast.ImportFrom):
+            continue
+        if not any(alias.name == "*" for alias in statement.names):
+            continue
+        module = _resolve_import(
+            source.name,
+            statement.module,
+            statement.level,
+            module_is_package=source.path.name == "__init__.py",
+        )
+        target = modules.get(module)
+        if target is None:
+            continue
+        resolved = _source_entrypoint(target, modules, name, seen)
+        if resolved is not None:
+            candidates.add(resolved)
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
 def _decorator_origin(

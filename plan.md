@@ -139,11 +139,14 @@ upstream #27 在两个短 s1024 B200 形状上报告该 barrier 为 `0.23–0.32
 builder-contract 检查器同时支持显式 re-export 的 canonical entrypoint。最小、
 最大 block-M、生产 g1、4-rank，以及 `fast_math=0 + collect_stats=True` 五个
 代表性变体的 pre/post `tvm.ir.save_json()` SHA256 均逐项相等。最终 CPU 验证为
-39 tests passed、519-row/48-kernel import check passed、registry strict passed。
+41 tests passed、519-row/48-kernel import check passed、registry strict passed；从
+`1097cce` baseline 机械导出的 38 个 kernel 身份（含 MegaMoE rename 映射）通过
+38/38 builder-only contract。当前新增的 12 个 upstream parser kernel 不在本
+goal 范围内。
 
 这些结构等价证据不改变性能 oracle：验收仍只针对 rebase 前指纹成立，不扩展到
 最终 rebase 后 source SHA256
-`6003d7c46eda7cbcaca5e8f1b6dd6780420eddd63db2272868304f5fb7e49808`。
+`193fe8b3c637b267a8151995195166eba98037dda15b134d3ddcffc3ddf66af3`。
 
 ### Historical restart-2 evidence and superseded diagnostics
 

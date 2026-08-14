@@ -133,6 +133,60 @@ KERNEL_META = {"name": "fixture", "category": "fixture", "compute_capability": 1
     assert report.builder_functions == ("contract_fixture.builder.get_kernel",)
 
 
+def test_builder_contract_accepts_builder_through_star_reexport(tmp_path):
+    files = {
+        "builder": """
+def get_kernel():
+    from tvm.script.ir_builder import IRBuilder
+    with IRBuilder() as builder:
+        pass
+    return builder.get()
+""",
+        "bridge": """
+from contract_fixture.builder import *
+""",
+        "kernel": """
+from contract_fixture.bridge import get_kernel as get_kernel
+
+KERNEL_META = {"name": "fixture", "category": "fixture", "compute_capability": 10}
+""",
+    }
+    with _load_package(tmp_path, files) as (package, modules):
+        report = inspect_registry_builder_contract(
+            {"fixture": modules["kernel"]}, package_root=package
+        )
+
+    assert report.ok, report.summary()
+    assert report.builder_functions == ("contract_fixture.builder.get_kernel",)
+
+
+def test_builder_contract_accepts_builder_through_package_star_reexport(tmp_path):
+    files = {
+        "__init__": """
+from .builder import *
+""",
+        "builder": """
+def get_kernel():
+    from tvm.script.ir_builder import IRBuilder
+    with IRBuilder() as builder:
+        pass
+    return builder.get()
+""",
+        "kernel": """
+from contract_fixture import get_kernel as get_kernel
+
+KERNEL_META = {"name": "fixture", "category": "fixture", "compute_capability": 10}
+""",
+    }
+    with _load_package(tmp_path, files) as (package, modules):
+        report = inspect_registry_builder_contract(
+            {"fixture": modules["kernel"]}, package_root=package
+        )
+
+    assert report.ok, report.summary()
+    assert report.builder_functions == ("contract_fixture.builder.get_kernel",)
+
+
 def test_builder_contract_rejects_reexported_parser_entrypoint(tmp_path):
     files = {
         "parser": """
