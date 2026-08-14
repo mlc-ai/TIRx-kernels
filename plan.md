@@ -164,6 +164,8 @@ CPU prepare 只应通过首个 READY 延迟进入关键路径；首个 GPU stage
 
 与 Upper Bound 收敛：通用两阶段 primitive、同进程 prepared child、精确目标 module 解析、单卡/原子多卡晚绑定、distributed rank prepared lifecycle、动态 READY scheduler 和 timeline 全部落地；静态 capability gate 证明所有 benchable workload 均为 pipeline-only；所有超过 3 个 default config 的 kernel 已完成小/中/大三点审查和 YAML flag 收敛；targeted 单卡和各可单卡运行的 timer 家族 A/B 满足 AC-1 至 AC-11。多卡代码仍须完整迁移，但 runtime 实测按人要求豁免，并以 `exempted_by_human_unmeasured` 单列；只提交 assignment mismatch、原子 claim、rank lifecycle 等不占多卡的结构性证据。任一 workload 仍保留 GPU-held CPU prepare、one-stage fallback、默认超过 3 个 config，或未选 config 失去显式 benchmark 能力，都不满足最低范围。
 
+2026-08-14 的最终人类范围裁决覆盖上一段中“各 timer 家族 A/B 全部完成”的通用要求：不再补跑 Event、CUDA-graph、Kineto 或 MegaMoE。现有 Proton pass、Event/CUDA-graph measured-without-win、Kineto missing、MegaMoE unmeasured 和多卡 `exempted_by_human_unmeasured` 必须原样保留，但都不再是实施完成的待办项；不得把这一 scope closure 误写成 pass。
+
 ### Allowed Choices
 
 - Can use:
@@ -346,7 +348,9 @@ child 负责：
 
 ### Convergence Status
 
-- Final Status: `implementation_blocked_acceptance_incomplete`
+- Final Status: `implementation_complete_with_explicit_terminal_evidence_states`
+- Tasks 1-7 are complete within the final human-directed scope: the two-stage implementation, all-config migration, one-shot scheduler, late set-device binding, same-claim retry, resource/cost telemetry, 109-default curation, structural multi-GPU evidence, targeted single-GPU evidence, and the supplemental 106-workload A/B are all persisted and independently checked.
+- AC-5 and AC-10 retain honest terminal evidence qualifications for pinned-TVM Kineto and unmeasured MegaMoE/multi-GPU runtime. These are neither passes nor active blockers after the 2026-08-14 scope decision.
 - FlashInfer correction: earlier MegaMoE device-0 matches are function-local CLI/benchmark/debug paths in a subpackage absent from this repository's import/call graph, so they are not blockers under the reachability criterion.
 - The reachable DeepGEMM MegaMoE override was latent under the former mask implementation: logical device 0 was the assigned card. The all-visible implementation now preserves `init_dist()` and its process group, then restores the assigned physical device and revalidates its UUID before allocation and timing.
 - The base interpreter's `deep_gemm` package fails earlier because it lacks `fp8_fp4_mega_moe`; the locked benchmark environment resolves a compatible package from `venv-bench-sglang96a04cb-nccl4py031-cublasmp010`. Evidence for the intended dependency's device override comes from the out-of-tree pinned copy at `/home/hongyij/workspace/tirx-kernels/.porting/deps/deep_gemm-559d79fb/deep_gemm/utils/dist.py:33`, which calls `torch.cuda.set_device(local_rank)`.
@@ -357,15 +361,16 @@ child 负责：
 - A second call-site audit found no existing repository-usable full-init alternative: `worker_id_start` is also the NVSHMEM PE rank and cannot carry physical index 2 for `nranks=1`; `mype_node` resets the device to 0 after init; Disco `default_device` is checked only after both device selections; and the official `nvshmemx_init_attr` full init is header-inline over a LOCAL/non-`dlsym` `nvshmemi_init_thread`, while the exported `nvshmemx_hostlib_init_attr` is not full device initialization. Reimplementing or binary-wrapping that ABI would be a new external workaround, not correct use of an existing API.
 - A third dependency audit searched every local TVM ref, the complete file history, all registered worktrees, and other workspace/TIR checkouts. Only the detached `ea0950ab` worktree exists, and no existing revision or alternative checkout separates NVSHMEM PE rank from physical device ordinal. Switching to an already-available fixed dependency is therefore not possible.
 
-## Pending Human Decision
+## Pending Human Decisions
 
-- Decide whether to authorize an external pinned-TVM change that separates NVSHMEM PE/rank from the physical CUDA device ordinal. Until then, do not weaken the UUID/context guard, monkey-patch the TVM function, reintroduce masking, or classify Kineto runtime as passed.
+- None. The pinned-TVM authorization request was withdrawn when the remaining timer-family GPU runs were removed from required scope. The implementation must still not weaken the UUID/context guard, monkey-patch TVM, reintroduce masking, or classify Kineto runtime as passed.
 
 ## Resolved Human Decisions
 
 - FlashInfer 的不可达命中不构成阻塞；DeepGEMM 的可达设备覆盖在本仓库调用点恢复并验证 assigned physical device。
 - 原地 retry 与普通测量同类使用，可进入 clean AC-10，不需要逐次批准；artifact 必须逐 record 标记 `retry_in_place`，用于未来按同 config 事后验证冷热进程差异假设。
 - 多卡代码完成统一生命周期迁移，但 runtime 实测保持 `exempted_by_human_unmeasured`；只保留不占多卡的结构性证据。
+- 剩余 Event/CUDA-graph/Kineto/MegaMoE GPU 补测不再要求；已有 pass/measured/missing/unmeasured 状态保持诚实，pinned TVM 修改授权请求作废。
 
 ## Implementation Notes
 

@@ -594,12 +594,12 @@ is generated in `.bench-suite/reports/pipeline-capability.md`.
 | AC-2 | satisfied for implementation and single-GPU targeted evidence | ASSIGN uses physical indices with `set_device`, exact per-attempt UUID proof, position validation after reachable external calls, and rejection of never-assigned-card contexts. Multi-GPU runtime remains explicitly exempted rather than passed |
 | AC-3 | satisfied | Bounded one-shot concurrency/backlog, condition-driven dispatch, same-GPU serialization, logical multi-GPU concurrency, and dynamic eligibility tests |
 | AC-4 | satisfied | Default 5 rounds/1.0s, finalization, raw samples, timer schemas, correctness/reference work, and evidence eligibility are unchanged. Every terminal record explicitly marks `retry_in_place` |
-| AC-5 | incomplete for Kineto runtime; satisfied for local retry and structural rank lifecycle | Same-child retry preserves prepared CPU state, rebuilds GPU state, and records exact attempt ownership. The pinned TVM NVSHMEM rank/device coupling creates an unassigned GPU-0 context and prevents the one-rank Kineto path from completing NVSHMEM/process-group cleanup; multi-rank runtime remains separately exempted |
+| AC-5 | implementation and in-scope structural evidence satisfied; Kineto runtime remains terminal missing | Same-child retry preserves prepared CPU state, rebuilds GPU state, and records exact attempt ownership. The pinned TVM NVSHMEM rank/device coupling creates an unassigned GPU-0 context and prevents the one-rank Kineto path from completing NVSHMEM/process-group cleanup; the 2026-08-14 scope decision removed that runtime collection from pending work without converting it to pass, and multi-rank runtime remains separately exempted |
 | AC-6 | satisfied | Bounded process/RSS/FD evidence, cancellation cleanup, immediate internal release, and resource accounting tests |
 | AC-7 | satisfied | Cost-model schema 3 separates initial CPU READY constraints, retry READY delay, ASSIGN-held card time, post-GPU_START execution, transient foreign-PID wait, and internal dispatch latency; complete-timeline/no-data gating remains intact. The clean Proton run measured 0.047s unexplained residual and 42.8ms internal dispatch p95 |
 | AC-8 | satisfied | Canonical `KERNEL_META` exact-load index, runtime metadata validation, duplicate rejection, cache invalidation, and all-config resolution gate |
 | AC-9 | satisfied for migration and structural coverage | 41/41 adapters and 992/992 configs pass the pipeline-only gate; one-stage execution is removed; multi-GPU runtime remains separately exempted |
-| AC-10 | incomplete, terminal by human scope decision | Proton has a passing persisted same-UUID schema-3 A/B. Event and CUDA-graph retain their honest non-winning measurements. Kineto remains explicitly missing because of the pinned external TVM rank/device coupling and MegaMoE remains unmeasured; the human decision of 2026-08-14 removed all remaining timer-family GPU runs from the required work queue without converting missing evidence into pass |
+| AC-10 | terminal evidence ledger closed by human scope decision | Proton has a passing persisted same-UUID schema-3 A/B. Event and CUDA-graph retain their honest non-winning measurements. Kineto remains explicitly missing because of the pinned external TVM rank/device coupling and MegaMoE remains unmeasured; the human decision of 2026-08-14 removed all remaining timer-family GPU runs from the required work queue without converting missing evidence into pass |
 | AC-11 | satisfied | 109 defaults, all 992 configs retained, and 32/32 reviewed three-point selections with YAML-owned small/medium/large roles and rationale; all 16 `gemm_reduce_scatter` configs remain explicitly runnable |
 
 The set-device and same-child retry implementation is complete at its structural
@@ -608,6 +608,34 @@ CUDA-graph retain the statuses stated above; no remaining timer family is a
 required completion item. Kineto and MegaMoE stay missing/unmeasured rather than
 being rewritten as pass, and multi-GPU runtime rows remain the explicit
 human-directed exemption.
+
+### Completion audit
+
+The final in-scope implementation is complete. This conclusion is based on the
+current tracked sources and independently executable gates, not on the absence
+of open notes:
+
+- `audit_pipeline_capabilities()` reports `static_pass`, `execution_mode:
+  pipeline`, 41 kernels, 992 module configs, 992 YAML configs, 109 defaults, 32
+  curated three-point selections, and 27 multi-GPU rows explicitly classified
+  `exempted_by_human_unmeasured`;
+- all 106 collected protocol/evidence tests pass, including lifecycle,
+  assignment/UUID, no-CUDA prepare, strict cache consumption, all-config
+  migration, measurement schema, cost-model no-data gating, raw artifact hash
+  verification, and suite A/B recomputation;
+- the license-header gate and its self-test pass, and the GDN no-tile structural
+  lint passes for the source plus all 42 pre-dispatch specializations;
+- repository searches find no legacy/fallback execution mode, reusable prepare
+  pool, process pool, or compilation thread pool. The only
+  `ThreadPoolExecutor` probes independent candidate GPUs in short-lived
+  subprocesses before workload preparation; it does not specialize or compile
+  workloads in the orchestrator interpreter;
+- default rounds/cooldown remain owned once by `runner.py` as 5 and 1.0s, and
+  every numeric evidence publisher reopens and hashes its raw sources.
+
+The pinned-TVM Kineto failure, unmeasured MegaMoE/multi-GPU runtime, and old
+invalidated measurements remain explicit terminal evidence states. They are not
+passes, but the 2026-08-14 human scope decision removed them from pending work.
 
 ## AC-external full-suite speedup supplement
 
@@ -764,7 +792,7 @@ is device/rank work. Full derivation and source hashes are in
   handshake and explicit per-record provenance, while remaining ordinary
   measurement evidence under the human ruling.
 
-## Remaining evidence boundary
+## Terminal evidence boundary
 
 - The implementation, static all-config migration gate, no-card structural
   tests, CPU-only prepare evidence, set-device binding, and same-child retry
