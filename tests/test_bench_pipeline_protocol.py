@@ -484,6 +484,24 @@ def test_external_busy_to_eligible_poll_dispatches_ready_child(monkeypatch, tmp_
     assert bench_run._BenchPidRegistry._roots == set()
 
 
+def test_gpu_pool_rejects_unattributed_physical_vram(monkeypatch):
+    pool = GpuPool(allowed={"0", "1"}, util_threshold=0.0, mem_threshold=0.0)
+
+    def fake_nvidia_smi(args):
+        if args == ["--query-gpu=index,utilization.gpu"]:
+            return ["0, 0", "1, 0"]
+        if args == ["--query-gpu=index,memory.used,memory.total"]:
+            return ["0, 110, 183359", "1, 115737, 183359"]
+        raise AssertionError(args)
+
+    monkeypatch.setattr(pool, "_nvidia_smi", fake_nvidia_smi)
+
+    assert pool._mem_used_pct()["0"] == 0.0
+    assert pool._mem_used_pct()["1"] > 0.0
+    assert pool._busy_indices() == {"1"}
+    assert pool._occupied_indices() == {"1"}
+
+
 def test_interference_retry_reuses_prepared_child_and_releases_claim_after_ack(
     monkeypatch, tmp_path: Path
 ):

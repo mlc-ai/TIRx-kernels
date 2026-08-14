@@ -84,7 +84,8 @@ DEFAULT_REGRESSION_THRESHOLD = 1.0
 POLL_INTERVAL = 5.0  # seconds between GPU re-checks when none is free
 MONITOR_INTERVAL = 0.5  # seconds between nvidia-smi polls during a workload
 DEFAULT_UTIL_THRESHOLD = 0.0  # % GPU util above which a card counts as busy.
-DEFAULT_MEM_THRESHOLD = 0.0  # % compute-app memory above which a card counts as busy.
+DEFAULT_MEM_THRESHOLD = 0.0  # % physical memory above the idle floor that counts as busy.
+IDLE_GPU_MEMORY_FLOOR_MIB = 512.0
 
 
 # Tiny real workload used to decide whether a GPU is actually usable.
@@ -970,12 +971,8 @@ class GpuPool:
         return result
 
     def _busy_indices(self) -> set[str]:
-        """GPU indices with at least one compute-app PID (anyone's). Kept for
-        the informational startup banner only — selection uses _occupied_indices
-        (utilization), since a PID may just be parking idle VRAM."""
-        rows = self._nvidia_smi(["--query-compute-apps=gpu_uuid"])
-        busy_uuids = {row for row in rows if row}
-        return {idx for idx, uuid in self._all_gpus() if uuid in busy_uuids}
+        """GPU indices with physical VRAM above the idle-driver allowance."""
+        return {idx for idx, used_pct in self._mem_used_pct().items() if used_pct > 0.0}
 
     def _utils(self) -> dict[str, float]:
         """Map GPU index -> current utilization.gpu (percent)."""
@@ -991,34 +988,18 @@ class GpuPool:
         return out
 
     def _mem_used_pct(self) -> dict[str, float]:
-        """Map GPU index -> compute-app used_memory / memory.total (percent)."""
-        gpus = self._nvidia_smi(["--query-gpu=index,uuid,memory.total"])
-        uuid_to_idx: dict[str, str] = {}
-        total_by_idx: dict[str, float] = {}
-        for line in gpus:
+        """Map GPU index -> physical VRAM above the idle floor / total (percent)."""
+        rows = self._nvidia_smi(["--query-gpu=index,memory.used,memory.total"])
+        out: dict[str, float] = {}
+        for line in rows:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 3:
                 try:
-                    uuid_to_idx[parts[1]] = parts[0]
-                    total_by_idx[parts[0]] = float(parts[2])
+                    used = max(0.0, float(parts[1]) - IDLE_GPU_MEMORY_FLOOR_MIB)
+                    total = float(parts[2])
+                    out[parts[0]] = 100.0 * used / total if total > 0 else 0.0
                 except ValueError:
                     pass
-        used_by_idx: dict[str, float] = {idx: 0.0 for idx in total_by_idx}
-        rows = self._nvidia_smi(["--query-compute-apps=gpu_uuid,used_memory"])
-        for line in rows:
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 2:
-                idx = uuid_to_idx.get(parts[0])
-                if idx is None:
-                    continue
-                try:
-                    used_by_idx[idx] += float(parts[1])
-                except ValueError:
-                    pass
-        out: dict[str, float] = {}
-        for idx, used in used_by_idx.items():
-            total = total_by_idx.get(idx, 0.0)
-            out[idx] = 100.0 * used / total if total > 0 else 0.0
         return out
 
     def _occupied_indices(self) -> set[str]:
