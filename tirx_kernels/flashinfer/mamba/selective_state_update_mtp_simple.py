@@ -1364,9 +1364,10 @@ def _selective_state_update_mtp_simple(
 
 
 def _num_sms(device: str | torch.device = "cuda") -> int:
-    if torch.cuda.is_available():
-        return torch.cuda.get_device_properties(device).multi_processor_count
-    return 148
+    del device
+    from tirx_kernels.runner import hardware_num_sms
+
+    return hardware_num_sms()
 
 
 def _specialization(config: dict[str, Any]) -> dict[str, Any]:

@@ -1374,6 +1374,38 @@ def test_cuda_initialization_guard_rejects_existing_driver_context(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("module_name", "label"),
+    [
+        (
+            "tirx_kernels.flashinfer.mamba.selective_state_update_mtp_simple",
+            "b1_h64_d64_s128_t6_r8_statebf16_official",
+        ),
+        (
+            "tirx_kernels.flashinfer.mamba.selective_state_update_stp_simple",
+            "b64_h64_d64_s128_r8_base",
+        ),
+    ],
+)
+def test_selective_state_specialization_uses_offline_sm_profile(
+    monkeypatch, module_name: str, label: str
+):
+    module = importlib.import_module(module_name)
+    config = next(config for config in module.BENCH_CONFIGS if config["label"] == label)
+    params = {key: value for key, value in config.items() if key != "label"}
+    monkeypatch.setenv("TIRX_PREPARE_NUM_SMS", "148")
+    monkeypatch.setattr(module.torch.cuda, "is_initialized", lambda: False)
+    monkeypatch.setattr(
+        module.torch.cuda,
+        "get_device_properties",
+        lambda *_args, **_kwargs: pytest.fail(
+            "CPU specialization must not query an unassigned CUDA device"
+        ),
+    )
+
+    assert module.get_kernel(**params) is not None
+
+
+@pytest.mark.parametrize(
     "missing_field", ["round_samples", "errors", "timer", "benchmark_protocol"]
 )
 def test_finalize_rejects_incomplete_measurement_schema(missing_field):
