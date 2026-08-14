@@ -44,7 +44,6 @@ from typing import Any, ClassVar
 
 import yaml
 
-from tirx_kernels._prepare_toolchain import pin_prepare_cuda_toolchain
 from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S as DEFAULT_COOLDOWN_S
 from tirx_kernels.runner import DEFAULT_BENCH_ROUNDS as DEFAULT_ROUNDS
 from tirx_kernels.runner import (
@@ -844,7 +843,6 @@ def _spawn_prepared_attempt(
     env[TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV] = "1"
     env[PREPARE_CUDA_ARCH_ENV] = str(compile_profile["cuda_arch"])
     env[PREPARE_NUM_SMS_ENV] = str(compile_profile["num_sms"])
-    pin_prepare_cuda_toolchain(env)
     repo_root = str(_kernels_repo_root())
     python_path = env.get("PYTHONPATH")
     env["PYTHONPATH"] = repo_root if not python_path else f"{repo_root}{os.pathsep}{python_path}"

@@ -7,14 +7,11 @@ import fcntl
 import hashlib
 import json
 import os
-import time
 from enum import IntEnum
-from functools import cache
 from pathlib import Path
 
 import tvm
-from tirx_kernels._prepare_toolchain import PREPARE_CUDA_ARCH_ENV
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as T
@@ -70,16 +67,14 @@ def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
 
 
 _CUBLASLT_EXT = None
-_CUBLASLT_EXT_CACHE_NAMESPACE = "basic.nvfp4_gemm.cublaslt_extension"
 
 
-def _cublaslt_ext_key(config: tuple[int, int, int]) -> str:
-    del config
-    return "nvfp4_cublaslt_baseline_ext"
+def _load_cublaslt_nvfp4_ext():
+    """Build and load the shape-independent cuBLASLt reference before READY."""
+    global _CUBLASLT_EXT
+    if _CUBLASLT_EXT is not None:
+        return _CUBLASLT_EXT
 
-
-def _build_cublaslt_nvfp4_ext():
-    """Build the shape-independent extension without loading it into this process."""
     from torch.utils import cpp_extension
 
     source = r"""
@@ -243,11 +238,6 @@ void nvfp4_cublaslt(torch::Tensor A, torch::Tensor B, torch::Tensor A_scale,
       stream));
 }
 """
-    source += r"""
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("nvfp4_cublaslt", torch::wrap_pybind_function(nvfp4_cublaslt), "nvfp4_cublaslt");
-}
-"""
     extra_include_paths = []
     extra_ldflags = ["-lcublas", "-lcublasLt"]
     if cpp_extension.CUDA_HOME:
@@ -255,100 +245,33 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         extra_ldflags.insert(0, f"-L{cpp_extension.CUDA_HOME}/lib64")
 
     name = "nvfp4_cublaslt_baseline_ext"
-    build_directory = cpp_extension._get_build_directory(name, verbose=False)
-    source_path = os.path.join(build_directory, "main.cpp")
-    cpp_extension._maybe_write(source_path, source)
-    sources = [source_path]
-    extra_cflags = ["-O3"]
-    extra_cuda_cflags = []
-    if prepare_arch := os.environ.get(PREPARE_CUDA_ARCH_ENV):
-        arch_suffix = prepare_arch.removeprefix("sm_")
-        extra_cuda_cflags.append(f"-gencode=arch=compute_{arch_suffix},code=sm_{arch_suffix}")
-    old_version = cpp_extension.JIT_EXTENSION_VERSIONER.get_version(name)
-    version = cpp_extension.JIT_EXTENSION_VERSIONER.bump_version_if_changed(
-        name,
-        sources,
-        build_arguments=[extra_cflags, extra_cuda_cflags, extra_ldflags, extra_include_paths],
-        build_directory=build_directory,
-        with_cuda=True,
-        with_sycl=False,
-        is_python_module=True,
-        is_standalone=False,
-    )
-    module_name = name if version == 0 else f"{name}_v{version}"
-    lock_fd = os.open(os.path.join(build_directory, "lock.flock"), os.O_CREAT | os.O_RDWR, 0o644)
-    deadline = time.monotonic() + 600.0
+    build_directory = Path(cpp_extension._get_build_directory(name, verbose=False))
+    lock_fd = os.open(build_directory / "lock.flock", os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        while True:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"timed out waiting for NVFP4 extension build lock: {build_directory}"
-                    ) from None
-                time.sleep(0.1)
-        library_path = Path(cpp_extension._get_exec_path(module_name, build_directory))
-        if version != old_version or not library_path.is_file():
-            cpp_extension._write_ninja_file_and_build_library(
-                name=module_name,
-                sources=sources,
-                extra_cflags=extra_cflags,
-                extra_cuda_cflags=extra_cuda_cflags,
-                extra_sycl_cflags=[],
-                extra_ldflags=extra_ldflags,
-                extra_include_paths=extra_include_paths,
-                build_directory=build_directory,
-                verbose=False,
-                with_cuda=True,
-                with_sycl=False,
-                is_standalone=False,
-            )
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # PyTorch's FileBaton is not process-death-safe. The outer flock proves
+        # no suite process is building here, so a remaining baton is stale.
+        (build_directory / "lock").unlink(missing_ok=True)
+        extra_cuda_cflags = []
+        if prepare_arch := os.environ.get(PREPARE_CUDA_ARCH_ENV):
+            arch = prepare_arch.removeprefix("sm_")
+            extra_cuda_cflags.append(f"-gencode=arch=compute_{arch},code=sm_{arch}")
+        _CUBLASLT_EXT = cpp_extension.load_inline(
+            name=name,
+            cpp_sources=[source],
+            functions=["nvfp4_cublaslt"],
+            with_cuda=True,
+            extra_include_paths=extra_include_paths,
+            extra_cflags=["-O3"],
+            extra_cuda_cflags=extra_cuda_cflags,
+            extra_ldflags=extra_ldflags,
+            build_directory=str(build_directory),
+            verbose=False,
+        )
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
-    return module_name, build_directory
-
-
-def _cublaslt_ext_artifact(config: tuple[int, int, int]):
-    """Build or reuse the device-independent extension artifact."""
-    del config
-    return _build_cublaslt_nvfp4_ext()
-
-
-def _load_cublaslt_nvfp4_ext(config: tuple[int, int, int], artifact=None):
-    """Load the READY-time build artifact after the process owns its GPU."""
-    global _CUBLASLT_EXT
-    if _CUBLASLT_EXT is None:
-        from torch.utils import cpp_extension
-
-        if artifact is None:
-            artifact = _cublaslt_ext_artifact(config)
-        module_name, build_directory = artifact
-        _CUBLASLT_EXT = cpp_extension._import_module_from_library(
-            module_name, build_directory, is_python_module=True
-        )
     return _CUBLASLT_EXT
-
-
-def _cublaslt_reference(
-    config: tuple[int, int, int],
-    A_fp4,
-    B_fp4,
-    A_sf,
-    B_sf,
-    alpha_value: float,
-    out_tir,
-    *,
-    artifact=None,
-):
-    import torch
-
-    M, N, K = config
-    ext = _load_cublaslt_nvfp4_ext(config, artifact)
-    out_cublaslt = torch.empty_like(out_tir)
-    return lambda: ext.nvfp4_cublaslt(A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K)
 
 
 def _mapa_u64(ptr, rank):
@@ -1087,7 +1010,6 @@ def get_kernel(M, N, K):
     return tir_ws_kernel(M, N, K)
 
 
-@cache
 def _compile_executable(M: int, N: int, K: int):
     from tirx_kernels.runner import compile_kernel
 
@@ -1193,11 +1115,10 @@ def prepare_bench(M=1024, N=1024, K=1024, **kwargs):
     """Compile TIRx and the device-independent cuBLASLt extension before READY."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
-    config = (M, N, K)
     state = {
         "config": {"M": M, "N": N, "K": K, **kwargs},
         "executable": _compile_executable(M, N, K),
-        "cublaslt_extension": _cublaslt_ext_artifact(config),
+        "cublaslt_extension": _load_cublaslt_nvfp4_ext(),
     }
     return prepared_gpu_benchmark(run_gpu, state)
 
@@ -1303,6 +1224,13 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
         )
         return run
 
+    def _cublaslt():
+        ext = prepared["cublaslt_extension"]
+        out_cublaslt = torch.empty_like(out_tir)
+        return lambda: ext.nvfp4_cublaslt(
+            A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K
+        )
+
     # FlashInfer is a required reference for this benchmark. Prepare and
     # validate its tuned launch before entering bench() so a bad/missing cache
     # fails the workload instead of being downgraded to an optional baseline
@@ -1319,16 +1247,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
             timer=timer,
             references={
                 "flashinfer": lambda: flashinfer_run,
-                "cublaslt_nvfp4": lambda: _cublaslt_reference(
-                    (M, N, K),
-                    A_fp4,
-                    B_fp4,
-                    A_sf,
-                    B_sf,
-                    alpha_value,
-                    out_tir,
-                    artifact=prepared["cublaslt_extension"],
-                ),
+                "cublaslt_nvfp4": _cublaslt,
             },
             **config_kwargs,
         )

@@ -14,10 +14,6 @@ import time
 import traceback
 from unittest import SkipTest
 
-from tirx_kernels._prepare_toolchain import preload_prepare_nvrtc, validate_prepare_nvrtc_binding
-
-_PREPARE_NVRTC = preload_prepare_nvrtc()
-
 
 def _get_bench_configs(mod):
     return getattr(mod, "BENCH_CONFIGS", getattr(mod, "CONFIGS", []))
@@ -110,7 +106,6 @@ def _prepared_child_main(args, *, child_started: float) -> int:
     prepared = None
     try:
         try:
-            prepare_cuda_toolchain = validate_prepare_nvrtc_binding(_PREPARE_NVRTC)
             framework_import_started = time.time()
             from tirx_kernels.registry import load_kernel
             from tirx_kernels.runner import (
@@ -162,7 +157,6 @@ def _prepared_child_main(args, *, child_started: float) -> int:
                     "config_resolved": config_resolved,
                     "ready": ready,
                     "required_num_gpus": prepared.required_num_gpus,
-                    "prepare_cuda_toolchain": prepare_cuda_toolchain,
                 },
             )
         except BaseException as error:

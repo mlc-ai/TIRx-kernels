@@ -9,16 +9,15 @@ each flagged `default: true|false`. The files are bucketed to mirror the kernel
 tree, so a kernel's configs sit at `config/<bucket>/<kernel>.yaml`. With no
 `--workloads`, the flagged configs across all files are assembled into
 `.bench-suite/workloads.generated.yaml` and that is what runs. The generated
-file is the inspectable source of truth for the current representative sweep,
-including the TP1 AllGather+GEMM profiles. Every kernel has at most three
-default small/medium/large representatives; the current tree assembles 136
+file is the inspectable source of truth for the current representative sweep.
+Every kernel has at most three default small/medium/large representatives; the current tree assembles 133
 workloads. Widening or narrowing the sweep is a YAML `default`
 flag flip, not a scheduler rule or a second selection file. Multi-GPU configs
 are deliberately absent from the default measured sweep but remain available
 to explicit workload files.
-For each of the 41 kernels retaining three curated defaults, the same YAML
-also owns a `selection_rationale`; the capability gate requires exactly three
-single-GPU defaults and renders those rationales for review.
+For each kernel retaining three curated defaults, the same YAML also owns a
+`selection_rationale` and the config loader requires exactly one
+small/medium/large selection.
 
 ```bash
 cd /path/to/tirx-kernels
@@ -36,54 +35,26 @@ Entry point: `python -m tirx_kernels.bench_suite` (same flags as `run.py`).
 
 Every row benches our kernel **and all of its reference impls**; a reference
 that fails to build is recorded as a baseline error and **fails the workload**
-(which fail-fasts the whole sweep). The default `workloads.yaml` therefore has
-two hard host requirements beyond torch/DeepGEMM:
+(which fail-fasts the whole sweep). The host requires:
 
-- **SGLang** checkout on `PYTHONPATH` (plus its CUTLASS DSL): the fp8 paged MQA
-  rows bench the `sglang_cutedsl` reference unconditionally.
-- **NVSHMEM**: required by the `allgather_gemm` / `gemm_reduce_scatter`
-  (GemmComm) rows.
+- a CUDA 13.2-aligned Python stack, including PyTorch, `cuda-toolkit`, NVRTC,
+  and extensions rebuilt against that PyTorch ABI;
+- **SGLang** on `PYTHONPATH` (plus its CUTLASS DSL) for the fp8 paged MQA
+  reference rows.
 
-GemmComm benchmark rows additionally require absolute runtime-library locks:
+Explicit GemmComm workloads additionally require NVSHMEM and absolute
+runtime-library locks:
 `TIRX_NCCL_LIBRARY`, `TIRX_CUBLAS_LIBRARY`, `TIRX_CUBLASMP_LIBRARY`, and
 `TIRX_NVSHMEM_LIBRARY`. `NVSHMEM_HOME` points to the development installation
 used while compiling the TIRx kernels. These locks affect only the spawned
 GemmComm rank workers.
 
-`--filter` is include-only and cannot exclude rows. On a host without NVSHMEM,
-run a trimmed workload list:
-
-```bash
-grep -vE "allgather_gemm|gemm_reduce_scatter" \
-  .bench-suite/workloads.generated.yaml > /tmp/workloads_no_comm.yaml
-python -m tirx_kernels.bench_suite --workloads /tmp/workloads_no_comm.yaml
-```
-
-Pipeline capability gate (all 50 registered kernels, all module configs, all
-YAML labels, and declared GPU counts; no prepare, compile, or GPU use):
+Import-check the kernels selected by the current workload file without
+preparing, compiling, or using a GPU:
 
 ```bash
 python -m tirx_kernels.bench_suite --check-imports
 ```
-
-The command also writes `.bench-suite/reports/pipeline-capability.md`, including
-the complete multi-GPU exemption inventory and its
-`exempted_by_human_unmeasured` runtime status. This explicit audit costs several
-seconds of CPU import work, so normal timed runs do not repeat it on their
-critical path. The current inventory is 1277 module configs and 1277 YAML configs.
-The gate requires exact bidirectional inventory coverage and statically enforces
-the generic-adapter boundary: CPU prepare compiles canonical `get_kernel()` output,
-while GPU execution may only consume it through lazy replay and cannot regenerate
-or compile the PrimFunc after assignment. Eleven strict-cache adapters use the same
-contract through exact custom-cache replay.
-GPU execution must request the exact prepared namespace/key and consume every
-prepared artifact. Independently, the runner rejects any in-process
-`tvm.compile` after GPU assignment, so a cache miss cannot silently move
-compilation back onto the measured GPU critical path.
-The remaining explicit/custom adapters retain process-local executables, delegate
-to an already-audited prepared implementation, or export distributed libraries
-before assignment. Capability accounting must total 50/50 adapters: 27 generic
-lazy-replay, 11 strict-cache replay, and 12 explicit/custom adapters.
 
 ### SGLang FP8 paged MQA exploration
 
