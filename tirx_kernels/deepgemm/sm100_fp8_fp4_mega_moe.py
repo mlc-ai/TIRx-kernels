@@ -86,9 +86,6 @@ class MegaMoeCase:
     transformed_l2_weights: tuple[torch.Tensor, torch.Tensor]
     workspace_layout: DeepGemmWorkspaceLayout
     symm_buffer_layout: DeepGemmSymmBufferLayout
-    dispatch_reference: DispatchReference
-    pull_reference: PullReference | None
-    scheduler_reference: SchedulerReference | None
     cumulative_local_expert_recv_stats: torch.Tensor | None = None
 
 
@@ -222,14 +219,6 @@ class DeepGemmWorkspaceLayout:
 
 
 @dataclass(frozen=True)
-class DispatchReference:
-    expert_send_count: torch.Tensor
-    expert_recv_count: torch.Tensor
-    expert_recv_count_sum: torch.Tensor
-    src_token_topk_idx: torch.Tensor
-
-
-@dataclass(frozen=True)
 class DeepGemmSymmBufferLayout:
     workspace_bytes: int
     input_token_offset: int
@@ -243,37 +232,6 @@ class DeepGemmSymmBufferLayout:
     l2_sf_offset: int
     combine_token_offset: int
     total_bytes: int
-
-
-@dataclass(frozen=True)
-class PullReference:
-    expert_pool_block_offset: torch.Tensor
-    pool_src_rank_idx: torch.Tensor
-    pool_src_token_idx: torch.Tensor
-    pool_src_topk_idx: torch.Tensor
-    pool_src_token_topk_idx: torch.Tensor
-    l1_full_count: torch.Tensor
-
-
-@dataclass(frozen=True)
-class SchedulerBlockReference:
-    block_idx_seed: int
-    phase: str
-    local_expert_idx: int
-    num_k_blocks: int
-    m_block_idx: int
-    n_block_idx: int
-    pool_block_offset: int
-    valid_m: int
-
-
-@dataclass(frozen=True)
-class SchedulerReference:
-    expert_num_tokens: torch.Tensor
-    expert_pool_block_offset: torch.Tensor
-    blocks: tuple[SchedulerBlockReference, ...]
-    num_linear1_blocks: int
-    num_linear2_blocks: int
 
 
 @dataclass
@@ -293,10 +251,6 @@ class TirxMegaMoePrepared:
 
 def _align_up(value: int, alignment: int) -> int:
     return ((value + alignment - 1) // alignment) * alignment
-
-
-def _align_down(value: int, alignment: int) -> int:
-    return (value // alignment) * alignment
 
 
 # Mirror of deep_gemm::layout constants from
@@ -626,210 +580,6 @@ def validate_runtime_symm_buffer_layout(
         )
 
 
-def build_dispatch_reference(
-    *, topk_idx: torch.Tensor, rank_idx: int, layout: DeepGemmWorkspaceLayout
-) -> DispatchReference:
-    num_tokens, num_topk = topk_idx.shape
-    if num_topk != layout.num_topk:
-        raise ValueError("topk shape does not match workspace layout")
-
-    expert_send_count = torch.zeros(layout.num_experts, dtype=torch.int64, device=topk_idx.device)
-    expert_recv_count = torch.zeros(
-        (layout.num_ranks, layout.num_experts_per_rank), dtype=torch.int64, device=topk_idx.device
-    )
-    expert_recv_count_sum = torch.zeros(
-        layout.num_experts_per_rank, dtype=torch.int64, device=topk_idx.device
-    )
-    src_token_topk_idx = torch.full(
-        (layout.num_experts_per_rank, layout.num_ranks, layout.num_max_recv_tokens_per_expert),
-        -1,
-        dtype=torch.int32,
-        device=topk_idx.device,
-    )
-
-    for token_idx in range(num_tokens):
-        for topk_slot in range(layout.num_topk):
-            expert_idx = int(topk_idx[token_idx, topk_slot].item())
-            if expert_idx < 0:
-                continue
-            dst_rank_idx = expert_idx // layout.num_experts_per_rank
-            dst_local_expert_idx = expert_idx % layout.num_experts_per_rank
-            dst_slot_idx = int(expert_send_count[expert_idx].item())
-            if dst_slot_idx >= layout.num_max_recv_tokens_per_expert:
-                raise ValueError("dispatch reference overflowed expert recv capacity")
-            token_topk_idx = token_idx * layout.num_topk + topk_slot
-            src_token_topk_idx[dst_local_expert_idx, rank_idx, dst_slot_idx] = token_topk_idx
-            expert_send_count[expert_idx] += 1
-            expert_recv_count[rank_idx, dst_local_expert_idx] += 1
-            expert_recv_count_sum[dst_local_expert_idx] += 1
-
-    return DispatchReference(
-        expert_send_count=expert_send_count,
-        expert_recv_count=expert_recv_count,
-        expert_recv_count_sum=expert_recv_count_sum,
-        src_token_topk_idx=src_token_topk_idx,
-    )
-
-
-def _select_round_robin_rank(rank_counts: list[int], token_idx_in_expert: int) -> tuple[int, int]:
-    remaining = list(rank_counts)
-    offset = 0
-    slot_idx = token_idx_in_expert
-    while True:
-        active_ranks = [rank_idx for rank_idx, value in enumerate(remaining) if value > 0]
-        if not active_ranks:
-            raise ValueError("round-robin pull encountered no active ranks")
-        length = min(remaining[rank_idx] for rank_idx in active_ranks)
-        num_round_tokens = length * len(active_ranks)
-        if slot_idx < num_round_tokens:
-            slot_idx_in_round = slot_idx % len(active_ranks)
-            return active_ranks[slot_idx_in_round], offset + (slot_idx // len(active_ranks))
-        slot_idx -= num_round_tokens
-        offset += length
-        for rank_idx in active_ranks:
-            remaining[rank_idx] -= length
-
-
-def build_pull_reference(
-    *, dispatch_reference: DispatchReference, layout: DeepGemmWorkspaceLayout
-) -> PullReference:
-    device = dispatch_reference.expert_recv_count.device
-    expert_pool_block_offset = torch.zeros(
-        layout.num_experts_per_rank, dtype=torch.int32, device=device
-    )
-    pool_src_rank_idx = torch.full(
-        (layout.num_max_pool_tokens,), -1, dtype=torch.int32, device=device
-    )
-    pool_src_token_idx = torch.full(
-        (layout.num_max_pool_tokens,), -1, dtype=torch.int32, device=device
-    )
-    pool_src_topk_idx = torch.full(
-        (layout.num_max_pool_tokens,), -1, dtype=torch.int32, device=device
-    )
-    pool_src_token_topk_idx = torch.full(
-        (layout.num_max_pool_tokens,), -1, dtype=torch.int32, device=device
-    )
-    l1_full_count = torch.zeros(layout.num_ring_blocks, dtype=torch.int32, device=device)
-    num_runtime_ring_blocks = layout.num_ring_tokens // layout.block_m
-
-    running_pool_block_offset = 0
-    expert_recv_count = dispatch_reference.expert_recv_count.cpu()
-    expert_recv_count_sum = dispatch_reference.expert_recv_count_sum.cpu()
-    src_token_topk_idx = dispatch_reference.src_token_topk_idx.cpu()
-
-    for local_expert_idx in range(layout.num_experts_per_rank):
-        expert_pool_block_offset[local_expert_idx] = running_pool_block_offset
-        num_tokens = int(expert_recv_count_sum[local_expert_idx].item())
-        rank_counts = [
-            int(expert_recv_count[rank_idx, local_expert_idx].item())
-            for rank_idx in range(layout.num_ranks)
-        ]
-        for token_idx_in_expert in range(num_tokens):
-            src_rank_idx, token_idx_in_rank = _select_round_robin_rank(
-                rank_counts, token_idx_in_expert
-            )
-            token_topk_linear_idx = int(
-                src_token_topk_idx[local_expert_idx, src_rank_idx, token_idx_in_rank].item()
-            )
-            if token_topk_linear_idx < 0:
-                raise ValueError("dispatch pull reference encountered an uninitialized source slot")
-            pool_token_idx = running_pool_block_offset * layout.block_m + token_idx_in_expert
-            pool_src_rank_idx[pool_token_idx] = src_rank_idx
-            pool_src_token_idx[pool_token_idx] = token_topk_linear_idx // layout.num_topk
-            pool_src_topk_idx[pool_token_idx] = token_topk_linear_idx % layout.num_topk
-            pool_src_token_topk_idx[pool_token_idx] = token_topk_linear_idx
-            pool_block_idx = running_pool_block_offset + token_idx_in_expert // layout.block_m
-            increment = 1
-            if token_idx_in_expert == num_tokens - 1:
-                increment = layout.block_m - (token_idx_in_expert % layout.block_m)
-            l1_full_count[pool_block_idx % num_runtime_ring_blocks] += increment
-        running_pool_block_offset += _align_up(num_tokens, layout.block_m) // layout.block_m
-
-    return PullReference(
-        expert_pool_block_offset=expert_pool_block_offset,
-        pool_src_rank_idx=pool_src_rank_idx,
-        pool_src_token_idx=pool_src_token_idx,
-        pool_src_topk_idx=pool_src_topk_idx,
-        pool_src_token_topk_idx=pool_src_token_topk_idx,
-        l1_full_count=l1_full_count,
-    )
-
-
-def build_scheduler_reference(
-    *,
-    config: MegaMoeConfig,
-    launch: DeepGemmLaunchConfig,
-    dispatch_reference: DispatchReference,
-    pull_reference: PullReference,
-) -> SchedulerReference:
-    """CPU mirror of the dynamic `MegaMoEScheduler` task enumeration (upstream
-    559d79f). Which CTA pair executes a task is decided at runtime by global
-    atomic counters, but the task set itself is deterministic: L1 task indices
-    map to `(pool m block, n cluster)` in counter order, likewise for L2."""
-    expert_num_tokens = dispatch_reference.expert_recv_count_sum.to(torch.int32).cpu()
-    expert_pool_block_offset = pull_reference.expert_pool_block_offset.to(torch.int32).cpu()
-    num_l1_clusters = (config.intermediate_hidden * 2) // launch.block_n // 2
-    num_l2_clusters = config.hidden // launch.block_n // 2
-    num_l1_block_ks = config.hidden // launch.block_k
-    num_l2_block_ks = config.intermediate_hidden // launch.block_k
-
-    def get_num_tokens(expert_idx: int) -> int:
-        if expert_idx >= config.num_experts_per_rank:
-            return 0
-        return int(expert_num_tokens[expert_idx].item())
-
-    num_total_m_blocks = 0
-    expert_of_pool_block: list[int] = []
-    m_block_of_pool_block: list[int] = []
-    for expert_idx in range(config.num_experts_per_rank):
-        num_m_blocks = _ceil_div(get_num_tokens(expert_idx), launch.block_m)
-        for m_block_idx in range(num_m_blocks):
-            expert_of_pool_block.append(expert_idx)
-            m_block_of_pool_block.append(m_block_idx)
-        num_total_m_blocks += num_m_blocks
-
-    blocks: list[SchedulerBlockReference] = []
-    num_linear1_blocks = 0
-    num_linear2_blocks = 0
-    for phase, num_clusters, num_k_blocks in (
-        ("Linear1", num_l1_clusters, num_l1_block_ks),
-        ("Linear2", num_l2_clusters, num_l2_block_ks),
-    ):
-        for task_idx in range(num_total_m_blocks * num_clusters):
-            pool_block_idx = task_idx // num_clusters
-            n_cluster_idx = task_idx % num_clusters
-            local_expert_idx = expert_of_pool_block[pool_block_idx]
-            m_block_idx = m_block_of_pool_block[pool_block_idx]
-            num_tokens = get_num_tokens(local_expert_idx)
-            valid_m = min(num_tokens - m_block_idx * launch.block_m, launch.block_m)
-            blocks.append(
-                SchedulerBlockReference(
-                    block_idx_seed=task_idx,
-                    phase=phase,
-                    local_expert_idx=local_expert_idx,
-                    num_k_blocks=num_k_blocks,
-                    m_block_idx=m_block_idx,
-                    n_block_idx=n_cluster_idx,
-                    pool_block_offset=pool_block_idx - m_block_idx,
-                    valid_m=max(valid_m, 0),
-                )
-            )
-            if phase == "Linear1":
-                num_linear1_blocks += 1
-            else:
-                num_linear2_blocks += 1
-
-    return SchedulerReference(
-        expert_num_tokens=expert_num_tokens.to(dispatch_reference.expert_recv_count_sum.device),
-        expert_pool_block_offset=expert_pool_block_offset.to(
-            dispatch_reference.expert_recv_count_sum.device
-        ),
-        blocks=tuple(blocks),
-        num_linear1_blocks=num_linear1_blocks,
-        num_linear2_blocks=num_linear2_blocks,
-    )
-
-
 def _get_block_config_for_mega_moe(
     *, num_ranks: int, num_experts: int, num_tokens: int, num_topk: int
 ) -> tuple[int, int, int, int, int]:
@@ -943,85 +693,6 @@ def get_deepgemm_launch_config(config: MegaMoeConfig) -> DeepGemmLaunchConfig:
 
 def get_tirx_launch_param_tags() -> list[str]:
     return ["blockIdx.x", "clusterCtaIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory"]
-
-
-def get_tirx_dynamic_shared_memory_bytes(config: MegaMoeConfig) -> int:
-    launch = get_deepgemm_launch_config(config)
-    num_experts = config.num_experts
-    hidden = config.hidden
-    intermediate_hidden = config.intermediate_hidden
-    l1_out_block_n = launch.block_n // 2
-    sf_block_m = _align_up(launch.block_m, 128)
-    num_epilogue_stages = 2
-    sm100_smem_capacity = 232448
-    shared_alignment = 1024
-    num_epilogue_wgs = launch.num_epilogue_warps // 4
-    smem_expert_count_size = _align_up(num_experts * 4, shared_alignment)
-    smem_send_buffer_size = _align_up(
-        launch.num_bytes_per_pull * launch.num_dispatch_warps, shared_alignment
-    )
-    smem_dispatch_size = smem_expert_count_size + smem_send_buffer_size
-    smem_cd_l1_size = num_epilogue_wgs * launch.store_block_m * l1_out_block_n * 2
-    smem_cd_l2_size = num_epilogue_wgs * launch.store_block_m * launch.block_n * 2
-    smem_cd_size = _align_up(max(smem_cd_l1_size, smem_cd_l2_size), shared_alignment)
-    smem_a_size_per_stage = launch.load_block_m * launch.block_k
-    smem_b_size_per_stage = launch.load_block_n * launch.block_k
-    smem_sfa_size_per_stage = sf_block_m * (launch.block_k // 32)
-    smem_sfb_size_per_stage = launch.block_n * (launch.block_k // 32)
-    smem_amax_reduction_size = launch.store_block_m * launch.num_epilogue_warps * 4
-    smem_tmem_ptr_size = 4
-    num_schedule_stages = 2
-    smem_task_info_size = num_schedule_stages * 32
-    smem_per_stage = (
-        smem_a_size_per_stage
-        + smem_b_size_per_stage
-        + smem_sfa_size_per_stage
-        + smem_sfb_size_per_stage
-        + 16
-    )
-    smem_fixed = (
-        smem_dispatch_size
-        + smem_cd_size
-        + smem_amax_reduction_size
-        + (
-            launch.num_dispatch_warps
-            + num_epilogue_stages * 2
-            + launch.num_epilogue_warps * 2
-            + num_schedule_stages * 2
-        )
-        * 8
-        + smem_task_info_size
-        + smem_tmem_ptr_size
-    )
-    num_stages = (sm100_smem_capacity - smem_fixed) // smem_per_stage
-    if num_stages < 2:
-        raise ValueError("MegaMoE requires at least two pipeline stages")
-    num_total_barriers = (
-        launch.num_dispatch_warps
-        + num_stages * 2
-        + num_epilogue_stages * 2
-        + launch.num_epilogue_warps * 2
-        + num_schedule_stages * 2
-    )
-    smem_expert_count_offset = 0
-    smem_send_buffer_offset = smem_expert_count_offset + smem_expert_count_size
-    smem_gemm_base_offset = smem_send_buffer_offset + smem_send_buffer_size
-    smem_cd_offset = smem_gemm_base_offset
-    smem_a_offset = smem_cd_offset + smem_cd_size
-    smem_b_offset = smem_a_offset + num_stages * smem_a_size_per_stage
-    smem_sfa_offset = smem_b_offset + num_stages * smem_b_size_per_stage
-    smem_sfb_offset = smem_sfa_offset + num_stages * smem_sfa_size_per_stage
-    smem_amax_reduction_offset = smem_sfb_offset + num_stages * smem_sfb_size_per_stage
-    smem_task_info_offset = _align_up(smem_amax_reduction_offset + smem_amax_reduction_size, 16)
-    smem_barrier_offset = smem_task_info_offset + smem_task_info_size
-    smem_tmem_ptr_offset = smem_barrier_offset + num_total_barriers * 8
-    smem_symm_rank_bases_offset = _align_up(smem_tmem_ptr_offset + smem_tmem_ptr_size, 8)
-    smem_symm_rank_bases_size = config.num_processes * 8 if config.num_processes > 1 else 0
-    return (
-        smem_symm_rank_bases_offset + smem_symm_rank_bases_size
-        if config.num_processes > 1
-        else smem_tmem_ptr_offset + smem_tmem_ptr_size
-    )
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -1438,22 +1109,6 @@ def create_case(
     validate_runtime_symm_buffer_layout(
         symm_buffer=symm_buffer, layout=symm_buffer_layout, config=config
     )
-    dispatch_reference = build_dispatch_reference(
-        topk_idx=topk_idx, rank_idx=rank_idx, layout=workspace_layout
-    )
-    pull_reference = None
-    scheduler_reference = None
-    if num_ranks == 1:
-        pull_reference = build_pull_reference(
-            dispatch_reference=dispatch_reference, layout=workspace_layout
-        )
-        scheduler_reference = build_scheduler_reference(
-            config=config,
-            launch=get_deepgemm_launch_config(config),
-            dispatch_reference=dispatch_reference,
-            pull_reference=pull_reference,
-        )
-
     return MegaMoeCase(
         config=config,
         rank_idx=rank_idx,
@@ -1468,9 +1123,6 @@ def create_case(
         transformed_l2_weights=transformed_l2_weights,
         workspace_layout=workspace_layout,
         symm_buffer_layout=symm_buffer_layout,
-        dispatch_reference=dispatch_reference,
-        pull_reference=pull_reference,
-        scheduler_reference=scheduler_reference,
     )
 
 
@@ -5149,25 +4801,6 @@ def get_kernel(
     return mega_moe.with_attr("tirx.kernel_launch_params", get_tirx_launch_param_tags())
 
 
-def _get_tirx_kernel_for_context(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> Any:
-    return get_kernel(
-        num_processes=case.config.num_processes,
-        num_max_tokens_per_rank=case.config.num_max_tokens_per_rank,
-        num_tokens=case.config.num_tokens,
-        hidden=case.config.hidden,
-        intermediate_hidden=case.config.intermediate_hidden,
-        num_experts=case.config.num_experts,
-        num_topk=case.config.num_topk,
-        activation_clamp=case.config.activation_clamp,
-        fast_math=case.config.fast_math,
-        collect_stats=getattr(case, "cumulative_local_expert_recv_stats", None) is not None,
-    )
-
-
-def _get_tirx_kernel_for_case(case: MegaMoeCase) -> Any:
-    return _get_tirx_kernel_for_context(case)
-
-
 def _view_symm_matrix(
     case: MegaMoeCase | TirxMegaMoeLaunchContext, offset: int, rows: int, cols: int
 ) -> torch.Tensor:
@@ -5521,14 +5154,6 @@ def fp8_fp4_mega_moe(
         fast_math=fast_math,
     )
     launch_prepared_tirx_fp8_fp4_mega_moe(prepared)
-
-
-fp8_fp4_mega_moe_tirx = fp8_fp4_mega_moe
-
-
-def _cleanup_case(case: MegaMoeCase | None) -> None:
-    if case is not None:
-        case.symm_buffer.destroy()
 
 
 def _cleanup_distinct_cases(*cases: MegaMoeCase | None) -> None:
