@@ -754,3 +754,28 @@ Size the expectation before measuring: the saving here is about one partly-empty
 block per group. When a specialization the reference treats specially is
 measurably slower than the one it otherwise shares code with, look for a work
 reduction transcribed at some of its sites and not the rest.
+## E31: Preserve cache policy across launch-local handoffs
+
+**Symptoms:** `cold_cache_regression`, `inter_kernel_handoff`, `global_store_policy`, `dispatch_specific_deficit`
+
+A global store into a workspace that the next launch consumes is not a terminal
+streaming store. Its cache operator is part of the producer-consumer schedule:
+adding `L1::no_allocate` can change the next launch's cache behavior even when
+the address stream and vector width match. When the source SASS uses the default
+`STG.E.128` form, preserve that default policy instead of adding a cache hint on
+general streaming-store intuition.
+
+In one four-launch recurrent chain, changing the 128-bit FP32 fixed-state stores
+from `st.global.L1::no_allocate.v4.b32` to the default `st.global.v4.b32` reduced
+the weakest 128-row shape from 86.56 to 82.93 us and moved source/port from 0.962
+to 1.005. A 64-row guard stayed effectively flat at 119.65 versus 119.85 us,
+which localized the gain to the affected dispatch. A later clean seven-shape
+matrix retained the result at 82.68 us for the port versus 82.95 us for the
+source, or 1.003 source/port.
+
+This does not justify default caching for final outputs or write-only
+workspaces; the boundary is an immediate cross-launch consumer. Verify the
+source and target SASS cache operators and vector width, then time the producer
+and consumer in the same cold-cache benchmark scope. Re-run the affected
+dispatch, a different-dispatch guard, and the full matrix before keeping the
+change.
