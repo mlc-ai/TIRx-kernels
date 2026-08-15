@@ -237,17 +237,6 @@ single output buffer shared by two implementations biases the same way, in
 favour of whichever runs second. Read what the reference wrapper does inside the
 timed region, and give each implementation its own output.
 
-A distributed kineto gate on a multi-tenant host multiplies all of this.
-Twenty-two runs of one 8-GPU DeepEP workload spanned official ratios of
-0.75-1.37, and eight runs of its sibling spanned 0.90-1.59, with the two sides
-drifting together inside every run. The only stable statistics there are the
-median across runs and steady rounds (drop the first round, which carries
-suite-start cold effects); a same-window alternating kernel profile is the
-tiebreaker, and it showed the main kernels at parity while single-run
-officials swung by twenty percent either way. Acquisition that waits for fully
-idle cards never fires on such a host: the utilization and memory thresholds
-have to admit shared cards, and the interference retry does the rest.
-
 ## Issue loads before conversions
 
 **Symptoms:** `long_scoreboard`, `insufficient_memory_parallelism`, `exposed_load_latency`
