@@ -26,6 +26,8 @@ The implementation structure follows the reviewer-approved sketch
 helpers live in ``tirx_kernels/flashinfer/utils/fp_quant.py``.
 """
 
+from typing import Any
+
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_8,
     cvt_e2m1x8,
@@ -45,8 +47,8 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     st_global_u64,
     warp_reduce_max,
 )
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 FLOAT32_MAX = 3.4028234663852886e38
 
@@ -292,6 +294,14 @@ def _run_reference(a, gs_inv, sf_layout: str, enable_pdl: bool):
     )
 
 
+def prepare_bench(**kwargs: Any):
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
+
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
+
+
 def run_test(
     dtype: str,
     m: int,
@@ -319,28 +329,21 @@ def run_test(
     torch.testing.assert_close(pts_tirx, ref_pts, rtol=0, atol=0)
 
 
-def run_bench(
-    dtype: str,
-    m: int,
-    k: int,
-    sf_layout: str = "128x4",
-    enable_pdl: bool = False,
-    zero_row: bool = False,
-    *,
-    warmup=None,
-    repeat=None,
-    timer=None,
-    rounds=1,
-    cooldown_s=1.0,
-    **kwargs,
-):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
     """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
-
-    from tirx_kernels.runner import compile_kernel
+    config = dict(prepared["config"])
+    dtype = config.pop("dtype")
+    m = config.pop("m")
+    k = config.pop("k")
+    sf_layout = config.pop("sf_layout")
+    enable_pdl = config.pop("enable_pdl")
+    zero_row = config.pop("zero_row")
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
 
     a, gs_inv = prepare_data(dtype=dtype, m=m, k=k, sf_layout=sf_layout, zero_row=zero_row)
-    kernel = get_kernel(dtype=dtype, m=m, k=k, sf_layout=sf_layout, enable_pdl=enable_pdl)
-    ex = compile_kernel(kernel)
+    ex = executable
     out_tirx, sf_tirx, pts_tirx = _alloc_outputs(m, k, sf_layout)
 
     def tirx_launch():
@@ -378,6 +381,36 @@ def run_bench(
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    dtype: str,
+    m: int,
+    k: int,
+    sf_layout: str = "128x4",
+    enable_pdl: bool = False,
+    zero_row: bool = False,
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    **kwargs,
+):
+    config = dict(kwargs)
+    prepared = prepare_bench(
+        dtype=dtype,
+        m=m,
+        k=k,
+        sf_layout=sf_layout,
+        enable_pdl=enable_pdl,
+        zero_row=zero_row,
+        **config,
+    )
+    return prepared.run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

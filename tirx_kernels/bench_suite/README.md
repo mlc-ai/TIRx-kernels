@@ -8,10 +8,16 @@ JSON + reports under `.bench-suite/`.
 each flagged `default: true|false`. The files are bucketed to mirror the kernel
 tree, so a kernel's configs sit at `config/<bucket>/<kernel>.yaml`. With no
 `--workloads`, the flagged configs across all files are assembled into
-`.bench-suite/workloads.generated.yaml` and that is what runs -- 128
-representative single-GPU workloads, including the TP1 AllGather+GEMM and
-GEMM+ReduceScatter profiles. Widening or narrowing the sweep
-is a flag flip, not a new file.
+`.bench-suite/workloads.generated.yaml` and that is what runs. The generated
+file is the inspectable source of truth for the current representative sweep.
+Every kernel has at most three default small/medium/large representatives; the current tree assembles 133
+workloads. Widening or narrowing the sweep is a YAML `default`
+flag flip, not a scheduler rule or a second selection file. Multi-GPU configs
+are deliberately absent from the default measured sweep but remain available
+to explicit workload files.
+For each kernel retaining three curated defaults, the same YAML also owns a
+`selection_rationale` and the config loader requires exactly one
+small/medium/large selection.
 
 ```bash
 cd /path/to/tirx-kernels
@@ -29,30 +35,22 @@ Entry point: `python -m tirx_kernels.bench_suite` (same flags as `run.py`).
 
 Every row benches our kernel **and all of its reference impls**; a reference
 that fails to build is recorded as a baseline error and **fails the workload**
-(which fail-fasts the whole sweep). The default `workloads.yaml` therefore has
-two hard host requirements beyond torch/DeepGEMM:
+(which fail-fasts the whole sweep). The host requires:
 
-- **SGLang** checkout on `PYTHONPATH` (plus its CUTLASS DSL): the fp8 paged MQA
-  rows bench the `sglang_cutedsl` reference unconditionally.
-- **NVSHMEM**: required by the `allgather_gemm` / `gemm_reduce_scatter`
-  (GemmComm) rows.
+- a CUDA 13.2-aligned Python stack, including PyTorch, `cuda-toolkit`, NVRTC,
+  and extensions rebuilt against that PyTorch ABI;
+- **SGLang** on `PYTHONPATH` (plus its CUTLASS DSL) for the fp8 paged MQA
+  reference rows.
 
-GemmComm benchmark rows additionally require absolute runtime-library locks:
+Explicit GemmComm workloads additionally require NVSHMEM and absolute
+runtime-library locks:
 `TIRX_NCCL_LIBRARY`, `TIRX_CUBLAS_LIBRARY`, `TIRX_CUBLASMP_LIBRARY`, and
 `TIRX_NVSHMEM_LIBRARY`. `NVSHMEM_HOME` points to the development installation
 used while compiling the TIRx kernels. These locks affect only the spawned
 GemmComm rank workers.
 
-`--filter` is include-only and cannot exclude rows. On a host without NVSHMEM,
-run a trimmed workload list:
-
-```bash
-grep -vE "allgather_gemm|gemm_reduce_scatter" \
-  .bench-suite/workloads.generated.yaml > /tmp/workloads_no_comm.yaml
-python -m tirx_kernels.bench_suite --workloads /tmp/workloads_no_comm.yaml
-```
-
-Import gate (kernels in the assembled default sweep only):
+Import-check the kernels selected by the current workload file without
+preparing, compiling, or using a GPU:
 
 ```bash
 python -m tirx_kernels.bench_suite --check-imports
@@ -114,27 +112,41 @@ are outside both timed closures. For this port, only the results emitted by
 
 Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and are not committed.
 
-## Strategy (TL;DR)
+## Execution strategy (TL;DR)
 
 1. **Pinned baseline lives in git** (`baseline.json`, `baseline.md`).
-2. **One job = one workload** (kernel + config). A worker atomically acquires the
-   workload's requested GPU count, then runs **one**
-   bench subprocess that always benches our kernel **and** every reference impl:
-   compile/prepare once, then **`--rounds N` in-bench**. Each round is one complete
-   call to the selected Triton-standard timer (including its own estimate, warmup,
-   and measurement), and `--cooldown` is applied before every implementation in
-   every round. The suite retains all round samples and reports their arithmetic mean.
-3. **Fail fast**: the first workload/subprocess `FAIL` stops new scheduling,
+2. **One fresh process per workload.** Each child performs CPU prepare exactly
+   once, then one or more GPU attempts before `RESULT_READY → accepted RESULT → exit`. Import/parsing,
+   config resolution, specialization, IR generation, and compilation happen in
+   CPU prepare without initializing CUDA or owning a GPU. The compiled executable
+   remains in that process; children and runtime objects are never recycled across
+   workloads or serialized across processes.
+3. **Bounded CPU/GPU pipeline.** The orchestrator starts multiple one-shot prepare
+   children up to `--max-prepare-processes`, bounds PREPARING+READY children with
+   `--ready-backlog`, and late-binds an atomic GPU claim only after READY. Prepare
+   children retain all physical GPUs visible; after ASSIGN the child selects the
+   physical index with `torch.cuda.set_device()` and verifies it through the UUID
+   handshake. GPU stages run concurrently across currently eligible cards and
+   serially per card. Live-process `CUDA_VISIBLE_DEVICES` mutation is not a valid
+   late-binding mechanism.
+   An accepted `RESULT_READY` releases dispatch immediately; an interfered
+   `RESULT_READY` returns the same child to READY instead. Polling is only for
+   foreign GPU occupancy changes. The initial occupancy snapshot starts alongside
+   the first CPU prepares; assignment remains blocked until that snapshot is complete.
+4. **Measurement semantics stay in the GPU stage.** Each child benches our kernel
+   and every reference implementation, retaining the original implementation
+   order, correctness/reference setup, timer, warmup/repeat, five rounds, 1.0s
+   cooldown before every implementation/round, raw samples, and arithmetic mean.
+5. **Fail fast**: the first workload/subprocess `FAIL` stops new scheduling,
    terminates the suite's in-flight subprocesses, writes the partial run for
    diagnosis, and exits with code 1. `INTERFERED` is not a workload failure and
-   is requeued; `SKIP` workloads are accepted without retry.
-4. **Dynamic free GPU queue** (one worker per probe-OK GPU):
-   workers pull jobs from a shared queue; each job atomically claims all required
-   free cards, runs one subprocess, then releases the full set. Whoever finishes
-   first grabs the next satisfiable job — no static workload→GPU binding and no
-   partial multi-GPU claims. Larger waiting claims take priority so single-GPU
-   traffic cannot starve 2/4/6-GPU workloads.
-5. **Ratio regression report** compares current ref/ours ratio vs the pinned
+   is retried in the same child without repeating CPU prepare; `SKIP` is accepted
+   without retry. The old claim is released before reassignment, and the child
+   rebuilds all GPU tensors, references, workspaces, and timer state on the newly
+   assigned card. Every interference retry records the workload, attempt,
+   intruder PIDs, and `retry_in_place: true`; retried results otherwise follow
+   the ordinary measurement path.
+6. **Ratio regression report** compares current ref/ours ratio vs the pinned
    `baseline.json` ratio (computed from its ours + ref impls). Promote a run over
    the baseline with `promote_baseline.py`.
 
@@ -158,7 +170,8 @@ python tirx_kernels/bench_suite/promote_baseline.py \
 ```
 
 The default is already five independent rounds. Use `--rounds 1` only for a quick
-diagnostic run that will not be promoted.
+diagnostic run that will not be promoted. The requested protocol remains recorded
+in the run JSON.
 
 ### Refresh the pinned baseline (rare)
 
@@ -181,9 +194,41 @@ Each `config/<bucket>/<kernel>.yaml` entry requires `config` and `default`; the 
 supplies `kernel` and an optional file-level `defaults:` mapping merged into
 every entry. Optional per-entry fields are `timer`, `warmup`, `repeat`, and
 `num_gpus` (default `1`). A file passed via `--workloads` uses the flat
-`workloads:` list form instead, where each entry carries its own `kernel`. Multi-GPU jobs receive
-the acquired physical indices as an ordered, comma-separated
-`CUDA_VISIBLE_DEVICES` value and all assigned cards are monitored for interference.
+`workloads:` list form instead, where each entry carries its own `kernel`.
+Single-GPU jobs receive a physical index and UUID and select that index after
+assignment. Multi-GPU jobs receive the complete ordered physical-index/UUID claim;
+rank workers synchronize their runtime device selection only after that atomic
+claim, and all assigned cards are monitored for interference.
+
+Multi-GPU, distributed, Kineto, and MegaMoE adapters use the same pipeline-only
+lifecycle. The scheduler rejects assignment-count mismatches and only launches
+rank/CUDA runtimes after a complete atomic claim. Their barriers, sample-wise max
+aggregation, Kineto spans, and process-group cleanup are preserved. On the shared
+benchmark host, multi-GPU runtime validation is intentionally recorded as
+`exempted_by_human_unmeasured`: this is neither `passed` nor `missing`, and must
+never be represented by zero, null, or an empty cell. Explicit multi-GPU workload
+files remain supported, but the default sweep and routine acceptance do not run them.
+
+Implementation note (2026-08-14): the set-device/in-place-retry implementation
+supersedes the former live-mask/fresh-prepare retry behavior. External-device
+audits use runtime reachability, not grep presence:
+FlashInfer MegaMoE's device-0 CLI/benchmark/debug functions are not imported by
+this project and are non-blocking. This project's MegaMoE worker does call the
+out-of-tree pinned DeepGEMM `utils.dist.init_dist`, which executes
+`torch.cuda.set_device(local_rank)` and can override a nonzero physical assignment
+once all devices remain visible. Under the former mask path that override was
+latent because logical device 0 was the assigned card. The installed package
+fails still earlier because it lacks `fp8_fp4_mega_moe`.
+
+The approved implementation preserves `init_dist()` and its process group, then
+restores the assigned physical device and revalidates its UUID before case
+construction and timing. This is one instance of the general position invariant:
+after any reachable external call that may change current device, restore and
+prove the assigned device before allocation or launch. The default single-GPU
+MegaMoE configs are therefore covered by the ordinary default sweep. External
+source edits, monkey-patches, and fallback to masking remain prohibited. The
+one-rank MegaMoE path also retains its TCP rendezvous/process-group setup and
+32-attempt EADDRINUSE handling as a known deferred overhead.
 
 MegaMoE entries use `timer: megamoe`, which invokes the dedicated DeepGEMM
 `bench_kineto` protocol. Do not set `warmup` or `repeat` for this timer because
@@ -193,7 +238,8 @@ span used by a full-span measurement. GemmComm entries use `timer: kineto`, whic
 measures the complete correlated GPU activity span across all streams after
 preparation and applies the same cold-cache setup before every sample.
 
-The suite exports an absolute `TIRX_BENCH_CACHE_DIR` under `.bench-suite/cache/`.
+The suite exports an absolute, report-directory-independent `TIRX_BENCH_CACHE_DIR`
+under `${XDG_CACHE_HOME:-~/.cache}/tirx-kernels/bench-suite/`.
 Reference adapters may use it for version/GPU-qualified autotune caches, but must
 finish cache loading, tuning, workspace setup, and validation before returning their
 timed launch closure. The NVFP4 FlashInfer adapter uses one cache file per shape and
@@ -209,6 +255,9 @@ defaults to FlashInfer's `auto` backend; set
 | `--cooldown` | `1.0` | Seconds before every implementation in every round |
 | `--util-threshold` | `0` | Skip GPUs above this utilization; requeue if a foreign process exceeds it during a run |
 | `--mem-threshold` | `0` | Skip GPUs with compute-app memory-used percent above this percent |
+| `--max-prepare-processes N` | host/GPU-derived | Maximum concurrent one-shot CPU prepare children |
+| `--ready-backlog N` | at least prepare bound and 2× visible GPUs | Maximum PREPARING+READY children awaiting assignment |
+| `--check-imports` | off | Import every kernel selected by the workload file and exit |
 
 Round aggregation is always the arithmetic mean. The raw five-element sample arrays
 remain in the run JSON for variance and outlier inspection.
@@ -224,8 +273,8 @@ remain in the run JSON for variance and outlier inspection.
 
 | Path | Description |
 |------|-------------|
-| `.bench-suite/runs/<id>.json` | Aggregated run results (times in microseconds) |
-| `.bench-suite/reports/<id>/summary.md` | Run overview: label, git provenance, ok/fail counts, per-row table |
+| `.bench-suite/runs/<id>.json` | Aggregated results, raw samples, GPU assignment, and retry metadata |
+| `.bench-suite/reports/<id>/summary.md` | Provenance and per-row times |
 | `.bench-suite/reports/<id>/bench.md` | Main diff report (ratio Δ vs pinned baseline) |
 | `.bench-suite/logs/*__a<N>.log` | Benchmark subprocess stdout for each attempt |
 

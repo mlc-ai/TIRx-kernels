@@ -1,10 +1,11 @@
 kernel: tinygemm2_sm100
+selection_rationale: Batch/output/K dimensions increase from a tiny latency case through a production middle case to a large throughput case, exercising stage selection changes.
 configs:
-  - {config: b1_o128_k720, default: true}
-  - {config: b2_o16_k256, default: true}
-  - {config: b4_o2880_k2880, default: true}
-  - {config: b7_o128_k4096, default: true}
-  - {config: b8_o1024_k1024, default: true}
-  - {config: b13_o1024_k2048, default: true}
-  - {config: b16_o2880_k2880, default: true}
-  - {config: b64_o4096_k3072, default: true}
+  - {config: b1_o128_k720, default: true, selection_role: small}
+  - {config: b2_o16_k256, default: false}
+  - {config: b4_o2880_k2880, default: false}
+  - {config: b7_o128_k4096, default: false}
+  - {config: b8_o1024_k1024, default: false}
+  - {config: b13_o1024_k2048, default: false}
+  - {config: b16_o2880_k2880, default: true, selection_role: medium}
+  - {config: b64_o4096_k3072, default: true, selection_role: large}

@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 import tvm
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import Pipeline, PipelineState
 from tvm.tirx.lang.smem_desc import SmemDescriptor
 from tvm.tirx.lang.tile_scheduler import ClusterLaunchControlScheduler
@@ -674,12 +676,12 @@ def get_kernel(dtype, M, N, K, **kwargs):
 
 def run_test(dtype, M, N, K, **kwargs):
     """Compile, run, and verify fp16/bf16 GEMM kernel."""
-    from tirx_kernels.runner import compile_kernel
+    from tirx_kernels.runner import compile_kernel, cuda_target
 
     A, B, C = prepare_data(dtype, M, N, K)
     kernel = tir_kernel(dtype, M, N, K)
     C_tvm = torch.zeros_like(C)
-    target = tvm.target.Target("cuda")
+    target = cuda_target()
     with target:
         ex = compile_kernel(kernel)
         ex(A, B, C_tvm)
@@ -687,37 +689,41 @@ def run_test(dtype, M, N, K, **kwargs):
     torch.testing.assert_close(C_tvm.cpu(), C_ref.cpu(), rtol=0.001, atol=0.01)
 
 
-def run_bench(dtype, M, N, K, warmup=None, repeat=None, timer=None, **kwargs):
-    """Benchmark fp16/bf16 GEMM."""
-    kernel = tir_kernel(dtype, M, N, K)
-    target = tvm.target.Target("cuda")
-    with target:
-        mod = tvm.IRModule({"main": kernel})
-        ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
+@dataclass(frozen=True)
+class PreparedBench:
+    """Kernel-owned state produced before GPU assignment."""
 
-    # Allocate inputs once, outside the timed region (Triton-standard pure launch).
-    A, B, C = prepare_data(dtype, M, N, K)
+    dtype: str
+    M: int
+    N: int
+    K: int
+    executable: object
+
+
+def run_gpu(prepared: PreparedBench, *, warmup=None, repeat=None, timer=None, **kwargs):
+    """Allocate inputs/references and run the unchanged GPU timing protocol."""
+    A, B, C = prepare_data(prepared.dtype, prepared.M, prepared.N, prepared.K)
     C_tir = torch.zeros_like(C, device="cuda")
 
-    funcs = {"tir": lambda: ex(A, B, C_tir)}
+    funcs = {"tir": lambda: prepared.executable(A, B, C_tir)}
 
     def _torch_cublas():
         C_out = torch.zeros_like(C, device="cuda")
         return lambda: torch.matmul(A, B.T, out=C_out)
 
     references = {"torch-cublas": _torch_cublas}
-    if dtype == "bf16":
+    if prepared.dtype == "bf16":
 
         def _deepgemm_cublaslt():
             import deep_gemm
 
-            C_out = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+            C_out = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
             return lambda: deep_gemm.cublaslt_gemm_nt(A, B, C_out, None)
 
         def _deepgemm_bf16():
             import deep_gemm
 
-            C_out = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+            C_out = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
             return lambda: deep_gemm.bf16_gemm_nt(A, B, C_out)
 
         references.update(
@@ -725,3 +731,24 @@ def run_bench(dtype, M, N, K, warmup=None, repeat=None, timer=None, **kwargs):
         )
 
     return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)
+
+
+def prepare_bench(dtype, M, N, K, **kwargs):
+    """Specialize and compile the GEMM without initializing CUDA."""
+    from tirx_kernels.runner import cuda_initialization_guard, cuda_target, prepared_gpu_benchmark
+
+    with cuda_initialization_guard():
+        kernel = tir_kernel(dtype, M, N, K)
+        target = cuda_target()
+        with target:
+            mod = tvm.IRModule({"main": kernel})
+            ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
+    state = PreparedBench(dtype=dtype, M=M, N=N, K=K, executable=ex)
+    return prepared_gpu_benchmark(run_gpu, state)
+
+
+def run_bench(dtype, M, N, K, warmup=None, repeat=None, timer=None, **kwargs):
+    """Benchmark fp16/bf16 GEMM."""
+    return prepare_bench(dtype, M, N, K).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, **kwargs
+    )

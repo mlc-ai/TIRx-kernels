@@ -20,6 +20,7 @@ from tvm.backend.cuda.op import cuda_func_call
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _TEST_DIFF_THRESHOLD = 5e-6
+_COMPILE_CACHE_NAMESPACE = "deepgemm.mqa_logits_fp4.compile"
 
 
 @dataclass(frozen=True)
@@ -1136,20 +1137,31 @@ def _compile_tirx_mqa_for_config(
 _compile_tirx_mqa_for_config = cache(_compile_tirx_mqa_for_config)
 
 
+def _compile_tirx_mqa_kwargs(config: MQALogitsConfig) -> dict[str, Any]:
+    return {
+        "seq_len": config.block_q,
+        "seq_len_kv": config.block_kv,
+        "num_heads": config.num_heads,
+        "head_dim": config.head_dim,
+        "logits_dtype": config.logits_dtype,
+        "compressed_logits": config.compressed_logits,
+        "disable_cp": True,
+        "num_sms": config.num_sms,
+        "logits_stride_override": None,
+    }
+
+
+def _compile_tirx_mqa_key(config: MQALogitsConfig) -> tuple[tuple[str, Any], ...]:
+    return tuple(_compile_tirx_mqa_kwargs(config).items())
+
+
 def _compile_tirx_mqa(config: MQALogitsConfig, max_seqlen_k: int) -> Any:
     # The kernel is independent of seq_len/seq_len_kv/disable_cp/logits_stride (all
     # runtime): canonical values let the cache dedup to one kernel per structural config.
-    return _compile_tirx_mqa_for_config(
-        seq_len=config.block_q,
-        seq_len_kv=config.block_kv,
-        num_heads=config.num_heads,
-        head_dim=config.head_dim,
-        logits_dtype=config.logits_dtype,
-        compressed_logits=config.compressed_logits,
-        disable_cp=True,
-        num_sms=config.num_sms,
-        logits_stride_override=None,
-    )
+    del max_seqlen_k
+
+    compile_kwargs = _compile_tirx_mqa_kwargs(config)
+    return _compile_tirx_mqa_for_config(**compile_kwargs)
 
 
 def _logits_storage_shape(config: MQALogitsConfig, max_seqlen_k: int) -> tuple[int, int]:
@@ -1294,8 +1306,18 @@ def run_test(**kwargs: Any) -> None:
         )
 
 
-def run_bench(**kwargs: Any) -> dict[str, Any]:
-    from tvm.tirx.bench import bench
+def prepare_bench(**kwargs: Any):
+    """Compile the TIRx executable without allocating CUDA data."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    config = _make_config(**kwargs)
+    executable = _compile_tirx_mqa(config, 0)
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+
+
+def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
+    from tirx_kernels.runner import bench
 
     warmup = kwargs.pop("warmup", None)
     repeat = kwargs.pop("repeat", None)
@@ -1303,7 +1325,7 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
     _rounds = kwargs.pop("rounds", 1)
     _cooldown_s = kwargs.pop("cooldown_s", 1.0)
     config_kwargs = dict(kwargs)
-    tirx_executable = _compile_tirx_mqa(_make_config(**config_kwargs), 0)
+    tirx_executable = prepared["executable"]
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     data = prepare_data(**config_kwargs)
@@ -1332,6 +1354,15 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
     )
     result["max_diff"] = max_diff
     return result
+
+
+def run_bench(**kwargs: Any) -> dict[str, Any]:
+    protocol = {
+        name: kwargs.pop(name)
+        for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
+        if name in kwargs
+    }
+    return prepare_bench(**kwargs).run_gpu(**protocol)
 
 
 __all__ = [

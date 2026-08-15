@@ -1090,9 +1090,10 @@ __all__ += [
 
 
 @cache
-def compile_spec(spec: GemmSpec):
+def _compile_spec_cached(spec: GemmSpec):
     """Compile one specialization.  `GemmSpec` is frozen, so it keys the cache."""
     import tvm
+    from tirx_kernels.runner import cuda_target
 
     from .kernel import build_kernel
 
@@ -1102,15 +1103,19 @@ def compile_spec(spec: GemmSpec):
     tags += ["threadIdx.x", "tirx.use_dyn_shared_memory"]
     func = build_kernel(spec).with_attr("tirx.kernel_launch_params", tags)
     return tvm.compile(
-        tvm.IRModule({"main": func}),
-        target=tvm.target.Target({"kind": "cuda", "arch": "sm_100f"}),
-        tir_pipeline="tirx",
+        tvm.IRModule({"main": func}), target=cuda_target(arch="sm_100a"), tir_pipeline="tirx"
     )
+
+
+def compile_spec(spec: GemmSpec):
+    """Compile or reuse one immutable specialization."""
+    return _compile_spec_cached(spec)
 
 
 def build_launch(
     spec: GemmSpec,
     *,
+    executable=None,
     a,
     b,
     sfa,
@@ -1132,7 +1137,8 @@ def build_launch(
     """
     import torch
 
-    executable = compile_spec(spec)
+    if executable is None:
+        executable = compile_spec(spec)
     if spec.gemm_type is GemmType.BATCHED:
         # A, B and C/D are rank-3 here and A/D are permuted views, so the
         # descriptors must read their real strides rather than assume packing.

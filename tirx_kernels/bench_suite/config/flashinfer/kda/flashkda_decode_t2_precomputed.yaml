@@ -16,13 +16,14 @@
 #   hv16h16_*   the non-GQA head count, at both ends of the batch range
 #   hv12h12_*   Kimi K3's TP8 per-rank head count, same two batch sizes
 kernel: flashkda_decode_t2_precomputed
+selection_rationale: The selected rows grow from batch 8 through 64 to 128 and cover Kimi TP8 heads, non-GQA heads, and the largest GQA shape while every other T=2 dispatch row remains explicitly runnable.
 configs:
-  - {config: hv32h16_b8_t2, default: true}
-  - {config: hv32h16_b16_t2, default: true}
-  - {config: hv32h16_b32_t2, default: true}
-  - {config: hv32h16_b64_t2, default: true}
-  - {config: hv32h16_b128_t2, default: true}
-  - {config: hv16h16_b8_t2, default: true}
-  - {config: hv16h16_b64_t2, default: true}
-  - {config: hv12h12_b8_t2, default: true}
-  - {config: hv12h12_b64_t2, default: true}
+  - {config: hv32h16_b8_t2, default: false}
+  - {config: hv32h16_b16_t2, default: false}
+  - {config: hv32h16_b32_t2, default: false}
+  - {config: hv32h16_b64_t2, default: false}
+  - {config: hv32h16_b128_t2, default: true, selection_role: large}
+  - {config: hv16h16_b8_t2, default: false}
+  - {config: hv16h16_b64_t2, default: true, selection_role: medium}
+  - {config: hv12h12_b8_t2, default: true, selection_role: small}
+  - {config: hv12h12_b64_t2, default: false}

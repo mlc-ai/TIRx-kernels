@@ -2539,16 +2539,19 @@ def _kernel_shape_params(
     cfg: SparseFlashMLADecodeHead64Config,
     device: torch.device | str,
     *,
+    prepared_num_sms: int | None = None,
     prepared_num_blocks: int | None = None,
     prepared_extra_num_blocks: int | None = None,
 ) -> dict[str, int]:
-    device_obj = torch.device(device)
-    device_index = device_obj.index
-    if device_index is None:
-        device_index = torch.cuda.current_device()
-    num_sm_parts = (
-        int(torch.cuda.get_device_properties(device_index).multi_processor_count) // cfg.s_q
-    )
+    if prepared_num_sms is None:
+        device_obj = torch.device(device)
+        device_index = device_obj.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        num_sms = int(torch.cuda.get_device_properties(device_index).multi_processor_count)
+    else:
+        num_sms = prepared_num_sms
+    num_sm_parts = num_sms // cfg.s_q
     num_sm_parts = max(num_sm_parts, 1)
     num_blocks = (
         prepared_num_blocks
@@ -3274,15 +3277,25 @@ def _compile_combine_kernel_cached(max_splits: int, have_attn_sink: bool, use_pd
 
 
 def _compile_decode_kernels(**kwargs: Any):
+    from tirx_kernels.runner import hardware_num_sms
+
     cfg = _cfg(**kwargs)
     device = kwargs.get("device", "cuda")
-    shape = _kernel_shape_params(cfg, device)
+    shape = _kernel_shape_params(cfg, device, prepared_num_sms=hardware_num_sms())
     presence = _main_presence_mask(cfg)
     use_pdl = cfg.b == 2
     return (
         _compile_main_kernel_cached(cfg.normalized_model_type, presence, use_pdl),
         _compile_combine_kernel_cached(shape["max_splits"], presence[1], use_pdl),
     )
+
+
+def prepare_bench(**kwargs: Any):
+    """Compile both sparse-decode executables without touching CUDA."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    state = {"config": dict(kwargs), "executables": _compile_decode_kernels(**kwargs)}
+    return prepared_gpu_benchmark(run_gpu, state)
 
 
 def _launch_tirx(case: dict[str, Any], executables: tuple[Any, Any]) -> None:
@@ -3334,17 +3347,23 @@ def run_test(**kwargs: Any) -> None:
     cfg.validate()
 
 
-def run_bench(
-    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+def run_gpu(
+    prepared,
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
     rounds = kwargs.pop("rounds", 1)
     cooldown_s = kwargs.pop("cooldown_s", 1.0)
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA decode benchmark")
 
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
-    executables = _compile_decode_kernels(**kwargs)
+    executables = prepared["executables"]
     # Allocate once outside both timed regions; both paths launch the exact
     # split-KV main kernel followed by their separate combine kernel.
     case = prepare_data(**kwargs)
@@ -3362,6 +3381,16 @@ def run_bench(
         references={"flashmla": lambda: flashmla_decode_reference_builder(case)},
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
+) -> dict[str, Any]:
+    rounds = kwargs.pop("rounds", 1)
+    cooldown_s = kwargs.pop("cooldown_s", 1.0)
+    return prepare_bench(**kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

@@ -1,7 +1,45 @@
 kernel: allgather_gemm
-defaults: {num_gpus: 1, timer: kineto}
+defaults:
+  num_gpus: 1
+  timer: kineto
 configs:
-  - {config: tp1_m8192_n24576_k4096_fp16_dynamic, default: true}
-  - {config: tp1_m8192_n51200_k5120_fp16_dynamic, default: true}
-  - {config: tp1_m8192_n57344_k8192_fp16_dynamic, default: true}
-  - {config: tp1_m8192_n106496_k16384_fp16_dynamic, default: true}
+- config: tp1_m8192_n24576_k4096_fp16_dynamic
+  default: false
+- config: tp4_m8192_n24576_k4096_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n28672_k4096_fp16_dynamic
+  default: false
+- config: tp4_m8192_n28672_k4096_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n28672_k3584_fp16_dynamic
+  default: false
+- config: tp4_m8192_n28672_k3584_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n73728_k4608_fp16_dynamic
+  default: false
+- config: tp4_m8192_n73728_k4608_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n51200_k5120_fp16_dynamic
+  default: false
+- config: tp4_m8192_n51200_k5120_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n57344_k8192_fp16_dynamic
+  default: false
+- config: tp4_m8192_n57344_k8192_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n98304_k12288_fp16_dynamic
+  default: false
+- config: tp4_m8192_n98304_k12288_fp16_dynamic
+  default: false
+  num_gpus: 4
+- config: tp1_m8192_n106496_k16384_fp16_dynamic
+  default: false
+- config: tp4_m8192_n106496_k16384_fp16_dynamic
+  default: false
+  num_gpus: 4

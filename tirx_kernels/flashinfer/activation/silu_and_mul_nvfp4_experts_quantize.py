@@ -16,9 +16,11 @@ and per-expert row masks.  Only the default-environment specialization is in
 scope (fast-math reciprocal, E4M3 scale factors, no 4over6 refinement).
 """
 
+from typing import Any
+
+from tirx_kernels.runner import bench
 from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {
     "name": "silu_and_mul_nvfp4_experts_quantize",
@@ -42,9 +44,9 @@ _SM_COUNT_CACHE = None
 def _sm_count() -> int:
     global _SM_COUNT_CACHE
     if _SM_COUNT_CACHE is None:
-        import torch
+        from tirx_kernels.runner import hardware_num_sms
 
-        _SM_COUNT_CACHE = torch.cuda.get_device_properties(0).multi_processor_count
+        _SM_COUNT_CACHE = hardware_num_sms()
     return _SM_COUNT_CACHE
 
 
@@ -453,6 +455,14 @@ def _run_launch(ex, a, global_scale, out, sf, mask, n_experts, m, k):
     )
 
 
+def prepare_bench(**kwargs: Any):
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
+
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
+
+
 def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand", **kwargs):
     """Compile, launch, and validate one config against the flashinfer source."""
     import torch
@@ -487,30 +497,23 @@ def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand"
     torch.testing.assert_close(sf_tirx_u8[valid], ref_sf_u8[valid], rtol=0, atol=0)
 
 
-def run_bench(
-    dtype: str,
-    n_experts: int,
-    m: int,
-    k: int,
-    mask_mode: str = "rand",
-    *,
-    warmup=None,
-    repeat=None,
-    timer=None,
-    rounds=1,
-    cooldown_s=1.0,
-    **kwargs,
-):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
     """Benchmark the TIRx port against the source thop (kernel-only)."""
+    config = dict(prepared["config"])
+    dtype = config.pop("dtype")
+    n_experts = config.pop("n_experts")
+    m = config.pop("m")
+    k = config.pop("k")
+    mask_mode = config.pop("mask_mode")
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
     import torch
-
-    from tirx_kernels.runner import compile_kernel
 
     a, mask, global_scale = prepare_data(
         dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode
     )
-    kernel = get_kernel(dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode)
-    ex = compile_kernel(kernel)
+    ex = executable
     out_tirx, sf_tirx = _alloc_outputs(dtype, n_experts, m, k)
 
     funcs = {
@@ -537,6 +540,29 @@ def run_bench(
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    dtype: str,
+    n_experts: int,
+    m: int,
+    k: int,
+    mask_mode: str = "rand",
+    *,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    rounds=1,
+    cooldown_s=1.0,
+    **kwargs,
+):
+    config = dict(kwargs)
+    prepared = prepare_bench(
+        dtype=dtype, n_experts=n_experts, m=m, k=k, mask_mode=mask_mode, **config
+    )
+    return prepared.run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

@@ -19,18 +19,19 @@
 # hv12 rows are the Kimi K3 TP8 per-rank value-head count; T=4 and T=2 cover
 # the speculative-decode test parity point and the legal floor.
 kernel: recurrent_kda_decode_grouped
+selection_rationale: One decode row and two target-verify rows cover both legal tile schedules, large and small batches, and the hv16/hv12 production head-count families.
 configs:
-  - {config: dec_hv16_b1, default: true}
-  - {config: dec_hv16_b4, default: true}
-  - {config: dec_hv12_b4, default: true}
-  - {config: dec_hv12_b8, default: true}
-  - {config: ver_t8_hv16_b1, default: true}
-  - {config: ver_t8_hv16_b4, default: true}
-  - {config: ver_t8_hv16_b16, default: true}
-  - {config: ver_t8_hv16_b32, default: true}
-  - {config: ver_t8_hv16_b64, default: true}
-  - {config: ver_t8_hv16_b128, default: true}
-  - {config: ver_t8_hv12_b16, default: true}
-  - {config: ver_t8_hv12_b64, default: true}
-  - {config: ver_t4_hv16_b32, default: true}
-  - {config: ver_t2_hv16_b8, default: true}
+  - {config: dec_hv16_b1, default: true, selection_role: small}
+  - {config: dec_hv16_b4, default: false}
+  - {config: dec_hv12_b4, default: false}
+  - {config: dec_hv12_b8, default: false}
+  - {config: ver_t8_hv16_b1, default: false}
+  - {config: ver_t8_hv16_b4, default: false}
+  - {config: ver_t8_hv16_b16, default: false}
+  - {config: ver_t8_hv16_b32, default: false}
+  - {config: ver_t8_hv16_b64, default: false}
+  - {config: ver_t8_hv16_b128, default: true, selection_role: large}
+  - {config: ver_t8_hv12_b16, default: true, selection_role: medium}
+  - {config: ver_t8_hv12_b64, default: false}
+  - {config: ver_t4_hv16_b32, default: false}
+  - {config: ver_t2_hv16_b8, default: false}

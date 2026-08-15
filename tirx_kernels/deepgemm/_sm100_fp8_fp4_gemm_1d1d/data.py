@@ -560,7 +560,7 @@ def bench_against_deepgemm(
     by `bench` as a baseline error instead of losing our own measurement.
     `extra` is merged into the result as the shape columns the report prints.
     """
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     def build_reference():
         launch, _out = reference_launcher(data)
@@ -1035,7 +1035,7 @@ def prepare_k_grouped(
 
     require_sm100()
     deep_gemm = require_deep_gemm()
-    from .k_grouped_fp8_gemm_contiguous import make_ks
+    from ..k_grouped_fp8_gemm_contiguous import make_ks
     from .spec import align_up
 
     torch.manual_seed(seed)

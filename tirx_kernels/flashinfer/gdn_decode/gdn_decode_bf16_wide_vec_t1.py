@@ -17,8 +17,8 @@ from unittest import SkipTest
 
 import torch
 
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {
     "name": "gdn_decode_bf16_wide_vec_t1",
@@ -1061,7 +1061,26 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def run_bench(
+def prepare_bench(**kwargs: Any):
+    """Compile the selected wide-vector specialization before CUDA setup."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    config = dict(kwargs)
+    _require_supported_config(config)
+    executable = _compile_tirx(
+        int(config["num_heads"]),
+        int(config["num_v_heads"]),
+        int(config["tile_v"]),
+        bool(config.get("use_qk_l2norm", True)),
+        bool(config.get("disable_state_update", False)),
+        bool(config.get("cache_intermediate_states", False)),
+        bool(config.get("same_pool", True)),
+    )
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+
+
+def run_gpu(
+    prepared,
     *,
     warmup: int | None = None,
     repeat: int | None = None,
@@ -1070,8 +1089,9 @@ def run_bench(
     cooldown_s: float = 1.0,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = prepared["executable"]
     args = _tirx_args(case)
     executable(*args)
     _run_reference(case)
@@ -1096,6 +1116,20 @@ def run_bench(
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    rounds: int = 1,
+    cooldown_s: float = 1.0,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return prepare_bench(**kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

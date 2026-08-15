@@ -18,6 +18,7 @@ import torch
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 1e-8
+_COMPILE_CACHE_NAMESPACE = "deepgemm.tf32_hc_prenorm_gemm.compile"
 
 
 def _tf32_hc_cuda_postproc(code: str) -> str:
@@ -272,11 +273,9 @@ def load_deep_gemm_hc() -> tuple[Any, str]:
 
 
 def _get_num_sms(default: int) -> int:
-    if torch.cuda.is_available():
-        return int(
-            torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        )
-    return default
+    from tirx_kernels.runner import hardware_num_sms
+
+    return hardware_num_sms(default)
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
@@ -1005,8 +1004,13 @@ def _compile_tirx_tf32_hc_for_config(
 _compile_tirx_tf32_hc_for_config = cache(_compile_tirx_tf32_hc_for_config)
 
 
+def _compile_tirx_tf32_hc_key(config: TF32HCPrenormGemmConfig) -> tuple[tuple[str, Any], ...]:
+    return tuple(asdict(config).items())
+
+
 def _compile_tirx_tf32_hc(config: TF32HCPrenormGemmConfig) -> Any:
-    return _compile_tirx_tf32_hc_for_config(**asdict(config))
+    compile_kwargs = asdict(config)
+    return _compile_tirx_tf32_hc_for_config(**compile_kwargs)
 
 
 def _build_tirx_tensor_maps(data: dict[str, Any]) -> dict[str, Any]:
@@ -1129,26 +1133,29 @@ def _bench_deepgemm_case(case: TF32HCBenchCase) -> tuple[torch.Tensor, torch.Ten
     return case.d_deepgemm, case.sqr_deepgemm
 
 
-def run_bench(**kwargs: Any) -> dict[str, Any]:
-    from tvm.tirx.bench import bench
+def prepare_bench(**kwargs: Any):
+    """Compile the hardware-profile specialization before GPU assignment."""
+    from tirx_kernels.runner import hardware_num_sms, prepared_gpu_benchmark
 
+    config = _make_config(**kwargs)
+    runtime_config = TF32HCPrenormGemmConfig(
+        **{**asdict(config), "num_sms": hardware_num_sms(config.num_sms)}
+    )
+    executable = _compile_tirx_tf32_hc(runtime_config)
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+
+
+def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+    from tirx_kernels.runner import bench
+
+    kwargs = {**prepared["config"], **kwargs}
     timer = kwargs.pop("timer", None)  # None inherits the global default (proton)
     warmup = kwargs.pop("warmup", None)
     repeat = kwargs.pop("repeat", None)
     _rounds = kwargs.pop("rounds", 1)
     _cooldown_s = kwargs.pop("cooldown_s", 1.0)
     config_kwargs = dict(kwargs)
-    config = _make_config(**config_kwargs)
-    deep_gemm, _ = load_deep_gemm_hc()
-    runtime_config = TF32HCPrenormGemmConfig(
-        **{
-            **asdict(config),
-            "num_sms": int(
-                getattr(deep_gemm, "get_num_sms", lambda: _get_num_sms(config.num_sms))()
-            ),
-        }
-    )
-    executable = _compile_tirx_tf32_hc(runtime_config)
+    executable = prepared["executable"]
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     case = _make_bench_case(config_kwargs)
@@ -1178,6 +1185,15 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
     result["tirx_diff"] = tirx_diff
     result["max_diff"] = tirx_diff
     return result
+
+
+def run_bench(**kwargs: Any) -> dict[str, Any]:
+    protocol = {
+        name: kwargs.pop(name)
+        for name in ("warmup", "repeat", "timer", "rounds", "cooldown_s")
+        if name in kwargs
+    }
+    return prepare_bench(**kwargs).run_gpu(**protocol)
 
 
 __all__ = [

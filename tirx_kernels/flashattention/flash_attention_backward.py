@@ -19,6 +19,7 @@ not depend on TIRx tile primitives.
 
 import copy
 import math
+from functools import cache
 
 import torch
 
@@ -193,7 +194,9 @@ def build_preprocess(B, S, H, D):
                             )
 
     mod = tvm.IRModule({"main": preprocess_kernel})
-    return tvm.compile(mod, target=tvm.target.Target("cuda"))
+    from tirx_kernels.runner import cuda_target
+
+    return tvm.compile(mod, target=cuda_target())
 
 
 def build_cast_f32_to_f16(B, S, H, D, scale):
@@ -253,7 +256,9 @@ def build_cast_f32_to_f16(B, S, H, D, scale):
                         )
 
     mod = tvm.IRModule({"main": cast_kernel})
-    return tvm.compile(mod, target=tvm.target.Target("cuda"))
+    from tirx_kernels.runner import cuda_target
+
+    return tvm.compile(mod, target=cuda_target())
 
 
 # ---------------------------------------------------------------------------
@@ -1871,8 +1876,22 @@ def build_kernel(
 # ---------------------------------------------------------------------------
 
 
-def setup(data, B, H, S, D):
-    """Compile backward kernels, prepare data, run once. Return no-arg kernel_fn."""
+@cache
+def _compile_pipeline(B: int, H: int, S: int, D: int, causal: bool, attention_scale: float):
+    from tirx_kernels.runner import cuda_target
+
+    preprocess_ex = build_preprocess(B, S, H, D)
+    cast_ex = build_cast_f32_to_f16(B, S, H, D, attention_scale)
+    target = cuda_target()
+    with target:
+        kernel_func = build_kernel(B, H, S, D, causal=causal, attention_scale=attention_scale)
+        kernel_mod = tvm.IRModule({"main": kernel_func})
+        kernel_ex = tvm.compile(kernel_mod, target=target, tir_pipeline="tirx")
+    return preprocess_ex, kernel_ex, cast_ex
+
+
+def setup(data, B, H, S, D, *, executables=None):
+    """Prepare GPU data and return one full backward-pipeline launch."""
     Q = data["Q"]
     K = data["K"]
     V = data["V"]
@@ -1888,15 +1907,9 @@ def setup(data, B, H, S, D):
     dK = data["dK"]
     dV = data["dV"]
     dQ = data["dQ"]
-    target = tvm.target.Target("cuda")
-
-    preprocess_ex = build_preprocess(B, S, H, D)
-    cast_ex = build_cast_f32_to_f16(B, S, H, D, attention_scale)
-
-    with target:
-        kernel_func = build_kernel(B, H, S, D, causal=causal, attention_scale=attention_scale)
-        kernel_mod = tvm.IRModule({"main": kernel_func})
-        kernel_ex = tvm.compile(kernel_mod, target=target, tir_pipeline="tirx")
+    if executables is None:
+        executables = _compile_pipeline(B, H, S, D, causal, attention_scale)
+    preprocess_ex, kernel_ex, cast_ex = executables
 
     def run_all():
         preprocess_ex(dO, O, LSE, dpsum, LSE_log2, dQ_acc)
@@ -2025,24 +2038,50 @@ def run_test(
             raise AssertionError(f"{name} matched ratio {matched.item():.6f} is below 0.995")
 
 
-def run_bench(
+def prepare_bench(
     batch_size: int,
     seq_len: int,
     num_heads: int,
     head_dim: int = 128,
     is_causal: bool = False,
-    warmup=None,
-    repeat=None,
-    timer=None,
     **kwargs,
 ):
+    """Compile the preprocess/core/cast pipeline before CUDA setup."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    scale = 1.0 / math.sqrt(head_dim)
+    state = {
+        "config": {
+            "batch_size": batch_size,
+            "seq_len": seq_len,
+            "num_heads": num_heads,
+            "head_dim": head_dim,
+            "is_causal": is_causal,
+            **kwargs,
+        },
+        "executables": _compile_pipeline(
+            batch_size, num_heads, seq_len, head_dim, is_causal, scale
+        ),
+    }
+    return prepared_gpu_benchmark(run_gpu, state)
+
+
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark the full preprocess/core/cast pipeline against current FA4."""
     from flash_attn.cute.interface import _flash_attn_bwd
 
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
+    config = {**prepared["config"], **kwargs}
+    batch_size = config.pop("batch_size")
+    seq_len = config.pop("seq_len")
+    num_heads = config.pop("num_heads")
+    head_dim = config.pop("head_dim")
+    is_causal = config.pop("is_causal")
     data, _ = _prepare_official_workload(batch_size, seq_len, num_heads, head_dim, is_causal)
-    candidate = setup(data, batch_size, num_heads, seq_len, head_dim)
+    candidate = setup(
+        data, batch_size, num_heads, seq_len, head_dim, executables=prepared["executables"]
+    )
 
     def official_factory():
         def run():
@@ -2065,5 +2104,33 @@ def run_bench(
         repeat=repeat,
         timer=timer,
         references={"flashattn_sm100": official_factory},
-        **kwargs,
+        **config,
     )
+
+
+def run_bench(
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int = 128,
+    is_causal: bool = False,
+    warmup=None,
+    repeat=None,
+    timer=None,
+    **kwargs,
+):
+    rounds = kwargs.pop("rounds", None)
+    cooldown_s = kwargs.pop("cooldown_s", None)
+    protocol = {"warmup": warmup, "repeat": repeat, "timer": timer}
+    if rounds is not None:
+        protocol["rounds"] = rounds
+    if cooldown_s is not None:
+        protocol["cooldown_s"] = cooldown_s
+    return prepare_bench(
+        batch_size=batch_size,
+        seq_len=seq_len,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        is_causal=is_causal,
+        **kwargs,
+    ).run_gpu(**protocol)

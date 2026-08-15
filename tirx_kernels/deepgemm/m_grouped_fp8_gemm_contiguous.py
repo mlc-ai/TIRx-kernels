@@ -129,9 +129,9 @@ def make_desc(
     (`sm100_fp8_fp4_gemm_1d1d.hpp:193-195`).
     """
     if num_sms is None:
-        import torch
+        from tirx_kernels.runner import hardware_num_sms
 
-        num_sms = torch.cuda.get_device_properties(0).multi_processor_count
+        num_sms = hardware_num_sms()
     alignment = get_theoretical_mk_alignment()
     m = sum(make_aligned_ms(num_groups, expected_m_per_group, seed, alignment))
     return GemmDesc(
@@ -180,11 +180,24 @@ def prepare_data(**config):
     return prepare_m_grouped_contiguous(**config)
 
 
-def _tirx_launch(data, config):
+def prepare_bench(**config):
+    """Compile the exact DeepGEMM specialization without initializing CUDA."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    config.pop("label", None)
+    spec = _spec_for(config)
+    from ._sm100_fp8_fp4_gemm_1d1d import compile_spec
+
+    state = {"config": dict(config), "executable": compile_spec(spec)}
+    return prepared_gpu_benchmark(run_gpu, state)
+
+
+def _tirx_launch(data, config, executable=None):
     from ._sm100_fp8_fp4_gemm_1d1d import build_launch
 
     return build_launch(
         _spec_for(config),
+        executable=executable,
         a=data["a"],
         b=data["b"],
         sfa=data["sfa"],
@@ -235,7 +248,8 @@ def run_test(**config):
     )
 
 
-def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
+    config = {**prepared["config"], **config}
     from ._sm100_fp8_fp4_gemm_1d1d.data import (
         bench_against_deepgemm,
         deepgemm_launch_m_grouped_contiguous,
@@ -244,7 +258,7 @@ def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0,
     config.pop("label", None)
     data = prepare_data(**config)
     return bench_against_deepgemm(
-        _tirx_launch(data, config),
+        _tirx_launch(data, config, executable=prepared["executable"]),
         deepgemm_launch_m_grouped_contiguous,
         data,
         warmup=warmup,
@@ -259,12 +273,19 @@ def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0,
     )
 
 
+def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
+    return prepare_bench(**config).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
+    )
+
+
 __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "get_kernel",
     "make_desc",
+    "prepare_bench",
     "prepare_data",
     "run_bench",
     "run_test",

@@ -3,21 +3,18 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 from enum import IntEnum
 from pathlib import Path
 
-import flashinfer
-import torch
-from flashinfer import SfLayout, nvfp4_quantize
-
 import tvm
+from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState, TMABar
 from tvm.tirx.lang.smem_desc import SmemDescriptor
 from tvm.tirx.lang.tile_scheduler import ClusterPersistentScheduler2D
@@ -48,6 +45,9 @@ _EVICT_FIRST_L2_POLICY = 0x12F0000000000000
 
 
 def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
+    import torch
+    from flashinfer import SfLayout, nvfp4_quantize
+
     torch.manual_seed(0)
     A_origin = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     B_origin = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
@@ -70,12 +70,12 @@ _CUBLASLT_EXT = None
 
 
 def _load_cublaslt_nvfp4_ext():
-    """Load the cuBLASLt NVFP4 baseline as a PyTorch inline extension."""
+    """Build and load the shape-independent cuBLASLt reference before READY."""
     global _CUBLASLT_EXT
     if _CUBLASLT_EXT is not None:
         return _CUBLASLT_EXT
 
-    from torch.utils.cpp_extension import CUDA_HOME, load_inline
+    from torch.utils import cpp_extension
 
     source = r"""
 #include <torch/extension.h>
@@ -240,19 +240,37 @@ void nvfp4_cublaslt(torch::Tensor A, torch::Tensor B, torch::Tensor A_scale,
 """
     extra_include_paths = []
     extra_ldflags = ["-lcublas", "-lcublasLt"]
-    if CUDA_HOME:
-        extra_include_paths.append(f"{CUDA_HOME}/include")
-        extra_ldflags.insert(0, f"-L{CUDA_HOME}/lib64")
-    _CUBLASLT_EXT = load_inline(
-        name="nvfp4_cublaslt_baseline_ext",
-        cpp_sources=[source],
-        functions=["nvfp4_cublaslt"],
-        with_cuda=True,
-        extra_include_paths=extra_include_paths,
-        extra_cflags=["-O3"],
-        extra_ldflags=extra_ldflags,
-        verbose=False,
-    )
+    if cpp_extension.CUDA_HOME:
+        extra_include_paths.append(f"{cpp_extension.CUDA_HOME}/include")
+        extra_ldflags.insert(0, f"-L{cpp_extension.CUDA_HOME}/lib64")
+
+    name = "nvfp4_cublaslt_baseline_ext"
+    build_directory = Path(cpp_extension._get_build_directory(name, verbose=False))
+    lock_fd = os.open(build_directory / "lock.flock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # PyTorch's FileBaton is not process-death-safe. The outer flock proves
+        # no suite process is building here, so a remaining baton is stale.
+        (build_directory / "lock").unlink(missing_ok=True)
+        extra_cuda_cflags = []
+        if prepare_arch := os.environ.get(PREPARE_CUDA_ARCH_ENV):
+            arch = prepare_arch.removeprefix("sm_")
+            extra_cuda_cflags.append(f"-gencode=arch=compute_{arch},code=sm_{arch}")
+        _CUBLASLT_EXT = cpp_extension.load_inline(
+            name=name,
+            cpp_sources=[source],
+            functions=["nvfp4_cublaslt"],
+            with_cuda=True,
+            extra_include_paths=extra_include_paths,
+            extra_cflags=["-O3"],
+            extra_cuda_cflags=extra_cuda_cflags,
+            extra_ldflags=extra_ldflags,
+            build_directory=str(build_directory),
+            verbose=False,
+        )
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     return _CUBLASLT_EXT
 
 
@@ -992,20 +1010,22 @@ def get_kernel(M, N, K):
     return tir_ws_kernel(M, N, K)
 
 
+def _compile_executable(M: int, N: int, K: int):
+    from tirx_kernels.runner import compile_kernel
+
+    return compile_kernel(get_kernel(M, N, K))
+
+
 def run_test(M=1024, N=1024, K=1024):
     """Compile, run, and verify kernel."""
     import torch
     import torch.nn.functional as F
 
-    kernel = tir_ws_kernel(M, N, K)
     A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
     alpha_tensor = torch.tensor([alpha], device="cuda", dtype=torch.float)
     out = torch.empty_like(C_ref).to("cuda").to(torch.bfloat16)
-    target = tvm.target.Target("cuda")
-    with target:
-        mod = tvm.IRModule({"main": kernel})
-        ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
-        ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out)
+    ex = _compile_executable(M, N, K)
+    ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out)
     cosine_sim = F.cosine_similarity(
         out.reshape(-1).float(), C_ref.to("cuda").reshape(-1).float(), dim=0
     )
@@ -1023,6 +1043,7 @@ def _flashinfer_autotune_cache_path(
     # FlashInfer rejects cache metadata from a different software/GPU stack.
     # Put each stack in its own directory as well, so an obsolete file cannot
     # prevent the current process from saving its newly tuned result.
+    import flashinfer
     from flashinfer.autotuner import _collect_metadata
 
     environment = _collect_metadata()
@@ -1090,16 +1111,29 @@ def _flashinfer_tuned_choice(
 # cudaDeviceSynchronize), and since the nvfp4 kernel (~28µs) is faster than that dispatch,
 # event wall-clock is host-starved and over-credits us ~4x. Proton measures pure GPU
 # kernel time -> honest ~parity (verified 0.996 vs event 4.11).
-def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, **kwargs):
+def prepare_bench(M=1024, N=1024, K=1024, **kwargs):
+    """Compile TIRx and the device-independent cuBLASLt extension before READY."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    state = {
+        "config": {"M": M, "N": N, "K": K, **kwargs},
+        "executable": _compile_executable(M, N, K),
+        "cublaslt_extension": _load_cublaslt_nvfp4_ext(),
+    }
+    return prepared_gpu_benchmark(run_gpu, state)
+
+
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark."""
+    import flashinfer
     import torch
 
+    config_kwargs = {**prepared["config"], **kwargs}
+    M = config_kwargs.pop("M")
+    N = config_kwargs.pop("N")
+    K = config_kwargs.pop("K")
     metadata = {}
-    kernel = tir_ws_kernel(M, N, K)
-    target = tvm.target.Target("cuda")
-    with target:
-        mod = tvm.IRModule({"main": kernel})
-        ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
+    ex = prepared["executable"]
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
@@ -1191,7 +1225,7 @@ def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, *
         return run
 
     def _cublaslt():
-        ext = _load_cublaslt_nvfp4_ext()
+        ext = prepared["cublaslt_extension"]
         out_cublaslt = torch.empty_like(out_tir)
         return lambda: ext.nvfp4_cublaslt(
             A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K
@@ -1211,8 +1245,18 @@ def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, *
             warmup=warmup,
             repeat=repeat,
             timer=timer,
-            references={"flashinfer": lambda: flashinfer_run, "cublaslt_nvfp4": _cublaslt},
-            **kwargs,
+            references={
+                "flashinfer": lambda: flashinfer_run,
+                "cublaslt_nvfp4": _cublaslt,
+            },
+            **config_kwargs,
         )
     result["metadata"] = {**result.get("metadata", {}), **metadata}
     return result
+
+
+def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, **kwargs):
+    protocol = {name: kwargs.pop(name) for name in ("rounds", "cooldown_s") if name in kwargs}
+    return prepare_bench(M=M, N=N, K=K, **kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, **protocol
+    )

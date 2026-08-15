@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 import math
+from typing import Any
 
 import numpy as np
 
 import tvm
+from tirx_kernels.runner import bench
 from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
-from tvm.tirx.bench import bench
 from tvm.tirx.lang.pipeline import MBarrier, TMABar
 
 
@@ -602,10 +603,12 @@ def build_tirx_soln(
 ) -> tuple[np.ndarray, tvm.runtime.Executable]:
     import torch
 
+    from tirx_kernels.runner import cuda_target
+
     input_cat_tir = input_cat.cuda() if not input_cat.is_cuda else input_cat
     weights_tir = weights.cuda() if not weights.is_cuda else weights
     output_tir = torch.empty((batch_size, dim), dtype=torch.float16, device="cuda")
-    target = tvm.target.Target("cuda")
+    target = cuda_target()
     with target:
         mod = tvm.IRModule({"main": func(dim, batch_size)})
         mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
@@ -822,6 +825,14 @@ def get_kernel(hidden_size, **kwargs):
     return _get_rmsnorm_kernel(hidden_size)
 
 
+def prepare_bench(**kwargs: Any):
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
+
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
+
+
 def run_test(hidden_size, batch_size, **kwargs):
     """Compile, run, and verify rmsnorm kernel."""
     import torch
@@ -844,15 +855,22 @@ def run_test(hidden_size, batch_size, **kwargs):
 # tiny (~2µs) kernel whose event wall is ~3x inflated by launch overhead, and its
 # reference is flashinfer (Python-dispatch-heavy). Proton measures the true ~2µs kernel
 # time and an undistorted ratio.
-def run_bench(hidden_size, batch_size, warmup=None, repeat=None, timer=None, **kwargs):
-    """Benchmark rmsnorm kernel."""
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
+    """Allocate, validate, and measure after GPU assignment."""
+    return _run_gpu(
+        prepared["executable"],
+        **prepared["config"],
+        warmup=warmup,
+        repeat=repeat,
+        timer=timer,
+        **kwargs,
+    )
+
+
+def _run_gpu(ex, hidden_size, batch_size, warmup=None, repeat=None, timer=None, **kwargs):
+    """GPU-stage implementation shared by suite and standalone execution."""
 
     import torch
-
-    from tirx_kernels.runner import compile_kernel
-
-    kernel = _get_rmsnorm_kernel(hidden_size)
-    ex = compile_kernel(kernel)
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     input_data, weights = prepare_data(batch_size, hidden_size)
@@ -877,6 +895,13 @@ def run_bench(hidden_size, batch_size, warmup=None, repeat=None, timer=None, **k
         timer=timer,
         references={"flashinfer": _flashinfer},
         **kwargs,
+    )
+
+
+def run_bench(hidden_size, batch_size, warmup=None, repeat=None, timer=None, **kwargs):
+    """Standalone wrapper over the same explicit prepare and GPU stages."""
+    return prepare_bench(hidden_size=hidden_size, batch_size=batch_size).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, **kwargs
     )
 
 

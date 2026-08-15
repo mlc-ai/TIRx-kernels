@@ -37,6 +37,7 @@ LANES_PER_GROUP = 32
 SOURCE_NUM_SMS = 148
 LOG2_E = 1.4426950408889634
 LN_2 = 0.6931471805599453
+_HAS_NATIVE_PTX_ADDR = hasattr(T.ptx, "addr")
 
 
 def _ptx_unary(chain: str, value):
@@ -1436,7 +1437,8 @@ def get_kernel(**kwargs: Any):
         ILP_ROWS=ilp_rows,
         USE_SMEM_V=use_smem_v,
         USE_QK_L2NORM=bool(config.get("use_qk_l2norm", True)),
-        USE_NATIVE_OFFSETS=(seq_len == 2 or 3 < seq_len < 8)
+        USE_NATIVE_OFFSETS=_HAS_NATIVE_PTX_ADDR
+        and (seq_len == 2 or 3 < seq_len < 8)
         and not (seq_len == 4 and int(config["num_heads"]) <= 8 and work_units == 1024),
         RELOAD_K_FOR_OUTPUT=seq_len == 8 and not use_smem_v,
         USE_CANONICAL_WARP_ID=seq_len == 4,
@@ -1573,7 +1575,12 @@ def _make_qkv(
 
 
 def _device_from_config(config: dict[str, Any]) -> torch.device:
-    device = torch.device(config.get("device", "cuda:0"))
+    configured_device = config.get("device")
+    device = (
+        torch.device(configured_device)
+        if configured_device is not None
+        else torch.device("cuda", torch.cuda.current_device())
+    )
     if device.type != "cuda" or not torch.cuda.is_available():
         raise SkipTest("CUDA is required for FP32 MTP warp GDN decode")
     capability = torch.cuda.get_device_capability(device)
@@ -1651,8 +1658,7 @@ def _compile_tirx(
     return compile_kernel(get_kernel(**config))
 
 
-def _tirx_executable(case: dict[str, Any]):
-    config = case["config"]
+def _compile_tirx_for_config(config: dict[str, Any]):
     return _compile_tirx(
         int(config["batch"]) * int(config["num_v_heads"]),
         int(config["seq_len"]),
@@ -1670,6 +1676,10 @@ def _tirx_executable(case: dict[str, Any]):
         bool(config.get("padded_pool", False)),
         bool(config.get("packed_qkv", False)),
     )
+
+
+def _tirx_executable(case: dict[str, Any]):
+    return _compile_tirx_for_config(case["config"])
 
 
 def _storage_span(tensor: torch.Tensor, elements: int) -> torch.Tensor:
@@ -1909,7 +1919,18 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def run_bench(
+def prepare_bench(**kwargs: Any):
+    """Compile the selected FP32 MTP warp specialization before CUDA setup."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    config = dict(kwargs)
+    _require_supported_config(config)
+    executable = _compile_tirx_for_config(config)
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+
+
+def run_gpu(
+    prepared,
     *,
     warmup: int | None = None,
     repeat: int | None = None,
@@ -1918,8 +1939,9 @@ def run_bench(
     cooldown_s: float = 1.0,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = prepared["executable"]
     args = _tirx_args(case)
     executable(*args)
     _run_reference(case)
@@ -1947,11 +1969,26 @@ def run_bench(
     )
 
 
+def run_bench(
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    rounds: int = 1,
+    cooldown_s: float = 1.0,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return prepare_bench(**kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
+    )
+
+
 __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "get_kernel",
+    "prepare_bench",
     "prepare_data",
     "run_bench",
     "run_test",

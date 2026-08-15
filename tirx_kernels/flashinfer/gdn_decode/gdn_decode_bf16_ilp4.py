@@ -17,8 +17,8 @@ from unittest import SkipTest
 
 import torch
 
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {"name": "gdn_decode_bf16_ilp4", "category": "flashinfer", "compute_capability": 10}
 
@@ -995,7 +995,12 @@ def _make_qkv(
 
 
 def _device_from_config(config: dict[str, Any]) -> torch.device:
-    device = torch.device(config.get("device", "cuda:0"))
+    configured_device = config.get("device")
+    device = (
+        torch.device(configured_device)
+        if configured_device is not None
+        else torch.device("cuda", torch.cuda.current_device())
+    )
     if device.type != "cuda" or not torch.cuda.is_available():
         raise SkipTest("CUDA is required for BF16 ILP4 GDN decode")
     capability = torch.cuda.get_device_capability(device)
@@ -1175,8 +1180,7 @@ def _compile_tirx(
     return compile_kernel(get_kernel(**config))
 
 
-def _tirx_executable(case: dict[str, Any]):
-    config = case["config"]
+def _compile_tirx_for_config(config: dict[str, Any]):
     return _compile_tirx(
         int(config["seq_len"]),
         int(config["num_heads"]),
@@ -1192,6 +1196,10 @@ def _tirx_executable(case: dict[str, Any]):
         bool(config.get("per_token_pool_scatter", False)),
         bool(config.get("padded_pool", False)),
     )
+
+
+def _tirx_executable(case: dict[str, Any]):
+    return _compile_tirx_for_config(case["config"])
 
 
 def _storage_span(tensor: torch.Tensor, elements: int) -> torch.Tensor:
@@ -1307,7 +1315,18 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def run_bench(
+def prepare_bench(**kwargs: Any):
+    """Compile the selected ILP4 specialization before CUDA setup."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    config = dict(kwargs)
+    _require_supported_config(config)
+    executable = _compile_tirx_for_config(config)
+    return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
+
+
+def run_gpu(
+    prepared,
     *,
     warmup: int | None = None,
     repeat: int | None = None,
@@ -1316,8 +1335,9 @@ def run_bench(
     cooldown_s: float = 1.0,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    kwargs = {**prepared["config"], **kwargs}
     case = prepare_data(**kwargs)
-    executable = _tirx_executable(case)
+    executable = prepared["executable"]
     args = _tirx_args(case)
     executable(*args)
     _run_reference(case)
@@ -1342,6 +1362,20 @@ def run_bench(
         timer=timer,
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    rounds: int = 1,
+    cooldown_s: float = 1.0,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return prepare_bench(**kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

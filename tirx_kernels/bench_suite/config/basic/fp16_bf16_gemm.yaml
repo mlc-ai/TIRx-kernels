@@ -1,12 +1,13 @@
 kernel: fp16_bf16_gemm
+selection_rationale: The small and large FP16 squares bound the scale curve, while the BF16 4096 square covers the second production dtype at a representative middle size.
 configs:
-  - {config: fp16_1024x1024x1024, default: true}
-  - {config: fp16_2048x2048x2048, default: true}
-  - {config: fp16_4096x4096x4096, default: true}
-  - {config: fp16_8192x8192x8192, default: true}
-  - {config: fp16_16384x16384x16384, default: true}
-  - {config: bf16_1024x1024x1024, default: true}
-  - {config: bf16_2048x2048x2048, default: true}
-  - {config: bf16_4096x4096x4096, default: true}
-  - {config: bf16_8192x8192x8192, default: true}
-  - {config: bf16_16384x16384x16384, default: true}
+  - {config: fp16_1024x1024x1024, default: true, selection_role: small}
+  - {config: fp16_2048x2048x2048, default: false}
+  - {config: fp16_4096x4096x4096, default: false}
+  - {config: fp16_8192x8192x8192, default: false}
+  - {config: fp16_16384x16384x16384, default: true, selection_role: large}
+  - {config: bf16_1024x1024x1024, default: false}
+  - {config: bf16_2048x2048x2048, default: false}
+  - {config: bf16_4096x4096x4096, default: true, selection_role: medium}
+  - {config: bf16_8192x8192x8192, default: false}
+  - {config: bf16_16384x16384x16384, default: false}

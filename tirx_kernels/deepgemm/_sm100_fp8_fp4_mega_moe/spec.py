@@ -29,6 +29,10 @@ import torch
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 DEEPGEMM_SYM_BUFFER_MAX_RANKS = 72
 _CUDA_COMPILE_MODE_LOCK = threading.RLock()
+_PREPARED_LIBRARY_ENV = {
+    False: "TIRX_PREPARED_MEGAMOE_LIBRARY_NO_STATS",
+    True: "TIRX_PREPARED_MEGAMOE_LIBRARY_STATS",
+}
 
 
 @dataclass(frozen=True)
@@ -632,13 +636,9 @@ def _get_num_sms_for_mega_moe() -> int:
     override = os.environ.get("TIRX_DEEPGEMM_NUM_SMS_OVERRIDE")
     if override is not None:
         return int(override)
-    if torch.cuda.is_available():
-        return int(
-            torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        )
-    raise RuntimeError(
-        "MegaMoE launch requires CUDA to infer kNumSMs; set TIRX_DEEPGEMM_NUM_SMS_OVERRIDE to override"
-    )
+    from tirx_kernels.runner import hardware_num_sms
+
+    return hardware_num_sms()
 
 
 def get_deepgemm_launch_config(config: MegaMoeConfig) -> DeepGemmLaunchConfig:
@@ -1068,6 +1068,7 @@ def _compile_tirx_mega_moe_for_config(
     emit_nvl_barrier_timeout_printf: bool = True,
 ) -> Any:
     import tvm
+    from tirx_kernels.runner import cuda_target
 
     # Deferred: `kernel` imports this module for its layout and launch config.
     from .kernel import get_kernel
@@ -1085,7 +1086,10 @@ def _compile_tirx_mega_moe_for_config(
         collect_stats=collect_stats,
         emit_nvl_barrier_timeout_printf=emit_nvl_barrier_timeout_printf,
     )
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
+    # The block-scale tcgen05 MMA below uses ``scale_vec::1X``, which ptxas
+    # rejects for the family-only sm_100f target. It requires the
+    # architecture-specific Blackwell target used by the B200 compile profile.
+    target = cuda_target(arch="sm_100a")
     mod = tvm.IRModule({"main": kernel})
     with _cuda_compile_mode(cuda_compile_mode):
         return tvm.compile(mod, target=target, tir_pipeline="tirx")
@@ -1093,6 +1097,10 @@ def _compile_tirx_mega_moe_for_config(
 
 def _compile_tirx_mega_moe(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> Any:
     config = case.config
+    collect_stats = getattr(case, "cumulative_local_expert_recv_stats", None) is not None
+    prepared_path = os.environ.get(_PREPARED_LIBRARY_ENV[collect_stats])
+    if prepared_path is not None:
+        return _load_prepared_mega_moe_executable(prepared_path)
     return _compile_tirx_mega_moe_for_config(
         num_processes=config.num_processes,
         num_max_tokens_per_rank=config.num_max_tokens_per_rank,
@@ -1103,9 +1111,16 @@ def _compile_tirx_mega_moe(case: MegaMoeCase | TirxMegaMoeLaunchContext) -> Any:
         num_topk=config.num_topk,
         activation_clamp=config.activation_clamp,
         fast_math=config.fast_math,
-        collect_stats=getattr(case, "cumulative_local_expert_recv_stats", None) is not None,
+        collect_stats=collect_stats,
         cuda_compile_mode=_get_mega_moe_cuda_compile_mode(),
     )
+
+
+@cache
+def _load_prepared_mega_moe_executable(library_path: str) -> Any:
+    import tvm
+
+    return tvm.runtime.Executable(tvm.runtime.load_module(library_path))
 
 
 def _require_mega_moe_tuple(name: str, value: Any) -> tuple[torch.Tensor, torch.Tensor]:

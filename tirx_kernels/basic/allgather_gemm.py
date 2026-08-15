@@ -33,6 +33,7 @@ from .utils._model_shapes import (
 from .utils._runtime import (
     DistributedRuntime,
     barrier_on_compute_stream,
+    prepare_distributed_bench,
     run_distributed,
     symmetric_empty,
     sync_communication_to_compute,
@@ -1246,7 +1247,7 @@ def _allocate_case(
     config: AllGatherGemmConfig,
 ) -> _Case:
     task_types, task_idxs, heads, tails = _queue_state(config)
-    device = torch.device("cuda", runtime.rank)
+    device = torch.device("cuda", runtime.device_index)
     ag_out = symmetric_empty(runtime, (config.M, config.K), a_type)
     semaphore = symmetric_empty(runtime, (config.world_size,), "uint64")
     initial_task_types = torch.from_numpy(task_types[runtime.rank].copy()).to(device)
@@ -1274,7 +1275,7 @@ def _allocate_case(
     )
     with torch.cuda.stream(runtime.timing_stream):
         case.reset()
-    torch.cuda.synchronize(runtime.rank)
+    torch.cuda.synchronize(runtime.device_index)
     runtime.barrier()
     return case
 
@@ -1314,7 +1315,7 @@ def _run_worker(
     if mode != "bench":
         raise ValueError(f"unsupported distributed worker mode {mode!r}")
 
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     def prepare() -> None:
         case.reset()
@@ -1401,11 +1402,35 @@ def run_bench(
         raise ValueError("distributed AllGather+GEMM supports only timer='kineto'")
     if warmup is not None or repeat is not None:
         raise ValueError("timer='kineto' uses fixed iteration counts and rejects overrides")
-    return run_distributed(
+    return prepare_bench(
+        M=M, N=N, K=K, world_size=world_size, dtype=dtype, scheduler=scheduler
+    ).run_gpu(warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s)
+
+
+def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
+    """Start distributed ranks only after the complete GPU claim exists."""
+    return prepared.run_gpu(**kwargs)
+
+
+def prepare_bench(
+    M: int = M,
+    N: int = N,
+    K: int = K,
+    world_size: int = WORLD_SIZE,
+    dtype: str = "float16",
+    *,
+    scheduler: str = "dynamic",
+    **_kwargs: Any,
+):
+    """Compile/export before assignment; ranks start CUDA in run_gpu."""
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    _check_config(M, N, K, world_size, dtype)
+    _check_scheduler(scheduler)
+    state = prepare_distributed_bench(
         _get_benchmark_kernel(M, N, K, world_size, dtype, scheduler=scheduler),
         world_size=world_size,
         worker=_run_worker,
-        mode="bench",
         worker_kwargs={
             "M": M,
             "N": N,
@@ -1413,11 +1438,10 @@ def run_bench(
             "world_size": world_size,
             "dtype": dtype,
             "scheduler": scheduler,
-            "timer": "kineto",
-            "rounds": rounds,
-            "cooldown_s": cooldown_s,
         },
+        required_timer="kineto",
     )
+    return prepared_gpu_benchmark(run_gpu, state, required_num_gpus=world_size, close=state.close)
 
 
 __all__ = [

@@ -1,6 +1,7 @@
 kernel: deepgemm_sm100_fp8_bmm
+selection_rationale: The three points cover the two operand/output layout families, both BHR/BHD expression orders, and the 4096-to-8192 batch-scale change.
 configs:
-  - {config: bhr_hdr_bhd_b4096_h8_r4096_d1024, default: true}
-  - {config: bhr_hdr_bhd_b8192_h8_r4096_d1024, default: true}
-  - {config: bhd_hdr_bhr_b8192_h8_r4096_d1024, default: true}
-  - {config: bhd_bhr_hdr_b4096_h8_r4096_d1024, default: true}
+  - {config: bhr_hdr_bhd_b4096_h8_r4096_d1024, default: true, selection_role: small}
+  - {config: bhr_hdr_bhd_b8192_h8_r4096_d1024, default: false}
+  - {config: bhd_hdr_bhr_b8192_h8_r4096_d1024, default: true, selection_role: large}
+  - {config: bhd_bhr_hdr_b4096_h8_r4096_d1024, default: true, selection_role: medium}

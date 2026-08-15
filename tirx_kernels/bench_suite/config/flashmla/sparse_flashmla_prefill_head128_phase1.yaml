@@ -1,8 +1,9 @@
 kernel: sparse_flashmla_prefill_head128_phase1
+selection_rationale: KV length grows from 8192 to 65536 at dqk512, with dqk576/kv32768 covering the alternate head-width dispatch regime.
 configs:
-  - {config: bench_regular_dqk512_hq128_s4096_kv8192_topk2048, default: true}
-  - {config: bench_regular_dqk512_hq128_s4096_kv32768_topk2048, default: true}
-  - {config: bench_regular_dqk512_hq128_s4096_kv65536_topk2048, default: true}
-  - {config: bench_regular_dqk576_hq128_s4096_kv8192_topk2048, default: true}
-  - {config: bench_regular_dqk576_hq128_s4096_kv32768_topk2048, default: true}
-  - {config: bench_regular_dqk576_hq128_s4096_kv65536_topk2048, default: true}
+  - {config: bench_regular_dqk512_hq128_s4096_kv8192_topk2048, default: true, selection_role: small}
+  - {config: bench_regular_dqk512_hq128_s4096_kv32768_topk2048, default: false}
+  - {config: bench_regular_dqk512_hq128_s4096_kv65536_topk2048, default: true, selection_role: large}
+  - {config: bench_regular_dqk576_hq128_s4096_kv8192_topk2048, default: false}
+  - {config: bench_regular_dqk576_hq128_s4096_kv32768_topk2048, default: true, selection_role: medium}
+  - {config: bench_regular_dqk576_hq128_s4096_kv65536_topk2048, default: false}

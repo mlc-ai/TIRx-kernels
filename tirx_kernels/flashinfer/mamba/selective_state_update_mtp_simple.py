@@ -1364,9 +1364,10 @@ def _selective_state_update_mtp_simple(
 
 
 def _num_sms(device: str | torch.device = "cuda") -> int:
-    if torch.cuda.is_available():
-        return torch.cuda.get_device_properties(device).multi_processor_count
-    return 148
+    del device
+    from tirx_kernels.runner import hardware_num_sms
+
+    return hardware_num_sms()
 
 
 def _specialization(config: dict[str, Any]) -> dict[str, Any]:
@@ -1905,6 +1906,14 @@ def _assert_case_close(case: dict[str, Any]) -> None:
             )
 
 
+def prepare_bench(**kwargs: Any):
+    """Specialize and compile before the workload receives a GPU."""
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
+
+    state = {"config": dict(kwargs), "executable": compile_kernel(get_kernel(**kwargs))}
+    return prepared_gpu_benchmark(run_gpu, state)
+
+
 def run_test(**kwargs: Any) -> None:
     from tirx_kernels.runner import compile_kernel
 
@@ -1917,7 +1926,8 @@ def run_test(**kwargs: Any) -> None:
     _assert_case_close(case)
 
 
-def run_bench(
+def run_gpu(
+    prepared,
     *,
     warmup: int | None = None,
     repeat: int | None = None,
@@ -1926,11 +1936,13 @@ def run_bench(
     cooldown_s: float = 1.0,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    from tirx_kernels.runner import compile_kernel
-    from tvm.tirx.bench import bench
+    config = dict(prepared["config"])
+    config.update(kwargs)
+    kwargs = config
+    executable = prepared["executable"]
+    from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
-    executable = compile_kernel(get_kernel(**kwargs))
     args = _tirx_args(case)
     executable(*args)
     _run_reference(case)
@@ -1955,6 +1967,20 @@ def run_bench(
         references={"flashinfer_cuda": source_builder},
         rounds=rounds,
         cooldown_s=cooldown_s,
+    )
+
+
+def run_bench(
+    *,
+    warmup: int | None = None,
+    repeat: int | None = None,
+    timer: str | None = None,
+    rounds: int = 1,
+    cooldown_s: float = 1.0,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return prepare_bench(**kwargs).run_gpu(
+        warmup=warmup, repeat=repeat, timer=timer, rounds=rounds, cooldown_s=cooldown_s
     )
 
 

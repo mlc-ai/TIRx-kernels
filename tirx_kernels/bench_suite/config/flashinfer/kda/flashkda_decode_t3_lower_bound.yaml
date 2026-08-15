@@ -17,9 +17,10 @@
 #
 #   hv16h16_b{1,2,4,8,16}_t3   parity with FlashInfer's own T=3 export bench
 kernel: flashkda_decode_t3_lower_bound
+selection_rationale: Batch sizes 1, 4, and 16 provide the small, middle, and large points across the complete fixed-head T=3 dispatch domain; batches 2 and 8 remain explicitly runnable.
 configs:
-  - {config: hv16h16_b1_t3, default: true}
-  - {config: hv16h16_b2_t3, default: true}
-  - {config: hv16h16_b4_t3, default: true}
-  - {config: hv16h16_b8_t3, default: true}
-  - {config: hv16h16_b16_t3, default: true}
+  - {config: hv16h16_b1_t3, default: true, selection_role: small}
+  - {config: hv16h16_b2_t3, default: false}
+  - {config: hv16h16_b4_t3, default: true, selection_role: medium}
+  - {config: hv16h16_b8_t3, default: false}
+  - {config: hv16h16_b16_t3, default: true, selection_role: large}
