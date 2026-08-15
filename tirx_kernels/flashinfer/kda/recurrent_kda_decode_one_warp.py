@@ -515,6 +515,7 @@ def _recurrent_kda_decode_one_warp(
             (batch_idx * NUM_VALUE_HEADS + value_head_idx) * HEAD_DIM + v_offset + tidx,
             T.uint16(0),
         )
+    T.cuda.warp_sync()
 
     # --- initial-state slot (recurrent_kda.py:257-272) ----------------------
     init_raw_slot: T.int32 = _load_i32(ssm_state_indices, batch_idx * NUM_TOKENS)

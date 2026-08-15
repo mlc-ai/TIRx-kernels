@@ -519,6 +519,24 @@ showed the barriers contributed nothing and the fast-math swap was an
 instruction-selection divergence that the parity contract forbids. Change one
 thing per measurement.
 
+## Measure elided warp synchronization as a scheduling constraint
+
+**Symptoms:** `warp_sync_schedule_shift`, `small_shape_regression`, `bar_warp_elided`
+
+A converged full-mask `bar.warp.sync` may remain in PTX while ptxas emits no
+`BAR.WARP` instruction. That does not make the source change performance
+neutral: the ordering constraint can still reschedule surrounding instructions
+differently for each specialization.
+
+One B200 `sm_100a` one-warp decode sweep added exactly one PTX
+`bar.warp.sync`, emitted no SASS barrier, and kept registers and spills
+unchanged. Cold-L2 time nevertheless moved by +2.07%, -0.76%, and -1.17%
+across its small, medium, and large default shapes; both benchmark orderings
+agreed. Treat the movement as specialization-specific scheduling, not as a
+fixed barrier latency. Inspect PTX, SASS, and resources for every affected
+shape, then A/B the complete dispatch matrix even when the machine barrier is
+elided.
+
 ## Predict the cross-shape ordering before measuring
 
 **Symptoms:** `hypothesis_not_falsifiable`, `placement_search`, `gate_flapping`
