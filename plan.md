@@ -114,17 +114,18 @@
 
 固定五-run 裁决确认没有剩余回归，因此 audit commit `a4f478dd51ecb56db1ab84342963c400ac5d559c` 之后未修改任何 kernel。正式通过行通常只有一个 run、只有正式失败候选取得五次补跑，这一用户接受的不对称覆盖限制已在最终报告显式披露。
 
-### Post-acceptance rebase closeout — Friday, August 14, 2026 (UTC)
+### Post-acceptance rebase closeout — Saturday, August 15, 2026 (UTC)
 
 验收范围与结论锁定在 `1097cce839f89a94` 时点的 195 个 canonical
 `default:true` 行（187 required + 8 user-exempted），以及 rebase 前 current
 source SHA256
 `007aa1046ee2829a2d2a2f9dcb585c348105c096ed2d969675d8570d29352f49`。
 分支 `ir-builder-migration-1097cce-scope` 最终 rebase 到
-`origin/main=2b9e112fe8f3bb895d5a160638d9b3a89fb2d05c`。该 upstream 范围的
-canonical defaults 已机械增长到 519；新增的 324 行（GDN decode、FlashKDA
-cake T1–T6、recurrent KDA 等）不在本 goal 中，保持 upstream 写法，未迁移、
-未验收。
+`origin/main=8116072819a7217affc8a7f94d7ce7a8531025b8`。upstream #26–#38
+新增的 GDN decode、FlashKDA cake T1–T6、recurrent KDA 等 kernel/config
+（当时约 227 个新增 `default:true` 行）不在本 goal 中，保持 upstream 写法，
+未迁移、未验收。后续 upstream 又把日常 sweep 策略收敛为当前 133 个
+`default:true` 行；该选择变化不追溯扩大或缩小本 goal 锁定的 195 行验收范围。
 
 首次 rebase 的 kernel 冲突位于 `flash_attention4.py`。冲突解决保留
 IR-builder 实现，并将 upstream #27 的单个 `T.cuda.cta_sync()` 放在 persistent
@@ -139,14 +140,15 @@ upstream #27 在两个短 s1024 B200 形状上报告该 barrier 为 `0.23–0.32
 builder-contract 检查器同时支持显式 re-export 的 canonical entrypoint。最小、
 最大 block-M、生产 g1、4-rank，以及 `fast_math=0 + collect_stats=True` 五个
 代表性变体的 pre/post `tvm.ir.save_json()` SHA256 均逐项相等。最终 CPU 验证为
-41 tests passed、519-row/48-kernel import check passed、registry strict passed；从
+41 tests passed、133-row/46-kernel default import check passed、50-kernel registry
+strict passed；从
 `1097cce` baseline 机械导出的 38 个 kernel 身份（含 MegaMoE rename 映射）通过
 38/38 builder-only contract。当前新增的 12 个 upstream parser kernel 不在本
 goal 范围内。
 
 这些结构等价证据不改变性能 oracle：验收仍只针对 rebase 前指纹成立，不扩展到
 最终 rebase 后 source SHA256
-`193fe8b3c637b267a8151995195166eba98037dda15b134d3ddcffc3ddf66af3`。
+`32393362ad21cafcc0f862c870592ce0643f670ff1ddd8008d603837fada40fe`。
 
 ### Historical restart-2 evidence and superseded diagnostics
 
