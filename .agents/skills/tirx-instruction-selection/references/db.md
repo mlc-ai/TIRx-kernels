@@ -1,6 +1,6 @@
 # TIRx instruction-selection DB
 
-## E1: Materialize and forward reused values
+## Materialize and forward reused values
 
 **Symptoms:** `repeated_expression`, `excess_address_math`, `excess_unpack_math`, `instruction_count_bloat`, `register_count_gap`
 
@@ -31,7 +31,7 @@ instructions; `IMAD.MOV.U32` fell from 84 to 31 and `MOV` from 45 to 20, with no
 spill. The resulting build then cleared all 43 gate workloads. Inspect ptxas
 resources and SASS for this pattern; source or PTX size can remain unchanged.
 
-## E2: Pin floating-point instructions
+## Pin floating-point instructions
 
 **Symptoms:** `bitwise_mismatch`, `denormal_mismatch`, `unexpected_ftz`, `select_lowered_as_branch`
 
@@ -64,7 +64,7 @@ first.
 
 Confirm with denormal inputs and an instruction-by-instruction PTX comparison.
 
-## E3: Match launch bounds
+## Match launch bounds
 
 **Symptoms:** `register_spill`, `register_budget_mismatch`, `local_memory_traffic`, `low_occupancy`
 
@@ -90,7 +90,7 @@ larger block cut its allocation to 32 registers before timing. The shape-aware
 such a large allocation shift as a separate shape A/B even when neither variant
 spills: ptxas can trade registers for recomputation and address instructions.
 
-## E4: Defeat harmful LSR
+## Defeat harmful LSR
 
 **Symptoms:** `imad_prologue_chain`, `excess_address_math`, `register_pressure`, `slow_small_shape`
 
@@ -106,7 +106,7 @@ data-path values indiscriminately.
 Confirm by comparing the SASS before the first loop branch, plus registers and
 latency on the smallest shapes.
 
-## E5: Match conversion and packing idioms
+## Match conversion and packing idioms
 
 **Symptoms:** `bitwise_mismatch`, `packing_mismatch`, `excess_shift_or`, `store_width_mismatch`
 
@@ -128,7 +128,7 @@ conversion is therefore not required to obtain a packed store. Trace the
 conversion-to-store def-use chain in SASS instead of comparing conversion
 mnemonics in isolation.
 
-## E6: Prefer binary parity
+## Prefer binary parity
 
 **Symptoms:** `local_rewrite_regression`, `sass_divergence`, `register_allocation_change`
 
@@ -140,7 +140,7 @@ First match PTX shape, register count, and SASS structure. Deviate only after a
 measured full-matrix result. A generated-code improvement that does not improve
 the production benchmark is not a retained optimization.
 
-## E7: Map SASS in both directions
+## Map SASS in both directions
 
 **Symptoms:** `unattributed_sass_hotspot`, `instruction_count_gap`, `register_count_gap`
 
@@ -177,7 +177,7 @@ carried an extra shuffle in every PTX dump, synthesized by the toolchain for any
 kernel that takes a thread index as a launch parameter; dynamic SASS shuffles
 matched the reference exactly, so there was nothing there to fix.
 
-## E8: Keep benchmark evidence clean
+## Keep benchmark evidence clean
 
 **Symptoms:** `unstable_benchmark`, `interfered_run`, `gate_flapping`
 
@@ -237,7 +237,7 @@ single output buffer shared by two implementations biases the same way, in
 favour of whichever runs second. Read what the reference wrapper does inside the
 timed region, and give each implementation its own output.
 
-## E9: Issue loads before conversions
+## Issue loads before conversions
 
 **Symptoms:** `long_scoreboard`, `insufficient_memory_parallelism`, `exposed_load_latency`
 
@@ -266,7 +266,7 @@ barrier ptxas finally places the work is not something the kernel controls.
 Confirm the load issue window and load-to-first-consumer distance in SASS, then
 measure long-scoreboard stalls, registers, spills, and the complete shape matrix.
 
-## E10: Bound hoisting by live-range cost
+## Bound hoisting by live-range cost
 
 **Symptoms:** `register_pressure`, `local_memory_traffic`, `low_occupancy`
 
@@ -281,7 +281,7 @@ fragments so only the next consumed tile remains live.
 Compare registers and dynamic LDL/STL before instruction count, and sweep the
 tightest specialization where one spill can reverse the result.
 
-## E11: Expose predication and uniform control
+## Expose predication and uniform control
 
 **Symptoms:** `branch_reconvergence`, `warp_divergence`, `excess_control_instructions`, `branch_in_hot_loop`, `serialized_stores`
 
@@ -344,7 +344,7 @@ run-to-run drift, so that is where to stop.
 Confirm predicate polarity and inactive-lane memory behavior, then compare BRA,
 BSYNC, reconvergence, code size, registers, and both control-flow outcomes.
 
-## E12: Materialize uniformity
+## Materialize uniformity
 
 **Symptoms:** `warp_retry_region`, `vectorized_uniform_math`, `excess_address_instructions`
 
@@ -373,7 +373,7 @@ geometry where the guard actually excludes warps.
 Confirm vector versus uniform op counts, branch topology, registers, and the
 full workload matrix.
 
-## E13: Select address lowering by shape
+## Select address lowering by shape
 
 **Symptoms:** `excess_address_math`, `register_pressure`, `schedule_regression`
 
@@ -397,7 +397,7 @@ chain and the affected shapes demonstrate a gain.
 Confirm normalized PTX/SASS addresses, register counts, integer address ops,
 spills, and latency per specialization.
 
-## E14: Tune pipeline shape and transfer granularity
+## Tune pipeline shape and transfer granularity
 
 **Symptoms:** `barrier_stall`, `exposed_epilogue_tail`, `underfilled_pipeline`, `late_stage_completion`, `tma_issue_overhead`
 
@@ -413,7 +413,7 @@ byte accounting. Extra TMA issue instructions often regress short shapes.
 Benchmark both sides of every dispatch boundary and validate deadlock freedom,
 footprints, registers, stage completion timing, and issue counts.
 
-## E15: Merge waits with a protocol proof
+## Merge waits with a protocol proof
 
 **Symptoms:** `redundant_barrier_wait`, `serialized_teardown`, `exposed_store_tail`
 
@@ -429,7 +429,7 @@ weaken cross-stream ordering.
 Validate transaction counts, ring wrap, completion visibility, and deadlock
 freedom before profiling wait stalls and tail-dominated shapes.
 
-## E16: Size swizzles and fragments physically
+## Size swizzles and fragments physically
 
 **Symptoms:** `smem_bank_conflict`, `register_spill`, `slow_epilogue`
 
@@ -451,7 +451,7 @@ the reference's 612.
 Measure bank conflicts, static registers, dynamic LDL/STL, and writeback depth
 together across all affected shapes.
 
-## E17: Sweep register budgets by role and shape
+## Sweep register budgets by role and shape
 
 **Symptoms:** `register_spill`, `excess_address_math`, `low_occupancy`
 
@@ -464,7 +464,7 @@ Re-run the sweep after changing descriptor placement, fragment width, or other
 live ranges. Record realized allocation and dynamic local traffic, not only the
 requested cap.
 
-## E18: Declare the block shape the reference declares
+## Declare the block shape the reference declares
 
 **Symptoms:** `special_register_reads`, `instruction_count_bloat`, `slow_latency_bound_shape`
 
@@ -481,7 +481,7 @@ and removed 48 static instructions, all in the affected phase.
 Take the block shape from the reference, not from a scaffold's correspondence
 table, and confirm with dynamic special-register counts on the worst shape.
 
-## E19: Treat a dead tail's unrolling as a change, not a cleanup
+## Treat a dead tail's unrolling as a change, not a cleanup
 
 **Symptoms:** `instruction_count_bloat`, `unreachable_code_expansion`, `dead_tail_loop`
 
@@ -502,7 +502,7 @@ other. Do not land it alongside a second change: these two were introduced
 together, and attributing their combined delta to the other one produced a
 specialization axis that had to be withdrawn.
 
-## E20: Do not blame volatile or memory clobbers
+## Do not blame volatile or memory clobbers
 
 **Symptoms:** `scheduling_barrier_suspicion`, `short_scoreboard`, `unexplained_small_shape_deficit`
 
@@ -519,7 +519,7 @@ showed the barriers contributed nothing and the fast-math swap was an
 instruction-selection divergence that the parity contract forbids. Change one
 thing per measurement.
 
-## E21: Predict the cross-shape ordering before measuring
+## Predict the cross-shape ordering before measuring
 
 **Symptoms:** `hypothesis_not_falsifiable`, `placement_search`, `gate_flapping`
 
@@ -548,7 +548,7 @@ obvious explanations for a latency-bound gap, and each is easy to assert without
 measuring: one rewrite that removed 31 instructions from a pre-barrier critical
 path made a shape 6.3% slower with non-overlapping ranges.
 
-## E22: Allocate shared memory beyond the static ceiling explicitly
+## Allocate shared memory beyond the static ceiling explicitly
 
 **Symptoms:** `illegal_memory_access`, `zero_dynamic_smem`, `smem_capacity_limit`
 
@@ -571,7 +571,7 @@ such a hint is "not needed" are assumptions until a counter is read; this one
 sat unexamined while the port chased a latency deficit a wrong split could
 plausibly have caused.
 
-## E23: Prove a PTX form by compiling it
+## Prove a PTX form by compiling it
 
 **Symptoms:** `invalid_ptx_form`, `unverified_instruction_selection`, `attribute_chain_resolves`
 
@@ -587,7 +587,7 @@ rows mean anything. Where the emitted operand form differs from the reference's
 -- registers where the reference wrote immediates -- check the SASS before
 treating it as a divergence; ptxas commonly folds it back.
 
-## E24: Give a specialization axis a mechanism
+## Give a specialization axis a mechanism
 
 **Symptoms:** `shape_conditional_constexpr`, `confounded_ab`, `gate_flapping`
 
@@ -608,7 +608,7 @@ candidate axes in one port, one on token count and one on occupancy, were both
 constructed from single runs, and both dissolved once the real mechanism was
 fixed and the matrix was re-run unconditionally.
 
-## E25: Match the profiler's regime to the gate's
+## Match the profiler's regime to the gate's
 
 **Symptoms:** `profiler_disagrees_with_gate`, `unstable_benchmark`, `unexplained_small_shape_deficit`
 
@@ -634,7 +634,7 @@ better and moved 17% less data, and still reached 81% of the reference's DRAM
 throughput; neither the opcode nor the memory table exposes that, and the lever
 that worked was raising the number of outstanding misses.
 
-## E26: Fold the loop index into the operand it indexes
+## Fold the loop index into the operand it indexes
 
 **Symptoms:** `unroll_no_effect`, `instruction_count_bloat`, `excess_guard_math`, `branch_in_hot_loop`
 
@@ -665,7 +665,7 @@ four, the same code measured unchanged, as predicted. A runtime trip count is
 not itself the cost either: the same kernel compiled with a dynamic K bound
 measured 0.9908x of the static-bound build.
 
-## E27: Divide unsigned
+## Divide unsigned
 
 **Symptoms:** `excess_integer_math`, `excess_address_math`, `instruction_count_gap`, `slow_small_shape`
 
@@ -687,7 +687,7 @@ divide. Count the fixup opcodes rather than the divide, and apply the cast
 across the whole family -- these counters feed every role, so the sites that
 matter are usually more numerous than the one the profile attributed.
 
-## E28: Hoist warp-converging instructions out of the loop
+## Hoist warp-converging instructions out of the loop
 
 **Symptoms:** `excess_control_instructions`, `branch_in_hot_loop`, `vectorized_uniform_math`, `instruction_count_gap`
 
@@ -708,7 +708,7 @@ evidence a later guard has that its condition is warp-uniform, removing it costs
 more than the instruction saves; lift it to the enclosing region and keep the
 predicate live instead of dropping the proof.
 
-## E29: Take an instruction's modifiers from the reference's PTX
+## Take an instruction's modifiers from the reference's PTX
 
 **Symptoms:** `instruction_variant_mismatch`, `unverified_instruction_selection`, `sass_divergence`, `instruction_count_gap`
 
@@ -731,7 +731,7 @@ at its call sites, not off the helper's source or off your model of the
 algorithm, and check any modifier a builder derives automatically against that
 same dump.
 
-## E30: Narrow every operand a shortened block reaches
+## Narrow every operand a shortened block reaches
 
 **Symptoms:** `partial_output`, `unported_work_reduction`, `bitwise_mismatch`, `slow_epilogue`
 
@@ -754,7 +754,8 @@ Size the expectation before measuring: the saving here is about one partly-empty
 block per group. When a specialization the reference treats specially is
 measurably slower than the one it otherwise shares code with, look for a work
 reduction transcribed at some of its sites and not the rest.
-## E31: Preserve cache policy across launch-local handoffs
+
+## Preserve cache policy across launch-local handoffs
 
 **Symptoms:** `cold_cache_regression`, `inter_kernel_handoff`, `global_store_policy`, `dispatch_specific_deficit`
 

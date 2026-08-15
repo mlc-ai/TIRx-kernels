@@ -38,3 +38,7 @@ per entry and reuse existing terms when they fit. Do not add a separate table,
 taxonomy, commit hash, run ID, file path, line number, raw artifact,
 baseline-only promotion, algorithm substitution, or unmeasured CUDA folklore.
 Delete stale advice instead of preserving compatibility metadata.
+
+Use a unique, descriptive, unnumbered `## <title>` heading for each entry. Do
+not assign sequence IDs; concurrent additions must not compete for a shared
+counter.
