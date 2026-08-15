@@ -283,6 +283,7 @@ def check_correctness(
                 intermediate_hidden=intermediate_hidden,
                 num_experts=num_experts,
                 num_topk=num_topk,
+                num_shared_experts=num_shared_experts,
                 activation_clamp=activation_clamp,
                 fast_math=fast_math,
             ),
@@ -365,6 +366,7 @@ def prepare_bench(
     intermediate_hidden=512,
     num_experts=8,
     num_topk=2,
+    num_shared_experts=0,
     activation_clamp=10.0,
     fast_math=1,
 ):
@@ -379,6 +381,7 @@ def prepare_bench(
         intermediate_hidden=intermediate_hidden,
         num_experts=num_experts,
         num_topk=num_topk,
+        num_shared_experts=num_shared_experts,
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )

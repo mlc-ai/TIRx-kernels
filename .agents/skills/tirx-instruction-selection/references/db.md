@@ -429,6 +429,30 @@ weaken cross-stream ordering.
 Validate transaction counts, ring wrap, completion visibility, and deadlock
 freedom before profiling wait stalls and tail-dominated shapes.
 
+## Keep multimem participants alive through kernel exit
+
+**Symptoms:** `illegal_instruction`, `unspecified_launch_failure`, `multimem_early_exit`, `distributed_flake`
+
+A host barrier after launch cannot keep a rank's device workers alive while
+peer ranks are still issuing `multimem.ld_reduce`.  Give every persistent
+worker its own symmetric exit flag, release-increment the multicast flag after
+all local multimem users finish, and acquire-wait on the local flag until every
+rank arrives before releasing device resources or exiting the kernel.
+
+Keep this barrier outside the tile protocol: first complete the local CTA or
+cluster drain, then perform the system-scope rank rendezvous, then deallocate
+TMEM and exit.  A single flag per rank is insufficient when independently
+scheduled persistent workers can finish at different times; index the flags by
+the physical worker or SM identity used by the grid.
+
+The missing exit rendezvous presented as two different asynchronous CUDA
+faults at two different TP4 shapes across two full correctness matrices, while
+standalone reruns passed.  Adding the per-worker device barrier passed 200
+non-blocking relaunches across both failing shapes, the complete 16-shape
+TP1/TP4 matrix, and a 1402-configuration full suite.  Launch blocking is a
+localization tool here, not a fix: it passed 200 relaunches but does not prove
+the cross-rank kernel-exit invariant.
+
 ## Size swizzles and fragments physically
 
 **Symptoms:** `smem_bank_conflict`, `register_spill`, `slow_epilogue`
@@ -463,6 +487,27 @@ Sweep neighboring budgets on representative single-wave and multi-wave shapes.
 Re-run the sweep after changing descriptor placement, fragment width, or other
 live ranges. Record realized allocation and dynamic local traffic, not only the
 requested cap.
+
+## Adapt row grouping when a fixup grid cannot fill one wave
+
+**Symptoms:** `low_wave_count`, `low_dram_throughput`, `latency_bound_fixup`, `small_grid`
+
+A bandwidth-looking fixup can instead be launch-latency-bound when grouping
+several independent rows into each CTA leaves too few blocks to occupy the SMs.
+Choose the largest supported row group that still launches roughly one wave:
+retain the wider group when the state count already provides enough blocks,
+then fall back through smaller groups only for underfilled shapes.  Keep the
+grouping decision derived from the state count and device SM count rather than
+special-casing a named shape.
+
+One B200 fixup launched 32 blocks, only 0.11 waves per SM, while using 0.66% of
+peak DRAM throughput.  Reducing its group from four rows to one raised the grid
+to 128 blocks; the generated row-one kernel used 255 registers, 512 bytes of
+shared memory, and no spills.  On the same physical GPU over 15 rounds, time
+improved from 54.641 us to 53.665 us, a 1.0182 before/current ratio.  The wider
+group remained selected for shapes with sufficient parallel states, all ten
+correctness configurations passed, and the complete affected bench matrix
+cleared its 0.99 ratio gate.
 
 ## Declare the block shape the reference declares
 

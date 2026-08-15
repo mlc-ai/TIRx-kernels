@@ -42,6 +42,8 @@ _mul_lo_s32 = _simple._mul_lo_s32
 _add_s32 = _simple._add_s32
 _global_load_u16 = _simple._global_load_u16
 _global_load_u32 = _simple._global_load_u32
+_global_load_s64 = _simple._global_load_s64
+_global_load_index_s64 = _simple._global_load_index_s64
 _shared_load_u16 = _simple._shared_load_u16
 _shared_load_u32 = _simple._shared_load_u32
 _bf16_to_f32 = _simple._bf16_to_f32
@@ -502,6 +504,7 @@ def _role_update_state(
     NUM_PASSES,
     STATE_DTYPE,
     WEIGHT_DTYPE,
+    INDEX_DTYPE,
     STATE_BYTES,
     STATE_VALUES_PER_THREAD,
     HAS_INTERMEDIATE_STATES,
@@ -522,10 +525,10 @@ def _role_update_state(
 ):
     random_seed: T.int64 = 0
     if PHILOX_ROUNDS > 0 and not IS_PAD:
-        random_seed = rand_seed[0]
+        random_seed = _global_load_s64(rand_seed, 0)
     icache_idx: T.int64 = state_batch
     if HAS_INTERMEDIATE_STATES and not IS_PAD:
-        icache_idx = T.cast(intermediate_indices[batch_i], "int64")
+        icache_idx = _global_load_index_s64(intermediate_indices, batch_i, INDEX_DTYPE)
 
     a_value: T.float32 = T.reinterpret("float32", _global_load_u32(matrix_a, head))
     d_value: T.float32 = 0.0
@@ -1099,6 +1102,7 @@ def _selective_state_update_mtp_vertical(
                     NUM_PASSES=NUM_PASSES,
                     STATE_DTYPE=STATE_DTYPE,
                     WEIGHT_DTYPE=WEIGHT_DTYPE,
+                    INDEX_DTYPE=INDEX_DTYPE,
                     STATE_BYTES=STATE_BYTES,
                     STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
                     HAS_INTERMEDIATE_STATES=HAS_INTERMEDIATE_STATES,

@@ -189,11 +189,11 @@ def get_kernel(
         lane = T.truncmod(tx, T.int32(32))
         warp = T.truncdiv(tx, T.int32(32))
         if lane == 0:
-            red_buf[warp] = warp_amax
+            T.ptx.st.shared.f32(red_buf.ptr_to([warp]), warp_amax)
         T.ptx.bar.sync(T.uint32(0), T.uint32(_PER_TOKEN_THREADS))
         block_val: T.float32 = T.float32(0.0)
         if lane < _PER_TOKEN_WARPS:
-            block_val = red_buf[lane]
+            T.ptx.ld.shared.f32(block_val, red_buf.ptr_to([lane]))
         row_amax = warp_reduce_max(block_val)
 
         gs_inv = ld_global_f32(gsi, 0)
@@ -208,7 +208,7 @@ def get_kernel(
             encode_scale = rcp_approx_ftz(token_scale)
 
         if tx == 0:
-            pts_out[row_idx] = token_scale
+            T.ptx.st.global_.f32(pts_out.ptr_to([row_idx]), token_scale)
         T.ptx.bar.sync(T.uint32(0), T.uint32(_PER_TOKEN_THREADS))
 
         # Pass 2: quantize with the row encode scale (kernel:846-875).

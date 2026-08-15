@@ -641,7 +641,7 @@ def _selective_state_update_stp_horizontal(
 
     random_seed: T.int64 = 0
     if PHILOX_ROUNDS > 0:
-        random_seed = rand_seed[0]
+        random_seed = _global_load_s64(rand_seed, 0)
 
     batch_i, head = T.cta_id([BATCH, NHEADS])
     raw_lane, warp = T.thread_id([32, NUM_WARPS])

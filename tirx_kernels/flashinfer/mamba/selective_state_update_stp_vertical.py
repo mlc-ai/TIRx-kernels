@@ -46,6 +46,7 @@ _mul_hi_u32 = _simple._mul_hi_u32
 _mul_lo_s32 = _simple._mul_lo_s32
 _add_s32 = _simple._add_s32
 _lane_mask = _simple._lane_mask
+_global_load_s64 = _simple._global_load_s64
 _shared_load_u16 = _simple._shared_load_u16
 _shared_load_u32 = _simple._shared_load_u32
 _bf16_to_f32 = _simple._bf16_to_f32
@@ -726,7 +727,7 @@ def _selective_state_update_stp_vertical(
 
     random_seed: T.int64 = 0
     if PHILOX_ROUNDS > 0 and not SCALE_STATE:
-        random_seed = rand_seed[0]
+        random_seed = _global_load_s64(rand_seed, 0)
 
     batch_i, head = T.cta_id([BATCH, NHEADS])
     lane_axis, warp = T.thread_id([32, 5])
