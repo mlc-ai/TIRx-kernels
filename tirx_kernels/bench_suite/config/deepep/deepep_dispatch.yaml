@@ -1,0 +1,11 @@
+kernel: deepep_dispatch
+defaults:
+  num_gpus: 1
+  timer: kineto
+configs:
+  # Single-domain NVLink path needs the full 8-rank NVLink domain on this host
+  # (the ElasticBuffer reference only exists at world_size 8). Multi-GPU
+  # workloads stay out of the default sweep; run explicitly with --filter.
+  - config: t4096_h7168_e256_k6
+    default: false
+    num_gpus: 8

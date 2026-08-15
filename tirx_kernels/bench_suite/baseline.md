@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '5f901d39', 'tirx-kernels': 'c66267cb', 'tirx-bench-ci': None}`
-- Workloads: 325 ok, 0 failed
+- Git:       `{'tir': '5f901d39', 'tirx-kernels': '8bf3305d-dirty', 'tirx-bench-ci': None}`
+- Workloads: 326 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -28,6 +28,12 @@ Grouped workloads show one row per config and one timing column per implementati
 | `tp1_m8192_n24576_k4096_fp16_dynamic` | tirx | 1066.3879 | cublas_nccl_cudagraph | 1034.9734 | 0.971 | cublasmp_split_p2p=1079.9175 |
 | `tp1_m8192_n51200_k5120_fp16_dynamic` | tirx | 2876.2938 | cublas_nccl_cudagraph | 2717.1455 | 0.945 | cublasmp_split_p2p=2772.5312 |
 | `tp1_m8192_n57344_k8192_fp16_dynamic` | tirx | 6103.6119 | cublas_nccl_cudagraph | 5984.3328 | 0.980 | cublasmp_split_p2p=6148.8383 |
+
+## deepep_dispatch
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `t4096_h7168_e256_k6` | tirx | 638.0497 | deepep | 616.1592 | 0.966 | — |
 
 ## deepgemm_sm100_fp4_mqa_logits
 
