@@ -237,6 +237,17 @@ single output buffer shared by two implementations biases the same way, in
 favour of whichever runs second. Read what the reference wrapper does inside the
 timed region, and give each implementation its own output.
 
+A distributed kineto gate on a multi-tenant host multiplies all of this.
+Twenty-two runs of one 8-GPU DeepEP workload spanned official ratios of
+0.75-1.37, and eight runs of its sibling spanned 0.90-1.59, with the two sides
+drifting together inside every run. The only stable statistics there are the
+median across runs and steady rounds (drop the first round, which carries
+suite-start cold effects); a same-window alternating kernel profile is the
+tiebreaker, and it showed the main kernels at parity while single-run
+officials swung by twenty percent either way. Acquisition that waits for fully
+idle cards never fires on such a host: the utilization and memory thresholds
+have to admit shared cards, and the interference retry does the rest.
+
 ## Issue loads before conversions
 
 **Symptoms:** `long_scoreboard`, `insufficient_memory_parallelism`, `exposed_load_latency`
@@ -605,6 +616,11 @@ rows mean anything. Where the emitted operand form differs from the reference's
 -- registers where the reference wrote immediates -- check the SASS before
 treating it as a divergence; ptxas commonly folds it back.
 
+The compiler itself is the same kind of cheap elimination. One epilogue built
+through the TIRx NVRTC path and through nvcc -O3 produced byte-identical SASS,
+so when a gap persists, diffing the two build paths first costs minutes and
+rules the toolchain out before any deeper analysis.
+
 ## Give a specialization axis a mechanism
 
 **Symptoms:** `shape_conditional_constexpr`, `confounded_ab`, `gate_flapping`
@@ -798,3 +814,166 @@ source and target SASS cache operators and vector width, then time the producer
 and consumer in the same cold-cache benchmark scope. Re-run the affected
 dispatch, a different-dispatch guard, and the full matrix before keeping the
 change.
+
+## Match every kernel's grid, not only its block
+
+**Symptoms:** `instruction_parity_with_deficit`, `unsaturated_bandwidth`, `launch_config_drift`
+
+A port whose loop is instruction-identical to the reference can still be slow
+when its grid is smaller. The launch SMs of a kernel pair are set per kernel
+at the host call site, and a sibling's value is not evidence: DeepEP's
+dispatch main kernel takes a bandwidth-model count (64 on B200 for e256/k6)
+while its copy epilogue is launched with the full device SM count
+(`device_runtime->get_num_sms()` = 148), 2.3x the warps for the same
+bandwidth-bound copy. A sketch that recorded "same as kernel 1" -- and passed
+review with it -- produced a 64-CTA epilogue measuring 112 us against the
+reference's 97 us; the full-SM launch closed it, and the same decoupling was
+then baked into the combine port from the start (main kernel 64, reduce
+epilogue 148, 16 warps each).
+
+Read the host launch call of every kernel in the chain and resolve each grid
+from its own source, not from the port's shared num_sms knob. On the bench
+suite, the device SM count is available to CPU-prepare as
+`TIRX_PREPARE_NUM_SMS` without initializing CUDA.
+
+## Relax bulk-group waits to read completion
+
+**Symptoms:** `serialized_tma_pipeline`, `store_load_overlap_blocked`, `instruction_parity_with_deficit`
+
+The full `cp.async.bulk.wait_group 0` waits for the whole previous TMA store
+-- SMEM read and the HBM or NVLink write -- before the next TMA load may
+issue. The `.read` form waits only until the TMA engine has finished reading
+the SMEM source, which is exactly the reuse requirement of a single per-warp
+SMEM slot. Relaxing both per-token waits in DeepEP's dispatch token loop and
+copy epilogue overlapped the previous store's write with the next token's
+load and brought the kernel to parity; publication semantics were unchanged
+because a full commit and wait still guard the exit barriers. A secondary
+effect visible in SASS: the full wait lowers to DEPBAR plus a per-token
+`CCTL.IVALL` (lineinfo attributes the invalidate to the wait helper), so the
+relaxed form also drops a per-token L1 invalidate from the loop.
+
+The relaxation is valid only where the SMEM slot's next consumer is the next
+load's read, not the store's completion; write that producer-consumer
+argument per wait site before editing, and re-verify correctness at scale.
+
+## Spend warps before pipeline slots
+
+**Symptoms:** `deeper_pipeline_slower`, `concurrency_capped`, `underfilled_pipeline`
+
+For a single-buffered per-warp TMA copy loop, concurrency is warps times one
+outstanding bulk copy. A two-slot per-warp pipeline at constant SMEM halves
+the warp count, and the lost concurrency can cost more than the deeper
+pipeline recovers: an A/B-paired two-slot variant of DeepEP's dispatch
+epilogue (8 warps x 2 slots, token B's load overlapping token A's wait and
+store) was correct but measured 126.5 us against the single-slot form's
+112.4 us p25, reference 99.2 us. The source's 16-warps x 1-slot shape was
+already near the bandwidth ceiling, so the extra slots bought latency hiding
+that the warp count was already providing.
+
+Count outstanding bytes (warps x slot bytes) before adding per-warp depth,
+and scale depth only after the SM's warp slots are full.
+
+## Avoid atomic-return tickets in grid barriers
+
+**Symptoms:** `rare_data_corruption`, `barrier_releases_early`, `compiler_lowering_change`
+
+A software grid barrier built on `atom.add` plus `old == num_sms - 1` was
+lowered by ptxas into a warp-aggregated ticket whose compare constant came
+out wrong (`0x1b` instead of `0x3f`) inside the full kernel, while the
+isolated repro compiled correctly. The barrier released after 27 of 64 CTAs,
+the end-of-kernel sender-counter cleanup raced CTAs still allocating slots,
+and 0.1-2% of tokens were overwritten by wraparound slots -- a failure far
+too rare for small-scale runs to catch. A monotonic per-site u64 counter
+(fire-and-forget `red.release.gpu.add`, spin on `ld.acquire.gpu` until the
+next multiple of num_sms, no reset) has no atomic return and no reset for
+the compiler to mangle, with identical arrive-before-proceed semantics.
+
+Prefer ticketless barrier counters in any kernel large enough that the
+lowering cannot be eyeballed, and if a ticket form is ever kept, read the
+compare constant in the final SASS.
+
+## Bind the cluster scope or lose the attribute
+
+**Symptoms:** `silently_dropped_attribute`, `cluster_dim_mismatch`, `launch_config_drift`
+
+Requesting `clusterCtaIdx.x` in the TIRx launch tags does not by itself
+produce a cluster launch: the resolved `tirx.kernel_launch_params` carries
+the cluster dimension only when the kernel body binds the scope
+(`T.cta_id_in_cluster([cluster])`, even if the value is never used). Without
+the binding the launch silently falls back to cluster (1,1,1). Correctness
+is unaffected, so the drift surfaces only when launch metadata or a
+profiled comparison against a cluster-launched reference disagrees. DeepEP's
+combine kernel declares cluster (2,1,1) to overlap clustered computation
+kernels; adding the dead binding restored
+`CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION = (2,1,1)`, verified through the real
+lowering path.
+
+Treat every launch-tag request as unproven until the resolved params are
+inspected; the request and the realized attribute are different objects.
+
+## Take register dtypes from the PTX table family
+
+**Symptoms:** `invalid_ptx_form`, `dtype_mismatch_at_use`, `register_view_friction`
+
+In the TIRx PTX table, operand dtypes are fixed per instruction family, not
+per use site: `ld...v4.s32` destinations must be int32 while `add.bf16x2`
+operands must be uint32, so one 16-byte register tile can need two typed
+views across neighboring instructions. The casts between them are register
+renames and cost nothing in SASS; plan the views up front instead of letting
+a type error redesign the data path.
+
+Where the source reads only part of a wide value, match the width: an i64
+top-k index consumed as i32 is a single low-word `ld.global.b32` in the
+reference, so the port declares an int32 view of the tensor rather than
+loading i64 and converting -- the latter is a real instruction-shape
+divergence, not a shorthand.
+
+## A PDL wait without a trigger releases at completion
+
+**Symptoms:** `pdl_chain_suspicion`, `missing_trigger`, `launch_config_drift`
+
+`griddepcontrol.wait` in the dependent kernel releases when the primary
+kernel completes; an explicit `griddepcontrol.launch_dependents` is required
+only where the source has one. DeepEP's dispatch triggers right after its
+data-arrival barrier, but its combine main kernel contains no
+`cudaTriggerProgrammaticLaunchCompletion` -- the reduce epilogue's wait
+releases at kernel-1 completion, overlapping only its prologue, and adding a
+trigger would start the epilogue early on unguarded data. Check the source
+for the trigger's existence and exact position before wiring the chain: a
+missing trigger is not a bug to fix, and an added one is a semantic
+reordering.
+
+## Spin backoffs cost their detection latency
+
+**Symptoms:** `backoff_regression`, `barrier_stall`, `cold_start_sensitivity`
+
+Adding `nanosleep` backoff to a barrier spin trades poll traffic for
+release-detection latency, and on this class of kernel the trade lost. In
+DeepEP's dispatch, 256/512 ns backoffs in the grid and NVLink barrier spins
+were correct but measured no better than busy-polling across three bench
+campaigns, with quiet rounds trending worse (~0.85-0.93 vs ~0.95-1.01):
+about 0.5-1 us of added detection latency per barrier outweighed the saved
+L2- and sys-scope poll traffic, which is already cheap at 64 CTAs on one
+line plus one SM's NVLink polls. The reference busy-polls everywhere; keep
+the reference's spin form and treat sleep-based throttling as a hypothesis
+to falsify, not a default.
+
+## Keep CPU prepare free of CUDA and compilation
+
+**Symptoms:** `prepare_stage_failure`, `cuda_init_in_prepare`, `compile_in_gpu_stage`
+
+The bench suite's two-stage contract is enforced, not advisory: CPU
+`prepare_bench` must return a process-local prepared object without
+initializing CUDA, and the `run_gpu` stage rejects `tvm.compile` outright.
+Three sequential workload failures map to the three rules -- a missing
+`prepare_bench` (the one-stage fallback is gone), a device query or a
+reference-model call that initializes CUDA (DeepEP's theoretical-SM model
+ends in `torch.cuda.get_device_properties`; mirror the arithmetic or take
+the suite's `TIRX_PREPARE_NUM_SMS`), and a compile left in `run_gpu`.
+Multi-GPU workloads additionally sit outside the default sweep
+(`default: false`, single-GPU-only default) and run explicitly through
+`--workloads` with `load_kernel_configs('<kernel>')`; `--filter` matches
+only the single-GPU sweep.
+
+Compile and export in prepare, spawn ranks in `run_gpu`, and make any
+shared launcher accept prebuilt libraries so the GPU stage never compiles.
