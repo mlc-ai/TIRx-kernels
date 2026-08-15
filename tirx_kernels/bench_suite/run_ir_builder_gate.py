@@ -29,6 +29,7 @@ from tirx_kernels.bench_suite._nvrtc132_sitecustomize import (
 
 CUDA_HOME_ENV = "TIRX_BENCH_CUDA_HOME"
 DEFAULT_CUDA_HOME = Path("/usr/local/cuda-13.2")
+IR_BUILDER_MIGRATION_MEM_THRESHOLD = 0.5
 
 
 def _cuda_library(cuda_home: Path, name: str) -> Path:
@@ -84,7 +85,7 @@ def main() -> None:
         "tirx_kernels.bench_suite",
         "--ir-builder-migration-gate",
         "--mem-threshold",
-        "0.5",
+        str(IR_BUILDER_MIGRATION_MEM_THRESHOLD),
         *sys.argv[1:],
     ]
     os.execve(sys.executable, command, env)
