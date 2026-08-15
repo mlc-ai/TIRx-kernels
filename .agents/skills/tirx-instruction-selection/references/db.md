@@ -25,14 +25,32 @@ loads and a redundant integer max disappeared that way.
 
 **Symptoms:** `bitwise_mismatch`, `denormal_mismatch`, `unexpected_ftz`, `select_lowered_as_branch`
 
-Fast-math defaults can add `.ftz`, approximate division, or change a compare and
-select into different control flow. This causes bitwise mismatches on denormals
-and may perturb scheduling even when normal values agree.
+Two independent mechanisms share one fix. Fast-math defaults (e.g. nvcc
+`--use_fast_math`) add `.ftz` to float arithmetic and make division
+approximate, causing bitwise mismatches on denormals. Independently, a float
+compare/select whose PTX form is unpinned lets the codegen choose whether
+`setp` carries `.ftz` and lets ptxas choose between `selp` and a branch; that
+perturbs instruction shape and scheduling even when normal values agree.
 
 When the reference pins an instruction, use the exact PTX operation: non-FTZ
 `mul.f32`/`add.f32`, `div.rn.f32`, or explicit `setp` plus `selp`. Retain
 `.approx.ftz` only where the reference uses it. Plain TIRx remains appropriate
 for integer and index math.
+
+Global fast-math off-switches exist for both TVM CUDA compile paths
+(`TVM_CUDA_NVCC_NO_FAST_MATH=1` for nvcc, `--ftz=false` via
+`TVM_CUDA_NVRTC_EXTRA_OPTS` for NVRTC), but prefer per-op pinning: it holds
+regardless of compile defaults and documents intent at the use site.
+
+The direction is a property of the reference, not of the family, and both
+families are registered in the PTX table, so the `.ftz` forms are always an
+explicit choice. Two siblings ported from a tile-DSL reference emit no `.ftz` at
+all and needed non-FTZ helpers to defeat the fast-math build; a third, whose
+reference is plain CUDA operators compiled with fast math, emits 108
+`fma.rn.ftz.f32`, 69 `mul.ftz.f32`, 53 `add.ftz.f32`, 4 `sub.ftz.f32` and no
+plain-`.f32` arithmetic at all. Inheriting a sibling's arithmetic helpers is a
+silent divergence in either direction; read the reference's own PTX census
+first.
 
 Confirm with denormal inputs and an instruction-by-instruction PTX comparison.
 
@@ -41,9 +59,13 @@ Confirm with denormal inputs and an instruction-by-instruction PTX comparison.
 **Symptoms:** `register_spill`, `register_budget_mismatch`, `local_memory_traffic`, `low_occupancy`
 
 `tirx.launch_bounds_min_blocks_per_sm` becomes the second CUDA
-`__launch_bounds__` argument and imposes a hard ptxas register budget. A value
-chosen from theoretical occupancy can starve a kernel whose reference uses more
-registers, producing STL/LDL or global rescheduling.
+`__launch_bounds__` argument and imposes a hard ptxas register budget: roughly
+65536 registers divided by (threads per CTA times the bound), rounded down to
+the allocation granularity. A value chosen from theoretical occupancy can
+starve a kernel whose reference uses more registers, producing STL/LDL or
+global rescheduling. One measured 512-thread quantization kernel was capped at
+32 registers with a bound of 4 while its reference ran at about 50; a bound of
+2 restored parity.
 
 Set the bound from the reference kernel's realized occupancy target. Compare
 resource usage, achieved occupancy, and dynamic local-memory traffic on both
