@@ -149,7 +149,7 @@ goal 范围内。
 
 这些结构等价证据不改变性能 oracle：验收仍只针对 rebase 前指纹成立，不扩展到
 最终 rebase 后 source SHA256
-`422ec0d36e0759c47747a4abe6aa4c607b2799718b59277a371ce01116963a81`。
+`5adf1c59edca0cc2d7ff65c183715f47d7e15bab47aaf01fc152fe0278640e3f`。
 
 ### Historical restart-2 evidence and superseded diagnostics
 
