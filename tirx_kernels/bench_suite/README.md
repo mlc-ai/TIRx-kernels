@@ -106,9 +106,10 @@ are outside both timed closures. For this port, only the results emitted by
 
 | Kind | Files |
 |------|--------|
-| **Run** | `run.py`, `config/<bucket>/<kernel>.yaml` (one per kernel, per-config `default:` flag) |
+| **Run** | `__main__.py` (the `python -m tirx_kernels.bench_suite` entry point), `run.py`, `config/<bucket>/<kernel>.yaml` (one per kernel, per-config `default:` flag) |
 | **Pinned baseline (git)** | `baseline.json`, `baseline.md` |
-| **Promote / report** | `promote_baseline.py`, `ratio_diff.py`, `baseline_view.py` |
+| **Promote / report** | `promote_baseline.py`, `ratio_diff.py`, `baseline_view.py`, `impls.py` (impl-name classification shared by the reports) |
+| **Package** | `__init__.py` |
 
 Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and are not committed.
 
