@@ -1,4 +1,6 @@
-# SPDX-License-Identifier: Apache-2.0
+# This file is a TIRx port of code from DeepEP
+# (https://github.com/deepseek-ai/DeepEP @ 01dc3aa), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 """DeepEP V2 elastic combine (single-domain NVLink path) ported to TIRx.

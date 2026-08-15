@@ -64,6 +64,11 @@ PORT_BUCKETS = {
         "https://github.com/deepseek-ai/DeepGEMM",
         "Apache-2.0 AND MIT",
     ),
+    "tirx_kernels/deepep/": (
+        "DeepEP",
+        "https://github.com/deepseek-ai/DeepEP",
+        "Apache-2.0 AND MIT",
+    ),
     "tirx_kernels/flashmla/": (
         "FlashMLA",
         "https://github.com/deepseek-ai/FlashMLA",
@@ -103,6 +108,8 @@ FILE_OVERRIDES = {
 
 # Native modules inside port buckets — package markers and our own harnesses.
 PORT_DIR_EXCEPTIONS = {
+    "tirx_kernels/deepep/utils/_buffer.py",
+    "tirx_kernels/deepep/utils/_runtime.py",
     "tirx_kernels/flashinfer/utils/_flashkda_bench.py",
     "tirx_kernels/flashmla/utils/_flashmla_bench.py",
     "tirx_kernels/flashmla/utils/_trtllm_gen_bench.py",
