@@ -106,9 +106,10 @@ are outside both timed closures. For this port, only the results emitted by
 
 | Kind | Files |
 |------|--------|
-| **Run** | `run.py`, `config/<bucket>/<kernel>.yaml` (one per kernel, per-config `default:` flag) |
+| **Run** | `__main__.py` (the `python -m tirx_kernels.bench_suite` entry point), `run.py`, `config/<bucket>/<kernel>.yaml` (one per kernel, per-config `default:` flag) |
 | **Pinned baseline (git)** | `baseline.json`, `baseline.md` |
-| **Promote / report** | `promote_baseline.py`, `ratio_diff.py`, `baseline_view.py` |
+| **Promote / report** | `promote_baseline.py`, `ratio_diff.py`, `baseline_view.py`, `impls.py` (impl-name classification shared by the reports) |
+| **Package** | `__init__.py` |
 
 Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and are not committed.
 
@@ -252,7 +253,7 @@ defaults to FlashInfer's `auto` backend; set
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--rounds N` | `5` | Complete standard-timer calls per implementation/workload |
-| `--cooldown` | `1.0` | Seconds before every implementation in every round |
+| `--cooldown` | `0.0` | Seconds before every implementation in every round |
 | `--util-threshold` | `0` | Skip GPUs above this utilization; requeue if a foreign process exceeds it during a run |
 | `--mem-threshold` | `0` | Skip GPUs with compute-app memory-used percent above this percent |
 | `--max-prepare-processes N` | host/GPU-derived | Maximum concurrent one-shot CPU prepare children |
