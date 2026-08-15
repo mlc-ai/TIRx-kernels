@@ -86,6 +86,13 @@ point each port backs (`activation`, `quantization` — CuTe-DSL backend —,
 | `deepgemm_sm100_fp8_paged_mqa_logits`          | `paged_mqa_logits_fp8.py`          | Paged-KV MQA attention logits |
 | `deepgemm_sm100_tf32_hc_prenorm_gemm`          | `tf32_hc_prenorm_gemm.py`          | Prenorm GEMM |
 | `sm100_fp8_fp4_mega_moe`                       | `sm100_fp8_fp4_mega_moe.py`        | Fused MoE megakernel (MegaMoE) |
+
+`deepep/` — DeepEP ports:
+
+| Kernel            | Module        | What it is |
+| ----------------- | ------------- | ---------- |
+| `deepep_dispatch` | `dispatch.py` | V2 elastic dispatch, single-domain NVLink path (multi-GPU, 8 ranks) |
+
 ## Performance
 
 Per-workload numbers — our kernel time, every reference impl, and the
