@@ -199,6 +199,17 @@ that the device is quiet immediately before and after each sample, discard the
 sample if it moved, interleave the variants, and keep a comparison inside one
 campaign.
 
+Give both sides the same memory state, not only the same arithmetic. An
+accumulating GEMM whose reference wrapper copies C into D inside the call under
+measurement does work the port does not: per-kernel attribution never charges
+that copy to the kernel, but it leaves the output resident in L2, and the
+reference's own kernel then measured 81.50 us against 83.48 us for the identical
+call made in place. Seeding the accumulator once outside the timed closure moved
+three variants from 0.963x, 0.989x and 1.003x to 0.990x, 1.004x and 1.006x. A
+single output buffer shared by two implementations biases the same way, in
+favour of whichever runs second. Read what the reference wrapper does inside the
+timed region, and give each implementation its own output.
+
 ## E9: Issue loads before conversions
 
 **Symptoms:** `long_scoreboard`, `insufficient_memory_parallelism`, `exposed_load_latency`
@@ -280,6 +291,19 @@ Not every predicate is worth rewriting. Rebuilding an integer-materialized
 condition as a boolean conjunction, aimed at an excess of logic ops and
 reconvergence, changed nothing: both forms lowered identically, down to equal
 totals. Check the lowering before assuming the written form survived.
+
+A whole elected-lane region in a warp-specialized mainloop is the same case at
+larger scale. Guarding a block of single-issue matrix and copy instructions on
+the elected lane costs a reconvergence pair per iteration, measured at 4.53
+instructions per K block against the reference's roughly zero, because the
+reference's compiler predicates those instructions individually instead.
+Flattening the region and predicating each issue -- in the mainloop and in both
+epilogue store paths -- took reconvergence-marked BSSY and BSYNC from 494,814
+and 989,628 to 222 and 444, the kernel from 58.81M to 55.64M instructions, and
+the tensor pipe from 67.3% to 74.2% of cycles against the reference's 73.5%. On
+the gate the mainloop half is what moved the family, from 0.939-0.983x to
+0.995-1.035x; extending the rewrite to the epilogue produced no separation from
+run-to-run drift, so that is where to stop.
 
 Confirm predicate polarity and inactive-lane memory behavior, then compare BRA,
 BSYNC, reconvergence, code size, registers, and both control-flow outcomes.
@@ -565,3 +589,124 @@ port issued fewer instructions, requested identical sectors, clustered its loads
 better and moved 17% less data, and still reached 81% of the reference's DRAM
 throughput; neither the opcode nor the memory table exposes that, and the lever
 that worked was raising the number of outstanding misses.
+
+## E26: Fold the loop index into the operand it indexes
+
+**Symptoms:** `unroll_no_effect`, `instruction_count_bloat`, `excess_guard_math`, `branch_in_hot_loop`
+
+Unrolling a mainloop by replicating its body is not by itself an
+instruction-selection change. Where a reference unrolls, the payoff is usually
+that the unroll factor turns a value the body reads at runtime into a per-copy
+compile-time constant; a transcription that keeps reading the runtime value
+takes the code growth and none of the folding.
+
+One mainloop unrolled four ways with a per-copy predicate, the shape nvcc emits
+for a trip count that is not a multiple of four, changed nothing: 813 us against
+810 us, dynamic instruction count unmoved. The body was still computing its
+scale-factor index as the loop counter modulo four. Re-indexing the loop as
+`counter = 4 * outer + inner` makes `inner` that index, and the per-copy
+constants then fold: the bit-field inserts that place the index into the
+instruction descriptor, and the guard around the scale-factor copy, both
+disappear in three of every four copies. The mainloop warp fell from 58.1 to
+42.0 instructions per K block against the reference's 37.4, and the kernel from
+61.68M to 58.81M instructions.
+
+Round the trip count up and cover the tail with one predicate rather than
+duplicating the body, and advance the counter outside that predicate -- inside
+it, the rounded loop never reaches its bound and the kernel hangs.
+
+The boundary is the fold, not the unroll. On the specializations where the
+folded quantity was already constant, one scale-factor stage per load instead of
+four, the same code measured unchanged, as predicted. A runtime trip count is
+not itself the cost either: the same kernel compiled with a dynamic K bound
+measured 0.9908x of the static-bound build.
+
+## E27: Divide unsigned
+
+**Symptoms:** `excess_integer_math`, `excess_address_math`, `instruction_count_gap`, `slow_small_shape`
+
+A signed `//` or `%` lowers to the full floordiv/floormod fixup sequence
+whenever the dividend's sign cannot be proven. A scheduler counter read from a
+signed integer global carries no such proof even when every value it can hold is
+a count, so each division emits an absolute value, a sign compare and a chain of
+moves that a reference written in unsigned arithmetic throughout does not have.
+
+One masked-layout shape carried 49,920 absolute-value and 38,460 signed-compare
+instructions against the reference's none. Casting each counter to unsigned
+before dividing, and routing the swizzled-block arithmetic through the same
+helpers, took that shape from 3.868M to 3.537M instructions against the
+reference's 3.388M, and from 0.976x to above the gate.
+
+What the cast removes is the correction, not the division: these divisors are
+runtime values whenever the group sizes are, so both sides issue a real integer
+divide. Count the fixup opcodes rather than the divide, and apply the cast
+across the whole family -- these counters feed every role, so the sites that
+matter are usually more numerous than the one the profile attributed.
+
+## E28: Hoist warp-converging instructions out of the loop
+
+**Symptoms:** `excess_control_instructions`, `branch_in_hot_loop`, `vectorized_uniform_math`, `instruction_count_gap`
+
+A lane election, vote or shuffle is a warp-converging instruction with real
+issue cost, and a reference that calls one at each use site does not necessarily
+execute it there: nvcc hoists a loop-invariant election into a single uniform
+predicate carried across the loop. Transcribing the call at every use is
+faithful to the text and diverges from the compiled form.
+
+One mainloop re-elected twice per K block, executing 495,036 elections against
+the reference's 36,284, while the reference executed 1.1M more uniform-register
+moves -- the predicate it was holding instead. Electing once outside the loop
+and consuming the resulting predicate on each instruction took the kernel from
+809.5 to 806.1 us and from 62.27M to 61.68M instructions.
+
+Hoisting is not deleting. Where a reference's election or broadcast is the only
+evidence a later guard has that its condition is warp-uniform, removing it costs
+more than the instruction saves; lift it to the enclosing region and keep the
+predicate live instead of dropping the proof.
+
+## E29: Take an instruction's modifiers from the reference's PTX
+
+**Symptoms:** `instruction_variant_mismatch`, `unverified_instruction_selection`, `sass_divergence`, `instruction_count_gap`
+
+A helper that assembles an instruction chain from kernel-level properties can
+select a modifier the reference never selects, and nothing in a count exposes
+it: same opcode family, same issue count, different instruction.
+
+One port appended a two-CTA modifier to every bulk tensor load because the
+cluster held more than one CTA. The reference's copy helper does contain a
+two-CTA branch, but every call site passes a literal one and never reaches it --
+the pairing lives in the matrix instruction, not in the load, and each CTA
+fetches its own slice. The two variants signal completion differently. Dropping
+the modifier left correctness unchanged and took the kernel from 55.64M to
+54.24M instructions, with the tensor pipe active 74.4% of cycles against the
+reference's 73.3%.
+
+A branch present in a reference helper is not evidence that it is taken. Read
+each modifier off the reference's own dumped PTX and off the literal arguments
+at its call sites, not off the helper's source or off your model of the
+algorithm, and check any modifier a builder derives automatically against that
+same dump.
+
+## E30: Narrow every operand a shortened block reaches
+
+**Symptoms:** `partial_output`, `unported_work_reduction`, `bitwise_mismatch`, `slow_epilogue`
+
+When a reference shortens its last tile to the rows that exist, that saving is
+encoded in several operands at once, and they have to move together. Porting a
+subset yields output that is partly correct and a specialization that is slower
+than its padded sibling for no visible reason.
+
+Three operands carried it in one grouped layout: the loader's per-CTA
+coordinate, which shifts by the shortened height while the transfer box keeps
+its compile-time size; the matrix instruction descriptor's row-count field; and
+the number of epilogue stores. With only the last two ported, the peer CTA read
+rows at the unshortened offset and just the first half of each block came out
+correct -- which reads like a transfer-shape bug rather than a missing
+narrowing. With all three, correctness was restored and the shape moved from
+0.964x to 0.996x, against 0.997x for the zero-padded sibling that shares its
+code.
+
+Size the expectation before measuring: the saving here is about one partly-empty
+block per group. When a specialization the reference treats specially is
+measurably slower than the one it otherwise shares code with, look for a work
+reduction transcribed at some of its sites and not the rest.
