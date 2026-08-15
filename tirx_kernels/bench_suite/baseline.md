@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': 'ea0950ab', 'tirx-kernels': '8166f465', 'tirx-bench-ci': None}`
-- Workloads: 320 ok, 0 failed
+- Git:       `{'tir': '5f901d39', 'tirx-kernels': 'c66267cb', 'tirx-bench-ci': None}`
+- Workloads: 325 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -28,13 +28,6 @@ Grouped workloads show one row per config and one timing column per implementati
 | `tp1_m8192_n24576_k4096_fp16_dynamic` | tirx | 1066.3879 | cublas_nccl_cudagraph | 1034.9734 | 0.971 | cublasmp_split_p2p=1079.9175 |
 | `tp1_m8192_n51200_k5120_fp16_dynamic` | tirx | 2876.2938 | cublas_nccl_cudagraph | 2717.1455 | 0.945 | cublasmp_split_p2p=2772.5312 |
 | `tp1_m8192_n57344_k8192_fp16_dynamic` | tirx | 6103.6119 | cublas_nccl_cudagraph | 5984.3328 | 0.980 | cublasmp_split_p2p=6148.8383 |
-
-## sm100_fp8_fp4_mega_moe
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `t64_m64_h7168_i3072_e384_k6_g1` | tirx | 1298.6000 | deepgemm | 1288.0000 | 0.992 | — |
-| `t8192_m8192_h7168_i3072_e384_k6_g1` | tirx | 3377.4000 | deepgemm | 3377.6000 | 1.000 | — |
 
 ## deepgemm_sm100_fp4_mqa_logits
 
@@ -491,6 +484,18 @@ Grouped workloads show one row per config and one timing column per implementati
 | `fp16_b4_m128_k4096` | tirx | 5.5833 | flashinfer | 5.7942 | 1.038 | — |
 | `fp16_b8_m16_k2048` | tirx | 4.8038 | flashinfer | 6.0456 | 1.259 | — |
 | `fp16_b8_m512_k2048` | tirx | 8.8492 | flashinfer | 10.2845 | 1.162 | — |
+
+## sm100_fp8_fp4_mega_moe
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `t64_m64_h7168_i3072_e384_k6_g1` | tirx | 1298.4000 | deepgemm | 1288.0000 | 0.992 | — |
+| `t64_m64_h7168_i3072_e384_k6_g1_s1` | tirx | 1280.0000 | deepgemm | 1270.8000 | 0.993 | — |
+| `t8192_m8192_h7168_i3072_e384_k6_g1` | tirx | 3406.2000 | deepgemm | 3406.2000 | 1.000 | — |
+| `t8192_m8192_h7168_i3072_e384_k6_g1_s1` | tirx | 3842.8000 | deepgemm | 3845.4000 | 1.001 | — |
+| `t8192_m8192_h7168_i3072_e384_k6_g2_s1` | tirx | 3577.0000 | deepgemm | 3557.2000 | 0.994 | — |
+| `t8192_m8192_h7168_i3072_e384_k6_g4_s1` | tirx | 3132.4000 | deepgemm | 3116.0000 | 0.995 | — |
+| `t8192_m8192_h7168_i3072_e384_k6_g6_s1` | tirx | 3096.6000 | deepgemm | 3075.2000 | 0.993 | — |
 
 ## sparse_flashmla_decode_head64
 
