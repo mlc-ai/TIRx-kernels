@@ -31,6 +31,7 @@ import torch.multiprocessing as mp
 from .spec import (
     MegaMoeCase,
     MegaMoeConfig,
+    _align_up,
     _launch_tirx_mega_moe,
     _prepare_tirx_invocation,
     fp8_fp4_mega_moe,
@@ -99,6 +100,70 @@ def _cast_grouped_weights_to_fp4(
     return packed_weights, transformed_scales
 
 
+def _cast_fp8_for_mega_moe(
+    deep_gemm: Any, x: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Port of `_cast_fp8_for_mega_moe` (DeepGEMM tests/test_mega_moe.py:53-60).
+
+    Returns ``(x_fp8, x_sf, x_sf_tma)``. The third entry is the TMA-strided SF
+    view required by ``check_sf_layout(..., tma_stride_check=true)``; shared
+    weights use ``[0::2]`` of this tuple, i.e. ``(x_fp8, x_sf_tma)``.
+    """
+    x_fp8, x_sf = deep_gemm.utils.per_token_cast_to_fp8(
+        x, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
+    )
+    mn, packed_sf_k = x_sf.shape
+    x_sf_tma = torch.empty_strided(
+        (mn, packed_sf_k), (1, _align_up(mn, 4)), dtype=x_sf.dtype, device=x_sf.device
+    )
+    x_sf_tma.copy_(x_sf)
+    return x_fp8, x_sf, x_sf_tma
+
+
+def _to_shared_mega_moe_sf_layout(
+    sf: torch.Tensor, block_m: int, num_max_sf_tokens: int
+) -> torch.Tensor:
+    """Port of `_to_shared_mega_moe_sf_layout` (tests/test_mega_moe.py:36-50).
+
+    The shared L1 input SF plane is host-written in the UTCCP-transposed,
+    BLOCK_M-dependent layout; the kernel never writes it. Padding rows stay
+    ZERO: the plane is allocated at full size, zeroed, and only ``[0,
+    num_tokens)`` is filled.
+    """
+    num_tokens, packed_sf_k = sf.shape
+    aligned_block_m = _align_up(block_m, 128)
+    num_m_blocks = (num_tokens + block_m - 1) // block_m
+    result = torch.empty_strided(
+        (num_max_sf_tokens, packed_sf_k), (1, num_max_sf_tokens), dtype=sf.dtype, device=sf.device
+    )
+    result.zero_()
+    for block_idx in range(num_m_blocks):
+        num_block_tokens = min(block_m, num_tokens - block_idx * block_m)
+        for m_idx in range(num_block_tokens):
+            transposed_m_idx = (m_idx // 128) * 128 + (m_idx % 32) * 4 + (m_idx % 128) // 32
+            result[block_idx * aligned_block_m + transposed_m_idx].copy_(
+                sf[block_idx * block_m + m_idx]
+            )
+    return result
+
+
+def _copy_fp8_sf(dst: torch.Tensor, src: torch.Tensor, num_tokens: int) -> None:
+    """Port of `_copy_fp8_sf` (tests/test_mega_moe.py:62-70).
+
+    At this call site ``dst.shape == src.shape`` (both are the full shared SF
+    plane), so the plain copy path is taken and the replicate-last-row branch is
+    dead; it is kept only to mirror the reference helper exactly.
+    """
+    if num_tokens == 0:
+        return
+    if dst.shape == src.shape:
+        dst.copy_(src)
+        return
+    dst[:num_tokens].copy_(src)
+    if num_tokens < dst.shape[0]:
+        dst[num_tokens:].copy_(src[-1:].expand(dst.shape[0] - num_tokens, -1))
+
+
 def create_case(
     deep_gemm: Any, config: MegaMoeConfig, group: Any, rank_idx: int, num_ranks: int
 ) -> MegaMoeCase:
@@ -112,6 +177,7 @@ def create_case(
         config.num_topk,
         config.hidden,
         config.intermediate_hidden,
+        config.num_shared_experts,
     )
     num_tokens = config.num_tokens
     num_experts_per_rank = config.num_experts // num_ranks
@@ -127,17 +193,47 @@ def create_case(
         dtype=torch.bfloat16,
         device="cuda",
     )
+    shared_intermediate_hidden = config.shared_intermediate_hidden
+    if config.has_shared_experts:
+        # One fused shared FFN of intermediate width S * I; no expert-group dim.
+        shared_l1_weights_bf16 = torch.randn(
+            (shared_intermediate_hidden * 2, config.hidden), dtype=torch.bfloat16, device="cuda"
+        )
+        shared_l2_weights_bf16 = torch.randn(
+            (config.hidden, shared_intermediate_hidden), dtype=torch.bfloat16, device="cuda"
+        )
     scores = torch.randn((num_tokens, config.num_experts), dtype=torch.float32, device="cuda")
     topk_weights, topk_idx = torch.topk(scores, config.num_topk, dim=-1, largest=True, sorted=False)
 
-    x_fp8 = deep_gemm.utils.per_token_cast_to_fp8(
-        x, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-    )
+    x_fp8_data, x_sf, _x_sf_tma = _cast_fp8_for_mega_moe(deep_gemm, x)
+    x_fp8 = (x_fp8_data, x_sf)
     transformed_l1_input = _cast_grouped_weights_to_fp4(deep_gemm, l1_weights)
     transformed_l2_input = _cast_grouped_weights_to_fp4(deep_gemm, l2_weights)
     transformed_l1_weights, transformed_l2_weights = deep_gemm.transform_weights_for_mega_moe(
         transformed_l1_input, transformed_l2_input
     )
+    transformed_shared_l1_weights = None
+    transformed_shared_l2_weights = None
+    shared_l1_acts_sf = None
+    if config.has_shared_experts:
+        # `[0::2]` selects `(fp8, tma-strided SF)`, matching the reference test.
+        shared_l1_input = _cast_fp8_for_mega_moe(deep_gemm, shared_l1_weights_bf16)[0::2]
+        shared_l2_input = _cast_fp8_for_mega_moe(deep_gemm, shared_l2_weights_bf16)[0::2]
+        transformed_shared_l1_weights, transformed_shared_l2_weights = (
+            deep_gemm.transform_weights_for_mega_moe(shared_l1_input, shared_l2_input)
+        )
+        # The shared L1 SF plane is host-written in a BLOCK_M-dependent layout.
+        block_m = deep_gemm.get_block_m_for_mega_moe(
+            num_ranks,
+            config.num_experts,
+            symm_buffer.num_max_tokens_per_rank,
+            num_tokens,
+            config.num_topk,
+            "fp8xfp4",
+        )
+        shared_l1_acts_sf = _to_shared_mega_moe_sf_layout(
+            x_sf, block_m, symm_buffer.shared_l1_acts_sf.shape[0]
+        )
     workspace_layout = get_deepgemm_workspace_layout(config)
     symm_buffer_layout = get_deepgemm_symm_buffer_layout(config)
     validate_runtime_symm_buffer_layout(
@@ -157,6 +253,9 @@ def create_case(
         transformed_l2_weights=transformed_l2_weights,
         workspace_layout=workspace_layout,
         symm_buffer_layout=symm_buffer_layout,
+        transformed_shared_l1_weights=transformed_shared_l1_weights,
+        transformed_shared_l2_weights=transformed_shared_l2_weights,
+        shared_l1_acts_sf=shared_l1_acts_sf,
     )
 
 
@@ -164,6 +263,10 @@ def _copy_inputs_into_symm_buffer(case: MegaMoeCase) -> None:
     num_tokens = case.config.num_tokens
     case.symm_buffer.x[:num_tokens].copy_(case.x_fp8[0])
     case.symm_buffer.x_sf[:num_tokens].copy_(case.x_fp8[1])
+    if case.config.has_shared_experts:
+        # Kernel-read, host-written: refreshed on every launch because debug mode
+        # zeroes the whole symmetric buffer between calls.
+        _copy_fp8_sf(case.symm_buffer.shared_l1_acts_sf, case.shared_l1_acts_sf, num_tokens)
     case.symm_buffer.topk_idx[:num_tokens].copy_(case.topk_idx)
     case.symm_buffer.topk_weights[:num_tokens].copy_(case.topk_weights)
 
@@ -180,6 +283,8 @@ def run_deepgemm_reference(
         case.transformed_l1_weights,
         case.transformed_l2_weights,
         case.symm_buffer,
+        shared_l1_weights=case.transformed_shared_l1_weights,
+        shared_l2_weights=case.transformed_shared_l2_weights,
         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
         activation_clamp=case.config.activation_clamp,
         fast_math=bool(case.config.fast_math),
@@ -204,6 +309,8 @@ def run_tirx_mega_moe(
         case.transformed_l1_weights,
         case.transformed_l2_weights,
         case.symm_buffer,
+        shared_l1_weights=case.transformed_shared_l1_weights,
+        shared_l2_weights=case.transformed_shared_l2_weights,
         cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
         activation_clamp=case.config.activation_clamp,
         fast_math=bool(case.config.fast_math),
@@ -452,6 +559,8 @@ def _run_worker(
                     dg_case.transformed_l1_weights,
                     dg_case.transformed_l2_weights,
                     dg_case.symm_buffer,
+                    shared_l1_weights=dg_case.transformed_shared_l1_weights,
+                    shared_l2_weights=dg_case.transformed_shared_l2_weights,
                     cumulative_local_expert_recv_stats=deepgemm_stats,
                     activation_clamp=dg_case.config.activation_clamp,
                     fast_math=bool(dg_case.config.fast_math),

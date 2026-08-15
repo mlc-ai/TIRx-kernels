@@ -181,10 +181,16 @@ def tma_store_wait(num_prior_groups):
     raise ValueError("Unsupported TMA store wait distance")
 
 
-def tma_store_2d(src, tensormap, coord0, coord1):
+def tma_store_2d_addr(src, tensormap_addr, coord0, coord1):
+    """`tma_store_2d` taking an already-computed descriptor address, so the
+    caller can select between two descriptors without materializing a local."""
     return T.ptx["cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group"](
-        T.address_of(tensormap), coord0, coord1, src
+        tensormap_addr, coord0, coord1, src
     )
+
+
+def tma_store_2d(src, tensormap, coord0, coord1):
+    return tma_store_2d_addr(src, T.address_of(tensormap), coord0, coord1)
 
 
 #: Unicast (cta_mask=1) at cta_group::2 scope with the evict-normal L2 policy;
@@ -346,6 +352,7 @@ def get_kernel(
     intermediate_hidden: int,
     num_experts: int,
     num_topk: int,
+    num_shared_experts: int = 0,
     activation_clamp: float = 10.0,
     fast_math: int = 1,
     collect_stats: bool = False,
@@ -364,6 +371,7 @@ def get_kernel(
         intermediate_hidden=intermediate_hidden,
         num_experts=num_experts,
         num_topk=num_topk,
+        num_shared_experts=num_shared_experts,
         activation_clamp=activation_clamp,
         fast_math=fast_math,
     )
@@ -376,6 +384,29 @@ def get_kernel(
     num_warps_per_warpgroup = 4
     num_l1_block_ns = (intermediate_hidden * 2) // kernel_config.block_n
     num_l2_block_ns = hidden // kernel_config.block_n
+    # Shared experts (`kNumSharedExperts`): a width multiplier only. One fused
+    # rank-local FFN of intermediate width `S * I`, unweighted, whose output
+    # lands in an extra combine slot. `has_shared` gates every region below;
+    # at S == 0 nothing shared is emitted and the generated CUDA is unchanged
+    # apart from the nine always-present tensor-map parameters.
+    has_shared = num_shared_experts > 0
+    shared_intermediate_hidden = intermediate_hidden * num_shared_experts
+    # Scheduler shapes (scheduler/mega_moe.cuh:154-157).
+    shared_l1_shape_n = shared_intermediate_hidden * 2
+    shared_l1_shape_k = hidden
+    shared_l2_shape_n = hidden
+    shared_l2_shape_k = shared_intermediate_hidden
+    num_shared_l1_block_ns = shared_l1_shape_n // kernel_config.block_n
+    num_shared_l2_block_ns = shared_l2_shape_n // kernel_config.block_n
+    num_shared_l1_clusters = num_shared_l1_block_ns // 2
+    num_shared_l2_clusters = num_shared_l2_block_ns // 2
+    # `BlockPhase`: None=0, Linear1=1, Linear2=2, SharedLinear1=3, SharedLinear2=4.
+    # `TaskInfo::is_shared()` is `block_phase > Linear2`.
+    block_phase_shared_l1 = 3
+    block_phase_shared_l2 = 4
+    # Shared experts add one combine slot per token, written rank-locally.
+    num_combine_slots = num_topk + (1 if has_shared else 0)
+    num_max_shared_sf_tokens = symm_buffer_layout.num_max_shared_sf_tokens
     # Dynamic task scheduler constants (scheduler/mega_moe.cuh, upstream 559d79f)
     num_l1_clusters = num_l1_block_ns // 2
     num_l2_clusters = num_l2_block_ns // 2
@@ -503,13 +534,42 @@ def get_kernel(
 
     @T.inline
     def sm100_tma_2sm_load_2d_select(
-        dst, mbar, tensor_map_l1, tensor_map_l2, block_phase_value, coord0, coord1
+        dst,
+        mbar,
+        tensor_map_l1,
+        tensor_map_l2,
+        block_phase_value,
+        coord0,
+        coord1,
+        tensor_map_shared_l1=None,
+        tensor_map_shared_l2=None,
     ):
+        # Chained descriptor select on `block_phase`, mirroring the source's
+        # ternary chain (impls .cuh:676-683). At S == 0 only Linear1/Linear2
+        # exist, so this collapses back to the original two-way select. The
+        # expression is built in Python and passed inline: binding it to a name
+        # would materialize a local buffer instead of an inline ternary.
         sm100_tma_2sm_load_2d_addr(
             dst,
             mbar,
-            T.Select(
-                block_phase_value == 1, T.address_of(tensor_map_l1), T.address_of(tensor_map_l2)
+            (
+                T.Select(
+                    block_phase_value == 1,
+                    T.address_of(tensor_map_l1),
+                    T.Select(
+                        block_phase_value == 2,
+                        T.address_of(tensor_map_l2),
+                        T.Select(
+                            block_phase_value == 3,
+                            T.address_of(tensor_map_shared_l1),
+                            T.address_of(tensor_map_shared_l2),
+                        ),
+                    ),
+                )
+                if has_shared
+                else T.Select(
+                    block_phase_value == 1, T.address_of(tensor_map_l1), T.address_of(tensor_map_l2)
+                )
             ),
             coord0,
             coord1,
@@ -659,6 +719,9 @@ def get_kernel(
     smem_sfb_size_per_stage = kernel_config.block_n * (kernel_config.block_k // 32)
     full_a_expect_tx_leader_bytes: int = smem_a_size_per_stage * 2 + (smem_sfa_size_per_stage * 2)
     full_b_expect_tx_leader_bytes: int = smem_b_size_per_stage + (smem_sfb_size_per_stage * 2)
+    full_shared_b_expect_tx_leader_bytes: int = (smem_b_size_per_stage * 2) + (
+        smem_sfb_size_per_stage * 2
+    )
     smem_amax_reduction_size = kernel_config.store_block_m * kernel_config.num_epilogue_warps * 4
     smem_tmem_ptr_size = 4
     smem_per_stage = (
@@ -869,6 +932,19 @@ def get_kernel(
         tensor_map_l2_acts_sf: T.TensorMap(),
         tensor_map_l2_weights: T.TensorMap(),
         tensor_map_l2_weights_sf: T.TensorMap(),
+        # The nine shared-expert descriptors are always in the signature. At
+        # `num_shared_experts == 0` the host binds the matching routed descriptor
+        # into each slot as a dummy, mirroring the upstream launcher, so the ABI
+        # is independent of S.
+        tensor_map_shared_l1_acts: T.TensorMap(),
+        tensor_map_shared_l1_acts_sf: T.TensorMap(),
+        tensor_map_shared_l1_weights: T.TensorMap(),
+        tensor_map_shared_l1_weights_sf: T.TensorMap(),
+        tensor_map_shared_l1_output: T.TensorMap(),
+        tensor_map_shared_l2_acts: T.TensorMap(),
+        tensor_map_shared_l2_acts_sf: T.TensorMap(),
+        tensor_map_shared_l2_weights: T.TensorMap(),
+        tensor_map_shared_l2_weights_sf: T.TensorMap(),
         num_tokens: T.int32,
         rank_idx: T.int32,
     ):
@@ -973,6 +1049,17 @@ def get_kernel(
             T.evaluate(prefetch_tensormap(tensor_map_l2_acts_sf))
             T.evaluate(prefetch_tensormap(tensor_map_l2_weights))
             T.evaluate(prefetch_tensormap(tensor_map_l2_weights_sf))
+            # Unconditional in the source for every specialization: at S == 0
+            # these alias the routed descriptors above (impls .cuh:106-114).
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l1_acts))
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l1_acts_sf))
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l1_weights))
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l1_weights_sf))
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l1_output))
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l2_acts))
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l2_acts_sf))
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l2_weights))
+            T.evaluate(prefetch_tensormap(tensor_map_shared_l2_weights_sf))
         input_topk_idx_data: T.let = T.reinterpret(
             PointerType(PrimType("int64")),
             symm_buffer.ptr_to([symm_buffer_layout.input_topk_idx_offset]),
@@ -1188,7 +1275,7 @@ def get_kernel(
             elem_offset=symm_buffer_layout.l2_sf_offset,
         )
         combine_tokens = T.decl_buffer(
-            (num_topk, workspace_layout.num_max_tokens_per_rank, hidden),
+            (num_combine_slots, workspace_layout.num_max_tokens_per_rank, hidden),
             "uint16",
             data=combine_tokens_data,
             scope="global",
@@ -1394,6 +1481,11 @@ def get_kernel(
         desc_b: T.uint64
         desc_sf: T.uint64
         desc_i: T.uint32
+        # Second instruction descriptor for shared tasks: identical except
+        # that the weight operand is plain e4m3 instead of packed FP4
+        # (impls .cuh:807-811). `desc_i_active` is the per-task working copy.
+        desc_i_shared: T.uint32
+        desc_i_active: T.uint32
         runtime_desc_i: T.uint32
         a_desc_lo: T.uint32
         b_desc_lo: T.uint32
@@ -1454,6 +1546,10 @@ def get_kernel(
         sched_owner_m_block_idx: T.uint32
         sched_owner_valid_m: T.uint32
         sched_required_l1_tasks: T.uint32
+        sched_shared_num_tasks: T.uint32
+        sched_shared_m_block_idx: T.uint32
+        sched_shared_valid_m: T.uint32
+        sched_shared_running: T.int32
         current_expert_idx: T.int32
         old_expert_idx: T.int32
         expert_start_idx: T.int32
@@ -1489,6 +1585,10 @@ def get_kernel(
         n_idx: T.int32
         pool_block_idx: T.int32
         ring_block_idx: T.int32
+        # `block_idx` in the source: the ring slot for routed tasks, but the
+        # absolute (non-ring) pool block for shared ones, whose buffers are
+        # full-size rather than a ring (impls .cuh:687-689).
+        block_idx: T.int32
         ring_m_idx: T.int32
         pool_m_idx: T.int32
         valid_m: T.int32
@@ -1878,6 +1978,49 @@ def get_kernel(
             sched_advance_pipeline()
 
         @T.inline
+        def producer_shared_mainloop(
+            task_phase, task_count_ptr, task_num_clusters, task_shape_n, task_shape_k
+        ):
+            # `shared_mainloop` (scheduler/mega_moe.cuh:364-381). Dynamic
+            # scheduling over `ceil_div(num_tokens, BLOCK_M) * kNumNClusters`
+            # tasks: the shared FFN is rank-local, so the m-block index is the
+            # token block directly and doubles as the (non-ring) pool block.
+            sched_shared_num_tasks = (
+                (T.cast(num_tokens, "uint32") + T.uint32(kernel_config.block_m - 1))
+                // T.uint32(kernel_config.block_m)
+            ) * T.uint32(task_num_clusters)
+            sched_shared_running = T.int32(1)
+            while sched_shared_running != T.int32(0):
+                barrier_wait(
+                    smem_barriers.ptr_to([task_info_empty_barrier_base + sched_stage_idx]),
+                    sched_phase ^ T.int32(1),
+                )
+                sched_task_idx = T.uint32(0)
+                if T.cuda.elect_sync():
+                    atomic_add_u32(sched_task_idx, task_count_ptr, T.uint32(1))
+                sched_task_idx = T.tvm_warp_shuffle(
+                    T.uint32(0xFFFFFFFF), sched_task_idx, T.int32(0), 32, 32
+                )
+                if sched_task_idx >= sched_shared_num_tasks:
+                    sched_shared_running = T.int32(0)
+                else:
+                    sched_shared_m_block_idx = sched_task_idx // T.uint32(task_num_clusters)
+                    sched_shared_valid_m = T.min(
+                        T.cast(num_tokens, "uint32")
+                        - sched_shared_m_block_idx * T.uint32(kernel_config.block_m),
+                        T.uint32(kernel_config.block_m),
+                    )
+                    task_info_regs[0] = T.uint32(task_phase)
+                    task_info_regs[1] = T.uint32(0)
+                    task_info_regs[2] = sched_shared_m_block_idx
+                    task_info_regs[3] = sched_task_idx % T.uint32(task_num_clusters)
+                    task_info_regs[4] = sched_shared_m_block_idx
+                    task_info_regs[5] = sched_shared_valid_m
+                    task_info_regs[6] = T.uint32(task_shape_n)
+                    task_info_regs[7] = T.uint32(task_shape_k)
+                    producer_publish_task()
+
+        @T.inline
         def update_get_valid_m_true():
             valid_m_u32 = T.cast(valid_m, "uint32")
             get_valid_m_true_u32 = (valid_m_u32 + T.uint32(15)) // T.uint32(16) * T.uint32(16)
@@ -1953,6 +2096,8 @@ def get_kernel(
             block_phase_value,
             coord0,
             coord1,
+            tensor_map_shared_l1_ptr=None,
+            tensor_map_shared_l2_ptr=None,
         ):
             sm100_tma_2sm_load_2d_select(
                 dst_ptr,
@@ -1962,6 +2107,68 @@ def get_kernel(
                 block_phase_value,
                 coord0,
                 coord1,
+                tensor_map_shared_l1_ptr,
+                tensor_map_shared_l2_ptr,
+            )
+
+        @T.inline
+        def epilogue_signal_routed_l1_done():
+            atomic_add_rel_u32(
+                atom_prev_unused, workspace_l2_full_count.ptr_to([ring_block_idx]), T.uint32(1)
+            )
+            T.evaluate(
+                red_add_gpu_u32(workspace_l1_empty_count.ptr_to([ring_block_idx]), T.uint32(1))
+            )
+
+        @T.inline
+        def epilogue_wait_l2_empty():
+            expected_ring_count = (
+                hidden // kernel_config.block_n * (pool_block_idx // num_ring_blocks)
+            )
+            load_acq_u32(current_ring_count, workspace_l2_empty_count.ptr_to([ring_block_idx]))
+            while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                load_acq_u32(current_ring_count, workspace_l2_empty_count.ptr_to([ring_block_idx]))
+
+        @T.inline
+        def load_a_wait_l1_full():
+            expected_ring_count = kernel_config.block_m * (pool_block_idx // num_ring_blocks + 1)
+            load_acq_u32(current_ring_count, workspace_l1_full_count.ptr_to([block_idx]))
+            while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                load_acq_u32(current_ring_count, workspace_l1_full_count.ptr_to([block_idx]))
+
+        @T.inline
+        def load_a_wait_l2_full():
+            expected_ring_count = (
+                intermediate_hidden
+                // kernel_config.block_n
+                * 2
+                * (pool_block_idx // num_ring_blocks + 1)
+            )
+            load_acq_u32(current_ring_count, workspace_l2_full_count.ptr_to([block_idx]))
+            while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                load_acq_u32(current_ring_count, workspace_l2_full_count.ptr_to([block_idx]))
+
+        @T.inline
+        def sm90_tma_store_2d_copy_select(
+            src_ptr, tensor_map, tensor_map_shared, block_phase_value, coord0, coord1
+        ):
+            # `task_info.is_shared() ? &tensor_map_shared_l1_output
+            #                        : &tensor_map_l1_output` (impls .cuh:1162)
+            T.evaluate(
+                tma_store_2d_addr(
+                    src_ptr,
+                    (
+                        T.Select(
+                            block_phase_value > T.int32(2),
+                            T.address_of(tensor_map_shared),
+                            T.address_of(tensor_map),
+                        )
+                        if has_shared
+                        else T.address_of(tensor_map)
+                    ),
+                    coord0,
+                    coord1,
+                )
             )
 
         @T.inline
@@ -1982,6 +2189,25 @@ def get_kernel(
                 T.address_of(desc_i),
                 d_dtype="float32",
                 a_dtype="float4_e2m1fn",
+                b_dtype="float8_e4m3fn",
+                sfa_dtype="float8_e8m0fnu",
+                sfb_dtype="float8_e8m0fnu",
+                sfa_tmem_addr=0,
+                sfb_tmem_addr=0,
+                M=umma_m,
+                N=umma_n,
+                K=umma_k,
+                trans_a=False,
+                trans_b=False,
+                n_cta_groups=kernel_config.num_ctas_per_cluster,
+            )
+
+        @T.inline
+        def make_instr_desc_block_scaled_shared():
+            T.cuda.tcgen05.encode_instr_descriptor_block_scaled(
+                T.address_of(desc_i_shared),
+                d_dtype="float32",
+                a_dtype="float8_e4m3fn",
                 b_dtype="float8_e4m3fn",
                 sfa_dtype="float8_e8m0fnu",
                 sfb_dtype="float8_e8m0fnu",
@@ -2720,31 +2946,33 @@ def get_kernel(
                     "int32",
                 )
                 ring_block_idx = pool_block_idx % num_ring_blocks
-                if block_phase == T.int32(1):
-                    expected_ring_count = kernel_config.block_m * (
-                        pool_block_idx // num_ring_blocks + 1
-                    )
-                    load_acq_u32(
-                        current_ring_count, workspace_l1_full_count.ptr_to([ring_block_idx])
-                    )
-                    while current_ring_count != T.cast(expected_ring_count, "uint32"):
-                        load_acq_u32(
-                            current_ring_count, workspace_l1_full_count.ptr_to([ring_block_idx])
-                        )
+                if has_shared:
+                    block_idx = T.Select(block_phase > T.int32(2), pool_block_idx, ring_block_idx)
                 else:
-                    expected_ring_count = (
-                        intermediate_hidden
-                        // kernel_config.block_n
-                        * 2
-                        * (pool_block_idx // num_ring_blocks + 1)
-                    )
-                    load_acq_u32(
-                        current_ring_count, workspace_l2_full_count.ptr_to([ring_block_idx])
-                    )
-                    while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                    block_idx = ring_block_idx
+                if has_shared:
+                    if block_phase == T.int32(1):
+                        load_a_wait_l1_full()
+                    elif block_phase == T.int32(2):
+                        load_a_wait_l2_full()
+                    elif block_phase == T.int32(block_phase_shared_l2):
+                        # SharedLinear2 waits for its full-size (non-ring) block,
+                        # so there is no wave multiplier. SharedLinear1 reads the
+                        # host-written input tokens and waits for nothing.
+                        expected_ring_count = shared_l2_shape_k // kernel_config.block_n * 2
                         load_acq_u32(
-                            current_ring_count, workspace_l2_full_count.ptr_to([ring_block_idx])
+                            current_ring_count, workspace_shared_l2_full_count.ptr_to([block_idx])
                         )
+                        while current_ring_count != T.cast(expected_ring_count, "uint32"):
+                            load_acq_u32(
+                                current_ring_count,
+                                workspace_shared_l2_full_count.ptr_to([block_idx]),
+                            )
+                else:
+                    if block_phase == T.int32(1):
+                        load_a_wait_l1_full()
+                    else:
+                        load_a_wait_l2_full()
                 # The release/acquire counters publish generic global stores
                 # from dispatch (L1) or the preceding epilogue's scale-factor
                 # writes (L2).  TMA reads through the async proxy, so bridge the
@@ -2755,9 +2983,9 @@ def get_kernel(
                         smem_barriers.ptr_to([empty_barrier_base + pipeline_stage_idx]),
                         pipeline_phase ^ T.int32(1),
                     )
-                    m_idx = ring_block_idx * kernel_config.block_m
+                    m_idx = block_idx * kernel_config.block_m
                     k_idx = k_block_idx * kernel_config.block_k
-                    sfa_m_idx = ring_block_idx * sf_block_m
+                    sfa_m_idx = block_idx * sf_block_m
                     sfa_k_idx = k_block_idx * sf_smem_outer_dim
                     if cta_idx_in_cluster != 0:
                         update_get_valid_m_true()
@@ -2777,6 +3005,8 @@ def get_kernel(
                                 block_phase,
                                 k_idx + tma_k_atom_idx * umma_block_k,
                                 m_idx,
+                                tensor_map_shared_l1_acts,
+                                tensor_map_shared_l2_acts,
                             )
                         tma_copy_2d_multicast_select(
                             smem_sfa_i32.ptr_to([pipeline_stage_idx, 0, 0]),
@@ -2786,6 +3016,8 @@ def get_kernel(
                             block_phase,
                             sfa_m_idx,
                             sfa_k_idx,
+                            tensor_map_shared_l1_acts_sf,
+                            tensor_map_shared_l2_acts_sf,
                         )
                         if cta_idx_in_cluster == 0:
                             full_barrier_arrive_and_expect_tx(
@@ -2827,10 +3059,26 @@ def get_kernel(
                         smem_barriers.ptr_to([empty_barrier_base + pipeline_stage_idx]),
                         pipeline_phase ^ T.int32(1),
                     )
-                    n_idx = local_expert_idx * shape_n + n_block_idx * kernel_config.block_n
+                    # Shared tasks have no expert-group dimension, so they drop
+                    # the `local_expert_idx` group offset (impls .cuh:762, :765).
+                    if has_shared:
+                        n_idx = T.Select(
+                            block_phase > T.int32(2),
+                            n_block_idx * kernel_config.block_n,
+                            local_expert_idx * shape_n + n_block_idx * kernel_config.block_n,
+                        )
+                    else:
+                        n_idx = local_expert_idx * shape_n + n_block_idx * kernel_config.block_n
                     k_idx = k_block_idx * kernel_config.block_k
                     sfb_n_idx = n_block_idx * kernel_config.block_n
-                    sfb_k_idx = local_expert_idx * shape_sfb_k + k_block_idx * sf_smem_outer_dim
+                    if has_shared:
+                        sfb_k_idx = T.Select(
+                            block_phase > T.int32(2),
+                            k_block_idx * sf_smem_outer_dim,
+                            local_expert_idx * shape_sfb_k + k_block_idx * sf_smem_outer_dim,
+                        )
+                    else:
+                        sfb_k_idx = local_expert_idx * shape_sfb_k + k_block_idx * sf_smem_outer_dim
                     if T.cuda.elect_sync():
                         full_barrier_ptr = smem_barriers.ptr_to(
                             [full_barrier_base + pipeline_stage_idx]
@@ -2846,6 +3094,8 @@ def get_kernel(
                                 block_phase,
                                 k_idx + tma_k_atom_idx * umma_block_k,
                                 n_idx,
+                                tensor_map_shared_l1_weights,
+                                tensor_map_shared_l2_weights,
                             )
                         tma_copy_2d_multicast_select(
                             smem_sfb_i32.ptr_to([pipeline_stage_idx, 0, 0]),
@@ -2855,11 +3105,27 @@ def get_kernel(
                             block_phase,
                             sfb_n_idx,
                             sfb_k_idx,
+                            tensor_map_shared_l1_weights_sf,
+                            tensor_map_shared_l2_weights_sf,
                         )
                         if cta_idx_in_cluster == 0:
-                            full_barrier_arrive_and_expect_tx(
-                                full_barrier_ptr, full_b_expect_tx_leader_bytes
-                            )
+                            # Routed weights are FP4-packed in gmem, so a 2-CTA
+                            # multicast moves exactly `smem_b` bytes; the shared
+                            # weights are plain e4m3 and move twice that
+                            # (impls .cuh:775 vs :785).
+                            if has_shared:
+                                full_barrier_arrive_and_expect_tx(
+                                    full_barrier_ptr,
+                                    T.Select(
+                                        block_phase > T.int32(2),
+                                        T.uint32(full_shared_b_expect_tx_leader_bytes),
+                                        T.uint32(full_b_expect_tx_leader_bytes),
+                                    ),
+                                )
+                            else:
+                                full_barrier_arrive_and_expect_tx(
+                                    full_barrier_ptr, full_b_expect_tx_leader_bytes
+                                )
                         else:
                             full_barrier_arrive_cta0(full_barrier_ptr)
                     T.cuda.warp_sync()
@@ -2868,6 +3134,8 @@ def get_kernel(
             warpgroup_reg_dealloc(num_non_epilogue_registers)
             if cta_idx_in_cluster == 0:
                 make_instr_desc_block_scaled()
+                if has_shared:
+                    make_instr_desc_block_scaled_shared()
                 make_sf_desc()
                 make_umma_desc_a()
                 make_umma_desc_b()
@@ -2908,10 +3176,21 @@ def get_kernel(
                     )
                     current_iter_idx = current_iter_idx + T.int32(1)
                     update_get_valid_m_true()
-                    desc_i = T.bitwise_or(
-                        T.bitwise_and(desc_i, T.uint32(0xFF81FFFF)),
-                        T.shift_left(T.cast(get_valid_m_true_eighth, "uint32"), T.uint32(17)),
-                    )
+                    # Dynamic UMMA-N update on the descriptor for this task kind
+                    # (impls .cuh:835-836).
+                    if has_shared:
+                        desc_i_active = T.bitwise_or(
+                            T.bitwise_and(
+                                T.Select(block_phase > T.int32(2), desc_i_shared, desc_i),
+                                T.uint32(0xFF81FFFF),
+                            ),
+                            T.shift_left(T.cast(get_valid_m_true_eighth, "uint32"), T.uint32(17)),
+                        )
+                    else:
+                        desc_i = T.bitwise_or(
+                            T.bitwise_and(desc_i, T.uint32(0xFF81FFFF)),
+                            T.shift_left(T.cast(get_valid_m_true_eighth, "uint32"), T.uint32(17)),
+                        )
                     barrier_wait(
                         smem_barriers.ptr_to([tmem_empty_barrier_base + accum_stage_idx]),
                         accum_phase ^ T.int32(1),
@@ -2963,7 +3242,7 @@ def get_kernel(
                                     )
                                 for k_idx in T.unroll(0, umma_block_k // umma_k):
                                     runtime_desc_i = make_runtime_instr_desc_with_sf_id(
-                                        desc_i, k_idx, k_idx
+                                        desc_i_active if has_shared else desc_i, k_idx, k_idx
                                     )
                                     desc_a = advance_umma_desc_lo(
                                         desc_a,
@@ -3032,6 +3311,16 @@ def get_kernel(
             if cta_idx_in_cluster == 0:
                 sched_stage_idx = T.int32(0)
                 sched_phase = T.int32(0)
+                if has_shared:
+                    # Shared expert L1 tasks do not depend on dispatch, so they
+                    # are enumerated first and fill the EP-dispatch bubble.
+                    producer_shared_mainloop(
+                        block_phase_shared_l1,
+                        workspace_shared_l1_task_count.ptr_to([0]),
+                        num_shared_l1_clusters,
+                        shared_l1_shape_n,
+                        shared_l1_shape_k,
+                    )
                 # Wait dispatch's results
                 scheduler_fetch_expert_recv_count()
                 # Generate routed tasks. Keep the original wait -> claim -> publish
@@ -3046,6 +3335,15 @@ def get_kernel(
                     producer_get_next_task()
                     if sched_task_valid != T.int32(0):
                         producer_publish_task()
+                if has_shared:
+                    # Shared expert L2 tasks depend on SharedLinear1 completion.
+                    producer_shared_mainloop(
+                        block_phase_shared_l2,
+                        workspace_shared_l2_task_count.ptr_to([0]),
+                        num_shared_l2_clusters,
+                        shared_l2_shape_n,
+                        shared_l2_shape_k,
+                    )
                 # Sentinel
                 barrier_wait(
                     smem_barriers.ptr_to([task_info_empty_barrier_base + sched_stage_idx]),
@@ -3117,6 +3415,13 @@ def get_kernel(
                 # the valid-row early exit as warp-uniform instead of divergent.
                 valid_m = T.tvm_warp_shuffle(T.uint32(0xFFFFFFFF), valid_m, T.int32(0), 32, 32)
                 ring_block_idx = pool_block_idx % num_ring_blocks
+                if has_shared:
+                    block_idx = T.Select(block_phase > T.int32(2), pool_block_idx, ring_block_idx)
+                else:
+                    block_idx = ring_block_idx
+                # `ring_m_idx` addresses the reusable ring buffers; the L1 store
+                # destination row uses `block_idx`, which for shared tasks is the
+                # absolute (non-ring) pool block (impls .cuh:981-982).
                 ring_m_idx = ring_block_idx * kernel_config.block_m
                 pool_m_idx = pool_block_idx * kernel_config.block_m
                 n_block_idx = n_cluster_idx * 2 + T.Select(
@@ -3125,17 +3430,18 @@ def get_kernel(
                 valid_rows_in_wg = T.max(
                     T.min(valid_m - epilogue_wg_idx * wg_block_m, wg_block_m), T.int32(0)
                 )
-                if block_phase == T.int32(1):
-                    expected_ring_count = (
-                        hidden // kernel_config.block_n * (pool_block_idx // num_ring_blocks)
-                    )
-                    load_acq_u32(
-                        current_ring_count, workspace_l2_empty_count.ptr_to([ring_block_idx])
-                    )
-                    while current_ring_count != T.cast(expected_ring_count, "uint32"):
-                        load_acq_u32(
-                            current_ring_count, workspace_l2_empty_count.ptr_to([ring_block_idx])
-                        )
+                if (
+                    (block_phase == T.int32(1)) or (block_phase == T.int32(block_phase_shared_l1))
+                    if has_shared
+                    else (block_phase == T.int32(1))
+                ):
+                    # Shared L1 writes a full-size (non-ring) buffer, so it has
+                    # no ring handshake to wait on (impls .cuh:988-993).
+                    if has_shared:
+                        if block_phase <= T.int32(2):
+                            epilogue_wait_l2_empty()
+                    else:
+                        epilogue_wait_l2_empty()
                     n_idx = n_block_idx * l1_out_block_n
                     # Declared outside the `for s` loop so the per-32-rows weight cache persists
                     # across store iters. When wg_block_m is not a multiple of 32 (e.g., 48 for
@@ -3152,7 +3458,11 @@ def get_kernel(
                             break
                         for i in T.unroll(0, num_atoms_per_store):
                             j = s * num_atoms_per_store + i
-                            if (j * atom_m) % 32 == 0:
+                            # Shared experts are unweighted: the gather is skipped
+                            # and `stored_cached_weight` stays 1.0 (impls .cuh:1017).
+                            if (j * atom_m) % 32 == 0 and (
+                                block_phase <= T.int32(2) if has_shared else True
+                            ):
                                 # Lanes whose row falls past wg_block_m must skip the load — the
                                 # warp-shuffle source lanes below are always < wg_block_m, so leaving
                                 # OOB lanes' stored_cached_weight stale is fine. (Matches upstream's
@@ -3320,11 +3630,23 @@ def get_kernel(
                                     + i * atom_m
                                 )
                                 sf_pool_token_idx = (
-                                    T.cast(ring_block_idx, "uint64") * T.uint64(sf_block_m)
+                                    T.cast(block_idx, "uint64") * T.uint64(sf_block_m)
                                     + T.cast(transform_sf_token_idx(token_base_idx), "uint64")
                                     + T.cast(lane_idx, "uint64") * T.uint64(8)
                                 )
-                                mn_stride = T.uint64(workspace_layout.num_sf_ring_tokens * 4)
+                                # Shared tasks write the full-size shared L2 SF
+                                # plane, which has its own MN stride and base
+                                # (impls .cuh:1134-1136). Selecting the base as a
+                                # byte delta keeps this a single address select
+                                # feeding one pair of stores, as in the source.
+                                if has_shared:
+                                    mn_stride = T.Select(
+                                        block_phase > T.int32(2),
+                                        T.uint64(num_max_shared_sf_tokens * 4),
+                                        T.uint64(workspace_layout.num_sf_ring_tokens * 4),
+                                    )
+                                else:
+                                    mn_stride = T.uint64(workspace_layout.num_sf_ring_tokens * 4)
                                 k_idx = n_block_idx * 2 + warp_idx_in_wg // 2
                                 k_uint_idx = k_idx // 4
                                 byte_idx = k_idx % 4
@@ -3333,6 +3655,19 @@ def get_kernel(
                                     + sf_pool_token_idx * T.uint64(4)
                                     + T.cast(byte_idx, "uint64")
                                 )
+                                if has_shared:
+                                    # Signed byte delta to the shared L2 SF plane,
+                                    # which sits *before* the routed ring in the
+                                    # symm buffer. Keeps the destination a single
+                                    # address select feeding one pair of stores.
+                                    sf_addr = T.cast(sf_addr, "int64") + T.Select(
+                                        block_phase > T.int32(2),
+                                        T.int64(
+                                            symm_buffer_layout.shared_l2_sf_offset
+                                            - symm_buffer_layout.l2_sf_offset
+                                        ),
+                                        T.int64(0),
+                                    )
                                 sf_bits = float_bits(sf[0])
                                 sf_bits_hi = float_bits(sf[1])
                                 store_global_u8(
@@ -3340,7 +3675,9 @@ def get_kernel(
                                     T.cast(T.shift_right(sf_bits, T.uint32(23)), "uint8"),
                                 )
                                 store_global_u8(
-                                    l2_sf_buffer.ptr_to([sf_addr + T.uint64(16)]),
+                                    l2_sf_buffer.ptr_to(
+                                        [sf_addr + (T.int64(16) if has_shared else T.uint64(16))]
+                                    ),
                                     T.cast(T.shift_right(sf_bits_hi, T.uint32(23)), "uint8"),
                                 )
                         T.cuda.warp_sync()
@@ -3349,11 +3686,13 @@ def get_kernel(
                         )
                         if (warp_idx_in_wg == 0) & T.cuda.elect_sync() != 0:
                             T.evaluate(tma_store_fence())
-                            sm90_tma_store_2d_copy(
+                            sm90_tma_store_2d_copy_select(
                                 smem_cd_l1.ptr_to([tma_stage_idx, epilogue_wg_idx, 0, 0]),
                                 tensor_map_l1_output,
+                                tensor_map_shared_l1_output,
+                                block_phase,
                                 n_idx,
-                                ring_m_idx
+                                (block_idx * kernel_config.block_m if has_shared else ring_m_idx)
                                 + epilogue_wg_idx * wg_block_m
                                 + s * kernel_config.store_block_m,
                             )
@@ -3365,25 +3704,40 @@ def get_kernel(
                         T.uint32(kernel_config.num_epilogue_threads),
                     )
                     if (epilogue_warp_idx == 0) & T.cuda.elect_sync() != 0:
-                        atomic_add_rel_u32(
-                            atom_prev_unused,
-                            workspace_l2_full_count.ptr_to([ring_block_idx]),
-                            T.uint32(1),
-                        )
-                        T.evaluate(
-                            red_add_gpu_u32(
-                                workspace_l1_empty_count.ptr_to([ring_block_idx]), T.uint32(1)
-                            )
-                        )
+                        # Shared L1 only signals its own full-size consumer; it has
+                        # no L1 ring slot to release (impls .cuh:1179-1189).
+                        if has_shared:
+                            if block_phase > T.int32(2):
+                                atomic_add_rel_u32(
+                                    atom_prev_unused,
+                                    workspace_shared_l2_full_count.ptr_to([pool_block_idx]),
+                                    T.uint32(1),
+                                )
+                            else:
+                                epilogue_signal_routed_l1_done()
+                        else:
+                            epilogue_signal_routed_l1_done()
                     T.cuda.warp_sync()
                 else:
-                    if (epilogue_warp_idx == 0) & T.cuda.elect_sync() != 0:
-                        T.evaluate(
-                            red_add_gpu_u32(
-                                workspace_l2_empty_count.ptr_to([ring_block_idx]), T.uint32(1)
+                    # Shared L2 has no ring slot to release (impls .cuh:1194).
+                    if has_shared:
+                        if block_phase <= T.int32(2):
+                            if (epilogue_warp_idx == 0) & T.cuda.elect_sync() != 0:
+                                T.evaluate(
+                                    red_add_gpu_u32(
+                                        workspace_l2_empty_count.ptr_to([ring_block_idx]),
+                                        T.uint32(1),
+                                    )
+                                )
+                            T.cuda.warp_sync()
+                    else:
+                        if (epilogue_warp_idx == 0) & T.cuda.elect_sync() != 0:
+                            T.evaluate(
+                                red_add_gpu_u32(
+                                    workspace_l2_empty_count.ptr_to([ring_block_idx]), T.uint32(1)
+                                )
                             )
-                        )
-                    T.cuda.warp_sync()
+                        T.cuda.warp_sync()
                     n_idx = n_block_idx * kernel_config.block_n
                     for s in T.serial(0, wg_block_m // kernel_config.store_block_m, unroll=True):
                         if s * kernel_config.store_block_m >= valid_rows_in_wg:
@@ -3469,18 +3823,27 @@ def get_kernel(
                             )
                             if T.cast(m_idx_in_block, "uint32") < T.cast(valid_m, "uint32"):
                                 src_metadata_idx = pool_m_idx + m_idx_in_block
-                                load_global_u32(
-                                    dst_rank_idx_u32,
-                                    workspace_token_src_metadata.ptr_to([src_metadata_idx, 0]),
-                                )
-                                load_global_u32(
-                                    dst_token_idx_u32,
-                                    workspace_token_src_metadata.ptr_to([src_metadata_idx, 1]),
-                                )
-                                load_global_u32(
-                                    dst_topk_idx_u32,
-                                    workspace_token_src_metadata.ptr_to([src_metadata_idx, 2]),
-                                )
+                                # Shared output is rank-local: it goes straight to
+                                # this rank's slot `kNumTopk` at the local token
+                                # index, with no dispatch metadata lookup and no
+                                # NVLink hop (impls .cuh:1275-1284).
+                                if has_shared and block_phase > T.int32(2):
+                                    dst_rank_idx_u32 = T.cast(rank_idx, "uint32")
+                                    dst_token_idx_u32 = T.cast(src_metadata_idx, "uint32")
+                                    dst_topk_idx_u32 = T.uint32(num_topk)
+                                else:
+                                    load_global_u32(
+                                        dst_rank_idx_u32,
+                                        workspace_token_src_metadata.ptr_to([src_metadata_idx, 0]),
+                                    )
+                                    load_global_u32(
+                                        dst_token_idx_u32,
+                                        workspace_token_src_metadata.ptr_to([src_metadata_idx, 1]),
+                                    )
+                                    load_global_u32(
+                                        dst_topk_idx_u32,
+                                        workspace_token_src_metadata.ptr_to([src_metadata_idx, 2]),
+                                    )
                                 dst_rank_idx = T.cast(dst_rank_idx_u32, "int32")
                                 dst_token_base_offset = T.cast(
                                     dst_topk_idx_u32, "uint64"
@@ -3557,6 +3920,12 @@ def get_kernel(
                         ordinary_global_s64, input_topk_idx.ptr_to([token_idx, lane_idx])
                     )
                     stored_topk_slot_idx = T.cast(ordinary_global_s64, "int32")
+                if has_shared:
+                    # Lane `kNumTopk` synthesizes the shared expert's slot, so the
+                    # shared output is folded into every token's sum without any
+                    # routing metadata (impls .cuh:1370).
+                    if lane_idx == num_topk:
+                        stored_topk_slot_idx = T.int32(num_topk)
                 total_mask = ballot_sync(T.uint32(0xFFFFFFFF), stored_topk_slot_idx >= T.int32(0))
                 for chunk in T.unroll(0, num_chunks):
                     mask = total_mask

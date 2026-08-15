@@ -1,4 +1,7 @@
 kernel: sm100_fp8_fp4_mega_moe
+selection_rationale: A decode-sized routed case, a prefill-sized routed case, and a
+  prefill-sized shared-expert case cover the small/large BLOCK_M buckets and both the
+  routed-only and shared-expert schedules.
 defaults:
   num_gpus: 1
   timer: megamoe
@@ -26,6 +29,7 @@ configs:
   default: false
 - config: t64_m64_h7168_i3072_e384_k6_g1
   default: true
+  selection_role: small
 - config: t64_m64_h7168_i3072_e384_k6_g2
   default: false
   num_gpus: 2
@@ -55,6 +59,7 @@ configs:
   default: false
 - config: t8192_m8192_h7168_i3072_e384_k6_g1
   default: true
+  selection_role: medium
 - config: t256_h7168_i3072_e384_k6_g4
   default: false
   num_gpus: 4
@@ -62,5 +67,37 @@ configs:
   default: false
   num_gpus: 4
 - config: t8192_m8192_h7168_i3072_e384_k6_g6
+  default: false
+  num_gpus: 6
+# Shared experts: one fused rank-local FFN of width S * intermediate_hidden.
+- config: p1_tok2_h1024_i512_e2_k1_bm16_s1
+  default: false
+- config: p1_tok2_h1024_i512_e2_k1_bm16_s2
+  default: false
+- config: p1_tok16_h1024_i512_e2_k2_bm32_s1
+  default: false
+- config: p1_tok32_h1024_i512_e2_k2_bm64_s1
+  default: false
+- config: p1_tok64_h1024_i512_e2_k2_bm96_s1
+  default: false
+- config: p1_tok96_h1024_i512_e2_k2_bm128_s1
+  default: false
+- config: p1_tok192_h1024_i512_e2_k2_bm192_s1
+  default: false
+- config: p2_tok2_h1024_i512_e4_k1_bm16_s1
+  default: false
+  num_gpus: 2
+- config: t64_m64_h7168_i3072_e384_k6_g1_s1
+  default: false
+- config: t8192_m8192_h7168_i3072_e384_k6_g1_s1
+  default: true
+  selection_role: large
+- config: t8192_m8192_h7168_i3072_e384_k6_g2_s1
+  default: false
+  num_gpus: 2
+- config: t8192_m8192_h7168_i3072_e384_k6_g4_s1
+  default: false
+  num_gpus: 4
+- config: t8192_m8192_h7168_i3072_e384_k6_g6_s1
   default: false
   num_gpus: 6
