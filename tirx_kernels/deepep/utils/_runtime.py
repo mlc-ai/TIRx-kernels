@@ -139,6 +139,20 @@ def _rank_entry(
         result_queue.put(result)
 
 
+def compile_kernels(kernels: dict[str, Any], tmpdir: str) -> dict[str, str]:
+    """Compile every kernel once and export loadable libraries into `tmpdir`."""
+
+    library_paths: dict[str, str] = {}
+    for name, func in kernels.items():
+        library_path = Path(tmpdir) / f"{name}.so"
+        executable = tvm.compile(
+            tvm.IRModule({"main": func}), target=tvm.target.Target("cuda"), tir_pipeline="tirx"
+        )
+        executable.export_library(str(library_path))
+        library_paths[name] = str(library_path)
+    return library_paths
+
+
 def run_distributed(
     kernels: dict[str, Any],
     *,
@@ -146,22 +160,24 @@ def run_distributed(
     worker: Callable[[DistributedRuntime, dict[str, Any], str, dict[str, Any]], dict[str, Any]],
     mode: str,
     worker_kwargs: dict[str, Any],
+    prepared_libraries: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Compile every kernel once in the parent, then run one rank-local worker per GPU."""
+    """Compile every kernel once in the parent, then run one rank-local worker per GPU.
+
+    When `prepared_libraries` is given, compilation is skipped and the
+    prebuilt `{name: library_path}` mapping is used instead (the two-stage
+    bench-suite contract compiles in the CPU-prepare stage).
+    """
 
     require_sm100(world_size)
     if not callable(worker):
         raise TypeError("worker must be callable")
 
     with tempfile.TemporaryDirectory(prefix="tirx-deepep-") as tmpdir:
-        library_paths: dict[str, str] = {}
-        for name, func in kernels.items():
-            library_path = Path(tmpdir) / f"{name}.so"
-            executable = tvm.compile(
-                tvm.IRModule({"main": func}), target=tvm.target.Target("cuda"), tir_pipeline="tirx"
-            )
-            executable.export_library(str(library_path))
-            library_paths[name] = str(library_path)
+        if prepared_libraries is not None:
+            library_paths = prepared_libraries
+        else:
+            library_paths = compile_kernels(kernels, tmpdir)
 
         context = mp.get_context("spawn")
         result_queue = context.SimpleQueue()
@@ -190,4 +206,4 @@ def run_distributed(
     return result
 
 
-__all__ = ["DistributedRuntime", "require_sm100", "run_distributed"]
+__all__ = ["DistributedRuntime", "compile_kernels", "require_sm100", "run_distributed"]
