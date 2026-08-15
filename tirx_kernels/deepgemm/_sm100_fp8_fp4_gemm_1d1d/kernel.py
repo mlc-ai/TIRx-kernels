@@ -1556,6 +1556,10 @@ def build_kernel(spec: GemmSpec):
                                 T.cast(tr_phase, "uint32"),
                                 T.uint32(TRY_WAIT_TICKS),
                             )
+                        # The prior logical task may still read this stage through tcgen05's
+                        # async proxy.  Complete that handoff before generic-proxy transpose
+                        # stores reuse the same shared bytes.
+                        T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
                         if tr_k % sfa_stages_per_load == 0:
                             for c in T.unroll(0, num_sfa_chunks):
                                 base = c * NUM_UTCCP_ALIGNED_ELEMS
