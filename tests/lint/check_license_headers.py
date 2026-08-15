@@ -85,13 +85,20 @@ PORT_BUCKETS = {
 # license requires to stay in the file verbatim (BSD-3 clause 1: the copyright
 # notice, the conditions list and the disclaimer travel with the source).
 FILE_OVERRIDES = {
+    "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
     "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
             "Redistribution and use in source and binary forms",
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
-    }
+    },
 }
 
 # Native modules inside port buckets — package markers and our own harnesses.
@@ -197,6 +204,12 @@ def self_test() -> int:
     dg = dict(project="DeepGEMM", url="https://github.com/deepseek-ai/DeepGEMM")
     fi = dict(project="FlashInfer", url="https://github.com/flashinfer-ai/flashinfer")
     gdn = "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py"
+    gdn_cp = "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py"
+    bsd_port = (
+        "# Copyright (c) 2025 Upstream\n"
+        "# Redistribution and use in source and binary forms\n"
+        '# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"\n' + port
+    )
     cases = [
         # (name, rel, text, must_error)
         (
@@ -206,6 +219,12 @@ def self_test() -> int:
             False,
         ),
         ("valid native", "tirx_kernels/x.py", f"{TIRX_HEADER}\n\nx = 1\n", False),
+        (
+            "valid gdn_cp_prefill BSD port",
+            gdn_cp,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fi),
+            False,
+        ),
         (
             "deepgemm tagged plain Apache-2.0",
             "tirx_kernels/deepgemm/x.py",

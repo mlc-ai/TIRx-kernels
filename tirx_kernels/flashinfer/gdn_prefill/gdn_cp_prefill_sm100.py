@@ -27,7 +27,7 @@
 #
 # This file is a TIRx port of code from FlashInfer
 # (https://github.com/flashinfer-ai/flashinfer @ f2e04400).
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 """FlashInfer SM100 chunk-parallel delta-rule prefill port.
