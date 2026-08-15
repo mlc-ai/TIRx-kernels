@@ -4004,6 +4004,12 @@ def get_kernel(
                                     bf16x2_hi(epilogue_bf16_packed[elem_idx]),
                                     reduced[j * num_elems_per_uint4 + elem_idx, 1],
                                 )
+                        # A later selection reuses this load stage through TMA's
+                        # async proxy. Publish every lane's completed generic
+                        # loads before the elected lane can issue that overwrite.
+                        if mask != T.uint32(0):
+                            T.ptx.fence.proxy.async_.shared__cta()
+                            T.cuda.warp_sync()
                         combine_phase = combine_phase ^ load_stage_idx
                         load_stage_idx = load_stage_idx ^ T.int32(1)
                         do_reduce = next_do_reduce

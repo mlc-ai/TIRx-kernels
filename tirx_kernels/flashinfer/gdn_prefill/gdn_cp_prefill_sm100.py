@@ -1035,6 +1035,7 @@ def _mn_opt_materialize_x(tmem_base, smem_raw, stage, thread, IO_DTYPE):
     values: T.float32[64]
     packed: T.uint32[32]
     _mn_opt_tmem_ld_128x64(tmem_base, MN_OPT_TMEM_XY_COL, thread, values)
+    T.ptx.tcgen05.wait__ld.sync.aligned()
     for pair in T.unroll(32):
         packed[pair] = _mn_opt_pack_iox2(values[pair * 2], values[pair * 2 + 1], IO_DTYPE)
     _mn_opt_store_128x64_fragment(smem_raw, MN_OPT_X_OFF, stage, thread, packed)
@@ -2251,6 +2252,9 @@ def _mn_precompute_sm100(
             T.address_of(tmem_holding[0]), T.uint32(MN_OPT_TMEM_COLUMNS)
         )
 
+    if valid_chunk != 0 and warp >= 8:
+        T.ptx.setmaxnreg.dec.sync.aligned.u32(72)
+
     if valid_chunk == 0:
         T.ptx.setmaxnreg.dec.sync.aligned.u32(24)
         tmem_base_invalid: T.int32 = 0
@@ -2386,7 +2390,6 @@ def _mn_precompute_sm100(
             )
 
     elif warp == 8:
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(72)
         T.ptx.bar.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_transfer: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_transfer, T.address_of(tmem_holding[0]))
@@ -2444,7 +2447,6 @@ def _mn_precompute_sm100(
             _mn_opt_mma_commit(_mn_opt_empty_addr(smem_addr, 24, block, 3))
 
     elif warp == 11:
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(72)
         T.ptx.bar.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_state: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_state, T.address_of(tmem_holding[0]))
@@ -2506,7 +2508,6 @@ def _mn_precompute_sm100(
             _mn_opt_mma_commit(_mn_opt_empty_addr(smem_addr, 272, block, 2))
 
     elif warp == 9:
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(24)
         for block in T.serial(num_blocks):
             k_stage_tma: T.int32 = _mn_opt_stage(block, 3)
             v_stage_tma: T.int32 = _mn_opt_stage(block, 3)
@@ -2547,7 +2548,6 @@ def _mn_precompute_sm100(
                 )
 
     elif warp == 10:
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(24)
         for block in T.serial(num_blocks):
             _mn_opt_producer_acquire(smem_addr, 176, block, 4)
             token0: T.int32 = block * T_BLOCK + lane
@@ -2611,8 +2611,6 @@ def _mn_precompute_sm100(
             )
             T.ptx.fence.proxy.async_.shared__cta()
             _mn_opt_commit(smem_addr, 144, block, 4)
-    else:
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(24)
 
 
 @T.jit
@@ -3701,6 +3699,7 @@ def _prefill_sm100(
                 _pf_consumer_wait(smem_addr, 256, kv_previous_cg1, 1)
                 kv_consumer_cg1 = kv_consumer_cg1 + 1
                 state_input_count_cg1: T.int32 = state_input_producer_cg1
+                _pf_producer_acquire(smem_addr, 408, state_input_count_cg1, 1)
                 state_input_producer_cg1 = state_input_producer_cg1 + 1
                 state_values_cg1: T.float32[128]
                 state_input_words_cg1: T.uint32[64]
