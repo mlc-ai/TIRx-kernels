@@ -8,5 +8,11 @@ FlashInfer
 Copyright 2025-2026 NVIDIA
 Copyright 2023-2026 FlashInfer community (https://flashinfer.ai/)
 
+This product includes modified software from DeepEP
+(https://github.com/deepseek-ai/DeepEP):
+
+DeepEP
+Copyright (c) 2025 DeepSeek
+
 Additional third-party copyright notices and license terms are provided in
 the LICENSE file and the licenses/ directory.

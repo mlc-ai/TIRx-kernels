@@ -1,23 +1,10 @@
 <!--
-Copyright (c) 2026 The TIRx Authors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-  http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
-This design sketch documents a TIRx port of DeepEP's
-deep_ep/include/deep_ep/impls/combine.cuh (combine_impl, direct
-single-domain path) and deep_ep/include/deep_ep/impls/combine_reduce_epilogue.cuh
-(combine_reduce_epilogue_impl). See NOTICE and licenses/ for upstream
-attribution.
+This file is a design sketch for a TIRx port of code from DeepEP
+(https://github.com/deepseek-ai/DeepEP @ 01dc3aa), Copyright (c) 2025 DeepSeek.
+It documents deep_ep/include/deep_ep/impls/combine.cuh and
+   deep_ep/include/deep_ep/impls/combine_reduce_epilogue.cuh; see NOTICE and licenses/ for upstream attribution.
+SPDX-License-Identifier: Apache-2.0 AND MIT
+SPDX-FileCopyrightText: Copyright TIRx authors
 -->
 
 # DeepEP elastic combine (single-domain NVLink): coarse WASP pipeline sketch
