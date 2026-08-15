@@ -1,8 +1,8 @@
 # TIRx instruction-selection DB
 
-## E1: Materialize reused expressions
+## E1: Materialize and forward reused values
 
-**Symptoms:** `repeated_expression`, `excess_address_math`, `excess_unpack_math`, `instruction_count_bloat`
+**Symptoms:** `repeated_expression`, `excess_address_math`, `excess_unpack_math`, `instruction_count_bloat`, `register_count_gap`
 
 TIRx expressions are trees. Reusing a `PrimExpr` can emit its complete subtree
 at every use; ptxas does not reliably recover the intended common subexpression.
@@ -20,6 +20,16 @@ instructions and left the shift count untouched. But no backend merges across
 opaque inline asm, so where the reference's own compiler CSEd two accesses to
 the same element, the port must reuse the earlier value explicitly; two excess
 loads and a redundant integer max disappeared that way.
+
+An in/out inline-PTX destination written directly into a dynamically indexed
+local buffer is another opaque boundary. If the next instruction consumes the
+just-written value, bind the PTX result to a scalar, write that scalar back, and
+forward it to the next instruction instead of rereading the buffer expression.
+In one recurrent state update this changed no PTX line count, but reduced the
+realized register allocation from 60 to 48 and static SASS from 1080 to 1000
+instructions; `IMAD.MOV.U32` fell from 84 to 31 and `MOV` from 45 to 20, with no
+spill. The resulting build then cleared all 43 gate workloads. Inspect ptxas
+resources and SASS for this pattern; source or PTX size can remain unchanged.
 
 ## E2: Pin floating-point instructions
 
@@ -49,6 +59,15 @@ Set the bound from the reference kernel's realized occupancy target. Compare
 resource usage, achieved occupancy, and dynamic local-memory traffic on both
 sides; do not infer success from the declared launch bound alone.
 
+Do not copy one minimum-block value across block-size families. In one measured
+selector, a 160-thread family used nine minimum blocks and a representative
+FP16-state specialization moved from 53 to 40 registers, while its 288-thread
+family used one minimum block and stayed at 53 registers. Forcing nine on the
+larger block cut its allocation to 32 registers before timing. The shape-aware
+9/1 selector cleared its five-workload boundary matrix at 1.003-1.028x. Treat
+such a large allocation shift as a separate shape A/B even when neither variant
+spills: ptxas can trade registers for recomputation and address instructions.
+
 ## E4: Defeat harmful LSR
 
 **Symptoms:** `imad_prologue_chain`, `excess_address_math`, `register_pressure`, `slow_small_shape`
@@ -67,7 +86,7 @@ latency on the smallest shapes.
 
 ## E5: Match conversion and packing idioms
 
-**Symptoms:** `bitwise_mismatch`, `packing_mismatch`, `excess_shift_or`
+**Symptoms:** `bitwise_mismatch`, `packing_mismatch`, `excess_shift_or`, `store_width_mismatch`
 
 - Check operand order for packed conversions; paired FP formats commonly take
   the high element first. Use asymmetric correctness inputs.
@@ -78,6 +97,14 @@ latency on the smallest shapes.
 - Match shuffle masks and saturation/rounding modifiers exactly.
 
 Confirm packed words bitwise before judging instruction count.
+
+Keep conversion width, packing width, and transaction width independent. A
+validated 128-bit state store used eight scalar FP32-to-16-bit conversions, four
+two-input `mov.b32` packs, and one `st.global.v4.b32`; ptxas then selected paired
+`F2FP.*.F32.PACK_AB` instructions feeding the 128-bit SASS store. A packed PTX
+conversion is therefore not required to obtain a packed store. Trace the
+conversion-to-store def-use chain in SASS instead of comparing conversion
+mnemonics in isolation.
 
 ## E6: Prefer binary parity
 
@@ -230,6 +257,15 @@ when an outer branch blocks if-conversion. For a loop-invariant uniform
 condition, hoist it and duplicate the hot loop only when that exposes a dense
 path without changing recurrence state.
 
+When the condition is runtime at kernel entry but constant throughout the CTA,
+an inline TIRx helper with a `T.constexpr` mode can force the two branch bodies
+to specialize independently: dispatch once on the runtime condition, then call
+the helper with `True` or `False`. Replacing repeated pad checks with this shape
+removed 262,144 dynamic `CS2R` instructions in the profiled specialization by
+letting each copy dead-code-eliminate the opposite path. This is a control-flow
+lowering tool, not permission to change dispatch semantics; test both copies and
+compare code size, registers, and every affected workload.
+
 Do not predicate substantial computation or duplicate a body that causes
 instruction-cache pressure, spills, or lower occupancy.
 
@@ -303,6 +339,14 @@ Keep native offsets and explicit pointer arithmetic as alternatives until a
 full shape picker is measured. One FP32 MTP matrix selected native offsets for
 56 of 97 configurations and explicit arithmetic for the other 41; neither form
 was globally best.
+
+Likewise, replacing `step * stride` with a moving cursor is not intrinsically
+cheaper. Five live cursors in one recurrent specialization increased registers
+from 58 to 60 and static SASS from 1072 to 1080 instructions, with no spill and
+no consistent full-matrix gain. ptxas had already strength-reduced much of the
+original indexing, while the explicit cursors extended five live ranges and
+added loop-back updates. Retain cursor induction only when the emitted address
+chain and the affected shapes demonstrate a gain.
 
 Confirm normalized PTX/SASS addresses, register counts, integer address ops,
 spills, and latency per specialization.
