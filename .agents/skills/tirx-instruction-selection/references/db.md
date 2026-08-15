@@ -35,6 +35,16 @@ Global fast-math off-switches exist for both TVM CUDA compile paths
 `TVM_CUDA_NVRTC_EXTRA_OPTS` for NVRTC), but prefer per-op pinning: it holds
 regardless of compile defaults and documents intent at the use site.
 
+The direction is a property of the reference, not of the family, and both
+families are registered in the PTX table, so the `.ftz` forms are always an
+explicit choice. Two siblings ported from a tile-DSL reference emit no `.ftz` at
+all and needed non-FTZ helpers to defeat the fast-math build; a third, whose
+reference is plain CUDA operators compiled with fast math, emits 108
+`fma.rn.ftz.f32`, 69 `mul.ftz.f32`, 53 `add.ftz.f32`, 4 `sub.ftz.f32` and no
+plain-`.f32` arithmetic at all. Inheriting a sibling's arithmetic helpers is a
+silent divergence in either direction; read the reference's own PTX census
+first.
+
 Confirm with denormal inputs and an instruction-by-instruction PTX comparison.
 
 ## E3: Match launch bounds
