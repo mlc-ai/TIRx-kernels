@@ -436,8 +436,13 @@ class GpuPool:
 
     def _occupied_indices(self) -> set[str]:
         """GPU indices over the configured SM or memory threshold."""
+        indices = {idx for idx, _uuid in self._all_gpus()}
         util_busy = {idx for idx, u in self._utils().items() if u > self.util_threshold}
-        mem_busy = {idx for idx, m in self._mem_used_pct().items() if m > self.mem_threshold}
+        memory = self._mem_used_pct()
+        # Missing framebuffer telemetry is not evidence that a card is free.
+        mem_busy = {
+            idx for idx in indices if idx not in memory or memory[idx] > self.mem_threshold
+        }
         return util_busy | mem_busy
 
     def total_visible(self) -> int:
@@ -2488,7 +2493,9 @@ def load_baseline(path=None):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-def _finalize_bench_record(row: dict, *, rounds: int, cooldown: float) -> None:
+def _finalize_bench_record(
+    row: dict, *, rounds: int, cooldown: float = DEFAULT_COOLDOWN_S
+) -> None:
     """Validate in-bench round samples and write aggregated impl times (microseconds)."""
     required_fields = ("round_samples", "errors", "timer", "benchmark_protocol")
     missing_fields = [field for field in required_fields if field not in row]

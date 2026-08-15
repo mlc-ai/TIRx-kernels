@@ -34,6 +34,7 @@ from tirx_kernels.bench_suite.run import (
     DEFAULT_MEM_THRESHOLD,
     DEFAULT_PAIRED_SPEEDUP_THRESHOLD,
     DEFAULT_UTIL_THRESHOLD,
+    IR_BUILDER_MIGRATION_MEM_THRESHOLD,
     IR_BUILDER_MIGRATION_ROUNDS,
     GpuPool,
     _assert_checkout_unchanged,
@@ -50,6 +51,7 @@ from tirx_kernels.bench_suite.run import (
     _paired_local_only_env,
     _paired_order,
     _read_bench_result,
+    _run_paired_scheduled_jobs,
     _run_subprocess_monitored,
     _validate_ir_builder_migration_gate_options,
     _validate_ir_builder_migration_workloads,
@@ -57,7 +59,6 @@ from tirx_kernels.bench_suite.run import (
     load_all_config_dir,
     load_config_dir,
     run_one_paired,
-    run_scheduled_jobs,
 )
 
 
@@ -123,7 +124,7 @@ def test_daily_bench_environment_clears_local_only_state():
 
 
 def test_gpu_pool_uses_global_framebuffer_and_fails_closed_on_missing_rows(monkeypatch):
-    pool = GpuPool(mem_threshold=0.5)
+    pool = GpuPool(mem_threshold=0.5, idle_memory_floor_mib=0.0)
 
     def fake_nvidia_smi(args):
         if args == ["--query-gpu=index,uuid"]:
@@ -583,7 +584,17 @@ def test_paired_result_requires_one_unambiguous_local_implementation():
 
 
 def test_daily_finalization_rejects_reference_errors():
-    row = {"round_samples": {"tirx": [1.25]}, "errors": {"missing_reference": "not installed"}}
+    row = {
+        "round_samples": {"tirx": [1.25]},
+        "errors": {"missing_reference": "not installed"},
+        "timer": "event",
+        "benchmark_protocol": {
+            "rounds": 1,
+            "round_aggregate": "mean",
+            "cooldown_s": DEFAULT_COOLDOWN_S,
+            "order": ["tirx"],
+        },
+    }
     _finalize_bench_record(row, rounds=1)
     assert row["status"] == "FAIL"
     assert "missing_reference" in row["error"]
@@ -656,7 +667,7 @@ def test_ir_builder_migration_gate_rejects_scope_and_threshold_overrides(tmp_pat
         "cooldown": DEFAULT_COOLDOWN_S,
         "speedup_threshold": DEFAULT_PAIRED_SPEEDUP_THRESHOLD,
         "util_threshold": DEFAULT_UTIL_THRESHOLD,
-        "mem_threshold": DEFAULT_MEM_THRESHOLD,
+        "mem_threshold": IR_BUILDER_MIGRATION_MEM_THRESHOLD,
         "check_imports": False,
     }
     _validate_ir_builder_migration_gate_options(**valid)
@@ -694,7 +705,7 @@ def test_ir_builder_migration_gate_requires_exact_canonical_workload_sequence():
     assert {
         (row["kernel"], row["config"]) for row in scope["user_exempted"]
     } == exempted_identities
-    assert {row["status"] for row in scope["user_exempted"]} == {"user-exempted"}
+    assert all(row["status"] == "user-exempted" for row in scope["user_exempted"])
     assert all(
         "requires NVSHMEM/distributed communication libraries" in row["reasons"]
         for row in scope["user_exempted"]
@@ -826,7 +837,9 @@ def test_scheduler_serializes_named_resource_without_blocking_unrelated_work(
         {"kernel": "ordinary", "config": "case"},
     ]
 
-    records, retries = run_scheduled_jobs(workloads, Pool(), tmp_path, rounds=1, cooldown=0.0)
+    records, retries = _run_paired_scheduled_jobs(
+        workloads, Pool(), tmp_path, rounds=1, cooldown=0.0
+    )
 
     assert retries == []
     assert len(records) == 3
@@ -917,6 +930,13 @@ def test_paired_runner_reuses_one_gpu_claim_and_aggregates_direct_samples(
                             "impls": {"tirx": sample},
                             "round_samples": {"tirx": [sample]},
                             "errors": {},
+                            "timer": "event",
+                            "benchmark_protocol": {
+                                "rounds": 1,
+                                "round_aggregate": "mean",
+                                "cooldown_s": 0,
+                                "order": ["tirx"],
+                            },
                             "local_only": True,
                         }
                     ]
