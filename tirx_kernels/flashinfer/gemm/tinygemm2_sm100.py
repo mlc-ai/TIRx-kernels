@@ -216,7 +216,9 @@ def _tinygemm2_sm100(
         smem_wt_addr_c: T.uint32 = smem_addr_c + T.uint32(WT_OFF)
         smem_act_addr_c: T.uint32 = smem_addr_c + T.uint32(act_off)
         if tid < 16:
-            smem_bias[tid] = d_bias[mib_c + tid]
+            bias_bits: T.uint16
+            T.ptx.ld.global_.b16(bias_bits, d_bias.ptr_to([mib_c + tid]))
+            T.ptx.st.shared.b16(smem_bias.ptr_to([tid]), bias_bits)
 
         accum = T.alloc_local((4,), "float32", align=4)
         for z in T.unroll(4):
@@ -309,8 +311,11 @@ def _tinygemm2_sm100(
 
             tm: T.int32 = mib_c + lane // 4
             tn: T.int32 = ni_c + 2 * (lane % 4)
-            bias_lo: T.float32 = T.cast(smem_bias[lane // 4], "float32")
-            bias_hi: T.float32 = T.cast(smem_bias[lane // 4 + 8], "float32")
+            bias_bits = T.alloc_local((2,), "uint16")
+            T.ptx.ld.shared.b16(bias_bits[0], smem_bias.ptr_to([lane // 4]))
+            T.ptx.ld.shared.b16(bias_bits[1], smem_bias.ptr_to([lane // 4 + 8]))
+            bias_lo: T.float32 = T.cast(T.reinterpret("bfloat16", bias_bits[0]), "float32")
+            bias_hi: T.float32 = T.cast(T.reinterpret("bfloat16", bias_bits[1]), "float32")
             out_frag = T.alloc_local((4,), "float32", align=4)
             T.ptx["add.ftz.f32"](out_frag[0], accum[0], bias_lo)
             T.ptx["add.ftz.f32"](out_frag[1], accum[1], bias_lo)
@@ -321,16 +326,28 @@ def _tinygemm2_sm100(
 
             if tn < b_N:
                 if tm < a_M:
-                    c_output[out_base] = T.cast(out_frag[0], "bfloat16")
+                    T.ptx.st.global_.b16(
+                        c_output.ptr_to([out_base]),
+                        T.reinterpret("uint16", T.cast(out_frag[0], "bfloat16")),
+                    )
             if tn + 1 < b_N:
                 if tm < a_M:
-                    c_output[out_next] = T.cast(out_frag[1], "bfloat16")
+                    T.ptx.st.global_.b16(
+                        c_output.ptr_to([out_next]),
+                        T.reinterpret("uint16", T.cast(out_frag[1], "bfloat16")),
+                    )
             if tn < b_N:
                 if tm + 8 < a_M:
-                    c_output[out_base + 8] = T.cast(out_frag[2], "bfloat16")
+                    T.ptx.st.global_.b16(
+                        c_output.ptr_to([out_base + 8]),
+                        T.reinterpret("uint16", T.cast(out_frag[2], "bfloat16")),
+                    )
             if tn + 1 < b_N:
                 if tm + 8 < a_M:
-                    c_output[out_next + 8] = T.cast(out_frag[3], "bfloat16")
+                    T.ptx.st.global_.b16(
+                        c_output.ptr_to([out_next + 8]),
+                        T.reinterpret("uint16", T.cast(out_frag[3], "bfloat16")),
+                    )
 
     elif 4 <= warp and warp <= 7:
         k_loops_w: T.int32 = T.truncdiv(c_K + 1023, 1024)

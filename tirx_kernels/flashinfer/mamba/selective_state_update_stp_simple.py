@@ -129,6 +129,24 @@ def _global_load_u32(buffer, index):
     return out[0]
 
 
+def _global_load_s32(buffer, index):
+    out = T.alloc_local((1,), "int32")
+    T.evaluate(T.ptx.ld.global_.s32(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _global_load_s64(buffer, index):
+    out = T.alloc_local((1,), "int64")
+    T.evaluate(T.ptx.ld.global_.s64(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _global_load_index_s64(buffer, index, dtype):
+    if dtype == "int32":
+        return T.cast(_global_load_s32(buffer, index), "int64")
+    return _global_load_s64(buffer, index)
+
+
 def _shared_load_u16(buffer, index):
     out = T.alloc_local((1,), "uint16")
     T.evaluate(T.ptx.ld.shared.b16(out[0], buffer.ptr_to([index])))
@@ -467,7 +485,7 @@ def _selective_state_update_stp_simple(
 
     random_seed: T.int64 = 0
     if PHILOX_ROUNDS > 0 and not SCALE_STATE:
-        random_seed = rand_seed[0]
+        random_seed = _global_load_s64(rand_seed, 0)
 
     batch_i, head, dim_tile = T.cta_id([BATCH, NHEADS, dim_tiles_runtime])
     lane_axis, warp = T.thread_id([32, 4])
@@ -478,12 +496,16 @@ def _selective_state_update_stp_simple(
 
     state_batch: T.int64
     if HAS_STATE_INDICES:
-        state_batch = T.cast(state_indices[batch_i * state_indices_stride_batch], "int64")
+        state_batch = _global_load_index_s64(
+            state_indices, batch_i * state_indices_stride_batch, INDEX_DTYPE
+        )
     else:
         state_batch = T.cast(batch_i, "int64")
     dst_state_batch: T.int64
     if HAS_DST_INDICES:
-        dst_state_batch = T.cast(dst_indices[batch_i * dst_indices_stride_batch], "int64")
+        dst_state_batch = _global_load_index_s64(
+            dst_indices, batch_i * dst_indices_stride_batch, INDEX_DTYPE
+        )
     else:
         dst_state_batch = state_batch
 

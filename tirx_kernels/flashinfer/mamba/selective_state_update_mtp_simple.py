@@ -129,6 +129,24 @@ def _global_load_u32(buffer, index):
     return out[0]
 
 
+def _global_load_s32(buffer, index):
+    out = T.alloc_local((1,), "int32")
+    T.evaluate(T.ptx.ld.global_.s32(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _global_load_s64(buffer, index):
+    out = T.alloc_local((1,), "int64")
+    T.evaluate(T.ptx.ld.global_.s64(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _global_load_index_s64(buffer, index, dtype):
+    if dtype == "int32":
+        return T.cast(_global_load_s32(buffer, index), "int64")
+    return _global_load_s64(buffer, index)
+
+
 def _shared_load_u16(buffer, index):
     out = T.alloc_local((1,), "uint16")
     T.evaluate(T.ptx.ld.shared.b16(out[0], buffer.ptr_to([index])))
@@ -139,6 +157,16 @@ def _shared_load_u32(buffer, index):
     out = T.alloc_local((1,), "uint32")
     T.evaluate(T.ptx.ld.shared.b32(out[0], buffer.ptr_to([index])))
     return out[0]
+
+
+def _shared_load_s64(buffer, index):
+    out = T.alloc_local((1,), "int64")
+    T.evaluate(T.ptx.ld.shared.b64(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def _shared_store_s64(buffer, index, value):
+    T.evaluate(T.ptx.st.shared.b64(buffer.ptr_to([index]), value))
 
 
 def _bf16_to_f32(bits):
@@ -552,24 +580,27 @@ def _selective_state_update_mtp_simple(
     bos: T.int32 = 0
     seq_len: T.int32 = NTOKENS
     if HAS_CU_SEQLENS:
-        bos = T.cast(cu_seqlens[seq_idx], "int32")
-        eos: T.int32 = T.cast(cu_seqlens[seq_idx + 1], "int32")
+        bos = T.cast(_global_load_index_s64(cu_seqlens, seq_idx, CU_SEQLENS_DTYPE), "int32")
+        eos: T.int32 = T.cast(
+            _global_load_index_s64(cu_seqlens, seq_idx + 1, CU_SEQLENS_DTYPE), "int32"
+        )
         seq_len = eos - bos
 
     if seq_len > 0:
         init_token_idx: T.int32 = 0
         if HAS_NUM_ACCEPTED_TOKENS:
-            accepted: T.int32 = T.cast(num_accepted_tokens[seq_idx], "int32")
+            accepted: T.int32 = T.cast(
+                _global_load_index_s64(num_accepted_tokens, seq_idx, ACCEPTED_DTYPE), "int32"
+            )
             init_token_idx = T.if_then_else(accepted > 1, accepted - 1, 0)
 
         state_batch: T.int64
         if HAS_STATE_INDICES:
-            state_batch = T.cast(
-                state_indices[
-                    T.cast(seq_idx, "int64") * state_indices_stride_batch
-                    + T.cast(init_token_idx, "int64") * state_indices_stride_t
-                ],
-                "int64",
+            state_batch = _global_load_index_s64(
+                state_indices,
+                T.cast(seq_idx, "int64") * state_indices_stride_batch
+                + T.cast(init_token_idx, "int64") * state_indices_stride_t,
+                INDEX_DTYPE,
             )
         else:
             state_batch = T.cast(seq_idx, "int64")
@@ -753,23 +784,24 @@ def _selective_state_update_mtp_simple(
                 dst_slot: T.int64 = -1
                 if not IS_PAD and step < seq_len:
                     if HAS_DST_INDICES:
-                        dst_index: T.int64 = T.cast(
-                            dst_indices[
-                                T.cast(seq_idx, "int64") * dst_indices_stride_batch
-                                + T.cast(step, "int64") * dst_indices_stride_t
-                            ],
-                            "int64",
+                        dst_index: T.int64 = _global_load_index_s64(
+                            dst_indices,
+                            T.cast(seq_idx, "int64") * dst_indices_stride_batch
+                            + T.cast(step, "int64") * dst_indices_stride_t,
+                            INDEX_DTYPE,
                         )
                         if dst_index != T.cast(pad_slot_id, "int64"):
                             dst_slot = dst_index
                     elif HAS_INTERMEDIATE_STATES:
                         intermediate_index: T.int64 = state_batch
                         if HAS_INTERMEDIATE_INDICES:
-                            intermediate_index = T.cast(intermediate_indices[seq_idx], "int64")
+                            intermediate_index = _global_load_index_s64(
+                                intermediate_indices, seq_idx, INDEX_DTYPE
+                            )
                         dst_slot = intermediate_index * T.cast(cache_steps, "int64") + step
                     elif step == seq_len - 1 and update_state != 0:
                         dst_slot = state_batch
-                s_dst_slots[step] = dst_slot
+                _shared_store_s64(s_dst_slots, step, dst_slot)
 
             T.ptx.cp.async_.commit_group()
             T.ptx.cp.async_.wait_group(0)
@@ -777,7 +809,7 @@ def _selective_state_update_mtp_simple(
 
             random_seed: T.int64 = 0
             if PHILOX_ROUNDS > 0:
-                random_seed = rand_seed[0]
+                random_seed = _global_load_s64(rand_seed, 0)
 
             member: T.int32 = lane % 8
             row_group: T.int32 = lane // 8
@@ -849,7 +881,7 @@ def _selective_state_update_mtp_simple(
                 out_step: T.int32 = 0
                 for step in T.serial(NTOKENS):
                     if step < seq_len:
-                        dst_slot: T.int64 = s_dst_slots[step]
+                        dst_slot: T.int64 = _shared_load_s64(s_dst_slots, step)
                         dt_value: T.float32 = T.reinterpret(
                             "float32", _shared_load_u32(s_dt, dt_step)
                         )

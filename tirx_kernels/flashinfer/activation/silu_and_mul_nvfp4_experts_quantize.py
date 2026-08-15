@@ -19,7 +19,6 @@ scope (fast-math reciprocal, E4M3 scale factors, no 4over6 refinement).
 from typing import Any
 
 from tirx_kernels.runner import bench
-from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
 
 KERNEL_META = {
@@ -244,20 +243,8 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
         if use_silu_and_mul != 0:
             actual_cols = cols_per_row * 2
 
-        x64 = T.alloc_local([4], "uint64")
-        y64 = T.alloc_local([4], "uint64")
-        xw = T.decl_buffer(
-            [8],
-            "uint32",
-            data=T.reinterpret(PointerType(PrimType("uint32")), T.address_of(x64[0])),
-            scope="local",
-        )
-        yw = T.decl_buffer(
-            [8],
-            "uint32",
-            data=T.reinterpret(PointerType(PrimType("uint32")), T.address_of(y64[0])),
-            scope="local",
-        )
+        xw = T.alloc_local([8], "uint32")
+        yw = T.alloc_local([8], "uint32")
         packed = T.alloc_local([1], "uint32")
         e_tmp = T.alloc_local([1], "float32")
         r_tmp = T.alloc_local([1], "float32")
@@ -277,24 +264,42 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
             row_idx_in_expert = row_idx - expert_idx * m_rows
 
             if use_mask:
-                if row_idx_in_expert >= mask[expert_idx]:
+                mask_rows: T.int32
+                T.ptx.ld.global_.s32(mask_rows, mask.ptr_to([expert_idx]))
+                if row_idx_in_expert >= mask_rows:
                     break
 
             in_offset = T.cast(row_idx, "int64") * actual_cols + col_idx
-            T.ptx.ld.global_.v4.b64(
-                x64[0],
-                x64[1],
-                x64[2],
-                x64[3],
+            T.ptx.ld.global_.v4.b32(
+                xw[0],
+                xw[1],
+                xw[2],
+                xw[3],
                 T.address_of(input_global[in_offset * ELTS_PER_THREAD]),
             )
+            T.ptx.ld.global_.v4.b32(
+                xw[4],
+                xw[5],
+                xw[6],
+                xw[7],
+                T.address_of(input_global[in_offset * ELTS_PER_THREAD + 8]),
+            )
             if use_silu_and_mul != 0:
-                T.ptx.ld.global_.v4.b64(
-                    y64[0],
-                    y64[1],
-                    y64[2],
-                    y64[3],
+                T.ptx.ld.global_.v4.b32(
+                    yw[0],
+                    yw[1],
+                    yw[2],
+                    yw[3],
                     T.address_of(input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD]),
+                )
+                T.ptx.ld.global_.v4.b32(
+                    yw[4],
+                    yw[5],
+                    yw[6],
+                    yw[7],
+                    T.address_of(
+                        input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD + 8]
+                    ),
                 )
                 # silu_and_mul (utils:1142-1166): fp32 silu*mul per element,
                 # rounded back to DTYPE pairs in place.
@@ -322,7 +327,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
             # SFScale select (branch-lowered in the source).
             sfscale_val: T.f32 = T.float32(1.0)
             if T.reinterpret("uint64", T.address_of(sf_scale[0])) != T.uint64(0):
-                sfscale_val = sf_scale[expert_idx]
+                T.ptx.ld.global_.f32(sfscale_val, sf_scale.ptr_to([expert_idx]))
 
             # SF swizzled output address (utils:1096-1140 + quantization.cuh:706-714).
             num_cols_padded = (

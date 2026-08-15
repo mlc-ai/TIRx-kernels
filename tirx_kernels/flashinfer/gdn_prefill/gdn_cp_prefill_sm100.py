@@ -392,6 +392,57 @@ def _device_chunk_bound(seq_idx, total, chunk_size):
     return clipped + (total - clipped) // chunk_size
 
 
+def _load_global_s32(dst, address):
+    return T.ptx.ld.global_.nc.b32(dst, address)
+
+
+def _load_global_f32(dst, address):
+    return T.ptx.ld.global_.nc.f32(dst, address)
+
+
+def _store_global_f32(address, value):
+    return T.ptx.st.global_.f32(address, value)
+
+
+def _load_shared_f32(dst, address):
+    return T.ptx.ld.shared.f32(dst, address)
+
+
+def _store_shared_f32(address, value):
+    return T.ptx.st.shared.f32(address, value)
+
+
+@T.inline
+def _load_global_as_f32(values, value_index, source, source_index, SOURCE_DTYPE):
+    if SOURCE_DTYPE == "float32":
+        T.ptx.ld.global_.f32(values[value_index], source.ptr_to([source_index]))
+    else:
+        bits = T.alloc_local((1,), "uint16")
+        T.ptx.ld.global_.b16(bits[0], source.ptr_to([source_index]))
+        values[value_index] = T.cast(T.reinterpret(SOURCE_DTYPE, bits[0]), "float32")
+
+
+def _store_global_from_f32(output, output_index, value, OUTPUT_DTYPE):
+    if OUTPUT_DTYPE == "float32":
+        return T.ptx.st.global_.f32(output.ptr_to([output_index]), value)
+    return T.ptx.st.global_.b16(
+        output.ptr_to([output_index]), T.reinterpret("uint16", T.cast(value, OUTPUT_DTYPE))
+    )
+
+
+@T.inline
+def _load_sequence_bounds(cu_seqlens, seq_idx, bounds, CU_DTYPE):
+    if CU_DTYPE == "int32":
+        T.ptx.ld.global_.nc.b32(bounds[0], cu_seqlens.ptr_to([seq_idx]))
+        T.ptx.ld.global_.nc.b32(bounds[1], cu_seqlens.ptr_to([seq_idx + 1]))
+    else:
+        raw = T.alloc_local((2,), "int64")
+        T.ptx.ld.global_.nc.b64(raw[0], cu_seqlens.ptr_to([seq_idx]))
+        T.ptx.ld.global_.nc.b64(raw[1], cu_seqlens.ptr_to([seq_idx + 1]))
+        bounds[0] = T.cast(raw[0], "int32")
+        bounds[1] = T.cast(raw[1], "int32")
+
+
 def _lg2_approx_ftz(value):
     result = T.alloc_local((1,), "float32")
     T.evaluate(T.ptx.lg2.approx.ftz.f32(result[0], value))
@@ -612,12 +663,21 @@ def _t_store_t_fragment(
         )
         output_lo: T.float32 = 0.0
         output_hi: T.float32 = 0.0
+        beta_value: T.float32
         if row < valid_len and col < valid_len:
-            output_lo = -beta_storage[col] * inverse_lo
+            _load_shared_f32(beta_value, beta_storage.ptr_to([col]))
+            output_lo = -beta_value * inverse_lo
         if row < valid_len and col + 1 < valid_len:
-            output_hi = -beta_storage[col + 1] * inverse_hi
-        t[t_base + col * T_BLOCK + row] = T.cast(output_lo, IO_DTYPE)
-        t[t_base + (col + 1) * T_BLOCK + row] = T.cast(output_hi, IO_DTYPE)
+            _load_shared_f32(beta_value, beta_storage.ptr_to([col + 1]))
+            output_hi = -beta_value * inverse_hi
+        T.ptx.st.global_.b16(
+            t.ptr_to([t_base + col * T_BLOCK + row]),
+            T.reinterpret("uint16", T.cast(output_lo, IO_DTYPE)),
+        )
+        T.ptx.st.global_.b16(
+            t.ptr_to([t_base + (col + 1) * T_BLOCK + row]),
+            T.reinterpret("uint16", T.cast(output_hi, IO_DTYPE)),
+        )
 
 
 @T.inline
@@ -1180,19 +1240,24 @@ def _fixup_load_initial_to_tmem(tmem_base, initial_state, base, thread, ROWS, ST
     if ROWS == 128:
         for sub in range(4):
             for i in T.unroll(32):
-                values[sub * 32 + i] = T.cast(
-                    initial_state[base + T.cast(thread, "int64") * D_HEAD + sub * 32 + i], "float32"
+                _load_global_as_f32(
+                    values,
+                    sub * 32 + i,
+                    initial_state,
+                    base + T.cast(thread, "int64") * D_HEAD + sub * 32 + i,
+                    STATE_DTYPE,
                 )
     else:
         local_row: T.int32 = (thread >> 5) * 16 + (thread & 15)
         col_base: T.int32 = thread & 16
         for sub in range(4):
             for i in T.unroll(16):
-                values[sub * 16 + i] = T.cast(
-                    initial_state[
-                        base + T.cast(local_row, "int64") * D_HEAD + col_base + sub * 32 + i
-                    ],
-                    "float32",
+                _load_global_as_f32(
+                    values,
+                    sub * 16 + i,
+                    initial_state,
+                    base + T.cast(local_row, "int64") * D_HEAD + col_base + sub * 32 + i,
+                    STATE_DTYPE,
                 )
     _fixup_tmem_st(tmem_base, _FIXUP_TMEM_ACC_COL, thread, words, ROWS)
 
@@ -1969,8 +2034,10 @@ def _t_precompute_sm100(
     state_head: T.int32 = bx % STATE_HEADS
     block_in_seq: T.int32 = bx // STATE_HEADS
     k_head: T.int32 = state_head * K_HEADS // STATE_HEADS
-    seq_start: T.int32 = T.cast(cu_seqlens[seq_idx], "int32")
-    seq_end: T.int32 = T.cast(cu_seqlens[seq_idx + 1], "int32")
+    sequence_bounds = T.alloc_local((2,), "int32")
+    _load_sequence_bounds(cu_seqlens, seq_idx, sequence_bounds, CU_DTYPE)
+    seq_start: T.int32 = sequence_bounds[0]
+    seq_end: T.int32 = sequence_bounds[1]
     seq_len: T.int32 = seq_end - seq_start
     num_blocks: T.int32 = (seq_len + T_BLOCK - 1) // T_BLOCK
 
@@ -2020,8 +2087,11 @@ def _t_precompute_sm100(
                 beta_row: T.int32 = lane + beta_half * 32
                 beta_value: T.float32 = 0.0
                 if beta_row < valid_len:
-                    beta_value = beta[(token_start + beta_row) * STATE_HEADS + state_head]
-                beta_storage[beta_row] = beta_value
+                    _load_global_f32(
+                        beta_value,
+                        beta.ptr_to([(token_start + beta_row) * STATE_HEADS + state_head]),
+                    )
+                _store_shared_f32(beta_storage.ptr_to([beta_row]), beta_value)
             T.ptx.fence.proxy.async_.shared__cta()
             _mn_opt_commit(smem_addr, 16, 0, 1)
 
@@ -2065,7 +2135,9 @@ def _t_precompute_sm100(
                 )
                 value_kk: T.float32 = 0.0
                 if row_kk > col_kk:
-                    value_kk = kk_acc[n_group * 8 + element] * beta_storage[row_kk]
+                    beta_value: T.float32
+                    _load_shared_f32(beta_value, beta_storage.ptr_to([row_kk]))
+                    value_kk = kk_acc[n_group * 8 + element] * beta_value
                 kk_acc[n_group * 8 + element] = value_kk
             for pair in T.unroll(4):
                 packed_kk[pair] = _t_pack_f16x2(
@@ -2210,8 +2282,10 @@ def _mn_precompute_sm100(
     chunk_in_seq: T.int32 = bx // STATE_HEADS
     k_head: T.int32 = state_head * K_HEADS // STATE_HEADS
     v_head: T.int32 = state_head * V_HEADS // STATE_HEADS
-    seq_start: T.int32 = T.cast(cu_seqlens[seq_idx], "int32")
-    seq_end: T.int32 = T.cast(cu_seqlens[seq_idx + 1], "int32")
+    sequence_bounds = T.alloc_local((2,), "int32")
+    _load_sequence_bounds(cu_seqlens, seq_idx, sequence_bounds, CU_DTYPE)
+    seq_start: T.int32 = sequence_bounds[0]
+    seq_end: T.int32 = sequence_bounds[1]
     seq_len: T.int32 = seq_end - seq_start
     num_chunks: T.int32 = (seq_len + CP_CHUNK_LEN - 1) // CP_CHUNK_LEN
     valid_chunk: T.int32 = T.cast(chunk_in_seq < num_chunks, "int32")
@@ -2918,11 +2992,12 @@ def _fixup_sm100(
     STATE_POOL: T.constexpr,
     TOTAL_CP_CHUNKS: T.constexpr,
     CP_CHUNK_LEN: T.constexpr,
+    ROWS_PER_CTA: T.constexpr,
     NEEDS_INITIAL_STATE: T.constexpr,
     STORE_FINAL_STATE: T.constexpr,
     USE_STATE_INDICES: T.constexpr,
 ):
-    """Source SIMT4 fixup: one thread owns one column and four rows."""
+    """Source SIMT fixup: one thread owns one column and a small row group."""
     transfer = T.match_buffer(
         transfer_h, (TOTAL_CP_CHUNKS * STATE_HEADS * D_HEAD * D_HEAD,), "float32", scope="global"
     )
@@ -2950,16 +3025,18 @@ def _fixup_sm100(
     T.attr({"tirx.launch_bounds_min_blocks_per_sm": 2})
     # TIRX_TRANSCRIBE_START cp_delta_rule_fixup_sm100
 
-    row_ctas = T.meta_var(D_HEAD // 4)
+    row_ctas = T.meta_var(D_HEAD // ROWS_PER_CTA)
     block = T.cta_id([NUM_SEQUENCES * STATE_HEADS * row_ctas])
     col = T.thread_id([T_THREADS])
     row_cta: T.int32 = block % row_ctas
     head_seq: T.int32 = block // row_ctas
     state_head: T.int32 = head_seq % STATE_HEADS
     seq_idx: T.int32 = head_seq // STATE_HEADS
-    row_start: T.int32 = row_cta * 4
-    seq_start: T.int32 = T.cast(cu_seqlens[seq_idx], "int32")
-    seq_end: T.int32 = T.cast(cu_seqlens[seq_idx + 1], "int32")
+    row_start: T.int32 = row_cta * ROWS_PER_CTA
+    sequence_bounds = T.alloc_local((2,), "int32")
+    _load_sequence_bounds(cu_seqlens, seq_idx, sequence_bounds, CU_DTYPE)
+    seq_start: T.int32 = sequence_bounds[0]
+    seq_end: T.int32 = sequence_bounds[1]
     seq_len: T.int32 = seq_end - seq_start
     num_chunks: T.int32 = (seq_len + CP_CHUNK_LEN - 1) // CP_CHUNK_LEN
     chunk_start: T.int32 = _device_chunk_bound(seq_idx, seq_start, CP_CHUNK_LEN)
@@ -2969,77 +3046,105 @@ def _fixup_sm100(
         gap_end = _device_chunk_bound(seq_idx + 1, seq_end, CP_CHUNK_LEN)
     state_slot: T.int32 = seq_idx
     if USE_STATE_INDICES:
-        state_slot = state_indices[seq_idx]
+        _load_global_s32(state_slot, state_indices.ptr_to([seq_idx]))
 
-    shared_state = T.alloc_buffer((4 * D_HEAD,), "float32", scope="shared", align=128)
+    shared_state = T.alloc_buffer(
+        (ROWS_PER_CTA * D_HEAD,), "float32", scope="shared", align=128
+    )
     T.ptx.setmaxnreg.inc.sync.aligned.u32(256)
     T.cuda.cta_sync()
     if num_chunks > 0:
         start: T.int32 = 0
         if NEEDS_INITIAL_STATE:
-            for local_row in T.unroll(4):
-                initial_value: T.float32 = T.cast(
-                    initial_state[
-                        ((state_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
-                        * D_HEAD
-                        + col
-                    ],
-                    "float32",
-                )
-                shared_state[local_row * D_HEAD + col] = initial_value
-                initial_state_workspace[
-                    ((seq_idx * STATE_HEADS + state_head) * D_HEAD + row_start + local_row) * D_HEAD
+            initial_values = T.alloc_local((ROWS_PER_CTA,), "float32")
+            for local_row in T.unroll(ROWS_PER_CTA):
+                initial_index: T.int32 = (
+                    ((state_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                    * D_HEAD
                     + col
-                ] = initial_value
+                )
+                _load_global_as_f32(
+                    initial_values,
+                    local_row,
+                    initial_state,
+                    initial_index,
+                    STATE_DTYPE,
+                )
+                _store_shared_f32(
+                    shared_state.ptr_to([local_row * D_HEAD + col]), initial_values[local_row]
+                )
+                workspace_index: T.int32 = (
+                    ((seq_idx * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                    * D_HEAD
+                    + col
+                )
+                _store_global_f32(
+                    initial_state_workspace.ptr_to([workspace_index]), initial_values[local_row]
+                )
         else:
             start = 1
             first_slot: T.int32 = chunk_start
-            for local_row in T.unroll(4):
-                first_value: T.float32 = local_state[
+            for local_row in T.unroll(ROWS_PER_CTA):
+                first_index: T.int32 = (
                     ((first_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
                     * D_HEAD
                     + col
-                ]
-                shared_state[local_row * D_HEAD + col] = first_value
-                fixed_state[
+                )
+                first_value: T.float32
+                _load_global_f32(first_value, local_state.ptr_to([first_index]))
+                _store_shared_f32(
+                    shared_state.ptr_to([local_row * D_HEAD + col]), first_value
+                )
+                fixed_index: T.int32 = (
                     ((first_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
                     * D_HEAD
                     + col
-                ] = first_value
+                )
+                _store_global_f32(fixed_state.ptr_to([fixed_index]), first_value)
         T.cuda.cta_sync()
 
-        accum: T.float32[4]
-        accum_next: T.float32[4]
+        accum = T.alloc_local((ROWS_PER_CTA,), "float32")
+        accum_next = T.alloc_local((ROWS_PER_CTA,), "float32")
         m_values: T.float32[16]
         m_next: T.float32[16]
         if start < num_chunks:
             first_work_slot: T.int32 = chunk_start + start
-            for local_row in T.unroll(4):
-                accum[local_row] = local_state[
+            for local_row in T.unroll(ROWS_PER_CTA):
+                first_work_index: T.int32 = (
                     ((first_work_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
                     * D_HEAD
                     + col
-                ]
+                )
+                _load_global_f32(accum[local_row], local_state.ptr_to([first_work_index]))
             for inner in T.unroll(16):
-                m_values[inner] = transfer[
+                transfer_index: T.int32 = (
                     ((first_work_slot * STATE_HEADS + state_head) * D_HEAD + inner) * D_HEAD + col
-                ]
+                )
+                _load_global_f32(m_values[inner], transfer.ptr_to([transfer_index]))
 
         for chunk in T.serial(start, num_chunks):
             cp_slot: T.int32 = chunk_start + chunk
             next_chunk: T.int32 = chunk + 1
             for k_tile in T.unroll(7):
                 for inner in T.unroll(16):
-                    m_next[inner] = transfer[
+                    transfer_next_index: T.int32 = (
                         ((cp_slot * STATE_HEADS + state_head) * D_HEAD + (k_tile + 1) * 16 + inner)
                         * D_HEAD
                         + col
-                    ]
-                for local_row in T.unroll(4):
+                    )
+                    _load_global_f32(m_next[inner], transfer.ptr_to([transfer_next_index]))
+                for local_row in T.unroll(ROWS_PER_CTA):
                     for inner in T.unroll(16):
+                        shared_value_main: T.float32
+                        _load_shared_f32(
+                            shared_value_main,
+                            shared_state.ptr_to(
+                                [local_row * D_HEAD + k_tile * 16 + inner]
+                            ),
+                        )
                         T.ptx.fma.rn.f32(
                             accum[local_row],
-                            shared_state[local_row * D_HEAD + k_tile * 16 + inner],
+                            shared_value_main,
                             m_values[inner],
                             accum[local_row],
                         )
@@ -3048,52 +3153,72 @@ def _fixup_sm100(
 
             if next_chunk < num_chunks:
                 next_slot: T.int32 = chunk_start + next_chunk
-                for local_row in T.unroll(4):
-                    accum_next[local_row] = local_state[
+                for local_row in T.unroll(ROWS_PER_CTA):
+                    next_state_index: T.int32 = (
                         ((next_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
                         * D_HEAD
                         + col
-                    ]
+                    )
+                    _load_global_f32(
+                        accum_next[local_row], local_state.ptr_to([next_state_index])
+                    )
                 for inner in T.unroll(16):
-                    m_next[inner] = transfer[
+                    next_transfer_index: T.int32 = (
                         ((next_slot * STATE_HEADS + state_head) * D_HEAD + inner) * D_HEAD + col
-                    ]
-            for local_row in T.unroll(4):
+                    )
+                    _load_global_f32(m_next[inner], transfer.ptr_to([next_transfer_index]))
+            for local_row in T.unroll(ROWS_PER_CTA):
                 for inner in T.unroll(16):
+                    shared_value_tail: T.float32
+                    _load_shared_f32(
+                        shared_value_tail,
+                        shared_state.ptr_to([local_row * D_HEAD + 112 + inner]),
+                    )
                     T.ptx.fma.rn.f32(
                         accum[local_row],
-                        shared_state[local_row * D_HEAD + 112 + inner],
+                        shared_value_tail,
                         m_values[inner],
                         accum[local_row],
                     )
             T.cuda.cta_sync()
-            for local_row in T.unroll(4):
-                shared_state[local_row * D_HEAD + col] = accum[local_row]
-                fixed_state[
+            for local_row in T.unroll(ROWS_PER_CTA):
+                _store_shared_f32(
+                    shared_state.ptr_to([local_row * D_HEAD + col]), accum[local_row]
+                )
+                fixed_index: T.int32 = (
                     ((cp_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row) * D_HEAD
                     + col
-                ] = accum[local_row]
+                )
+                _store_global_f32(fixed_state.ptr_to([fixed_index]), accum[local_row])
             T.cuda.cta_sync()
             if next_chunk < num_chunks:
-                for local_row in T.unroll(4):
+                for local_row in T.unroll(ROWS_PER_CTA):
                     accum[local_row] = accum_next[local_row]
                 for inner in T.unroll(16):
                     m_values[inner] = m_next[inner]
 
         if STORE_FINAL_STATE:
-            for local_row in T.unroll(4):
-                final_state[
+            for local_row in T.unroll(ROWS_PER_CTA):
+                final_index: T.int32 = (
                     ((state_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
                     * D_HEAD
                     + col
-                ] = T.cast(shared_state[local_row * D_HEAD + col], STATE_DTYPE)
+                )
+                final_value: T.float32
+                _load_shared_f32(
+                    final_value, shared_state.ptr_to([local_row * D_HEAD + col])
+                )
+                _store_global_from_f32(
+                    final_state, final_index, final_value, STATE_DTYPE
+                )
 
     for gap_slot in T.serial(gap_start, gap_end):
-        for local_row in T.unroll(4):
-            fixed_state[
+        for local_row in T.unroll(ROWS_PER_CTA):
+            gap_index: T.int32 = (
                 ((gap_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row) * D_HEAD
                 + col
-            ] = T.float32(0.0)
+            )
+            _store_global_f32(fixed_state.ptr_to([gap_index]), T.float32(0.0))
 
 
 @T.jit
@@ -3175,8 +3300,10 @@ def _fixup_utcmma_sm100(
     state_head: T.int32 = head_seq % STATE_HEADS
     seq_idx: T.int32 = head_seq // STATE_HEADS
     row_start: T.int32 = row_cta * ROWS
-    seq_start: T.int32 = T.cast(cu_seqlens[seq_idx], "int32")
-    seq_end: T.int32 = T.cast(cu_seqlens[seq_idx + 1], "int32")
+    sequence_bounds = T.alloc_local((2,), "int32")
+    _load_sequence_bounds(cu_seqlens, seq_idx, sequence_bounds, CU_DTYPE)
+    seq_start: T.int32 = sequence_bounds[0]
+    seq_end: T.int32 = sequence_bounds[1]
     seq_len: T.int32 = seq_end - seq_start
     num_chunks: T.int32 = (seq_len + CP_CHUNK_LEN - 1) // CP_CHUNK_LEN
     chunk_start: T.int32 = _device_chunk_bound(seq_idx, seq_start, CP_CHUNK_LEN)
@@ -3184,7 +3311,7 @@ def _fixup_utcmma_sm100(
     num_iters: T.int32 = num_chunks - start
     state_slot: T.int32 = seq_idx
     if USE_STATE_INDICES:
-        state_slot = state_indices[seq_idx]
+        _load_global_s32(state_slot, state_indices.ptr_to([seq_idx]))
 
     pool = T.SMEMPool()
     smem_raw = pool.alloc((SMEM_TOTAL,), "uint8", align=1024)
@@ -3434,8 +3561,10 @@ def _prefill_sm100(
     lane: T.int32 = thread & 31
     state_head: T.int32 = bx % STATE_HEADS
     chunk_in_seq: T.int32 = bx // STATE_HEADS
-    seq_start: T.int32 = T.cast(cu_seqlens[seq_idx], "int32")
-    seq_end: T.int32 = T.cast(cu_seqlens[seq_idx + 1], "int32")
+    sequence_bounds = T.alloc_local((2,), "int32")
+    _load_sequence_bounds(cu_seqlens, seq_idx, sequence_bounds, CU_DTYPE)
+    seq_start: T.int32 = sequence_bounds[0]
+    seq_end: T.int32 = sequence_bounds[1]
     seq_len: T.int32 = seq_end - seq_start
     num_cp_chunks: T.int32 = (seq_len + CP_CHUNK_LEN - 1) // CP_CHUNK_LEN
     chunk_len: T.int32 = 0
@@ -5007,6 +5136,14 @@ def _fixup_kind(cfg: GDNCPPrefillSM100Config, num_sms: int) -> str:
     return "fixup_utcmma128"
 
 
+def _fixup_simt_rows(cfg: GDNCPPrefillSM100Config, num_sms: int) -> int:
+    parallel_states = cfg.num_sequences * cfg.state_heads
+    for rows_per_cta in (4, 2, 1):
+        if parallel_states * (D_HEAD // rows_per_cta) >= num_sms:
+            return rows_per_cta
+    return 1
+
+
 def _specialization(cfg: GDNCPPrefillSM100Config, device: str = "cuda") -> dict[str, Any]:
     del device
     from tirx_kernels.runner import hardware_num_sms
@@ -5036,6 +5173,7 @@ def _specialization(cfg: GDNCPPrefillSM100Config, device: str = "cuda") -> dict[
         "STORE_FINAL_STATE": cfg.store_final_state,
         "USE_STATE_INDICES": cfg.indexed_state,
         "FIXUP_KIND": _fixup_kind(cfg, num_sms),
+        "FIXUP_SIMT_ROWS": _fixup_simt_rows(cfg, num_sms),
     }
 
 
@@ -5117,7 +5255,9 @@ def get_kernel(**kwargs: Any) -> dict[str, Any]:
     return {
         "t_precompute": t_kernel,
         "mn_precompute": mn_kernel,
-        "fixup_simt_row4": _fixup_sm100.specialize(**fixup_common),
+        "fixup_simt_row4": _fixup_sm100.specialize(
+            **fixup_common, ROWS_PER_CTA=spec["FIXUP_SIMT_ROWS"]
+        ),
         "fixup_utcmma64": _fixup_utcmma_sm100.specialize(
             **fixup_common,
             ROWS=64,

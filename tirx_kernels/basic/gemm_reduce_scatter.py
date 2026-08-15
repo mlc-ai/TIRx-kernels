@@ -197,6 +197,27 @@ def derive_config(
 
 ld_reduce_8xfp16 = '\n__forceinline__ __device__ void ld_reduce_8_fp16(void* src_addr, void* dst_addr) {\n    int4* source = (int4*) nvshmemx_mc_ptr(NVSHMEM_TEAM_WORLD, src_addr);\n    int4* dest = (int4*) dst_addr;\n    constexpr int UNROLL = 1;\n    union {\n        uint16_t u2[8 * UNROLL];\n        uint64_t u8[2 * UNROLL];\n    };\n    for (int u = 0; u < UNROLL; u++) {\n        asm("multimem.ld_reduce.global.add.v8.f16 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"\n            : "=h"(u2[8 * u]), "=h"(u2[8 * u + 1]), "=h"(u2[8 * u + 2]), "=h"(u2[8 * u + 3]), "=h"(u2[8 * u + 4]), "=h"(u2[8 * u + 5]), "=h"(u2[8 * u + 6]), "=h"(u2[8 * u + 7])\n            : "l"(source + u));\n    }\n    for (int u = 0; u < UNROLL; u++) {\n        asm("st.global.v2.b64 [%0], {%1, %2};" ::"l"(dest + u), "l"(u8[2 * u]),\n            "l"(u8[2 * u + 1]));\n    }\n}\n'
 semaphore_notify_remote = "\n__forceinline__ __device__ uint64_t semaphore_notify_remote(int32_t signal_rank, uint64_t* addr, uint64_t signal_value) {\n    auto dst_addr = reinterpret_cast<unsigned long long*>(nvshmem_ptr(addr, signal_rank));\n    return atomicAdd_system(dst_addr, signal_value);\n}\n"
+exit_barrier_arrive_and_wait = """
+__forceinline__ __device__ void exit_barrier_arrive_and_wait(
+        uint32_t* flags, int32_t worker_idx, int32_t expected) {
+    uint32_t* flag = flags + worker_idx;
+    auto mc_flag = reinterpret_cast<uint32_t*>(
+        nvshmemx_mc_ptr(NVSHMEM_TEAM_WORLD, flag));
+    asm volatile(
+        "multimem.red.release.sys.global.add.u32 [%0], 1;"
+        :
+        : "l"(mc_flag)
+        : "memory");
+    uint32_t value;
+    do {
+        asm volatile(
+            "ld.global.acquire.sys.b32 %0, [%1];"
+            : "=r"(value)
+            : "l"(flag)
+            : "memory");
+    } while (value != static_cast<uint32_t>(expected));
+}
+"""
 enqueue_remote = """
 __forceinline__ __device__ void enqueue_remote(
         int32_t* task_types, int32_t* task_idxs, int32_t* tail, int32_t mask,
@@ -564,6 +585,7 @@ def test_mma_ss_tma_2sm_persistent(
     rs_task_idxs: Tx.Buffer((CAPACITY, 2), "int32"),
     rs_head: Tx.Buffer((1,), "int32"),
     rs_tail: Tx.Buffer((1,), "int32"),
+    exit_barrier: Tx.Buffer((SM_NUMBER,), "uint32"),
 ):
     A_tensor_map: Tx.let[Tx.handle("tensormap")] = Tx.tvm_stack_alloca("tensormap", 1)
     B_tensor_map: Tx.let[Tx.handle("tensormap")] = Tx.tvm_stack_alloca("tensormap", 1)
@@ -994,6 +1016,15 @@ def test_mma_ss_tma_2sm_persistent(
     # Synchronize every local and peer-CTA TMEM user before collective deallocation.
     Tx.ptx.barrier.cluster.arrive()
     Tx.ptx.barrier.cluster.wait()
+    if WORLD_SIZE > 1:
+        if tid == 0:
+            Tx.cuda.func_call(
+                "exit_barrier_arrive_and_wait",
+                exit_barrier.ptr_to([bx]),
+                Tx.int32(0),
+                Tx.int32(WORLD_SIZE),
+                source_code=exit_barrier_arrive_and_wait,
+            )
     if (wg_id == 0) & (warp_id == 0):
         Tx.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
         Tx.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0]))
@@ -1143,6 +1174,7 @@ class _Case:
     rs_task_idxs: Any
     rs_head: Any
     rs_tail: Any
+    exit_barrier: Any
     gemm_out_torch: torch.Tensor
     semaphore_torch: torch.Tensor
     gemm_types_torch: torch.Tensor
@@ -1151,6 +1183,7 @@ class _Case:
     rs_types_torch: torch.Tensor
     rs_head_torch: torch.Tensor
     rs_tail_torch: torch.Tensor
+    exit_barrier_torch: torch.Tensor
     initial_queues: tuple[torch.Tensor, ...]
 
     def reset(self) -> None:
@@ -1176,6 +1209,7 @@ class _Case:
         torch_view(self.rs_task_idxs).copy_(rs_indices)
         self.rs_head_torch.copy_(rs_heads)
         self.rs_tail_torch.copy_(rs_tails)
+        self.exit_barrier_torch.zero_()
         self.semaphore_torch.zero_()
         self.gemm_out_torch.fill_(float("nan"))
         self.out.fill_(float("nan"))
@@ -1198,6 +1232,7 @@ class _Case:
             self.rs_task_idxs,
             self.rs_head,
             self.rs_tail,
+            self.exit_barrier,
         )
 
     def assert_terminal_state(self) -> None:
@@ -1216,6 +1251,11 @@ class _Case:
         torch.testing.assert_close(
             self.semaphore_torch,
             torch.full_like(self.semaphore_torch, self.config.completion_count),
+        )
+        expected_exit_count = self.config.world_size if self.config.world_size > 1 else 0
+        torch.testing.assert_close(
+            self.exit_barrier_torch,
+            torch.full_like(self.exit_barrier_torch, expected_exit_count),
         )
         if torch.isnan(self.gemm_out_torch).any() or torch.isnan(self.out).any():
             raise AssertionError("GemmRS output contains an uncovered tile")
@@ -1236,6 +1276,8 @@ def _allocate_case(
     rs_task_idxs = symmetric_empty(runtime, (CAPACITY, TASK_IDX_LEN), "int32")
     rs_head = symmetric_empty(runtime, (1,), "int32")
     rs_tail = symmetric_empty(runtime, (1,), "int32")
+    exit_barrier = symmetric_empty(runtime, (SM_NUMBER,), "uint32")
+    exit_barrier_torch = torch_view(exit_barrier)
     initial_queues = tuple(
         torch.from_numpy(array[runtime.rank].copy()).to(device) for array in queue_state
     )
@@ -1256,6 +1298,7 @@ def _allocate_case(
         rs_task_idxs=rs_task_idxs,
         rs_head=rs_head,
         rs_tail=rs_tail,
+        exit_barrier=exit_barrier,
         gemm_out_torch=torch_view(gemm_out),
         semaphore_torch=torch_view(semaphore),
         gemm_types_torch=torch_view(gemm_task_types),
@@ -1264,10 +1307,12 @@ def _allocate_case(
         rs_types_torch=torch_view(rs_task_types),
         rs_head_torch=torch_view(rs_head),
         rs_tail_torch=torch_view(rs_tail),
+        exit_barrier_torch=exit_barrier_torch,
         initial_queues=initial_queues,
     )
     if config.world_size > 1:
         require_nvls_multicast(runtime, case.gemm_out_torch)
+        require_nvls_multicast(runtime, exit_barrier_torch)
     with torch.cuda.stream(runtime.timing_stream):
         case.reset()
     runtime.timing_stream.synchronize()

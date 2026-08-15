@@ -120,6 +120,10 @@ def _uceil(x, d):
     return T.cast((T.cast(x, "uint32") + T.uint32(d - 1)) // T.uint32(d), "int32")
 
 
+def _load_grouped_layout(dst, grouped_layout, index):
+    return T.ptx.ld.global_.s32(dst, grouped_layout.ptr_to([index]))
+
+
 def _udiv(x, d):
     """Exact division of a known non-negative value; see `_uceil`."""
     return T.cast(T.cast(x, "uint32") // T.cast(d, "uint32"), "int32")
@@ -695,7 +699,7 @@ def build_kernel(spec: GemmSpec):
                     ld_nmb = num_m_blocks
                     if is_k_grouped_psum:
                         while ld_grp < num_groups:
-                            ld_nxtk = grouped_layout[ld_grp]
+                            _load_grouped_layout(ld_nxtk, grouped_layout, ld_grp)
                             ld_last = (_uceil(ld_kend, k_alignment)) * k_alignment
                             ld_psum = ld_nxtk - ld_last
                             ld_kend = ld_nxtk
@@ -704,18 +708,18 @@ def build_kernel(spec: GemmSpec):
                             ld_grp = ld_grp + 1
                     else:
                         while ld_grp < num_groups:
-                            ld_psum = grouped_layout[ld_grp]
+                            _load_grouped_layout(ld_psum, grouped_layout, ld_grp)
                             if ld_psum > 0:
                                 break
                             ld_grp = ld_grp + 1
                         ld_nxt = ld_grp + 1
                         while ld_nxt < num_groups:
-                            ld_nxtk = grouped_layout[ld_nxt]
+                            _load_grouped_layout(ld_nxtk, grouped_layout, ld_nxt)
                             if ld_nxtk > 0:
                                 break
                             ld_nxt = ld_nxt + 1
                 elif is_m_grouped_psum:
-                    ld_psum = grouped_layout[0]
+                    _load_grouped_layout(ld_psum, grouped_layout, 0)
                     ld_nmb = _uceil(ld_psum, block_m)
                 else:
                     ld_psum = 0
@@ -731,7 +735,8 @@ def build_kernel(spec: GemmSpec):
                                 ld_valid = 0
                                 ld_done = 1
                             else:
-                                ld_nmb = _uceil(grouped_layout[ld_grp], block_m)
+                                _load_grouped_layout(ld_nmb, grouped_layout, ld_grp)
+                                ld_nmb = _uceil(ld_nmb, block_m)
                                 if ld_nb < (ld_cum + ld_nmb) * num_n_blocks:
                                     ld_done = 1
                                 else:
@@ -748,7 +753,7 @@ def build_kernel(spec: GemmSpec):
                                     ld_done = 1
                                 else:
                                     ld_last = (_uceil(ld_psum, block_m)) * block_m
-                                    ld_psum = grouped_layout[ld_grp]
+                                    _load_grouped_layout(ld_psum, grouped_layout, ld_grp)
                                     ld_cum = ld_cum + ld_nmb
                                     ld_nmb = _uceil(ld_psum - ld_last, block_m)
                     elif is_k_grouped:
@@ -766,7 +771,7 @@ def build_kernel(spec: GemmSpec):
                                 if is_k_grouped_psum:
                                     ld_grp = ld_grp + 1
                                     while ld_grp < num_groups:
-                                        ld_nxtk = grouped_layout[ld_grp]
+                                        _load_grouped_layout(ld_nxtk, grouped_layout, ld_grp)
                                         ld_last = (_uceil(ld_kend, k_alignment)) * k_alignment
                                         ld_psum = ld_nxtk - ld_last
                                         ld_kend = ld_nxtk
@@ -779,7 +784,7 @@ def build_kernel(spec: GemmSpec):
                                     ld_nxt = ld_nxt + 1
                                     ld_psum = ld_nxtk
                                     while ld_nxt < num_groups:
-                                        ld_nxtk = grouped_layout[ld_nxt]
+                                        _load_grouped_layout(ld_nxtk, grouped_layout, ld_nxt)
                                         if ld_nxtk > 0:
                                             break
                                         ld_nxt = ld_nxt + 1
@@ -826,7 +831,8 @@ def build_kernel(spec: GemmSpec):
                         if is_m_grouped_contiguous:
                             # Non-psum contiguous: the expert is a per-row id.
                             expert: T.int32
-                            expert = T.max(0, grouped_layout[m_idx])
+                            _load_grouped_layout(expert, grouped_layout, m_idx)
+                            expert = T.max(0, expert)
                             if major_b_is_k:
                                 n_idx = expert * eff_n + n_idx
                             else:
@@ -1056,7 +1062,7 @@ def build_kernel(spec: GemmSpec):
                     mma_nmb = num_m_blocks
                     if is_k_grouped_psum:
                         while mma_grp < num_groups:
-                            mma_nxtk = grouped_layout[mma_grp]
+                            _load_grouped_layout(mma_nxtk, grouped_layout, mma_grp)
                             mma_last = (_uceil(mma_kend, k_alignment)) * k_alignment
                             mma_psum = mma_nxtk - mma_last
                             mma_kend = mma_nxtk
@@ -1065,18 +1071,18 @@ def build_kernel(spec: GemmSpec):
                             mma_grp = mma_grp + 1
                     else:
                         while mma_grp < num_groups:
-                            mma_psum = grouped_layout[mma_grp]
+                            _load_grouped_layout(mma_psum, grouped_layout, mma_grp)
                             if mma_psum > 0:
                                 break
                             mma_grp = mma_grp + 1
                         mma_nxt = mma_grp + 1
                         while mma_nxt < num_groups:
-                            mma_nxtk = grouped_layout[mma_nxt]
+                            _load_grouped_layout(mma_nxtk, grouped_layout, mma_nxt)
                             if mma_nxtk > 0:
                                 break
                             mma_nxt = mma_nxt + 1
                 elif is_m_grouped_psum:
-                    mma_psum = grouped_layout[0]
+                    _load_grouped_layout(mma_psum, grouped_layout, 0)
                     mma_nmb = _uceil(mma_psum, block_m)
                 else:
                     mma_psum = 0
@@ -1093,7 +1099,8 @@ def build_kernel(spec: GemmSpec):
                                 mma_valid = 0
                                 mma_done = 1
                             else:
-                                mma_nmb = _uceil(grouped_layout[mma_grp], block_m)
+                                _load_grouped_layout(mma_nmb, grouped_layout, mma_grp)
+                                mma_nmb = _uceil(mma_nmb, block_m)
                                 if mma_nb < (mma_cum + mma_nmb) * num_n_blocks:
                                     mma_done = 1
                                 else:
@@ -1110,7 +1117,7 @@ def build_kernel(spec: GemmSpec):
                                     mma_done = 1
                                 else:
                                     mma_last = (_uceil(mma_psum, block_m)) * block_m
-                                    mma_psum = grouped_layout[mma_grp]
+                                    _load_grouped_layout(mma_psum, grouped_layout, mma_grp)
                                     mma_cum = mma_cum + mma_nmb
                                     mma_nmb = _uceil(mma_psum - mma_last, block_m)
                     elif is_k_grouped:
@@ -1127,7 +1134,7 @@ def build_kernel(spec: GemmSpec):
                                 if is_k_grouped_psum:
                                     mma_grp = mma_grp + 1
                                     while mma_grp < num_groups:
-                                        mma_nxtk = grouped_layout[mma_grp]
+                                        _load_grouped_layout(mma_nxtk, grouped_layout, mma_grp)
                                         mma_last = (_uceil(mma_kend, k_alignment)) * k_alignment
                                         mma_psum = mma_nxtk - mma_last
                                         mma_kend = mma_nxtk
@@ -1140,7 +1147,7 @@ def build_kernel(spec: GemmSpec):
                                     mma_nxt = mma_nxt + 1
                                     mma_psum = mma_nxtk
                                     while mma_nxt < num_groups:
-                                        mma_nxtk = grouped_layout[mma_nxt]
+                                        _load_grouped_layout(mma_nxtk, grouped_layout, mma_nxt)
                                         if mma_nxtk > 0:
                                             break
                                         mma_nxt = mma_nxt + 1
@@ -1443,7 +1450,7 @@ def build_kernel(spec: GemmSpec):
                 tr_nmb = num_m_blocks
                 if is_k_grouped_psum:
                     while tr_grp < num_groups:
-                        tr_nxtk = grouped_layout[tr_grp]
+                        _load_grouped_layout(tr_nxtk, grouped_layout, tr_grp)
                         tr_last = (_uceil(tr_kend, k_alignment)) * k_alignment
                         tr_psum = tr_nxtk - tr_last
                         tr_kend = tr_nxtk
@@ -1452,18 +1459,18 @@ def build_kernel(spec: GemmSpec):
                         tr_grp = tr_grp + 1
                 else:
                     while tr_grp < num_groups:
-                        tr_psum = grouped_layout[tr_grp]
+                        _load_grouped_layout(tr_psum, grouped_layout, tr_grp)
                         if tr_psum > 0:
                             break
                         tr_grp = tr_grp + 1
                     tr_nxt = tr_grp + 1
                     while tr_nxt < num_groups:
-                        tr_nxtk = grouped_layout[tr_nxt]
+                        _load_grouped_layout(tr_nxtk, grouped_layout, tr_nxt)
                         if tr_nxtk > 0:
                             break
                         tr_nxt = tr_nxt + 1
             elif is_m_grouped_psum:
-                tr_psum = grouped_layout[0]
+                _load_grouped_layout(tr_psum, grouped_layout, 0)
                 tr_nmb = _uceil(tr_psum, block_m)
             else:
                 tr_psum = 0
@@ -1480,7 +1487,8 @@ def build_kernel(spec: GemmSpec):
                             tr_valid = 0
                             tr_done = 1
                         else:
-                            tr_nmb = _uceil(grouped_layout[tr_grp], block_m)
+                            _load_grouped_layout(tr_nmb, grouped_layout, tr_grp)
+                            tr_nmb = _uceil(tr_nmb, block_m)
                             if tr_nb < (tr_cum + tr_nmb) * num_n_blocks:
                                 tr_done = 1
                             else:
@@ -1497,7 +1505,7 @@ def build_kernel(spec: GemmSpec):
                                 tr_done = 1
                             else:
                                 tr_last = (_uceil(tr_psum, block_m)) * block_m
-                                tr_psum = grouped_layout[tr_grp]
+                                _load_grouped_layout(tr_psum, grouped_layout, tr_grp)
                                 tr_cum = tr_cum + tr_nmb
                                 tr_nmb = _uceil(tr_psum - tr_last, block_m)
                 elif is_k_grouped:
@@ -1514,7 +1522,7 @@ def build_kernel(spec: GemmSpec):
                             if is_k_grouped_psum:
                                 tr_grp = tr_grp + 1
                                 while tr_grp < num_groups:
-                                    tr_nxtk = grouped_layout[tr_grp]
+                                    _load_grouped_layout(tr_nxtk, grouped_layout, tr_grp)
                                     tr_last = (_uceil(tr_kend, k_alignment)) * k_alignment
                                     tr_psum = tr_nxtk - tr_last
                                     tr_kend = tr_nxtk
@@ -1527,7 +1535,7 @@ def build_kernel(spec: GemmSpec):
                                 tr_nxt = tr_nxt + 1
                                 tr_psum = tr_nxtk
                                 while tr_nxt < num_groups:
-                                    tr_nxtk = grouped_layout[tr_nxt]
+                                    _load_grouped_layout(tr_nxtk, grouped_layout, tr_nxt)
                                     if tr_nxtk > 0:
                                         break
                                     tr_nxt = tr_nxt + 1
@@ -1564,19 +1572,35 @@ def build_kernel(spec: GemmSpec):
                             for c in T.unroll(0, num_sfa_chunks):
                                 base = c * NUM_UTCCP_ALIGNED_ELEMS
                                 for i in T.unroll(0, 4):
-                                    sf_vals[i] = smem_sfa[tr_stage, base + i * 32 + lane_idx]
+                                    T.ptx.ld.shared.u32(
+                                        sf_vals[i],
+                                        smem_sfa.ptr_to([tr_stage, base + i * 32 + lane_idx]),
+                                    )
                                 T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF))
-                                for i in T.unroll(0, 4):
-                                    smem_sfa[tr_stage, base + lane_idx * 4 + i] = sf_vals[i]
+                                T.ptx.st.shared.v4.u32(
+                                    smem_sfa.ptr_to([tr_stage, base + lane_idx * 4]),
+                                    sf_vals[0],
+                                    sf_vals[1],
+                                    sf_vals[2],
+                                    sf_vals[3],
+                                )
                             T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
                         if tr_k % sfb_stages_per_load == 0:
                             for c in T.unroll(0, num_sfb_chunks):
                                 base = c * NUM_UTCCP_ALIGNED_ELEMS
                                 for i in T.unroll(0, 4):
-                                    sf_vals[i] = smem_sfb[tr_stage, base + i * 32 + lane_idx]
+                                    T.ptx.ld.shared.u32(
+                                        sf_vals[i],
+                                        smem_sfb.ptr_to([tr_stage, base + i * 32 + lane_idx]),
+                                    )
                                 T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF))
-                                for i in T.unroll(0, 4):
-                                    smem_sfb[tr_stage, base + lane_idx * 4 + i] = sf_vals[i]
+                                T.ptx.st.shared.v4.u32(
+                                    smem_sfb.ptr_to([tr_stage, base + lane_idx * 4]),
+                                    sf_vals[0],
+                                    sf_vals[1],
+                                    sf_vals[2],
+                                    sf_vals[3],
+                                )
                             T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
                         # `arrive(0u)` passes a destination CTA rank, not a count:
                         # every thread arrives on the leader CTA's barrier copy.
@@ -1626,7 +1650,7 @@ def build_kernel(spec: GemmSpec):
                 ep_nmb = num_m_blocks
                 if is_k_grouped_psum:
                     while ep_grp < num_groups:
-                        ep_nxtk = grouped_layout[ep_grp]
+                        _load_grouped_layout(ep_nxtk, grouped_layout, ep_grp)
                         ep_last = (_uceil(ep_kend, k_alignment)) * k_alignment
                         ep_psum = ep_nxtk - ep_last
                         ep_kend = ep_nxtk
@@ -1635,18 +1659,18 @@ def build_kernel(spec: GemmSpec):
                         ep_grp = ep_grp + 1
                 else:
                     while ep_grp < num_groups:
-                        ep_psum = grouped_layout[ep_grp]
+                        _load_grouped_layout(ep_psum, grouped_layout, ep_grp)
                         if ep_psum > 0:
                             break
                         ep_grp = ep_grp + 1
                     ep_nxt = ep_grp + 1
                     while ep_nxt < num_groups:
-                        ep_nxtk = grouped_layout[ep_nxt]
+                        _load_grouped_layout(ep_nxtk, grouped_layout, ep_nxt)
                         if ep_nxtk > 0:
                             break
                         ep_nxt = ep_nxt + 1
             elif is_m_grouped_psum:
-                ep_psum = grouped_layout[0]
+                _load_grouped_layout(ep_psum, grouped_layout, 0)
                 ep_nmb = _uceil(ep_psum, block_m)
             else:
                 ep_psum = 0
@@ -1665,7 +1689,8 @@ def build_kernel(spec: GemmSpec):
                             ep_valid = 0
                             ep_done = 1
                         else:
-                            ep_nmb = _uceil(grouped_layout[ep_grp], block_m)
+                            _load_grouped_layout(ep_nmb, grouped_layout, ep_grp)
+                            ep_nmb = _uceil(ep_nmb, block_m)
                             if ep_nb < (ep_cum + ep_nmb) * num_n_blocks:
                                 ep_done = 1
                             else:
@@ -1682,7 +1707,7 @@ def build_kernel(spec: GemmSpec):
                                 ep_done = 1
                             else:
                                 ep_last = (_uceil(ep_psum, block_m)) * block_m
-                                ep_psum = grouped_layout[ep_grp]
+                                _load_grouped_layout(ep_psum, grouped_layout, ep_grp)
                                 ep_cum = ep_cum + ep_nmb
                                 ep_nmb = _uceil(ep_psum - ep_last, block_m)
                 elif is_k_grouped:
@@ -1699,7 +1724,7 @@ def build_kernel(spec: GemmSpec):
                             if is_k_grouped_psum:
                                 ep_grp = ep_grp + 1
                                 while ep_grp < num_groups:
-                                    ep_nxtk = grouped_layout[ep_grp]
+                                    _load_grouped_layout(ep_nxtk, grouped_layout, ep_grp)
                                     ep_last = (_uceil(ep_kend, k_alignment)) * k_alignment
                                     ep_psum = ep_nxtk - ep_last
                                     ep_kend = ep_nxtk
@@ -1712,7 +1737,7 @@ def build_kernel(spec: GemmSpec):
                                 ep_nxt = ep_nxt + 1
                                 ep_psum = ep_nxtk
                                 while ep_nxt < num_groups:
-                                    ep_nxtk = grouped_layout[ep_nxt]
+                                    _load_grouped_layout(ep_nxtk, grouped_layout, ep_nxt)
                                     if ep_nxtk > 0:
                                         break
                                     ep_nxt = ep_nxt + 1
@@ -1952,8 +1977,13 @@ def build_kernel(spec: GemmSpec):
                                             )
                                         )
                                         T.ptx.tcgen05.wait__ld.sync.aligned()
-                                        for j in T.unroll(0, 4):
-                                            smem_cd_u32[cd_word + j] = values[j]
+                                        T.ptx.st.shared.v4.u32(
+                                            smem_cd_u32.ptr_to([cd_word]),
+                                            values[0],
+                                            values[1],
+                                            values[2],
+                                            values[3],
+                                        )
                                     else:
                                         T.evaluate(
                                             T.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
@@ -1972,8 +2002,13 @@ def build_kernel(spec: GemmSpec):
                                                 T.reinterpret("float32", values[2 * j + 1]),
                                                 T.reinterpret("float32", values[2 * j]),
                                             )
-                                        for j in T.unroll(0, 4):
-                                            smem_cd_u32[cd_word + j] = packed[j]
+                                        T.ptx.st.shared.v4.u32(
+                                            smem_cd_u32.ptr_to([cd_word]),
+                                            packed[0],
+                                            packed[1],
+                                            packed[2],
+                                            packed[3],
+                                        )
 
                                 if w == num_m_waves - 1 and st == num_stores - 1:
                                     T.ptx.tcgen05.fence__before_thread_sync()
