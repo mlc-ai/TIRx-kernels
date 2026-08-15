@@ -1035,6 +1035,7 @@ def _mn_opt_materialize_x(tmem_base, smem_raw, stage, thread, IO_DTYPE):
     values: T.float32[64]
     packed: T.uint32[32]
     _mn_opt_tmem_ld_128x64(tmem_base, MN_OPT_TMEM_XY_COL, thread, values)
+    T.ptx.tcgen05.wait__ld.sync.aligned()
     for pair in T.unroll(32):
         packed[pair] = _mn_opt_pack_iox2(values[pair * 2], values[pair * 2 + 1], IO_DTYPE)
     _mn_opt_store_128x64_fragment(smem_raw, MN_OPT_X_OFF, stage, thread, packed)
