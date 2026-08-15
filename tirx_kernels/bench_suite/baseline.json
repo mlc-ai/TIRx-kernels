@@ -3,12 +3,12 @@
   "label": "post-refactor",
   "git": {
     "tir": "5f901d39",
-    "tirx-kernels": "8bf3305d-dirty",
+    "tirx-kernels": "277c6761-dirty",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "d8daf965756dcbad62048f746ce522def492b337"
+    "tirx-kernels:tirx_kernels": "dda29bf2f26132ac42a63a8a7a2ed53e1ff7650e"
   },
   "baselines": {
     "torch": {
@@ -246,6 +246,20 @@
         "tirx": 6103.611899999998,
         "cublas_nccl_cudagraph": 5984.332800000004,
         "cublasmp_split_p2p": 6148.8382999999985
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "deepep_combine",
+      "config": "t4096_h7168_e256_k6",
+      "label": "t4096_h7168_e256_k6",
+      "status": "ok",
+      "impls": {
+        "tirx": 1098.7104999999974,
+        "deepep": 989.9300000000003
       },
       "aggregated": {
         "rounds": 5,

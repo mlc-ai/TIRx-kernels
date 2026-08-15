@@ -92,6 +92,7 @@ point each port backs (`activation`, `quantization` — CuTe-DSL backend —,
 | Kernel            | Module        | What it is |
 | ----------------- | ------------- | ---------- |
 | `deepep_dispatch` | `dispatch.py` | V2 elastic dispatch, single-domain NVLink path (multi-GPU, 8 ranks) |
+| `deepep_combine` | `combine.py` | V2 elastic combine, single-domain NVLink path (multi-GPU, 8 ranks) |
 
 ## Performance
 
