@@ -323,7 +323,7 @@ _SMOKE_CONFIGS = [
 ]
 
 CONFIGS = _SMOKE_CONFIGS
-BENCH_CONFIGS = DSA_INDEXER_LIKE_COVERAGE + SERVING_BENCH_CONFIGS
+BENCH_CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SERVING_BENCH_CONFIGS
 
 
 def _make_context_lens(config: PagedMQALogitsFP8Config) -> torch.Tensor:
@@ -2213,7 +2213,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench
 
-    # timer=None inherits the local event-timer default.
+    # timer=None inherits the canonical local timer default.
     timer = kwargs.pop("timer", None)
     # warmup/repeat: no hardcoded default here; pass through (None = defer to the
     # timer's own default; the graph timers ignore them anyway). Overridable via the

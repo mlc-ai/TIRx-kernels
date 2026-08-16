@@ -108,9 +108,11 @@ runner.
 Each workload uses one fresh child process. CPU preparation completes before GPU
 assignment. The GPU stage constructs operands once and, by default, times only
 the TIRx launch. `--with-references` constructs and times the selected lazy
-peers in that same child. Local workloads use CUDA-event wall timing;
-distributed workloads opt into Kineto explicitly. Timers record five rounds by
-default and aggregate their arithmetic mean. The scheduler rejects foreign GPU
+peers in that same child. Local workloads inherit the canonical Proton timer
+unless their workload selects another timer; distributed workloads opt into
+Kineto explicitly. A workload's timer applies equally to TIRx and every enabled
+reference. Timers record five rounds by default and aggregate their arithmetic
+mean. The scheduler rejects foreign GPU
 activity and retries the same prepared child on an idle eligible card; failed
 workloads stop the sweep.
 

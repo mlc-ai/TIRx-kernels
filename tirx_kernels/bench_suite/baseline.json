@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "timestamp": "8",
-  "label": "candidate-only-fixed-runner",
+  "timestamp": "12",
+  "label": "restore-proton-timer-3",
   "runner": {
     "hostname": "catalyst-fleet1.cs.cmu.edu",
     "gpu": {
@@ -155,7 +155,7 @@
   },
   "git": {
     "tir": "27c2e019-dirty",
-    "tirx-kernels": "d56a4596-dirty"
+    "tirx-kernels": "bcd09d07-dirty"
   },
   "results": [
     {
@@ -163,9 +163,9 @@
       "config": "gelu_tanh_fp16_d11008_t8192",
       "label": "gelu_tanh_fp16_d11008_t8192",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 100.42712224315628
+        "tirx": 97.6651910352221
       },
       "aggregated": {
         "rounds": 5,
@@ -177,9 +177,9 @@
       "config": "silu_bf16_d16384_t32768",
       "label": "silu_bf16_d16384_t32768",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 458.4564709550952
+        "tirx": 454.43658288482817
       },
       "aggregated": {
         "rounds": 5,
@@ -191,9 +191,9 @@
       "config": "silu_fp16_d4096_t1",
       "label": "silu_fp16_d4096_t1",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 6.201030021522865
+        "tirx": 2.5013426796851337
       },
       "aggregated": {
         "rounds": 5,
@@ -205,9 +205,9 @@
       "config": "s2048_skv4096_h64_d128_f32_dense_cp",
       "label": "s2048_skv4096_h64_d128_f32_dense_cp",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 42.8830025822838
+        "tirx": 37.844504997739826
       },
       "aggregated": {
         "rounds": 5,
@@ -219,9 +219,9 @@
       "config": "s4096_skv8192_h64_d128_bf16_compressed_nocp",
       "label": "s4096_skv8192_h64_d128_bf16_compressed_nocp",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 189.98064871023178
+        "tirx": 186.6705489431195
       },
       "aggregated": {
         "rounds": 5,
@@ -233,9 +233,9 @@
       "config": "b16_n1_mp128_ps64_h64_d128_bf16_fixed",
       "label": "b16_n1_mp128_ps64_h64_d128_bf16_fixed",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.289671870351139
+        "tirx": 6.112924545110973
       },
       "aggregated": {
         "rounds": 5,
@@ -247,9 +247,9 @@
       "config": "b1_n1_mp1_ps32_h64_d128_f32_fixed",
       "label": "b1_n1_mp1_ps32_h64_d128_f32_fixed",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 8.552940556586531
+        "tirx": 4.0887734455173135
       },
       "aggregated": {
         "rounds": 5,
@@ -261,9 +261,9 @@
       "config": "bhd_bhr_hdr_b4096_h8_r4096_d1024",
       "label": "bhd_bhr_hdr_b4096_h8_r4096_d1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 144.72951358896543
+        "tirx": 133.7839935976431
       },
       "aggregated": {
         "rounds": 5,
@@ -275,9 +275,9 @@
       "config": "bhd_hdr_bhr_b8192_h8_r4096_d1024",
       "label": "bhd_hdr_bhr_b8192_h8_r4096_d1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 252.6356748207328
+        "tirx": 224.32102502387133
       },
       "aggregated": {
         "rounds": 5,
@@ -289,9 +289,9 @@
       "config": "bhr_hdr_bhd_b4096_h8_r4096_d1024",
       "label": "bhr_hdr_bhd_b4096_h8_r4096_d1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 110.29908317476122
+        "tirx": 97.77073873589949
       },
       "aggregated": {
         "rounds": 5,
@@ -303,9 +303,9 @@
       "config": "m4096_n4096_k7168_bfp4",
       "label": "m4096_n4096_k7168_bfp4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 89.93459368809953
+        "tirx": 77.41677834058383
       },
       "aggregated": {
         "rounds": 5,
@@ -317,9 +317,9 @@
       "config": "m4096_n576_k7168",
       "label": "m4096_n576_k7168",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 22.91170787221031
+        "tirx": 18.813296638283795
       },
       "aggregated": {
         "rounds": 5,
@@ -331,9 +331,9 @@
       "config": "m4096_n7168_k16384",
       "label": "m4096_n7168_k16384",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 377.44873573943397
+        "tirx": 332.6277211231946
       },
       "aggregated": {
         "rounds": 5,
@@ -345,9 +345,9 @@
       "config": "s2048_skv4096_h64_d128_f32_dense_cp",
       "label": "s2048_skv4096_h64_d128_f32_dense_cp",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 44.949370525194574
+        "tirx": 39.94644051058957
       },
       "aggregated": {
         "rounds": 5,
@@ -359,9 +359,9 @@
       "config": "s4096_skv8192_h64_d128_bf16_compressed_nocp",
       "label": "s4096_skv8192_h64_d128_bf16_compressed_nocp",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 195.68972865944332
+        "tirx": 193.06929369559387
       },
       "aggregated": {
         "rounds": 5,
@@ -373,9 +373,9 @@
       "config": "b16_n1_mp128_ps64_h64_d128_bf16_fixed",
       "label": "b16_n1_mp128_ps64_h64_d128_bf16_fixed",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.652982808821413
+        "tirx": 6.76902242057026
       },
       "aggregated": {
         "rounds": 5,
@@ -387,9 +387,9 @@
       "config": "b1_n1_mp1_ps64_h64_d128_f32_fixed",
       "label": "b1_n1_mp1_ps64_h64_d128_f32_fixed",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 8.224577830336106
+        "tirx": 4.583119036898578
       },
       "aggregated": {
         "rounds": 5,
@@ -401,9 +401,9 @@
       "config": "g16_m7168_n2048_k2048_gran128_al128",
       "label": "g16_m7168_n2048_k2048_gran128_al128",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 623.852051700647
+        "tirx": 578.0204286395009
       },
       "aggregated": {
         "rounds": 5,
@@ -415,9 +415,9 @@
       "config": "g4_m4096_n7168_k8192_gran128_al128_psum",
       "label": "g4_m4096_n7168_k8192_gran128_al128_psum",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 954.2545841160606
+        "tirx": 852.6775837070938
       },
       "aggregated": {
         "rounds": 5,
@@ -429,9 +429,9 @@
       "config": "g8_m4096_n7168_k4096_gran32_al160",
       "label": "g8_m4096_n7168_k4096_gran32_al160",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 998.9753347779728
+        "tirx": 927.9265593327773
       },
       "aggregated": {
         "rounds": 5,
@@ -443,9 +443,9 @@
       "config": "g4_m8192_n6144_k7168",
       "label": "g4_m8192_n6144_k7168",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1127.2969513321011
+        "tirx": 1034.9155678465847
       },
       "aggregated": {
         "rounds": 5,
@@ -457,9 +457,9 @@
       "config": "g8_m4096_n4096_k2048_bfp4",
       "label": "g8_m4096_n4096_k2048_bfp4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 205.46650390054097
+        "tirx": 187.41075994887225
       },
       "aggregated": {
         "rounds": 5,
@@ -471,9 +471,9 @@
       "config": "g8_m4096_n7168_k3072_psum_zp",
       "label": "g8_m4096_n7168_k3072_psum_zp",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 579.9664556645541
+        "tirx": 518.9475643243243
       },
       "aggregated": {
         "rounds": 5,
@@ -485,9 +485,9 @@
       "config": "g32_m192_n4096_k4096_bfp4",
       "label": "g32_m192_n4096_k4096_bfp4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 128.2674347913507
+        "tirx": 113.53367636277355
       },
       "aggregated": {
         "rounds": 5,
@@ -499,9 +499,9 @@
       "config": "g32_m192_n6144_k7168",
       "label": "g32_m192_n6144_k7168",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 366.4217934543677
+        "tirx": 342.1665591890939
       },
       "aggregated": {
         "rounds": 5,
@@ -513,9 +513,9 @@
       "config": "g6_m1024_n4096_k2048",
       "label": "g6_m1024_n4096_k2048",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 44.698024534118865
+        "tirx": 39.63855950797839
       },
       "aggregated": {
         "rounds": 5,
@@ -527,9 +527,9 @@
       "config": "m128_n24_k16384_s64",
       "label": "m128_n24_k16384_s64",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.071058962036814
+        "tirx": 5.320947087639086
       },
       "aggregated": {
         "rounds": 5,
@@ -541,9 +541,9 @@
       "config": "m4096_n24_k16384_s2",
       "label": "m4096_n24_k16384_s2",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 32.90990408311218
+        "tirx": 28.76172471756678
       },
       "aggregated": {
         "rounds": 5,
@@ -555,9 +555,9 @@
       "config": "m8192_n24_k28672_s1",
       "label": "m8192_n24_k28672_s1",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 87.77812627358837
+        "tirx": 83.23684342760933
       },
       "aggregated": {
         "rounds": 5,
@@ -569,9 +569,9 @@
       "config": "s1024_h32kv4",
       "label": "s1024_h32kv4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 24.069739264704822
+        "tirx": 19.568467202437322
       },
       "aggregated": {
         "rounds": 5,
@@ -583,9 +583,9 @@
       "config": "s4096_h32kv4_causal",
       "label": "s4096_h32kv4_causal",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 119.75816506904513
+        "tirx": 110.35829588611738
       },
       "aggregated": {
         "rounds": 5,
@@ -597,9 +597,9 @@
       "config": "s8192_h32kv32",
       "label": "s8192_h32kv32",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 814.2044978449646
+        "tirx": 770.3913115188953
       },
       "aggregated": {
         "rounds": 5,
@@ -611,9 +611,9 @@
       "config": "b1_s2048_h16_causal",
       "label": "b1_s2048_h16_causal",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 85.94089099089959
+        "tirx": 81.59272253918495
       },
       "aggregated": {
         "rounds": 5,
@@ -625,9 +625,9 @@
       "config": "b1_s8192_h16_noncausal",
       "label": "b1_s8192_h16_noncausal",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1178.0889530365284
+        "tirx": 1095.4508518189884
       },
       "aggregated": {
         "rounds": 5,
@@ -639,9 +639,9 @@
       "config": "b4_s8192_h16_noncausal",
       "label": "b4_s8192_h16_noncausal",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 4711.712794040976
+        "tirx": 4406.960304256293
       },
       "aggregated": {
         "rounds": 5,
@@ -653,9 +653,9 @@
       "config": "h64_mixed",
       "label": "h64_mixed",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 272.65868353374685
+        "tirx": 265.4006677603428
       },
       "aggregated": {
         "rounds": 5,
@@ -667,9 +667,9 @@
       "config": "h96_fixed8192",
       "label": "h96_fixed8192",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 503.62522062327685
+        "tirx": 500.4741131075209
       },
       "aggregated": {
         "rounds": 5,
@@ -681,9 +681,9 @@
       "config": "h96_uniform",
       "label": "h96_uniform",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 435.8495530054653
+        "tirx": 433.36071125431914
       },
       "aggregated": {
         "rounds": 5,
@@ -695,9 +695,9 @@
       "config": "hv16h16_b128_s8",
       "label": "hv16h16_b128_s8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 32.86116570092946
+        "tirx": 28.701752527058545
       },
       "aggregated": {
         "rounds": 5,
@@ -709,9 +709,9 @@
       "config": "hv16h16_b1_s16",
       "label": "hv16h16_b1_s16",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 8.21156890997999
+        "tirx": 4.006778325531927
       },
       "aggregated": {
         "rounds": 5,
@@ -723,9 +723,9 @@
       "config": "hv32h16_b32_s8",
       "label": "hv32h16_b32_s8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 20.540689249507373
+        "tirx": 16.652502277197588
       },
       "aggregated": {
         "rounds": 5,
@@ -737,9 +737,9 @@
       "config": "hv12h12_b8_t2",
       "label": "hv12h12_b8_t2",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.277500402188139
+        "tirx": 6.391928121183497
       },
       "aggregated": {
         "rounds": 5,
@@ -751,9 +751,9 @@
       "config": "hv16h16_b64_t2",
       "label": "hv16h16_b64_t2",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 29.72368150002776
+        "tirx": 25.340937722386126
       },
       "aggregated": {
         "rounds": 5,
@@ -765,9 +765,9 @@
       "config": "hv32h16_b128_t2",
       "label": "hv32h16_b128_t2",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 86.45595694741621
+        "tirx": 83.24392657612364
       },
       "aggregated": {
         "rounds": 5,
@@ -779,9 +779,9 @@
       "config": "hv16h16_b16_t3",
       "label": "hv16h16_b16_t3",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 18.15975067624996
+        "tirx": 13.476734983069115
       },
       "aggregated": {
         "rounds": 5,
@@ -793,9 +793,9 @@
       "config": "hv16h16_b1_t3",
       "label": "hv16h16_b1_t3",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.278307915374954
+        "tirx": 5.832385005868499
       },
       "aggregated": {
         "rounds": 5,
@@ -807,9 +807,9 @@
       "config": "hv16h16_b4_t3",
       "label": "hv16h16_b4_t3",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.56925752733336
+        "tirx": 6.69557454129043
       },
       "aggregated": {
         "rounds": 5,
@@ -821,9 +821,9 @@
       "config": "hv12h12_b8_t4",
       "label": "hv12h12_b8_t4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 13.053031342128186
+        "tirx": 8.78433418173919
       },
       "aggregated": {
         "rounds": 5,
@@ -835,9 +835,9 @@
       "config": "hv16h16_b64_t4",
       "label": "hv16h16_b64_t4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 45.045746166232895
+        "tirx": 41.159944364651246
       },
       "aggregated": {
         "rounds": 5,
@@ -849,9 +849,9 @@
       "config": "hv32h16_b128_t4",
       "label": "hv32h16_b128_t4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 139.19749206671773
+        "tirx": 135.6345866308029
       },
       "aggregated": {
         "rounds": 5,
@@ -863,9 +863,9 @@
       "config": "hv32h16_b128_s1",
       "label": "hv32h16_b128_s1",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 161.05590776898111
+        "tirx": 158.00768676464887
       },
       "aggregated": {
         "rounds": 5,
@@ -877,9 +877,9 @@
       "config": "hv32h16_b1_s8",
       "label": "hv32h16_b1_s8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 12.301909305277462
+        "tirx": 7.533641229870824
       },
       "aggregated": {
         "rounds": 5,
@@ -891,9 +891,9 @@
       "config": "hv32h16_b3_s4",
       "label": "hv32h16_b3_s4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 12.392634390575001
+        "tirx": 8.86648407716518
       },
       "aggregated": {
         "rounds": 5,
@@ -905,9 +905,9 @@
       "config": "hv32h16_b128_s1",
       "label": "hv32h16_b128_s1",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 181.07331458356222
+        "tirx": 177.0170066088637
       },
       "aggregated": {
         "rounds": 5,
@@ -919,9 +919,9 @@
       "config": "hv32h16_b1_s8",
       "label": "hv32h16_b1_s8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 12.136125804327236
+        "tirx": 7.36644293996633
       },
       "aggregated": {
         "rounds": 5,
@@ -933,9 +933,9 @@
       "config": "hv32h16_b3_s4",
       "label": "hv32h16_b3_s4",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 18.498968314278766
+        "tirx": 14.514097100219798
       },
       "aggregated": {
         "rounds": 5,
@@ -947,9 +947,9 @@
       "config": "bf16_4096x4096x4096",
       "label": "bf16_4096x4096x4096",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 102.91144397189024
+        "tirx": 92.3262011200381
       },
       "aggregated": {
         "rounds": 5,
@@ -961,9 +961,9 @@
       "config": "fp16_1024x1024x1024",
       "label": "fp16_1024x1024x1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 11.015370931500158
+        "tirx": 6.742755572188528
       },
       "aggregated": {
         "rounds": 5,
@@ -975,9 +975,9 @@
       "config": "fp16_16384x16384x16384",
       "label": "fp16_16384x16384x16384",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 6830.046198856622
+        "tirx": 5811.492873856209
       },
       "aggregated": {
         "rounds": 5,
@@ -989,9 +989,9 @@
       "config": "fp16_q16_k16_v16_s4096+4096_init_f16_i64",
       "label": "fp16_q16_k16_v16_s4096+4096_init_f16_i64",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 123.73021700348232
+        "tirx": 119.39543475237134
       },
       "aggregated": {
         "rounds": 5,
@@ -1003,9 +1003,9 @@
       "config": "fp16_q16_k16_v64_s192+64_initfinal_f16_i64",
       "label": "fp16_q16_k16_v64_s192+64_initfinal_f16_i64",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 87.04929468067796
+        "tirx": 82.84976524710507
       },
       "aggregated": {
         "rounds": 5,
@@ -1017,9 +1017,9 @@
       "config": "fp16_q1_k1_v1_s2048_none_i32",
       "label": "fp16_q1_k1_v1_s2048_none_i32",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 57.258376475872325
+        "tirx": 55.11985246681963
       },
       "aggregated": {
         "rounds": 5,
@@ -1031,9 +1031,9 @@
       "config": "t1_b1_h2_hv4_tv16",
       "label": "t1_b1_h2_hv4_tv16",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 7.532333055818796
+        "tirx": 2.9442449660602557
       },
       "aggregated": {
         "rounds": 5,
@@ -1045,9 +1045,9 @@
       "config": "t4_b8_h4_hv8_tv16",
       "label": "t4_b8_h4_hv8_tv16",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.281107957148793
+        "tirx": 6.562670072836388
       },
       "aggregated": {
         "rounds": 5,
@@ -1059,9 +1059,9 @@
       "config": "t8_b4_h8_hv16_tv16",
       "label": "t8_b4_h8_hv16_tv16",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 14.357300188952639
+        "tirx": 10.468938778474516
       },
       "aggregated": {
         "rounds": 5,
@@ -1073,9 +1073,9 @@
       "config": "t2_b4_h16_hv32_tv32",
       "label": "t2_b4_h16_hv32_tv32",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.2422478868403
+        "tirx": 6.326944614065842
       },
       "aggregated": {
         "rounds": 5,
@@ -1087,9 +1087,9 @@
       "config": "t4_b64_h8_hv16_tv128",
       "label": "t4_b64_h8_hv16_tv128",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 38.035846877089114
+        "tirx": 34.030662733955985
       },
       "aggregated": {
         "rounds": 5,
@@ -1101,9 +1101,9 @@
       "config": "t8_b512_h16_hv32_tv128",
       "label": "t8_b512_h16_hv32_tv128",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 891.7668495013447
+        "tirx": 858.6385002661752
       },
       "aggregated": {
         "rounds": 5,
@@ -1115,9 +1115,9 @@
       "config": "b128_h8_hv16_tv128",
       "label": "b128_h8_hv16_tv128",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 28.88914795647445
+        "tirx": 24.80495679762998
       },
       "aggregated": {
         "rounds": 5,
@@ -1129,9 +1129,9 @@
       "config": "b16_h16_hv32_tv64",
       "label": "b16_h16_hv32_tv64",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 12.459390570881459
+        "tirx": 8.80879456675884
       },
       "aggregated": {
         "rounds": 5,
@@ -1143,9 +1143,9 @@
       "config": "b512_h4_hv8_tv128",
       "label": "b512_h4_hv8_tv128",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 50.49345023481604
+        "tirx": 46.11533793913152
       },
       "aggregated": {
         "rounds": 5,
@@ -1157,9 +1157,9 @@
       "config": "t2_b4_h16_hv64_tv16_ilp2_sv0",
       "label": "t2_b4_h16_hv64_tv16_ilp2_sv0",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 18.66376514407411
+        "tirx": 14.683634103343298
       },
       "aggregated": {
         "rounds": 5,
@@ -1171,9 +1171,9 @@
       "config": "t4_b64_h8_hv32_tv64_ilp4_sv1",
       "label": "t4_b64_h8_hv32_tv64_ilp4_sv1",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 146.75123984837055
+        "tirx": 142.57497854509418
       },
       "aggregated": {
         "rounds": 5,
@@ -1185,9 +1185,9 @@
       "config": "t8_b256_h16_hv64_tv64_ilp4_sv1",
       "label": "t8_b256_h16_hv64_tv64_ilp4_sv1",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1811.6203942869463
+        "tirx": 1775.8249505723904
       },
       "aggregated": {
         "rounds": 5,
@@ -1199,9 +1199,9 @@
       "config": "hq16_hv64_s1x8192",
       "label": "hq16_hv64_s1x8192",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 244.38802506251173
+        "tirx": 240.20701188234654
       },
       "aggregated": {
         "rounds": 5,
@@ -1213,9 +1213,9 @@
       "config": "hq32_hv32_s8192x16",
       "label": "hq32_hv32_s8192x16",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1157.8114776331067
+        "tirx": 1087.3939352566756
       },
       "aggregated": {
         "rounds": 5,
@@ -1227,9 +1227,9 @@
       "config": "hq8_hv32_s1024x8",
       "label": "hq8_hv32_s1024x8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 96.75077555060788
+        "tirx": 90.86260088406702
       },
       "aggregated": {
         "rounds": 5,
@@ -1241,9 +1241,9 @@
       "config": "fp16_128x4_m128_k1024",
       "label": "fp16_128x4_m128_k1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 7.403876255260209
+        "tirx": 2.952087532031616
       },
       "aggregated": {
         "rounds": 5,
@@ -1255,9 +1255,9 @@
       "config": "fp16_128x4_m16384_k7168",
       "label": "fp16_128x4_m16384_k7168",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 57.08884435185115
+        "tirx": 52.46372649324661
       },
       "aggregated": {
         "rounds": 5,
@@ -1269,9 +1269,9 @@
       "config": "fp16_linear_m4096_k4096",
       "label": "fp16_linear_m4096_k4096",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 14.373922933291215
+        "tirx": 10.375255207360915
       },
       "aggregated": {
         "rounds": 5,
@@ -1283,9 +1283,9 @@
       "config": "fp16_128x4_m128_k1024",
       "label": "fp16_128x4_m128_k1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 6.208599748656266
+        "tirx": 2.5601573975947036
       },
       "aggregated": {
         "rounds": 5,
@@ -1297,9 +1297,9 @@
       "config": "fp16_128x4_m16384_k7168",
       "label": "fp16_128x4_m16384_k7168",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 64.77927898025936
+        "tirx": 60.74615106591859
       },
       "aggregated": {
         "rounds": 5,
@@ -1311,9 +1311,9 @@
       "config": "fp16_linear_m4096_k4096",
       "label": "fp16_linear_m4096_k4096",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 15.925012099479108
+        "tirx": 11.396136030611688
       },
       "aggregated": {
         "rounds": 5,
@@ -1325,9 +1325,9 @@
       "config": "1024x1024x1024",
       "label": "1024x1024x1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.225301927964653
+        "tirx": 5.4476734206181545
       },
       "aggregated": {
         "rounds": 5,
@@ -1339,9 +1339,9 @@
       "config": "16384x16384x16384",
       "label": "16384x16384x16384",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1607.3575539485068
+        "tirx": 1465.8599656862746
       },
       "aggregated": {
         "rounds": 5,
@@ -1353,9 +1353,9 @@
       "config": "4096x4096x4096",
       "label": "4096x4096x4096",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 34.01544721358646
+        "tirx": 29.499432133585692
       },
       "aggregated": {
         "rounds": 5,
@@ -1367,9 +1367,9 @@
       "config": "fp16_128x4_m128_k1024",
       "label": "fp16_128x4_m128_k1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 6.216553675264615
+        "tirx": 2.389802655235146
       },
       "aggregated": {
         "rounds": 5,
@@ -1381,9 +1381,9 @@
       "config": "fp16_128x4_m16384_k7168",
       "label": "fp16_128x4_m16384_k7168",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 59.725160482359065
+        "tirx": 54.99471661502917
       },
       "aggregated": {
         "rounds": 5,
@@ -1395,9 +1395,9 @@
       "config": "fp16_linear_m4096_k4096",
       "label": "fp16_linear_m4096_k4096",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 14.432651416579697
+        "tirx": 10.266282695766304
       },
       "aggregated": {
         "rounds": 5,
@@ -1409,9 +1409,9 @@
       "config": "fp16_128x4_m128_k1024",
       "label": "fp16_128x4_m128_k1024",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 6.493875175766918
+        "tirx": 2.774643461886424
       },
       "aggregated": {
         "rounds": 5,
@@ -1423,9 +1423,9 @@
       "config": "fp16_128x4_m16384_k7168",
       "label": "fp16_128x4_m16384_k7168",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 61.5182805786866
+        "tirx": 57.6667959427783
       },
       "aggregated": {
         "rounds": 5,
@@ -1437,9 +1437,9 @@
       "config": "fp16_linear_m4096_k4096",
       "label": "fp16_linear_m4096_k4096",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 16.414215871333276
+        "tirx": 12.026434683982973
       },
       "aggregated": {
         "rounds": 5,
@@ -1451,9 +1451,9 @@
       "config": "dec_hv16_b1",
       "label": "dec_hv16_b1",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 8.004692898990381
+        "tirx": 3.3446695645532967
       },
       "aggregated": {
         "rounds": 5,
@@ -1465,9 +1465,9 @@
       "config": "ver_t8_hv12_b16",
       "label": "ver_t8_hv12_b16",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 26.73507018074674
+        "tirx": 22.00831325148105
       },
       "aggregated": {
         "rounds": 5,
@@ -1479,9 +1479,9 @@
       "config": "ver_t8_hv16_b128",
       "label": "ver_t8_hv16_b128",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 165.69375129432652
+        "tirx": 161.72641297808357
       },
       "aggregated": {
         "rounds": 5,
@@ -1493,9 +1493,9 @@
       "config": "hv12_b64_tr16_lb",
       "label": "hv12_b64_tr16_lb",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 16.46253538598123
+        "tirx": 12.802464855580695
       },
       "aggregated": {
         "rounds": 5,
@@ -1507,9 +1507,9 @@
       "config": "hv16_b128_tr16_lb",
       "label": "hv16_b128_tr16_lb",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 30.732791956276056
+        "tirx": 26.672874706498014
       },
       "aggregated": {
         "rounds": 5,
@@ -1521,9 +1521,9 @@
       "config": "hv16_b8_tr8_lb",
       "label": "hv16_b8_tr8_lb",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 10.225695034693107
+        "tirx": 5.2856616400183
       },
       "aggregated": {
         "rounds": 5,
@@ -1535,9 +1535,9 @@
       "config": "b1_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b1_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 11.256760943030482
+        "tirx": 6.9387761423835865
       },
       "aggregated": {
         "rounds": 5,
@@ -1549,9 +1549,9 @@
       "config": "b2048_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b2048_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1385.8200510392278
+        "tirx": 1388.8938760662527
       },
       "aggregated": {
         "rounds": 5,
@@ -1563,9 +1563,9 @@
       "config": "b512_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b512_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 355.892457388321
+        "tirx": 352.3265210101165
       },
       "aggregated": {
         "rounds": 5,
@@ -1577,9 +1577,9 @@
       "config": "b1_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b1_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 8.245645954368864
+        "tirx": 4.388171012332256
       },
       "aggregated": {
         "rounds": 5,
@@ -1591,9 +1591,9 @@
       "config": "b2048_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b2048_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1521.0322657866138
+        "tirx": 1519.0504208333332
       },
       "aggregated": {
         "rounds": 5,
@@ -1605,9 +1605,9 @@
       "config": "b512_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b512_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 388.37269808775903
+        "tirx": 385.28278867532356
       },
       "aggregated": {
         "rounds": 5,
@@ -1619,9 +1619,9 @@
       "config": "b1_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b1_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 21.878697639623713
+        "tirx": 17.386018586194798
       },
       "aggregated": {
         "rounds": 5,
@@ -1633,9 +1633,9 @@
       "config": "b2048_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b2048_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 2819.403237134469
+        "tirx": 2824.6168445378153
       },
       "aggregated": {
         "rounds": 5,
@@ -1647,9 +1647,9 @@
       "config": "b512_h64_d64_s128_t6_r8_statebf16_official",
       "label": "b512_h64_d64_s128_t6_r8_statebf16_official",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 714.4234388291043
+        "tirx": 713.3218971658167
       },
       "aggregated": {
         "rounds": 5,
@@ -1661,9 +1661,9 @@
       "config": "b64_h64_d128_s128_r8",
       "label": "b64_h64_d128_s128_r8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 52.38623631188803
+        "tirx": 48.68301592839619
       },
       "aggregated": {
         "rounds": 5,
@@ -1675,9 +1675,9 @@
       "config": "b64_h64_d64_s128_r8_base",
       "label": "b64_h64_d64_s128_r8_base",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 31.26699510282636
+        "tirx": 28.139162236538535
       },
       "aggregated": {
         "rounds": 5,
@@ -1689,9 +1689,9 @@
       "config": "b64_h64_d64_s256_r8",
       "label": "b64_h64_d64_s256_r8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 51.25905528924501
+        "tirx": 46.89174700608261
       },
       "aggregated": {
         "rounds": 5,
@@ -1703,9 +1703,9 @@
       "config": "b64_h64_d128_s128_r8",
       "label": "b64_h64_d128_s128_r8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 69.61584837883132
+        "tirx": 65.82148905092306
       },
       "aggregated": {
         "rounds": 5,
@@ -1717,9 +1717,9 @@
       "config": "b64_h64_d64_s128_r8_base",
       "label": "b64_h64_d64_s128_r8_base",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 41.15769058353043
+        "tirx": 37.37384625949264
       },
       "aggregated": {
         "rounds": 5,
@@ -1731,9 +1731,9 @@
       "config": "b64_h64_d64_s256_r8",
       "label": "b64_h64_d64_s256_r8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 57.89248441132557
+        "tirx": 54.11833019704697
       },
       "aggregated": {
         "rounds": 5,
@@ -1745,9 +1745,9 @@
       "config": "b64_h64_d128_s128_r8",
       "label": "b64_h64_d128_s128_r8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 51.38400558716764
+        "tirx": 47.31608321449531
       },
       "aggregated": {
         "rounds": 5,
@@ -1759,9 +1759,9 @@
       "config": "b64_h64_d64_s128_r8_base",
       "label": "b64_h64_d64_s128_r8_base",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 31.98826559802192
+        "tirx": 27.66994321679787
       },
       "aggregated": {
         "rounds": 5,
@@ -1773,9 +1773,9 @@
       "config": "b64_h64_d64_s256_r8",
       "label": "b64_h64_d64_s256_r8",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 50.532520492559584
+        "tirx": 46.100567138449456
       },
       "aggregated": {
         "rounds": 5,
@@ -1787,9 +1787,9 @@
       "config": "bf16_b8_m512_k2048",
       "label": "bf16_b8_m512_k2048",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 13.10226728351975
+        "tirx": 8.871649872361793
       },
       "aggregated": {
         "rounds": 5,
@@ -1801,9 +1801,9 @@
       "config": "fp16_b128_m2048_k2048",
       "label": "fp16_b128_m2048_k2048",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 278.8652040826726
+        "tirx": 275.2879496014064
       },
       "aggregated": {
         "rounds": 5,
@@ -1815,9 +1815,9 @@
       "config": "fp16_b8_m16_k2048",
       "label": "fp16_b8_m16_k2048",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 8.163204207551827
+        "tirx": 3.380426074415005
       },
       "aggregated": {
         "rounds": 5,
@@ -1831,7 +1831,7 @@
       "status": "ok",
       "timer": "kineto",
       "impls": {
-        "tirx": 1297.8718999999974
+        "tirx": 1298.9994
       },
       "aggregated": {
         "rounds": 5,
@@ -1845,7 +1845,7 @@
       "status": "ok",
       "timer": "kineto",
       "impls": {
-        "tirx": 3388.0190999999913
+        "tirx": 3375.899699999997
       },
       "aggregated": {
         "rounds": 5,
@@ -1859,7 +1859,7 @@
       "status": "ok",
       "timer": "kineto",
       "impls": {
-        "tirx": 3848.197900000003
+        "tirx": 3765.0908999999983
       },
       "aggregated": {
         "rounds": 5,
@@ -1871,9 +1871,9 @@
       "config": "deepseek_v4_v32_b128_sq2_sk32768_topk2048_p64",
       "label": "deepseek_v4_v32_b128_sq2_sk32768_topk2048_p64",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 140.8051041083622
+        "tirx": 137.94849340036393
       },
       "aggregated": {
         "rounds": 5,
@@ -1885,9 +1885,9 @@
       "config": "model1_b2_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64",
       "label": "model1_b2_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 34.82230744802323
+        "tirx": 16.744340262892525
       },
       "aggregated": {
         "rounds": 5,
@@ -1899,9 +1899,9 @@
       "config": "v32_b148_sq2_sk32768_topk16384_p64",
       "label": "v32_b148_sq2_sk32768_topk16384_p64",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 975.5750887720573
+        "tirx": 910.8161948791184
       },
       "aggregated": {
         "rounds": 5,
@@ -1913,9 +1913,9 @@
       "config": "bench_regular_dqk512_hq128_s4096_kv65536_topk2048",
       "label": "bench_regular_dqk512_hq128_s4096_kv65536_topk2048",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1993.304823488653
+        "tirx": 1878.057738888889
       },
       "aggregated": {
         "rounds": 5,
@@ -1927,9 +1927,9 @@
       "config": "bench_regular_dqk512_hq128_s4096_kv8192_topk2048",
       "label": "bench_regular_dqk512_hq128_s4096_kv8192_topk2048",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1843.9232162443598
+        "tirx": 1704.5194662962963
       },
       "aggregated": {
         "rounds": 5,
@@ -1941,9 +1941,9 @@
       "config": "bench_regular_dqk576_hq128_s4096_kv32768_topk2048",
       "label": "bench_regular_dqk576_hq128_s4096_kv32768_topk2048",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1939.4790582406208
+        "tirx": 1828.7784316883117
       },
       "aggregated": {
         "rounds": 5,
@@ -1955,9 +1955,9 @@
       "config": "bench_smalltopk_dqk512_hq128_s4096_kv32768_topk1280",
       "label": "bench_smalltopk_dqk512_hq128_s4096_kv32768_topk1280",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1215.0993933277168
+        "tirx": 1145.927834090909
       },
       "aggregated": {
         "rounds": 5,
@@ -1969,9 +1969,9 @@
       "config": "bench_smalltopk_dqk512_hq128_s4096_kv65536_topk1280",
       "label": "bench_smalltopk_dqk512_hq128_s4096_kv65536_topk1280",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1256.565434709873
+        "tirx": 1186.1721455578092
       },
       "aggregated": {
         "rounds": 5,
@@ -1983,9 +1983,9 @@
       "config": "bench_smalltopk_dqk512_hq128_s4096_kv8192_topk1280",
       "label": "bench_smalltopk_dqk512_hq128_s4096_kv8192_topk1280",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 1217.3677406646984
+        "tirx": 1143.6162099288642
       },
       "aggregated": {
         "rounds": 5,
@@ -1997,9 +1997,9 @@
       "config": "bench_dqk512_hq64_s4096_kv65536_topk512",
       "label": "bench_dqk512_hq64_s4096_kv65536_topk512",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 395.1228616033054
+        "tirx": 378.8519136844696
       },
       "aggregated": {
         "rounds": 5,
@@ -2011,9 +2011,9 @@
       "config": "bench_dqk512_hq64_s4096_kv8192_topk512",
       "label": "bench_dqk512_hq64_s4096_kv8192_topk512",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 372.8654293361958
+        "tirx": 367.177221905928
       },
       "aggregated": {
         "rounds": 5,
@@ -2025,9 +2025,9 @@
       "config": "bench_dqk576_hq64_s4096_kv32768_topk512",
       "label": "bench_dqk576_hq64_s4096_kv32768_topk512",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 395.35122017757664
+        "tirx": 388.91570913793106
       },
       "aggregated": {
         "rounds": 5,
@@ -2039,9 +2039,9 @@
       "config": "b16_o2880_k2880",
       "label": "b16_o2880_k2880",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 12.325851912083762
+        "tirx": 7.956361625667702
       },
       "aggregated": {
         "rounds": 5,
@@ -2053,9 +2053,9 @@
       "config": "b1_o128_k720",
       "label": "b1_o128_k720",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 6.212367473971081
+        "tirx": 2.970221368905431
       },
       "aggregated": {
         "rounds": 5,
@@ -2067,9 +2067,9 @@
       "config": "b64_o4096_k3072",
       "label": "b64_o4096_k3072",
       "status": "ok",
-      "timer": "event",
+      "timer": "proton",
       "impls": {
-        "tirx": 26.03376597123181
+        "tirx": 22.216328661037576
       },
       "aggregated": {
         "rounds": 5,

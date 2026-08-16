@@ -757,7 +757,7 @@ def run_test(hidden_size, batch_size, **kwargs):
     torch.testing.assert_close(output_tir.cpu(), ref.cpu(), rtol=0.001, atol=0.001)
 
 
-# timer=None inherits the local event-timer default.
+# timer=None inherits the canonical local timer default.
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Allocate, validate, and measure after GPU assignment."""
     return _run_gpu(

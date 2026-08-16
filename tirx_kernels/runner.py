@@ -29,7 +29,6 @@ from tirx_kernels.low_level_ir import check_low_level_ir
 
 DEFAULT_BENCH_ROUNDS = 5
 DEFAULT_BENCH_COOLDOWN_S = 0.0
-DEFAULT_LOCAL_BENCH_TIMER = "event"
 PREPARE_NUM_SMS_ENV = "TIRX_PREPARE_NUM_SMS"
 PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
 TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
@@ -369,8 +368,6 @@ def bench(*args: Any, references: Mapping[str, Any] | None = None, **kwargs: Any
 
             checked_references[name] = checked_builder
 
-    if kwargs.get("timer") is None and kwargs.get("distributed") is None:
-        kwargs["timer"] = DEFAULT_LOCAL_BENCH_TIMER
     result = canonical_bench(*args, references=checked_references, **kwargs)
     if _CUDA_ASSIGNMENT is not None:
         validate_current_cuda_assignment("after benchmark timing", restore=True)

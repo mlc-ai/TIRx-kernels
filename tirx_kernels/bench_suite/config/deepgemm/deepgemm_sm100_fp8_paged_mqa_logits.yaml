@@ -1,5 +1,25 @@
 kernel: deepgemm_sm100_fp8_paged_mqa_logits
+defaults:
+  timer: proton
 configs:
+- config: b1_n1_mp4_ps64_h64_d128_f32_fixed
+  default: false
+- config: b2_n1_mp4_ps64_h64_d128_bf16_fixed
+  default: false
+- config: b2_n3_mp4_ps64_h64_d128_f32_fixed
+  default: false
+- config: b1_n1_mp2_ps64_h32_d128_f32_fixed_sgfixed
+  default: false
+- config: b2_n2_mp16_ps64_h32_d128_f32_fixed_sgfixed
+  default: false
+- config: b4_n3_mp64_ps64_h64_d128_f32_fixed_sgragged
+  default: false
+- config: b2_n4_mp64_ps64_h32_d128_f32_fixed_sgfixed
+  default: false
+- config: b1_n5_mp16_ps64_h64_d128_f32_fixed_sgfixed
+  default: false
+- config: b2_n6_mp64_ps64_h32_d128_f32_fixed_sgragged
+  default: false
 - config: b1_n1_mp1_ps64_h64_d128_f32_fixed
   default: true
 - config: b1_n1_mp8_ps64_h64_d128_f32_fixed

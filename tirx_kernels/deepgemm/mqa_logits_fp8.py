@@ -1117,7 +1117,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
 
     warmup = kwargs.pop("warmup", None)
     repeat = kwargs.pop("repeat", None)
-    timer = kwargs.pop("timer", None)  # None inherits the local event-timer default.
+    timer = kwargs.pop("timer", None)  # None inherits the canonical local timer default.
     _rounds = kwargs.pop("rounds", 1)
     _cooldown_s = kwargs.pop("cooldown_s", 1.0)
     config_kwargs = dict(kwargs)

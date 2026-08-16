@@ -1048,7 +1048,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     from tirx_kernels.runner import bench
 
     kwargs = {**prepared["config"], **kwargs}
-    timer = kwargs.pop("timer", None)  # None inherits the local event-timer default.
+    timer = kwargs.pop("timer", None)  # None inherits the canonical local timer default.
     warmup = kwargs.pop("warmup", None)
     repeat = kwargs.pop("repeat", None)
     _rounds = kwargs.pop("rounds", 1)
