@@ -16,7 +16,7 @@ from unittest import SkipTest
 
 
 def _get_bench_configs(mod):
-    return getattr(mod, "BENCH_CONFIGS", getattr(mod, "CONFIGS", []))
+    return mod.BENCH_CONFIGS
 
 
 def _find_bench_config(mod, label: str) -> dict:
@@ -374,12 +374,17 @@ def main():
     parser.add_argument(
         "--timer",
         type=str,
-        choices=("event", "proton", "cudagraph_proton", "kineto", "megamoe"),
+        choices=("event", "proton", "cudagraph_proton", "kineto"),
         default=None,
         help="Override the kernel module's benchmark timer: 'event' = do_bench, "
         "'proton' = do_bench_proton, 'cudagraph_proton' = "
         "do_bench_cudagraph_proton [NVIDIA], 'kineto' = distributed full GPU "
-        "activity span, 'megamoe' = DeepGEMM bench_kineto protocol for MegaMoE",
+        "activity span",
+    )
+    parser.add_argument(
+        "--with-references",
+        action="store_true",
+        help="Explicitly import and time external reference implementations (off by default)",
     )
     parser.add_argument(
         "--rounds",
@@ -402,6 +407,10 @@ def main():
 
     if args.json or args.json_file:
         os.environ["TIRX_BENCH_JSON"] = "1"
+
+    from tirx_kernels.runner import set_external_references_enabled
+
+    set_external_references_enabled(args.with_references)
 
     if args.prepared_control_fd is not None:
         sys.exit(_prepared_child_main(args, child_started=child_started))
@@ -437,8 +446,7 @@ def main():
     else:
         all_kernels = discover_kernels(min_compute_capability=args.cc)
 
-    # Each kernel's run_bench() manages its own Proton session via bench(timer=...).
-    # No global proton session needed.
+    # Each kernel's run_bench() owns its selected timing method.
     results = []
 
     for name, mod in sorted(all_kernels.items()):

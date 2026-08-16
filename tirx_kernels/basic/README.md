@@ -63,37 +63,24 @@ GEMM+ReduceScatter correctness checks every rank's full partial GEMM and local
 ReduceScatter output for 20 consecutive reset/relaunch cycles, including queue
 tails, task consumption, semaphore counts, and NaN tile coverage.
 
-The headline benchmark uses cold-cache Kineto full spans: 5 warmups and 30
-measured launches per implementation and round, with DeepGEMM's 8 GB L2 flush,
-GPU sleep, and rank barrier before every launch. Mutable state is reset before
-the profiler scope. Each sample spans the earliest through latest correlated
-CUDA activity across all streams, is reduced by the slowest rank, and contributes
-to the round median; multiple rounds use their arithmetic mean. The cuBLAS+NCCL
-reference initializes both libraries and captures the complete GEMM-plus-
-collective sequence before timing; its measured closure is one CUDA Graph replay.
-TIRx and cuBLASMp retain their direct launch closures. All headline values use
-the same Kineto full-span protocol, so ratios never mix timers.
+The benchmark defaults to timing only the TIRx candidate with the distributed
+Kineto full-span protocol. Mutable state is reset before each measured launch;
+each sample spans the earliest through latest correlated CUDA activity across
+all streams and is reduced by the slowest rank. Multiple rounds use their
+arithmetic mean. The bench CLI and bench-suite can explicitly enable the lazy
+cuBLAS/cuBLASMp peers with `--with-references`.
 
-cuBLASMp 0.10 requires nvmath-python, NCCL4Py, and a compatible recent NCCL.
-Every benchmark requires absolute paths for all four runtime dependencies so a
-loader-path change cannot silently alter the comparison:
+Distributed benchmarks require absolute paths for the two communication
+libraries used by the candidate ranks:
 
 ```bash
 export TIRX_NCCL_LIBRARY=/path/to/libnccl.so.2
-export TIRX_CUBLAS_LIBRARY=/path/to/libcublas.so
-export TIRX_CUBLASMP_LIBRARY=/path/to/libcublasmp.so.0
 export TIRX_NVSHMEM_LIBRARY=/path/to/libnvshmem_host.so
-export PYTHONPATH=/path/to/nvmath-python:/path/to/cublasmp-package:$PYTHONPATH
 ```
 
-The selected files are preloaded only in newly spawned rank workers. Each
-result records the actual shared object resolving the NCCL, cuBLAS, cuBLASMp,
-and NVSHMEM API symbol together with its runtime version, and fails if any
-loaded file differs from its configured lock. cuBLASMp builder failures remain
-visible in `errors`, which bench-suite treats as a failed workload.
-
-The result's `ratios` mapping is always `baseline_us / tirx_us`; values greater
-than one mean TIRx is faster.
+The selected files are preloaded only in newly spawned rank workers. In the
+default mode, cuBLAS, cuBLASMp, and other reference implementations are not
+imported or launched.
 
 For a B200 host, select any registered config explicitly when needed:
 

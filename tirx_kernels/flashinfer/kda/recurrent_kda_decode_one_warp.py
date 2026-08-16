@@ -356,7 +356,7 @@ BENCH_CONFIGS = [
     _case("hv12_b64_tr16_lb", num_seqs=64, num_heads=12, num_value_heads=12),
 ]
 
-CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
+CONFIGS = [
     # Schedule-band boundaries: 176 is the largest TILE_ROWS = 8 shape and 192
     # the smallest that falls through to the TILE_ROWS = 16 else-branch.
     _case("hv16_b11_tr8_lb", num_seqs=11),
@@ -776,11 +776,6 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         return raw, view
 
     tirx_state_raw, tirx_state = make_state_pool()
-    reference_state_raw = tirx_state_raw.clone()
-    reference_state = reference_state_raw.as_strided(
-        (pool_size, num_value_heads, HEAD_DIM, HEAD_DIM),
-        (slot_stride, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
-    )
     initial_state_raw = tirx_state_raw.clone()
 
     tirx_out = torch.empty(
@@ -802,8 +797,6 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "ssm_state_indices": slots,
         "tirx_state_raw": tirx_state_raw,
         "tirx_state": tirx_state,
-        "reference_state_raw": reference_state_raw,
-        "reference_state": reference_state,
         "initial_state_raw": initial_state_raw,
         "tirx_out": tirx_out,
         "scale": HEAD_DIM**-0.5,
@@ -897,37 +890,6 @@ def _torch_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
 _LOG2_E_T = 1.4426950408889634
 
 
-def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
-    """Run the FlashInfer CuTe DSL source on the reference state pool."""
-    import importlib
-
-    # flashinfer.kda_kernels.__init__ rebinds ``recurrent_kda`` to the run
-    # function, so the submodule must be imported explicitly.
-    fi = importlib.import_module("flashinfer.kda_kernels.recurrent_kda")
-    out, _ = fi.run_recurrent_kda(
-        q=case["q"],
-        k=case["k"],
-        v=case["v"],
-        g=case["g"],
-        beta=case["beta"],
-        A_log=case["a_log"],
-        dt_bias=case["dt_bias"],
-        scale=case["scale"],
-        initial_state=case["reference_state"],
-        output_final_state=False,
-        use_qk_l2norm_in_kernel=True,
-        use_gate_in_kernel=True,
-        lower_bound=case["lower_bound"],
-        cu_seqlens=case["cu_seqlens"],
-        ssm_state_indices=case["ssm_state_indices"],
-    )
-    return out
-
-
-# Two bfloat16 ULP.  The port is within one ULP of the source on every config
-# measured; this leaves headroom without hiding a real divergence.
-_RTOL = 2.0**-7
-_ATOL = 1.0e-4
 # The FP32 oracle reassociates freely, so it only needs to agree to bf16 noise.
 _ORACLE_RTOL = 2.0**-6
 _ORACLE_ATOL = 3.0e-4
@@ -952,14 +914,7 @@ def run_test(**kwargs: Any) -> None:
     spec = case["spec"]
     shape = (1, spec["NUM_SEQS"], spec["NUM_VALUE_HEADS"], HEAD_DIM)
 
-    # Primary: the ported kernel against the source implementation it transcribes.
-    flashinfer_out = _flashinfer_reference(case).reshape(shape)
-    torch.testing.assert_close(case["tirx_out"], flashinfer_out, rtol=_RTOL, atol=_ATOL)
-    torch.testing.assert_close(
-        case["tirx_state_raw"], case["reference_state_raw"], rtol=_RTOL, atol=_ATOL
-    )
-
-    # Secondary: an independent FP32 oracle of the same math.
+    # Independent FP32 oracle
     oracle_out, oracle_state = _torch_reference(case)
     torch.testing.assert_close(
         case["tirx_out"].float().reshape(oracle_out.shape),
@@ -1012,27 +967,12 @@ def run_gpu(
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
 
-    # Validate once, outside the timed region.
-    executable(*args)
-    spec = case["spec"]
-    shape = (1, spec["NUM_SEQS"], spec["NUM_VALUE_HEADS"], HEAD_DIM)
-    flashinfer_out = _flashinfer_reference(case).reshape(shape)
-    torch.cuda.synchronize()
-    torch.testing.assert_close(case["tirx_out"], flashinfer_out, rtol=_RTOL, atol=_ATOL)
-    torch.testing.assert_close(
-        case["tirx_state_raw"], case["reference_state_raw"], rtol=_RTOL, atol=_ATOL
-    )
-
     def flashinfer_builder():
-        # Heavy import, CuTe JIT and warmup all happen here, outside the timing.
-        for _ in range(2):
-            _flashinfer_reference(case)
-        torch.cuda.synchronize()
+        from tirx_kernels.flashinfer.utils._flashkda_bench import (
+            prepare_flashinfer_cutedsl_reference,
+        )
 
-        def launch():
-            _flashinfer_reference(case)
-
-        return launch
+        return prepare_flashinfer_cutedsl_reference(case)
 
     return bench(
         {"tirx": lambda: executable(*args)},

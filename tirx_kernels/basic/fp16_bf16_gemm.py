@@ -663,10 +663,14 @@ def tir_kernel(dtype: str, M: int, N: int, K: int):
 
 
 KERNEL_META = {"name": "fp16_bf16_gemm", "category": "basic", "compute_capability": 10}
-CONFIGS = [
+BENCH_CONFIGS = [
     {"dtype": d, "M": s, "N": s, "K": s, "label": f"{d}_{s}x{s}x{s}"}
     for d in ["fp16", "bf16"]
     for s in [1024, 2048, 4096, 8192, 16384]
+]
+CONFIGS = [
+    {"dtype": dtype, "M": 1024, "N": 1024, "K": 1024, "label": f"{dtype}_correctness_1024"}
+    for dtype in ("fp16", "bf16")
 ]
 
 
@@ -701,36 +705,41 @@ class PreparedBench:
 
 
 def run_gpu(prepared: PreparedBench, *, warmup=None, repeat=None, timer=None, **kwargs):
-    """Allocate inputs/references and run the unchanged GPU timing protocol."""
+    """Allocate inputs and time TIRx plus explicitly enabled references."""
     A, B, C = prepare_data(prepared.dtype, prepared.M, prepared.N, prepared.K)
     C_tir = torch.zeros_like(C, device="cuda")
 
-    funcs = {"tir": lambda: prepared.executable(A, B, C_tir)}
+    def build_torch_cublas():
+        output = torch.zeros_like(C, device="cuda")
+        return lambda: torch.matmul(A, B.T, out=output)
 
-    def _torch_cublas():
-        C_out = torch.zeros_like(C, device="cuda")
-        return lambda: torch.matmul(A, B.T, out=C_out)
-
-    references = {"torch-cublas": _torch_cublas}
+    references = {"torch-cublas": build_torch_cublas}
     if prepared.dtype == "bf16":
 
-        def _deepgemm_cublaslt():
+        def build_deepgemm_cublaslt():
             import deep_gemm
 
-            C_out = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
-            return lambda: deep_gemm.cublaslt_gemm_nt(A, B, C_out, None)
+            output = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
+            return lambda: deep_gemm.cublaslt_gemm_nt(A, B, output, None)
 
-        def _deepgemm_bf16():
+        def build_deepgemm_bf16():
             import deep_gemm
 
-            C_out = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
-            return lambda: deep_gemm.bf16_gemm_nt(A, B, C_out)
+            output = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
+            return lambda: deep_gemm.bf16_gemm_nt(A, B, output)
 
         references.update(
-            {"deepgemm-cublaslt": _deepgemm_cublaslt, "deepgemm-bf16": _deepgemm_bf16}
+            {"deepgemm-cublaslt": build_deepgemm_cublaslt, "deepgemm-bf16": build_deepgemm_bf16}
         )
 
-    return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)
+    return bench(
+        {"tirx": lambda: prepared.executable(A, B, C_tir)},
+        references=references,
+        warmup=warmup,
+        repeat=repeat,
+        timer=timer,
+        **kwargs,
+    )
 
 
 def prepare_bench(dtype, M, N, K, **kwargs):

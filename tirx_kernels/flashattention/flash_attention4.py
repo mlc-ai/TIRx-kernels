@@ -1611,7 +1611,7 @@ def prepare_data(batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, 
 
 
 KERNEL_META = {"name": "flash_attention4", "category": "flashattention", "compute_capability": 10}
-CONFIGS = [
+BENCH_CONFIGS = [
     {
         "batch_size": 1,
         "seq_len": sl,
@@ -1624,6 +1624,18 @@ CONFIGS = [
     for sl in [1024, 2048, 4096, 8192]
     for kv in [4, 8, 16, 32]
     for causal in [False, True]
+]
+CONFIGS = [
+    {
+        "batch_size": 1,
+        "seq_len": 128,
+        "num_qo_heads": 32,
+        "num_kv_heads": num_kv_heads,
+        "head_dim": 128,
+        "is_causal": is_causal,
+        "label": f"correctness_s128_h32kv{num_kv_heads}{'_causal' if is_causal else ''}",
+    }
+    for num_kv_heads, is_causal in ((4, False), (32, True))
 ]
 
 
@@ -1677,16 +1689,7 @@ def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causa
     np.testing.assert_allclose(O_tir.cpu().numpy(), ref.cpu().numpy(), rtol=0.01, atol=0.01)
 
 
-def run_gpu(
-    prepared,
-    *,
-    warmup=None,
-    repeat=None,
-    timer=None,  # None inherits the global default (proton); the CuTeDSL flashattn
-    # reference cannot be CUDA-graph-captured, so proton (not cudagraph_proton) is what
-    # gives an honest ratio here (verified 0.994 vs event's unstable 0.97-1.38).
-    **kwargs,
-):
+def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark flash attention 4."""
     config = dict(prepared["config"])
     batch_size = config.pop("batch_size")
@@ -1709,43 +1712,33 @@ def run_gpu(
     O_tir = torch.empty(
         (batch_size, seq_len, num_qo_heads, head_dim), dtype=torch.float16, device="cuda"
     )
-    funcs = {"tir": lambda: ex(Q_cuda, K_cuda, V_cuda, O_tir)}
 
-    def _flashattn_sm100():
-        # Flash-Attention SM100 (CuTeDSL FA4) baseline.
-        #
-        # CUTe-DSL hard rule (discovered by experiment): every `cute_tensor_like`
-        # call must happen BEFORE `cute.compile`. Wrapping new tensors after
-        # compile poisons the host-side `cuTensorMapEncodeTiled` path (it starts
-        # failing ~hundreds of launches later anywhere in the process, including
-        # in unrelated TIR kernels). So we wrap one FA tensor set up-front, then
-        # compile exactly once using it.
+    def build_flashattn_sm100():
         import cutlass
         import cutlass.cute as cute
         import cutlass.torch as cutlass_torch
         from flash_attn.cute.flash_fwd_sm100 import FlashAttentionForwardSm100
         from flash_attn.cute.utils import AuxData
 
-        Qi, Ki, Vi, _ = prepare_data(
+        qi, ki, vi, _ = prepare_data(
             batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim
         )
-        Qf = Qi.cuda().contiguous()
-        Kf = Ki.cuda().contiguous()
-        Vf = Vi.cuda().contiguous()
-        Of = torch.zeros_like(Qf)
+        qf = qi.cuda().contiguous()
+        kf = ki.cuda().contiguous()
+        vf = vi.cuda().contiguous()
+        of = torch.zeros_like(qf)
         q_t, q_th = cutlass_torch.cute_tensor_like(
-            Qf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+            qf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
         )
         k_t, k_th = cutlass_torch.cute_tensor_like(
-            Kf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+            kf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
         )
         v_t, v_th = cutlass_torch.cute_tensor_like(
-            Vf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+            vf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
         )
         o_t, o_th = cutlass_torch.cute_tensor_like(
-            Of, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
+            of, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
         )
-
         fa_fwd = FlashAttentionForwardSm100(
             head_dim=head_dim,
             head_dim_v=head_dim,
@@ -1757,63 +1750,62 @@ def run_gpu(
             n_block_size=128,
             is_persistent=True,
         )
-        _stream_fa = cutlass_torch.default_stream()
-        _scale_fa = 1.0 / math.sqrt(head_dim)
-        compiled_fa = cute.compile(
+        stream = cutlass_torch.default_stream()
+        scale = 1.0 / math.sqrt(head_dim)
+        compiled = cute.compile(
             fa_fwd,
             q_t,
             k_t,
             v_t,
             o_t,
-            None,  # mLSE
-            _scale_fa,  # softmax_scale
-            None,  # mCuSeqlensQ
-            None,  # mCuSeqlensK
-            None,  # mSeqUsedQ
-            None,  # mSeqUsedK
-            None,  # mPageTable
-            None,  # window_size_left
-            None,  # window_size_right
-            None,  # learnable_sink
-            None,  # descale_tensors
-            None,  # blocksparse_tensors
-            AuxData(),  # aux_data (FA4 takes an AuxData, not None)
-            _stream_fa,  # stream (FA4 sm100 keeps stream as the LAST positional)
+            None,
+            scale,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            AuxData(),
+            stream,
         )
 
         def run():
-            compiled_fa(
+            compiled(
                 q_t,
                 k_t,
                 v_t,
                 o_t,
-                None,  # mLSE
-                _scale_fa,
-                None,  # mCuSeqlensQ
-                None,  # mCuSeqlensK
-                None,  # mSeqUsedQ
-                None,  # mSeqUsedK
-                None,  # mPageTable
-                None,  # window_size_left
-                None,  # window_size_right
-                None,  # learnable_sink
-                None,  # descale_tensors
-                None,  # blocksparse_tensors
-                AuxData(),  # aux_data (FA4 takes an AuxData, not None)
-                _stream_fa,  # stream (FA4 sm100 keeps stream as the LAST positional)
+                None,
+                scale,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                AuxData(),
+                stream,
             )
 
-        # Keep the backing torch storage alive for the run's lifetime
-        # (the cute tensors alias it).
-        run._fa_keep_alive = (q_th, k_th, v_th, o_th, Qf, Kf, Vf, Of)
+        # The CuTe tensors alias this storage, so retain both for the run.
+        run._fa_keep_alive = (q_th, k_th, v_th, o_th, qf, kf, vf, of)
         return run
 
     return bench(
-        funcs,
+        {"tirx": lambda: ex(Q_cuda, K_cuda, V_cuda, O_tir)},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references={"flashattn_sm100": _flashattn_sm100},
+        references={"flashattn_sm100": build_flashattn_sm100},
         **kwargs,
     )
 
@@ -1827,9 +1819,7 @@ def run_bench(
     is_causal=False,
     warmup=None,
     repeat=None,
-    timer=None,  # None inherits the global default (proton); the CuTeDSL flashattn
-    # reference cannot be CUDA-graph-captured, so proton (not cudagraph_proton) is what
-    # gives an honest ratio here (verified 0.994 vs event's unstable 0.97-1.38).
+    timer=None,
     **kwargs,
 ):
     config = dict(kwargs)

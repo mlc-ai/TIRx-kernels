@@ -86,6 +86,8 @@ PORT_BUCKETS = {
     ),
 }
 
+PORT_FILES = {"tirx_kernels/_torch_quant.py": PORT_BUCKETS["tirx_kernels/deepgemm/"]}
+
 # Files whose terms differ from their bucket, with header text the upstream
 # license requires to stay in the file verbatim (BSD-3 clause 1: the copyright
 # notice, the conditions list and the disclaimer travel with the source).
@@ -143,6 +145,8 @@ def header_of(text: str) -> str:
 
 
 def bucket_of(rel: str):
+    if rel in PORT_FILES:
+        return PORT_FILES[rel]
     if rel in PORT_DIR_EXCEPTIONS or rel.endswith("__init__.py"):
         return None
     for prefix, expect in PORT_BUCKETS.items():
@@ -312,9 +316,22 @@ def self_test() -> int:
 
 def tracked_python_files() -> list[str]:
     out = subprocess.run(
-        ["git", "-C", str(REPO), "ls-files", "*.py"], capture_output=True, text=True, check=True
+        [
+            "git",
+            "-C",
+            str(REPO),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "*.py",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.split()
-    return out
+    return [rel for rel in out if (REPO / rel).is_file()]
 
 
 def main() -> int:

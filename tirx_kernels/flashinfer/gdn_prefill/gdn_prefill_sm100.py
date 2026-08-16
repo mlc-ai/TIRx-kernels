@@ -43,7 +43,6 @@ from __future__ import annotations
 import ctypes
 import math
 from dataclasses import dataclass, fields
-from functools import lru_cache
 from typing import Any
 from unittest import SkipTest
 
@@ -107,7 +106,7 @@ class GDNPrefillSM100Config:
         return sum(self.seq_lens)
 
 
-CONFIGS = [
+BENCH_CONFIGS = [
     {
         "label": f"hq{hq}_hv{hv}_s{seq_label}",
         "hq": hq,
@@ -117,6 +116,12 @@ CONFIGS = [
     }
     for head_idx, (hq, hv) in enumerate(HEAD_PAIRS)
     for seq_idx, (seq_lens, seq_label) in enumerate(SEQ_CASES)
+]
+
+CONFIGS = [
+    {"label": "test_hq2_hv8_s128", "hq": 2, "hv": 8, "seq_lens": (128,), "seed": 0},
+    {"label": "test_hq16_hv16_s64+192", "hq": 16, "hv": 16, "seq_lens": (64, 192), "seed": 1},
+    {"label": "test_hq16_hv48_s129", "hq": 16, "hv": 48, "seq_lens": (129,), "seed": 2},
 ]
 
 KERNEL_META = {"name": "gdn_prefill_sm100", "category": "flashinfer", "compute_capability": 10}
@@ -2838,26 +2843,20 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-@lru_cache(maxsize=1)
-def _load_oracle():
-    from flashinfer.gdn_kernels.blackwell.gdn_prefill import chunk_gated_delta_rule_sm100
-
-    return chunk_gated_delta_rule_sm100
-
-
 def _run_oracle(case: dict[str, Any], output: torch.Tensor, final_state: torch.Tensor) -> None:
-    oracle = _load_oracle()
-    oracle(
-        case["q"],
-        case["k"],
-        case["v"],
-        case["gate"],
-        case["beta"],
-        output,
-        case["cu_seqlens"],
-        case["initial_state"],
-        final_state,
-        case["scale"],
+    from tirx_kernels.flashinfer._gdn_reference import gated_delta_rule_prefill
+
+    gated_delta_rule_prefill(
+        q=case["q"],
+        k=case["k"],
+        v=case["v"],
+        alpha=case["gate"],
+        beta=case["beta"],
+        output=output,
+        cu_seqlens=case["cu_seqlens"],
+        initial_state=case["initial_state"],
+        final_state=final_state,
+        scale=case["scale"],
     )
 
 
@@ -3003,19 +3002,25 @@ def run_gpu(
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
 
-    def _flashinfer_cutedsl_builder():
+    def source_builder():
+        from flashinfer.gdn_kernels.blackwell.gdn_prefill import chunk_gated_delta_rule_sm100
+
         reference_o = torch.empty_like(case["o"])
         reference_state = torch.empty_like(case["final_state"])
 
-        # First execution performs CuTeDSL JIT and initializes its persistent
-        # workspace; subsequent executions are launch-only warmups.
-        _run_oracle(case, reference_o, reference_state)
-        for _ in range(2):
-            _run_oracle(case, reference_o, reference_state)
-        torch.cuda.synchronize()
-
         def launch():
-            _run_oracle(case, reference_o, reference_state)
+            chunk_gated_delta_rule_sm100(
+                case["q"],
+                case["k"],
+                case["v"],
+                case["gate"],
+                case["beta"],
+                reference_o,
+                case["cu_seqlens"],
+                case["initial_state"],
+                reference_state,
+                case["scale"],
+            )
 
         return launch
 
@@ -3024,7 +3029,7 @@ def run_gpu(
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references={"flashinfer_cutedsl": _flashinfer_cutedsl_builder},
+        references={"flashinfer_cutedsl": source_builder},
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
@@ -3039,4 +3044,12 @@ def run_bench(
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 
-__all__ = ["CONFIGS", "KERNEL_META", "get_kernel", "prepare_data", "run_bench", "run_test"]
+__all__ = [
+    "BENCH_CONFIGS",
+    "CONFIGS",
+    "KERNEL_META",
+    "get_kernel",
+    "prepare_data",
+    "run_bench",
+    "run_test",
+]

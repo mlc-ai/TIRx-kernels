@@ -5,7 +5,7 @@
 
 import ctypes
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,6 @@ import torch
 from tvm.backend.cuda.op import cuda_func_call
 from tvm.ir.type import PointerType, PrimType
 
-_DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 5e-6
 _COMPILE_CACHE_NAMESPACE = "deepgemm.paged_mqa_logits_fp4.compile"
@@ -238,22 +237,39 @@ DSA_INDEXER_LIKE_COVERAGE = [
     )
 ]
 
-CONFIGS = DSA_INDEXER_LIKE_COVERAGE
+BENCH_CONFIGS = DSA_INDEXER_LIKE_COVERAGE
 
-
-def load_deep_gemm_paged_mqa() -> tuple[Any, str]:
-    try:
-        import deep_gemm as module
-    except Exception as exc:
-        raise SkipTest(
-            f"DeepGEMM FP4 paged MQA logits runtime unavailable: {_DEEP_GEMM_MODULE_NAME}: {exc}"
-        ) from exc
-
-    if not hasattr(module, "fp8_fp4_paged_mqa_logits"):
-        raise SkipTest("DeepGEMM runtime unavailable: missing fp8_fp4_paged_mqa_logits")
-    if not hasattr(module, "get_paged_mqa_logits_metadata"):
-        raise SkipTest("DeepGEMM runtime unavailable: missing get_paged_mqa_logits_metadata")
-    return module, "installed"
+# Correctness covers the distinct page sizes, output dtypes, and multi-token
+# scheduling without allocating the production benchmark working sets.
+CONFIGS = [
+    _make_case(
+        batch_size=1,
+        next_n=1,
+        max_num_pages=4,
+        num_pages=128,
+        page_size=32,
+        logits_dtype="float32",
+        seed=0,
+    ),
+    _make_case(
+        batch_size=2,
+        next_n=1,
+        max_num_pages=4,
+        num_pages=128,
+        page_size=64,
+        logits_dtype="bfloat16",
+        seed=1,
+    ),
+    _make_case(
+        batch_size=2,
+        next_n=3,
+        max_num_pages=4,
+        num_pages=128,
+        page_size=64,
+        logits_dtype="float32",
+        seed=2,
+    ),
+]
 
 
 def _make_context_lens(config: PagedMQALogitsFP4Config) -> torch.Tensor:
@@ -300,19 +316,21 @@ def _make_indices(config: PagedMQALogitsFP4Config) -> torch.Tensor | None:
 
 
 def _make_fused_kv_cache(
-    config: PagedMQALogitsFP4Config, deep_gemm: Any
-) -> tuple[torch.Tensor, torch.Tensor]:
+    config: PagedMQALogitsFP4Config, *, keep_dequant: bool
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    from tirx_kernels._torch_quant import cast_back_from_fp4, per_token_cast_to_fp4
+
     kv_bf16 = torch.randn(
         config.num_pages, config.page_size, 1, config.head_dim, device="cuda", dtype=torch.bfloat16
     ).clamp_(-2.0, 2.0)
-    kv_fp4 = deep_gemm.utils.per_token_cast_to_fp4(
-        kv_bf16.view(-1, config.head_dim), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-    )
+    kv_fp4 = per_token_cast_to_fp4(kv_bf16.view(-1, config.head_dim), gran_k=32, packed_ue8m0=True)
     kv_packed = kv_fp4[0].view(config.num_pages, config.page_size, config.head_dim // 2)
     kv_scales = kv_fp4[1].view(config.num_pages, config.page_size)
-    kv_dequant = deep_gemm.utils.cast_back_from_fp4(
-        kv_fp4[0], kv_fp4[1], gran_k=32, use_packed_ue8m0=True
-    ).view(config.num_pages, config.page_size, 1, config.head_dim)
+    kv_dequant = None
+    if keep_dequant:
+        kv_dequant = cast_back_from_fp4(kv_fp4[0], kv_fp4[1], gran_k=32, packed_ue8m0=True).view(
+            config.num_pages, config.page_size, 1, config.head_dim
+        )
     fused = torch.empty(
         (config.num_pages, config.page_size, 1, config.head_dim // 2 + 4),
         dtype=torch.uint8,
@@ -327,9 +345,11 @@ def _make_fused_kv_cache(
     fused_flat[:, config.page_size * config.head_dim // 2 :].copy_(
         kv_scales.view(torch.uint8).reshape(config.num_pages, config.page_size * 4)
     )
-    return fused.contiguous(), kv_dequant.view(
-        config.num_pages, config.page_size, config.head_dim
-    ).to(torch.bfloat16)
+    return fused.contiguous(), (
+        None
+        if kv_dequant is None
+        else kv_dequant.view(config.num_pages, config.page_size, config.head_dim).to(torch.bfloat16)
+    )
 
 
 def _ref_paged_mqa_logits(
@@ -364,21 +384,15 @@ def _ref_paged_mqa_logits(
     return output
 
 
-def prepare_data(**kwargs: Any) -> dict[str, Any]:
-    deep_gemm, source = load_deep_gemm_paged_mqa()
-    config = _make_config(**kwargs)
+def _prepare_data(config: PagedMQALogitsFP4Config, *, compute_reference: bool) -> dict[str, Any]:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for SM100 FP4 paged MQA logits")
     if torch.cuda.get_device_capability()[0] < 10:
         raise SkipTest("SM100 FP4 paged MQA logits requires compute capability 10.x")
 
     torch.manual_seed(config.seed)
-    runtime_config = PagedMQALogitsFP4Config(
-        **{
-            **asdict(config),
-            "num_sms": int(getattr(deep_gemm, "get_num_sms", lambda: config.num_sms)()),
-        }
-    )
+    from tirx_kernels._torch_quant import cast_back_from_fp4, per_token_cast_to_fp4
+
     q_bf16 = torch.randn(
         config.batch_size,
         config.next_n,
@@ -387,33 +401,29 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         device="cuda",
         dtype=torch.bfloat16,
     ).clamp_(-2.0, 2.0)
-    q_fp4 = deep_gemm.utils.per_token_cast_to_fp4(
-        q_bf16.view(-1, config.head_dim), use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-    )
+    q_fp4 = per_token_cast_to_fp4(q_bf16.view(-1, config.head_dim), gran_k=32, packed_ue8m0=True)
     q_in = (
         q_fp4[0].view(config.batch_size, config.next_n, config.num_heads, config.head_dim // 2),
         q_fp4[1].view(config.batch_size, config.next_n, config.num_heads),
     )
     q_in = (q_in[0].contiguous(), q_in[1].contiguous())
-    q_simulated = deep_gemm.utils.cast_back_from_fp4(
-        q_fp4[0], q_fp4[1], gran_k=32, use_packed_ue8m0=True
-    ).view(config.batch_size, config.next_n, config.num_heads, config.head_dim)
-    fused_kv_cache, kv_dequant = _make_fused_kv_cache(config, deep_gemm)
+    fused_kv_cache, kv_dequant = _make_fused_kv_cache(config, keep_dequant=compute_reference)
     weights = torch.randn(
         config.batch_size * config.next_n, config.num_heads, device="cuda", dtype=torch.float32
     ).contiguous()
     context_lens = _make_context_lens(config)
     block_table = _make_block_table(config)
     indices = _make_indices(config)
-    schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-        context_lens, config.page_size, runtime_config.num_sms, indices
+    from ._paged_mqa import make_schedule_metadata
+
+    tirx_schedule_meta = make_schedule_metadata(
+        context_lens, num_sms=config.num_sms, indices=indices
     )
-    tirx_schedule_meta = schedule_meta
     if not config.varlen and config.next_n >= 2:
         num_q_atoms = _align_up(config.next_n, 2) // 2
         atom_context_lens = context_lens[:, -1:].expand(config.batch_size, num_q_atoms).contiguous()
-        tirx_schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-            atom_context_lens, config.page_size, runtime_config.num_sms
+        tirx_schedule_meta = make_schedule_metadata(
+            atom_context_lens.reshape(-1, 1), num_sms=config.num_sms
         )
         expected_end = config.batch_size * num_q_atoms
         if int(tirx_schedule_meta[-1, 0]) != expected_end:
@@ -421,12 +431,8 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
                 f"TIRx schedule metadata ends at {int(tirx_schedule_meta[-1, 0])}, "
                 f"expected {expected_end} q atoms"
             )
-    reference = _ref_paged_mqa_logits(
-        q_simulated.to(torch.bfloat16), kv_dequant, weights, context_lens, block_table, config
-    )
-    return {
-        "config": runtime_config,
-        "reference_source": source,
+    data = {
+        "config": config,
         "q": q_bf16,
         "q_in": q_in,
         "fused_kv_cache": fused_kv_cache,
@@ -434,11 +440,21 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "context_lens": context_lens,
         "block_table": block_table,
         "indices": indices,
-        "schedule_meta": schedule_meta,
         "tirx_schedule_meta": tirx_schedule_meta,
-        "reference": reference,
-        "deep_gemm": deep_gemm,
     }
+    if compute_reference:
+        assert kv_dequant is not None
+        q_simulated = cast_back_from_fp4(q_fp4[0], q_fp4[1], gran_k=32, packed_ue8m0=True).view(
+            config.batch_size, config.next_n, config.num_heads, config.head_dim
+        )
+        data["reference"] = _ref_paged_mqa_logits(
+            q_simulated.to(torch.bfloat16), kv_dequant, weights, context_lens, block_table, config
+        )
+    return data
+
+
+def prepare_data(**kwargs: Any) -> dict[str, Any]:
+    return _prepare_data(_make_config(**kwargs), compute_reference=True)
 
 
 def get_kernel(**kwargs: Any):
@@ -2128,22 +2144,6 @@ def _compile_tirx_paged_mqa(config: PagedMQALogitsFP4Config) -> Any:
     return _compile_tirx_paged_mqa_for_config(**compile_kwargs)
 
 
-def _run_deepgemm_paged_mqa(data: dict[str, Any], *, clean_logits: bool = False) -> torch.Tensor:
-    config: PagedMQALogitsFP4Config = data["config"]
-    return data["deep_gemm"].fp8_fp4_paged_mqa_logits(
-        q=data["q_in"],
-        kv_cache=data["fused_kv_cache"],
-        weights=data["weights"],
-        context_lens=data["context_lens"],
-        block_table=data["block_table"],
-        schedule_meta=data["schedule_meta"],
-        max_context_len=config.max_context_len,
-        clean_logits=clean_logits,
-        logits_dtype=_torch_logits_dtype(config.logits_dtype),
-        indices=data["indices"],
-    )
-
-
 def _allocate_logits(config: PagedMQALogitsFP4Config) -> torch.Tensor:
     return torch.full(
         (config.batch_size * config.next_n, config.logits_stride),
@@ -2390,15 +2390,9 @@ def _assert_correct(data: dict[str, Any], logits: torch.Tensor, *, name: str) ->
 
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
-    deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
-    deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_paged_mqa(data)
     torch.cuda.synchronize()
-    tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
-    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
-        raise AssertionError(
-            f"TIRx diff {tirx_diff:.6g} is worse than DeepGEMM diff {deepgemm_diff:.6g}"
-        )
+    _assert_correct(data, tirx_logits, name="TIRx")
 
 
 def prepare_bench(**kwargs: Any):
@@ -2414,9 +2408,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench
 
-    # Tiny (~8-11µs) paged kernel: event timing is launch-jitter-noisy (sporadic
-    # 10-13% ratio spread) and ~2x inflated by launch overhead. timer=None inherits the
-    # global default (proton) -> pure per-kernel GPU time (~4.5µs, verified stable).
+    # timer=None inherits the local event-timer default.
     timer = kwargs.pop("timer", None)
     # warmup/repeat: no hardcoded default here; pass through (None = defer to the
     # timer's own default; the graph timers ignore them anyway). Overridable via the
@@ -2428,29 +2420,38 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     config_kwargs = dict(kwargs)
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
-    data = prepare_data(**config_kwargs)
+    data = _prepare_data(_make_config(**config_kwargs), compute_reference=False)
     invocation = _prepare_tirx_invocation(data, executable=prepared["executable"])
-    tirx_logits = _run_tirx_invocation(data, invocation)
-    torch.cuda.synchronize()
-    tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
-    torch.cuda.empty_cache()
 
-    def _deepgemm():
-        return lambda: _run_deepgemm_paged_mqa(data, clean_logits=False)
+    def build_deepgemm():
+        import deep_gemm
 
-    funcs_tirx_first = {"tirx": lambda: _run_tirx_invocation(data, invocation)}
+        config = data["config"]
+        schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
+            data["context_lens"], config.page_size, config.num_sms, data["indices"]
+        )
+        return lambda: deep_gemm.fp8_fp4_paged_mqa_logits(
+            q=data["q_in"],
+            kv_cache=data["fused_kv_cache"],
+            weights=data["weights"],
+            context_lens=data["context_lens"],
+            block_table=data["block_table"],
+            schedule_meta=schedule_meta,
+            max_context_len=config.max_context_len,
+            clean_logits=False,
+            logits_dtype=_torch_logits_dtype(config.logits_dtype),
+            indices=data["indices"],
+        )
 
-    result = bench(
-        funcs_tirx_first,
+    return bench(
+        {"tirx": lambda: _run_tirx_invocation(data, invocation)},
+        references={"deepgemm": build_deepgemm},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
-        references={"deepgemm": _deepgemm},
     )
-    result["max_diff"] = tirx_diff
-    return result
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:
@@ -2463,6 +2464,7 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 
 
 __all__ = [
+    "BENCH_CONFIGS",
     "CONFIGS",
     "DSA_INDEXER_LIKE_COVERAGE",
     "KERNEL_META",

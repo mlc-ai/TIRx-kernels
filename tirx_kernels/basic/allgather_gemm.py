@@ -22,8 +22,6 @@ from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.bench import CudaProfiler
 from tvm.tirx.layout import TCol, TileLayout, TLane
 
-from .utils._baselines import create_baseline_suite
-from .utils._baselines import ratios as baseline_ratios
 from .utils._model_shapes import (
     ALLGATHER_GEMM_MODEL_SHAPES,
     SUPPORTED_WORLD_SIZES,
@@ -1072,7 +1070,8 @@ def _build_kernel():
 
 KERNEL_META = {"name": "allgather_gemm", "category": "basic", "compute_capability": 10}
 
-CONFIGS = make_configs(ALLGATHER_GEMM_MODEL_SHAPES)
+BENCH_CONFIGS = make_configs(ALLGATHER_GEMM_MODEL_SHAPES)
+CONFIGS = make_configs(ALLGATHER_GEMM_MODEL_SHAPES[:1])
 
 
 def _check_config(M_: int, N_: int, K_: int, world_size: int, dtype: str) -> AllGatherGemmConfig:
@@ -1315,37 +1314,39 @@ def _run_worker(
     if mode != "bench":
         raise ValueError(f"unsupported distributed worker mode {mode!r}")
 
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     def prepare() -> None:
         case.reset()
         case.prepare()
 
-    baselines = create_baseline_suite(
-        runtime,
-        data,
-        workload="allgather_gemm",
-        M=kwargs["M"],
-        N=kwargs["N"],
-        K=kwargs["K"],
-        world_size=kwargs["world_size"],
-    )
+    baselines = None
+    if external_references_enabled():
+        from .utils._baselines import create_baseline_suite
+
+        baselines = create_baseline_suite(
+            runtime,
+            data,
+            workload="allgather_gemm",
+            M=kwargs["M"],
+            N=kwargs["N"],
+            K=kwargs["K"],
+            world_size=kwargs["world_size"],
+        )
     try:
         result = bench(
             {"tirx": case.launch},
-            references=baselines.references(),
+            references=baselines.references() if baselines is not None else None,
             timer=kwargs.get("timer", "kineto"),
             rounds=kwargs.get("rounds", 1),
             cooldown_s=kwargs.get("cooldown_s", 1.0),
             distributed=runtime.bench_context(),
             prepare={"tirx": prepare},
         )
-        result["baseline_metadata"] = baselines.metadata()
-        result["ratio_definition"] = "baseline_us / tirx_us"
-        result["ratios"] = baseline_ratios(result)
         return {"status": "OK", **result}
     finally:
-        baselines.close()
+        if baselines is not None:
+            baselines.close()
 
 
 def run_test(
@@ -1394,7 +1395,7 @@ def run_bench(
     scheduler: str = "dynamic",
     **_kwargs: Any,
 ) -> dict[str, Any]:
-    """Return cold-cache Kineto full-span timings for TIRx and both baselines."""
+    """Return cold-cache Kineto full-span timings for TIRx."""
 
     _check_config(M, N, K, world_size, dtype)
     _check_scheduler(scheduler)
@@ -1445,6 +1446,7 @@ def prepare_bench(
 
 
 __all__ = [
+    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "AllGatherGemmConfig",

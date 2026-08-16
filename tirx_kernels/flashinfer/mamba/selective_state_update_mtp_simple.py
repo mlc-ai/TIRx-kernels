@@ -1722,7 +1722,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 @functools.cache
 def _load_oracle():
-    from flashinfer.mamba import selective_state_update
+    from tirx_kernels.flashinfer._mamba_reference import selective_state_update
 
     return selective_state_update
 
@@ -1832,13 +1832,13 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _run_reference(case: dict[str, Any]) -> torch.Tensor:
+def _run_reference(case: dict[str, Any], oracle=None) -> torch.Tensor:
     config = case["config"]
     stride_factor = int(config.get("state_stride_factor", 1))
     state_view = case["flashinfer_state_storage"][::stride_factor]
     scale_state = str(config["state_dtype"]) == "int16"
     source_out = case["flashinfer_output"] if bool(config.get("use_out_tensor", True)) else None
-    oracle = _load_oracle()
+    oracle = _load_oracle() if oracle is None else oracle
     result = oracle(
         state_view,
         case["x"],
@@ -1976,20 +1976,11 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
-    executable(*args)
-    _run_reference(case)
-    torch.cuda.synchronize()
-    _assert_case_close(case)
 
     def source_builder():
-        for _ in range(2):
-            _run_reference(case)
-        torch.cuda.synchronize()
+        from flashinfer.mamba import selective_state_update
 
-        def launch():
-            _run_reference(case)
-
-        return launch
+        return lambda: _run_reference(case, selective_state_update)
 
     return bench(
         {"tirx": lambda: executable(*args)},

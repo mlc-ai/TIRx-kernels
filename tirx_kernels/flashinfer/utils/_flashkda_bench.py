@@ -5,110 +5,114 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
 from importlib import import_module
-from importlib.metadata import PackageNotFoundError, distribution
-from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 import torch
 
 
-@dataclass
-class FlashKDARawReference:
-    launch: Callable[[], None]
-    provenance: dict[str, Any]
-    correctness: dict[str, float]
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _git_output(root: Path, *args: str) -> str:
+def _load_flash_kda_peer() -> Any:
     try:
-        return subprocess.check_output(
-            ["git", "-C", str(root), *args], text=True, stderr=subprocess.STDOUT
-        ).strip()
-    except subprocess.CalledProcessError as error:
-        raise RuntimeError(
-            f"failed to verify FlashKDA source provenance at {root}: {error.output.strip()}"
-        ) from error
-
-
-def _source_dir(dist: Any) -> Path | None:
-    override = os.environ.get("FLASHKDA_SOURCE_DIR")
-    if override:
-        return Path(override).expanduser().resolve(strict=True)
-
-    direct_url_text = dist.read_text("direct_url.json")
-    if direct_url_text:
-        url = json.loads(direct_url_text).get("url", "")
-        parsed = urlparse(url)
-        if parsed.scheme == "file":
-            source_dir = Path(unquote(parsed.path))
-            if source_dir.exists():
-                return source_dir.resolve(strict=True)
-    return None
-
-
-def _load_flash_kda_peer() -> tuple[Any, dict[str, Any]]:
-    try:
-        dist = distribution("flash-kda")
-    except PackageNotFoundError as error:
+        flash_kda = import_module("flash_kda")
+        import_module("flash_kda_C")
+    except ImportError as error:
         raise RuntimeError("MoonshotAI/FlashKDA is not installed") from error
-
-    flash_kda = import_module("flash_kda")
-    extension = import_module("flash_kda_C")
-    package_path = Path(flash_kda.__file__).resolve(strict=True)
-    extension_path = Path(extension.__file__).resolve(strict=True)
-    provenance = {
-        "repository": "https://github.com/MoonshotAI/FlashKDA.git",
-        "package_version": dist.version,
-        "package_path": str(package_path),
-        "package_sha256": _sha256(package_path),
-        "extension_path": str(extension_path),
-        "extension_sha256": _sha256(extension_path),
-    }
-
-    source_dir = _source_dir(dist)
-    if source_dir is not None:
-        source_commit = _git_output(source_dir, "rev-parse", "HEAD")
-        tracked_changes = _git_output(source_dir, "status", "--porcelain", "--untracked-files=no")
-        if tracked_changes:
-            raise RuntimeError(f"FlashKDA checkout has tracked modifications:\n{tracked_changes}")
-
-        source_package_path = source_dir / "flash_kda" / "__init__.py"
-        if _sha256(package_path) != _sha256(source_package_path):
-            raise RuntimeError(
-                "installed flash_kda package does not match its source checkout: "
-                f"package={package_path}, source={source_package_path}"
-            )
-
-        provenance.update({"source_dir": str(source_dir), "source_commit": source_commit})
-        cutlass_dir = source_dir / "cutlass"
-        if cutlass_dir.is_dir():
-            cutlass_commit = _git_output(cutlass_dir, "rev-parse", "HEAD")
-            submodule_record = _git_output(source_dir, "ls-tree", "HEAD", "cutlass").split()
-            if len(submodule_record) < 3 or submodule_record[2] != cutlass_commit:
-                raise RuntimeError("FlashKDA CUTLASS checkout does not match its gitlink")
-            provenance["cutlass_commit"] = cutlass_commit
-    return flash_kda, provenance
+    return flash_kda
 
 
-def prepare_flashkda_raw_reference(case: dict[str, Any]) -> FlashKDARawReference:
-    """Prepare and validate the installed raw FlashKDA peer."""
-    flash_kda, provenance = _load_flash_kda_peer()
+def prepare_flashinfer_cake_decode_reference(
+    case: dict[str, Any],
+    variant: str,
+    *,
+    direct_sm103: bool = False,
+    uses_lower_bound: bool = False,
+) -> Callable[[], None]:
+    """Build one installed FlashInfer CAKE decode launch lazily."""
+    from unittest import SkipTest
+
+    from flashinfer.jit.flash_kda_decode import get_flash_kda_decode_module
+
+    device = case["device"]
+    major, minor = torch.cuda.get_device_capability(device)
+    if (major, minor) == (10, 0):
+        target = "sm100f" if torch.version.cuda and torch.version.cuda >= "12.9" else "sm100a"
+    elif (major, minor) == (10, 3):
+        target = "sm103a" if direct_sm103 else "sm100f"
+    else:
+        raise SkipTest(f"FlashKDA CAKE decode has no export for capability {major}.{minor}")
+
+    module = get_flash_kda_decode_module(variant, target)
+    reference_state = case["initial_state_raw"].clone()
+    reference_out = torch.empty_like(case["tirx_out"])
+    dummy_f32 = torch.ones(1, device=device, dtype=torch.float32)
+    a_log = case["a_log"] if uses_lower_bound else dummy_f32
+    dt_bias = case["dt_bias"] if uses_lower_bound else dummy_f32
+    lower_bound = float(case["lower_bound"]) if uses_lower_bound else 0.0
+
+    def launch() -> None:
+        module.run(
+            case["q"],
+            case["k"],
+            case["v"],
+            case["g"],
+            case["beta"],
+            a_log,
+            dt_bias,
+            reference_state,
+            reference_out,
+            case["cu_seqlens"],
+            case["ssm_state_indices"],
+            case["num_accepted_tokens"],
+            float(case["scale"]),
+            lower_bound,
+            int(torch.cuda.current_stream(device).cuda_stream),
+        )
+
+    return launch
+
+
+def prepare_flashinfer_cutedsl_reference(case: dict[str, Any]) -> Callable[[], None]:
+    """Build the installed FlashInfer recurrent-KDA CuTeDSL launch."""
+    fi = import_module("flashinfer.kda_kernels.recurrent_kda")
+    spec = case["spec"]
+    raw_state = case["initial_state_raw"].clone()
+    state_stride = int(spec["STATE_SLOT_STRIDE"])
+    num_value_heads = int(spec["NUM_VALUE_HEADS"])
+    head_dim = 128
+    state_slots = raw_state.numel() // state_stride
+    state = raw_state.as_strided(
+        (state_slots, num_value_heads, head_dim, head_dim),
+        (state_stride, head_dim * head_dim, head_dim, 1),
+    )
+    tokens = int(spec["NUM_TOKENS"])
+
+    def launch() -> None:
+        fi.run_recurrent_kda(
+            q=case["q"],
+            k=case["k"],
+            v=case["v"],
+            g=case["g"],
+            beta=case["beta"],
+            A_log=case["a_log"],
+            dt_bias=case["dt_bias"],
+            scale=case["scale"],
+            initial_state=state,
+            output_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            lower_bound=case["lower_bound"],
+            cu_seqlens=case["cu_seqlens"],
+            ssm_state_indices=case["ssm_state_indices"],
+            num_spec_tokens=(tokens - 1) if tokens > 1 else None,
+        )
+
+    return launch
+
+
+def prepare_flashkda_raw_reference(case: dict[str, Any]) -> Callable[[], None]:
+    """Prepare the installed raw FlashKDA peer and return its launch."""
+    flash_kda = _load_flash_kda_peer()
     cfg = case["config"]
     batch = 1 if cfg.packed else cfg.num_seqs
     seq_len = cfg.total_tokens if cfg.packed else cfg.seq_lens[0]
@@ -140,27 +144,4 @@ def prepare_flashkda_raw_reference(case: dict[str, Any]) -> FlashKDARawReference
             cu_seqlens=case["cu_seqlens"] if cfg.packed else None,
         )
 
-    launch()
-    torch.cuda.synchronize()
-    expected_out = case["out"]
-    actual_out = peer_out.reshape_as(expected_out)
-    out_max_abs = float((actual_out.float() - expected_out.float()).abs().max())
-    torch.testing.assert_close(actual_out, expected_out, rtol=1e-2, atol=1e-2)
-
-    correctness = {"output_max_abs": out_max_abs}
-    if cfg.store_final_state:
-        if peer_final_state is None:
-            raise AssertionError("FlashKDA raw final-state buffer was not prepared")
-        state_max_abs = float((peer_final_state.float() - case["final_state"].float()).abs().max())
-        torch.testing.assert_close(peer_final_state, case["final_state"], rtol=1e-2, atol=1e-2)
-        correctness["final_state_max_abs"] = state_max_abs
-
-    provenance.update(
-        {
-            "timing_scope": "flash_kda._fwd_raw",
-            "workspace_bytes": int(workspace_bytes),
-            "use_initial_state": cfg.use_initial_state,
-            "store_final_state": cfg.store_final_state,
-        }
-    )
-    return FlashKDARawReference(launch=launch, provenance=provenance, correctness=correctness)
+    return launch

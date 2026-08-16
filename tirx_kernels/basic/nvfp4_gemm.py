@@ -3,15 +3,10 @@
 
 from __future__ import annotations
 
-import fcntl
-import hashlib
-import json
-import os
 from enum import IntEnum
-from pathlib import Path
 
 import tvm
-from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
+from tirx_kernels.runner import bench
 from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as T
@@ -44,234 +39,64 @@ _EVICT_NORMAL_L2_POLICY = 0x1000000000000000
 _EVICT_FIRST_L2_POLICY = 0x12F0000000000000
 
 
-def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
+def _decode_e2m1(packed, rows: int, K: int):
     import torch
-    from flashinfer import SfLayout, nvfp4_quantize
+
+    nibbles = torch.empty((rows, K), dtype=torch.uint8, device=packed.device)
+    nibbles[:, 0::2] = packed & 0xF
+    nibbles[:, 1::2] = packed >> 4
+    magnitudes = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32, device=packed.device
+    )
+    values = magnitudes[nibbles & 0x7]
+    return torch.where(nibbles < 8, values, -values)
+
+
+def _swizzle_sf_128x4(logical):
+    import torch
+
+    rows, cols = logical.shape
+    row = torch.arange(rows, device=logical.device)[:, None]
+    col = torch.arange(cols, device=logical.device)[None, :]
+    offset = (
+        col % 4
+        + (col // 4) * 512
+        + (row % 32) * 16
+        + ((row % 128) // 32) * 4
+        + (row // 128) * (128 * cols)
+    )
+    physical = torch.empty(rows * cols, dtype=torch.uint8, device=logical.device)
+    physical[offset.reshape(-1)] = logical.reshape(-1)
+    return physical.reshape(rows, cols)
+
+
+def _make_operand(rows: int, K: int, generator, *, compute_dequantized: bool):
+    import torch
+
+    packed = torch.randint(
+        0, 256, (rows, K // 2), dtype=torch.uint8, device="cuda", generator=generator
+    )
+    scale_exponents = torch.randint(-2, 3, (rows, K // 16), device="cuda", generator=generator)
+    scale_values = torch.pow(2.0, scale_exponents.float()).to(torch.float8_e4m3fn)
+    scale_bytes = _swizzle_sf_128x4(scale_values.view(torch.uint8))
+    dequantized = None
+    if compute_dequantized:
+        dequantized = _decode_e2m1(packed, rows, K) * scale_values.float().repeat_interleave(
+            16, dim=1
+        )
+    return packed, scale_bytes, dequantized
+
+
+def prepare_data(M: int, N: int, K: int, *, compute_reference: bool = True):
+    import torch
 
     torch.manual_seed(0)
-    A_origin = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    B_origin = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
-    A_global_sf = 448 * 6 / A_origin.float().abs().nan_to_num().max()
-    B_global_sf = 448 * 6 / B_origin.float().abs().nan_to_num().max()
-    A_fp4, A_sf = nvfp4_quantize(
-        A_origin, A_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False
-    )
-    B_fp4, B_sf = nvfp4_quantize(
-        B_origin, B_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False
-    )
-    alpha = 1.0 / (A_global_sf * B_global_sf)
-    C_ref = torch.mm(A_origin, B_origin.T)
-    if return_origin:
-        return (A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref, A_origin, B_origin)
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    A_fp4, A_sf, A_dequant = _make_operand(M, K, generator, compute_dequantized=compute_reference)
+    B_fp4, B_sf, B_dequant = _make_operand(N, K, generator, compute_dequantized=compute_reference)
+    alpha = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+    C_ref = torch.mm(A_dequant, B_dequant.T) if compute_reference else None
     return (A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref)
-
-
-_CUBLASLT_EXT = None
-
-
-def _load_cublaslt_nvfp4_ext():
-    """Build and load the shape-independent cuBLASLt reference before READY."""
-    global _CUBLASLT_EXT
-    if _CUBLASLT_EXT is not None:
-        return _CUBLASLT_EXT
-
-    from torch.utils import cpp_extension
-
-    source = r"""
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <cuda_runtime.h>
-#include <cublasLt.h>
-#include <cuda_fp8.h>
-#include <cuda_bf16.h>
-#include <cuda_fp4.h>
-
-#include <memory>
-#include <mutex>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-
-#define CHECK_CUBLAS_THROW(call)                                             \
-  do {                                                                       \
-    cublasStatus_t status = call;                                            \
-    if (status != CUBLAS_STATUS_SUCCESS) {                                   \
-      throw std::runtime_error("cuBLASLt error status=" +                    \
-                               std::to_string(static_cast<int>(status)));     \
-    }                                                                        \
-  } while (0)
-
-#define CHECK_CUDA_THROW(call)                                               \
-  do {                                                                       \
-    cudaError_t err = call;                                                  \
-    if (err != cudaSuccess) {                                                \
-      throw std::runtime_error(std::string("CUDA error: ") +                \
-                               cudaGetErrorString(err));                     \
-    }                                                                        \
-  } while (0)
-
-struct Nvfp4Plan {
-  cublasLtHandle_t handle = nullptr;
-  cublasLtMatmulDesc_t desc = nullptr;
-  cublasLtMatrixLayout_t layout_a = nullptr;
-  cublasLtMatrixLayout_t layout_b = nullptr;
-  cublasLtMatrixLayout_t layout_c = nullptr;
-  cublasLtMatrixLayout_t layout_d = nullptr;
-  cublasLtMatmulPreference_t preference = nullptr;
-  cublasLtMatmulHeuristicResult_t heuristic{};
-  void* workspace = nullptr;
-  size_t workspace_size = 128 * 1024 * 1024;
-
-  Nvfp4Plan(int M, int N, int K) {
-    CHECK_CUBLAS_THROW(cublasLtCreate(&handle));
-    CHECK_CUBLAS_THROW(cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
-
-    cublasOperation_t trans_a = CUBLAS_OP_T;
-    cublasOperation_t trans_b = CUBLAS_OP_N;
-    CHECK_CUBLAS_THROW(cublasLtMatmulDescSetAttribute(
-        desc, CUBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(trans_a)));
-    CHECK_CUBLAS_THROW(cublasLtMatmulDescSetAttribute(
-        desc, CUBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(trans_b)));
-
-    cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
-    CHECK_CUBLAS_THROW(cublasLtMatmulDescSetAttribute(
-        desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode, sizeof(scale_mode)));
-    CHECK_CUBLAS_THROW(cublasLtMatmulDescSetAttribute(
-        desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode, sizeof(scale_mode)));
-
-    // TN layout mapping for the cuBLASLt NVFP4 matmul:
-    // cuBLAS "A" is logical B, cuBLAS "B" is logical A, TN writes row-major D
-    // through a column-major NxM view.
-    CHECK_CUBLAS_THROW(cublasLtMatrixLayoutCreate(&layout_a, CUDA_R_4F_E2M1, K, N, K));
-    CHECK_CUBLAS_THROW(cublasLtMatrixLayoutCreate(&layout_b, CUDA_R_4F_E2M1, K, M, K));
-    CHECK_CUBLAS_THROW(cublasLtMatrixLayoutCreate(&layout_c, CUDA_R_16BF, N, M, N));
-    CHECK_CUBLAS_THROW(cublasLtMatrixLayoutCreate(&layout_d, CUDA_R_16BF, N, M, N));
-
-    CHECK_CUDA_THROW(cudaMalloc(&workspace, workspace_size));
-    CHECK_CUBLAS_THROW(cublasLtMatmulPreferenceCreate(&preference));
-    CHECK_CUBLAS_THROW(cublasLtMatmulPreferenceSetAttribute(
-        preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-        &workspace_size, sizeof(workspace_size)));
-
-    void* dummy_scale = workspace;
-    CHECK_CUBLAS_THROW(cublasLtMatmulDescSetAttribute(
-        desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &dummy_scale, sizeof(dummy_scale)));
-    CHECK_CUBLAS_THROW(cublasLtMatmulDescSetAttribute(
-        desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &dummy_scale, sizeof(dummy_scale)));
-
-    int returned = 0;
-    cublasStatus_t status = cublasLtMatmulAlgoGetHeuristic(
-        handle, desc, layout_a, layout_b, layout_c, layout_d, preference,
-        1, &heuristic, &returned);
-    if (status != CUBLAS_STATUS_SUCCESS || returned == 0) {
-      throw std::runtime_error("cuBLASLt NVFP4 heuristic returned no algorithm");
-    }
-  }
-
-  ~Nvfp4Plan() {
-    if (workspace) cudaFree(workspace);
-    if (preference) cublasLtMatmulPreferenceDestroy(preference);
-    if (layout_a) cublasLtMatrixLayoutDestroy(layout_a);
-    if (layout_b) cublasLtMatrixLayoutDestroy(layout_b);
-    if (layout_c) cublasLtMatrixLayoutDestroy(layout_c);
-    if (layout_d) cublasLtMatrixLayoutDestroy(layout_d);
-    if (desc) cublasLtMatmulDescDestroy(desc);
-    if (handle) cublasLtDestroy(handle);
-  }
-};
-
-static std::mutex g_mu;
-static std::unordered_map<std::string, std::unique_ptr<Nvfp4Plan>> g_plans;
-
-static Nvfp4Plan* get_plan(int M, int N, int K) {
-  std::lock_guard<std::mutex> lock(g_mu);
-  std::string key = std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
-  auto it = g_plans.find(key);
-  if (it == g_plans.end()) {
-    it = g_plans.emplace(key, std::make_unique<Nvfp4Plan>(M, N, K)).first;
-  }
-  return it->second.get();
-}
-
-void nvfp4_cublaslt(torch::Tensor A, torch::Tensor B, torch::Tensor A_scale,
-                    torch::Tensor B_scale, double alpha, torch::Tensor D,
-                    int64_t M, int64_t N, int64_t K) {
-  TORCH_CHECK(A.is_cuda() && B.is_cuda() && A_scale.is_cuda() && B_scale.is_cuda() && D.is_cuda(),
-              "all tensors must be CUDA tensors");
-  TORCH_CHECK(A.scalar_type() == at::kByte && B.scalar_type() == at::kByte,
-              "A and B must be uint8 packed FP4 tensors");
-  TORCH_CHECK(A_scale.scalar_type() == at::kByte && B_scale.scalar_type() == at::kByte,
-              "scale tensors must be uint8 FP8 payloads");
-  TORCH_CHECK(D.scalar_type() == at::kBFloat16, "D must be bf16");
-  TORCH_CHECK(A.is_contiguous() && B.is_contiguous() && A_scale.is_contiguous() &&
-              B_scale.is_contiguous() && D.is_contiguous(), "all tensors must be contiguous");
-
-  Nvfp4Plan* plan = get_plan(static_cast<int>(M), static_cast<int>(N), static_cast<int>(K));
-
-  auto* A_ptr = reinterpret_cast<const __nv_fp4x2_e2m1*>(A.data_ptr<uint8_t>());
-  auto* B_ptr = reinterpret_cast<const __nv_fp4x2_e2m1*>(B.data_ptr<uint8_t>());
-  auto* A_scale_ptr = reinterpret_cast<const __nv_fp8_e4m3*>(A_scale.data_ptr<uint8_t>());
-  auto* B_scale_ptr = reinterpret_cast<const __nv_fp8_e4m3*>(B_scale.data_ptr<uint8_t>());
-  auto* D_ptr = reinterpret_cast<__nv_bfloat16*>(D.data_ptr<at::BFloat16>());
-
-  const void* cublas_a_scale = B_scale_ptr;
-  const void* cublas_b_scale = A_scale_ptr;
-  CHECK_CUBLAS_THROW(cublasLtMatmulDescSetAttribute(
-      plan->desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-      &cublas_a_scale, sizeof(cublas_a_scale)));
-  CHECK_CUBLAS_THROW(cublasLtMatmulDescSetAttribute(
-      plan->desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-      &cublas_b_scale, sizeof(cublas_b_scale)));
-
-  float alpha_f = static_cast<float>(alpha);
-  float beta = 0.0f;
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-  CHECK_CUBLAS_THROW(cublasLtMatmul(
-      plan->handle, plan->desc, &alpha_f,
-      B_ptr, plan->layout_a,
-      A_ptr, plan->layout_b,
-      &beta,
-      D_ptr, plan->layout_c,
-      D_ptr, plan->layout_d,
-      &plan->heuristic.algo,
-      plan->workspace, plan->workspace_size,
-      stream));
-}
-"""
-    extra_include_paths = []
-    extra_ldflags = ["-lcublas", "-lcublasLt"]
-    if cpp_extension.CUDA_HOME:
-        extra_include_paths.append(f"{cpp_extension.CUDA_HOME}/include")
-        extra_ldflags.insert(0, f"-L{cpp_extension.CUDA_HOME}/lib64")
-
-    name = "nvfp4_cublaslt_baseline_ext"
-    build_directory = Path(cpp_extension._get_build_directory(name, verbose=False))
-    lock_fd = os.open(build_directory / "lock.flock", os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        # PyTorch's FileBaton is not process-death-safe. The outer flock proves
-        # no suite process is building here, so a remaining baton is stale.
-        (build_directory / "lock").unlink(missing_ok=True)
-        extra_cuda_cflags = []
-        if prepare_arch := os.environ.get(PREPARE_CUDA_ARCH_ENV):
-            arch = prepare_arch.removeprefix("sm_")
-            extra_cuda_cflags.append(f"-gencode=arch=compute_{arch},code=sm_{arch}")
-        _CUBLASLT_EXT = cpp_extension.load_inline(
-            name=name,
-            cpp_sources=[source],
-            functions=["nvfp4_cublaslt"],
-            with_cuda=True,
-            extra_include_paths=extra_include_paths,
-            extra_cflags=["-O3"],
-            extra_cuda_cflags=extra_cuda_cflags,
-            extra_ldflags=extra_ldflags,
-            build_directory=str(build_directory),
-            verbose=False,
-        )
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-    return _CUBLASLT_EXT
 
 
 def _mapa_u64(ptr, rank):
@@ -1001,9 +826,10 @@ TIRX_CONFIGS = {
 
 
 KERNEL_META = {"name": "nvfp4_gemm", "category": "basic", "compute_capability": 10}
-CONFIGS = [
+BENCH_CONFIGS = [
     {"M": s, "N": s, "K": s, "label": f"{s}x{s}x{s}"} for s in [1024, 2048, 4096, 8192, 16384]
 ]
+CONFIGS = [{"M": 1024, "N": 1024, "K": 1024, "label": "correctness_1024"}]
 
 
 def get_kernel(M, N, K):
@@ -1022,8 +848,8 @@ def run_test(M=1024, N=1024, K=1024):
     import torch.nn.functional as F
 
     A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
-    alpha_tensor = torch.tensor([alpha], device="cuda", dtype=torch.float)
-    out = torch.empty_like(C_ref).to("cuda").to(torch.bfloat16)
+    alpha_tensor = alpha.reshape(1)
+    out = torch.empty_like(C_ref, dtype=torch.bfloat16)
     ex = _compile_executable(M, N, K)
     ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out)
     cosine_sim = F.cosine_similarity(
@@ -1032,227 +858,75 @@ def run_test(M=1024, N=1024, K=1024):
     assert cosine_sim > 0.97, f"nvfp4_gemm cosine_sim {cosine_sim:.6f} <= 0.97"
 
 
-def _flashinfer_autotune_cache_path(
-    M: int, N: int, K: int, *, backend: str = "auto"
-) -> Path | None:
-    """Return an environment-specific, per-shape FlashInfer cache path."""
-    cache_root = os.environ.get("TIRX_BENCH_CACHE_DIR")
-    if not cache_root:
-        return None
-
-    # FlashInfer rejects cache metadata from a different software/GPU stack.
-    # Put each stack in its own directory as well, so an obsolete file cannot
-    # prevent the current process from saving its newly tuned result.
-    import flashinfer
-    from flashinfer.autotuner import _collect_metadata
-
-    environment = _collect_metadata()
-    digest = hashlib.sha256(
-        json.dumps(environment, sort_keys=True, default=str).encode()
-    ).hexdigest()[:16]
-    version = str(getattr(flashinfer, "__version__", "unknown")).replace("/", "_")
-    backend_suffix = "" if backend == "auto" else f"_{backend}"
-    return (
-        Path(cache_root)
-        / "flashinfer"
-        / f"{version}-{digest}"
-        / f"nvfp4_gemm{backend_suffix}_{M}x{N}x{K}.json"
-    )
-
-
-def _flashinfer_tuned_choice(
-    M: int, N: int, K: int, cache_path: Path | None, *, expected_runner: str | None = None
-) -> tuple[str, object]:
-    """Read the exact-shape runner/tactic selected by FlashInfer's autotuner."""
-    choices: list[tuple[str, object]] = []
-    if cache_path is not None and cache_path.exists():
-        payload = json.loads(cache_path.read_text())
-        packed_shape_prefix = f"(({M}, {K // 2}), ({K // 2}, {N})"
-        choices.extend(
-            (value[0], value[1])
-            for key, value in payload.items()
-            if key.startswith("('fp4_gemm', ") and packed_shape_prefix in key
-        )
-    else:
-        from flashinfer.autotuner import AutoTuner
-
-        for key, (_, tactic, _) in AutoTuner.get().profiling_cache.items():
-            if (
-                key.custom_op == "fp4_gemm"
-                and len(key.nearest_profile) >= 2
-                and key.nearest_profile[0] == (M, K // 2)
-                and key.nearest_profile[1] == (K // 2, N)
-            ):
-                choices.append((key.runner_class_name, tactic))
-
-    if expected_runner is not None:
-        choices = [choice for choice in choices if choice[0] == expected_runner]
-
-    unique = list(
-        dict.fromkeys((runner, json.dumps(tactic, sort_keys=True)) for runner, tactic in choices)
-    )
-    if len(unique) != 1:
-        raise RuntimeError(
-            "FlashInfer autotune did not produce exactly one fp4_gemm choice "
-            f"for M={M}, N={N}, K={K}, expected_runner={expected_runner}: {choices}"
-        )
-    runner, tactic_json = unique[0]
-    tactic = json.loads(tactic_json)
-    if tactic == -1:
-        raise RuntimeError(
-            f"FlashInfer autotune fell back to {runner} tactic=-1 for M={M}; "
-            "refusing to benchmark an untuned fallback"
-        )
-    return runner, tactic
-
-
-# timer=None inherits the global default (proton). Proton matters here: the
-# flashinfer/cublaslt references carry heavy per-call host dispatch (Python + internal
-# cudaDeviceSynchronize), and since the nvfp4 kernel (~28µs) is faster than that dispatch,
-# event wall-clock is host-starved and over-credits us ~4x. Proton measures pure GPU
-# kernel time -> honest ~parity (verified 0.996 vs event 4.11).
 def prepare_bench(M=1024, N=1024, K=1024, **kwargs):
-    """Compile TIRx and the device-independent cuBLASLt extension before READY."""
+    """Compile TIRx before the workload receives a GPU."""
     from tirx_kernels.runner import prepared_gpu_benchmark
 
     state = {
         "config": {"M": M, "N": N, "K": K, **kwargs},
         "executable": _compile_executable(M, N, K),
-        "cublaslt_extension": _load_cublaslt_nvfp4_ext(),
     }
     return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
-    """Benchmark."""
-    import flashinfer
+    """Benchmark TIRx plus the explicitly enabled FlashInfer reference."""
     import torch
+
+    from tirx_kernels.runner import external_references_enabled
 
     config_kwargs = {**prepared["config"], **kwargs}
     M = config_kwargs.pop("M")
     N = config_kwargs.pop("N")
     K = config_kwargs.pop("K")
-    metadata = {}
     ex = prepared["executable"]
 
-    # Allocate inputs once, outside the timed region (Triton-standard pure launch).
-    A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
-    alpha_value = float(alpha.item())
-    alpha_tensor = torch.tensor([alpha_value], device="cuda", dtype=torch.float)
-    out_tir = torch.empty_like(C_ref).to("cuda").to(torch.bfloat16)
+    with_references = external_references_enabled()
+    A_fp4, B_fp4, A_sf, B_sf, alpha, reference = prepare_data(
+        M, N, K, compute_reference=with_references
+    )
+    alpha_tensor = alpha.reshape(1)
+    out_tir = torch.empty((M, N), dtype=torch.bfloat16, device="cuda")
 
-    funcs = {"tir": lambda: ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out_tir)}
-    flashinfer_backend = os.environ.get("TIRX_NVFP4_FLASHINFER_BACKEND", "auto")
-    if flashinfer_backend not in {"auto", "cutlass"}:
-        raise ValueError(
-            f"TIRX_NVFP4_FLASHINFER_BACKEND must be 'auto' or 'cutlass', got {flashinfer_backend!r}"
-        )
-    expected_flashinfer_runner = "CutlassFp4GemmRunner" if flashinfer_backend == "cutlass" else None
-    flashinfer_cache_path = _flashinfer_autotune_cache_path(M, N, K, backend=flashinfer_backend)
-    flashinfer_context_kwargs = {"tuning_buckets": (M,), "round_up": False}
-    if flashinfer_cache_path is not None:
-        flashinfer_context_kwargs["cache"] = str(flashinfer_cache_path)
+    def build_flashinfer():
+        import flashinfer
 
-    def _flashinfer():
-        out_fi = torch.empty_like(out_tir)
-        cache_hit_before_tune = False
-        if flashinfer_cache_path is not None and flashinfer_cache_path.exists():
-            try:
-                _flashinfer_tuned_choice(
-                    M, N, K, flashinfer_cache_path, expected_runner=expected_flashinfer_runner
-                )
-                cache_hit_before_tune = True
-            except (json.JSONDecodeError, RuntimeError):
-                pass
+        output = torch.empty_like(out_tir)
 
-        def run():
+        def launch():
             return flashinfer.mm_fp4(
                 A_fp4,
                 B_fp4.T,
                 A_sf,
                 B_sf.T,
                 alpha,
-                out=out_fi,
+                out=output,
                 block_size=16,
-                backend=flashinfer_backend,
+                backend=os.environ.get("TIRX_NVFP4_FLASHINFER_BACKEND", "auto"),
                 use_nvfp4=True,
             )
 
-        # Tune/load exactly this benchmark shape and persist the selection in
-        # the suite cache. Both profiling and all cache I/O happen before the
-        # launch closure is handed to bench().
-        with flashinfer.autotune(True, **flashinfer_context_kwargs):
-            run()
+        with flashinfer.autotune(True):
+            launch()
         torch.cuda.synchronize()
-
-        # Exercise the normal non-tuning lookup once before timing and reject
-        # a silent heuristic fallback. Keep the exact same bucket override that
-        # was used while tuning: cuDNN runner cache keys include its mapper.
-        with flashinfer.autotune(False, **flashinfer_context_kwargs):
-            run()
-        torch.cuda.synchronize()
-        runner, tactic = _flashinfer_tuned_choice(
-            M, N, K, flashinfer_cache_path, expected_runner=expected_flashinfer_runner
-        )
-        sample_rows = min(M, 256)
-        sample_cols = min(N, 256)
-        cosine_similarity = torch.nn.functional.cosine_similarity(
-            out_fi[:sample_rows, :sample_cols].reshape(-1).float(),
-            C_ref[:sample_rows, :sample_cols].reshape(-1).float(),
-            dim=0,
-        ).item()
-        if cosine_similarity <= 0.97:
-            raise RuntimeError(
-                "FlashInfer tuned NVFP4 output failed validation: "
-                f"cosine_similarity={cosine_similarity:.6f}"
+        if reference is not None:
+            cosine = torch.nn.functional.cosine_similarity(
+                output.reshape(-1).float(), reference.reshape(-1).float(), dim=0
             )
-        metadata.update(
-            {
-                "flashinfer_autotune_cache": (
-                    "hit"
-                    if cache_hit_before_tune
-                    else "miss"
-                    if flashinfer_cache_path is not None
-                    else "memory"
-                ),
-                "flashinfer_tuning_bucket": M,
-                "flashinfer_requested_backend": flashinfer_backend,
-                "flashinfer_runner": runner,
-                "flashinfer_tactic": tactic,
-                "flashinfer_cosine_similarity": cosine_similarity,
-            }
-        )
-        return run
+            if float(cosine) <= 0.97:
+                raise RuntimeError(
+                    f"FlashInfer NVFP4 output failed validation: cosine={float(cosine):.6f}"
+                )
+        return launch
 
-    def _cublaslt():
-        ext = prepared["cublaslt_extension"]
-        out_cublaslt = torch.empty_like(out_tir)
-        return lambda: ext.nvfp4_cublaslt(
-            A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K
-        )
-
-    # FlashInfer is a required reference for this benchmark. Prepare and
-    # validate its tuned launch before entering bench() so a bad/missing cache
-    # fails the workload instead of being downgraded to an optional baseline
-    # construction error.
-    flashinfer_run = _flashinfer()
-    # Load the file and install the exact-M mapper once, outside all timer
-    # calls. Timed FlashInfer launches then perform only an in-memory cache
-    # lookup and the selected kernel launch.
-    with flashinfer.autotune(False, **flashinfer_context_kwargs):
-        result = bench(
-            funcs,
-            warmup=warmup,
-            repeat=repeat,
-            timer=timer,
-            references={
-                "flashinfer": lambda: flashinfer_run,
-                "cublaslt_nvfp4": _cublaslt,
-            },
-            **config_kwargs,
-        )
-    result["metadata"] = {**result.get("metadata", {}), **metadata}
-    return result
+    return bench(
+        {"tirx": lambda: ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out_tir)},
+        references={"flashinfer": build_flashinfer},
+        warmup=warmup,
+        repeat=repeat,
+        timer=timer,
+        **config_kwargs,
+    )
 
 
 def run_bench(M=1024, N=1024, K=1024, *, warmup=None, repeat=None, timer=None, **kwargs):

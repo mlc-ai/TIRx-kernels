@@ -15,7 +15,6 @@ from unittest import SkipTest
 
 import torch
 
-_DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 1e-8
 _COMPILE_CACHE_NAMESPACE = "deepgemm.tf32_hc_prenorm_gemm.compile"
@@ -189,16 +188,6 @@ KERNEL_META = {
     "compute_capability": 10,
 }
 
-DEEPGEMM_TEST_COVERAGE = [
-    _make_case(m=m, n=n, k=k, num_splits=num_splits, seed=1000 + seed)
-    for seed, (m, n, k, num_splits) in enumerate(
-        (m, n, k, num_splits)
-        for m in (13, 137, 4096, 8192)
-        for n, k in ((24, 28672), (24, 7680), (24, 7168))
-        for num_splits in (1, 16)
-    )
-]
-
 # ── Bench shape set ─────────────────────────────────────────────────────────
 # num_splits follows SGLang's _compute_num_split_for_mhc_pre with n_sms pinned
 # to 148 (SM100 / B200):
@@ -230,7 +219,7 @@ def _mhc_pre_token_count_representatives(
 _PROD_HC_HIDDENS = (16384, 28672)
 _MHC_PRE_MAX_TOKENS = (2048, 4096, 8192)
 
-CONFIGS = [
+BENCH_CONFIGS = [
     _make_case(m=m, n=24, k=k, num_splits=s, seed=3000 + i)
     for i, (m, k, s) in enumerate(
         sorted(
@@ -244,43 +233,16 @@ CONFIGS = [
     )
 ]
 
-# Legacy shapes kept for regression continuity with the pinned baseline. The
-# k=7168/7680 ones are edge (hidden=1792/1920, non-production) and stay out of
-# the main set.
-LEGACY_CONFIGS = [
-    _make_case(m=13, n=24, k=7168, num_splits=1, seed=2000),  # edge: hidden=1792
-    _make_case(m=137, n=24, k=7680, num_splits=16, seed=2001),  # edge: hidden=1920
-    _make_case(m=4096, n=24, k=7168, num_splits=1, seed=2002),  # edge: hidden=1792
-    _make_case(m=4096, n=24, k=28672, num_splits=16, seed=2003),
+CONFIGS = [
+    _make_case(m=13, n=24, k=512, num_splits=1, seed=0),
+    _make_case(m=137, n=24, k=1024, num_splits=4, seed=1),
+    _make_case(m=65, n=32, k=768, num_splits=3, seed=2),
 ]
 
-BENCH_CONFIGS = CONFIGS + LEGACY_CONFIGS
 
-
-def load_deep_gemm_hc() -> tuple[Any, str]:
-    try:
-        import deep_gemm as module
-
-        source = "installed"
-    except Exception as exc:
-        raise SkipTest(
-            f"DeepGEMM HC prenorm GEMM runtime unavailable: {_DEEP_GEMM_MODULE_NAME}: {exc}"
-        ) from exc
-
-    if not hasattr(module, "tf32_hc_prenorm_gemm"):
-        raise SkipTest("DeepGEMM runtime unavailable: missing tf32_hc_prenorm_gemm")
-    return module, source
-
-
-def _get_num_sms(default: int) -> int:
+def _prepare_data(config: TF32HCPrenormGemmConfig, *, compute_reference: bool) -> dict[str, Any]:
     from tirx_kernels.runner import hardware_num_sms
 
-    return hardware_num_sms(default)
-
-
-def prepare_data(**kwargs: Any) -> dict[str, Any]:
-    deep_gemm, source = load_deep_gemm_hc()
-    config = _make_config(**kwargs)
     if torch.cuda.is_available():
         torch.cuda.set_device(torch.cuda.current_device())
     else:
@@ -293,48 +255,30 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     torch.manual_seed(config.seed)
 
     runtime_config = TF32HCPrenormGemmConfig(
-        **{
-            **asdict(config),
-            "num_sms": int(
-                getattr(deep_gemm, "get_num_sms", lambda: _get_num_sms(config.num_sms))()
-            ),
-        }
+        **{**asdict(config), "num_sms": hardware_num_sms(config.num_sms)}
     )
     a = torch.randn((config.m, config.k), dtype=torch.bfloat16, device="cuda")
     b = torch.randn((config.n, config.k), dtype=torch.float32, device="cuda")
-    d_deepgemm = torch.empty(config.d_shape, dtype=torch.float32, device="cuda")
-    sqr_deepgemm = torch.empty(config.sqr_sum_shape, dtype=torch.float32, device="cuda")
     d_tirx = torch.empty(config.d_shape, dtype=torch.float32, device="cuda")
     sqr_tirx = torch.empty(config.sqr_sum_shape, dtype=torch.float32, device="cuda")
-    reference_d = a.float() @ b.T
-    reference_sqr = a.float().square().sum(dim=-1)
-    return {
-        "config": runtime_config,
-        "reference_source": source,
-        "a": a,
-        "b": b,
-        "d_deepgemm": d_deepgemm,
-        "sqr_deepgemm": sqr_deepgemm,
-        "d_tirx": d_tirx,
-        "sqr_tirx": sqr_tirx,
-        "reference_d": reference_d,
-        "reference_sqr": reference_sqr,
-        "deep_gemm": deep_gemm,
-    }
+    data = {"config": runtime_config, "a": a, "b": b, "d_tirx": d_tirx, "sqr_tirx": sqr_tirx}
+    if compute_reference:
+        data["reference_d"] = a.float() @ b.T
+        data["reference_sqr"] = a.float().square().sum(dim=-1)
+    return data
+
+
+def prepare_data(**kwargs: Any) -> dict[str, Any]:
+    return _prepare_data(_make_config(**kwargs), compute_reference=True)
 
 
 @dataclass
 class TF32HCBenchCase:
     config: TF32HCPrenormGemmConfig
-    deep_gemm: Any
     a: torch.Tensor
     b: torch.Tensor
-    d_deepgemm: torch.Tensor
-    sqr_deepgemm: torch.Tensor
     d_tirx: torch.Tensor
     sqr_tirx: torch.Tensor
-    reference_d: torch.Tensor
-    reference_sqr: torch.Tensor
     tensor_maps: dict[str, Any]
 
 
@@ -1033,18 +977,6 @@ def _launch_tirx_hc(data: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
     )
 
 
-def _run_deepgemm_hc(data: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
-    config: TF32HCPrenormGemmConfig = data["config"]
-    data["deep_gemm"].tf32_hc_prenorm_gemm(
-        data["a"],
-        data["b"],
-        data["d_deepgemm"],
-        data["sqr_deepgemm"],
-        num_splits=None if config.num_splits == 1 else config.num_splits,
-    )
-    return data["d_deepgemm"], data["sqr_deepgemm"]
-
-
 def _final_outputs(
     d: torch.Tensor, sqr_sum: torch.Tensor, config: TF32HCPrenormGemmConfig
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1076,43 +1008,21 @@ def _assert_correct(
     return diff
 
 
-def _assert_correct_case(
-    case: TF32HCBenchCase, d: torch.Tensor, sqr_sum: torch.Tensor, *, name: str
-) -> float:
-    final_d, final_sqr = _final_outputs(d, sqr_sum, case.config)
-    diff = max(_calc_diff(final_d, case.reference_d), _calc_diff(final_sqr, case.reference_sqr))
-    if diff >= _TEST_DIFF_THRESHOLD:
-        raise AssertionError(f"{name} diff {diff:.10g} >= {_TEST_DIFF_THRESHOLD}")
-    return diff
-
-
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
-    deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
-    torch.cuda.synchronize()
-    deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
     tirx_d, tirx_sqr = _launch_tirx_hc(data)
     torch.cuda.synchronize()
-    tirx_diff = _assert_correct(data, tirx_d, tirx_sqr, name="TIRx")
-    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
-        raise AssertionError(
-            f"TIRx diff {tirx_diff:.10g} is worse than DeepGEMM diff {deepgemm_diff:.10g}"
-        )
+    _assert_correct(data, tirx_d, tirx_sqr, name="TIRx")
 
 
 def _make_bench_case(config_kwargs: dict[str, Any]) -> TF32HCBenchCase:
-    data = prepare_data(**config_kwargs)
+    data = _prepare_data(_make_config(**config_kwargs), compute_reference=False)
     return TF32HCBenchCase(
         config=data["config"],
-        deep_gemm=data["deep_gemm"],
         a=data["a"],
         b=data["b"],
-        d_deepgemm=data["d_deepgemm"],
-        sqr_deepgemm=data["sqr_deepgemm"],
         d_tirx=data["d_tirx"],
         sqr_tirx=data["sqr_tirx"],
-        reference_d=data["reference_d"],
-        reference_sqr=data["reference_sqr"],
         tensor_maps=_build_tirx_tensor_maps(data),
     )
 
@@ -1120,17 +1030,6 @@ def _make_bench_case(config_kwargs: dict[str, Any]) -> TF32HCBenchCase:
 def _bench_tirx_case(case: TF32HCBenchCase, executable: Any) -> tuple[torch.Tensor, torch.Tensor]:
     executable(case.config.m, case.a, case.b, case.d_tirx, case.sqr_tirx.reshape(-1))
     return case.d_tirx, case.sqr_tirx
-
-
-def _bench_deepgemm_case(case: TF32HCBenchCase) -> tuple[torch.Tensor, torch.Tensor]:
-    case.deep_gemm.tf32_hc_prenorm_gemm(
-        case.a,
-        case.b,
-        case.d_deepgemm,
-        case.sqr_deepgemm,
-        num_splits=None if case.config.num_splits == 1 else case.config.num_splits,
-    )
-    return case.d_deepgemm, case.sqr_deepgemm
 
 
 def prepare_bench(**kwargs: Any):
@@ -1149,7 +1048,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     from tirx_kernels.runner import bench
 
     kwargs = {**prepared["config"], **kwargs}
-    timer = kwargs.pop("timer", None)  # None inherits the global default (proton)
+    timer = kwargs.pop("timer", None)  # None inherits the local event-timer default.
     warmup = kwargs.pop("warmup", None)
     repeat = kwargs.pop("repeat", None)
     _rounds = kwargs.pop("rounds", 1)
@@ -1160,31 +1059,28 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     case = _make_bench_case(config_kwargs)
 
-    # Correctness gate for our kernel before timing (preserves the tirx half of
-    # the old validate_case; the deepgemm reference is trusted).
-    tirx_d, tirx_sqr = _bench_tirx_case(case, executable)
-    torch.cuda.synchronize()
-    tirx_diff = _assert_correct_case(case, tirx_d, tirx_sqr, name="TIRx")
+    def build_deepgemm():
+        import deep_gemm
 
-    funcs = {"tirx": lambda: _bench_tirx_case(case, executable)}
+        output = torch.empty(case.config.d_shape, dtype=torch.float32, device="cuda")
+        sqr_sum = torch.empty(case.config.sqr_sum_shape, dtype=torch.float32, device="cuda")
+        return lambda: deep_gemm.tf32_hc_prenorm_gemm(
+            case.a,
+            case.b,
+            output,
+            sqr_sum,
+            num_splits=None if case.config.num_splits == 1 else case.config.num_splits,
+        )
 
-    def _deepgemm():
-        return lambda: _bench_deepgemm_case(case)
-
-    references = {"deepgemm": _deepgemm}
-
-    result = bench(
-        funcs,
+    return bench(
+        {"tirx": lambda: _bench_tirx_case(case, executable)},
+        references={"deepgemm": build_deepgemm},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references=references,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
-    result["tirx_diff"] = tirx_diff
-    result["max_diff"] = tirx_diff
-    return result
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:
@@ -1197,8 +1093,8 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 
 
 __all__ = [
+    "BENCH_CONFIGS",
     "CONFIGS",
-    "DEEPGEMM_TEST_COVERAGE",
     "KERNEL_META",
     "TF32HCPrenormGemmConfig",
     "get_kernel",

@@ -1,5 +1,5 @@
 # FlashInfer MTP horizontal: official batch/T/state sweep plus compile-shape
-# and execution-body guards. Every reference row uses algorithm="horizontal".
+# and execution-body guards. Every row uses the horizontal specialization.
 # The pinned sweep keeps the b1/b512/b2048 small/medium/large points of the
 # official BF16-state batch curve; the rest stay benchable on request.
 kernel: selective_state_update_mtp_horizontal

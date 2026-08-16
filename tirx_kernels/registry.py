@@ -256,10 +256,15 @@ def load_kernel(name: str, *, strict: bool = False) -> ModuleType:
 
 
 def check_workload_imports(workloads: list[dict], *, strict: bool = True) -> list[str]:
-    """Import every unique kernel referenced in a workloads list. Returns names."""
+    """Import kernels and validate every workload against ``BENCH_CONFIGS``."""
     names = sorted({workload["kernel"] for workload in workloads})
     for name in names:
-        load_kernel(name, strict=strict)
+        module = load_kernel(name, strict=strict)
+        available = {config["label"] for config in module.BENCH_CONFIGS}
+        requested = {workload["config"] for workload in workloads if workload["kernel"] == name}
+        missing = sorted(requested - available)
+        if missing:
+            raise KeyError(f"{name} workload config(s) absent from BENCH_CONFIGS: {missing}")
     return names
 
 
@@ -309,11 +314,18 @@ if __name__ == "__main__":
         out = []
         for name, mod in sorted(all_kernels.items()):
             configs = getattr(mod, "CONFIGS", [])
-            out.append({"name": name, "meta": mod.KERNEL_META, "configs": configs})
+            out.append(
+                {
+                    "name": name,
+                    "meta": mod.KERNEL_META,
+                    "configs": configs,
+                    "bench_configs": mod.BENCH_CONFIGS,
+                }
+            )
         print(json.dumps(out, indent=2))
     elif args.format == "benchrun":
         for name, mod in sorted(all_kernels.items()):
-            for cfg in getattr(mod, "CONFIGS", []):
+            for cfg in mod.BENCH_CONFIGS:
                 label = cfg.get("label", "default")
                 print(
                     f"{name}|{label}|python -m tirx_kernels.bench --kernel {name} "

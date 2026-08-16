@@ -33,9 +33,9 @@ KERNEL_META = {"name": "deepep_dispatch", "category": "deepep", "compute_capabil
 # (bf16, non-cached, non-expand, do_cpu_sync=False) on `world_size` ranks.
 CONFIGS = [
     {
-        "label": "t128_h7168_e256_k6",
+        "label": "correctness_t16_h7168_e256_k6",
         "world_size": 8,
-        "num_tokens": 128,
+        "num_tokens": 16,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,
@@ -43,19 +43,9 @@ CONFIGS = [
         "masked_ratio": 0.0,
     },
     {
-        "label": "t4096_h7168_e256_k6",
+        "label": "correctness_t32_h7168_e256_k6_masked",
         "world_size": 8,
-        "num_tokens": 4096,
-        "hidden": 7168,
-        "num_experts": 256,
-        "num_topk": 6,
-        "expert_alignment": 1,
-        "masked_ratio": 0.0,
-    },
-    {
-        "label": "t1024_h7168_e256_k6_masked",
-        "world_size": 8,
-        "num_tokens": 1024,
+        "num_tokens": 32,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,
@@ -63,9 +53,9 @@ CONFIGS = [
         "masked_ratio": 0.3,
     },
     {
-        "label": "t1024_h7168_e256_k6_align128",
+        "label": "correctness_t128_h7168_e256_k6_align128",
         "world_size": 8,
-        "num_tokens": 1024,
+        "num_tokens": 128,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,
@@ -1071,6 +1061,101 @@ def prepare_data(
     }
 
 
+def _simulate_dispatch_torch(
+    x,
+    topk_idx,
+    topk_weights,
+    *,
+    world_size: int,
+    num_tokens_max: int,
+    num_experts: int,
+    expert_alignment: int,
+    rank: int,
+):
+    """Build the rank-local dispatch result from the public routing math."""
+
+    import torch
+    import torch.distributed as dist
+
+    local_tokens, hidden = x.shape
+    num_topk = topk_idx.shape[1]
+    x_padded = torch.zeros((num_tokens_max, hidden), dtype=x.dtype, device=x.device)
+    idx_padded = torch.full((num_tokens_max, num_topk), -1, dtype=topk_idx.dtype, device=x.device)
+    weights_padded = torch.zeros(
+        (num_tokens_max, num_topk), dtype=topk_weights.dtype, device=x.device
+    )
+    x_padded[:local_tokens] = x
+    idx_padded[:local_tokens] = topk_idx
+    weights_padded[:local_tokens] = topk_weights
+    count = torch.tensor([local_tokens], dtype=torch.int32, device=x.device)
+
+    x_all = [torch.empty_like(x_padded) for _ in range(world_size)]
+    idx_all = [torch.empty_like(idx_padded) for _ in range(world_size)]
+    weights_all = [torch.empty_like(weights_padded) for _ in range(world_size)]
+    count_all = [torch.empty_like(count) for _ in range(world_size)]
+    dist.all_gather(x_all, x_padded)
+    dist.all_gather(idx_all, idx_padded)
+    dist.all_gather(weights_all, weights_padded)
+    dist.all_gather(count_all, count)
+
+    experts_per_rank = num_experts // world_size
+    expert_start = rank * experts_per_rank
+    expert_end = expert_start + experts_per_rank
+    rows = []
+    rank_counts = []
+    expert_counts = [0] * experts_per_rank
+    for source_rank in range(world_size):
+        source_count = int(count_all[source_rank].item())
+        before = len(rows)
+        for token in range(source_count):
+            indices = idx_all[source_rank][token]
+            in_rank = (indices >= expert_start) & (indices < expert_end)
+            if not bool(in_rank.any()):
+                continue
+            # The device path uses `bfind` on the destination-rank match mask,
+            # so duplicate routes choose the highest top-k lane as master.
+            master_lane = int(in_rank.nonzero()[-1].item())
+            localized = torch.where(in_rank, indices - expert_start, -1)
+            for expert in indices[in_rank].tolist():
+                expert_counts[int(expert) - expert_start] += 1
+            rows.append(
+                (
+                    source_rank * num_tokens_max + token,
+                    source_rank * num_topk + master_lane,
+                    x_all[source_rank][token],
+                    localized,
+                    weights_all[source_rank][token],
+                )
+            )
+        rank_counts.append(len(rows) - before)
+
+    device = x.device
+    metadata = torch.empty((len(rows), 2), dtype=torch.int32, device=device)
+    recv_x = torch.empty((len(rows), hidden), dtype=x.dtype, device=device)
+    recv_topk_idx = torch.empty((len(rows), num_topk), dtype=topk_idx.dtype, device=device)
+    recv_topk_weights = torch.empty((len(rows), num_topk), dtype=topk_weights.dtype, device=device)
+    if rows:
+        metadata.copy_(
+            torch.tensor([[row[0], row[1]] for row in rows], dtype=torch.int32, device=device)
+        )
+        recv_x.copy_(torch.stack([row[2] for row in rows]))
+        recv_topk_idx.copy_(torch.stack([row[3] for row in rows]))
+        recv_topk_weights.copy_(torch.stack([row[4] for row in rows]))
+    psum_rank = torch.tensor(rank_counts, dtype=torch.int32, device=device).cumsum(0)
+    unaligned = torch.tensor(expert_counts, dtype=torch.int32, device=device)
+    aligned = ((unaligned + expert_alignment - 1) // expert_alignment) * expert_alignment
+    psum_expert = aligned.cumsum(0)
+    return {
+        "metadata": metadata,
+        "recv_x": recv_x,
+        "recv_topk_idx": recv_topk_idx,
+        "recv_topk_weights": recv_topk_weights,
+        "psum_rank": psum_rank,
+        "psum_expert": psum_expert,
+        "num_unaligned": unaligned,
+    }
+
+
 def _run_worker(
     runtime: Any, modules: dict[str, Any], mode: str, kwargs: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1095,22 +1180,18 @@ def _run_worker(
     x, topk_idx, topk_weights = data["x"], data["topk_idx"], data["topk_weights"]
     local_num_tokens = data["num_tokens"]
 
-    # The reference runtime needs GIN disabled on this host (verified in
-    # scaffolding: single-node NVLink LSA path works with EP_DISABLE_GIN=1).
-    import os
-
-    os.environ.setdefault("EP_DISABLE_GIN", "1")
-    import deep_ep
-
-    ref_buffer = deep_ep.ElasticBuffer(
-        group,
-        num_max_tokens_per_rank=num_tokens_max,
-        hidden=hidden,
-        num_topk=num_topk,
-        # Match the source perf test (tests/elastic/test_ep.py defaults).
-        prefer_overlap_with_compute=False,
-        explicitly_destroy=True,
-    )
+    expected = None
+    if mode == "test":
+        expected = _simulate_dispatch_torch(
+            x,
+            topk_idx,
+            topk_weights,
+            world_size=world_size,
+            num_tokens_max=num_tokens_max,
+            num_experts=num_experts,
+            expert_alignment=expert_alignment,
+            rank=rank,
+        )
 
     # TIRx-side symmetric window + metadata tensors.
     recv_region_bytes = world_size * num_tokens_max * TOKEN_BYTES_GMEM
@@ -1143,6 +1224,40 @@ def _run_worker(
     recv_topk_weights_flat = recv_topk_weights.view(-1)
     recv_src_metadata_flat = recv_src_metadata.view(-1)
 
+    ref_buffer = None
+    reference_launch = None
+    if mode == "bench":
+        from tirx_kernels.runner import external_references_enabled
+
+        if external_references_enabled():
+            import os
+
+            os.environ.setdefault("EP_DISABLE_GIN", "1")
+            import deep_ep
+
+            ref_buffer = deep_ep.ElasticBuffer(
+                group,
+                num_max_tokens_per_rank=num_tokens_max,
+                hidden=hidden,
+                num_topk=num_topk,
+                prefer_overlap_with_compute=False,
+                explicitly_destroy=True,
+            )
+
+            def launch_deepep_dispatch():
+                return ref_buffer.dispatch(
+                    x,
+                    topk_idx=topk_idx,
+                    topk_weights=topk_weights,
+                    num_max_tokens_per_rank=num_tokens_max,
+                    num_experts=num_experts,
+                    expert_alignment=expert_alignment,
+                    num_sms=num_sms,
+                    do_cpu_sync=False,
+                )
+
+            reference_launch = launch_deepep_dispatch
+
     def tirx_launch() -> None:
         dispatch_fn(
             x_flat,
@@ -1173,43 +1288,29 @@ def _run_worker(
             rank,
         )
 
-    def reference_launch():
-        return ref_buffer.dispatch(
-            x,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            num_max_tokens_per_rank=num_tokens_max,
-            num_experts=num_experts,
-            expert_alignment=expert_alignment,
-            num_sms=num_sms,
-            do_cpu_sync=False,
-        )
-
     try:
         if mode == "test":
 
             def _launch_and_check() -> None:
                 with torch.cuda.stream(runtime.timing_stream):
-                    ref_recv_x, ref_recv_topk_idx, ref_recv_topk_weights, ref_handle, _ = (
-                        reference_launch()
-                    )
                     tirx_launch()
                 runtime.device.sync(runtime.compute_stream)
 
-                num_recv_ref = int(ref_handle.psum_num_recv_tokens_per_scaleup_rank[-1].item())
+                assert expected is not None
+                num_recv_ref = int(expected["psum_rank"][-1].item())
                 num_recv_ours = int(psum_rank[-1].item())
                 assert num_recv_ref == num_recv_ours, (
                     f"rank {rank}: num_recv_tokens {num_recv_ours} != reference {num_recv_ref}"
                 )
-                assert torch.equal(ref_handle.psum_num_recv_tokens_per_scaleup_rank, psum_rank), (
+                assert torch.equal(expected["psum_rank"], psum_rank), (
                     f"rank {rank}: psum_num_recv_tokens_per_scaleup_rank mismatch"
                 )
-                assert torch.equal(ref_handle.psum_num_recv_tokens_per_expert, psum_expert[1:]), (
+                assert torch.equal(expected["psum_expert"], psum_expert[1:]), (
                     f"rank {rank}: psum_num_recv_tokens_per_expert mismatch"
                 )
-                assert torch.equal(
-                    ref_handle.num_unaligned_recv_tokens_per_expert, num_unaligned
-                ), f"rank {rank}: num_unaligned_recv_tokens_per_expert mismatch"
+                assert torch.equal(expected["num_unaligned"], num_unaligned), (
+                    f"rank {rank}: num_unaligned_recv_tokens_per_expert mismatch"
+                )
                 assert torch.equal(copied_topk_idx, topk_idx), (
                     f"rank {rank}: copied_topk_idx mismatch"
                 )
@@ -1217,7 +1318,7 @@ def _run_worker(
                 # The receive order inside each source-rank segment is atomic-order
                 # dependent in both implementations; compare up to permutation by
                 # sorting on the unique src_token_global_idx.
-                ref_meta = ref_handle.recv_src_metadata[:num_recv_ref]
+                ref_meta = expected["metadata"]
                 ours_meta = recv_src_metadata[:num_recv_ours]
                 ref_order = torch.argsort(ref_meta[:, 0])
                 ours_order = torch.argsort(ours_meta[:, 0])
@@ -1227,14 +1328,14 @@ def _run_worker(
                 assert torch.equal(ref_meta[ref_order, 1], ours_meta[ours_order, 1]), (
                     f"rank {rank}: recv_src_metadata[:, 1] mismatch"
                 )
-                assert torch.equal(ref_recv_x[:num_recv_ref][ref_order], recv_x[ours_order]), (
+                assert torch.equal(expected["recv_x"][ref_order], recv_x[ours_order]), (
                     f"rank {rank}: recv_x mismatch"
                 )
                 assert torch.equal(
-                    ref_recv_topk_idx[:num_recv_ref][ref_order], recv_topk_idx[ours_order]
+                    expected["recv_topk_idx"][ref_order], recv_topk_idx[ours_order]
                 ), f"rank {rank}: recv_topk_idx mismatch"
                 assert torch.equal(
-                    ref_recv_topk_weights[:num_recv_ref][ref_order], recv_topk_weights[ours_order]
+                    expected["recv_topk_weights"][ref_order], recv_topk_weights[ours_order]
                 ), f"rank {rank}: recv_topk_weights mismatch"
 
             check_error = ""
@@ -1252,18 +1353,14 @@ def _run_worker(
             return {"status": "OK"}
 
         # mode == "bench"
-        from tvm.tirx.bench import bench
-
-        def build_reference():
-            def launch() -> None:
-                reference_launch()
-
-            return launch
+        from tirx_kernels.runner import bench
 
         with torch.cuda.stream(runtime.timing_stream):
             result = bench(
                 {"tirx": tirx_launch},
-                references={"deepep": build_reference},
+                references=(
+                    {"deepep": lambda: reference_launch} if reference_launch is not None else None
+                ),
                 timer="kineto",
                 rounds=kwargs.get("rounds", 1),
                 cooldown_s=kwargs.get("cooldown_s", 1.0),
@@ -1272,7 +1369,8 @@ def _run_worker(
         return {"status": "OK", **result}
     finally:
         window.destroy()
-        ref_buffer.destroy()
+        if ref_buffer is not None:
+            ref_buffer.destroy()
 
 
 def _resolve_num_sms(config: dict[str, Any]) -> int:

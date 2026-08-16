@@ -18,6 +18,7 @@ scope (fast-math reciprocal, E4M3 scale factors, no 4over6 refinement).
 
 from typing import Any
 
+from tirx_kernels._torch_quant import quantize_nvfp4
 from tirx_kernels.runner import bench
 from tvm.script import tirx as T
 
@@ -271,11 +272,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
 
             in_offset = T.cast(row_idx, "int64") * actual_cols + col_idx
             T.ptx.ld.global_.v4.b32(
-                xw[0],
-                xw[1],
-                xw[2],
-                xw[3],
-                T.address_of(input_global[in_offset * ELTS_PER_THREAD]),
+                xw[0], xw[1], xw[2], xw[3], T.address_of(input_global[in_offset * ELTS_PER_THREAD])
             )
             T.ptx.ld.global_.v4.b32(
                 xw[4],
@@ -297,9 +294,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
                     yw[5],
                     yw[6],
                     yw[7],
-                    T.address_of(
-                        input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD + 8]
-                    ),
+                    T.address_of(input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD + 8]),
                 )
                 # silu_and_mul (utils:1142-1166): fp32 silu*mul per element,
                 # rounded back to DTYPE pairs in place.
@@ -469,7 +464,7 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand", **kwargs):
-    """Compile, launch, and validate one config against the flashinfer source."""
+    """Compile, launch, and validate one config against in-tree Torch math."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -483,16 +478,14 @@ def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand"
     _run_launch(ex, a, global_scale, out_tirx, sf_tirx, mask, n_experts, m, k)
     torch.cuda.synchronize()
 
-    import flashinfer
-
-    # Source API allocates its own outputs and returns permuted logical views.
-    ref_q, ref_sf = flashinfer.activation.silu_and_mul_scaled_nvfp4_experts_quantize(
-        a, mask, global_scale
+    ref_q = torch.empty_like(out_tirx)
+    ref_sf_u8 = torch.zeros(
+        (n_experts, _padded_m(m) * _padded_k_sf(k)), dtype=torch.uint8, device=a.device
     )
-    # ref_q logical [M, K/2, B] -> physical [B, M, K/2] uint8.
-    ref_q = ref_q.permute(2, 0, 1)
-    # ref_sf logical [32, 4, pm/128, 4, pk/64, B] -> physical (B, pm/128, pk/4, 32, 4, 4).
-    ref_sf_u8 = ref_sf.permute(5, 2, 4, 0, 1, 3).contiguous().view(torch.uint8).view(n_experts, -1)
+    for expert in range(n_experts):
+        ref_q[expert], ref_sf_u8[expert] = quantize_nvfp4(
+            a[expert], global_scale[expert : expert + 1], sf_layout="128x4", fuse_silu=True
+        )
 
     for e in range(n_experts):
         rows = int(mask[e].item())
@@ -503,7 +496,7 @@ def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand"
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
-    """Benchmark the TIRx port against the source thop (kernel-only)."""
+    """Benchmark the TIRx kernel only."""
     config = dict(prepared["config"])
     dtype = config.pop("dtype")
     n_experts = config.pop("n_experts")
@@ -521,10 +514,6 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     ex = executable
     out_tirx, sf_tirx = _alloc_outputs(dtype, n_experts, m, k)
 
-    funcs = {
-        "tirx": lambda: _run_launch(ex, a, global_scale, out_tirx, sf_tirx, mask, n_experts, m, k)
-    }
-
     def build_reference():
         from flashinfer.jit.fp4_quantization import gen_fp4_quantization_sm100_module
 
@@ -538,7 +527,11 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         return lambda: thop(out_ref, sf_ref, in_2d, global_scale, mask, True)
 
     return bench(
-        funcs,
+        {
+            "tirx": lambda: _run_launch(
+                ex, a, global_scale, out_tirx, sf_tirx, mask, n_experts, m, k
+            )
+        },
         references={"flashinfer": build_reference},
         warmup=warmup,
         repeat=repeat,

@@ -15,11 +15,9 @@ csrc/jit_kernels/heuristics/mega_moe.h.
 from __future__ import annotations
 
 import inspect
-import math
 import os
 import random
 import socket
-import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Any
@@ -28,31 +26,20 @@ from unittest import SkipTest
 import torch
 import torch.multiprocessing as mp
 
+from tirx_kernels import _torch_quant
+
 from .spec import (
     MegaMoeCase,
     MegaMoeConfig,
     _align_up,
     _launch_tirx_mega_moe,
     _prepare_tirx_invocation,
+    create_mega_moe_symm_buffer,
     fp8_fp4_mega_moe,
+    get_deepgemm_launch_config,
     get_deepgemm_symm_buffer_layout,
     get_deepgemm_workspace_layout,
-    validate_runtime_symm_buffer_layout,
 )
-
-_DEEP_GEMM_MODULE_NAME = "deep_gemm"
-
-
-def load_deep_gemm_mega() -> tuple[Any, str]:
-    try:
-        import deep_gemm as module
-    except Exception as exc:
-        raise SkipTest(
-            f"DeepGEMM mega_moe runtime unavailable: {_DEEP_GEMM_MODULE_NAME}: {exc}"
-        ) from exc
-    if not hasattr(module, "fp8_fp4_mega_moe"):
-        raise SkipTest("DeepGEMM mega_moe runtime unavailable: missing fp8_fp4_mega_moe")
-    return module, "installed"
 
 
 def _find_free_port() -> int:
@@ -81,43 +68,80 @@ def _distributed_env(port: int):
 
 
 def _cast_grouped_weights_to_fp4(
-    deep_gemm: Any, bf16_weights: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+    bf16_weights: torch.Tensor, *, compute_reference: bool
+) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor | None]:
     num_groups, n, k = bf16_weights.shape
     weights = []
     scales = []
+    restored = []
     for group_idx in range(num_groups):
-        weight, scale = deep_gemm.utils.per_token_cast_to_fp4(
-            bf16_weights[group_idx], use_ue8m0=True, gran_k=32
-        )
+        weight, scale = _torch_quant.per_token_cast_to_fp4(bf16_weights[group_idx], gran_k=32)
         weights.append(weight)
         scales.append(scale)
+        if compute_reference:
+            restored.append(_torch_quant.cast_back_from_fp4(weight, scale, gran_k=32))
     packed_weights = torch.stack(weights, dim=0).contiguous()
     raw_scales = torch.stack(scales, dim=0).contiguous()
-    transformed_scales = deep_gemm.transform_sf_into_required_layout(
-        raw_scales, n, k, (1, 32), num_groups
+    transformed_scales = _torch_quant.transform_sf(
+        raw_scales, mn=n, gran_mn=1, num_groups=num_groups
     )
-    return packed_weights, transformed_scales
+    reference = torch.stack(restored) if compute_reference else None
+    return (packed_weights, transformed_scales), reference
 
 
 def _cast_fp8_for_mega_moe(
-    deep_gemm: Any, x: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Port of `_cast_fp8_for_mega_moe` (DeepGEMM tests/test_mega_moe.py:53-60).
+    x: torch.Tensor, *, compute_reference: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Construct the packed input and TMA scale layouts consumed by MegaMoE.
 
-    Returns ``(x_fp8, x_sf, x_sf_tma)``. The third entry is the TMA-strided SF
-    view required by ``check_sf_layout(..., tma_stride_check=true)``; shared
-    weights use ``[0::2]`` of this tuple, i.e. ``(x_fp8, x_sf_tma)``.
+    The third entry is the TMA-strided scale view used by shared weights; the
+    fourth is the dequantized Torch operand retained only for correctness.
     """
-    x_fp8, x_sf = deep_gemm.utils.per_token_cast_to_fp8(
-        x, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
-    )
+    x_fp8, scales = _torch_quant.per_token_cast_to_fp8(x, gran_k=32)
+    x_sf = _torch_quant.pack_ue8m0_words(scales)
     mn, packed_sf_k = x_sf.shape
     x_sf_tma = torch.empty_strided(
         (mn, packed_sf_k), (1, _align_up(mn, 4)), dtype=x_sf.dtype, device=x_sf.device
     )
     x_sf_tma.copy_(x_sf)
-    return x_fp8, x_sf, x_sf_tma
+    restored = (
+        _torch_quant.cast_back_from_fp8(x_fp8, scales, gran_k=32) if compute_reference else None
+    )
+    return x_fp8, x_sf, x_sf_tma, restored
+
+
+def _interleave_gate_up(tensor: torch.Tensor, granularity: int = 8) -> torch.Tensor:
+    squeeze = tensor.ndim == 2
+    source = tensor.unsqueeze(0) if squeeze else tensor
+    groups, rows, *tail = source.shape
+    half = rows // 2
+    gate = source[:, :half].reshape(groups, half // granularity, granularity, *tail)
+    up = source[:, half:].reshape(groups, half // granularity, granularity, *tail)
+    logical = torch.stack((gate, up), dim=2).reshape_as(source)
+    # Packed weights enter contiguous, while their scale tensors enter in the
+    # MN-major TMA layout.  Preserve whichever physical strides the input owns.
+    result = torch.empty_like(source).copy_(logical)
+    return result.squeeze(0) if squeeze else result
+
+
+def _transpose_sf_for_utccp(scales: torch.Tensor) -> torch.Tensor:
+    squeeze = scales.ndim == 2
+    source = scales.unsqueeze(0) if squeeze else scales
+    groups, rows, packed_k = source.shape
+    if rows % 128:
+        raise ValueError("MegaMoE weight scale rows must be divisible by 128")
+    logical = source.reshape(groups, -1, 4, 32, packed_k).transpose(2, 3).reshape_as(source)
+    result = torch.empty_like(source).copy_(logical)
+    return result.squeeze(0) if squeeze else result
+
+
+def _transform_weights_for_mega_moe(
+    l1: tuple[torch.Tensor, torch.Tensor], l2: tuple[torch.Tensor, torch.Tensor]
+) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+    return (
+        (_interleave_gate_up(l1[0]), _transpose_sf_for_utccp(_interleave_gate_up(l1[1]))),
+        (l2[0], _transpose_sf_for_utccp(l2[1])),
+    )
 
 
 def _to_shared_mega_moe_sf_layout(
@@ -165,20 +189,12 @@ def _copy_fp8_sf(dst: torch.Tensor, src: torch.Tensor, num_tokens: int) -> None:
 
 
 def create_case(
-    deep_gemm: Any, config: MegaMoeConfig, group: Any, rank_idx: int, num_ranks: int
+    config: MegaMoeConfig, group: Any, rank_idx: int, num_ranks: int, *, compute_reference: bool
 ) -> MegaMoeCase:
     torch.manual_seed(rank_idx)
     random.seed(rank_idx)
 
-    symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
-        group,
-        config.num_experts,
-        config.num_max_tokens_per_rank,
-        config.num_topk,
-        config.hidden,
-        config.intermediate_hidden,
-        config.num_shared_experts,
-    )
+    symm_buffer = create_mega_moe_symm_buffer(config, group)
     num_tokens = config.num_tokens
     num_experts_per_rank = config.num_experts // num_ranks
 
@@ -205,46 +221,50 @@ def create_case(
     scores = torch.randn((num_tokens, config.num_experts), dtype=torch.float32, device="cuda")
     topk_weights, topk_idx = torch.topk(scores, config.num_topk, dim=-1, largest=True, sorted=False)
 
-    x_fp8_data, x_sf, _x_sf_tma = _cast_fp8_for_mega_moe(deep_gemm, x)
+    x_fp8_data, x_sf, _x_sf_tma, reference_x = _cast_fp8_for_mega_moe(
+        x, compute_reference=compute_reference
+    )
     x_fp8 = (x_fp8_data, x_sf)
-    transformed_l1_input = _cast_grouped_weights_to_fp4(deep_gemm, l1_weights)
-    transformed_l2_input = _cast_grouped_weights_to_fp4(deep_gemm, l2_weights)
-    transformed_l1_weights, transformed_l2_weights = deep_gemm.transform_weights_for_mega_moe(
+    transformed_l1_input, reference_l1_weights = _cast_grouped_weights_to_fp4(
+        l1_weights, compute_reference=compute_reference
+    )
+    transformed_l2_input, reference_l2_weights = _cast_grouped_weights_to_fp4(
+        l2_weights, compute_reference=compute_reference
+    )
+    transformed_l1_weights, transformed_l2_weights = _transform_weights_for_mega_moe(
         transformed_l1_input, transformed_l2_input
     )
     transformed_shared_l1_weights = None
     transformed_shared_l2_weights = None
     shared_l1_acts_sf = None
+    reference_shared_l1_weights = None
+    reference_shared_l2_weights = None
     if config.has_shared_experts:
-        # `[0::2]` selects `(fp8, tma-strided SF)`, matching the reference test.
-        shared_l1_input = _cast_fp8_for_mega_moe(deep_gemm, shared_l1_weights_bf16)[0::2]
-        shared_l2_input = _cast_fp8_for_mega_moe(deep_gemm, shared_l2_weights_bf16)[0::2]
+        shared_l1_cast = _cast_fp8_for_mega_moe(
+            shared_l1_weights_bf16, compute_reference=compute_reference
+        )
+        shared_l2_cast = _cast_fp8_for_mega_moe(
+            shared_l2_weights_bf16, compute_reference=compute_reference
+        )
+        shared_l1_input = (shared_l1_cast[0], shared_l1_cast[2])
+        shared_l2_input = (shared_l2_cast[0], shared_l2_cast[2])
+        reference_shared_l1_weights = shared_l1_cast[3]
+        reference_shared_l2_weights = shared_l2_cast[3]
         transformed_shared_l1_weights, transformed_shared_l2_weights = (
-            deep_gemm.transform_weights_for_mega_moe(shared_l1_input, shared_l2_input)
+            _transform_weights_for_mega_moe(shared_l1_input, shared_l2_input)
         )
         # The shared L1 SF plane is host-written in a BLOCK_M-dependent layout.
-        block_m = deep_gemm.get_block_m_for_mega_moe(
-            num_ranks,
-            config.num_experts,
-            symm_buffer.num_max_tokens_per_rank,
-            num_tokens,
-            config.num_topk,
-            "fp8xfp4",
-        )
+        block_m = get_deepgemm_launch_config(config).block_m
         shared_l1_acts_sf = _to_shared_mega_moe_sf_layout(
             x_sf, block_m, symm_buffer.shared_l1_acts_sf.shape[0]
         )
     workspace_layout = get_deepgemm_workspace_layout(config)
     symm_buffer_layout = get_deepgemm_symm_buffer_layout(config)
-    validate_runtime_symm_buffer_layout(
-        symm_buffer=symm_buffer, layout=symm_buffer_layout, config=config
-    )
     return MegaMoeCase(
         config=config,
         rank_idx=rank_idx,
         num_ranks=num_ranks,
         group=group,
-        deep_gemm=deep_gemm,
         symm_buffer=symm_buffer,
         x_fp8=x_fp8,
         topk_idx=topk_idx,
@@ -256,6 +276,11 @@ def create_case(
         transformed_shared_l1_weights=transformed_shared_l1_weights,
         transformed_shared_l2_weights=transformed_shared_l2_weights,
         shared_l1_acts_sf=shared_l1_acts_sf,
+        reference_x=reference_x,
+        reference_l1_weights=reference_l1_weights,
+        reference_l2_weights=reference_l2_weights,
+        reference_shared_l1_weights=reference_shared_l1_weights,
+        reference_shared_l2_weights=reference_shared_l2_weights,
     )
 
 
@@ -271,30 +296,107 @@ def _copy_inputs_into_symm_buffer(case: MegaMoeCase) -> None:
     case.symm_buffer.topk_weights[:num_tokens].copy_(case.topk_weights)
 
 
-def run_deepgemm_reference(
-    case: MegaMoeCase, cumulative_local_expert_recv_stats: torch.Tensor | None = None
+def _quantized_swiglu(
+    l1: torch.Tensor,
+    *,
+    intermediate_hidden: int,
+    activation_clamp: float,
+    route_weights: torch.Tensor | None,
 ) -> torch.Tensor:
-    _copy_inputs_into_symm_buffer(case)
-    y = torch.empty(
-        (case.config.num_tokens, case.config.hidden), dtype=torch.bfloat16, device="cuda"
-    )
-    case.deep_gemm.fp8_fp4_mega_moe(
-        y,
-        case.transformed_l1_weights,
-        case.transformed_l2_weights,
-        case.symm_buffer,
-        shared_l1_weights=case.transformed_shared_l1_weights,
-        shared_l2_weights=case.transformed_shared_l2_weights,
-        cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-        activation_clamp=case.config.activation_clamp,
-        fast_math=bool(case.config.fast_math),
-    )
-    return y
+    values = l1.to(torch.bfloat16).float()
+    gate = values[:, :intermediate_hidden].clamp(max=activation_clamp)
+    up = values[:, intermediate_hidden:].clamp(min=-activation_clamp, max=activation_clamp)
+    activated = torch.nn.functional.silu(gate) * up
+    if route_weights is not None:
+        activated = activated * route_weights[:, None]
+    quantized, scales = _torch_quant.per_token_cast_to_fp8(activated, gran_k=32)
+    return _torch_quant.cast_back_from_fp8(quantized, scales, gran_k=32)
 
 
-def _max_abs_diff(lhs: torch.Tensor, rhs: torch.Tensor) -> float:
-    abs_diff = (lhs.float() - rhs.float()).abs()
-    return 0.0 if abs_diff.numel() == 0 else float(abs_diff.max().item())
+def _torch_ffn(
+    x: torch.Tensor,
+    l1_weights: torch.Tensor,
+    l2_weights: torch.Tensor,
+    *,
+    intermediate_hidden: int,
+    activation_clamp: float,
+    route_weights: torch.Tensor | None,
+) -> torch.Tensor:
+    l1 = x.float() @ l1_weights.float().T
+    l2_input = _quantized_swiglu(
+        l1,
+        intermediate_hidden=intermediate_hidden,
+        activation_clamp=activation_clamp,
+        route_weights=route_weights,
+    )
+    return l2_input @ l2_weights.float().T
+
+
+def run_torch_reference(
+    case: MegaMoeCase, initial_stats: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Evaluate routed and shared experts with the quantized operands TIRx consumes."""
+
+    import torch.distributed as dist
+
+    if any(
+        value is None
+        for value in (case.reference_x, case.reference_l1_weights, case.reference_l2_weights)
+    ):
+        raise RuntimeError("Torch reference operands were not retained for this case")
+
+    def gather(tensor: torch.Tensor) -> torch.Tensor:
+        parts = [torch.empty_like(tensor) for _ in range(case.num_ranks)]
+        dist.all_gather(parts, tensor, group=case.group)
+        return torch.cat(parts, dim=0)
+
+    all_x = gather(case.reference_x)
+    all_topk_idx = gather(case.topk_idx)
+    all_topk_weights = gather(case.topk_weights)
+    result = torch.zeros((all_x.shape[0], case.config.hidden), dtype=torch.float32, device="cuda")
+
+    local_expert_begin = case.rank_idx * case.config.num_experts_per_rank
+    local_counts = torch.zeros(case.config.num_experts_per_rank, dtype=torch.int32, device="cuda")
+    for local_idx in range(case.config.num_experts_per_rank):
+        global_idx = local_expert_begin + local_idx
+        token_idx, topk_slot = torch.where(all_topk_idx == global_idx)
+        local_counts[local_idx] = token_idx.numel()
+        if token_idx.numel() == 0:
+            continue
+        contribution = _torch_ffn(
+            all_x.index_select(0, token_idx),
+            case.reference_l1_weights[local_idx],
+            case.reference_l2_weights[local_idx],
+            intermediate_hidden=case.config.intermediate_hidden,
+            activation_clamp=case.config.activation_clamp,
+            route_weights=all_topk_weights[token_idx, topk_slot],
+        )
+        result.index_add_(0, token_idx, contribution)
+
+    if case.config.has_shared_experts:
+        if case.reference_shared_l1_weights is None or case.reference_shared_l2_weights is None:
+            raise RuntimeError("Torch shared-expert operands were not retained for this case")
+        begin = case.rank_idx * case.config.num_tokens
+        end = begin + case.config.num_tokens
+        result[begin:end] += _torch_ffn(
+            all_x[begin:end],
+            case.reference_shared_l1_weights,
+            case.reference_shared_l2_weights,
+            intermediate_hidden=case.config.shared_intermediate_hidden,
+            activation_clamp=case.config.activation_clamp,
+            route_weights=None,
+        )
+
+    dist.all_reduce(result, group=case.group)
+    begin = case.rank_idx * case.config.num_tokens
+    end = begin + case.config.num_tokens
+    return result[begin:end].to(torch.bfloat16), initial_stats + local_counts
+
+
+def _relative_l2_diff(lhs: torch.Tensor, rhs: torch.Tensor) -> float:
+    difference = torch.linalg.vector_norm(lhs.float() - rhs.float())
+    scale = torch.linalg.vector_norm(rhs.float()).clamp_min(1.0e-12)
+    return float((difference / scale).item())
 
 
 def run_tirx_mega_moe(
@@ -335,68 +437,6 @@ def _destroy_process_group() -> None:
 
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
-
-
-def _bench_megamoe_mode(
-    funcs: dict[str, Any],
-    kernel_names: dict[str, str],
-    bench_kineto: Any,
-    barrier: Any,
-    between_impls: Any,
-    *,
-    rounds: int,
-    cooldown_s: float,
-) -> dict[str, Any]:
-    """Run the exact benchmark protocol used by latest DeepGEMM MegaMoE."""
-    if funcs.keys() != kernel_names.keys():
-        raise ValueError("MegaMoE benchmark funcs and kernel_names must have identical keys")
-    num_tests = int(inspect.signature(bench_kineto).parameters["num_tests"].default)
-    round_samples: dict[str, list[float]] = {name: [] for name in funcs}
-    round_orders: list[list[str]] = []
-    items = list(funcs.items())
-    for round_idx in range(rounds):
-        if round_idx > 0:
-            time.sleep(cooldown_s)
-        round_items = items if round_idx % 2 == 0 else list(reversed(items))
-        round_orders.append([name for name, _ in round_items])
-
-        def run_pair() -> None:
-            for impl_idx, (_, fn) in enumerate(round_items):
-                if impl_idx > 0:
-                    between_impls()
-                fn()
-
-        round_kernel_names = tuple(kernel_names[name] for name, _ in round_items)
-        round_times = bench_kineto(run_pair, round_kernel_names, barrier=barrier)
-        for (name, _), seconds in zip(round_items, round_times):
-            seconds = float(seconds)
-            if not math.isfinite(seconds) or seconds <= 0:
-                raise RuntimeError(
-                    f"DeepGEMM bench_kineto returned invalid time for {name}: {seconds}"
-                )
-            round_samples[name].append(seconds * 1e6)
-
-    return {
-        "impls": {name: sum(samples) / len(samples) for name, samples in round_samples.items()},
-        "round_samples": round_samples,
-        "errors": {},
-        "timer": "megamoe",
-        "benchmark_protocol": {
-            "source": "deep_gemm.testing.bench_kineto",
-            "kernel_names": kernel_names,
-            "num_tests": num_tests,
-            "flush_l2": True,
-            "flush_l2_bytes": int(8e9),
-            "gpu_sleep_cycles": int(2e7),
-            "rank_barrier_outside_kernel_timing": True,
-            "paired_profile_session": True,
-            "cold_setup_per_implementation": True,
-            "rounds": rounds,
-            "round_aggregate": "mean",
-            "round_cooldown_s": cooldown_s,
-            "round_orders": round_orders,
-        },
-    }
 
 
 def _init_dist_on_assigned_device(
@@ -455,10 +495,9 @@ def _run_worker(
     from tirx_kernels.runner import bind_cuda_assignment, validate_current_cuda_assignment
 
     bind_cuda_assignment((physical_device_index,), (physical_device_uuid,))
-    deep_gemm, source = load_deep_gemm_mega()
     case = None
-    dg_case = None
     tirx_case = None
+    reference_case = None
     default_device_before = torch.get_default_device()
     cuda_device_before = (
         torch.cuda.current_device()
@@ -474,21 +513,19 @@ def _run_worker(
         rank_idx, num_ranks, group = _init_dist_on_assigned_device(
             local_rank, config.num_processes, physical_device_index
         )
-        validate_current_cuda_assignment("after DeepGEMM distributed init")
+        validate_current_cuda_assignment("after distributed init")
 
         if mode == "test":
-            case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
+            case = create_case(config, group, rank_idx, num_ranks, compute_reference=True)
             initial_stats = torch.arange(
                 config.num_experts_per_rank, dtype=torch.int32, device="cuda"
             )
-            deepgemm_stats = initial_stats.clone()
             tirx_stats = initial_stats.clone()
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
-            y_ref = run_deepgemm_reference(case, deepgemm_stats)
+            y_ref, reference_stats = run_torch_reference(case, initial_stats)
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
-            checksum = float(y_ref.float().sum().item())
             try:
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
@@ -496,164 +533,105 @@ def _run_worker(
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
             except NotImplementedError as exc:
-                return {
-                    "status": "SKIP",
-                    "reason": str(exc),
-                    "reference_source": source,
-                    "reference_checksum": checksum,
-                    "num_tokens": config.num_tokens,
-                }
-            deepgemm_max_abs_diff = _max_abs_diff(y_tir, y_ref)
+                return {"status": "SKIP", "reason": str(exc), "num_tokens": config.num_tokens}
+            torch_relative_l2_diff = _relative_l2_diff(y_tir, y_ref)
             stats_max_abs_diff = int(
-                (tirx_stats.to(torch.int64) - deepgemm_stats.to(torch.int64)).abs().max().item()
+                (tirx_stats.to(torch.int64) - reference_stats.to(torch.int64)).abs().max().item()
             )
             return {
                 "status": "OK",
-                "reference_source": source,
-                "reference_checksum": checksum,
-                "deepgemm_max_abs_diff": deepgemm_max_abs_diff,
+                "torch_relative_l2_diff": torch_relative_l2_diff,
                 "stats_max_abs_diff": stats_max_abs_diff,
             }
 
         if mode == "bench":
-            from tirx_kernels.runner import bench
+            from tirx_kernels.runner import bench, external_references_enabled
+            from tvm.tirx.bench import DistributedBenchContext
 
-            # bench()'s proton/event/cudagraph_proton timers are single-process:
-            # each rank derives n_warmup/n_repeat from its own per-call estimate
-            # with no cross-rank sync, so a cross-rank mega_moe kernel (in-kernel
-            # collectives per launch) deadlocks when ranks run different iteration
-            # counts. Multi-process bench must use the purpose-built megamoe
-            # harness (DeepGEMM bench_kineto + barrier reset); default to it and
-            # reject an explicit single-process timer.
-            if config.num_processes > 1:
-                if timer is None:
-                    timer = "megamoe"
-                elif timer != "megamoe":
-                    raise ValueError(
-                        "multi-process mega_moe bench requires timer='megamoe' (or omit "
-                        f"--timer); {timer!r} is a single-process timer and would "
-                        "deadlock the cross-rank kernel collectives"
-                    )
-
-            dg_case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
-            tirx_case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
-            deepgemm_stats = None
-            tirx_stats = None
-            if timer == "megamoe":
-                initial_stats = torch.zeros(
-                    config.num_experts_per_rank, dtype=torch.int32, device="cuda"
-                )
-                deepgemm_stats = initial_stats.clone()
-                tirx_stats = initial_stats.clone()
-                tirx_case.cumulative_local_expert_recv_stats = tirx_stats
-            _copy_inputs_into_symm_buffer(dg_case)
+            if timer not in (None, "kineto"):
+                raise ValueError("MegaMoE benchmark supports only distributed timer='kineto'")
+            tirx_case = create_case(config, group, rank_idx, num_ranks, compute_reference=False)
             _copy_inputs_into_symm_buffer(tirx_case)
-            y_deepgemm = torch.empty(
-                (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
-            )
             tirx_invocation = _prepare_tirx_invocation(tirx_case)
 
-            def deepgemm_step() -> None:
-                dg_case.deep_gemm.fp8_fp4_mega_moe(
-                    y_deepgemm,
-                    dg_case.transformed_l1_weights,
-                    dg_case.transformed_l2_weights,
-                    dg_case.symm_buffer,
-                    shared_l1_weights=dg_case.transformed_shared_l1_weights,
-                    shared_l2_weights=dg_case.transformed_shared_l2_weights,
-                    cumulative_local_expert_recv_stats=deepgemm_stats,
-                    activation_clamp=dg_case.config.activation_clamp,
-                    fast_math=bool(dg_case.config.fast_math),
+            reference_step = None
+            reference_prepare = None
+            if external_references_enabled():
+                reference_case = create_case(
+                    config, group, rank_idx, num_ranks, compute_reference=False
                 )
+                _copy_inputs_into_symm_buffer(reference_case)
+                reference_output = torch.empty(
+                    (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
+                )
+
+                def build_deepgemm_reference():
+                    import deep_gemm
+
+                    def deepgemm_step() -> None:
+                        deep_gemm.fp8_fp4_mega_moe(
+                            reference_output,
+                            reference_case.transformed_l1_weights,
+                            reference_case.transformed_l2_weights,
+                            reference_case.symm_buffer,
+                            shared_l1_weights=reference_case.transformed_shared_l1_weights,
+                            shared_l2_weights=reference_case.transformed_shared_l2_weights,
+                            cumulative_local_expert_recv_stats=None,
+                            activation_clamp=config.activation_clamp,
+                            fast_math=bool(config.fast_math),
+                        )
+
+                    return deepgemm_step
+
+                def prepare_deepgemm_reference() -> None:
+                    _copy_inputs_into_symm_buffer(reference_case)
+
+                reference_step = build_deepgemm_reference
+                reference_prepare = prepare_deepgemm_reference
 
             def tirx_step() -> None:
                 _launch_tirx_mega_moe(tirx_case, tirx_invocation)
 
-            if torch.distributed.is_initialized():
+            def barrier() -> None:
                 torch.distributed.barrier()
-            deepgemm_step()
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            tirx_step()
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            deepgemm_max_abs_diff = _max_abs_diff(tirx_invocation.y, y_deepgemm)
-            if deepgemm_max_abs_diff != 0.0:
-                raise AssertionError(f"TIRx diff={deepgemm_max_abs_diff}")
-            if timer == "megamoe" and not torch.equal(tirx_stats, deepgemm_stats):
-                raise AssertionError("TIRx cumulative expert stats differ from DeepGEMM")
 
-            if timer == "megamoe":
-                if warmup is not None or repeat is not None:
-                    raise ValueError(
-                        "timer='megamoe' uses DeepGEMM's fixed bench_kineto protocol; "
-                        "do not pass warmup/repeat overrides"
-                    )
+            def max_reduce(value: float) -> float:
+                reduced = torch.tensor(value, dtype=torch.float64, device="cuda")
+                torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.MAX)
+                return float(reduced.item())
 
-                def deepgemm_megamoe_step() -> None:
-                    nonlocal y_deepgemm
-                    _copy_inputs_into_symm_buffer(dg_case)
-                    y_deepgemm = torch.empty(
-                        (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
-                    )
-                    deepgemm_step()
+            def prepare() -> None:
+                _copy_inputs_into_symm_buffer(tirx_case)
 
-                def tirx_megamoe_step() -> None:
-                    _copy_inputs_into_symm_buffer(tirx_case)
-                    tirx_invocation.y = torch.empty(
-                        (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
-                    )
-                    tirx_step()
-
-                def reset_between_implementations() -> None:
-                    torch.empty(int(8e9 // 4), dtype=torch.int, device="cuda").zero_()
-                    torch.cuda._sleep(int(2e7))
-                    torch.distributed.barrier()
-
-                from deep_gemm.testing import bench_kineto
-
-                validate_current_cuda_assignment("before DeepGEMM MegaMoE timing", restore=True)
-                bench_result = _bench_megamoe_mode(
-                    {"tirx": tirx_megamoe_step, "deepgemm": deepgemm_megamoe_step},
-                    {"tirx": "mega_moe_kernel", "deepgemm": "sm100_fp8_fp4_mega_moe_impl"},
-                    bench_kineto,
-                    torch.distributed.barrier,
-                    reset_between_implementations,
-                    rounds=rounds,
-                    cooldown_s=cooldown_s,
-                )
-            else:
-                validate_current_cuda_assignment("before TIRx MegaMoE timing", restore=True)
-                bench_result = bench(
-                    {"tirx": tirx_step},
-                    warmup=warmup,
-                    repeat=repeat,
-                    timer=timer,
-                    references={"deepgemm": lambda: deepgemm_step},
-                    rounds=rounds,
-                    cooldown_s=cooldown_s,
-                )
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            impls = bench_result["impls"]
-            missing = {"deepgemm", "tirx"} - set(impls)
-            if missing:
-                raise RuntimeError(f"Benchmark did not report timings for: {sorted(missing)}")
-            return {
-                "status": "OK",
-                "reference_source": source,
-                "deepgemm_max_abs_diff": deepgemm_max_abs_diff,
-                "impls": {"deepgemm": float(impls["deepgemm"]), "tirx": float(impls["tirx"])},
-                "round_samples": bench_result.get("round_samples", {}),
-                "errors": bench_result["errors"],
-                "timer": bench_result.get("timer"),
-                "benchmark_protocol": bench_result.get("benchmark_protocol", {}),
-            }
+            distributed = DistributedBenchContext(
+                rank=rank_idx,
+                world_size=num_ranks,
+                barrier=barrier,
+                max_reduce=max_reduce,
+                stream=torch.cuda.current_stream(),
+            )
+            validate_current_cuda_assignment("before TIRx MegaMoE timing", restore=True)
+            result = bench(
+                {"tirx": tirx_step},
+                warmup=warmup,
+                repeat=repeat,
+                timer="kineto",
+                rounds=rounds,
+                cooldown_s=cooldown_s,
+                distributed=distributed,
+                prepare={
+                    "tirx": prepare,
+                    **({"deepgemm": reference_prepare} if reference_prepare is not None else {}),
+                },
+                references=({"deepgemm": reference_step} if reference_step is not None else None),
+            )
+            barrier()
+            return {"status": "OK", **result}
 
         raise ValueError(f"Unsupported mode: {mode}")
     finally:
         try:
-            _cleanup_distinct_cases(case, dg_case, tirx_case)
+            _cleanup_distinct_cases(case, tirx_case, reference_case)
             _destroy_process_group()
         finally:
             torch.set_default_device(default_device_before)
@@ -714,31 +692,28 @@ def _aggregate_rank_results(rank_results: list[tuple[int, dict[str, Any]]]) -> d
             "impls": impls,
             "round_samples": round_samples,
             "errors": errors,
-            "deepgemm_max_abs_diff": max(
-                float(result.get("deepgemm_max_abs_diff", 0.0)) for result in results
-            ),
             "rank_results": [
                 {
                     "rank": rank,
                     "impls": result.get("impls", {}),
                     "round_samples": result.get("round_samples", {}),
-                    "deepgemm_max_abs_diff": float(result.get("deepgemm_max_abs_diff", 0.0)),
                 }
                 for rank, result in rank_results
             ],
         }
-    if "deepgemm_max_abs_diff" not in first:
+    if "torch_relative_l2_diff" not in first:
         return first
     return {
         **first,
-        "deepgemm_max_abs_diff": max(float(result["deepgemm_max_abs_diff"]) for result in results),
+        "torch_relative_l2_diff": max(
+            float(result["torch_relative_l2_diff"]) for result in results
+        ),
         "stats_max_abs_diff": max(int(result["stats_max_abs_diff"]) for result in results),
         "rank_results": [
             {
                 "rank": rank,
-                "deepgemm_max_abs_diff": float(result["deepgemm_max_abs_diff"]),
+                "torch_relative_l2_diff": float(result["torch_relative_l2_diff"]),
                 "stats_max_abs_diff": int(result["stats_max_abs_diff"]),
-                "reference_checksum": float(result["reference_checksum"]),
             }
             for rank, result in rank_results
         ],

@@ -27,6 +27,7 @@ The implementation structure follows the reviewer-approved sketch
 
 from typing import Any
 
+from tirx_kernels._torch_quant import quantize_mxfp4
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_8,
     cvt_e2m1x8,
@@ -363,25 +364,6 @@ def _alloc_outputs(m: int, k: int, sf_layout: str):
     return out, sf
 
 
-def _sf_layout_enum(sf_layout: str):
-    from flashinfer.tllm_enums import SfLayout
-
-    return {
-        "linear": SfLayout.layout_linear,
-        "128x4": SfLayout.layout_128x4,
-        "8x4": SfLayout.layout_8x4,
-    }[sf_layout]
-
-
-def _run_reference(a, sf_layout: str, enable_pdl: bool):
-    """Run the FlashInfer CuTe-DSL source wrapper (allocates its own outputs)."""
-    from flashinfer.quantization import mxfp4_quantize
-
-    return mxfp4_quantize(
-        a, backend="cute-dsl", sfLayout=_sf_layout_enum(sf_layout), enable_pdl=enable_pdl
-    )
-
-
 def prepare_bench(**kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
@@ -393,7 +375,7 @@ def prepare_bench(**kwargs: Any):
 def run_test(
     dtype: str, m: int, k: int, sf_layout: str = "128x4", enable_pdl: bool = False, **kwargs
 ):
-    """Compile, launch, and validate one config against the flashinfer source."""
+    """Compile, launch, and validate one config against in-tree Torch math."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -408,13 +390,13 @@ def run_test(
         ex(a.view(-1), out_tirx.view(-1), sf_tirx, m, _padded_m(m, sf_layout))
     torch.cuda.synchronize()
 
-    ref_fp4, ref_sf = _run_reference(a, sf_layout, enable_pdl)
+    ref_fp4, ref_sf = quantize_mxfp4(a, sf_layout=sf_layout)
     torch.testing.assert_close(out_tirx, ref_fp4, rtol=0, atol=0)
-    torch.testing.assert_close(sf_tirx, ref_sf.view(-1), rtol=0, atol=0)
+    torch.testing.assert_close(sf_tirx, ref_sf, rtol=0, atol=0)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
-    """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
+    """Benchmark the TIRx kernel only."""
     config = dict(prepared["config"])
     dtype = config.pop("dtype")
     m = config.pop("m")
@@ -441,8 +423,6 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
             ex(a.view(-1), out_tirx.view(-1), sf_tirx, m, padded_m)
 
     def build_reference():
-        # Bypass the allocating public wrapper: call the cached compiled source
-        # kernel directly with preallocated outputs (kernel-only timing).
         from flashinfer.quantization.kernels.mxfp4_quantize import (
             SF_LAYOUT_LINEAR,
             SF_LAYOUT_8x4,
@@ -450,11 +430,12 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
             _get_compiled_kernel_mxfp4,
         )
 
-        is_bf16 = dtype == "bfloat16"
         layout_code = {"linear": SF_LAYOUT_LINEAR, "128x4": SF_LAYOUT_128x4, "8x4": SF_LAYOUT_8x4}[
             sf_layout
         ]
-        kernel_fn, _ = _get_compiled_kernel_mxfp4(is_bf16, k, layout_code, enable_pdl, False)
+        kernel_fn, _ = _get_compiled_kernel_mxfp4(
+            dtype == "bfloat16", k, layout_code, enable_pdl, False
+        )
         out_ref, sf_ref = _alloc_outputs(m, k, sf_layout)
         if sf_layout == "linear":
             total_sf = m * (k // MXFP4_SF_VEC_SIZE)

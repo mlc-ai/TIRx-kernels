@@ -215,7 +215,7 @@ def run_test(**config):
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):
-    """Time our launch against `deep_gemm.fp8_fp4_gemm_nt`."""
+    """Time the prepared TIRx launch."""
     config = {**prepared["config"], **config}
     from ._sm100_fp8_fp4_gemm_1d1d.data import bench_against_deepgemm, deepgemm_launch_normal
 

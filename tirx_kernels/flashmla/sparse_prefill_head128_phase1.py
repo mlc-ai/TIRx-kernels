@@ -179,7 +179,7 @@ class SparseFlashMLAPrefillHead128Config:
             raise ValueError("topk must be a multiple of 128")
 
 
-CONFIGS = [
+BENCH_CONFIGS = [
     {
         "label": f"bench_regular_dqk{d_qk}_hq128_s4096_kv{s_kv}_topk2048",
         "s_q": 4096,
@@ -191,6 +191,29 @@ CONFIGS = [
     }
     for d_qk in (512, 576)
     for s_kv in (8192, 32768, 65536)
+]
+
+CONFIGS = [
+    {
+        "label": "correctness_regular_dqk512_hq128_s1_kv2048_topk1408",
+        "s_q": 1,
+        "s_kv": 2048,
+        "topk": 1408,
+        "d_qk": 512,
+        "h_q": B_H,
+        "have_attn_sink": True,
+        "have_topk_length": True,
+        "inject_invalid_indices": True,
+    },
+    {
+        "label": "correctness_regular_dqk576_hq128_s2_kv256_topk128",
+        "s_q": 2,
+        "s_kv": 256,
+        "topk": 128,
+        "d_qk": 576,
+        "h_q": B_H,
+        "have_attn_sink": True,
+    },
 ]
 
 KERNEL_META = {
@@ -1640,8 +1663,6 @@ def run_gpu(
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     args = _tirx_args(case)
 
-    funcs = {"tirx": lambda: ex(*args)}
-
     from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_reference_builder
     from tirx_kernels.flashmla.utils._trtllm_gen_bench import (
         trtllm_gen_config_compatible,
@@ -1653,7 +1674,7 @@ def run_gpu(
         references["trtllm_gen"] = lambda: trtllm_gen_reference_builder(case)
 
     return bench(
-        funcs,
+        {"tirx": lambda: ex(*args)},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
@@ -1672,4 +1693,12 @@ def run_bench(
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 
-__all__ = ["CONFIGS", "KERNEL_META", "get_kernel", "prepare_data", "run_bench", "run_test"]
+__all__ = [
+    "BENCH_CONFIGS",
+    "CONFIGS",
+    "KERNEL_META",
+    "get_kernel",
+    "prepare_data",
+    "run_bench",
+    "run_test",
+]
