@@ -22,6 +22,7 @@ from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.bench import CudaProfiler
 from tvm.tirx.layout import TCol, TileLayout, TLane
 
+from .utils._baselines import ratios as baseline_ratios
 from .utils._model_shapes import (
     ALLGATHER_GEMM_MODEL_SHAPES,
     SUPPORTED_WORLD_SIZES,
@@ -1343,6 +1344,10 @@ def _run_worker(
             distributed=runtime.bench_context(),
             prepare={"tirx": prepare},
         )
+        if baselines is not None:
+            result["baseline_metadata"] = baselines.metadata()
+            result["ratio_definition"] = "baseline_us / tirx_us"
+            result["ratios"] = baseline_ratios(result)
         return {"status": "OK", **result}
     finally:
         if baselines is not None:
@@ -1395,7 +1400,7 @@ def run_bench(
     scheduler: str = "dynamic",
     **_kwargs: Any,
 ) -> dict[str, Any]:
-    """Return cold-cache Kineto full-span timings for TIRx."""
+    """Return cold-cache Kineto full-span timings for TIRx and enabled references."""
 
     _check_config(M, N, K, world_size, dtype)
     _check_scheduler(scheduler)

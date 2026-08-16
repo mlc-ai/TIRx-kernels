@@ -1491,6 +1491,13 @@ def run_gpu(
                 recovery_steps=int(config.get("recovery_steps", 0)),
             )
 
+        executable(*args)
+        launch()
+        torch.cuda.synchronize(case["tirx_state"].device)
+        _assert_case_close(case)
+        for _ in range(2):
+            launch()
+        torch.cuda.synchronize(case["source_state"].device)
         return launch
 
     return bench(

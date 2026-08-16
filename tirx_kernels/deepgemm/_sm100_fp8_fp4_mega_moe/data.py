@@ -15,9 +15,11 @@ csrc/jit_kernels/heuristics/mega_moe.h.
 from __future__ import annotations
 
 import inspect
+import math
 import os
 import random
 import socket
+import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Any
@@ -439,6 +441,68 @@ def _destroy_process_group() -> None:
         dist.destroy_process_group()
 
 
+def _bench_megamoe_mode(
+    funcs: dict[str, Any],
+    kernel_names: dict[str, str],
+    bench_kineto: Any,
+    barrier: Any,
+    between_impls: Any,
+    *,
+    rounds: int,
+    cooldown_s: float,
+) -> dict[str, Any]:
+    """Run the exact benchmark protocol used by latest DeepGEMM MegaMoE."""
+    if funcs.keys() != kernel_names.keys():
+        raise ValueError("MegaMoE benchmark funcs and kernel_names must have identical keys")
+    num_tests = int(inspect.signature(bench_kineto).parameters["num_tests"].default)
+    round_samples: dict[str, list[float]] = {name: [] for name in funcs}
+    round_orders: list[list[str]] = []
+    items = list(funcs.items())
+    for round_idx in range(rounds):
+        if round_idx > 0:
+            time.sleep(cooldown_s)
+        round_items = items if round_idx % 2 == 0 else list(reversed(items))
+        round_orders.append([name for name, _ in round_items])
+
+        def run_all() -> None:
+            for impl_idx, (_, fn) in enumerate(round_items):
+                if impl_idx > 0:
+                    between_impls()
+                fn()
+
+        round_kernel_names = tuple(kernel_names[name] for name, _ in round_items)
+        round_times = bench_kineto(run_all, round_kernel_names, barrier=barrier)
+        for (name, _), seconds in zip(round_items, round_times):
+            seconds = float(seconds)
+            if not math.isfinite(seconds) or seconds <= 0:
+                raise RuntimeError(
+                    f"DeepGEMM bench_kineto returned invalid time for {name}: {seconds}"
+                )
+            round_samples[name].append(seconds * 1e6)
+
+    return {
+        "impls": {name: sum(samples) / len(samples) for name, samples in round_samples.items()},
+        "round_samples": round_samples,
+        "errors": {},
+        "timer": "megamoe",
+        "benchmark_protocol": {
+            "source": "deep_gemm.testing.bench_kineto",
+            "kernel_names": kernel_names,
+            "num_tests": num_tests,
+            "flush_l2": True,
+            "flush_l2_bytes": int(8e9),
+            "gpu_sleep_cycles": int(2e7),
+            "rank_barrier_outside_kernel_timing": True,
+            "paired_profile_session": len(funcs) > 1,
+            "cold_setup_per_implementation": True,
+            "rounds": rounds,
+            "round_aggregate": "mean",
+            "round_cooldown_s": cooldown_s,
+            "round_orders": round_orders,
+        },
+    }
+
+
 def _init_dist_on_assigned_device(
     local_rank: int, num_local_ranks: int, physical_device_index: int
 ) -> tuple[int, int, Any]:
@@ -546,17 +610,32 @@ def _run_worker(
 
         if mode == "bench":
             from tirx_kernels.runner import bench, external_references_enabled
-            from tvm.tirx.bench import DistributedBenchContext
 
-            if timer not in (None, "kineto"):
-                raise ValueError("MegaMoE benchmark supports only distributed timer='kineto'")
+            if config.num_processes > 1:
+                if timer is None:
+                    timer = "megamoe"
+                elif timer != "megamoe":
+                    raise ValueError(
+                        "multi-process mega_moe bench requires timer='megamoe' (or omit "
+                        f"--timer); {timer!r} is a single-process timer and would "
+                        "deadlock the cross-rank kernel collectives"
+                    )
             tirx_case = create_case(config, group, rank_idx, num_ranks, compute_reference=False)
             _copy_inputs_into_symm_buffer(tirx_case)
+            tirx_stats = None
+            reference_stats = None
+            if timer == "megamoe":
+                initial_stats = torch.zeros(
+                    config.num_experts_per_rank, dtype=torch.int32, device="cuda"
+                )
+                tirx_stats = initial_stats.clone()
+                tirx_case.cumulative_local_expert_recv_stats = tirx_stats
             tirx_invocation = _prepare_tirx_invocation(tirx_case)
 
-            reference_step = None
-            reference_prepare = None
+            deepgemm_step = None
             if external_references_enabled():
+                import deep_gemm
+
                 reference_case = create_case(
                     config, group, rank_idx, num_ranks, compute_reference=False
                 )
@@ -564,68 +643,110 @@ def _run_worker(
                 reference_output = torch.empty(
                     (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
                 )
+                if timer == "megamoe":
+                    reference_stats = initial_stats.clone()
 
-                def build_deepgemm_reference():
-                    import deep_gemm
-
-                    def deepgemm_step() -> None:
-                        deep_gemm.fp8_fp4_mega_moe(
-                            reference_output,
-                            reference_case.transformed_l1_weights,
-                            reference_case.transformed_l2_weights,
-                            reference_case.symm_buffer,
-                            shared_l1_weights=reference_case.transformed_shared_l1_weights,
-                            shared_l2_weights=reference_case.transformed_shared_l2_weights,
-                            cumulative_local_expert_recv_stats=None,
-                            activation_clamp=config.activation_clamp,
-                            fast_math=bool(config.fast_math),
-                        )
-
-                    return deepgemm_step
-
-                def prepare_deepgemm_reference() -> None:
-                    _copy_inputs_into_symm_buffer(reference_case)
-
-                reference_step = build_deepgemm_reference
-                reference_prepare = prepare_deepgemm_reference
+                def deepgemm_step() -> None:
+                    deep_gemm.fp8_fp4_mega_moe(
+                        reference_output,
+                        reference_case.transformed_l1_weights,
+                        reference_case.transformed_l2_weights,
+                        reference_case.symm_buffer,
+                        shared_l1_weights=reference_case.transformed_shared_l1_weights,
+                        shared_l2_weights=reference_case.transformed_shared_l2_weights,
+                        cumulative_local_expert_recv_stats=reference_stats,
+                        activation_clamp=config.activation_clamp,
+                        fast_math=bool(config.fast_math),
+                    )
 
             def tirx_step() -> None:
                 _launch_tirx_mega_moe(tirx_case, tirx_invocation)
 
-            def barrier() -> None:
+            if torch.distributed.is_initialized():
                 torch.distributed.barrier()
+            if deepgemm_step is not None:
+                deepgemm_step()
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
+            tirx_step()
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            if deepgemm_step is not None:
+                max_abs_diff = float(
+                    (tirx_invocation.y.float() - reference_output.float()).abs().max().item()
+                )
+                if max_abs_diff != 0.0:
+                    raise AssertionError(f"TIRx diff={max_abs_diff}")
+                if timer == "megamoe" and not torch.equal(tirx_stats, reference_stats):
+                    raise AssertionError("TIRx cumulative expert stats differ from DeepGEMM")
 
-            def max_reduce(value: float) -> float:
-                reduced = torch.tensor(value, dtype=torch.float64, device="cuda")
-                torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.MAX)
-                return float(reduced.item())
+            if timer == "megamoe":
+                if warmup is not None or repeat is not None:
+                    raise ValueError(
+                        "timer='megamoe' uses DeepGEMM's fixed bench_kineto protocol; "
+                        "do not pass warmup/repeat overrides"
+                    )
 
-            def prepare() -> None:
-                _copy_inputs_into_symm_buffer(tirx_case)
+                def tirx_megamoe_step() -> None:
+                    _copy_inputs_into_symm_buffer(tirx_case)
+                    tirx_invocation.y = torch.empty(
+                        (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
+                    )
+                    tirx_step()
 
-            distributed = DistributedBenchContext(
-                rank=rank_idx,
-                world_size=num_ranks,
-                barrier=barrier,
-                max_reduce=max_reduce,
-                stream=torch.cuda.current_stream(),
-            )
-            validate_current_cuda_assignment("before TIRx MegaMoE timing", restore=True)
-            result = bench(
-                {"tirx": tirx_step},
-                warmup=warmup,
-                repeat=repeat,
-                timer="kineto",
-                rounds=rounds,
-                cooldown_s=cooldown_s,
-                distributed=distributed,
-                prepare={
-                    "tirx": prepare,
-                    **({"deepgemm": reference_prepare} if reference_prepare is not None else {}),
-                },
-                references=({"deepgemm": reference_step} if reference_step is not None else None),
-            )
-            barrier()
+                funcs = {"tirx": tirx_megamoe_step}
+                kernel_names = {"tirx": "mega_moe_kernel"}
+                if deepgemm_step is not None:
+
+                    def deepgemm_megamoe_step() -> None:
+                        nonlocal reference_output
+                        _copy_inputs_into_symm_buffer(reference_case)
+                        reference_output = torch.empty(
+                            (config.num_tokens, config.hidden),
+                            dtype=torch.bfloat16,
+                            device="cuda",
+                        )
+                        deepgemm_step()
+
+                    funcs["deepgemm"] = deepgemm_megamoe_step
+                    kernel_names["deepgemm"] = "sm100_fp8_fp4_mega_moe_impl"
+
+                def reset_between_implementations() -> None:
+                    torch.empty(int(8e9 // 4), dtype=torch.int, device="cuda").zero_()
+                    torch.cuda._sleep(int(2e7))
+                    torch.distributed.barrier()
+
+                # This external import owns the dedicated timer protocol; it is
+                # intentionally allowed even when reference implementations are disabled.
+                from deep_gemm.testing import bench_kineto
+
+                validate_current_cuda_assignment("before DeepGEMM MegaMoE timing", restore=True)
+                result = _bench_megamoe_mode(
+                    funcs,
+                    kernel_names,
+                    bench_kineto,
+                    torch.distributed.barrier,
+                    reset_between_implementations,
+                    rounds=rounds,
+                    cooldown_s=cooldown_s,
+                )
+            else:
+                validate_current_cuda_assignment("before TIRx MegaMoE timing", restore=True)
+                result = bench(
+                    {"tirx": tirx_step},
+                    warmup=warmup,
+                    repeat=repeat,
+                    timer=timer,
+                    references=(
+                        {"deepgemm": lambda: deepgemm_step}
+                        if deepgemm_step is not None
+                        else None
+                    ),
+                    rounds=rounds,
+                    cooldown_s=cooldown_s,
+                )
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
             return {"status": "OK", **result}
 
         raise ValueError(f"Unsupported mode: {mode}")

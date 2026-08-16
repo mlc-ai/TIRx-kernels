@@ -5,8 +5,9 @@
 
 """Fused MoE megakernel (MegaMoE) -- fp8 activations, fp4 weights, SM100.
 
-The implementation lives in :mod:`tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe`;
-this module pins distinct correctness and benchmark matrices and the registry surface.
+Reference: ``deep_gemm.fp8_fp4_mega_moe``.  The implementation lives in
+:mod:`tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe`; this module pins distinct
+correctness and benchmark matrices and the registry surface.
 
 Upstream sources: deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh, csrc/apis/mega.h,
 csrc/jit_kernels/heuristics/mega_moe.h.

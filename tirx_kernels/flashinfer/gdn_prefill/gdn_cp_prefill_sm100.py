@@ -3046,7 +3046,9 @@ def _fixup_sm100(
     if USE_STATE_INDICES:
         _load_global_s32(state_slot, state_indices.ptr_to([seq_idx]))
 
-    shared_state = T.alloc_buffer((ROWS_PER_CTA * D_HEAD,), "float32", scope="shared", align=128)
+    shared_state = T.alloc_buffer(
+        (ROWS_PER_CTA * D_HEAD,), "float32", scope="shared", align=128
+    )
     T.ptx.setmaxnreg.inc.sync.aligned.u32(256)
     T.cuda.cta_sync()
     if num_chunks > 0:
@@ -3055,17 +3057,25 @@ def _fixup_sm100(
             initial_values = T.alloc_local((ROWS_PER_CTA,), "float32")
             for local_row in T.unroll(ROWS_PER_CTA):
                 initial_index: T.int32 = (
-                    (state_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-                ) * D_HEAD + col
+                    ((state_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                    * D_HEAD
+                    + col
+                )
                 _load_global_as_f32(
-                    initial_values, local_row, initial_state, initial_index, STATE_DTYPE
+                    initial_values,
+                    local_row,
+                    initial_state,
+                    initial_index,
+                    STATE_DTYPE,
                 )
                 _store_shared_f32(
                     shared_state.ptr_to([local_row * D_HEAD + col]), initial_values[local_row]
                 )
                 workspace_index: T.int32 = (
-                    (seq_idx * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-                ) * D_HEAD + col
+                    ((seq_idx * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                    * D_HEAD
+                    + col
+                )
                 _store_global_f32(
                     initial_state_workspace.ptr_to([workspace_index]), initial_values[local_row]
                 )
@@ -3074,14 +3084,20 @@ def _fixup_sm100(
             first_slot: T.int32 = chunk_start
             for local_row in T.unroll(ROWS_PER_CTA):
                 first_index: T.int32 = (
-                    (first_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-                ) * D_HEAD + col
+                    ((first_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                    * D_HEAD
+                    + col
+                )
                 first_value: T.float32
                 _load_global_f32(first_value, local_state.ptr_to([first_index]))
-                _store_shared_f32(shared_state.ptr_to([local_row * D_HEAD + col]), first_value)
+                _store_shared_f32(
+                    shared_state.ptr_to([local_row * D_HEAD + col]), first_value
+                )
                 fixed_index: T.int32 = (
-                    (first_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-                ) * D_HEAD + col
+                    ((first_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                    * D_HEAD
+                    + col
+                )
                 _store_global_f32(fixed_state.ptr_to([fixed_index]), first_value)
         T.cuda.cta_sync()
 
@@ -3093,13 +3109,15 @@ def _fixup_sm100(
             first_work_slot: T.int32 = chunk_start + start
             for local_row in T.unroll(ROWS_PER_CTA):
                 first_work_index: T.int32 = (
-                    (first_work_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-                ) * D_HEAD + col
+                    ((first_work_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                    * D_HEAD
+                    + col
+                )
                 _load_global_f32(accum[local_row], local_state.ptr_to([first_work_index]))
             for inner in T.unroll(16):
                 transfer_index: T.int32 = (
-                    (first_work_slot * STATE_HEADS + state_head) * D_HEAD + inner
-                ) * D_HEAD + col
+                    ((first_work_slot * STATE_HEADS + state_head) * D_HEAD + inner) * D_HEAD + col
+                )
                 _load_global_f32(m_values[inner], transfer.ptr_to([transfer_index]))
 
         for chunk in T.serial(start, num_chunks):
@@ -3108,18 +3126,25 @@ def _fixup_sm100(
             for k_tile in T.unroll(7):
                 for inner in T.unroll(16):
                     transfer_next_index: T.int32 = (
-                        (cp_slot * STATE_HEADS + state_head) * D_HEAD + (k_tile + 1) * 16 + inner
-                    ) * D_HEAD + col
+                        ((cp_slot * STATE_HEADS + state_head) * D_HEAD + (k_tile + 1) * 16 + inner)
+                        * D_HEAD
+                        + col
+                    )
                     _load_global_f32(m_next[inner], transfer.ptr_to([transfer_next_index]))
                 for local_row in T.unroll(ROWS_PER_CTA):
                     for inner in T.unroll(16):
                         shared_value_main: T.float32
                         _load_shared_f32(
                             shared_value_main,
-                            shared_state.ptr_to([local_row * D_HEAD + k_tile * 16 + inner]),
+                            shared_state.ptr_to(
+                                [local_row * D_HEAD + k_tile * 16 + inner]
+                            ),
                         )
                         T.ptx.fma.rn.f32(
-                            accum[local_row], shared_value_main, m_values[inner], accum[local_row]
+                            accum[local_row],
+                            shared_value_main,
+                            m_values[inner],
+                            accum[local_row],
                         )
                 for inner in T.unroll(16):
                     m_values[inner] = m_next[inner]
@@ -3128,29 +3153,40 @@ def _fixup_sm100(
                 next_slot: T.int32 = chunk_start + next_chunk
                 for local_row in T.unroll(ROWS_PER_CTA):
                     next_state_index: T.int32 = (
-                        (next_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-                    ) * D_HEAD + col
-                    _load_global_f32(accum_next[local_row], local_state.ptr_to([next_state_index]))
+                        ((next_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                        * D_HEAD
+                        + col
+                    )
+                    _load_global_f32(
+                        accum_next[local_row], local_state.ptr_to([next_state_index])
+                    )
                 for inner in T.unroll(16):
                     next_transfer_index: T.int32 = (
-                        (next_slot * STATE_HEADS + state_head) * D_HEAD + inner
-                    ) * D_HEAD + col
+                        ((next_slot * STATE_HEADS + state_head) * D_HEAD + inner) * D_HEAD + col
+                    )
                     _load_global_f32(m_next[inner], transfer.ptr_to([next_transfer_index]))
             for local_row in T.unroll(ROWS_PER_CTA):
                 for inner in T.unroll(16):
                     shared_value_tail: T.float32
                     _load_shared_f32(
-                        shared_value_tail, shared_state.ptr_to([local_row * D_HEAD + 112 + inner])
+                        shared_value_tail,
+                        shared_state.ptr_to([local_row * D_HEAD + 112 + inner]),
                     )
                     T.ptx.fma.rn.f32(
-                        accum[local_row], shared_value_tail, m_values[inner], accum[local_row]
+                        accum[local_row],
+                        shared_value_tail,
+                        m_values[inner],
+                        accum[local_row],
                     )
             T.cuda.cta_sync()
             for local_row in T.unroll(ROWS_PER_CTA):
-                _store_shared_f32(shared_state.ptr_to([local_row * D_HEAD + col]), accum[local_row])
+                _store_shared_f32(
+                    shared_state.ptr_to([local_row * D_HEAD + col]), accum[local_row]
+                )
                 fixed_index: T.int32 = (
-                    (cp_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-                ) * D_HEAD + col
+                    ((cp_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row) * D_HEAD
+                    + col
+                )
                 _store_global_f32(fixed_state.ptr_to([fixed_index]), accum[local_row])
             T.cuda.cta_sync()
             if next_chunk < num_chunks:
@@ -3162,17 +3198,24 @@ def _fixup_sm100(
         if STORE_FINAL_STATE:
             for local_row in T.unroll(ROWS_PER_CTA):
                 final_index: T.int32 = (
-                    (state_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-                ) * D_HEAD + col
+                    ((state_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row)
+                    * D_HEAD
+                    + col
+                )
                 final_value: T.float32
-                _load_shared_f32(final_value, shared_state.ptr_to([local_row * D_HEAD + col]))
-                _store_global_from_f32(final_state, final_index, final_value, STATE_DTYPE)
+                _load_shared_f32(
+                    final_value, shared_state.ptr_to([local_row * D_HEAD + col])
+                )
+                _store_global_from_f32(
+                    final_state, final_index, final_value, STATE_DTYPE
+                )
 
     for gap_slot in T.serial(gap_start, gap_end):
         for local_row in T.unroll(ROWS_PER_CTA):
             gap_index: T.int32 = (
-                (gap_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row
-            ) * D_HEAD + col
+                ((gap_slot * STATE_HEADS + state_head) * D_HEAD + row_start + local_row) * D_HEAD
+                + col
+            )
             _store_global_f32(fixed_state.ptr_to([gap_index]), T.float32(0.0))
 
 
@@ -4894,7 +4937,7 @@ def _encode_tensor_map(
     swizzle: int = 3,
 ) -> _AlignedTensorMap:
     """Encode one source-shaped swizzled TMA tile."""
-    from cuda.bindings import driver as cuda_driver
+    import tvm
 
     rank = len(global_dims)
     if rank not in (3, 4, 5):
@@ -4905,33 +4948,22 @@ def _encode_tensor_map(
         box_dims = (64, 64, *((1,) * (rank - 2)))
     if len(box_dims) != rank:
         raise ValueError("TensorMap box dimension count must match rank")
-
-    tensor_map_dtype = {
-        "float16": cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
-        "bfloat16": cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-        "float32": cuda_driver.CUtensorMapDataType.CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
-    }.get(dtype)
-    if tensor_map_dtype is None:
-        raise ValueError(f"unsupported GDN CP TensorMap dtype: {dtype}")
-
-    result, encoded = cuda_driver.cuTensorMapEncodeTiled(
-        tensor_map_dtype,
-        cuda_driver.cuuint32_t(rank),
-        cuda_driver.CUdeviceptr(tensor.data_ptr()),
-        [cuda_driver.cuuint64_t(dim) for dim in global_dims],
-        [cuda_driver.cuuint64_t(stride) for stride in global_strides_bytes],
-        [cuda_driver.cuuint32_t(dim) for dim in box_dims],
-        [cuda_driver.cuuint32_t(1) for _ in range(rank)],
-        cuda_driver.CUtensorMapInterleave.CU_TENSOR_MAP_INTERLEAVE_NONE,
-        cuda_driver.CUtensorMapSwizzle(swizzle),
-        cuda_driver.CUtensorMapL2promotion.CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
-        cuda_driver.CUtensorMapFloatOOBfill.CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
-    )
-    if result != cuda_driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"cuTensorMapEncodeTiled failed: {result}")
-
     descriptor = _AlignedTensorMap()
-    ctypes.memmove(descriptor.ptr, encoded.getPtr(), DESCRIPTOR_SLOT_BYTES)
+    encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
+    encode(
+        descriptor.ptr,
+        dtype,
+        rank,
+        ctypes.c_void_p(int(tensor.data_ptr())),
+        *global_dims,
+        *global_strides_bytes,
+        *box_dims,
+        *((1,) * rank),
+        0,  # CU_TENSOR_MAP_INTERLEAVE_NONE
+        swizzle,
+        3,  # CU_TENSOR_MAP_L2_PROMOTION_L2_256B
+        0,  # CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    )
     return descriptor
 
 
@@ -5549,7 +5581,7 @@ def run_gpu(
     cooldown_s: float = 1.0,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Benchmark the prepared TIRx four-launch chain."""
+    """Benchmark the prepared four-launch chain against the source chain."""
     kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench
 
@@ -5580,6 +5612,9 @@ def run_gpu(
                 cp_chunk_len=case["spec"]["CP_CHUNK_LEN"],
             )
 
+        launch()
+        launch()
+        torch.cuda.synchronize()
         return launch
 
     return bench(

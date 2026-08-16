@@ -38,16 +38,12 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, ClassVar
 
 import yaml
 
-from tirx_kernels.bench_suite.timing_diff import (
-    DEFAULT_ABSOLUTE_THRESHOLD_US,
-    DEFAULT_TIMING_THRESHOLD,
-)
-from tirx_kernels.bench_suite.timing_diff import build_report as _build_bench_report
 from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S as DEFAULT_COOLDOWN_S
 from tirx_kernels.runner import DEFAULT_BENCH_ROUNDS as DEFAULT_ROUNDS
 from tirx_kernels.runner import (
@@ -55,6 +51,11 @@ from tirx_kernels.runner import (
     PREPARE_NUM_SMS_ENV,
     TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV,
 )
+
+try:
+    from tirx_kernels.bench_suite.impls import our_impls
+except ModuleNotFoundError:  # Support `python tirx_kernels/bench_suite/run.py`.
+    from impls import our_impls
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -72,9 +73,10 @@ CONFIG_DIR = SCRIPT_DIR / "config"
 GENERATED_WORKLOADS_NAME = "workloads.generated.yaml"
 MAX_DEFAULT_CONFIGS_PER_KERNEL = 3
 DEFAULT_SELECTION_ROLES = ("small", "medium", "large")
-# Single pinned baseline of our own kernel timings. Promote a run over it via
-# promote_baseline.py.
+# Single pinned baseline: every run benches our kernel + all reference impls,
+# so one JSON holds both. Promote a run over it via promote_baseline.py.
 DEFAULT_BASELINE = SCRIPT_DIR / "baseline.json"
+DEFAULT_REGRESSION_THRESHOLD = 1.0
 POLL_INTERVAL = 5.0  # seconds between GPU re-checks when none is free
 MONITOR_INTERVAL = 0.5  # seconds between nvidia-smi polls during a workload
 DEFAULT_UTIL_THRESHOLD = 0.0  # % GPU util above which a card counts as busy.
@@ -117,6 +119,13 @@ def _normalize_workload(workload: dict) -> dict:
     if type(num_gpus) is not int or num_gpus < 1:
         raise ValueError(f"workload num_gpus must be a positive integer: {workload}")
     workload["num_gpus"] = num_gpus
+    if workload.get("timer") == "megamoe" and (
+        workload.get("warmup") is not None or workload.get("repeat") is not None
+    ):
+        raise ValueError(
+            "timer='megamoe' uses a fixed DeepGEMM protocol and cannot override "
+            f"warmup/repeat: {workload}"
+        )
     return workload
 
 
@@ -585,75 +594,6 @@ def gpu_compile_profile(indices: set[str]) -> dict:
     return first
 
 
-def collect_runner_identity(compile_profile: dict) -> dict:
-    """Return the hardware/policy identity required for absolute timing comparison."""
-
-    try:
-        driver = subprocess.run(
-            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        ).stdout.splitlines()
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError(f"cannot identify fixed benchmark runner driver: {error}") from error
-    versions = sorted({line.strip() for line in driver if line.strip()})
-    if len(versions) != 1:
-        raise RuntimeError(f"benchmark runner GPUs report different driver versions: {versions}")
-
-    inventory_fields = (
-        "index",
-        "uuid",
-        "pci.bus_id",
-        "name",
-        "clocks.max.sm",
-        "clocks.max.memory",
-        "power.limit",
-        "persistence_mode",
-    )
-    try:
-        inventory_lines = subprocess.run(
-            [
-                "nvidia-smi",
-                f"--query-gpu={','.join(inventory_fields)}",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        ).stdout.splitlines()
-        topology_lines = (
-            subprocess.run(
-                ["nvidia-smi", "topo", "-m"], capture_output=True, text=True, check=True, timeout=5
-            )
-            .stdout.strip()
-            .splitlines()
-        )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError(
-            f"cannot identify fixed benchmark GPU/clock topology: {error}"
-        ) from error
-
-    inventory = []
-    for line in inventory_lines:
-        values = [value.strip() for value in line.split(",")]
-        if len(values) != len(inventory_fields):
-            raise RuntimeError(f"unexpected nvidia-smi inventory row: {line!r}")
-        inventory.append(dict(zip(inventory_fields, values)))
-    if not inventory or not topology_lines:
-        raise RuntimeError("fixed benchmark runner has empty GPU inventory or topology")
-
-    return {
-        "hostname": socket.gethostname(),
-        "gpu": dict(compile_profile),
-        "gpu_inventory": inventory,
-        "gpu_topology": topology_lines,
-        "driver_version": versions[0],
-    }
-
-
 # ── Workload execution ───────────────────────────────────────────────────────
 
 
@@ -852,7 +792,12 @@ class _PreparedAttempt:
 
 
 def _prepared_child_command(
-    workload: dict, *, control_fd: int, rounds: int, cooldown: float, with_references: bool
+    workload: dict,
+    *,
+    control_fd: int,
+    rounds: int,
+    cooldown: float,
+    with_references: bool,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1089,13 +1034,238 @@ def _module_repo_root(import_name: str) -> Path | None:
 
 
 def collect_repo_git() -> dict[str, str | None]:
-    """Diagnostic commit labels for the compiler and kernel source."""
+    """SHAs for the three repos involved: tvm, tirx-kernels, tirx-bench-ci."""
     tir_root = _tir_repo_root()
     tirx_root = _module_repo_root("tirx_kernels") or _kernels_repo_root()
+    bench_ci_root: Path | None = None
+    for base in (tirx_root, tir_root):
+        if base is None:
+            continue
+        candidate = base.parent / "tirx-bench-ci"
+        if (candidate / ".git").exists():
+            bench_ci_root = candidate
+            break
     return {
         "tir": git_label(tir_root) if tir_root else None,
         "tirx-kernels": git_label(tirx_root) if tirx_root else None,
+        "tirx-bench-ci": git_label(bench_ci_root) if bench_ci_root else None,
     }
+
+
+def collect_kernel_fingerprint() -> dict[str, str | None]:
+    """Merge-stable content fingerprints (git *tree* SHAs) of the source that
+    determines kernel codegen + perf.
+
+    The commit SHAs in ``collect_repo_git`` are rewritten by a squash/rebase
+    merge, so a baseline that records only commit SHAs can't be mapped back to a
+    mainline commit afterwards. A git tree SHA is content-addressed (Merkle): it
+    is identical before and after a merge as long as the directory's content is
+    unchanged. Confirm a checkout matches a recorded baseline with
+    ``git rev-parse HEAD:<path>``.
+    """
+    tir_root = _tir_repo_root()
+    tirx_root = _module_repo_root("tirx_kernels") or _kernels_repo_root()
+
+    def _tree(root: Path | None, path: str) -> str | None:
+        if root is None:
+            return None
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", f"HEAD:{path}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        return out.stdout.strip() or None
+
+    return {
+        "tir:python/tvm/tirx": _tree(tir_root, "python/tvm/tirx"),
+        "tirx-kernels:tirx_kernels": _tree(tirx_root, "tirx_kernels"),
+    }
+
+
+# Packages used as baselines in workloads.yaml — anything our regression
+# numbers compare against, so the recorded version pins the comparison.
+BASELINE_PACKAGES = [
+    "torch",
+    "deep_gemm",
+    "flashinfer",
+    "flash_kda",
+    "flash_attn",
+    "sglang",
+    "cutlass",
+]
+
+
+def package_provenance(import_name: str) -> dict | None:
+    """Probe a Python package: version + (if editable git install) repo + SHA.
+
+    Returns None when neither the package nor distribution metadata exists.
+    """
+
+    def _record_git(path: Path, info: dict) -> None:
+        try:
+            root = subprocess.run(
+                ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            if not root:
+                return
+            sha = subprocess.run(
+                ["git", "-C", root, "rev-parse", "--short=8", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            if not sha:
+                return
+            dirty = subprocess.run(
+                ["git", "-C", root, "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            info["git_dir"] = root
+            info["git_sha"] = sha + ("-dirty" if dirty else "")
+        except Exception:
+            pass
+
+    dists: list[str] = []
+    try:
+        from importlib.metadata import distribution as _probe_dist
+
+        _probe_dist(import_name)
+        dists.append(import_name)
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import packages_distributions
+
+        for dist_name in packages_distributions().get(import_name) or []:
+            if dist_name not in dists:
+                dists.append(dist_name)
+    except Exception:
+        pass
+    if not dists:
+        dists = [import_name]
+
+    mod = None
+    try:
+        mod = __import__(import_name)
+    except Exception:
+        pass
+    info: dict = {"importable": mod is not None}
+    # Heavy optional baselines can fail during their top-level import even when
+    # their source checkout is discoverable on PYTHONPATH. Resolve the module
+    # spec without executing it so provenance still records that checkout.
+    try:
+        spec = find_spec(import_name)
+    except Exception:
+        spec = None
+    if spec is not None:
+        source_dir = None
+        if spec.origin and spec.origin not in ("built-in", "frozen"):
+            source_dir = Path(spec.origin).resolve().parent
+        elif spec.submodule_search_locations:
+            source_dir = Path(next(iter(spec.submodule_search_locations))).resolve()
+        if source_dir is not None:
+            info.setdefault("source_dir", str(source_dir))
+            _record_git(source_dir, info)
+    # Version: prefer __version__, else importlib.metadata. Top-level import
+    # name and the distribution name often disagree (e.g. flash_attn ↔
+    # flash-attn-4) — use packages_distributions() to bridge.
+    version = getattr(mod, "__version__", None) if mod is not None else None
+    if version is None:
+        try:
+            from importlib.metadata import version as _meta_version
+
+            for d in dists:
+                try:
+                    version = _meta_version(d)
+                    if version is not None:
+                        info["dist"] = d
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    if version is not None:
+        info["version"] = str(version)
+    if import_name == "torch":
+        cuda = getattr(getattr(mod, "version", None), "cuda", None)
+        git_v = getattr(getattr(mod, "version", None), "git_version", None)
+        if cuda:
+            info["cuda"] = str(cuda)
+        if git_v:
+            info["torch_git_version"] = str(git_v)
+    # PEP 610 direct_url.json: when a package was `pip install -e <path>` or
+    # `pip install <path>`, pip writes the source path/URL into the dist-info.
+    # This catches the editable case (the package lives outside the repo it
+    # was built from, so the __file__ walk below misses it). dist resolution:
+    # prefer `info["dist"]` if we set it above, else default to import_name.
+    try:
+        from importlib.metadata import distribution as _meta_dist
+
+        dist = None
+        for dist_name in [info.get("dist"), *dists, import_name]:
+            if not dist_name:
+                continue
+            try:
+                dist = _meta_dist(dist_name)
+                info.setdefault("dist", dist.metadata["Name"])
+                break
+            except Exception:
+                continue
+        if dist is not None:
+            direct_url_text = dist.read_text("direct_url.json")
+            if direct_url_text:
+                direct = json.loads(direct_url_text)
+                url = direct.get("url") or ""
+                if url.startswith("file://"):
+                    src_path = Path(url[len("file://") :]).resolve()
+                    info["source_dir"] = str(src_path)
+                    if direct.get("dir_info", {}).get("editable"):
+                        info["editable"] = True
+                    _record_git(src_path, info)
+    except Exception:
+        pass
+    if mod is None:
+        return info if "version" in info or "source_dir" in info else None
+    # Resolve a directory we can git-probe. Namespace packages and some
+    # __init__.py-less namespaces set mod.__file__ to None — fall back to
+    # __path__[0] then to a known submodule's file.
+    pkg_file = getattr(mod, "__file__", None)
+    if not pkg_file:
+        try:
+            paths = list(getattr(mod, "__path__", []) or [])
+            if paths:
+                pkg_file = str(Path(paths[0]) / "__init__.py")
+        except Exception:
+            pass
+    if not pkg_file:
+        # Last resort: try to import a likely submodule with a real file.
+        for sub in (".cute", ".csrc", ".jit_kernels", ".jit"):
+            try:
+                submod = __import__(import_name + sub, fromlist=["__file__"])
+                if getattr(submod, "__file__", None):
+                    pkg_file = submod.__file__
+                    break
+            except Exception:
+                continue
+    if pkg_file:
+        pkg_dir = Path(pkg_file).resolve().parent
+        # Walk up looking for a git repo. .git can be a dir (regular clone)
+        # or a file (worktree); both are fine for `git rev-parse`.
+        _record_git(pkg_dir, info)
+    return info
+
+
+def collect_baseline_provenance() -> dict:
+    return {name: package_provenance(name) or {"installed": False} for name in BASELINE_PACKAGES}
 
 
 def write_run(
@@ -1103,7 +1273,6 @@ def write_run(
     stamp: str,
     results: list[dict],
     label: str | None,
-    runner: dict,
     references_enabled: bool,
     probe: dict | None = None,
     pipeline: dict | None = None,
@@ -1111,12 +1280,12 @@ def write_run(
     runs_dir = out_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 2,
         "timestamp": stamp,
         "label": label,
-        "runner": runner,
         "references_enabled": references_enabled,
         "git": collect_repo_git(),
+        "kernel_tree": collect_kernel_fingerprint(),
+        "baselines": collect_baseline_provenance() if references_enabled else {},
         "probe": probe or {},
         "pipeline": pipeline or {},
         "results": results,
@@ -1126,11 +1295,47 @@ def write_run(
     return path
 
 
+#: Which reference a kernel's ratio is quoted against, for the kernels that
+#: benchmark against more than one.  A kernel with a single non-ours impl needs
+#: no entry -- `_baseline_impl` derives it from the row.
+BASELINE_IMPL_BY_KERNEL = {
+    "fp16_bf16_gemm": "torch-cublas",
+    "nvfp4_gemm": "flashinfer",
+    "flashkda_bf16_fused_m128": "flashinfer_m128",
+    "deepgemm_sm100_fp8_paged_mqa_logits": "deepgemm",
+    "sparse_flashmla_prefill_head64_phase1": "flashmla",
+    "sparse_flashmla_prefill_head128_phase1": "flashmla",
+}
+
+
+def _baseline_impl(kernel: str, impl_names: list[str]) -> str | None:
+    """The reference a kernel's ratio is quoted against.
+
+    Most kernels have exactly one non-ours implementation, so naming it in a
+    hand-maintained table only creates a row that can be forgotten -- and four
+    kernels already had been, printing a bare `ratio` header.  The table now
+    only breaks genuine ties.
+    """
+    pinned = BASELINE_IMPL_BY_KERNEL.get(kernel)
+    if pinned:
+        return pinned
+    ours = set(our_impls(dict.fromkeys(impl_names)))
+    others = [name for name in impl_names if name not in ours]
+    return others[0] if len(others) == 1 else None
+
+
+def _our_impl(row_impls: dict) -> str | None:
+    """Pick the first TIR/TIRx implementation from a row's impls dict."""
+    return next(iter(our_impls(row_impls)), None)
+
+
 def write_summary(out_dir: Path, current: dict) -> Path:
     """Human-readable per-run report, grouped by kernel.
 
     Times are in µs to match the existing bench-suite doc convention. Per row:
-    config, one column per TIR/TIRx implementation, then attempt + gpu.
+    config, one column per impl present in that kernel, baseline/ours ratio
+    (against the kernel's reference impl from BASELINE_IMPL_BY_KERNEL),
+    then attempt + gpu.
     """
     stamp = current["timestamp"]
     reports_dir = out_dir / "reports" / stamp
@@ -1141,9 +1346,10 @@ def write_summary(out_dir: Path, current: dict) -> Path:
     label = current.get("label") or "-"
     git = current.get("git") or {}
     lines.append(f"- label: `{label}`")
-    lines.append(f"- runner: `{current.get('runner') or '-'}`")
     lines.append(
-        f"- git: tir=`{git.get('tir') or '-'}`  tirx-kernels=`{git.get('tirx-kernels') or '-'}`"
+        f"- git: tir=`{git.get('tir') or '-'}`  "
+        f"tirx-kernels=`{git.get('tirx-kernels') or '-'}`  "
+        f"tirx-bench-ci=`{git.get('tirx-bench-ci') or '-'}`"
     )
     statuses: dict[str, int] = {}
     for r in current.get("results") or []:
@@ -1152,6 +1358,28 @@ def write_summary(out_dir: Path, current: dict) -> Path:
     status_line = ", ".join(f"{k}={v}" for k, v in sorted(statuses.items()))
     lines.append(f"- status: {status_line} (over {sum(statuses.values())} workloads)")
     lines.append("")
+
+    baselines = current.get("baselines") or {}
+    if baselines:
+        lines.append("## Baseline impl provenance")
+        lines.append("")
+        for name, info in sorted(baselines.items()):
+            if not info or info.get("installed") is False:
+                lines.append(f"- `{name}`: not installed")
+                continue
+            bits = []
+            if "version" in info:
+                bits.append(f"v{info['version']}")
+            if "cuda" in info:
+                bits.append(f"cuda={info['cuda']}")
+            if "torch_git_version" in info:
+                bits.append(f"torch_git={info['torch_git_version'][:12]}")
+            if "git_sha" in info:
+                bits.append(f"@`{info['git_sha']}`")
+            if "git_dir" in info:
+                bits.append(f"({info['git_dir']})")
+            lines.append(f"- `{name}`: {' '.join(bits) if bits else '?'}")
+        lines.append("")
 
     # Group by kernel
     by_kernel: dict[str, list[dict]] = {}
@@ -1169,11 +1397,25 @@ def write_summary(out_dir: Path, current: dict) -> Path:
                     seen.add(impl)
                     impl_names.append(impl)
         impl_names.sort()
+        baseline_impl = _baseline_impl(kernel, impl_names)
+        # Determine "ours" impl name once for the whole kernel (constant per kernel)
+        ours_impl = None
+        for r in rows:
+            ours_impl = _our_impl(r.get("impls") or {})
+            if ours_impl:
+                break
+        ratio_label = f"{baseline_impl}/{ours_impl}" if baseline_impl and ours_impl else "ratio"
         lines.append(f"## `{kernel}`")
+        if baseline_impl and ours_impl:
+            lines.append("")
+            lines.append(
+                f"_baseline impl_: `{baseline_impl}` · _ours_: `{ours_impl}` · "
+                f"_ratio_ = baseline/ours · `>1` means ours is faster"
+            )
         lines.append("")
         # Table header
-        header = ["config", *impl_names, "attempt", "gpus"]
-        align = ["---"] + ["---:"] * len(impl_names) + ["---:", "---:"]
+        header = ["config", *impl_names, ratio_label, "attempt", "gpus"]
+        align = ["---"] + ["---:"] * len(impl_names) + ["---:", "---:", "---:"]
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "|".join(align) + "|")
         for r in rows:
@@ -1184,6 +1426,16 @@ def write_summary(out_dir: Path, current: dict) -> Path:
             for impl in impl_names:
                 us = impls.get(impl)
                 row.append(f"{us:.2f}" if us is not None else "—")
+            # Ratio column
+            ratio_cell = "—"
+            if baseline_impl and ours_impl:
+                base_us = impls.get(baseline_impl)
+                ours_us = impls.get(ours_impl)
+                if base_us is not None and ours_us is not None and ours_us > 0:
+                    ratio = base_us / ours_us
+                    # Bold values that flag a regression risk (we're slower)
+                    ratio_cell = f"**{ratio:.3f}**" if ratio < 1.0 else f"{ratio:.3f}"
+            row.append(ratio_cell)
             if status != "ok":
                 row[0] = f"{cfg} **[{status}]**"
             row.append(str(r.get("attempt", 1)))
@@ -1256,25 +1508,26 @@ def _finalize_bench_record(
         )
         return
 
-    benchmark_errors = row["errors"]
-    if benchmark_errors:
-        details = "; ".join(f"{name}: {error}" for name, error in benchmark_errors.items())
+    baseline_errors = row["errors"]
+    if baseline_errors:
+        details = "; ".join(f"{name}: {error}" for name, error in baseline_errors.items())
         row["status"] = "FAIL"
-        row["error"] = f"benchmark error(s): {details}"
+        row["error"] = f"baseline error(s): {details}"
         return
     samples = row["round_samples"]
     if not isinstance(samples, dict) or not samples:
         row["status"] = "FAIL"
         row["error"] = "bench result field 'round_samples' must be a non-empty mapping"
         return
-    if "tirx" not in samples:
-        row["status"] = "FAIL"
-        row["error"] = f"benchmark must report 'tirx', got {list(samples)}"
-        return
-    if not references_enabled and set(samples) != {"tirx"}:
-        row["status"] = "FAIL"
-        row["error"] = f"candidate-only benchmark must report exactly 'tirx', got {list(samples)}"
-        return
+    if not references_enabled:
+        external_impls = [name for name in samples if name not in our_impls(samples)]
+        if external_impls:
+            row["status"] = "FAIL"
+            row["error"] = (
+                "reference-disabled benchmark reported external implementation(s): "
+                f"{external_impls}"
+            )
+            return
     bad = {
         impl: len(vals) if isinstance(vals, list) else type(vals).__name__
         for impl, vals in samples.items()
@@ -1282,7 +1535,7 @@ def _finalize_bench_record(
     }
     if bad:
         row["status"] = "FAIL"
-        row["error"] = f"expected {rounds} TIRx round(s), got {bad}"
+        row["error"] = f"expected {rounds} round(s) per impl, got {bad}"
         return
     invalid = {
         impl: value
@@ -1398,7 +1651,10 @@ def run_scheduled_jobs(
     ) -> None:
         if item.state not in ("ASSIGNED", "RUNNING_GPU") or item.pending_interference:
             return
-        item.pending_interference = {"intruder_pids": intruders, "detail": detail[:240]}
+        item.pending_interference = {
+            "intruder_pids": intruders,
+            "detail": detail[:240],
+        }
         item.interference_stop_deadline = time.monotonic() + 30.0
         item.state = "STOPPING_INTERFERED_GPU"
         log(
@@ -1660,9 +1916,7 @@ def run_scheduled_jobs(
                         records.append(record)
                         completed += 1
                         impls = record.get("impls") or {}
-                        impl_str = ", ".join(
-                            f"{name}={value:.3f}µs" for name, value in impls.items()
-                        )
+                        impl_str = ", ".join(f"{name}={value:.3f}µs" for name, value in impls.items())
                         log(
                             f"[bench-suite] {record['finished_at']} "
                             f"gpus={record.get('gpu') or '-'} {record.get('status', 'ok'):4s} "
@@ -1764,14 +2018,8 @@ def main() -> None:
     ap.add_argument(
         "--threshold",
         type=float,
-        default=DEFAULT_TIMING_THRESHOLD,
-        help=f"Regression threshold in percent slowdown (default {DEFAULT_TIMING_THRESHOLD:g})",
-    )
-    ap.add_argument(
-        "--absolute-threshold-us",
-        type=float,
-        default=DEFAULT_ABSOLUTE_THRESHOLD_US,
-        help=f"Absolute slowdown floor in microseconds (default {DEFAULT_ABSOLUTE_THRESHOLD_US:g})",
+        default=DEFAULT_REGRESSION_THRESHOLD,
+        help=f"Regression threshold in percent slowdown (default {DEFAULT_REGRESSION_THRESHOLD:g})",
     )
     ap.add_argument(
         "--filter",
@@ -1792,10 +2040,7 @@ def main() -> None:
     ap.add_argument(
         "--with-references",
         action="store_true",
-        help=(
-            "Explicitly import and time external references. Off by default; "
-            "diagnostic runs cannot be promoted to the pinned TIRx baseline."
-        ),
+        help="Import and benchmark external reference implementations (off by default)",
     )
     ap.add_argument(
         "--no-probe",
@@ -1834,7 +2079,7 @@ def main() -> None:
         "--cooldown",
         type=float,
         default=DEFAULT_COOLDOWN_S,
-        help=f"Seconds to sleep before every timing round (default {DEFAULT_COOLDOWN_S:g}).",
+        help=f"Seconds to sleep before every implementation (default {DEFAULT_COOLDOWN_S:g}).",
     )
     ap.add_argument(
         "--max-prepare-processes",
@@ -1862,9 +2107,6 @@ def main() -> None:
     args = ap.parse_args()
     if args.rounds < 1:
         print("[bench-suite] --rounds must be >= 1", file=sys.stderr)
-        sys.exit(2)
-    if args.threshold < 0 or args.absolute_threshold_us < 0:
-        print("[bench-suite] timing thresholds must be non-negative", file=sys.stderr)
         sys.exit(2)
     if args.cooldown < 0:
         print("[bench-suite] --cooldown must be >= 0", file=sys.stderr)
@@ -1939,9 +2181,10 @@ def main() -> None:
     print(f"[bench-suite] run id : {stamp}")
 
     # ── Automatic GPU selection (no manual override on purpose) ──
-    # 1. Startup probe: run a tiny fp16 matmul on every currently idle card.
-    #    Occupied cards are excluded from this run rather than perturbing their
-    #    existing work. Probe failures are also excluded for the rest of the run.
+    # 1. Startup probe: run a tiny fp16 matmul on every visible card
+    #    (including busy ones — the probe is light, finishes fine on a
+    #    contended card; this catches broken drivers / ECC). Probe failures
+    #    are banned for the rest of the run.
     # 2. Per-workload acquire: re-scan utilization/memory every time we need a card.
     listing_pool = GpuPool(util_threshold=args.util_threshold, mem_threshold=args.mem_threshold)
     in_filter = [idx for idx, _ in _visible_gpu_rows(listing_pool._all_gpus())]
@@ -1968,21 +2211,19 @@ def main() -> None:
         f"(resident-VRAM cards: {resident if resident else 'none'})",
         flush=True,
     )
-    startup_candidates = sorted(set(in_filter) - set(occupied_now), key=int)
 
     if args.no_probe:
-        usable = set(startup_candidates)
+        usable = set(in_filter)
         probe_failures: dict[str, str] = {}
     else:
         print(
-            f"[bench-suite] probing {len(startup_candidates)} idle GPU(s) "
-            "with fp16 512x512 matmul ...",
+            f"[bench-suite] probing {len(in_filter)} GPU(s) with fp16 512x512 matmul ...",
             flush=True,
         )
-        usable, probe_failures = detect_usable_gpus(startup_candidates, args.probe_timeout)
+        usable, probe_failures = detect_usable_gpus(in_filter, args.probe_timeout)
 
     if not usable:
-        print("[bench-suite] no idle usable GPUs.", file=sys.stderr)
+        print("[bench-suite] no usable GPUs (all probes failed).", file=sys.stderr)
         for idx, err in probe_failures.items():
             print(f"[bench-suite]   gpu {idx}: {err}", file=sys.stderr)
         sys.exit(1)
@@ -2001,12 +2242,11 @@ def main() -> None:
     )
     n_gpus = len(usable)
     compile_profile = gpu_compile_profile(usable)
-    runner_identity = collect_runner_identity(compile_profile)
     _repo_git = collect_repo_git()
     label = args.label or _repo_git.get("tirx-kernels") or _repo_git.get("tir") or "local"
     agg_note = (
         f", {args.rounds} standard-timer round(s), aggregate=mean, "
-        f"cooldown={args.cooldown:g}s before every round"
+        f"cooldown={args.cooldown:g}s before every impl/round"
         if args.rounds > 1 or args.cooldown > 0
         else ""
     )
@@ -2040,18 +2280,12 @@ def main() -> None:
         log("[bench-suite] interference retry summary: none")
 
     results.sort(key=lambda r: (r["kernel"], r.get("label") or r.get("config")))
-    probe_meta = {
-        "enabled": not args.no_probe,
-        "occupied_at_start": occupied_now,
-        "usable": sorted(usable),
-        "failed": probe_failures,
-    }
+    probe_meta = {"enabled": not args.no_probe, "usable": sorted(usable), "failed": probe_failures}
     run_path = write_run(
         out_dir,
         stamp,
         results,
         label,
-        runner_identity,
         args.with_references,
         probe=probe_meta,
         pipeline=pipeline_meta,
@@ -2077,11 +2311,14 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if args.no_report or args.with_references:
-        if args.with_references and not args.no_report:
-            print(
-                "[bench-suite] reference mode is diagnostic; skipping pinned TIRx regression report"
-            )
+    if args.no_report:
+        return
+
+    if not args.with_references:
+        print(
+            "[bench-suite] references are disabled; skipping the reference-ratio "
+            "regression report (rerun with --with-references to compare ratios)"
+        )
         return
 
     # Single pinned baseline (baseline.json). Promote a fresh run over it via
@@ -2100,10 +2337,11 @@ def main() -> None:
         reports_latest.unlink()
     reports_latest.symlink_to(current["timestamp"])
 
+    sys.path.insert(0, str(SCRIPT_DIR))
+    from ratio_diff import build_report as _build_bench_report
+
     try:
-        bench_md, n_regress = _build_bench_report(
-            baseline, current, threshold_pct=args.threshold, threshold_us=args.absolute_threshold_us
-        )
+        bench_md, n_regress = _build_bench_report(baseline, current, threshold_pct=args.threshold)
     except Exception as e:
         print(f"[bench-suite] bench report failed: {e}", file=sys.stderr)
         sys.exit(3)

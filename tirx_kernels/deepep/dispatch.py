@@ -1401,30 +1401,14 @@ def run_test(**config: Any) -> None:
 
 
 def _resolve_num_sms_cpu(config: dict[str, Any]) -> int:
-    """CUDA-free mirror of the source single-domain SM-count model."""
+    """Resolve the fixed ported launch width without importing DeepEP."""
 
-    import math
-
-    from deep_ep.utils.envs import get_nvlink_gbs
-
-    world = config["world_size"]
-    experts = config["num_experts"]
-    topk = config["num_topk"]
-    expected_topk = world * (
-        1 - math.comb(experts - experts // world, topk) / math.comb(experts, topk)
+    return get_theoretical_num_sms(
+        config["world_size"],
+        config["num_experts"],
+        config["num_topk"],
+        prefer_overlap_with_compute=False,
     )
-    gbs = get_nvlink_gbs()
-    nvlink_traffic = 1 - 1 / world if world > 1 else 0.0
-    device_sms = _device_num_sms()
-    num_sms = float(device_sms)
-    if nvlink_traffic > 0:
-        num_sms = max(
-            gbs / nvlink_traffic * (1 / expected_topk) / 200, gbs / nvlink_traffic * 1 / 50
-        )
-    num_sms = max(4, math.ceil(num_sms * 1.25))
-    num_sms += num_sms % 2
-    num_sms = max(num_sms, 64)
-    return min(num_sms, device_sms)
 
 
 def _run_bench_gpu(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:

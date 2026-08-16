@@ -3455,12 +3455,18 @@ def run_gpu(
 
         return launch
 
+    flashkda_peer: dict[str, Any] = {}
+
     def flashkda_builder():
         from tirx_kernels.flashinfer.utils._flashkda_bench import prepare_flashkda_raw_reference
 
-        return prepare_flashkda_raw_reference(case)
+        ex(*args)
+        torch.cuda.synchronize()
+        peer = prepare_flashkda_raw_reference(case)
+        flashkda_peer["reference"] = peer
+        return peer.launch
 
-    return bench(
+    result = bench(
         {"tirx": lambda: ex(*args)},
         warmup=warmup,
         repeat=repeat,
@@ -3469,6 +3475,11 @@ def run_gpu(
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
+    peer = flashkda_peer.get("reference")
+    if peer is not None:
+        result["flashkda_raw_provenance"] = peer.provenance
+        result["flashkda_raw_correctness"] = peer.correctness
+    return result
 
 
 def run_bench(

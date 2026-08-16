@@ -117,10 +117,6 @@ latency on the smallest shapes.
 - For an unavailable packed form, reuse a native equivalent already validated
   in another kernel instead of inventing a new lowering.
 - Match shuffle masks and saturation/rounding modifiers exactly.
-- `cvt.rn.satfinite.e2m1x2.f32` preserves the input sign when the magnitude
-  rounds to zero, and midpoint ties select the even E2M1 code. A Torch oracle
-  must therefore preserve signed zero and alternate its tie direction with the
-  lower code's parity; verify asymmetric values, both signs, and every midpoint.
 
 Confirm packed words bitwise before judging instruction count.
 
@@ -131,20 +127,6 @@ two-input `mov.b32` packs, and one `st.global.v4.b32`; ptxas then selected paire
 conversion is therefore not required to obtain a packed store. Trace the
 conversion-to-store def-use chain in SASS instead of comparing conversion
 mnemonics in isolation.
-
-## Preserve host-side physical tensor layouts
-
-**Symptoms:** `bitwise_mismatch`, `tma_layout_mismatch`, `scale_factor_mismatch`, `large_numeric_error`
-
-Logical tensor equality does not establish ABI equality for tensors consumed
-through a TMA layout. One MegaMoE FP8/FP4 port produced a 0.679 relative L2
-error after host scale transforms were made contiguous: the logical values
-were right, but the MN-major physical strides expected by TMA were gone.
-
-When a host transform populates a tensor whose existing strides define the
-kernel ABI, allocate with `empty_like` and copy the logical result so those
-strides survive. Confirm shapes, strides, and a kernel correctness result; do
-not validate only the logical values.
 
 ## Prefer binary parity
 

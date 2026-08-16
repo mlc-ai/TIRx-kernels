@@ -255,7 +255,10 @@ def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     else:
         activated = torch.nn.functional.gelu(x, approximate="tanh")
     ref = (activated * y).to(_torch_dtype(dtype))
-    torch.testing.assert_close(out_tirx, ref, rtol=1e-3, atol=1e-3)
+    # The kernel uses tanh.approx.f32; the independent Torch oracle uses the
+    # precise tanh and can round the BF16 result to the adjacent value.
+    rtol = 1e-2 if act == "gelu_tanh" and dtype == "bfloat16" else 1e-3
+    torch.testing.assert_close(out_tirx, ref, rtol=rtol, atol=1e-3)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):

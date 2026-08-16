@@ -176,15 +176,15 @@ DSA_INDEXER_LIKE_COVERAGE = [
 # The Cartesian product contains 9 * 4 * 5 = 180 configs. Extending the same
 # grid to num_heads = (32, 64) contains 360 configs.
 #
-# SERVING_BENCH_CONFIGS is a curated 80-config kernel-only subset:
+# SGLANG_BENCH_CONFIGS is currently a curated 80-config kernel-only subset:
 #   decode: H=(32,64) x B=(1,2,4,8,16) x every context_len = 50
 #   target verify: H=(32,64) x next_n=(2,4,6) x the five paired (B, pages)
 #                  points below = 30
 # max_num_pages is context_len / page_size, with page_size fixed at 64.
-_SERVING_CONTEXT_PAGES = (64, 160, 512, 1280, 2048)
-_SERVING_TARGET_VERIFY_POINTS = ((1, 64), (2, 2048), (6, 160), (10, 512), (16, 1280))
+_SGLANG_CONTEXT_PAGES = (64, 160, 512, 1280, 2048)
+_SGLANG_TARGET_VERIFY_POINTS = ((1, 64), (2, 2048), (6, 160), (10, 512), (16, 1280))
 
-_SERVING_DECODE_BENCH_CONFIGS = [
+_SGLANG_DECODE_BENCH_CONFIGS = [
     _make_case(
         batch_size=batch_size,
         next_n=1,
@@ -200,11 +200,11 @@ _SERVING_DECODE_BENCH_CONFIGS = [
         (num_heads, batch_size, max_num_pages)
         for num_heads in (32, 64)
         for batch_size in (1, 2, 4, 8, 16)
-        for max_num_pages in _SERVING_CONTEXT_PAGES
+        for max_num_pages in _SGLANG_CONTEXT_PAGES
     )
 ]
 
-_SERVING_TARGET_VERIFY_BENCH_CONFIGS = [
+_SGLANG_TARGET_VERIFY_BENCH_CONFIGS = [
     _make_case(
         batch_size=batch_size,
         next_n=next_n,
@@ -220,11 +220,11 @@ _SERVING_TARGET_VERIFY_BENCH_CONFIGS = [
         (num_heads, next_n, batch_size, max_num_pages)
         for num_heads in (32, 64)
         for next_n in (2, 4, 6)
-        for batch_size, max_num_pages in _SERVING_TARGET_VERIFY_POINTS
+        for batch_size, max_num_pages in _SGLANG_TARGET_VERIFY_POINTS
     )
 ]
 
-SERVING_BENCH_CONFIGS = _SERVING_DECODE_BENCH_CONFIGS + _SERVING_TARGET_VERIFY_BENCH_CONFIGS
+SGLANG_BENCH_CONFIGS = _SGLANG_DECODE_BENCH_CONFIGS + _SGLANG_TARGET_VERIFY_BENCH_CONFIGS
 
 _SMOKE_CONFIGS = [
     _make_case(
@@ -323,7 +323,7 @@ _SMOKE_CONFIGS = [
 ]
 
 CONFIGS = _SMOKE_CONFIGS
-BENCH_CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SERVING_BENCH_CONFIGS
+BENCH_CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SGLANG_BENCH_CONFIGS
 
 
 def _make_context_lens(config: PagedMQALogitsFP8Config) -> torch.Tensor:
@@ -2211,7 +2211,7 @@ def prepare_bench(**kwargs: Any):
 
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     # timer=None inherits the canonical local timer default.
     timer = kwargs.pop("timer", None)
@@ -2229,15 +2229,34 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     # The independent Python reference is intentionally omitted here: it iterates
     # page-by-page and is prohibitively slow for SGLang's 131K-context sweep.
+    with_references = external_references_enabled()
     data = _prepare_data(config, compute_reference=False)
-    invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
-
-    def build_deepgemm():
+    if with_references:
         import deep_gemm
 
         schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
             data["context_lens"], config.page_size, config.num_sms, data["indices"]
         )
+        data["schedule_meta"] = schedule_meta
+        data["tirx_schedule_meta"] = schedule_meta
+        if not config.varlen and config.next_n >= 2:
+            num_q_atoms = _align_up(config.next_n, 2) // 2
+            atom_context_lens = data["context_lens"][:, -1:].expand(
+                config.batch_size, num_q_atoms
+            ).contiguous()
+            data["tirx_schedule_meta"] = deep_gemm.get_paged_mqa_logits_metadata(
+                atom_context_lens.reshape(-1, 1), config.page_size, config.num_sms
+            )
+    invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
+
+    def build_deepgemm():
+        import deep_gemm
+
+        schedule_meta = data.get("schedule_meta")
+        if schedule_meta is None:
+            schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
+                data["context_lens"], config.page_size, config.num_sms, data["indices"]
+            )
         return lambda: deep_gemm.fp8_fp4_paged_mqa_logits(
             q=(data["q"], None),
             kv_cache=data["fused_kv_cache"],
@@ -2292,7 +2311,17 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
             output_dtype=_torch_logits_dtype(config.logits_dtype),
         )
 
-    return bench(
+    max_diff = None
+    if with_references:
+        reference_logits = build_deepgemm()()
+        tirx_logits = _run_tirx_invocation(data, invocation)
+        torch.cuda.synchronize()
+        max_diff = _assert_valid_correct(
+            data, tirx_logits, reference_logits, name="TIRx vs DeepGEMM"
+        )
+        torch.cuda.empty_cache()
+
+    result = bench(
         {"tirx": lambda: _run_tirx_invocation(data, invocation)},
         references={"deepgemm": build_deepgemm, "sglang_cutedsl": build_sglang_cutedsl},
         warmup=warmup,
@@ -2301,6 +2330,9 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
+    if max_diff is not None:
+        result["max_diff"] = max_diff
+    return result
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:
@@ -2317,7 +2349,7 @@ __all__ = [
     "CONFIGS",
     "DSA_INDEXER_LIKE_COVERAGE",
     "KERNEL_META",
-    "SERVING_BENCH_CONFIGS",
+    "SGLANG_BENCH_CONFIGS",
     "PagedMQALogitsFP8Config",
     "get_kernel",
     "prepare_data",

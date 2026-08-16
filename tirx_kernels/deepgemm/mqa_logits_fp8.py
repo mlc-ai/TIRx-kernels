@@ -141,7 +141,7 @@ KERNEL_META = {
     "compute_capability": 10,
 }
 
-PRODUCTION_BENCH_CONFIGS = [
+DEEPGEMM_TEST_COVERAGE = [
     _make_case(
         seq_len=seq_len,
         seq_len_kv=seq_len_kv,
@@ -160,7 +160,7 @@ PRODUCTION_BENCH_CONFIGS = [
     )
 ]
 
-BENCH_CONFIGS = PRODUCTION_BENCH_CONFIGS
+BENCH_CONFIGS = DEEPGEMM_TEST_COVERAGE
 
 CONFIGS = [
     _make_case(
@@ -1113,7 +1113,7 @@ def prepare_bench(**kwargs: Any):
 
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     warmup = kwargs.pop("warmup", None)
     repeat = kwargs.pop("repeat", None)
@@ -1124,7 +1124,8 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     tirx_executable = prepared["executable"]
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
-    data = _prepare_data(_make_config(**config_kwargs), compute_reference=False)
+    with_references = external_references_enabled()
+    data = _prepare_data(_make_config(**config_kwargs), compute_reference=with_references)
     invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
 
     def build_deepgemm():
@@ -1142,7 +1143,16 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
             logits_dtype=_torch_logits_dtype(config.logits_dtype),
         )
 
-    return bench(
+    max_diff = None
+    if with_references:
+        reference_logits = build_deepgemm()()
+        tirx_logits = _run_tirx_invocation(data, invocation)
+        torch.cuda.synchronize()
+        _assert_correct(data, reference_logits, name="DeepGEMM")
+        max_diff = _assert_correct(data, tirx_logits, name="TIRx")
+        torch.cuda.empty_cache()
+
+    result = bench(
         {"tirx": lambda: _run_tirx_invocation(data, invocation)},
         references={"deepgemm": build_deepgemm},
         warmup=warmup,
@@ -1151,6 +1161,9 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
+    if max_diff is not None:
+        result["max_diff"] = max_diff
+    return result
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:
@@ -1165,8 +1178,8 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
+    "DEEPGEMM_TEST_COVERAGE",
     "KERNEL_META",
-    "PRODUCTION_BENCH_CONFIGS",
     "MQALogitsFP8Config",
     "get_kernel",
     "prepare_data",

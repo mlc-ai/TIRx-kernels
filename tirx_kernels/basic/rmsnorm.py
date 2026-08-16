@@ -4,6 +4,9 @@
 import math
 from typing import Any
 
+import numpy as np
+
+import tvm
 from tirx_kernels.runner import bench
 from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as T
@@ -56,6 +59,60 @@ def prepare_data(batch_size, dim):
     input = torch.randn(batch_size, dim, dtype=torch.float16, device="cuda")
     weights = torch.randn(dim, dtype=torch.float16, device="cuda")
     return (input, weights)
+
+
+def torch_impl(input, weights):
+    import torch
+
+    input_naive = input.clone().to(dtype=torch.float32, device="cuda")
+    weights_naive = weights.clone().to(dtype=torch.float32, device="cuda")
+
+    def func():
+        variance = input_naive.pow(2).mean(dim=-1, keepdim=True)
+        norm_factor = torch.rsqrt(variance + eps)
+        scaled = input_naive * norm_factor
+        output = (scaled * weights_naive).to(torch.float16)
+        return output
+
+    result = bench({"naive": func}, timer="event")
+    ms = result["impls"].get("naive", float("nan"))
+    print(f"torch time: {ms:.3f} ms")
+    return func()
+
+
+def flashinfer_impl(input, weights, batch_size, dim):
+    import flashinfer
+    import torch
+
+    out = torch.empty((batch_size, dim), dtype=torch.float16, device="cuda")
+    flashinfer_input = input.clone().to(dtype=torch.float16, device="cuda")
+    flashinfer_weights = weights.clone().to(dtype=torch.float16, device="cuda")
+
+    def func():
+        return flashinfer.norm.rmsnorm(
+            flashinfer_input, flashinfer_weights, eps, enable_pdl=False, out=out
+        )
+
+    result = bench({"flashinfer": func}, timer="event")
+    ms = result["impls"].get("flashinfer", float("nan"))
+    print(f"FlashInfer time: {ms:.3f} ms")
+    return out
+
+
+def quack_impl(input, weights, batch_size, dim):
+    import quack
+    import torch
+
+    quack_input = input.clone().to(dtype=torch.float16, device="cuda")
+    quack_weights = weights.clone().to(dtype=torch.float16, device="cuda")
+
+    def func():
+        return quack.rmsnorm(quack_input, quack_weights, eps=eps)
+
+    result = bench({"quack": func}, timer="event")
+    ms = result["impls"].get("quack", float("nan"))
+    print(f"Quack time: {ms:.3f} ms")
+    return func()
 
 
 def tirx_dispatch_rmsnorm(dim: int, batch_size: int, SMEM_PER_CTA=220, MAX_THREADS=256):
@@ -541,6 +598,51 @@ def tirx_input_DSMEM_write_TMA_wts_GMEM(
     return rms_norm
 
 
+def build_tirx_soln(
+    func, input_cat, weights, funcstr: str, dim: int, batch_size: int
+) -> tuple[np.ndarray, tvm.runtime.Executable]:
+    import torch
+
+    from tirx_kernels.runner import cuda_target
+
+    input_cat_tir = input_cat.cuda() if not input_cat.is_cuda else input_cat
+    weights_tir = weights.cuda() if not weights.is_cuda else weights
+    output_tir = torch.empty((batch_size, dim), dtype=torch.float16, device="cuda")
+    target = cuda_target()
+    with target:
+        mod = tvm.IRModule({"main": func(dim, batch_size)})
+        mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
+
+        def run():
+            return mod(input_cat_tir, weights_tir, output_tir)
+
+        result = bench({f"tirx_soln_{funcstr}": run}, timer="event")
+        ms = result["impls"].get(f"tirx_soln_{funcstr}", float("nan"))
+        print(f"{funcstr} time: {ms:.3f} ms")
+
+    return (output_tir, mod)
+
+
+def test(batch_size: int, dim: int = 16384):
+    import torch
+
+    input, weights = prepare_data(batch_size, dim)
+    print(f"----Testing Batch Size {batch_size}, Dim {dim}----")
+    output_torch = torch_impl(input, weights)
+    output_flashinfer = flashinfer_impl(input, weights, batch_size, dim)
+    output_quack = quack_impl(input, weights, batch_size, dim)
+    output_tirx_original, tirx_primfunc_1 = build_tirx_soln(
+        tirx_original_impl, input, weights, "TIRX_original_impl", dim, batch_size
+    )
+    output_tirx_dispatch_rmsnorm, tirx_primfunc_2 = build_tirx_soln(
+        tirx_dispatch_rmsnorm, input, weights, "TIRX_dispatch_rmsnorm", dim, batch_size
+    )
+    torch.testing.assert_close(output_flashinfer, output_torch, rtol=0.005, atol=0.005)
+    torch.testing.assert_close(output_quack, output_torch, rtol=0.005, atol=0.005)
+    torch.testing.assert_close(output_tirx_original, output_torch, rtol=0.005, atol=0.005)
+    torch.testing.assert_close(output_tirx_dispatch_rmsnorm, output_torch, rtol=0.005, atol=0.005)
+
+
 KERNEL_META = {"name": "rmsnorm", "category": "basic", "compute_capability": 10}
 BENCH_CONFIGS = [
     {"hidden_size": hs, "batch_size": bs, "label": f"hs{hs}_bs{bs}"}
@@ -757,7 +859,10 @@ def run_test(hidden_size, batch_size, **kwargs):
     torch.testing.assert_close(output_tir.cpu(), ref.cpu(), rtol=0.001, atol=0.001)
 
 
-# timer=None inherits the canonical local timer default.
+# timer=None inherits the global default (proton). Proton matters here: rmsnorm is a
+# tiny (~2µs) kernel whose event wall is ~3x inflated by launch overhead, and its
+# reference is flashinfer (Python-dispatch-heavy). Proton measures the true ~2µs kernel
+# time and an undistorted ratio.
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Allocate, validate, and measure after GPU assignment."""
     return _run_gpu(
@@ -781,20 +886,22 @@ def _run_gpu(ex, hidden_size, batch_size, warmup=None, repeat=None, timer=None, 
     weights_cuda = weights.cuda()
     output_cuda = torch.empty((batch_size, hidden_size), dtype=torch.float16, device="cuda")
 
-    def build_flashinfer():
+    funcs = {"tir": lambda: ex(input_cuda, weights_cuda, output_cuda)}
+
+    def _flashinfer():
         import flashinfer
 
-        output = torch.zeros_like(input_cuda)
+        out_fi = torch.zeros_like(input_cuda)
         return lambda: flashinfer.norm.rmsnorm(
-            input_cuda, weights_cuda, eps, enable_pdl=False, out=output
+            input_cuda, weights_cuda, eps, enable_pdl=False, out=out_fi
         )
 
     return bench(
-        {"tirx": lambda: ex(input_cuda, weights_cuda, output_cuda)},
-        references={"flashinfer": build_flashinfer},
+        funcs,
         warmup=warmup,
         repeat=repeat,
         timer=timer,
+        references={"flashinfer": _flashinfer},
         **kwargs,
     )
 
@@ -807,4 +914,5 @@ def run_bench(hidden_size, batch_size, warmup=None, repeat=None, timer=None, **k
 
 
 if __name__ == "__main__":
-    run_test(hidden_size=8192, batch_size=2048)
+    for batch_size, dim in [(2048, 8192)]:
+        test(batch_size, dim)

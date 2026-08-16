@@ -188,6 +188,16 @@ KERNEL_META = {
     "compute_capability": 10,
 }
 
+DEEPGEMM_TEST_COVERAGE = [
+    _make_case(m=m, n=n, k=k, num_splits=num_splits, seed=1000 + seed)
+    for seed, (m, n, k, num_splits) in enumerate(
+        (m, n, k, num_splits)
+        for m in (13, 137, 4096, 8192)
+        for n, k in ((24, 28672), (24, 7680), (24, 7168))
+        for num_splits in (1, 16)
+    )
+]
+
 # ── Bench shape set ─────────────────────────────────────────────────────────
 # num_splits follows SGLang's _compute_num_split_for_mhc_pre with n_sms pinned
 # to 148 (SM100 / B200):
@@ -219,7 +229,7 @@ def _mhc_pre_token_count_representatives(
 _PROD_HC_HIDDENS = (16384, 28672)
 _MHC_PRE_MAX_TOKENS = (2048, 4096, 8192)
 
-BENCH_CONFIGS = [
+_PRODUCTION_BENCH_CONFIGS = [
     _make_case(m=m, n=24, k=k, num_splits=s, seed=3000 + i)
     for i, (m, k, s) in enumerate(
         sorted(
@@ -232,6 +242,18 @@ BENCH_CONFIGS = [
         )
     )
 ]
+
+# Legacy shapes kept for regression continuity with the pinned baseline. The
+# k=7168/7680 ones are edge (hidden=1792/1920, non-production) and stay out of
+# the main set.
+LEGACY_CONFIGS = [
+    _make_case(m=13, n=24, k=7168, num_splits=1, seed=2000),
+    _make_case(m=137, n=24, k=7680, num_splits=16, seed=2001),
+    _make_case(m=4096, n=24, k=7168, num_splits=1, seed=2002),
+    _make_case(m=4096, n=24, k=28672, num_splits=16, seed=2003),
+]
+
+BENCH_CONFIGS = _PRODUCTION_BENCH_CONFIGS + LEGACY_CONFIGS
 
 CONFIGS = [
     _make_case(m=13, n=24, k=512, num_splits=1, seed=0),
@@ -1045,7 +1067,7 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     kwargs = {**prepared["config"], **kwargs}
     timer = kwargs.pop("timer", None)  # None inherits the canonical local timer default.
@@ -1072,7 +1094,20 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
             num_splits=None if case.config.num_splits == 1 else case.config.num_splits,
         )
 
-    return bench(
+    tirx_diff = None
+    if external_references_enabled():
+        d_tirx, sqr_tirx = _bench_tirx_case(case, executable)
+        torch.cuda.synchronize()
+        final_d, final_sqr = _final_outputs(d_tirx, sqr_tirx, case.config)
+        reference_d = case.a.float() @ case.b.T
+        reference_sqr = case.a.float().square().sum(dim=-1)
+        tirx_diff = max(
+            _calc_diff(final_d, reference_d), _calc_diff(final_sqr, reference_sqr)
+        )
+        if tirx_diff >= _TEST_DIFF_THRESHOLD:
+            raise AssertionError(f"TIRx diff {tirx_diff:.10g} >= {_TEST_DIFF_THRESHOLD}")
+
+    result = bench(
         {"tirx": lambda: _bench_tirx_case(case, executable)},
         references={"deepgemm": build_deepgemm},
         warmup=warmup,
@@ -1081,6 +1116,10 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
+    if tirx_diff is not None:
+        result["tirx_diff"] = tirx_diff
+        result["max_diff"] = tirx_diff
+    return result
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:
@@ -1095,6 +1134,7 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
+    "DEEPGEMM_TEST_COVERAGE",
     "KERNEL_META",
     "TF32HCPrenormGemmConfig",
     "get_kernel",

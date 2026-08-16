@@ -1,4 +1,11 @@
 # Two-CTA SM100 FlashAttention backward, D=128, 16 heads.
+#
+# These rows were held out of the pinned sweep for a while because the reference
+# they bench against, flash_attn.cute's backward, deadlocked on this host:
+# cutlass-dsl 4.6.1 compiled FlashAttentionBackwardSm100 into a kernel whose
+# warps sat in mbarrier try_wait spin loops forever, so the sweep and the
+# registry correctness manifest hung instead of failing. cutlass-dsl 4.6.0.dev0
+# compiles it correctly and the reference returns in ~4s, so the rows are back.
 kernel: flash_attention_backward_sm100
 selection_rationale: The selected rows increase sequence/token work and cover causal versus noncausal execution plus the batch-4 production-sized backward regime.
 configs:

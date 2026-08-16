@@ -16,7 +16,7 @@ from unittest import SkipTest
 
 
 def _get_bench_configs(mod):
-    return mod.BENCH_CONFIGS
+    return getattr(mod, "BENCH_CONFIGS", getattr(mod, "CONFIGS", []))
 
 
 def _find_bench_config(mod, label: str) -> dict:
@@ -374,12 +374,12 @@ def main():
     parser.add_argument(
         "--timer",
         type=str,
-        choices=("event", "proton", "cudagraph_proton", "kineto"),
+        choices=("event", "proton", "cudagraph_proton", "kineto", "megamoe"),
         default=None,
         help="Override the kernel module's benchmark timer: 'event' = do_bench, "
         "'proton' = do_bench_proton, 'cudagraph_proton' = "
         "do_bench_cudagraph_proton [NVIDIA], 'kineto' = distributed full GPU "
-        "activity span",
+        "activity span, 'megamoe' = DeepGEMM bench_kineto protocol for MegaMoE",
     )
     parser.add_argument(
         "--with-references",
@@ -446,7 +446,8 @@ def main():
     else:
         all_kernels = discover_kernels(min_compute_capability=args.cc)
 
-    # Each kernel's run_bench() owns its selected timing method.
+    # Each kernel's run_bench() manages its own Proton session via bench(timer=...).
+    # No global proton session needed.
     results = []
 
     for name, mod in sorted(all_kernels.items()):

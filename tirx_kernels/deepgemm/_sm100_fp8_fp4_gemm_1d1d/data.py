@@ -19,7 +19,6 @@ from .spec import Major, ceil_div, gran_k_for
 __all__ = [
     "assert_within_threshold",
     "bench_against_deepgemm",
-    "bench_tirx",
     "calc_diff",
     "dequantize",
     "quantize_a",
@@ -30,11 +29,13 @@ __all__ = [
 
 
 def require_deep_gemm():
-    """Load DeepGEMM only while explicit reference mode builds its launch."""
+    """Return the `deep_gemm` module, or skip if it is not installed."""
+    from unittest import SkipTest
+
     try:
         import deep_gemm
-    except ImportError as error:
-        raise RuntimeError(f"deep_gemm is not installed: {error}") from error
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise SkipTest(f"deep_gemm is not installed: {exc}") from exc
     return deep_gemm
 
 
@@ -519,22 +520,6 @@ def assert_within_threshold(diff, data, *, kernel: str, detail: str, **extra) ->
     if not diff < threshold:
         raise AssertionError(f"{kernel} {detail}: diff {diff:.3e} >= {threshold:.0e}")
     return {"diff": diff, "threshold": threshold, **extra}
-
-
-def bench_tirx(tirx_launch, *, warmup, repeat, timer, rounds, cooldown_s, **extra) -> dict:
-    """Time one prepared TIRx launch and attach its shape metadata."""
-    from tirx_kernels.runner import bench
-
-    result = bench(
-        {"tirx": tirx_launch},
-        warmup=warmup,
-        repeat=repeat,
-        timer=timer,
-        rounds=rounds,
-        cooldown_s=cooldown_s,
-    )
-    result.update(extra)
-    return result
 
 
 def bench_against_deepgemm(

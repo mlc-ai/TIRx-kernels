@@ -7,8 +7,8 @@ Each kernel module must provide ``run_test(**config)`` which handles
 compile → run → correctness-check internally.  Optionally, it can
 provide ``run_bench(**config, warmup, repeat)`` for profiling.
 
-The helpers ``compile_kernel`` and ``bench`` are exposed for kernel modules to
-use.
+The helpers ``compile_kernel`` and ``proton_bench`` are exposed for
+kernel modules to use.
 """
 
 from __future__ import annotations
@@ -35,16 +35,11 @@ TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
 TVM_COMPILE_FORCE_FALLBACK_ENV = "TVM_COMPILE_FORCE_FALLBACK"
 _EXTERNAL_REFERENCES_ENV = "TIRX_INTERNAL_BENCH_REFERENCES"
 
-_EXTERNAL_REFERENCES_ENABLED: ContextVar[bool] = ContextVar(
-    "tirx_external_references_enabled", default=False
-)
-
 
 def set_external_references_enabled(enabled: bool) -> None:
     """Select explicit diagnostic reference timing for the current process."""
     if not isinstance(enabled, bool):
         raise TypeError("external reference mode must be a bool")
-    _EXTERNAL_REFERENCES_ENABLED.set(enabled)
     if enabled:
         os.environ[_EXTERNAL_REFERENCES_ENV] = "1"
     else:
@@ -53,7 +48,7 @@ def set_external_references_enabled(enabled: bool) -> None:
 
 def external_references_enabled() -> bool:
     """Whether this process may import, prepare, or launch external references."""
-    return _EXTERNAL_REFERENCES_ENABLED.get() or os.environ.get(_EXTERNAL_REFERENCES_ENV) == "1"
+    return os.environ.get(_EXTERNAL_REFERENCES_ENV) == "1"
 
 
 @runtime_checkable

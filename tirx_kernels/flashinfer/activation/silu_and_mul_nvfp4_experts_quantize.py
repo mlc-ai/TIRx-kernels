@@ -272,7 +272,11 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
 
             in_offset = T.cast(row_idx, "int64") * actual_cols + col_idx
             T.ptx.ld.global_.v4.b32(
-                xw[0], xw[1], xw[2], xw[3], T.address_of(input_global[in_offset * ELTS_PER_THREAD])
+                xw[0],
+                xw[1],
+                xw[2],
+                xw[3],
+                T.address_of(input_global[in_offset * ELTS_PER_THREAD]),
             )
             T.ptx.ld.global_.v4.b32(
                 xw[4],
@@ -294,7 +298,9 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
                     yw[5],
                     yw[6],
                     yw[7],
-                    T.address_of(input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD + 8]),
+                    T.address_of(
+                        input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD + 8]
+                    ),
                 )
                 # silu_and_mul (utils:1142-1166): fp32 silu*mul per element,
                 # rounded back to DTYPE pairs in place.

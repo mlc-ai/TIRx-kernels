@@ -1,5 +1,5 @@
 kernel: nvfp4_gemm
-selection_rationale: Square GEMMs at 1024, 4096, and 16384 provide increasing small, medium, and large FP4 work while retaining the same TIRx autotune contract.
+selection_rationale: Square GEMMs at 1024, 4096, and 16384 provide increasing small, medium, and large FP4 work while retaining the same reference/autotune contract.
 configs:
   - {config: 1024x1024x1024, default: true, selection_role: small}
   - {config: 2048x2048x2048, default: false}

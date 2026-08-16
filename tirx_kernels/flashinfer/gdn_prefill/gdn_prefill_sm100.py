@@ -3022,6 +3022,16 @@ def run_gpu(
                 case["scale"],
             )
 
+        executable(*args)
+        launch()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(case["o"], reference_o, atol=2e-3, rtol=1e-3)
+        torch.testing.assert_close(
+            case["final_state"], reference_state, atol=1e-3, rtol=1e-4
+        )
+        for _ in range(2):
+            launch()
+        torch.cuda.synchronize()
         return launch
 
     return bench(

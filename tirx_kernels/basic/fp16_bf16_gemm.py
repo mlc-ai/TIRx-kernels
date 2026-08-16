@@ -705,41 +705,36 @@ class PreparedBench:
 
 
 def run_gpu(prepared: PreparedBench, *, warmup=None, repeat=None, timer=None, **kwargs):
-    """Allocate inputs and time TIRx plus explicitly enabled references."""
+    """Allocate inputs/references and run the unchanged GPU timing protocol."""
     A, B, C = prepare_data(prepared.dtype, prepared.M, prepared.N, prepared.K)
     C_tir = torch.zeros_like(C, device="cuda")
 
-    def build_torch_cublas():
-        output = torch.zeros_like(C, device="cuda")
-        return lambda: torch.matmul(A, B.T, out=output)
+    funcs = {"tir": lambda: prepared.executable(A, B, C_tir)}
 
-    references = {"torch-cublas": build_torch_cublas}
+    def _torch_cublas():
+        C_out = torch.zeros_like(C, device="cuda")
+        return lambda: torch.matmul(A, B.T, out=C_out)
+
+    references = {"torch-cublas": _torch_cublas}
     if prepared.dtype == "bf16":
 
-        def build_deepgemm_cublaslt():
+        def _deepgemm_cublaslt():
             import deep_gemm
 
-            output = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
-            return lambda: deep_gemm.cublaslt_gemm_nt(A, B, output, None)
+            C_out = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
+            return lambda: deep_gemm.cublaslt_gemm_nt(A, B, C_out, None)
 
-        def build_deepgemm_bf16():
+        def _deepgemm_bf16():
             import deep_gemm
 
-            output = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
-            return lambda: deep_gemm.bf16_gemm_nt(A, B, output)
+            C_out = torch.zeros(prepared.M, prepared.N, dtype=torch.bfloat16, device="cuda")
+            return lambda: deep_gemm.bf16_gemm_nt(A, B, C_out)
 
         references.update(
-            {"deepgemm-cublaslt": build_deepgemm_cublaslt, "deepgemm-bf16": build_deepgemm_bf16}
+            {"deepgemm-cublaslt": _deepgemm_cublaslt, "deepgemm-bf16": _deepgemm_bf16}
         )
 
-    return bench(
-        {"tirx": lambda: prepared.executable(A, B, C_tir)},
-        references=references,
-        warmup=warmup,
-        repeat=repeat,
-        timer=timer,
-        **kwargs,
-    )
+    return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)
 
 
 def prepare_bench(dtype, M, N, K, **kwargs):

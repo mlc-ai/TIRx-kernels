@@ -7,17 +7,19 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import math
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
 from ._model_shapes import SUPPORTED_WORLD_SIZES
-from ._runtime import DistributedRuntime
+from ._runtime import DistributedRuntime, _locked_library_paths
 
 _ALGORITHMS = {
     "default": "DEFAULT",
@@ -25,6 +27,116 @@ _ALGORITHMS = {
     "split_multicast": "SPLIT_MULTICAST",
     "no_overlap": "NO_OVERLAP",
 }
+
+_LIBRARY_SYMBOLS = {
+    "nccl": "ncclGetVersion",
+    "cublas": "cublasGetProperty",
+    "cublasmp": "cublasMpGetVersion",
+    "nvshmem": "nvshmem_info_get_version",
+}
+
+
+class _DlInfo(ctypes.Structure):
+    _fields_: ClassVar = [
+        ("dli_fname", ctypes.c_char_p),
+        ("dli_fbase", ctypes.c_void_p),
+        ("dli_sname", ctypes.c_char_p),
+        ("dli_saddr", ctypes.c_void_p),
+    ]
+
+
+def _process_symbol(symbol: str):
+    try:
+        return getattr(ctypes.CDLL(None), symbol)
+    except AttributeError as error:
+        raise RuntimeError(f"required library symbol is not loaded: {symbol}") from error
+
+
+def _symbol_library_path(symbol: str) -> Path:
+    """Return the real shared object that currently resolves ``symbol``."""
+
+    libdl = ctypes.CDLL(ctypes.util.find_library("dl") or "libdl.so.2")
+    libdl.dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DlInfo)]
+    libdl.dladdr.restype = ctypes.c_int
+    info = _DlInfo()
+    address = ctypes.cast(_process_symbol(symbol), ctypes.c_void_p)
+    if libdl.dladdr(address, ctypes.byref(info)) == 0 or not info.dli_fname:
+        raise RuntimeError(f"unable to resolve the loaded library for symbol {symbol}")
+    return Path(os.fsdecode(info.dli_fname)).resolve(strict=True)
+
+
+def _format_encoded_version(version: int) -> str:
+    return f"{version // 10000}.{version % 10000 // 100}.{version % 100}"
+
+
+def _read_encoded_version(symbol: str) -> tuple[str, int]:
+    get_version = _process_symbol(symbol)
+    get_version.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    get_version.restype = ctypes.c_int
+    version = ctypes.c_int()
+    status = int(get_version(ctypes.byref(version)))
+    if status != 0:
+        raise RuntimeError(f"{symbol} failed with status {status}")
+    return _format_encoded_version(version.value), int(version.value)
+
+
+def _read_cublas_version() -> tuple[str, int]:
+    get_property = _process_symbol("cublasGetProperty")
+    get_property.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    get_property.restype = ctypes.c_int
+    parts = []
+    for property_id in range(3):
+        value = ctypes.c_int()
+        status = int(get_property(property_id, ctypes.byref(value)))
+        if status != 0:
+            raise RuntimeError(f"cublasGetProperty({property_id}) failed with status {status}")
+        parts.append(int(value.value))
+    major, minor, patch = parts
+    return f"{major}.{minor}.{patch}", major * 10000 + minor * 100 + patch
+
+
+def _read_nvshmem_version() -> tuple[str, str]:
+    get_version = _process_symbol("nvshmem_info_get_version")
+    get_version.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    get_version.restype = None
+    major = ctypes.c_int()
+    minor = ctypes.c_int()
+    get_version(ctypes.byref(major), ctypes.byref(minor))
+    get_name = _process_symbol("nvshmem_info_get_name")
+    get_name.argtypes = [ctypes.c_char_p]
+    get_name.restype = None
+    name = ctypes.create_string_buffer(256)
+    get_name(name)
+    release = name.value.decode().removeprefix("NVSHMEM v")
+    return release, f"{major.value}.{minor.value}"
+
+
+def _library_provenance() -> dict[str, dict[str, Any]]:
+    """Verify every configured lock against the library resolving its API symbol."""
+
+    configured = _locked_library_paths(required=True)
+    result = {}
+    for name, symbol in _LIBRARY_SYMBOLS.items():
+        actual = _symbol_library_path(symbol)
+        expected = configured[name]
+        if not actual.samefile(expected):
+            raise RuntimeError(
+                f"{name} library lock mismatch: configured {expected}, loaded {actual}"
+            )
+        if name == "cublas":
+            version, version_raw = _read_cublas_version()
+        elif name == "nvshmem":
+            version, api_version = _read_nvshmem_version()
+            version_raw = None
+        else:
+            version, version_raw = _read_encoded_version(symbol)
+        record: dict[str, Any] = {"path": str(actual), "version": version}
+        if name == "nvshmem":
+            record["api_version"] = api_version
+        if version_raw is not None:
+            record["version_raw"] = version_raw
+        result[name] = record
+    return result
 
 
 @dataclass(frozen=True)
@@ -457,6 +569,31 @@ class GemmCommBaselineSuite:
             f"cublasmp_{self.cublasmp_algo}": self._build_cublasmp_launch,
         }
 
+    def metadata(self) -> dict[str, Any]:
+        libraries = _library_provenance()
+        result: dict[str, Any] = {
+            "cublas_nccl_execution": "cuda_graph_replay",
+            "cublasmp_algorithm": self.cublasmp_algo,
+            "libraries": libraries,
+        }
+        if self._cublasmp is not None:
+            binding_version = int(self._cublasmp._cublas_mp.get_version())
+            if binding_version != libraries["cublasmp"]["version_raw"]:
+                raise RuntimeError(
+                    "cuBLASMp binding/library version mismatch: "
+                    f"binding={binding_version}, library={libraries['cublasmp']['version_raw']}"
+                )
+            result.update(
+                {
+                    "cublasmp_version": binding_version,
+                    "cublasmp_workspace_device_bytes": self._cublasmp.workspace_device_bytes,
+                    "cublasmp_workspace_host_bytes": self._cublasmp.workspace_host_bytes,
+                }
+            )
+        elif self._cublasmp_error is not None:
+            result["cublasmp_error"] = self._cublasmp_error
+        return result
+
     def close(self) -> None:
         self.runtime.barrier()
         if self._cublasmp is not None:
@@ -481,4 +618,20 @@ def create_baseline_suite(
     )
 
 
-__all__ = ["GemmCommBaselineSuite", "create_baseline_suite"]
+def ratios(result: Mapping[str, Any], tirx: str = "tirx") -> dict[str, float]:
+    """Return ``baseline_us / tirx_us``; values above one favor TIRx."""
+
+    impls = result.get("impls")
+    if not isinstance(impls, Mapping) or tirx not in impls:
+        raise ValueError(f"benchmark result does not contain {tirx!r}")
+    tirx_us = float(impls[tirx])
+    if not math.isfinite(tirx_us) or tirx_us <= 0:
+        raise ValueError(f"benchmark result contains invalid {tirx!r} timing: {tirx_us}")
+    return {
+        name: float(value) / tirx_us
+        for name, value in impls.items()
+        if name != tirx and math.isfinite(float(value)) and float(value) > 0
+    }
+
+
+__all__ = ["GemmCommBaselineSuite", "create_baseline_suite", "ratios"]

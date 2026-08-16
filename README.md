@@ -96,13 +96,12 @@ point each port backs (`activation`, `quantization` — CuTe-DSL backend —,
 
 ## Performance
 
-Per-workload TIRx GPU times are pinned in
+Per-workload numbers — our kernel time, every reference impl, and the
+ref/ours ratio (>1 means ours is faster) — are pinned in
 [`tirx_kernels/bench_suite/baseline.md`](tirx_kernels/bench_suite/baseline.md),
-regenerated on every timing promotion. The regression report compares current
-and pinned absolute times only when they were measured on the exact same fixed
-runner. See the
+regenerated on every baseline promotion. See the
 [bench-suite README](tirx_kernels/bench_suite/README.md) for how the sweep runs
-and how to refresh the pin.
+and how to refresh the baseline.
 
 ## Installation
 
@@ -114,17 +113,27 @@ pip install -e .
 
 ### External dependencies
 
-The runtime/compiler dependencies are managed outside this package:
+These are **not on PyPI** and must be installed/available separately. They are
+imported lazily and are only needed when a benchmark is run with
+`--with-references` (except runtime dependencies listed for the TIRx kernel itself):
 
 | Dependency       | Needed by                          | Notes                                                  |
 | ---------------- | ---------------------------------- | ------------------------------------------------------ |
 | `tvm.tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tir/python`. |
-| `torch`          | test, data preparation, and launch | CUDA build matching your GPU.                          |
+| `torch`          | all kernels                        | CUDA build matching your GPU.                          |
+| `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels and the MegaMoE timer. |
+| `flashinfer`     | `nvfp4_gemm` baseline | Used for reference implementations. |
+| `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` baseline | Current SM100 forward/backward reference. |
+| `flash_kda`      | `flashkda_bf16_fused_m128` baseline | Uses the installed package; results record its package, source, extension, and CUTLASS provenance when available. |
+| `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` reference; checkout on `PYTHONPATH`. |
+| `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
 
-Tests use in-tree Torch/math oracles, and benchmarks time only TIRx. Upstream
-projects cited by ported source files are not runtime test or benchmark
-dependencies.
+The bench suite does not import or run reference implementations by default.
+Pass `--with-references` to enable them; a missing enabled reference fails its
+workload. See
+[`tirx_kernels/bench_suite/README.md`](tirx_kernels/bench_suite/README.md)
+for the prerequisites and workarounds.
 
 ## Usage
 
@@ -141,6 +150,7 @@ python -m tirx_kernels.test --kernel fp16_bf16_gemm --config bf16_correctness_10
 
 # Benchmark
 python -m tirx_kernels.bench --kernel nvfp4_gemm
+python -m tirx_kernels.bench --kernel nvfp4_gemm --with-references
 
 # Pre-commit regression benchmark sweep (see tirx_kernels/bench_suite/README.md)
 python -m tirx_kernels.bench_suite
@@ -163,8 +173,8 @@ mod.run_bench(M=1024, N=1024, K=1024) # profile (needs a GPU)
 func = mod.get_kernel(M=1024, N=1024, K=1024)  # the TIRx PrimFunc
 ```
 
-Each module also provides `KERNEL_META` (name / category / `compute_capability`),
-small correctness `CONFIGS`, and a separate production `BENCH_CONFIGS` matrix.
+Each module also provides `KERNEL_META` (name / category / `compute_capability`)
+and separate `CONFIGS` correctness and `BENCH_CONFIGS` benchmark sweeps.
 
 ## License
 

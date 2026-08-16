@@ -1375,7 +1375,17 @@ def run_gpu(
     def source_builder():
         from flashinfer.mamba import selective_state_update
 
-        return lambda: _run_reference(case, selective_state_update)
+        def launch():
+            _run_reference(case, selective_state_update)
+
+        executable(*args)
+        launch()
+        torch.cuda.synchronize()
+        _assert_case_close(case)
+        for _ in range(2):
+            launch()
+        torch.cuda.synchronize()
+        return launch
 
     return bench(
         {"tirx": lambda: executable(*args)},

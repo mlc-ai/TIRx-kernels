@@ -2406,7 +2406,7 @@ def prepare_bench(**kwargs: Any):
 
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     # timer=None inherits the canonical local timer default.
     timer = kwargs.pop("timer", None)
@@ -2420,16 +2420,36 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     config_kwargs = dict(kwargs)
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
-    data = _prepare_data(_make_config(**config_kwargs), compute_reference=False)
-    invocation = _prepare_tirx_invocation(data, executable=prepared["executable"])
-
-    def build_deepgemm():
+    with_references = external_references_enabled()
+    data = _prepare_data(_make_config(**config_kwargs), compute_reference=with_references)
+    if with_references:
         import deep_gemm
 
         config = data["config"]
         schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
             data["context_lens"], config.page_size, config.num_sms, data["indices"]
         )
+        data["schedule_meta"] = schedule_meta
+        data["tirx_schedule_meta"] = schedule_meta
+        if not config.varlen and config.next_n >= 2:
+            num_q_atoms = _align_up(config.next_n, 2) // 2
+            atom_context_lens = data["context_lens"][:, -1:].expand(
+                config.batch_size, num_q_atoms
+            ).contiguous()
+            data["tirx_schedule_meta"] = deep_gemm.get_paged_mqa_logits_metadata(
+                atom_context_lens.reshape(-1, 1), config.page_size, config.num_sms
+            )
+    invocation = _prepare_tirx_invocation(data, executable=prepared["executable"])
+
+    def build_deepgemm():
+        import deep_gemm
+
+        config = data["config"]
+        schedule_meta = data.get("schedule_meta")
+        if schedule_meta is None:
+            schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
+                data["context_lens"], config.page_size, config.num_sms, data["indices"]
+            )
         return lambda: deep_gemm.fp8_fp4_paged_mqa_logits(
             q=data["q_in"],
             kv_cache=data["fused_kv_cache"],
@@ -2443,7 +2463,15 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
             indices=data["indices"],
         )
 
-    return bench(
+    max_diff = None
+    if with_references:
+        reference_logits = build_deepgemm()()
+        tirx_logits = _run_tirx_invocation(data, invocation)
+        torch.cuda.synchronize()
+        _assert_correct(data, reference_logits, name="DeepGEMM")
+        max_diff = _assert_correct(data, tirx_logits, name="TIRx")
+
+    result = bench(
         {"tirx": lambda: _run_tirx_invocation(data, invocation)},
         references={"deepgemm": build_deepgemm},
         warmup=warmup,
@@ -2452,6 +2480,9 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
+    if max_diff is not None:
+        result["max_diff"] = max_diff
+    return result
 
 
 def run_bench(**kwargs: Any) -> dict[str, Any]:

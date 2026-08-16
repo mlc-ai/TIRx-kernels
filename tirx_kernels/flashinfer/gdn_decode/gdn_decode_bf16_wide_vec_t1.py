@@ -1119,6 +1119,13 @@ def run_gpu(
                 tile_v=int(config["tile_v"]),
             )
 
+        executable(*args)
+        launch()
+        torch.cuda.synchronize()
+        _assert_case_close(case)
+        for _ in range(2):
+            launch()
+        torch.cuda.synchronize()
         return launch
 
     return bench(

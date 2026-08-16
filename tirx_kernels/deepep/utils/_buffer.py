@@ -81,6 +81,19 @@ class SymmetricWindow:
         self.group = group
         self.rank = group.rank()
         self.world_size = group.size()
+        from tirx_kernels.runner import external_references_enabled
+
+        if external_references_enabled():
+            # Keep the original dedicated communicator when DeepEP is present,
+            # so the TIRx window does not share reference communication state.
+            from deep_ep.utils.comm import get_nccl_comm_handle
+
+            self._comm_handle = get_nccl_comm_handle(group, force_new_comm=True)
+            comm = ctypes.c_void_p(self._comm_handle.get())
+        else:
+            device = torch.device("cuda", self.rank)
+            backend = group._get_backend(device)
+            comm = ctypes.c_void_p(backend._comm_ptr())
         self._nccl = _load_nccl()
 
         self.workspace_bytes = WORKSPACE_ALIGNED_BYTES
@@ -88,8 +101,6 @@ class SymmetricWindow:
         self.total_bytes = self.workspace_bytes + self.buffer_bytes
 
         device = torch.device("cuda", self.rank)
-        backend = group._get_backend(device)
-        comm = ctypes.c_void_p(backend._comm_ptr())
 
         base = ctypes.c_void_p()
         _check(

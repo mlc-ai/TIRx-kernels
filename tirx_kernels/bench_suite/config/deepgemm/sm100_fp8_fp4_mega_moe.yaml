@@ -4,7 +4,7 @@ selection_rationale: A decode-sized routed case, a prefill-sized routed case, an
   routed-only and shared-expert schedules.
 defaults:
   num_gpus: 1
-  timer: kineto
+  timer: megamoe
 configs:
 - config: p1_tok2_h1024_i512_e2_k1_bm16
   default: false

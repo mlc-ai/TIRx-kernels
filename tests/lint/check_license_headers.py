@@ -316,22 +316,9 @@ def self_test() -> int:
 
 def tracked_python_files() -> list[str]:
     out = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(REPO),
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            "*.py",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
+        ["git", "-C", str(REPO), "ls-files", "*.py"], capture_output=True, text=True, check=True
     ).stdout.split()
-    return [rel for rel in out if (REPO / rel).is_file()]
+    return out
 
 
 def main() -> int:

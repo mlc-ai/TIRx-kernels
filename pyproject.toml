@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0 AND BSD-3-Clause AND MIT"
 license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
-# tvm and torch are runtime dependencies managed externally (not on PyPI)
+# tvm, torch, triton are runtime dependencies managed externally (not on PyPI)
 dependencies = ["pyyaml>=6.0"]
 
 [tool.setuptools.packages.find]
