@@ -25,7 +25,10 @@ from types import ModuleType
 from typing import Any, Protocol, runtime_checkable
 
 import tvm
-from tirx_kernels.low_level_ir import check_low_level_ir
+from tirx_kernels.low_level_ir import (
+    LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL,
+    check_low_level_ir,
+)
 
 DEFAULT_BENCH_ROUNDS = 5
 DEFAULT_BENCH_COOLDOWN_S = 0.0
@@ -585,7 +588,10 @@ def run_kernel_test(kernel_name: str, config: dict[str, Any], *, registry=None):
 
     mod = registry[kernel_name]
     params = {k: v for k, v in config.items() if k != "label"}
-    check_low_level_ir(mod.get_kernel(**params))
+    check_low_level_ir(
+        mod.get_kernel(**params),
+        allowed_func_calls=LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL.get(kernel_name, ()),
+    )
     mod.run_test(**params)
 
 

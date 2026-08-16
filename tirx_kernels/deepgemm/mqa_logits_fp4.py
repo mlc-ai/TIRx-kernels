@@ -16,11 +16,10 @@ from unittest import SkipTest
 
 import torch
 
-from tvm.backend.cuda.op import cuda_func_call
-
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _TEST_DIFF_THRESHOLD = 5e-6
 _COMPILE_CACHE_NAMESPACE = "deepgemm.mqa_logits_fp4.compile"
+_CUDA_ARCH = "sm_100a"
 
 
 @dataclass(frozen=True)
@@ -275,39 +274,8 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     }
 
 
-def _mqa_fp4_wrelu_reduce_src(num_heads: int) -> str:
-    """DeepGEMM's packed weighted-ReLU reduction.
-
-    The individual PTX operations are registered, and ptxas produces the same
-    FADD2/FFMA2 reduction from them.  However, expanding the reduction into
-    separate inline-asm wrappers prevents NVRTC from hoisting and uniform-
-    lowering surrounding runtime address calculations in the compressed BF16
-    kernel.  Keep this hot composite so those calculations stay on the uniform
-    datapath; the expanded form regresses its paired bench_suite result.
-    """
-    return (
-        f"__forceinline__ __device__ float tvm_builtin_mqa_fp4_wrelu_reduce_{num_heads}("
-        "const float* __restrict__ accum, const float* __restrict__ weights) {\n"
-        "    float2 sum_0 = make_float2(0.0f, 0.0f);\n"
-        "    float2 sum_1 = make_float2(0.0f, 0.0f);\n"
-        "    #pragma unroll\n"
-        f"    for (int j = 0; j < {num_heads}; j += 4) {{\n"
-        "        float2 a_0 = make_float2(accum[j], accum[j + 1]);\n"
-        "        float2 a_1 = make_float2(fabsf(accum[j]), fabsf(accum[j + 1]));\n"
-        "        sum_0 = __ffma2_rn(__fadd2_rn(a_0, a_1),"
-        " make_float2(weights[j], weights[j + 1]), sum_0);\n"
-        "        float2 a_2 = make_float2(accum[j + 2], accum[j + 3]);\n"
-        "        float2 a_3 = make_float2(fabsf(accum[j + 2]), fabsf(accum[j + 3]));\n"
-        "        sum_1 = __ffma2_rn(__fadd2_rn(a_2, a_3),"
-        " make_float2(weights[j + 2], weights[j + 3]), sum_1);\n"
-        "    }\n"
-        "    float2 sum = __fadd2_rn(sum_0, sum_1);\n"
-        "    return (sum.x + sum.y) / 2.0f;\n"
-        "}"
-    )
-
-
 def get_kernel(**kwargs: Any):
+    import tvm
     from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_tmem_layout
     from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
     from tvm.script import tirx as T
@@ -373,6 +341,52 @@ def get_kernel(**kwargs: Any):
     tcgen05_cp = "tcgen05.cp.cta_group::1.32x128b.warpx4"
     tcgen05_mma = "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.scale_vec::2X"
     tcgen05_ld_x32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
+
+    @T.prim_func(private=True)
+    def wrelu_reduce(
+        accum_h: T.handle("float32", "local"), weights_h: T.handle("float32", "local")
+    ) -> T.float32:
+        accum = T.decl_buffer((num_heads,), "float32", data=accum_h, scope="local")
+        weights = T.decl_buffer((num_heads,), "float32", data=weights_h, scope="local")
+        sum_0: T.uint64
+        sum_1: T.uint64
+        accum_pair: T.uint64
+        abs_pair: T.uint64
+        relu_pair: T.uint64
+        weight_pair: T.uint64
+        abs_lo: T.float32
+        abs_hi: T.float32
+        total: T.uint64
+        total_lo: T.float32
+        total_hi: T.float32
+        T.ptx.mov.b64(sum_0, T.float32(0), T.float32(0))
+        T.ptx.mov.b64(sum_1, T.float32(0), T.float32(0))
+        for head_group in T.unroll(0, num_heads // 4):
+            head = head_group * 4
+            T.ptx.mov.b64(accum_pair, accum[head], accum[head + 1])
+            T.ptx.abs.f32(abs_lo, accum[head])
+            T.ptx.abs.f32(abs_hi, accum[head + 1])
+            T.ptx.mov.b64(abs_pair, abs_lo, abs_hi)
+            T.ptx.add.rn.f32x2(relu_pair, accum_pair, abs_pair)
+            T.ptx.mov.b64(weight_pair, weights[head], weights[head + 1])
+            T.ptx.fma.rn.f32x2(sum_0, relu_pair, weight_pair, sum_0)
+
+            T.ptx.mov.b64(accum_pair, accum[head + 2], accum[head + 3])
+            T.ptx.abs.f32(abs_lo, accum[head + 2])
+            T.ptx.abs.f32(abs_hi, accum[head + 3])
+            T.ptx.mov.b64(abs_pair, abs_lo, abs_hi)
+            T.ptx.add.rn.f32x2(relu_pair, accum_pair, abs_pair)
+            T.ptx.mov.b64(weight_pair, weights[head + 2], weights[head + 3])
+            T.ptx.fma.rn.f32x2(sum_1, relu_pair, weight_pair, sum_1)
+        T.ptx.add.rn.f32x2(total, sum_0, sum_1)
+        T.ptx.mov.b64(total_lo, total_hi, total)
+        result: T.float32
+        T.ptx.add.rn.f32(result, total_lo, total_hi)
+        T.ptx.mul.rn.f32(result, result, T.float32(0.5))
+        return result
+
+    kernel_module = tvm.IRModule({"wrelu_reduce": wrelu_reduce})
+    wrelu_reduce_gv = kernel_module.get_global_var("wrelu_reduce")
 
     def replace_smem_desc_addr(desc, smem_ptr):
         shared_addr = T.cuda.cvta_generic_to_shared(smem_ptr)
@@ -1038,12 +1052,13 @@ def get_kernel(**kwargs: Any):
                             T.ptx.tcgen05.wait__ld.sync.aligned()
                             if q_inner_i == block_q - 1:
                                 tmem_pipe.empty.arrive(tmem_stage_idx)
-                            result_f32: T.float32 = cuda_func_call(
-                                f"tvm_builtin_mqa_fp4_wrelu_reduce_{num_heads}",
-                                T.address_of(accum[0]),
-                                T.address_of(cached_weights[q_inner_i, 0]),
-                                source_code=_mqa_fp4_wrelu_reduce_src(num_heads),
-                                return_type="float32",
+                            result_f32: T.float32 = tvm.ir.Call(
+                                wrelu_reduce_gv,
+                                [
+                                    T.address_of(accum[0]),
+                                    T.address_of(cached_weights[q_inner_i, 0]),
+                                ],
+                                ret_ty="float32",
                             )
                             result = T.cast(result_f32, logits_tir_dtype)
                             if config.compressed_logits:
@@ -1089,7 +1104,7 @@ def get_kernel(**kwargs: Any):
                     T.uint32(0), T.uint32(num_tmem_cols)
                 )
 
-    return sm100_fp4_mqa_logits.with_attr(
+    kernel_module["main"] = sm100_fp4_mqa_logits.with_attr(
         "tirx.kernel_launch_params",
         [
             "blockIdx.x",
@@ -1098,6 +1113,7 @@ def get_kernel(**kwargs: Any):
             "tirx.use_dyn_shared_memory",
         ],
     )
+    return kernel_module
 
 
 def _compile_tirx_mqa_for_config(
@@ -1114,8 +1130,8 @@ def _compile_tirx_mqa_for_config(
 ) -> Any:
     import tvm
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
-    kernel = get_kernel(
+    target = tvm.target.Target({"kind": "cuda", "arch": _CUDA_ARCH})
+    kernel_module = get_kernel(
         seq_len=seq_len,
         seq_len_kv=seq_len_kv,
         num_heads=num_heads,
@@ -1127,11 +1143,10 @@ def _compile_tirx_mqa_for_config(
         logits_stride_override=logits_stride_override,
     )
     with target:
-        mod = tvm.IRModule({"main": kernel})
         # --ftz=false lets abs fold into FADD2 operand modifiers (ftz blocks it).
         os.environ["TVM_CUDA_NVRTC_EXTRA_OPTS"] = "--ftz=false"
         os.environ["TVM_CUDA_PTXAS_EXTRA_OPTS"] = "--allow-expensive-optimizations=true"
-        return tvm.compile(mod, target=target, tir_pipeline="tirx")
+        return tvm.compile(kernel_module, target=target, tir_pipeline="tirx")
 
 
 _compile_tirx_mqa_for_config = cache(_compile_tirx_mqa_for_config)

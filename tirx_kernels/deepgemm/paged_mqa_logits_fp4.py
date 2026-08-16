@@ -13,57 +13,12 @@ from unittest import SkipTest
 
 import torch
 
-from tvm.backend.cuda.op import cuda_func_call
 from tvm.ir.type import PointerType, PrimType
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 5e-6
 _COMPILE_CACHE_NAMESPACE = "deepgemm.paged_mqa_logits_fp4.compile"
-
-
-def _mxf4_block32_mma_src() -> str:
-    return r"""
-__forceinline__ __device__ void tvm_builtin_tcgen05_mma_mxf4_block32_ss(
-    uint32_t tmem_c,
-    uint64_t desc_a,
-    uint64_t desc_b,
-    uint32_t i_desc,
-    uint32_t scale_c,
-    uint32_t tmem_sfa,
-    uint32_t tmem_sfb) {
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "setp.ne.b32 p, %4, 0;\n"
-        "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.block32 "
-        "[%0], %1, %2, %3, [%5], [%6], p;\n"
-        "}\n"
-        :
-        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(i_desc), "r"(scale_c),
-          "r"(tmem_sfa), "r"(tmem_sfb));
-}
-"""
-
-
-def _opaque_warp_id_src() -> str:
-    return r"""
-__forceinline__ __device__ int tvm_builtin_opaque_warp_id(int x) {
-    int y;
-    asm volatile("mov.u32 %0, %1;" : "=r"(y) : "r"(x));
-    return y;
-}
-"""
-
-
-def _opaque_sm_idx_u32_src() -> str:
-    return r"""
-__forceinline__ __device__ unsigned int tvm_builtin_opaque_sm_idx_u32(unsigned int x) {
-    unsigned int y;
-    asm volatile("mov.u32 %0, %1;" : "=r"(y) : "r"(x));
-    return y;
-}
-"""
 
 
 def _paged_mqa_logits_fp4_cuda_postproc(code: str) -> str:
@@ -714,16 +669,8 @@ def get_kernel(**kwargs: Any):
     def mma_mxf4_block32_ss(desc_a, desc_b, tmem_c, scale_c, desc, tmem_sfa, tmem_sfb):
         i_desc_hi: T.uint32 = T.cast(desc >> T.uint64(32), "uint32")
         T.evaluate(
-            cuda_func_call(
-                "tvm_builtin_tcgen05_mma_mxf4_block32_ss",
-                tmem_c,
-                desc_a,
-                desc_b,
-                i_desc_hi,
-                scale_c,
-                tmem_sfa,
-                tmem_sfb,
-                source_code=_mxf4_block32_mma_src(),
+            T.ptx["tcgen05.mma.cta_group::1.kind::mxf4.block_scale.block32"](
+                tmem_c, desc_a, desc_b, i_desc_hi, tmem_sfa, tmem_sfb, T.ptx.pred(scale_c)
             )
         )
 
@@ -767,20 +714,13 @@ def get_kernel(**kwargs: Any):
             ((config.num_sms + 1) * 2,), "uint32", data=schedule_meta.data, scope="global"
         )
         sm_idx = T.cta_id([config.num_sms])
-        sm_idx_u32: T.uint32 = cuda_func_call(
-            "tvm_builtin_opaque_sm_idx_u32",
-            T.cast(sm_idx, "uint32"),
-            source_code=_opaque_sm_idx_u32_src(),
-            return_type="uint32",
-        )
+        sm_idx_u32: T.uint32
+        T.ptx.mov.u32(sm_idx_u32, T.cast(sm_idx, "uint32"))
         warp_idx = T.warp_id([num_warps])
         warp_idx_u32: T.let = T.cast(warp_idx, "uint32")
-        warp_idx_presync: T.int32 = cuda_func_call(
-            "tvm_builtin_opaque_warp_id",
-            warp_idx,
-            source_code=_opaque_warp_id_src(),
-            return_type="int32",
-        )
+        warp_idx_presync_u32: T.uint32
+        T.ptx.mov.u32(warp_idx_presync_u32, warp_idx_u32)
+        warp_idx_presync: T.let = T.cast(warp_idx_presync_u32, "int32")
         warpgroup_idx = T.warpgroup_id([num_warps // 4])
         lane_idx = T.lane_id([32])
         lane_idx_u32: T.uint32 = T.cast(lane_idx, "uint32")
@@ -2123,7 +2063,6 @@ def _compile_tirx_paged_mqa_key(config: PagedMQALogitsFP4Config) -> tuple[tuple[
 
 
 def _compile_tirx_paged_mqa(config: PagedMQALogitsFP4Config) -> Any:
-
     compile_kwargs = _compile_tirx_paged_mqa_kwargs(config)
     return _compile_tirx_paged_mqa_for_config(**compile_kwargs)
 

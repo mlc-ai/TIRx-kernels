@@ -241,29 +241,6 @@ def derive_config(
     )
 
 
-semaphore_notify_remote = """
-__forceinline__ __device__ uint64_t semaphore_notify_remote(int32_t signal_rank, uint64_t* addr, uint64_t signal_value) {
-    auto dst_addr = reinterpret_cast<unsigned long long*>(nvshmem_ptr(addr, signal_rank));
-    return atomicAdd_system(dst_addr, signal_value);
-}
-"""
-
-enqueue_remote = """
-__forceinline__ __device__ void enqueue_remote(int32_t* task_types, int32_t* task_idxs, int32_t* tail, int32_t mask,
-                                               int32_t signal_rank, int32_t task_type, int32_t task_idx0, int32_t task_idx1) {
-    int32_t* remote_task_types = (int32_t*)nvshmem_ptr(task_types, signal_rank);
-    int32_t* remote_task_idxs = (int32_t*)nvshmem_ptr(task_idxs, signal_rank);
-    int32_t* remote_tail = (int32_t*)nvshmem_ptr(tail, signal_rank);
-    int32_t tail_r = atomicAdd(&(remote_tail[0]), 1);
-    int32_t masked_pos = tail_r & mask;
-    remote_task_types[masked_pos] = task_type;
-    remote_task_idxs[masked_pos * 2] = task_idx0;
-    remote_task_idxs[masked_pos * 2 + 1] = task_idx1;
-    __threadfence();
-}
-"""
-
-
 @T.meta_class
 class Barriers:
     def __init__(self, shared_buffer_base, shared_buffer_offs, pipe_depth, pipe_width, is_p2c):
@@ -420,36 +397,17 @@ class MPMCQueue:
         task_types: T.Buffer,
         task_idxs: T.Buffer,
         head: T.Buffer,
-        tail: T.Buffer,
         num_tot_tasks: int,
     ):
         if capacity & (capacity - 1):
             raise ValueError("capacity must be a power-of-two")
-        self.capacity = capacity
         self.mask = capacity - 1
         self.task_types = task_types
         self.task_idxs = task_idxs
         self.head = head
-        self.tail = tail
         self.head_r = int_var("head_r")
-        self.tail_r = int_var("tail_r")
-        self.pos = int_var("pos")
         self.masked_pos = int_var("masked_pos")
         self.num_tot_tasks = num_tot_tasks
-
-    @T.inline
-    def enqueue(self, signal_rank: int, task_type: int, *task_idx: int):
-        T.cuda.func_call(
-            "enqueue_remote",
-            self.task_types.ptr_to([0]),
-            self.task_idxs.ptr_to([0, 0]),
-            self.tail.ptr_to([0]),
-            self.mask,
-            signal_rank,
-            task_type,
-            *task_idx,
-            source_code=enqueue_remote,
-        )
 
 
 class GEMMMPMCQueue(MPMCQueue):
@@ -792,7 +750,7 @@ def _build_kernel():
 
         # ag + gemm
         sem = T.meta_var(Semaphore(cnt=1, buffer=semaphore))
-        gemm_queue = T.meta_var(GEMMMPMCQueue(CAPACITY, gemm_task_types, gemm_task_idxs, gemm_head, gemm_tail, GEMM_M_CLUSTERS * GEMM_N_CLUSTERS))
+        gemm_queue = T.meta_var(GEMMMPMCQueue(CAPACITY, gemm_task_types, gemm_task_idxs, gemm_head, GEMM_M_CLUSTERS * GEMM_N_CLUSTERS))
         packed_buf = T.decl_buffer((1,), "uint64", buf.data, elem_offset=64)
         packed_ptr: T.let[T.Var(name="packed_ptr", ty=PointerType(PrimType("uint64")))] = T.reinterpret(PointerType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)) # rank: 0
         packed_value = T.decl_buffer([1,], "uint64", data=packed_ptr, scope="shared")

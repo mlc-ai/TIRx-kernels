@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import tvm
@@ -15,6 +16,19 @@ from tvm.tirx.stmt_functor import StmtExprVisitor
 
 _FORBIDDEN_SCOPE_ROOTS = ("global", "shared")
 _ADDRESS_OF_OP = "tirx.address_of"
+_FUNC_CALL_OP = "tirx.cuda.func_call"
+
+NVSHMEM_RUNTIME_FUNC_CALLS = frozenset(
+    {
+        "enqueue_remote",
+        "exit_barrier_arrive_and_wait",
+        "ld_reduce_8_fp16",
+        "semaphore_notify_remote",
+    }
+)
+LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL: Mapping[str, frozenset[str]] = MappingProxyType(
+    {"gemm_reduce_scatter": NVSHMEM_RUNTIME_FUNC_CALLS}
+)
 
 
 def _is_forbidden_scope(scope: str) -> bool:
@@ -52,6 +66,7 @@ class LowLevelIRFinding:
     kind: str
     node_type: str
     scope: str | None
+    callee: str | None
     span: str | None
 
 
@@ -61,6 +76,7 @@ class LowLevelIRReport:
 
     checked_functions: tuple[str, ...]
     violations: tuple[LowLevelIRFinding, ...]
+    func_calls: tuple[LowLevelIRFinding, ...]
     address_only_loads: tuple[LowLevelIRFinding, ...]
 
     @property
@@ -71,21 +87,27 @@ class LowLevelIRReport:
     def summary(self) -> str:
         """Return a compact human-readable result."""
         address_count = len(self.address_only_loads)
+        func_call_count = len(self.func_calls)
         if self.ok:
             return (
                 f"low-level IR contract passed for {len(self.checked_functions)} function(s); "
-                f"recorded {address_count} address-only load(s)"
+                f"recorded {func_call_count} func_call(s) and "
+                f"{address_count} address-only load(s)"
             )
 
         lines = [
             f"low-level IR contract failed with {len(self.violations)} violation(s) "
             f"across {len(self.checked_functions)} function(s); "
-            f"recorded {address_count} address-only load(s)"
+            f"recorded {func_call_count} func_call(s) and "
+            f"{address_count} address-only load(s)"
         ]
         for finding in self.violations:
             scope = f", scope={finding.scope}" if finding.scope is not None else ""
+            callee = f", callee={finding.callee}" if finding.callee is not None else ""
             span = f", span={finding.span}" if finding.span is not None else ""
-            lines.append(f"- {finding.function}: {finding.kind} ({finding.node_type}{scope}{span})")
+            lines.append(
+                f"- {finding.function}: {finding.kind} ({finding.node_type}{scope}{callee}{span})"
+            )
         return "\n".join(lines)
 
 
@@ -100,18 +122,23 @@ class LowLevelIRContractError(ValueError):
 class _LowLevelIRVisitor(StmtExprVisitor):
     """Collect forbidden operations from one pre-lowering ``PrimFunc`` body."""
 
-    def __init__(self, function: str):
+    def __init__(self, function: str, allowed_func_calls: frozenset[str]):
         super().__init__()
         self.function = function
+        self.allowed_func_calls = allowed_func_calls
         self.violations: list[LowLevelIRFinding] = []
+        self.func_calls: list[LowLevelIRFinding] = []
         self.address_only_loads: list[LowLevelIRFinding] = []
 
-    def _finding(self, node: Any, kind: str, scope: str | None = None) -> LowLevelIRFinding:
+    def _finding(
+        self, node: Any, kind: str, scope: str | None = None, callee: str | None = None
+    ) -> LowLevelIRFinding:
         return LowLevelIRFinding(
             function=self.function,
             kind=kind,
             node_type=_node_name(node),
             scope=scope,
+            callee=callee,
             span=_span_text(node),
         )
 
@@ -143,6 +170,12 @@ class _LowLevelIRVisitor(StmtExprVisitor):
 
     def visit_call_(self, op: tvm.ir.Call) -> None:
         op_name = getattr(op.op, "name", None)
+        if op_name == _FUNC_CALL_OP:
+            callee = str(getattr(op.args[0], "value", op.args[0])) if op.args else "<missing>"
+            finding = self._finding(op, "func_call", callee=callee)
+            self.func_calls.append(finding)
+            if callee not in self.allowed_func_calls:
+                self.violations.append(finding)
         if op_name == _ADDRESS_OF_OP and len(op.args) == 1:
             addressed = op.args[0]
             if isinstance(addressed, tirx.BufferLoad):
@@ -197,7 +230,9 @@ def _iter_prim_funcs(value: Any, path: str = "root") -> Iterator[tuple[str, tirx
     )
 
 
-def inspect_low_level_ir(value: Any) -> LowLevelIRReport:
+def inspect_low_level_ir(
+    value: Any, *, allowed_func_calls: frozenset[str] | set[str] | tuple[str, ...] = ()
+) -> LowLevelIRReport:
     """Inspect a public ``get_kernel`` return value without lowering it.
 
     ``value`` may be a TIRx ``PrimFunc``, ``IRModule``, or nested list, tuple,
@@ -206,13 +241,16 @@ def inspect_low_level_ir(value: Any) -> LowLevelIRReport:
     """
     checked_functions: list[str] = []
     violations: list[LowLevelIRFinding] = []
+    func_calls: list[LowLevelIRFinding] = []
     address_only_loads: list[LowLevelIRFinding] = []
+    allowed_func_calls = frozenset(allowed_func_calls)
 
     for path, prim_func in _iter_prim_funcs(value):
         checked_functions.append(path)
-        visitor = _LowLevelIRVisitor(path)
+        visitor = _LowLevelIRVisitor(path, allowed_func_calls)
         visitor(prim_func.body)
         violations.extend(visitor.violations)
+        func_calls.extend(visitor.func_calls)
         address_only_loads.extend(visitor.address_only_loads)
 
     if not checked_functions:
@@ -221,19 +259,24 @@ def inspect_low_level_ir(value: Any) -> LowLevelIRReport:
     return LowLevelIRReport(
         checked_functions=tuple(checked_functions),
         violations=tuple(violations),
+        func_calls=tuple(func_calls),
         address_only_loads=tuple(address_only_loads),
     )
 
 
-def check_low_level_ir(value: Any) -> LowLevelIRReport:
+def check_low_level_ir(
+    value: Any, *, allowed_func_calls: frozenset[str] | set[str] | tuple[str, ...] = ()
+) -> LowLevelIRReport:
     """Return a report for valid IR, or raise ``LowLevelIRContractError``."""
-    report = inspect_low_level_ir(value)
+    report = inspect_low_level_ir(value, allowed_func_calls=allowed_func_calls)
     if not report.ok:
         raise LowLevelIRContractError(report)
     return report
 
 
 __all__ = [
+    "LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL",
+    "NVSHMEM_RUNTIME_FUNC_CALLS",
     "LowLevelIRContractError",
     "LowLevelIRFinding",
     "LowLevelIRReport",
