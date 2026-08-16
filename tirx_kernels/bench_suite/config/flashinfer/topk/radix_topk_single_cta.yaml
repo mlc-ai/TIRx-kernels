@@ -1,0 +1,64 @@
+# Every config the SINGLE_CTA dispatch domain reaches: all 18
+# dtype x mode x deterministic cells at three shape/topology regimes each
+# (small, mid-size multi-row, and the largest chunk the shared-memory budget
+# still keeps on one CTA per row).  The performance gate requires every entry
+# here to beat 0.99x the FlashInfer source, so the list is the full domain
+# rather than a curated subset; the three `default: true` rows are only the
+# representatives carried into the repository-wide default sweep.
+kernel: radix_topk_single_cta
+selection_rationale: The fp32 Basic column is the base dispatch; 8x8192 anchors the small single-CTA shape, 64x32768 the mid-range where the grid still fits one row per SM, and 256x57592 the largest chunk the smem budget allows with rows restriding the grid.
+configs:
+  - {config: f32_basic_r8_l8192_k256, default: true, selection_role: small}
+  - {config: f32_basic_r64_l32768_k512, default: true, selection_role: medium}
+  - {config: f32_basic_r256_l57592_k1024_maxchunk, default: true, selection_role: large}
+  - {config: f32_basic_det_r8_l8192_k256, default: false}
+  - {config: f32_basic_det_r64_l32768_k512, default: false}
+  - {config: f32_basic_det_r256_l55464_k1024_maxchunk, default: false}
+  - {config: f32_pt_r8_l8192_k256, default: false}
+  - {config: f32_pt_r64_l32768_k512, default: false}
+  - {config: f32_pt_r256_l57592_k1024_maxchunk, default: false}
+  - {config: f32_pt_det_r8_l8192_k256, default: false}
+  - {config: f32_pt_det_r64_l32768_k512, default: false}
+  - {config: f32_pt_det_r256_l55464_k1024_maxchunk, default: false}
+  - {config: f32_rag_r8_l8192_k256, default: false}
+  - {config: f32_rag_r64_l32768_k512, default: false}
+  - {config: f32_rag_r256_l57592_k1024_maxchunk, default: false}
+  - {config: f32_rag_det_r8_l8192_k256, default: false}
+  - {config: f32_rag_det_r64_l32768_k512, default: false}
+  - {config: f32_rag_det_r256_l55464_k1024_maxchunk, default: false}
+  - {config: f16_basic_r8_l8192_k256, default: false}
+  - {config: f16_basic_r64_l32768_k512, default: false}
+  - {config: f16_basic_r256_l115184_k1024_maxchunk, default: false}
+  - {config: f16_basic_det_r8_l8192_k256, default: false}
+  - {config: f16_basic_det_r64_l32768_k512, default: false}
+  - {config: f16_basic_det_r256_l110928_k1024_maxchunk, default: false}
+  - {config: f16_pt_r8_l8192_k256, default: false}
+  - {config: f16_pt_r64_l32768_k512, default: false}
+  - {config: f16_pt_r256_l115184_k1024_maxchunk, default: false}
+  - {config: f16_pt_det_r8_l8192_k256, default: false}
+  - {config: f16_pt_det_r64_l32768_k512, default: false}
+  - {config: f16_pt_det_r256_l110928_k1024_maxchunk, default: false}
+  - {config: f16_rag_r8_l8192_k256, default: false}
+  - {config: f16_rag_r64_l32768_k512, default: false}
+  - {config: f16_rag_r256_l115184_k1024_maxchunk, default: false}
+  - {config: f16_rag_det_r8_l8192_k256, default: false}
+  - {config: f16_rag_det_r64_l32768_k512, default: false}
+  - {config: f16_rag_det_r256_l110928_k1024_maxchunk, default: false}
+  - {config: bf16_basic_r8_l8192_k256, default: false}
+  - {config: bf16_basic_r64_l32768_k512, default: false}
+  - {config: bf16_basic_r256_l115184_k1024_maxchunk, default: false}
+  - {config: bf16_basic_det_r8_l8192_k256, default: false}
+  - {config: bf16_basic_det_r64_l32768_k512, default: false}
+  - {config: bf16_basic_det_r256_l110928_k1024_maxchunk, default: false}
+  - {config: bf16_pt_r8_l8192_k256, default: false}
+  - {config: bf16_pt_r64_l32768_k512, default: false}
+  - {config: bf16_pt_r256_l115184_k1024_maxchunk, default: false}
+  - {config: bf16_pt_det_r8_l8192_k256, default: false}
+  - {config: bf16_pt_det_r64_l32768_k512, default: false}
+  - {config: bf16_pt_det_r256_l110928_k1024_maxchunk, default: false}
+  - {config: bf16_rag_r8_l8192_k256, default: false}
+  - {config: bf16_rag_r64_l32768_k512, default: false}
+  - {config: bf16_rag_r256_l115184_k1024_maxchunk, default: false}
+  - {config: bf16_rag_det_r8_l8192_k256, default: false}
+  - {config: bf16_rag_det_r64_l32768_k512, default: false}
+  - {config: bf16_rag_det_r256_l110928_k1024_maxchunk, default: false}
