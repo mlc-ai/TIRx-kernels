@@ -2,12 +2,6 @@
 # base plus small and large 128x4 shapes; the rest stay benchable on request.
 kernel: mxfp4_quantize
 selection_rationale: The linear 4096 square anchors the base layout; small and large 128x4 rows bound the alternate scale-layout work range.
-defaults:
-  # Wider timing windows than the do_bench_proton defaults (25ms/100ms):
-  # these kernels are 2-100us and memory-bound, so longer windows average out
-  # mid-window clock wobble on the shared machine.
-  warmup: 50
-  repeat: 300
 configs:
   - {config: fp16_linear_m4096_k4096, default: true, selection_role: medium}
   - {config: bf16_linear_m4096_k4096, default: false}
