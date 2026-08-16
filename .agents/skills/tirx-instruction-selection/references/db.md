@@ -907,24 +907,49 @@ that the warp count was already providing.
 Count outstanding bytes (warps x slot bytes) before adding per-warp depth,
 and scale depth only after the SM's warp slots are full.
 
-## Avoid atomic-return tickets in grid barriers
+## Prefer native cooperative grid sync over software tickets
 
-**Symptoms:** `rare_data_corruption`, `barrier_releases_early`, `compiler_lowering_change`
+**Symptoms:** `rare_data_corruption`, `barrier_releases_early`, `software_grid_barrier`, `cooperative_launch_available`
 
 A software grid barrier built on `atom.add` plus `old == num_sms - 1` was
 lowered by ptxas into a warp-aggregated ticket whose compare constant came
 out wrong (`0x1b` instead of `0x3f`) inside the full kernel, while the
-isolated repro compiled correctly. The barrier released after 27 of 64 CTAs,
-the end-of-kernel sender-counter cleanup raced CTAs still allocating slots,
-and 0.1-2% of tokens were overwritten by wraparound slots -- a failure far
-too rare for small-scale runs to catch. A monotonic per-site u64 counter
-(fire-and-forget `red.release.gpu.add`, spin on `ld.acquire.gpu` until the
-next multiple of num_sms, no reset) has no atomic return and no reset for
-the compiler to mangle, with identical arrive-before-proceed semantics.
+isolated repro compiled correctly. The barrier released after 27 of 64 CTAs
+and caused rare token corruption. A monotonic ticketless u64 counter avoids
+that compiler hazard, but it still adds port-only global loads, reductions,
+and polling.
 
-Prefer ticketless barrier counters in any kernel large enough that the
-lowering cannot be eyeballed, and if a ticket form is ever kept, read the
-compare constant in the final SASS.
+When the source already uses `cooperative_groups::this_grid().sync()` and
+the launch keeps every CTA resident, use `T.cuda.grid_sync()` together with
+`tirx.use_cooperative_launch`. Current lowering emits the native cooperative
+launch attribute, so DeepEP dispatch no longer needs either software form.
+Replacing its two ticketless barriers removed the workspace counters and
+polling, passed all four correctness configurations, and moved stable
+five-round 8-GPU campaigns from the pinned 0.966x ratio to 0.993x and 1.022x.
+Keep the dependent epilogue PDL-only: cooperative launch applies to the main
+kernel that executes the grid sync, not automatically to every kernel in the
+chain. Use a ticketless monotonic counter only as a fallback when native
+cooperative launch is unavailable, and inspect final SASS if a ticket form is
+ever unavoidable.
+
+## Express low-level memory access through raw PTX
+
+**Symptoms:** `low_level_ir_contract`, `buffer_load_violation`, `buffer_store_violation`, `precompile_test_failure`
+
+The public low-level IR contract rejects `BufferLoad` and `BufferStore` in
+global or shared scope even when their eventual CUDA happens to match the
+source. Keep buffers for shape and pointer ownership, but perform memory
+access with `T.ptx.ld.*` and `T.ptx.st.*` through `buffer.ptr_to([index])`.
+The pointer operand is recorded as an address-only load and is contract-safe.
+
+Do not reinterpret an arbitrary rvalue solely to feed a bit-typed store:
+reinterpreting a literal such as zero can lower to an invalid address-of-rvalue
+expression in CUDA. Cast integer values to the store's bit type, or reinterpret
+a real register-backed lvalue when exact floating-point bits are required.
+Migrating DeepEP dispatch this way reduced 29 violations across its two public
+functions to zero (50 address-only pointer operands remained), passed all four
+correctness configurations, and retained 0.993x and 1.022x in stable five-round
+8-GPU campaigns.
 
 ## Bind the cluster scope or lose the attribute
 

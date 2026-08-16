@@ -113,8 +113,6 @@ WS_NOTIFY_REDUCTION = 16
 WS_COUNT_SEND = 24592
 WS_COUNT_RECV = 49168
 WS_SENDER_COUNTER = 73744
-WS_PORT_SCRATCH = 12_820_528  # software grid-barrier slots (sketch substitution 2)
-
 NUM_COUNT_SLOTS = NUM_RANKS + NUM_EXPERTS  # 264
 
 TIMEOUT_CYCLES = 200_000_000_000  # 100 s at ~2 GHz (comm.cuh: kNumOneSecCycles)
@@ -129,8 +127,34 @@ def _gptr(base_u64, byte_off):
     return T.reinterpret("handle", base_u64 + T.cast(byte_off, "uint64"))
 
 
+def _ld_global_s64(buffer, index):
+    out = T.alloc_local([1], "int64")
+    T.evaluate(T.ptx.ld.global_.s64(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
 def _peer_u64(table, dst):
-    return T.cast(table[dst], "uint64")
+    return T.cast(_ld_global_s64(table, dst), "uint64")
+
+
+def _ld_shared_s32(buffer, index):
+    out = T.alloc_local([1], "uint32")
+    T.evaluate(T.ptx.ld.shared.b32(out[0], buffer.ptr_to([index])))
+    return T.reinterpret("int32", out[0])
+
+
+def _ld_shared_f32(buffer, index):
+    out = T.alloc_local([1], "uint32")
+    T.evaluate(T.ptx.ld.shared.b32(out[0], buffer.ptr_to([index])))
+    return T.reinterpret("float32", out[0])
+
+
+def _st_shared_s32(buffer, index, value):
+    return T.ptx.st.shared.b32(buffer.ptr_to([index]), T.cast(value, "uint32"))
+
+
+def _st_shared_f32(buffer, index, value):
+    return T.ptx.st.shared.b32(buffer.ptr_to([index]), T.reinterpret("uint32", value))
 
 
 def _ld_volatile_u64(dst, addr):
@@ -143,14 +167,6 @@ def _ld_volatile_s64(dst, addr):
 
 def _ld_acquire_sys_s32(dst, addr):
     return T.ptx.ld.acquire.sys.global_.s32(dst, addr)
-
-
-def _ld_acquire_gpu_s32(dst, addr):
-    return T.ptx.ld.acquire.gpu.global_.s32(dst, addr)
-
-
-def _ld_acquire_gpu_u64(dst, addr):
-    return T.ptx.ld.acquire.gpu.global_.u64(dst, addr)
 
 
 def _shfl_idx(dst, src, src_lane):
@@ -173,11 +189,16 @@ def _warp_inclusive_sum(value, lane):
     return result
 
 
-def _launch_tags(cluster: int) -> list[str]:
+def _launch_tags(cluster: int, *, cooperative: bool = False, pdl: bool = False) -> list[str]:
     tags = ["blockIdx.x"]
     if cluster > 1:
         tags.append("clusterCtaIdx.x")
-    tags += ["threadIdx.x", "tirx.use_programtic_dependent_launch", "tirx.use_dyn_shared_memory"]
+    tags.append("threadIdx.x")
+    if cooperative:
+        tags.append("tirx.use_cooperative_launch")
+    if pdl:
+        tags.append("tirx.use_programtic_dependent_launch")
+    tags.append("tirx.use_dyn_shared_memory")
     return tags
 
 
@@ -288,38 +309,18 @@ def _build_dispatch_kernel(
                             T.cuda.trap_when_assert_failed(False)
                         T.evaluate(_ld_acquire_sys_s32(sig[0], sig_ptr))
 
-        # --- Software grid barrier (sketch substitution 2) ------------------
-        # Monotonic per-site u64 counter: every CTA's thread 0 adds 1, then
-        # spins until the counter crosses the next multiple of num_sms. No
-        # reset and no atomic-return ticket -> nothing for the compiler to
-        # mangle, and no reset race with straggler CTAs.
-        @T.inline
-        def grid_barrier(site):
-            counter_ptr = _gptr(ws_u64, WS_PORT_SCRATCH + site * 8)
-            if thread_idx == 0:
-                c0 = T.alloc_local([1], "uint64")
-                T.evaluate(_ld_acquire_gpu_u64(c0[0], counter_ptr))
-                target = (c0[0] // T.uint64(num_sms) + T.uint64(1)) * T.uint64(num_sms)
-                T.evaluate(T.ptx.red.release.gpu.global_.add.u64(counter_ptr, T.uint64(1)))
-                now = T.alloc_local([1], "uint64")
-                T.evaluate(_ld_acquire_gpu_u64(now[0], counter_ptr))
-                while now[0] < target:
-                    T.evaluate(_ld_acquire_gpu_u64(now[0], counter_ptr))
-            T.ptx.bar.sync(T.uint32(0), T.uint32(num_threads))
-
         # -------------------------------------------------------------------
         # Entry NVLink barrier (tag0) + end grid sync (dispatch.cuh:73-76)
         # -------------------------------------------------------------------
-        # Reset the atomic sender counters up front (source resets them at
-        # kernel end; moved here after the mid-kernel reset race traced to
-        # the end-of-kernel cleanup). Every CTA allocates only after
-        # grid_barrier(0), which is gated behind this store on SM 0.
+        # Reset the atomic sender counters up front. Every CTA allocates only
+        # after the following native grid sync, which is gated behind this
+        # store on SM 0.
         if sm_idx == 0 and thread_idx < NUM_RANKS:
             T.evaluate(
                 T.ptx.st.global_.s32(_gptr(ws_u64, WS_SENDER_COUNTER + thread_idx * 4), T.int32(0))
             )
         nvlink_barrier(2)
-        grid_barrier(0)
+        T.cuda.grid_sync()
 
         if warp < NUM_NOTIFY_WARPS:
             # =================================================================
@@ -334,7 +335,11 @@ def _build_dispatch_kernel(
 
             # Clean initial counts (dispatch.cuh:87-89)
             for i in T.serial(0, 3):
-                rank_expert_count[i * NUM_NOTIFY_THREADS + thread_idx] = 0
+                T.evaluate(
+                    _st_shared_s32(
+                        rank_expert_count, i * NUM_NOTIFY_THREADS + thread_idx, T.int32(0)
+                    )
+                )
             T.ptx.bar.sync(T.uint32(1), T.uint32(NUM_NOTIFY_THREADS))
 
             # Per-token counting (dispatch.cuh:94-107)
@@ -383,7 +388,7 @@ def _build_dispatch_kernel(
                     T.ptx.red.gpu.global_.add.u64(
                         _gptr(ws_u64, WS_NOTIFY_REDUCTION + i * 8),
                         (T.uint64(1) << T.uint64(32))
-                        | T.cast(T.cast(rank_expert_count[i], "uint32"), "uint64"),
+                        | T.cast(T.cast(_ld_shared_s32(rank_expert_count, i), "uint32"), "uint64"),
                     )
                 )
 
@@ -413,7 +418,7 @@ def _build_dispatch_kernel(
                         )
                     total = T.cast(T.bitwise_and(status[0], T.uint64(0xFFFFFFFF)), "int64")
                     encoded = T.cast(-total - 1, "int32")
-                    rank_expert_count[i] = encoded
+                    T.evaluate(_st_shared_s32(rank_expert_count, i, encoded))
                     T.evaluate(
                         T.ptx.st.global_.u64(
                             _gptr(ws_u64, WS_NOTIFY_REDUCTION + i * 8), T.uint64(0)
@@ -429,7 +434,7 @@ def _build_dispatch_kernel(
                     T.evaluate(
                         T.ptx.st.relaxed.sys.global_.u64(
                             _gptr(_peer_u64(peer_ws_ptrs, i), WS_COUNT_RECV + rank_idx * 8),
-                            T.cast(rank_expert_count[i], "uint64"),
+                            T.cast(_ld_shared_s32(rank_expert_count, i), "uint64"),
                         )
                     )
                 T.cuda.warp_sync()
@@ -446,7 +451,7 @@ def _build_dispatch_kernel(
                                 _peer_u64(peer_ws_ptrs, i // EXPERTS_PER_RANK),
                                 WS_COUNT_RECV + NUM_RANKS * 8 + idx * 8,
                             ),
-                            T.cast(rank_expert_count[NUM_RANKS + i], "uint64"),
+                            T.cast(_ld_shared_s32(rank_expert_count, NUM_RANKS + i), "uint64"),
                         )
                     )
                 T.ptx.bar.sync(T.uint32(1), T.uint32(NUM_NOTIFY_THREADS))
@@ -478,7 +483,7 @@ def _build_dispatch_kernel(
                     T.evaluate(
                         T.ptx.st.global_.u64(_gptr(ws_u64, WS_COUNT_RECV + i * 8), T.uint64(0))
                     )
-                    rank_expert_count[i] = T.cast(decoded, "int32")
+                    T.evaluate(_st_shared_s32(rank_expert_count, i, T.cast(decoded, "int32")))
                 T.ptx.bar.sync(T.uint32(1), T.uint32(NUM_NOTIFY_THREADS))
 
                 # Per-expert reduce across source ranks + align (dispatch.cuh:205-220)
@@ -490,13 +495,18 @@ def _build_dispatch_kernel(
                     total = T.alloc_local([1], "int32")
                     total[0] = 0
                     for j in T.serial(0, NUM_RANKS):
-                        total[0] = (
-                            total[0] + rank_expert_count[NUM_RANKS + j * EXPERTS_PER_RANK + i]
+                        total[0] = total[0] + _ld_shared_s32(
+                            rank_expert_count, NUM_RANKS + j * EXPERTS_PER_RANK + i
                         )
-                    num_unaligned[i] = total[0]
-                    rank_expert_count[NUM_RANKS + i] = (
-                        (total[0] + expert_alignment - 1) // expert_alignment
-                    ) * expert_alignment
+                    T.evaluate(T.ptx.st.global_.s32(num_unaligned.ptr_to([i]), total[0]))
+                    T.evaluate(
+                        _st_shared_s32(
+                            rank_expert_count,
+                            NUM_RANKS + i,
+                            ((total[0] + expert_alignment - 1) // expert_alignment)
+                            * expert_alignment,
+                        )
+                    )
                 T.ptx.bar.sync(T.uint32(1), T.uint32(NUM_NOTIFY_THREADS))
 
                 # (kDoCPUSync=false: host-workspace write compiled out)
@@ -504,27 +514,26 @@ def _build_dispatch_kernel(
                 # Prefix sums, one warp each (dispatch.cuh:234-257)
                 if warp == 0:
                     # Inclusive prefix over 8 rank counts -> psum_rank[0:8)
-                    value = T.Select(lane < NUM_RANKS, rank_expert_count[lane], 0)
-                    scan = _warp_inclusive_sum(value, lane)
+                    value = T.alloc_local([1], "int32")
+                    value[0] = 0
                     if lane < NUM_RANKS:
-                        psum_rank[lane] = scan
+                        value[0] = _ld_shared_s32(rank_expert_count, lane)
+                    scan = _warp_inclusive_sum(value[0], lane)
+                    if lane < NUM_RANKS:
+                        T.evaluate(T.ptx.st.global_.s32(psum_rank.ptr_to([lane]), scan))
                 if warp == 1:
                     # Exclusive prefix over the expert counts -> psum_expert[0:EPR+1)
                     psum = T.alloc_local([1], "int32")
                     psum[0] = 0
                     for it in T.serial(0, (EXPERTS_PER_RANK + 1 + 31) // 32):
                         idx = it * 32 + lane
-                        value = T.Select(
-                            idx >= 1 and idx - 1 < EXPERTS_PER_RANK,
-                            rank_expert_count[NUM_RANKS + idx - 1],
-                            0,
-                        )
-                        # Out-of-range lanes contribute 0; guard the smem read.
-                        if idx == 0 or idx > EXPERTS_PER_RANK:
-                            value = 0
-                        scan = psum[0] + _warp_inclusive_sum(value, lane)
+                        value = T.alloc_local([1], "int32")
+                        value[0] = 0
+                        if idx >= 1 and idx - 1 < EXPERTS_PER_RANK:
+                            value[0] = _ld_shared_s32(rank_expert_count, NUM_RANKS + idx - 1)
+                        scan = psum[0] + _warp_inclusive_sum(value[0], lane)
                         if idx < EXPERTS_PER_RANK + 1:
-                            psum_expert[idx] = scan
+                            T.evaluate(T.ptx.st.global_.s32(psum_expert.ptr_to([idx]), scan))
                         carry = T.alloc_local([1], "uint32")
                         T.evaluate(_shfl_idx(carry[0], scan, 31))
                         psum[0] = T.cast(carry[0], "int32")
@@ -613,20 +622,28 @@ def _build_dispatch_kernel(
                     stored_dst_rank[0] = T.Select(
                         dst_expert >= 0, dst_expert // EXPERTS_PER_RANK, -1
                     )
-                    tma_topk_idx[lane] = dst_expert
+                    T.evaluate(_st_shared_s32(tma_topk_idx, lane, dst_expert))
                     w = T.alloc_local([1], "float32")
                     T.evaluate(
                         T.ptx["ld.global.nc.f32"](
                             w[0], topk_weights.ptr_to([token_idx * NUM_TOPK + lane])
                         )
                     )
-                    tma_topk_w[lane] = w[0]
-                    copied_topk_idx[token_idx * NUM_TOPK + lane] = raw[0]
+                    T.evaluate(_st_shared_f32(tma_topk_w, lane, w[0]))
+                    T.evaluate(
+                        T.ptx.st.global_.s64(
+                            copied_topk_idx.ptr_to([token_idx * NUM_TOPK + lane]), raw[0]
+                        )
+                    )
                 T.cuda.warp_sync()
 
                 # Source metadata; last SMEM write before the fence (dispatch.cuh:331-333)
                 if T.cuda.elect_sync():
-                    tma_src_idx[0] = rank_idx * num_max_tokens_per_rank + token_idx
+                    T.evaluate(
+                        _st_shared_s32(
+                            tma_src_idx, 0, rank_idx * num_max_tokens_per_rank + token_idx
+                        )
+                    )
                 T.evaluate(T.ptx.fence.proxy.async_.shared__cta())
                 T.cuda.warp_sync()
 
@@ -650,8 +667,15 @@ def _build_dispatch_kernel(
                         )
                     )
                 if lane < NUM_TOPK:
-                    dst_slot_idx[token_idx * NUM_TOPK + lane] = T.Select(
-                        stored_slot[0] >= 0, rank_idx * num_max_tokens_per_rank + stored_slot[0], -1
+                    T.evaluate(
+                        T.ptx.st.global_.s32(
+                            dst_slot_idx.ptr_to([token_idx * NUM_TOPK + lane]),
+                            T.Select(
+                                stored_slot[0] >= 0,
+                                rank_idx * num_max_tokens_per_rank + stored_slot[0],
+                                -1,
+                            ),
+                        )
                     )
                 T.cuda.warp_sync()
 
@@ -689,13 +713,15 @@ def _build_dispatch_kernel(
         T.evaluate(T.ptx.cp.async_.bulk.commit_group())
         T.ptx.cp.async_.bulk.wait_group(0)
         T.cuda.warp_sync()
-        grid_barrier(1)
+        T.cuda.grid_sync()
         nvlink_barrier(3)
 
         # Chain the copy epilogue (dispatch.cuh:403)
         T.evaluate(T.ptx.griddepcontrol.launch_dependents())
 
-    return deepep_dispatch.with_attr("tirx.kernel_launch_params", _launch_tags(cluster))
+    return deepep_dispatch.with_attr(
+        "tirx.kernel_launch_params", _launch_tags(cluster, cooperative=True)
+    )
 
 
 def _build_epilogue_kernel(
@@ -894,7 +920,11 @@ def _build_epilogue_kernel(
                 T.cast(dedup_master[0], "int32") == lane or dst_expert[0] == -1
             )
             if lane < NUM_TOPK:
-                recv_topk_idx[i * NUM_TOPK + lane] = T.cast(dst_expert[0], "int64")
+                T.evaluate(
+                    T.ptx.st.global_.s64(
+                        recv_topk_idx.ptr_to([i * NUM_TOPK + lane]), T.cast(dst_expert[0], "int64")
+                    )
+                )
             T.cuda.warp_sync()
 
             # Wait TMA arrival (epilogue.cuh:126-127)
@@ -918,23 +948,53 @@ def _build_epilogue_kernel(
 
             # Store top-k weights (epilogue.cuh:182-184)
             if lane < NUM_TOPK:
-                recv_topk_weights[i * NUM_TOPK + lane] = tma_topk_w[lane]
+                T.evaluate(
+                    T.ptx.st.global_.f32(
+                        recv_topk_weights.ptr_to([i * NUM_TOPK + lane]),
+                        _ld_shared_f32(tma_topk_w, lane),
+                    )
+                )
             T.cuda.warp_sync()
 
             # Write source metadata, non-cached mode (epilogue.cuh:192-201)
             if T.cuda.elect_sync():
-                recv_src_metadata[i * (2 + NUM_TOPK) + 0] = tma_src_idx[0]
-                recv_src_metadata[i * (2 + NUM_TOPK) + 1] = current_rank[0] * NUM_TOPK + T.cast(
-                    master_lane[0], "int32"
+                T.evaluate(
+                    T.ptx.st.global_.s32(
+                        recv_src_metadata.ptr_to([i * (2 + NUM_TOPK) + 0]),
+                        _ld_shared_s32(tma_src_idx, 0),
+                    )
+                )
+                T.evaluate(
+                    T.ptx.st.global_.s32(
+                        recv_src_metadata.ptr_to([i * (2 + NUM_TOPK) + 1]),
+                        current_rank[0] * NUM_TOPK + T.cast(master_lane[0], "int32"),
+                    )
                 )
             T.cuda.warp_sync()
 
-    return deepep_dispatch_copy_epilogue.with_attr("tirx.kernel_launch_params", _launch_tags(1))
+    return deepep_dispatch_copy_epilogue.with_attr(
+        "tirx.kernel_launch_params", _launch_tags(1, pdl=True)
+    )
 
 
 # ---------------------------------------------------------------------------
 # Module entries (tirx-kernels conventions)
 # ---------------------------------------------------------------------------
+
+
+def _device_num_sms() -> int:
+    """Device SM count without forcing CUDA init in the bench-suite CPU stage."""
+
+    import os
+
+    from tirx_kernels.runner import PREPARE_NUM_SMS_ENV
+
+    value = os.environ.get(PREPARE_NUM_SMS_ENV)
+    if value:
+        return int(value)
+    import torch
+
+    return torch.cuda.get_device_properties(0).multi_processor_count
 
 
 def get_kernel(
@@ -960,9 +1020,7 @@ def get_kernel(
     # Source parity: the copy epilogue always launches with full device SMs
     # (buffer.hpp "Launch copy kernels with full SMs": device_runtime->get_num_sms()),
     # not the dispatch kernel's num_sms.
-    import torch
-
-    epilogue_num_sms = torch.cuda.get_device_properties(0).multi_processor_count
+    epilogue_num_sms = _device_num_sms()
     return [
         _build_dispatch_kernel(num_sms, num_tokens, expert_alignment, world_size),
         _build_epilogue_kernel(epilogue_num_sms, num_tokens, expert_alignment, world_size),
@@ -1244,6 +1302,84 @@ def run_test(**config: Any) -> None:
     )
 
 
+def _resolve_num_sms_cpu(config: dict[str, Any]) -> int:
+    """CUDA-free mirror of the source single-domain SM-count model."""
+
+    import math
+
+    from deep_ep.utils.envs import get_nvlink_gbs
+
+    world = config["world_size"]
+    experts = config["num_experts"]
+    topk = config["num_topk"]
+    expected_topk = world * (
+        1 - math.comb(experts - experts // world, topk) / math.comb(experts, topk)
+    )
+    gbs = get_nvlink_gbs()
+    nvlink_traffic = 1 - 1 / world if world > 1 else 0.0
+    device_sms = _device_num_sms()
+    num_sms = float(device_sms)
+    if nvlink_traffic > 0:
+        num_sms = max(
+            gbs / nvlink_traffic * (1 / expected_topk) / 200, gbs / nvlink_traffic * 1 / 50
+        )
+    num_sms = max(4, math.ceil(num_sms * 1.25))
+    num_sms += num_sms % 2
+    num_sms = max(num_sms, 64)
+    return min(num_sms, device_sms)
+
+
+def _run_bench_gpu(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    """Launch ranks against libraries compiled by the CPU prepare stage."""
+
+    from .utils._runtime import run_distributed
+
+    config = state["config"]
+    return run_distributed(
+        {},
+        world_size=config["world_size"],
+        worker=_run_worker,
+        mode="bench",
+        worker_kwargs={
+            **config,
+            "num_sms": state["num_sms"],
+            "rounds": kwargs.get("rounds", 1),
+            "cooldown_s": kwargs.get("cooldown_s", 1.0),
+        },
+        prepared_libraries=state["library_paths"],
+    )
+
+
+def prepare_bench(**config: Any):
+    """Specialize and compile without initializing CUDA, then await GPU assignment."""
+
+    import tempfile
+
+    from tirx_kernels.runner import prepared_gpu_benchmark
+
+    from .utils._runtime import compile_kernels
+
+    if config.get("timer") not in {None, "kineto"}:
+        raise ValueError(
+            f"deepep_dispatch is distributed and supports only kineto, got {config['timer']}"
+        )
+    num_sms = _resolve_num_sms_cpu(config)
+    dispatch_kernel, epilogue_kernel = get_kernel(**config, num_sms=num_sms)
+    tmpdir = tempfile.TemporaryDirectory(prefix="tirx-deepep-prepare-")
+    library_paths = compile_kernels(
+        {"dispatch": dispatch_kernel, "epilogue": epilogue_kernel}, tmpdir.name
+    )
+    state = {
+        "config": dict(config),
+        "num_sms": num_sms,
+        "library_paths": library_paths,
+        "tmpdir": tmpdir,
+    }
+    return prepared_gpu_benchmark(
+        _run_bench_gpu, state, required_num_gpus=config["world_size"], close=state["tmpdir"].cleanup
+    )
+
+
 def run_bench(
     *args: Any,
     warmup: Any = None,
@@ -1255,8 +1391,6 @@ def run_bench(
 ) -> dict[str, Any]:
     """Benchmark entry point used by the runner (kineto only, distributed)."""
 
-    from .utils._runtime import run_distributed
-
     if timer is not None and timer != "kineto":
         raise ValueError(f"deepep_dispatch is distributed and supports only kineto, got {timer}")
     if warmup is not None or repeat is not None:
@@ -1264,15 +1398,7 @@ def run_bench(
     config = dict(kwargs)
     if args:
         raise TypeError(f"unexpected positional arguments: {args}")
-    num_sms = _resolve_num_sms(config)
-    dispatch_kernel, epilogue_kernel = get_kernel(**config, num_sms=num_sms)
-    return run_distributed(
-        {"dispatch": dispatch_kernel, "epilogue": epilogue_kernel},
-        world_size=config["world_size"],
-        worker=_run_worker,
-        mode="bench",
-        worker_kwargs={**config, "num_sms": num_sms, "rounds": rounds, "cooldown_s": cooldown_s},
-    )
+    return prepare_bench(**config).run_gpu(rounds=rounds, cooldown_s=cooldown_s)
 
 
 __all__ = [
@@ -1280,6 +1406,7 @@ __all__ = [
     "CONFIGS",
     "KERNEL_META",
     "get_kernel",
+    "prepare_bench",
     "prepare_data",
     "run_bench",
     "run_test",
