@@ -53,6 +53,7 @@ def gated_delta_rule_decode(
     disable_output: bool = False,
     recovery_steps: int = 0,
     fused_accepted_steps: bool = False,
+    negative_read_write_are_padding: bool = False,
 ) -> torch.Tensor:
     batch, seq_len, _, _ = q.shape
     num_value_heads = v.shape[2]
@@ -68,11 +69,15 @@ def gated_delta_rule_decode(
     decay = torch.exp(-torch.exp(A_log.float()) * softplus)
     beta = torch.sigmoid(b.float())
 
+    valid_reads = read_indices >= 0
+    valid_writes = write_indices >= 0
     read_slots = read_indices.clamp_min(0).long()
     write_slots = write_indices.clamp_min(0).long()
     current = state_pool.index_select(0, read_slots).float()
 
     for row in range(batch):
+        if negative_read_write_are_padding and not bool(valid_reads[row]):
+            continue
         if fused_accepted_steps and accepted_steps is not None:
             phase_a = int(accepted_steps[row].item()) + 1
             phase_b_end = seq_len
@@ -88,13 +93,14 @@ def gated_delta_rule_decode(
             residual = v_f[row, token] - torch.einsum("hvk,hk->hv", state, k_f[row, token])
             residual = residual * beta[row, token, :, None]
             state = state + residual.unsqueeze(-1) * k_f[row, token].unsqueeze(-2)
-            current[row] = state.to(state_pool.dtype).float()
+            current[row] = state
 
             if token < phase_a:
                 if (
                     token + 1 == phase_a
                     and not disable_state_update
                     and intermediate_states is None
+                    and (not negative_read_write_are_padding or bool(valid_writes[row]))
                 ):
                     state_pool[write_slots[row]].copy_(current[row].to(state_pool.dtype))
                 continue
@@ -114,6 +120,7 @@ def gated_delta_rule_decode(
             and recovery_steps == 0
             and not fused_accepted_steps
             and not (ssm_state_indices is not None and torch.equal(read_indices, write_indices))
+            and (not negative_read_write_are_padding or bool(valid_writes[row]))
         ):
             state_pool[write_slots[row]].copy_(current[row].to(state_pool.dtype))
 
@@ -173,7 +180,6 @@ def gated_delta_rule_prefill(
             residual = v_f[token] - torch.einsum("hk,hkv->hv", k_f[token], state)
             residual = residual * beta[token].float()[:, None]
             state = state + k_f[token].unsqueeze(-1) * residual.unsqueeze(-2)
-            state = state.to(state_dtype).float()
             output[token].copy_(torch.einsum("hk,hkv->hv", q_f[token], state).to(output.dtype))
         if final_state is not None:
             final_state[state_slot].copy_(state.to(final_state.dtype))

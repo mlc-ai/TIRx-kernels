@@ -1738,6 +1738,7 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
         ),
         disable_state_update=bool(config.get("disable_state_update", False)),
         use_qk_l2norm=bool(config.get("use_qk_l2norm", True)),
+        negative_read_write_are_padding=True,
     )
 
 

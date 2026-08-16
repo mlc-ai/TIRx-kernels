@@ -62,7 +62,7 @@ def pack_ue8m0_words(scales: torch.Tensor) -> torch.Tensor:
     pad = (-scales.shape[-1]) % 4
     if pad:
         scales = torch.nn.functional.pad(scales, (0, pad), value=1.0)
-    return _ue8m0_bytes(scales).contiguous().view(torch.uint32)
+    return _ue8m0_bytes(scales).contiguous().view(torch.int32)
 
 
 def unpack_ue8m0_words(words: torch.Tensor, *, count: int | None = None) -> torch.Tensor:
@@ -94,6 +94,16 @@ def quantize_e2m1(x: torch.Tensor) -> torch.Tensor:
 def _pack_e2m1(codes: torch.Tensor) -> torch.Tensor:
     pairs = codes.view(*codes.shape[:-1], codes.shape[-1] // 2, 2)
     return ((pairs[..., 0] & 15) | ((pairs[..., 1] & 15) << 4)).contiguous()
+
+
+def _quantize_deepgemm_e2m1(x: torch.Tensor) -> torch.Tensor:
+    """Match DeepGEMM's host FP4 encoder, including positive zero."""
+
+    code = torch.zeros_like(x, dtype=torch.uint8)
+    for boundary in (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0):
+        code += (x.abs() > boundary).to(torch.uint8)
+    sign = (x < 0) & (code != 0)
+    return code | (sign.to(torch.uint8) << 3)
 
 
 def swizzle_sf(scales: torch.Tensor, layout: str) -> torch.Tensor:
@@ -224,7 +234,7 @@ def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
         *packed.shape[:-1], packed.shape[-1] * 2, dtype=torch.uint8, device=packed.device
     )
     codes[..., 0::2] = packed & 15
-    codes[..., 1::2] = packed >> 4
+    codes[..., 1::2] = (packed >> 4) & 15
     return codes
 
 
@@ -250,14 +260,15 @@ def per_token_cast_to_fp4(
     padded[:, :width] = x
     groups = padded.view(rows, -1, gran_k)
     scales = ceil_to_ue8m0(groups.abs().float().amax(dim=2).clamp_min(1.0e-4) / 6.0)
-    codes = quantize_e2m1(groups / scales.unsqueeze(2)).view(rows, padded_width)
+    codes = _quantize_deepgemm_e2m1(groups / scales.unsqueeze(2)).view(rows, padded_width)
     pairs = codes.view(rows, padded_width // 2, 2)
-    packed = (pairs[:, :, 0] & 15) | ((pairs[:, :, 1] & 15) << 4)
+    packed = ((pairs[:, :, 0] & 15) | ((pairs[:, :, 1] & 15) << 4)).view(torch.int8)
     scales_out: torch.Tensor = scales
     if packed_ue8m0:
-        if scales.shape[1] % 4:
-            raise ValueError("packed UE8M0 requires a whole number of four-byte words")
-        scales_out = _ue8m0_bytes(scales).contiguous().view(torch.uint32)
+        pad = (-scales.shape[1]) % 4
+        if pad:
+            scales = torch.nn.functional.pad(scales, (0, pad), value=1.0)
+        scales_out = _ue8m0_bytes(scales).contiguous().view(torch.int32)
     return packed[:, : width // 2].contiguous(), scales_out
 
 
@@ -270,15 +281,17 @@ def cast_back_from_fp4(
     codes = torch.stack((packed & 15, (packed >> 4) & 15), dim=2).reshape(rows, -1)
     values = decode_e2m1(codes)
     if packed_ue8m0:
-        if scales.dtype != torch.uint32:
-            raise ValueError("packed UE8M0 scales must use torch.uint32")
+        if scales.dtype != torch.int32:
+            raise ValueError("packed UE8M0 scales must use torch.int32")
         exponents = scales.contiguous().view(torch.uint8).view(rows, -1)
         scale_values = _scales_from_ue8m0_bytes(exponents)
     else:
         scale_values = scales.float()
-    if scale_values.shape[1] * gran_k != values.shape[1]:
+    group_index = torch.arange(values.shape[1], device=values.device) // gran_k
+    required_groups = ceil_div(values.shape[1], gran_k)
+    if scale_values.shape[1] < required_groups:
         raise ValueError("scale groups do not cover the FP4 operand width")
-    return (values.view(rows, -1, gran_k) * scale_values.unsqueeze(2)).reshape(rows, half_width * 2)
+    return values * scale_values[:, group_index]
 
 
 def per_token_cast_to_fp8(

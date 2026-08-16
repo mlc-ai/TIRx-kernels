@@ -51,7 +51,7 @@ def selective_state_update(
     dst_state_batch_indices: torch.Tensor | None,
     pad_slot_id: int,
     state_scale: torch.Tensor | None,
-    out: torch.Tensor,
+    out: torch.Tensor | None,
     disable_state_update: bool,
     intermediate_states_buffer: torch.Tensor | None = None,
     intermediate_state_indices: torch.Tensor | None = None,
@@ -65,6 +65,8 @@ def selective_state_update(
 
     del cache_steps
     original_x_ndim = x.ndim
+    if out is None:
+        out = torch.empty_like(x)
     fixed = cu_seqlens is None
     if fixed:
         if x.ndim == 3:

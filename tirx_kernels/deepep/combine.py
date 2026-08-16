@@ -764,8 +764,10 @@ def _simulate_combine_torch(
     num_experts: int,
     rank: int,
     device: Any,
+    *,
+    compute_golden: bool,
 ) -> tuple[Any, Any, Any, Any, Any]:
-    """Small-rank oracle: simulate dispatch routing and the combine golden.
+    """Simulate dispatch metadata and, for correctness only, combine goldens.
 
     Metadata/psum/topk_weights inputs are simulated in Torch from the dispatch contract
     (one received token per (token, rank) group, master lane = group identity,
@@ -843,6 +845,9 @@ def _simulate_combine_torch(
         s, t = src_global // num_tokens_max, src_global % num_tokens_max
         tw_input[i] = torch.tensor(w_all_np[s][t], dtype=torch.float32, device=device)
 
+    if not compute_golden:
+        return metadata, psum_rank, tw_input, None, None
+
     # Golden: per local token, sum groups' x rows in ascending master-lane order
     my_idx_np = idx_all_np[rank]
     my_w_np = w_all_np[rank]
@@ -905,49 +910,63 @@ def _run_worker(
     topk_idx_padded = torch.zeros((num_tokens_max, num_topk), dtype=torch.int64, device=device)
     topk_idx_padded[:local_num_tokens] = topk_idx
 
-    metadata, psum_rank, tw_input, golden_x, golden_w = _simulate_combine_torch(
-        topk_idx, topk_weights, x_input, world_size, num_tokens_max, num_experts, rank, device
-    )
-
-    ref_buffer = None
-    reference_launch = None
+    use_reference = False
     if mode == "bench":
         from tirx_kernels.runner import external_references_enabled
 
-        if external_references_enabled() and world_size == 8:
-            import os
+        use_reference = external_references_enabled() and world_size == 8
 
-            os.environ.setdefault("EP_DISABLE_GIN", "1")
-            import deep_ep
+    if use_reference:
+        metadata = psum_rank = tw_input = golden_x = golden_w = None
+    else:
+        metadata, psum_rank, tw_input, golden_x, golden_w = _simulate_combine_torch(
+            topk_idx,
+            topk_weights,
+            x_input,
+            world_size,
+            num_tokens_max,
+            num_experts,
+            rank,
+            device,
+            compute_golden=mode == "test",
+        )
 
-            ref_buffer = deep_ep.ElasticBuffer(
-                dist.group.WORLD,
-                num_max_tokens_per_rank=num_tokens_max,
-                hidden=hidden,
-                num_topk=num_topk,
-                prefer_overlap_with_compute=False,
-                explicitly_destroy=True,
-            )
-            _, _, ref_topk_weights, ref_handle, _ = ref_buffer.dispatch(
-                x,
-                topk_idx=topk_idx,
-                topk_weights=topk_weights,
-                num_max_tokens_per_rank=num_tokens_max,
-                num_experts=num_experts,
-                expert_alignment=expert_alignment,
-                num_sms=num_sms,
-                do_cpu_sync=False,
-            )
-            # Preserve the original reference-enabled benchmark contract: both
-            # implementations consume the metadata emitted by DeepEP dispatch.
-            metadata = ref_handle.recv_src_metadata
-            psum_rank = ref_handle.psum_num_recv_tokens_per_scaleup_rank
-            tw_input = ref_topk_weights
+    ref_buffer = None
+    reference_launch = None
+    if use_reference:
+        import os
 
-            def launch_deepep_combine():
-                return ref_buffer.combine(x_input, ref_handle, topk_weights=ref_topk_weights)
+        os.environ.setdefault("EP_DISABLE_GIN", "1")
+        import deep_ep
 
-            reference_launch = launch_deepep_combine
+        ref_buffer = deep_ep.ElasticBuffer(
+            dist.group.WORLD,
+            num_max_tokens_per_rank=num_tokens_max,
+            hidden=hidden,
+            num_topk=num_topk,
+            prefer_overlap_with_compute=False,
+            explicitly_destroy=True,
+        )
+        _, _, ref_topk_weights, ref_handle, _ = ref_buffer.dispatch(
+            x,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            num_max_tokens_per_rank=num_tokens_max,
+            num_experts=num_experts,
+            expert_alignment=expert_alignment,
+            num_sms=num_sms,
+            do_cpu_sync=False,
+        )
+        # Preserve the original reference-enabled benchmark contract: both
+        # implementations consume the metadata emitted by DeepEP dispatch.
+        metadata = ref_handle.recv_src_metadata
+        psum_rank = ref_handle.psum_num_recv_tokens_per_scaleup_rank
+        tw_input = ref_topk_weights
+
+        def launch_deepep_combine():
+            return ref_buffer.combine(x_input, ref_handle, topk_weights=ref_topk_weights)
+
+        reference_launch = launch_deepep_combine
 
     def tirx_launch() -> None:
         combine_fn(
@@ -972,6 +991,7 @@ def _run_worker(
 
     try:
         if mode == "test":
+            assert golden_x is not None and golden_w is not None
 
             def _launch_and_check() -> None:
                 with torch.cuda.stream(runtime.timing_stream):
