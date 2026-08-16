@@ -399,13 +399,13 @@ rather than a workload-specific source helper.
 **Symptoms:** `predicated_destination`, `inactive_lane_value`, `sass_divergence`, `performance_regression`
 
 A predicated instruction with a written destination needs the policy at that
-specific program point, not one policy for the whole expression chain.  Use a
-write-only undefined destination when inactive lanes cannot be consumed before
-an explicit merge, perform that merge with `selp`, then use a read-write
-destination on a later predicated transform when inactive lanes must retain the
-merged value.  Applying read-write binding to the initial loads creates false
-input dependencies; applying write-only binding to the final transform loses
-the inactive value.
+specific program point, not one policy for the whole expression chain.  Keep
+the default `preserve_dst=False` write-only destination when inactive lanes
+cannot be consumed before an explicit merge, perform that merge with `selp`,
+then use `preserve_dst=True` on a later predicated transform when inactive lanes
+must retain the merged value.  Applying read-write binding to the initial loads
+creates false input dependencies; applying write-only binding to the final
+transform loses the inactive value.
 
 One shared-memory gamma path recovered its original lowering with predicated
 undefined shared loads, an unconditional subtract, `selp` to zero inactive
