@@ -658,7 +658,7 @@ def run_gpu(
     cooldown_s: float = 1.0,
 ) -> dict[str, Any]:
     _require_sm100()
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     B, O, K = prepared["B"], prepared["O"], prepared["K"]
     stage = prepared["stage"]
@@ -666,12 +666,13 @@ def run_gpu(
     case = prepare_data(B, O, K)
     args = _tirx_args(case)
 
-    reference_out = torch.zeros_like(case["out"])
-    _run_flashinfer(case, stage, False, reference_out)
-    executable(*args)
-    torch.cuda.synchronize()
-    if not torch.equal(case["out"], reference_out):
-        raise AssertionError("TinyGEMM2 benchmark preflight failed bitwise validation")
+    if external_references_enabled():
+        reference_out = torch.zeros_like(case["out"])
+        _run_flashinfer(case, stage, False, reference_out)
+        executable(*args)
+        torch.cuda.synchronize()
+        if not torch.equal(case["out"], reference_out):
+            raise AssertionError("TinyGEMM2 benchmark preflight failed bitwise validation")
 
     def _flashinfer_builder():
         output = torch.empty_like(case["out"])

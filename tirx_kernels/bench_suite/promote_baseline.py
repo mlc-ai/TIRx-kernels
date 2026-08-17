@@ -24,6 +24,14 @@ def _result_key(row: dict) -> tuple[str, str]:
     return row["kernel"], row.get("label") or row["config"]
 
 
+def _require_reference_run(doc: dict) -> None:
+    if doc.get("references_enabled") is not True:
+        raise ValueError(
+            "reference-disabled runs cannot update the reference-ratio baseline; "
+            "rerun the suite with --with-references"
+        )
+
+
 def slim_baseline_row(row: dict) -> dict:
     """Drop per-run metadata; keep only checked-in baseline fields."""
     agg = row.get("aggregated") or {}
@@ -38,7 +46,7 @@ def slim_baseline_row(row: dict) -> dict:
 
 
 def slim_baseline_doc(doc: dict) -> dict:
-    out = {k: v for k, v in doc.items() if k != "results"}
+    out = {k: v for k, v in doc.items() if k not in {"results", "references_enabled"}}
     out["results"] = sorted(
         [slim_baseline_row(r) for r in doc.get("results") or []], key=_result_key
     )
@@ -55,6 +63,7 @@ def merge_baseline(run_json: Path, baseline_path: Path) -> int:
     If ``baseline_path`` does not exist yet, the slimmed run is written as a
     fresh baseline."""
     run = json.loads(run_json.read_text())
+    _require_reference_run(run)
     if not baseline_path.exists():
         _write_baseline(baseline_path, run)
         print(f"[promote] merge: no existing baseline, wrote {baseline_path.relative_to(HERE)}")
@@ -135,6 +144,7 @@ def main() -> None:
                 sys.exit(1)
         else:
             run = json.loads(args.run_json.read_text())
+            _require_reference_run(run)
             _write_baseline(baseline_path, run)
             print(f"[promote] {args.run_json} -> {baseline_path.relative_to(HERE)}")
 

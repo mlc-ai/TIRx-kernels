@@ -22,6 +22,7 @@ small/medium/large selection.
 ```bash
 cd /path/to/tirx-kernels
 pip install -e .
+python scripts/install_reference_dependencies.py
 
 export TVM_PATH=/path/to/tvm
 export PYTHONPATH="${TVM_PATH}/python"
@@ -33,21 +34,19 @@ Entry point: `python -m tirx_kernels.bench_suite` (same flags as `run.py`).
 
 ### Default-sweep prerequisites
 
-Every row benches our kernel **and all of its reference impls**; a reference
-that fails to build is recorded as a baseline error and **fails the workload**
-(which fail-fasts the whole sweep). The host requires:
+By default every row benches only the TIRx implementation. Pass
+`--with-references` to run and time all configured reference implementations;
+an enabled reference that fails to build fails the workload. The host requires:
 
 - a CUDA 13.2-aligned Python stack, including PyTorch, `cuda-toolkit`, NVRTC,
   and extensions rebuilt against that PyTorch ABI;
-- **SGLang** on `PYTHONPATH` (plus its CUTLASS DSL) for the fp8 paged MQA
-  reference rows.
+- the revisions installed from the repository's `reference-dependencies.json`
+  for correctness and reference-enabled benchmark rows.
 
-Explicit GemmComm workloads additionally require NVSHMEM and absolute
-runtime-library locks:
-`TIRX_NCCL_LIBRARY`, `TIRX_CUBLAS_LIBRARY`, `TIRX_CUBLASMP_LIBRARY`, and
-`TIRX_NVSHMEM_LIBRARY`. `NVSHMEM_HOME` points to the development installation
-used while compiling the TIRx kernels. These locks affect only the spawned
-GemmComm rank workers.
+Explicit GemmComm workloads require NVSHMEM plus `TIRX_NCCL_LIBRARY` and
+`TIRX_NVSHMEM_LIBRARY`. Reference-enabled runs additionally require
+`TIRX_CUBLAS_LIBRARY` and `TIRX_CUBLASMP_LIBRARY`. `NVSHMEM_HOME` points to the
+development installation used while compiling the TIRx kernels.
 
 Import-check the kernels selected by the current workload file without
 preparing, compiling, or using a GPU:
@@ -58,17 +57,12 @@ python -m tirx_kernels.bench_suite --check-imports
 
 ### SGLang FP8 paged MQA exploration
 
-The `sglang_cutedsl` reference is required wherever it appears — the fp8 paged
-MQA rows of the default sweep as well as this exploration sweep (see
-"Default-sweep prerequisites" above). To run the 80-shape SM100 comparison
-against SGLang's current production picker, expose a matching SGLang checkout
-and install the CUTLASS DSL version required by that checkout:
+The `sglang_cutedsl` reference is enabled only by `--with-references`. To run
+the 80-shape SM100 comparison against the locked SGLang production picker:
 
 ```bash
-export SGLANG_PATH=/path/to/sglang
-export PYTHONPATH="${SGLANG_PATH}/python:${PYTHONPATH}"
-
-python -m tirx_kernels.bench_suite --filter deepgemm_sm100_fp8_paged_mqa_logits \
+python -m tirx_kernels.bench_suite --with-references \
+  --filter deepgemm_sm100_fp8_paged_mqa_logits \
   --workloads <(python -c "import yaml,sys; from tirx_kernels.bench_suite import run; \
 yaml.safe_dump({'workloads': run.load_kernel_configs('deepgemm_sm100_fp8_paged_mqa_logits')}, sys.stdout)")
 ```
@@ -135,7 +129,7 @@ Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and 
    foreign GPU occupancy changes. The initial occupancy snapshot starts alongside
    the first CPU prepares; assignment remains blocked until that snapshot is complete.
 4. **Measurement semantics stay in the GPU stage.** Each child benches our kernel
-   and every reference implementation, retaining the original implementation
+   and, with `--with-references`, every reference implementation, retaining the original implementation
    order, correctness/reference setup, timer, warmup/repeat, five rounds, 1.0s
    cooldown before every implementation/round, raw samples, and arithmetic mean.
 5. **Fail fast**: the first workload/subprocess `FAIL` stops new scheduling,
@@ -147,9 +141,9 @@ Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and 
    assigned card. Every interference retry records the workload, attempt,
    intruder PIDs, and `retry_in_place: true`; retried results otherwise follow
    the ordinary measurement path.
-6. **Ratio regression report** compares current ref/ours ratio vs the pinned
-   `baseline.json` ratio (computed from its ours + ref impls). Promote a run over
-   the baseline with `promote_baseline.py`.
+6. **Ratio regression report** is generated only by `--with-references` and
+   compares current ref/ours ratio vs the pinned `baseline.json` ratio. Only a
+   reference-enabled run can be promoted with `promote_baseline.py`.
 
 ## Baseline files (git-tracked)
 
@@ -165,7 +159,7 @@ Promote through `promote_baseline.py` only (never bare `cp`).
 ### Daily: kernel iteration
 
 ```bash
-python -m tirx_kernels.bench_suite
+python -m tirx_kernels.bench_suite --with-references
 python tirx_kernels/bench_suite/promote_baseline.py \
   .bench-suite/runs/<id>.json --merge
 ```
@@ -177,7 +171,7 @@ in the run JSON.
 ### Refresh the pinned baseline (rare)
 
 ```bash
-python -m tirx_kernels.bench_suite
+python -m tirx_kernels.bench_suite --with-references
 python tirx_kernels/bench_suite/promote_baseline.py .bench-suite/runs/<id>.json
 ```
 
@@ -188,6 +182,7 @@ workloads do not remain in `baseline.json`. For a targeted update,
 arithmetic mean of all five samples; no samples are trimmed or silently dropped.
 
 Spot-check one workload: `python -m tirx_kernels.bench --kernel ... --config ... --rounds 5`
+(add `--with-references` for the source comparisons).
 
 ## Workload fields
 

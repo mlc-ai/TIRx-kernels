@@ -452,7 +452,11 @@ def _run_worker(
             f"{torch.cuda.device_count()} CUDA devices are visible"
         )
 
-    from tirx_kernels.runner import bind_cuda_assignment, validate_current_cuda_assignment
+    from tirx_kernels.runner import (
+        bind_cuda_assignment,
+        external_references_enabled,
+        validate_current_cuda_assignment,
+    )
 
     bind_cuda_assignment((physical_device_index,), (physical_device_uuid,))
     deep_gemm, source = load_deep_gemm_mega()
@@ -518,6 +522,8 @@ def _run_worker(
         if mode == "bench":
             from tirx_kernels.runner import bench
 
+            with_references = external_references_enabled()
+
             # bench()'s proton/event/cudagraph_proton timers are single-process:
             # each rank derives n_warmup/n_repeat from its own per-call estimate
             # with no cross-rank sync, so a cross-rank mega_moe kernel (in-kernel
@@ -535,7 +541,9 @@ def _run_worker(
                         "deadlock the cross-rank kernel collectives"
                     )
 
-            dg_case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
+            dg_case = None
+            if with_references:
+                dg_case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
             tirx_case = create_case(deep_gemm, config, group, rank_idx, num_ranks)
             deepgemm_stats = None
             tirx_stats = None
@@ -543,17 +551,22 @@ def _run_worker(
                 initial_stats = torch.zeros(
                     config.num_experts_per_rank, dtype=torch.int32, device="cuda"
                 )
-                deepgemm_stats = initial_stats.clone()
+                if with_references:
+                    deepgemm_stats = initial_stats.clone()
                 tirx_stats = initial_stats.clone()
                 tirx_case.cumulative_local_expert_recv_stats = tirx_stats
-            _copy_inputs_into_symm_buffer(dg_case)
+            if dg_case is not None:
+                _copy_inputs_into_symm_buffer(dg_case)
             _copy_inputs_into_symm_buffer(tirx_case)
-            y_deepgemm = torch.empty(
-                (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
-            )
+            y_deepgemm = None
+            if with_references:
+                y_deepgemm = torch.empty(
+                    (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
+                )
             tirx_invocation = _prepare_tirx_invocation(tirx_case)
 
             def deepgemm_step() -> None:
+                assert dg_case is not None and y_deepgemm is not None
                 dg_case.deep_gemm.fp8_fp4_mega_moe(
                     y_deepgemm,
                     dg_case.transformed_l1_weights,
@@ -571,17 +584,21 @@ def _run_worker(
 
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
-            deepgemm_step()
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
+            if with_references:
+                deepgemm_step()
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
             tirx_step()
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
-            deepgemm_max_abs_diff = _max_abs_diff(tirx_invocation.y, y_deepgemm)
-            if deepgemm_max_abs_diff != 0.0:
-                raise AssertionError(f"TIRx diff={deepgemm_max_abs_diff}")
-            if timer == "megamoe" and not torch.equal(tirx_stats, deepgemm_stats):
-                raise AssertionError("TIRx cumulative expert stats differ from DeepGEMM")
+            deepgemm_max_abs_diff = None
+            if with_references:
+                assert y_deepgemm is not None
+                deepgemm_max_abs_diff = _max_abs_diff(tirx_invocation.y, y_deepgemm)
+                if deepgemm_max_abs_diff != 0.0:
+                    raise AssertionError(f"TIRx diff={deepgemm_max_abs_diff}")
+                if timer == "megamoe" and not torch.equal(tirx_stats, deepgemm_stats):
+                    raise AssertionError("TIRx cumulative expert stats differ from DeepGEMM")
 
             if timer == "megamoe":
                 if warmup is not None or repeat is not None:
@@ -592,6 +609,7 @@ def _run_worker(
 
                 def deepgemm_megamoe_step() -> None:
                     nonlocal y_deepgemm
+                    assert dg_case is not None
                     _copy_inputs_into_symm_buffer(dg_case)
                     y_deepgemm = torch.empty(
                         (config.num_tokens, config.hidden), dtype=torch.bfloat16, device="cuda"
@@ -613,9 +631,14 @@ def _run_worker(
                 from deep_gemm.testing import bench_kineto
 
                 validate_current_cuda_assignment("before DeepGEMM MegaMoE timing", restore=True)
+                funcs = {"tirx": tirx_megamoe_step}
+                kernel_names = {"tirx": "mega_moe_kernel"}
+                if with_references:
+                    funcs["deepgemm"] = deepgemm_megamoe_step
+                    kernel_names["deepgemm"] = "sm100_fp8_fp4_mega_moe_impl"
                 bench_result = _bench_megamoe_mode(
-                    {"tirx": tirx_megamoe_step, "deepgemm": deepgemm_megamoe_step},
-                    {"tirx": "mega_moe_kernel", "deepgemm": "sm100_fp8_fp4_mega_moe_impl"},
+                    funcs,
+                    kernel_names,
                     bench_kineto,
                     torch.distributed.barrier,
                     reset_between_implementations,
@@ -636,19 +659,22 @@ def _run_worker(
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
             impls = bench_result["impls"]
-            missing = {"deepgemm", "tirx"} - set(impls)
+            expected_impls = {"tirx", "deepgemm"} if with_references else {"tirx"}
+            missing = expected_impls - set(impls)
             if missing:
                 raise RuntimeError(f"Benchmark did not report timings for: {sorted(missing)}")
-            return {
+            result = {
                 "status": "OK",
                 "reference_source": source,
-                "deepgemm_max_abs_diff": deepgemm_max_abs_diff,
-                "impls": {"deepgemm": float(impls["deepgemm"]), "tirx": float(impls["tirx"])},
+                "impls": {name: float(impls[name]) for name in sorted(expected_impls)},
                 "round_samples": bench_result.get("round_samples", {}),
                 "errors": bench_result["errors"],
                 "timer": bench_result.get("timer"),
                 "benchmark_protocol": bench_result.get("benchmark_protocol", {}),
             }
+            if deepgemm_max_abs_diff is not None:
+                result["deepgemm_max_abs_diff"] = deepgemm_max_abs_diff
+            return result
 
         raise ValueError(f"Unsupported mode: {mode}")
     finally:

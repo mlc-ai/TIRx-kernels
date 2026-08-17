@@ -1249,19 +1249,17 @@ def run_gpu(
     spec = case["spec"]
     args = _tirx_args(case)
 
-    # Validate once, outside the timed region.  Both implementations update
-    # their own state-pool clone in place, so repeated timed launches let the
-    # values drift; the work per launch is identical either way.
-    executable(*args)
-    shape = (1, spec["Q_TOTAL"], spec["NUM_VALUE_HEADS"], HEAD_DIM)
-    flashinfer_out = _flashinfer_reference(case).reshape(shape)
-    torch.cuda.synchronize()
-    torch.testing.assert_close(case["tirx_out"], flashinfer_out, rtol=_RTOL, atol=_ATOL)
-    torch.testing.assert_close(
-        case["tirx_state_raw"], case["reference_state_raw"], rtol=_RTOL, atol=_ATOL
-    )
-
     def flashinfer_builder():
+        # Validate once before the reference enters the timed region. Both
+        # implementations update independent state-pool clones in place.
+        executable(*args)
+        shape = (1, spec["Q_TOTAL"], spec["NUM_VALUE_HEADS"], HEAD_DIM)
+        flashinfer_out = _flashinfer_reference(case).reshape(shape)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(case["tirx_out"], flashinfer_out, rtol=_RTOL, atol=_ATOL)
+        torch.testing.assert_close(
+            case["tirx_state_raw"], case["reference_state_raw"], rtol=_RTOL, atol=_ATOL
+        )
         # Heavy import, CuTe JIT and warmup all happen here, outside the timing.
         for _ in range(2):
             _flashinfer_reference(case)

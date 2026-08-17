@@ -17,8 +17,8 @@ from unittest import SkipTest
 
 import torch
 
+from tirx_kernels.runner import bench
 from tvm.script import tirx as T
-from tvm.tirx.bench import bench
 
 KERNEL_META = {
     "name": "gdn_decode_fp32_mtp_warp",
@@ -1943,12 +1943,11 @@ def run_gpu(
     case = prepare_data(**kwargs)
     executable = prepared["executable"]
     args = _tirx_args(case)
-    executable(*args)
-    _run_reference(case)
-    torch.cuda.synchronize(case["tirx_state"].device)
-    _assert_case_close(case)
-
     def source_builder():
+        executable(*args)
+        _run_reference(case)
+        torch.cuda.synchronize(case["tirx_state"].device)
+        _assert_case_close(case)
         for _ in range(2):
             _run_reference(case)
         torch.cuda.synchronize(case["source_state"].device)

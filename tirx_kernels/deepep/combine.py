@@ -867,6 +867,8 @@ def _run_worker(
     import torch
     import torch.distributed as dist
 
+    from tirx_kernels.runner import external_references_enabled
+
     from .utils._buffer import SymmetricWindow
 
     rank = runtime.rank
@@ -903,7 +905,8 @@ def _run_worker(
     ref_buffer = None
     handle = None
     golden_x = golden_w = None
-    if world_size == 8:
+    with_references = mode == "test" or external_references_enabled()
+    if world_size == 8 and with_references:
         # The reference runtime needs GIN disabled on this host (verified in the
         # dispatch scaffolding: single-node NVLink LSA path works with EP_DISABLE_GIN=1).
         os.environ.setdefault("EP_DISABLE_GIN", "1")
@@ -957,6 +960,7 @@ def _run_worker(
         )
 
     def reference_launch():
+        assert ref_buffer is not None and handle is not None
         return ref_buffer.combine(x_input, handle, topk_weights=tw_input)
 
     try:
@@ -1014,7 +1018,7 @@ def _run_worker(
         with torch.cuda.stream(runtime.timing_stream):
             result = bench(
                 {"tirx": tirx_launch},
-                references={"deepep": build_reference},
+                references={"deepep": build_reference} if ref_buffer is not None else None,
                 timer="kineto",
                 rounds=kwargs.get("rounds", 1),
                 cooldown_s=kwargs.get("cooldown_s", 1.0),

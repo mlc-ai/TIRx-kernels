@@ -1113,13 +1113,14 @@ def _flashinfer_tuned_choice(
 # kernel time -> honest ~parity (verified 0.996 vs event 4.11).
 def prepare_bench(M=1024, N=1024, K=1024, **kwargs):
     """Compile TIRx and the device-independent cuBLASLt extension before READY."""
-    from tirx_kernels.runner import prepared_gpu_benchmark
+    from tirx_kernels.runner import external_references_enabled, prepared_gpu_benchmark
 
     state = {
         "config": {"M": M, "N": N, "K": K, **kwargs},
         "executable": _compile_executable(M, N, K),
-        "cublaslt_extension": _load_cublaslt_nvfp4_ext(),
     }
+    if external_references_enabled():
+        state["cublaslt_extension"] = _load_cublaslt_nvfp4_ext()
     return prepared_gpu_benchmark(run_gpu, state)
 
 
@@ -1127,6 +1128,8 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark."""
     import flashinfer
     import torch
+
+    from tirx_kernels.runner import external_references_enabled
 
     config_kwargs = {**prepared["config"], **kwargs}
     M = config_kwargs.pop("M")
@@ -1231,24 +1234,28 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
             A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K
         )
 
-    # FlashInfer is a required reference for this benchmark. Prepare and
-    # validate its tuned launch before entering bench() so a bad/missing cache
-    # fails the workload instead of being downgraded to an optional baseline
-    # construction error.
-    flashinfer_run = _flashinfer()
-    # Load the file and install the exact-M mapper once, outside all timer
-    # calls. Timed FlashInfer launches then perform only an in-memory cache
-    # lookup and the selected kernel launch.
-    with flashinfer.autotune(False, **flashinfer_context_kwargs):
+    if external_references_enabled():
+        # Prepare and validate the tuned reference launch before entering bench().
+        flashinfer_run = _flashinfer()
+        # Keep the exact-M mapper installed while timing FlashInfer.
+        with flashinfer.autotune(False, **flashinfer_context_kwargs):
+            result = bench(
+                funcs,
+                warmup=warmup,
+                repeat=repeat,
+                timer=timer,
+                references={
+                    "flashinfer": lambda: flashinfer_run,
+                    "cublaslt_nvfp4": _cublaslt,
+                },
+                **config_kwargs,
+            )
+    else:
         result = bench(
             funcs,
             warmup=warmup,
             repeat=repeat,
             timer=timer,
-            references={
-                "flashinfer": lambda: flashinfer_run,
-                "cublaslt_nvfp4": _cublaslt,
-            },
             **config_kwargs,
         )
     result["metadata"] = {**result.get("metadata", {}), **metadata}

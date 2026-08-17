@@ -2007,7 +2007,7 @@ def _make_sglang_cutedsl_runner(data: dict[str, Any]) -> Any:
             "use context_pattern='sglang_fixed' or 'sglang_ragged'"
         )
 
-    from sglang.jit_kernel.dsa.cutedsl_paged_mqa_logits import (
+    from sglang.kernels.ops.attention.dsa.cutedsl_paged_mqa_logits import (
         CuteDSLPagedMQALogitsRunner,
         pick_dsl_expand,
     )
@@ -2318,7 +2318,7 @@ def prepare_bench(**kwargs: Any):
 
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     # Tiny (~8-11µs) paged kernel: event timing is launch-jitter-noisy (sporadic
     # 10-13% ratio spread) and ~2x inflated by launch overhead. timer=None inherits the
@@ -2340,16 +2340,22 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     # page-by-page and is prohibitively slow for SGLang's 131K-context sweep.
     data = _prepare_data(config, compute_reference=False)
     invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
-    deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
-    tirx_logits = _run_tirx_invocation(data, invocation)
-    torch.cuda.synchronize()
-    max_diff = _assert_valid_correct(data, tirx_logits, deepgemm_logits, name="TIRx vs DeepGEMM")
-    torch.cuda.empty_cache()
+    deepgemm_logits = None
+    max_diff = None
+    if external_references_enabled():
+        deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+        tirx_logits = _run_tirx_invocation(data, invocation)
+        torch.cuda.synchronize()
+        max_diff = _assert_valid_correct(
+            data, tirx_logits, deepgemm_logits, name="TIRx vs DeepGEMM"
+        )
+        torch.cuda.empty_cache()
 
     def _deepgemm():
         return lambda: _run_deepgemm_paged_mqa(data, clean_logits=False)
 
     def _sglang_cutedsl():
+        assert deepgemm_logits is not None
         cutedsl_runner = _make_sglang_cutedsl_runner(data)
         cutedsl_logits = cutedsl_runner()
         torch.cuda.synchronize()
@@ -2367,7 +2373,8 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         cooldown_s=_cooldown_s,
         references={"deepgemm": _deepgemm, "sglang_cutedsl": _sglang_cutedsl},
     )
-    result["max_diff"] = max_diff
+    if max_diff is not None:
+        result["max_diff"] = max_diff
     return result
 
 

@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "python_requirements": [
+    "nvidia-cutlass-dsl[cu13]==4.6.2",
+    "nvidia-cuda-cccl==13.2.75",
+    "quack-kernels==0.6.4"
+  ],
+  "test_requirements": [
+    "pytest==9.0.2",
+    "pytest-xdist==3.8.0"
+  ],
+  "sources": [
+    {
+      "name": "deep-gemm",
+      "import_name": "deep_gemm",
+      "url": "https://github.com/deepseek-ai/DeepGEMM.git",
+      "revision": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+      "install_subdirectory": ".",
+      "source_links": [
+        {
+          "source": "third-party/cutlass/include/cutlass",
+          "target": "deep_gemm/include/cutlass"
+        },
+        {
+          "source": "third-party/cutlass/include/cute",
+          "target": "deep_gemm/include/cute"
+        }
+      ]
+    },
+    {
+      "name": "flashinfer",
+      "import_name": "flashinfer",
+      "url": "https://github.com/flashinfer-ai/flashinfer.git",
+      "revision": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "flash-attention",
+      "import_name": "flash_attn.cute",
+      "url": "https://github.com/Dao-AILab/flash-attention.git",
+      "revision": "0251105a2fb19d2957484b7f023cd8c115286ced",
+      "install_subdirectory": "flash_attn/cute"
+    },
+    {
+      "name": "flash-mla",
+      "import_name": "flash_mla",
+      "url": "https://github.com/deepseek-ai/FlashMLA.git",
+      "revision": "9241ae3ef9bac614dd25e45e507e089f888280e0",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "deep-ep",
+      "import_name": "deep_ep",
+      "url": "https://github.com/deepseek-ai/DeepEP.git",
+      "revision": "01dc3aaac82068020353dce2c302e38153c0bfaa",
+      "install_subdirectory": "."
+    },
+    {
+      "name": "sglang",
+      "import_name": "sglang",
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "c7c03ec53b1e664c2d415db4f02e43f86661f31d",
+      "install_subdirectory": "python"
+    },
+    {
+      "name": "flash-kda",
+      "import_name": "flash_kda",
+      "url": "https://github.com/MoonshotAI/FlashKDA.git",
+      "revision": "1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b",
+      "install_subdirectory": "."
+    }
+  ]
+}
