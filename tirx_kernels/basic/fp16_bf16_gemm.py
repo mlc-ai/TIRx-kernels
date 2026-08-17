@@ -663,14 +663,10 @@ def tir_kernel(dtype: str, M: int, N: int, K: int):
 
 
 KERNEL_META = {"name": "fp16_bf16_gemm", "category": "basic", "compute_capability": 10}
-BENCH_CONFIGS = [
+CONFIGS = [
     {"dtype": d, "M": s, "N": s, "K": s, "label": f"{d}_{s}x{s}x{s}"}
     for d in ["fp16", "bf16"]
     for s in [1024, 2048, 4096, 8192, 16384]
-]
-CONFIGS = [
-    {"dtype": dtype, "M": 1024, "N": 1024, "K": 1024, "label": f"{dtype}_correctness_1024"}
-    for dtype in ("fp16", "bf16")
 ]
 
 

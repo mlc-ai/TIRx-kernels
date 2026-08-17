@@ -26,6 +26,7 @@ from typing import Any
 
 import torch
 
+_DEEP_GEMM_MODULE_NAME = "deep_gemm"
 DEEPGEMM_SYM_BUFFER_MAX_RANKS = 72
 _CUDA_COMPILE_MODE_LOCK = threading.RLock()
 _PREPARED_LIBRARY_ENV = {
@@ -95,6 +96,7 @@ class MegaMoeCase:
     rank_idx: int
     num_ranks: int
     group: Any
+    deep_gemm: Any
     symm_buffer: Any
     x_fp8: tuple[torch.Tensor, torch.Tensor]
     topk_idx: torch.Tensor
@@ -111,11 +113,6 @@ class MegaMoeCase:
     # Host-built shared L1 input SF plane in the UTCCP-transposed, BLOCK_M-dependent
     # layout; the kernel never writes it.
     shared_l1_acts_sf: torch.Tensor | None = None
-    reference_x: torch.Tensor | None = None
-    reference_l1_weights: torch.Tensor | None = None
-    reference_l2_weights: torch.Tensor | None = None
-    reference_shared_l1_weights: torch.Tensor | None = None
-    reference_shared_l2_weights: torch.Tensor | None = None
 
 
 @dataclass
@@ -310,8 +307,8 @@ def _align_up(value: int, alignment: int) -> int:
 
 
 # Mirror of deep_gemm::layout constants from
-# deep_gemm/include/deep_gemm/layout/mega_moe.cuh. The in-tree host owner allocates
-# the shared symmetric buffer; the upstream layout is block_m-agnostic
+# deep_gemm/include/deep_gemm/layout/mega_moe.cuh. The shared symm buffer is
+# allocated by deep_gemm host code; the upstream layout is block_m-agnostic
 # (uses LCM of the candidate set for token alignment and Min for the barrier-
 # array sizing) so the same buffer is reusable across all candidate block_m's.
 _K_CANDIDATE_BLOCK_M: tuple[int, ...] = (8, 16, 32, 64, 96, 128, 192)
@@ -596,122 +593,6 @@ def get_deepgemm_symm_buffer_layout(config: MegaMoeConfig) -> DeepGemmSymmBuffer
         combine_token_offset=combine_token_offset,
         total_bytes=cursor,
     )
-
-
-class MegaMoeSymmBuffer:
-    """In-tree owner of the symmetric-memory ABI consumed by MegaMoE."""
-
-    def __init__(self, config: MegaMoeConfig, group: Any) -> None:
-        import types
-
-        workspace = get_deepgemm_workspace_layout(config)
-        layout = get_deepgemm_symm_buffer_layout(config)
-        self.group = group
-        self.num_experts = config.num_experts
-        self.num_max_tokens_per_rank = workspace.num_max_tokens_per_rank
-        self.num_topk = config.num_topk
-        self.hidden = config.hidden
-        self.intermediate_hidden = config.intermediate_hidden
-
-        if group.size() == 1:
-            self.buffer = torch.empty(layout.total_bytes, dtype=torch.int8, device="cuda")
-            self.handle = types.SimpleNamespace(buffer_ptrs=[self.buffer.data_ptr()])
-        else:
-            import torch.distributed._symmetric_memory as symm_mem
-
-            self.buffer = symm_mem.empty(layout.total_bytes, dtype=torch.int8, device="cuda")
-            self.handle = symm_mem.rendezvous(self.buffer, group=group)
-        self.buffer.zero_()
-        group.barrier()
-        torch.cuda.synchronize()
-
-        def view(
-            offset: int,
-            shape: tuple[int, int],
-            dtype: torch.dtype,
-            stride: tuple[int, int] | None = None,
-        ) -> torch.Tensor:
-            numel = shape[0] * shape[1]
-            num_bytes = numel * torch.empty((), dtype=dtype).element_size()
-            storage = self.buffer.narrow(0, offset, num_bytes).view(dtype)
-            if stride is None:
-                return storage.view(shape)
-            return torch.as_strided(storage, shape, stride)
-
-        aligned_tokens = workspace.num_max_tokens_per_rank
-        self.x = view(
-            layout.input_token_offset, (aligned_tokens, config.hidden), torch.float8_e4m3fn
-        )
-        self.x_sf = view(
-            layout.input_sf_offset, (aligned_tokens, config.hidden // 128), torch.int32
-        )
-        self.topk_idx = view(
-            layout.input_topk_idx_offset, (aligned_tokens, config.num_topk), torch.int64
-        )
-        self.topk_weights = view(
-            layout.input_topk_weights_offset, (aligned_tokens, config.num_topk), torch.float32
-        )
-
-        if config.has_shared_experts:
-            shared_sf_shape = (layout.num_max_shared_sf_tokens, config.hidden // 128)
-            self.shared_l1_acts = self.x
-            self.shared_l1_acts_sf = view(
-                layout.shared_l1_sf_offset,
-                shared_sf_shape,
-                torch.int32,
-                (1, layout.num_max_shared_sf_tokens),
-            )
-            self.shared_l2_acts = view(
-                layout.shared_l2_token_offset,
-                (aligned_tokens, config.shared_intermediate_hidden),
-                torch.float8_e4m3fn,
-            )
-            self.shared_l2_acts_sf = view(
-                layout.shared_l2_sf_offset,
-                (layout.num_max_shared_sf_tokens, config.shared_intermediate_hidden // 128),
-                torch.int32,
-                (1, layout.num_max_shared_sf_tokens),
-            )
-        else:
-            empty = torch.empty(0, device="cuda")
-            self.shared_l1_acts = empty
-            self.shared_l1_acts_sf = empty
-            self.shared_l2_acts = empty
-            self.shared_l2_acts_sf = empty
-
-        self.l1_acts = view(
-            layout.l1_token_offset, (workspace.num_ring_tokens, config.hidden), torch.float8_e4m3fn
-        )
-        self.l1_acts_sf = view(
-            layout.l1_sf_offset,
-            (workspace.num_sf_ring_tokens, config.hidden // 128),
-            torch.int32,
-            (1, workspace.num_sf_ring_tokens),
-        )
-        self.l2_acts = view(
-            layout.l2_token_offset,
-            (workspace.num_ring_tokens, config.intermediate_hidden),
-            torch.float8_e4m3fn,
-        )
-        self.l2_acts_sf = view(
-            layout.l2_sf_offset,
-            (workspace.num_sf_ring_tokens, config.intermediate_hidden // 128),
-            torch.int32,
-            (1, workspace.num_sf_ring_tokens),
-        )
-
-    def destroy(self) -> None:
-        self.handle = None
-        self.buffer = None
-        self.group = None
-
-
-def create_mega_moe_symm_buffer(config: MegaMoeConfig, group: Any) -> MegaMoeSymmBuffer:
-    buffer = MegaMoeSymmBuffer(config, group)
-    validate_runtime_symm_buffer_layout(
-        symm_buffer=buffer, layout=get_deepgemm_symm_buffer_layout(config), config=config
-    )
-    return buffer
 
 
 def _tensor_offset_bytes(base: torch.Tensor, view: torch.Tensor) -> int:

@@ -840,6 +840,50 @@ def _reference_torch(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
     return out.to(torch.bfloat16), state
 
 
+def _load_flashinfer_recurrent_kda():
+    """Import the reference kernel from the installed flashinfer."""
+    try:
+        from flashinfer.kda import recurrent_kda
+    except ImportError as e:
+        raise RuntimeError(
+            "flashinfer.kda is unavailable; the m128 reference needs a flashinfer "
+            "release that carries it (flashinfer-ai/flashinfer#4262 or later)"
+        ) from e
+
+    return recurrent_kda
+
+
+def _flashinfer_cuda_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run the m128 CUDA reference via flashinfer.recurrent_kda on the same inputs."""
+    cfg: FlashKDABf16FusedM128Config = case["config"]
+    recurrent_kda = _load_flashinfer_recurrent_kda()
+    batch = 1 if cfg.packed else cfg.num_seqs
+    seq_len = cfg.total_tokens if cfg.packed else cfg.seq_lens[0]
+
+    def reshaped(t: torch.Tensor) -> torch.Tensor:
+        return t.reshape(batch, seq_len, cfg.num_heads, -1)
+
+    ref_out, ref_state = recurrent_kda(
+        q=reshaped(case["q"]),
+        k=reshaped(case["k"]),
+        v=reshaped(case["v"]),
+        g=reshaped(case["g"]),
+        beta=case["beta"].reshape(batch, seq_len, cfg.num_heads),
+        A_log=case["A_log"],
+        dt_bias=case["dt_bias"],
+        scale=case["scale"],
+        initial_state=case["initial_state"] if cfg.use_initial_state else None,
+        output_final_state=cfg.store_final_state,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        lower_bound=cfg.lower_bound,
+        cu_seqlens=case["cu_seqlens"] if cfg.packed else None,
+        beta_is_logit=True,
+        seq_order=case["seq_order"] if cfg.packed else None,
+    )
+    return ref_out.reshape(cfg.total_tokens, cfg.num_heads, D_HEAD), ref_state
+
+
 def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     return (
         case["q"].reshape(-1),
@@ -3389,6 +3433,15 @@ def run_test(**kwargs: Any) -> None:
     if cfg.store_final_state:
         torch.testing.assert_close(case["final_state"], ref_state, rtol=4.01 / 128, atol=5e-3)
 
+    flashinfer_out, flashinfer_state = _flashinfer_cuda_reference(case)
+    torch.testing.assert_close(case["out"], flashinfer_out, rtol=4.01 / 128, atol=5e-3)
+    if cfg.store_final_state and flashinfer_state is not None:
+        torch.testing.assert_close(
+            case["final_state"],
+            flashinfer_state.reshape(case["final_state"].shape),
+            rtol=4.01 / 128,
+            atol=5e-3,
+        )
     cfg.validate()
 
 
@@ -3417,61 +3470,38 @@ def run_gpu(
         raise SkipTest(case["dispatch_reason"])
     args = _tirx_args(case)
     ex = executable
+    funcs = {"tirx": lambda: ex(*args)}
 
-    def flashinfer_builder():
-        try:
-            from flashinfer.kda import recurrent_kda
-        except ImportError as exc:
-            raise RuntimeError(
-                "flashinfer.kda is unavailable; the m128 reference requires recurrent_kda"
-            ) from exc
+    # Produce the expected buffers once.  The FlashKDA peer builder validates
+    # against these outside the timed region before returning its pure launch.
+    for func in funcs.values():
+        func()
+    torch.cuda.synchronize()
 
-        batch = 1 if cfg.packed else cfg.num_seqs
-        seq_len = cfg.total_tokens if cfg.packed else cfg.seq_lens[0]
-        initial_state = case["initial_state"].clone() if cfg.use_initial_state else None
-
-        def reshaped(tensor: torch.Tensor) -> torch.Tensor:
-            return tensor.reshape(batch, seq_len, cfg.num_heads, -1)
-
-        def launch():
-            recurrent_kda(
-                q=reshaped(case["q"]),
-                k=reshaped(case["k"]),
-                v=reshaped(case["v"]),
-                g=reshaped(case["g"]),
-                beta=case["beta"].reshape(batch, seq_len, cfg.num_heads),
-                A_log=case["A_log"],
-                dt_bias=case["dt_bias"],
-                scale=case["scale"],
-                initial_state=initial_state,
-                output_final_state=cfg.store_final_state,
-                use_qk_l2norm_in_kernel=True,
-                use_gate_in_kernel=True,
-                lower_bound=cfg.lower_bound,
-                cu_seqlens=case["cu_seqlens"] if cfg.packed else None,
-                beta_is_logit=True,
-                seq_order=case["seq_order"] if cfg.packed else None,
-            )
-
-        return launch
+    def _flashinfer_builder():
+        _load_flashinfer_recurrent_kda()
+        flashinfer_case = dict(case)
+        if cfg.use_initial_state:
+            flashinfer_case["initial_state"] = case["initial_state"].clone()
+        return lambda: _flashinfer_cuda_reference(flashinfer_case)
 
     flashkda_peer: dict[str, Any] = {}
 
-    def flashkda_builder():
+    def _flashkda_raw_builder():
         from tirx_kernels.flashinfer.utils._flashkda_bench import prepare_flashkda_raw_reference
 
-        ex(*args)
-        torch.cuda.synchronize()
         peer = prepare_flashkda_raw_reference(case)
         flashkda_peer["reference"] = peer
         return peer.launch
 
+    references = {"flashinfer_m128": _flashinfer_builder, "flashkda_raw": _flashkda_raw_builder}
+
     result = bench(
-        {"tirx": lambda: ex(*args)},
+        funcs,
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references={"flashinfer_m128": flashinfer_builder, "flashkda_raw": flashkda_builder},
+        references=references,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )

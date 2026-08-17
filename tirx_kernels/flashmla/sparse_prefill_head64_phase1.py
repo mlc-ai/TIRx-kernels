@@ -135,7 +135,7 @@ class SparseFlashMLAPrefillHead64Config:
 
 # Cover the two upstream fwd/head64 phase1 instantiations:
 # D_QK=512 and D_QK=576, h_q=64, topk=512 at the scoped s_kv values.
-BENCH_CONFIGS = [
+CONFIGS = [
     {
         "label": f"bench_dqk{d_qk}_hq64_s4096_kv{s_kv}_topk512",
         "s_q": 4096,
@@ -147,21 +147,6 @@ BENCH_CONFIGS = [
     }
     for d_qk in (512, 576)
     for s_kv in (8192, 32768, 49152, 65536)
-]
-
-CONFIGS = [
-    {
-        "label": f"correctness_dqk{d_qk}_hq64_s2_kv128_topk64",
-        "s_q": 2,
-        "s_kv": 128,
-        "topk": 64,
-        "d_qk": d_qk,
-        "h_q": B_H,
-        "have_attn_sink": True,
-        "have_topk_length": True,
-        "inject_invalid_indices": True,
-    }
-    for d_qk in (512, 576)
 ]
 
 KERNEL_META = {
@@ -1628,6 +1613,8 @@ def run_gpu(
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
 
+    funcs = {"tirx": lambda: ex(*args)}
+
     from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_reference_builder
     from tirx_kernels.flashmla.utils._trtllm_gen_bench import (
         trtllm_gen_config_compatible,
@@ -1639,7 +1626,7 @@ def run_gpu(
         references["trtllm_gen"] = lambda: trtllm_gen_reference_builder(case)
 
     return bench(
-        {"tirx": lambda: ex(*args)},
+        funcs,
         warmup=warmup,
         repeat=repeat,
         timer=timer,
@@ -1658,12 +1645,4 @@ def run_bench(
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 
-__all__ = [
-    "BENCH_CONFIGS",
-    "CONFIGS",
-    "KERNEL_META",
-    "get_kernel",
-    "prepare_data",
-    "run_bench",
-    "run_test",
-]
+__all__ = ["CONFIGS", "KERNEL_META", "get_kernel", "prepare_data", "run_bench", "run_test"]

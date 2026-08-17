@@ -33,22 +33,6 @@ PREPARE_NUM_SMS_ENV = "TIRX_PREPARE_NUM_SMS"
 PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
 TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
 TVM_COMPILE_FORCE_FALLBACK_ENV = "TVM_COMPILE_FORCE_FALLBACK"
-_EXTERNAL_REFERENCES_ENV = "TIRX_INTERNAL_BENCH_REFERENCES"
-
-
-def set_external_references_enabled(enabled: bool) -> None:
-    """Select explicit diagnostic reference timing for the current process."""
-    if not isinstance(enabled, bool):
-        raise TypeError("external reference mode must be a bool")
-    if enabled:
-        os.environ[_EXTERNAL_REFERENCES_ENV] = "1"
-    else:
-        os.environ.pop(_EXTERNAL_REFERENCES_ENV, None)
-
-
-def external_references_enabled() -> bool:
-    """Whether this process may import, prepare, or launch external references."""
-    return os.environ.get(_EXTERNAL_REFERENCES_ENV) == "1"
 
 
 @runtime_checkable
@@ -341,14 +325,14 @@ def validate_current_cuda_assignment(stage: str, *, restore: bool = False) -> tu
 
 
 def bench(*args: Any, references: Mapping[str, Any] | None = None, **kwargs: Any):
-    """Run the canonical timer, admitting references only in explicit diagnostic mode."""
+    """Run the canonical timer with assignment checks around external setup."""
     from tvm.tirx.bench import bench as canonical_bench
 
     if _CUDA_ASSIGNMENT is not None:
         validate_current_cuda_assignment("before benchmark setup", restore=True)
 
     checked_references = None
-    if references is not None and external_references_enabled():
+    if references is not None:
         checked_references = {}
         for name, builder in references.items():
 

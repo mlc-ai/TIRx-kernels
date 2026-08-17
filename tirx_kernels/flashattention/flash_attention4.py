@@ -1611,7 +1611,7 @@ def prepare_data(batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, 
 
 
 KERNEL_META = {"name": "flash_attention4", "category": "flashattention", "compute_capability": 10}
-BENCH_CONFIGS = [
+CONFIGS = [
     {
         "batch_size": 1,
         "seq_len": sl,
@@ -1624,18 +1624,6 @@ BENCH_CONFIGS = [
     for sl in [1024, 2048, 4096, 8192]
     for kv in [4, 8, 16, 32]
     for causal in [False, True]
-]
-CONFIGS = [
-    {
-        "batch_size": 1,
-        "seq_len": 128,
-        "num_qo_heads": 32,
-        "num_kv_heads": num_kv_heads,
-        "head_dim": 128,
-        "is_causal": is_causal,
-        "label": f"correctness_s128_h32kv{num_kv_heads}{'_causal' if is_causal else ''}",
-    }
-    for num_kv_heads, is_causal in ((4, False), (32, True))
 ]
 
 

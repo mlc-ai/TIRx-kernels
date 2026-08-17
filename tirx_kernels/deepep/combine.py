@@ -34,9 +34,9 @@ KERNEL_META = {"name": "deepep_combine", "category": "deepep", "compute_capabili
 # (bf16, non-expanded, allow_multiple_reduction, no bias) on `world_size` ranks.
 CONFIGS = [
     {
-        "label": "correctness_t16_h7168_e256_k6",
+        "label": "t128_h7168_e256_k6",
         "world_size": 8,
-        "num_tokens": 16,
+        "num_tokens": 128,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,
@@ -44,9 +44,19 @@ CONFIGS = [
         "masked_ratio": 0.0,
     },
     {
-        "label": "correctness_t32_h7168_e256_k6_masked",
+        "label": "t4096_h7168_e256_k6",
         "world_size": 8,
-        "num_tokens": 32,
+        "num_tokens": 4096,
+        "hidden": 7168,
+        "num_experts": 256,
+        "num_topk": 6,
+        "expert_alignment": 1,
+        "masked_ratio": 0.0,
+    },
+    {
+        "label": "t1024_h7168_e256_k6_masked",
+        "world_size": 8,
+        "num_tokens": 1024,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,
@@ -54,9 +64,9 @@ CONFIGS = [
         "masked_ratio": 0.3,
     },
     {
-        "label": "correctness_t128_h7168_e256_k6_align128",
+        "label": "t1024_h7168_e256_k6_align128",
         "world_size": 8,
-        "num_tokens": 128,
+        "num_tokens": 1024,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,
@@ -736,10 +746,6 @@ def prepare_data(
 # ---------------------------------------------------------------------------
 
 
-_CLOSED_FORM_ROW_STEP = 0.373
-_CLOSED_FORM_COL_STEP = 0.001
-
-
 def _closed_form_x(alloc: int, hidden: int, device: Any) -> Any:
     """Deterministic combine input, identical on every rank for the same row.
 
@@ -752,7 +758,7 @@ def _closed_form_x(alloc: int, hidden: int, device: Any) -> Any:
 
     rows = torch.arange(alloc, device=device, dtype=torch.float32).unsqueeze(1)
     cols = torch.arange(hidden, device=device, dtype=torch.float32).unsqueeze(0)
-    return torch.sin(rows * _CLOSED_FORM_ROW_STEP + cols * _CLOSED_FORM_COL_STEP).to(torch.bfloat16)
+    return torch.sin(rows * 0.373 + cols * 0.001).to(torch.bfloat16)
 
 
 def _simulate_combine_torch(
@@ -764,16 +770,16 @@ def _simulate_combine_torch(
     num_experts: int,
     rank: int,
     device: Any,
-    *,
-    compute_golden: bool,
 ) -> tuple[Any, Any, Any, Any, Any]:
-    """Simulate dispatch metadata and, for correctness only, combine goldens.
+    """Small-rank oracle: simulate dispatch routing and the combine golden.
 
-    Metadata/psum/topk_weights inputs are simulated in Torch from the dispatch contract
+    The reference ElasticBuffer segfaults below 8 ranks on this host, so 1/2/4-
+    rank bring-up validates against pure-torch semantics instead:
+    metadata/psum/topk_weights inputs are simulated per the dispatch contract
     (one received token per (token, rank) group, master lane = group identity,
     rows sorted by (src rank, src token)), and the golden combine output is
-    computed from the same rows using the kernel's two exact reduction paths:
-    one/two rows add in bf16; three or more rows accumulate bf16 inputs in fp32.
+    computed from the same rows: per local token, sum each contributing
+    group's x row in ascending master-lane order in fp32, then cast to bf16.
     """
 
     import numpy as np
@@ -785,21 +791,10 @@ def _simulate_combine_torch(
     experts_per_rank = num_experts // world_size
     alloc = world_size * num_tokens_max
 
-    local_num_tokens = topk_idx.shape[0]
-    idx_padded = torch.full((num_tokens_max, num_topk), -1, dtype=topk_idx.dtype, device=device)
-    weights_padded = torch.zeros(
-        (num_tokens_max, num_topk), dtype=topk_weights.dtype, device=device
-    )
-    idx_padded[:local_num_tokens] = topk_idx
-    weights_padded[:local_num_tokens] = topk_weights
-    count = torch.tensor([local_num_tokens], dtype=torch.int32, device=device)
-
-    idx_all = [torch.empty_like(idx_padded) for _ in range(world_size)]
-    w_all = [torch.empty_like(weights_padded) for _ in range(world_size)]
-    count_all = [torch.empty_like(count) for _ in range(world_size)]
-    dist.all_gather(idx_all, idx_padded)
-    dist.all_gather(w_all, weights_padded)
-    dist.all_gather(count_all, count)
+    idx_all = [torch.empty_like(topk_idx) for _ in range(world_size)]
+    dist.all_gather(idx_all, topk_idx)
+    w_all = [torch.empty_like(topk_weights) for _ in range(world_size)]
+    dist.all_gather(w_all, topk_weights)
     idx_all_np = [t.cpu().numpy() for t in idx_all]
     w_all_np = [t.cpu().numpy() for t in w_all]
 
@@ -809,15 +804,13 @@ def _simulate_combine_torch(
     for g in range(world_size):
         rows: list[tuple[int, int]] = []
         for s in range(world_size):
-            for t in range(int(count_all[s].item())):
+            for t in range(idx_all_np[s].shape[0]):
                 lanes = idx_all_np[s][t]
                 groups: dict[int, int] = {}
                 for lane in range(num_topk):
                     expert = int(lanes[lane])
                     if expert >= 0:
-                        # `bfind` in dispatch/combine selects the highest lane
-                        # among duplicate destinations as the master slot.
-                        groups[expert // experts_per_rank] = lane
+                        groups.setdefault(expert // experts_per_rank, lane)
                 if g in groups:
                     rows.append((s * num_tokens_max + t, s * num_topk + groups[g]))
         rows.sort()
@@ -845,29 +838,23 @@ def _simulate_combine_torch(
         s, t = src_global // num_tokens_max, src_global % num_tokens_max
         tw_input[i] = torch.tensor(w_all_np[s][t], dtype=torch.float32, device=device)
 
-    if not compute_golden:
-        return metadata, psum_rank, tw_input, None, None
-
     # Golden: per local token, sum groups' x rows in ascending master-lane order
+    local_num_tokens = topk_idx.shape[0]
     my_idx_np = idx_all_np[rank]
     my_w_np = w_all_np[rank]
     golden_x = torch.zeros((local_num_tokens, hidden), dtype=torch.bfloat16, device=device)
+    cols = torch.arange(hidden, device=device, dtype=torch.float32).unsqueeze(0)
     for t in range(local_num_tokens):
         groups = {}
         for lane in range(num_topk):
             expert = int(my_idx_np[t][lane])
             if expert >= 0:
-                groups[expert // experts_per_rank] = lane
-        rows = [row_of[(g, rank * num_tokens_max + t)] for g in sorted(groups, key=groups.get)]
-        if len(rows) < 3:
-            first = x_input[rows[0]] if rows else torch.zeros_like(x_input[0])
-            second = x_input[rows[1]] if len(rows) == 2 else torch.zeros_like(x_input[0])
-            golden_x[t] = first + second
-        else:
-            acc = torch.zeros((hidden,), dtype=torch.float32, device=device)
-            for row in rows:
-                acc += x_input[row].float()
-            golden_x[t] = acc.to(torch.bfloat16)
+                groups.setdefault(expert // experts_per_rank, lane)
+        acc = torch.zeros((hidden,), dtype=torch.float32, device=device)
+        for g in sorted(groups, key=groups.get):
+            row = row_of[(g, rank * num_tokens_max + t)]
+            acc += torch.sin(row * 0.373 + cols).view(-1)
+        golden_x[t] = acc.to(torch.bfloat16)
     golden_w = torch.where(topk_idx >= 0, topk_weights, torch.zeros_like(topk_weights))
     return metadata, psum_rank, tw_input, golden_x, golden_w
 
@@ -875,6 +862,8 @@ def _simulate_combine_torch(
 def _run_worker(
     runtime: Any, modules: dict[str, Any], mode: str, kwargs: dict[str, Any]
 ) -> dict[str, Any]:
+    import os
+
     import torch
     import torch.distributed as dist
 
@@ -888,6 +877,7 @@ def _run_worker(
     num_topk = kwargs["num_topk"]
     expert_alignment = kwargs["expert_alignment"]
     num_sms = kwargs["num_sms"]
+
     data = prepare_data(**{k: v for k, v in kwargs.items() if k != "num_sms"}, rank=rank)
     x, topk_idx, topk_weights = data["x"], data["topk_idx"], data["topk_weights"]
     local_num_tokens = data["num_tokens"]
@@ -910,32 +900,12 @@ def _run_worker(
     topk_idx_padded = torch.zeros((num_tokens_max, num_topk), dtype=torch.int64, device=device)
     topk_idx_padded[:local_num_tokens] = topk_idx
 
-    use_reference = False
-    if mode == "bench":
-        from tirx_kernels.runner import external_references_enabled
-
-        use_reference = external_references_enabled() and world_size == 8
-
-    if use_reference:
-        metadata = psum_rank = tw_input = golden_x = golden_w = None
-    else:
-        metadata, psum_rank, tw_input, golden_x, golden_w = _simulate_combine_torch(
-            topk_idx,
-            topk_weights,
-            x_input,
-            world_size,
-            num_tokens_max,
-            num_experts,
-            rank,
-            device,
-            compute_golden=mode == "test",
-        )
-
     ref_buffer = None
-    reference_launch = None
-    if use_reference:
-        import os
-
+    handle = None
+    golden_x = golden_w = None
+    if world_size == 8:
+        # The reference runtime needs GIN disabled on this host (verified in the
+        # dispatch scaffolding: single-node NVLink LSA path works with EP_DISABLE_GIN=1).
         os.environ.setdefault("EP_DISABLE_GIN", "1")
         import deep_ep
 
@@ -947,7 +917,7 @@ def _run_worker(
             prefer_overlap_with_compute=False,
             explicitly_destroy=True,
         )
-        _, _, ref_topk_weights, ref_handle, _ = ref_buffer.dispatch(
+        _, _, recv_topk_weights, handle, _ = ref_buffer.dispatch(
             x,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
@@ -957,16 +927,13 @@ def _run_worker(
             num_sms=num_sms,
             do_cpu_sync=False,
         )
-        # Preserve the original reference-enabled benchmark contract: both
-        # implementations consume the metadata emitted by DeepEP dispatch.
-        metadata = ref_handle.recv_src_metadata
-        psum_rank = ref_handle.psum_num_recv_tokens_per_scaleup_rank
-        tw_input = ref_topk_weights
-
-        def launch_deepep_combine():
-            return ref_buffer.combine(x_input, ref_handle, topk_weights=ref_topk_weights)
-
-        reference_launch = launch_deepep_combine
+        metadata = handle.recv_src_metadata
+        psum_rank = handle.psum_num_recv_tokens_per_scaleup_rank
+        tw_input = recv_topk_weights
+    else:
+        metadata, psum_rank, tw_input, golden_x, golden_w = _simulate_combine_torch(
+            topk_idx, topk_weights, x_input, world_size, num_tokens_max, num_experts, rank, device
+        )
 
     def tirx_launch() -> None:
         combine_fn(
@@ -989,25 +956,37 @@ def _run_worker(
             local_num_tokens,
         )
 
+    def reference_launch():
+        return ref_buffer.combine(x_input, handle, topk_weights=tw_input)
+
     try:
         if mode == "test":
-            assert golden_x is not None and golden_w is not None
 
             def _launch_and_check() -> None:
                 with torch.cuda.stream(runtime.timing_stream):
+                    if world_size == 8:
+                        ref_cx, ref_cw, _ = reference_launch()
                     tirx_launch()
                 runtime.device.sync(runtime.compute_stream)
 
                 our_cx = combined_x[:local_num_tokens]
                 our_cw = combined_w[:local_num_tokens]
-                assert torch.equal(golden_x, our_cx), (
-                    f"rank {rank}: combined_x mismatch vs torch golden "
-                    f"(max abs diff "
-                    f"{(golden_x.float() - our_cx.float()).abs().max().item()})"
-                )
-                assert torch.equal(golden_w, our_cw), (
-                    f"rank {rank}: combined_topk_weights mismatch vs torch golden"
-                )
+                if world_size == 8:
+                    assert torch.equal(ref_cx, our_cx), (
+                        f"rank {rank}: combined_x mismatch "
+                        f"(max abs diff {(ref_cx.float() - our_cx.float()).abs().max().item()})"
+                    )
+                    assert torch.equal(ref_cw, our_cw), (
+                        f"rank {rank}: combined_topk_weights mismatch"
+                    )
+                else:
+                    assert torch.equal(golden_x, our_cx), (
+                        f"rank {rank}: combined_x mismatch vs torch golden "
+                        f"(max abs diff {(golden_x.float() - our_cx.float()).abs().max().item()})"
+                    )
+                    assert torch.equal(golden_w, our_cw), (
+                        f"rank {rank}: combined_topk_weights mismatch vs torch golden"
+                    )
 
             check_error = ""
             try:
@@ -1024,14 +1003,18 @@ def _run_worker(
             return {"status": "OK"}
 
         # mode == "bench"
-        from tirx_kernels.runner import bench
+        from tvm.tirx.bench import bench
+
+        def build_reference():
+            def launch() -> None:
+                reference_launch()
+
+            return launch
 
         with torch.cuda.stream(runtime.timing_stream):
             result = bench(
                 {"tirx": tirx_launch},
-                references=(
-                    {"deepep": lambda: reference_launch} if reference_launch is not None else None
-                ),
+                references={"deepep": build_reference},
                 timer="kineto",
                 rounds=kwargs.get("rounds", 1),
                 cooldown_s=kwargs.get("cooldown_s", 1.0),
@@ -1072,14 +1055,41 @@ def run_test(**config: Any) -> None:
 
 
 def _resolve_num_sms_cpu(config: dict[str, Any]) -> int:
-    """Resolve the fixed ported launch width without initializing CUDA."""
+    """CUDA-free mirror of `ElasticBuffer.get_theoretical_num_sms` for the
+    single-domain path, for the bench-suite CPU-prepare stage.
 
-    return get_theoretical_num_sms(
-        config["world_size"],
-        config["num_experts"],
-        config["num_topk"],
-        prefer_overlap_with_compute=False,
+    The source model's only CUDA-initializing call is its closing
+    `torch.cuda.get_device_properties`; the bench suite forbids CUDA in CPU
+    prepare, so the arithmetic is mirrored with the suite-provided device SM
+    count (TIRX_PREPARE_NUM_SMS via `_device_num_sms`) and the
+    subprocess-based `get_nvlink_gbs` (no CUDA init). For the bench config
+    (world=8, e=256, k=6) the result is 64 over a wide bandwidth range, equal
+    to the source model's output.
+    """
+
+    import math
+
+    from deep_ep.utils.envs import get_nvlink_gbs
+
+    world = config["world_size"]
+    experts = config["num_experts"]
+    topk = config["num_topk"]
+    expected_topk = world * (
+        1 - math.comb(experts - experts // world, topk) / math.comb(experts, topk)
     )
+    gbs = get_nvlink_gbs()
+    nvlink_traffic = 1 - 1 / world if world > 1 else 0.0
+    device_sms = _device_num_sms()
+    num_sms = float(device_sms)
+    if nvlink_traffic > 0:
+        num_sms = max(
+            gbs / nvlink_traffic * (1 / expected_topk) / 200, gbs / nvlink_traffic * 1 / 50
+        )
+    # align(max(4, ceil(x * 1.25)), 2); prefer_overlap_with_compute=False -> max(.., 64)
+    num_sms = max(4, math.ceil(num_sms * 1.25))
+    num_sms += num_sms % 2
+    num_sms = max(num_sms, 64)
+    return min(num_sms, device_sms)
 
 
 def _run_bench_gpu(state: dict[str, Any], **kwargs: Any) -> dict[str, Any]:

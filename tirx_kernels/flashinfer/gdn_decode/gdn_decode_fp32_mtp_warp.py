@@ -18,6 +18,7 @@ from unittest import SkipTest
 import torch
 
 from tvm.script import tirx as T
+from tvm.tirx.bench import bench
 
 KERNEL_META = {
     "name": "gdn_decode_fp32_mtp_warp",
@@ -1589,6 +1590,13 @@ def _device_from_config(config: dict[str, Any]) -> torch.device:
 
 
 @functools.cache
+def _load_oracle():
+    import flashinfer.gdn_decode as public
+
+    return public.gated_delta_rule_mtp
+
+
+@functools.cache
 def _compile_tirx(
     work_units: int,
     seq_len: int,
@@ -1710,25 +1718,31 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _run_reference(case: dict[str, Any]) -> torch.Tensor:
-    from tirx_kernels.flashinfer._gdn_reference import gated_delta_rule_decode
-
     config = case["config"]
-    return gated_delta_rule_decode(
+    if not case.get("source_cache_initialized", False):
+        import flashinfer.gdn_kernels.gdn_decode_mtp as source_module
+
+        # The frozen native-4D cache key records strides but not pool_size,
+        # even though the compiled tensor keeps shape[0] static.  Isolate each
+        # correctness/benchmark case once, then retain its compiled source for
+        # all subsequent launches and timing rounds.
+        source_module._get_compiled_mtp_kernel.cache_clear()
+        source_module._get_compiled_mtp_kernel_inline.cache_clear()
+        case["source_cache_initialized"] = True
+    oracle = _load_oracle()
+    output, _ = oracle(
         q=case["q"],
         k=case["k"],
         v=case["v"],
-        state_pool=case["source_state"],
-        read_indices=case["read_indices"],
-        write_indices=(
-            case["read_indices"] if bool(config.get("same_pool", True)) else case["write_indices"]
-        ),
+        initial_state=case["source_state"],
+        initial_state_indices=case["read_indices"],
         A_log=case["A_log"],
         a=case["a"],
         dt_bias=case["dt_bias"],
         b=case["b_gate"],
         scale=SCALE,
         output=case["source_output"],
-        intermediate_states=(
+        intermediate_states_buffer=(
             case["source_intermediate"]
             if bool(config.get("cache_intermediate_states", False))
             else None
@@ -1738,8 +1752,11 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
         ),
         disable_state_update=bool(config.get("disable_state_update", False)),
         use_qk_l2norm=bool(config.get("use_qk_l2norm", True)),
-        negative_read_write_are_padding=True,
+        output_state_indices=(
+            None if bool(config.get("same_pool", True)) else case["write_indices"]
+        ),
     )
+    return output
 
 
 def _assert_case_close(case: dict[str, Any]) -> None:
@@ -1922,55 +1939,23 @@ def run_gpu(
     cooldown_s: float = 1.0,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    from tirx_kernels.runner import bench
-
     kwargs = {**prepared["config"], **kwargs}
     case = prepare_data(**kwargs)
     executable = prepared["executable"]
     args = _tirx_args(case)
+    executable(*args)
+    _run_reference(case)
+    torch.cuda.synchronize(case["tirx_state"].device)
+    _assert_case_close(case)
 
     def source_builder():
-        import flashinfer.gdn_decode as public
-
-        config = case["config"]
+        for _ in range(2):
+            _run_reference(case)
+        torch.cuda.synchronize(case["source_state"].device)
 
         def launch():
-            public.gated_delta_rule_mtp(
-                q=case["q"],
-                k=case["k"],
-                v=case["v"],
-                initial_state=case["source_state"],
-                initial_state_indices=case["read_indices"],
-                A_log=case["A_log"],
-                a=case["a"],
-                dt_bias=case["dt_bias"],
-                b=case["b_gate"],
-                scale=SCALE,
-                output=case["source_output"],
-                intermediate_states_buffer=(
-                    case["source_intermediate"]
-                    if bool(config.get("cache_intermediate_states", False))
-                    else None
-                ),
-                ssm_state_indices=(
-                    case["ssm_state_indices"]
-                    if bool(config.get("per_token_pool_scatter", False))
-                    else None
-                ),
-                disable_state_update=bool(config.get("disable_state_update", False)),
-                use_qk_l2norm=bool(config.get("use_qk_l2norm", True)),
-                output_state_indices=(
-                    None if bool(config.get("same_pool", True)) else case["write_indices"]
-                ),
-            )
+            _run_reference(case)
 
-        executable(*args)
-        launch()
-        torch.cuda.synchronize(case["tirx_state"].device)
-        _assert_case_close(case)
-        for _ in range(2):
-            launch()
-        torch.cuda.synchronize(case["source_state"].device)
         return launch
 
     return bench(

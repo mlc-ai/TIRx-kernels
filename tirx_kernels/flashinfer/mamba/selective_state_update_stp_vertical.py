@@ -224,7 +224,7 @@ BENCH_CONFIGS = [
 
 # The public FlashInfer wrapper requires D, so the nullable-D branch is
 # correctness-only.  DIM=64/128 is the reviewed vertical dispatch domain.
-CONFIGS = [
+CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
     _case("b1_h64_d64_s128_r8", batch=1),
     _case("b64_h64_d64_s128_r8_no_d", has_d=False),
     _case("b64_h64_d64_s128_r8_out_allocated", use_out_tensor=False),
@@ -1279,10 +1279,10 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _run_reference(case: dict[str, Any], oracle=None) -> torch.Tensor:
+def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     kwargs = case["kwargs"]
     spec = case["spec"]
-    oracle = _simple._load_oracle() if oracle is None else oracle
+    oracle = _simple._load_oracle()
     state_view = _simple._view_state(case["reference_state_raw"], spec, case["state_stride"])
     state_scale = (
         _simple._view_scale(case["reference_scale_raw"], spec, case["scale_stride"])
@@ -1357,20 +1357,19 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
+    executable(*args)
+    _run_reference(case)
+    torch.cuda.synchronize()
+    _simple._assert_case_close(case)
 
     def source_builder():
-        from flashinfer.mamba import selective_state_update
+        for _ in range(2):
+            _run_reference(case)
+        torch.cuda.synchronize()
 
         def launch():
-            _run_reference(case, selective_state_update)
+            _run_reference(case)
 
-        executable(*args)
-        launch()
-        torch.cuda.synchronize()
-        _simple._assert_case_close(case)
-        for _ in range(2):
-            launch()
-        torch.cuda.synchronize()
         return launch
 
     return bench(
