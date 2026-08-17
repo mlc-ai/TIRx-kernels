@@ -1439,7 +1439,7 @@ def _kernel(
     if warp <= 3:
         smem_addr_cg0: T.uint32 = T.cuda.cvta_generic_to_shared(smem_raw.ptr_to([0]))
         T.ptx.setmaxnreg.inc.sync.aligned.u32(224)
-        T.ptx.bar.sync(T.uint32(TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_cg0: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_cg0, T.address_of(tmem_holding[0]))
         gate_consumer_index_cg0: T.int32 = 0
@@ -1741,7 +1741,7 @@ def _kernel(
             T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                 T.address_of(tmem_holding[0]), T.uint32(TMEM_COLUMNS)
             )
-        T.ptx.bar.sync(T.uint32(TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_cg1: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_cg1, T.address_of(tmem_holding[0]))
         v_consumer_index_cg1: T.int32 = 0
@@ -2092,7 +2092,7 @@ def _kernel(
     elif warp == 8:
         smem_addr_issuer0: T.uint32 = T.cuda.cvta_generic_to_shared(smem_raw.ptr_to([0]))
         T.ptx.setmaxnreg.dec.sync.aligned.u32(24)
-        T.ptx.bar.sync(T.uint32(TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_issuer0: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_issuer0, T.address_of(tmem_holding[0]))
         cg0_producer_index_i0: T.int32 = 0
@@ -2209,7 +2209,7 @@ def _kernel(
     elif warp == 10:
         smem_addr_issuer1: T.uint32 = T.cuda.cvta_generic_to_shared(smem_raw.ptr_to([0]))
         T.ptx.setmaxnreg.dec.sync.aligned.u32(24)
-        T.ptx.bar.sync(T.uint32(TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_issuer1: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_issuer1, T.address_of(tmem_holding[0]))
         cg1_producer_count_i1: T.int32 = 0

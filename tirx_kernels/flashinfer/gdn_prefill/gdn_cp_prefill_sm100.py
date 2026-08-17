@@ -2342,7 +2342,7 @@ def _mn_precompute_sm100(
             )
     elif warp <= 3:
         T.ptx.setmaxnreg.inc.sync.aligned.u32(216)
-        T.ptx.bar.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_cg0: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_cg0, T.address_of(tmem_holding[0]))
         cg0_thread: T.int32 = tid
@@ -2401,7 +2401,7 @@ def _mn_precompute_sm100(
 
     elif warp <= 7:
         T.ptx.setmaxnreg.inc.sync.aligned.u32(216)
-        T.ptx.bar.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_cg1: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_cg1, T.address_of(tmem_holding[0]))
         cg1_thread: T.int32 = tid & 127
@@ -2464,7 +2464,7 @@ def _mn_precompute_sm100(
             )
 
     elif warp == 8:
-        T.ptx.bar.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_transfer: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_transfer, T.address_of(tmem_holding[0]))
         _mn_opt_consumer_wait(smem_addr, 208, 0, 1)
@@ -2521,7 +2521,7 @@ def _mn_precompute_sm100(
             _mn_opt_mma_commit(_mn_opt_empty_addr(smem_addr, 24, block, 3))
 
     elif warp == 11:
-        T.ptx.bar.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(MN_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_state: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_state, T.address_of(tmem_holding[0]))
         _mn_opt_consumer_wait(smem_addr, 224, 0, 1)
@@ -3636,7 +3636,7 @@ def _prefill_sm100(
     # CG0: transform the precomputed T tile and materialize gated QK.
     if warp <= 3:
         T.ptx.setmaxnreg.inc.sync.aligned.u32(224)
-        T.ptx.bar.sync(T.uint32(PREFILL_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(PREFILL_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_cg0: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_cg0, T.address_of(tmem_holding[0]))
         gate_index_cg0: T.int32 = 0
@@ -3743,7 +3743,7 @@ def _prefill_sm100(
             T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                 T.address_of(tmem_holding[0]), T.uint32(PREFILL_OPT_TMEM_COLUMNS)
             )
-        T.ptx.bar.sync(T.uint32(PREFILL_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(PREFILL_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_cg1: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_cg1, T.address_of(tmem_holding[0]))
         v_index_cg1: T.int32 = 0
@@ -4096,7 +4096,7 @@ def _prefill_sm100(
     # Issuer and load roles are mutually exclusive with CG1, matching source.
     elif warp == 8:
         T.ptx.setmaxnreg.dec.sync.aligned.u32(24)
-        T.ptx.bar.sync(T.uint32(PREFILL_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(PREFILL_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_i0: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_i0, T.address_of(tmem_holding[0]))
         acc_index_i0: T.int32 = 0
@@ -4140,7 +4140,7 @@ def _prefill_sm100(
 
     elif warp == 10:
         T.ptx.setmaxnreg.dec.sync.aligned.u32(24)
-        T.ptx.bar.sync(T.uint32(PREFILL_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
+        T.ptx.barrier.sync(T.uint32(PREFILL_OPT_TMEM_ALLOC_BARRIER), T.uint32(320))
         tmem_base_i1: T.int32
         T.ptx.ld.volatile.shared.s32(tmem_base_i1, T.address_of(tmem_holding[0]))
         cg1_producer_i1: T.int32 = 0

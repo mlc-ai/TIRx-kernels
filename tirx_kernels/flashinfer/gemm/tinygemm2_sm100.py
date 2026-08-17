@@ -288,7 +288,7 @@ def _tinygemm2_sm100(
             accum_bits[2],
             accum_bits[3],
         )
-        T.ptx.bar.sync(T.uint32(2), T.uint32(THREADS))
+        T.ptx.barrier.sync(T.uint32(2), T.uint32(THREADS))
 
         if warp == 0:
             part_bits = T.alloc_local((12,), "uint32", align=4)
@@ -384,7 +384,7 @@ def _tinygemm2_sm100(
                     T.uint32(consumed_off) + dstage_w * T.uint32(8),
                     dphase_w ^ T.uint32(1),
                 )
-        T.ptx.bar.sync(T.uint32(2), T.uint32(THREADS))
+        T.ptx.barrier.sync(T.uint32(2), T.uint32(THREADS))
 
     elif 8 <= warp and warp <= 11:
         k_loops_a: T.int32 = T.truncdiv(c_K + 1023, 1024)
@@ -425,7 +425,7 @@ def _tinygemm2_sm100(
                     T.uint32(consumed_off) + dstage_a * T.uint32(8),
                     dphase_a ^ T.uint32(1),
                 )
-        T.ptx.bar.sync(T.uint32(2), T.uint32(THREADS))
+        T.ptx.barrier.sync(T.uint32(2), T.uint32(THREADS))
 
 
 def get_kernel(
