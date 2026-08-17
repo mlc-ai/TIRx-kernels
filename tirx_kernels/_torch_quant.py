@@ -88,7 +88,7 @@ def quantize_e2m1(x: torch.Tensor) -> torch.Tensor:
     code += (midpoint & ((code & 1) != 0)).to(torch.uint8)
     # PTX's E2M1 conversion preserves the sign when a negative value rounds
     # to zero, so the packed ABI distinguishes +0 (0x0) from -0 (0x8).
-    return code | ((x < 0).to(torch.uint8) << 3)
+    return code | (torch.signbit(x).to(torch.uint8) << 3)
 
 
 def _pack_e2m1(codes: torch.Tensor) -> torch.Tensor:
@@ -106,23 +106,19 @@ def _quantize_deepgemm_e2m1(x: torch.Tensor) -> torch.Tensor:
     return code | (sign.to(torch.uint8) << 3)
 
 
-def swizzle_sf(scales: torch.Tensor, layout: str) -> torch.Tensor:
-    """Lay out logical ``[row, block]`` scale bytes for a quantization ABI."""
-
-    if scales.dtype != torch.uint8 or scales.ndim != 2:
-        raise ValueError("scale swizzle expects a 2-D uint8 tensor")
-    rows, columns = scales.shape
+def _sf_layout_offsets(
+    rows: int, columns: int, layout: str, device: torch.device
+) -> tuple[torch.Tensor, int, int]:
+    row = torch.arange(rows, device=device, dtype=torch.long)[:, None]
+    column = torch.arange(columns, device=device, dtype=torch.long)[None, :]
     if layout == "linear":
-        return scales.contiguous().view(-1)
+        return row * columns + column, rows, columns
     if layout not in ("128x4", "8x4"):
         raise ValueError(f"unsupported scale layout: {layout}")
 
     row_tile = 128 if layout == "128x4" else 8
     padded_rows = align_up(rows, row_tile)
     padded_columns = align_up(columns, 4)
-    output = torch.zeros(padded_rows * padded_columns, dtype=torch.uint8, device=scales.device)
-    row = torch.arange(rows, device=scales.device, dtype=torch.long)[:, None]
-    column = torch.arange(columns, device=scales.device, dtype=torch.long)[None, :]
     if layout == "128x4":
         offset = (
             column % 4
@@ -134,8 +130,36 @@ def swizzle_sf(scales: torch.Tensor, layout: str) -> torch.Tensor:
     else:
         k_tiles = padded_columns // 4
         offset = (row // 8) * (k_tiles * 32) + (column // 4) * 32 + (row % 8) * 4 + column % 4
-    output[offset.expand(rows, columns).reshape(-1)] = scales.reshape(-1)
+    return offset.expand(rows, columns), padded_rows, padded_columns
+
+
+def _swizzle_sf_values(values: torch.Tensor, layout: str) -> torch.Tensor:
+    """Apply a scale-factor layout to a logical ``[row, block]`` tensor."""
+
+    if values.ndim != 2:
+        raise ValueError("scale swizzle expects a 2-D tensor")
+    rows, columns = values.shape
+    offset, padded_rows, padded_columns = _sf_layout_offsets(rows, columns, layout, values.device)
+    output = torch.zeros(padded_rows * padded_columns, dtype=values.dtype, device=values.device)
+    output[offset.expand(rows, columns).reshape(-1)] = values.reshape(-1)
     return output
+
+
+def swizzle_sf(scales: torch.Tensor, layout: str) -> torch.Tensor:
+    """Lay out logical ``[row, block]`` scale bytes for a quantization ABI."""
+
+    if scales.dtype != torch.uint8:
+        raise ValueError("scale swizzle expects uint8 values")
+    return _swizzle_sf_values(scales, layout)
+
+
+def unswizzle_sf(scales: torch.Tensor, *, rows: int, columns: int, layout: str) -> torch.Tensor:
+    """Recover logical ``[row, block]`` scale values from an ABI layout."""
+
+    offset, padded_rows, padded_columns = _sf_layout_offsets(rows, columns, layout, scales.device)
+    if scales.numel() != padded_rows * padded_columns:
+        raise ValueError("scale buffer size does not match its logical shape and layout")
+    return scales.reshape(-1)[offset].contiguous()
 
 
 def quantize_mxfp8(
@@ -173,11 +197,7 @@ def quantize_nvfp4(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Torch oracle for 16-value E4M3-scaled E2M1 quantization."""
 
-    if fuse_silu:
-        width = values.shape[1] // 2
-        values = (
-            torch.nn.functional.silu(values[:, :width].float()) * values[:, width:].float()
-        ).to(values.dtype)
+    values = _nvfp4_input_values(values, fuse_silu=fuse_silu)
     rows, width = values.shape
     blocks = values.float().view(rows, width // 16, 16)
     scale = global_scale.float().reshape(-1, 1)
@@ -191,19 +211,67 @@ def quantize_nvfp4(
     return _pack_e2m1(codes), swizzle_sf(sf_bytes, sf_layout)
 
 
+def _nvfp4_input_values(values: torch.Tensor, *, fuse_silu: bool) -> torch.Tensor:
+    if not fuse_silu:
+        return values
+    width = values.shape[1] // 2
+    return (torch.nn.functional.silu(values[:, :width].float()) * values[:, width:].float()).to(
+        values.dtype
+    )
+
+
+def nvfp4_scale_values(
+    values: torch.Tensor,
+    global_scale: torch.Tensor,
+    *,
+    sf_layout: str = "linear",
+    fuse_silu: bool = False,
+) -> torch.Tensor:
+    """Return exact-math pre-quantization NVFP4 scales in the ABI layout."""
+
+    values = _nvfp4_input_values(values, fuse_silu=fuse_silu)
+    rows, width = values.shape
+    blocks = values.float().view(rows, width // 16, 16)
+    scale = global_scale.float().reshape(-1, 1)
+    if scale.shape[0] == 1:
+        scale = scale.expand(rows, 1)
+    unquantized_sf = blocks.abs().amax(dim=-1) * scale / 6.0
+    return _swizzle_sf_values(unquantized_sf, sf_layout)
+
+
+def nvfp4_scaled_values(
+    values: torch.Tensor,
+    global_scale: torch.Tensor,
+    scale_factors: torch.Tensor,
+    *,
+    fuse_silu: bool = False,
+) -> torch.Tensor:
+    """Scale NVFP4 inputs using independently validated logical E4M3 factors."""
+
+    values = _nvfp4_input_values(values, fuse_silu=fuse_silu)
+    rows, width = values.shape
+    blocks = values.float().view(rows, width // 16, 16)
+    scale = global_scale.float().reshape(-1, 1)
+    if scale.shape[0] == 1:
+        scale = scale.expand(rows, 1)
+    decoded_sf = scale_factors.view(torch.float8_e4m3fn).float()
+    output_scale = torch.where(decoded_sf != 0, scale / decoded_sf, 0.0)
+    return (blocks * output_scale.unsqueeze(-1)).view(rows, width)
+
+
 def quantize_nvfp4_per_token(
     values: torch.Tensor, global_scale_inverse: torch.Tensor, *, sf_layout: str = "linear"
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Torch oracle for NVFP4 quantization with one additional row scale."""
 
-    scaled, sf_bytes, token_scale = _nvfp4_per_token_state(values, global_scale_inverse)
+    scaled, sf_bytes, token_scale, _ = _nvfp4_per_token_state(values, global_scale_inverse)
     codes = quantize_e2m1(scaled).view_as(values)
     return _pack_e2m1(codes), swizzle_sf(sf_bytes, sf_layout), token_scale
 
 
 def _nvfp4_per_token_state(
     values: torch.Tensor, global_scale_inverse: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return the logical scaled values, FP8 scales, and token scales."""
 
     rows, width = values.shape
@@ -211,20 +279,21 @@ def _nvfp4_per_token_state(
     token_scale = row_amax * global_scale_inverse.float().reshape(1)[0]
     encode_scale = torch.where(token_scale != 0, token_scale.reciprocal(), 0.0)
     blocks = values.float().view(rows, width // 16, 16)
-    sf = (blocks.abs().amax(dim=-1) * encode_scale.unsqueeze(1) / 6.0).to(torch.float8_e4m3fn)
+    unquantized_sf = blocks.abs().amax(dim=-1) * encode_scale.unsqueeze(1) / 6.0
+    sf = unquantized_sf.to(torch.float8_e4m3fn)
     sf_bytes = sf.view(torch.uint8)
     decoded_sf = sf.float()
     output_scale = torch.where(decoded_sf != 0, encode_scale.unsqueeze(1) / decoded_sf, 0.0)
-    return blocks * output_scale.unsqueeze(-1), sf_bytes, token_scale
+    return blocks * output_scale.unsqueeze(-1), sf_bytes, token_scale, unquantized_sf
 
 
-def nvfp4_per_token_scaled_values(
-    values: torch.Tensor, global_scale_inverse: torch.Tensor
+def nvfp4_per_token_scale_values(
+    values: torch.Tensor, global_scale_inverse: torch.Tensor, *, sf_layout: str = "linear"
 ) -> torch.Tensor:
-    """Return the exact-math scaled values used by the per-token oracle."""
+    """Return exact-math pre-quantization scale values in the ABI layout."""
 
-    scaled, _, _ = _nvfp4_per_token_state(values, global_scale_inverse)
-    return scaled.view_as(values)
+    _, _, _, unquantized_sf = _nvfp4_per_token_state(values, global_scale_inverse)
+    return _swizzle_sf_values(unquantized_sf, sf_layout)
 
 
 def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
@@ -417,7 +486,9 @@ __all__ = [
     "cast_back_from_fp8",
     "ceil_div",
     "decode_e2m1",
-    "nvfp4_per_token_scaled_values",
+    "nvfp4_per_token_scale_values",
+    "nvfp4_scale_values",
+    "nvfp4_scaled_values",
     "pack_k_grouped_ue8m0",
     "pack_ue8m0_mn_major",
     "pack_ue8m0_words",
@@ -435,4 +506,5 @@ __all__ = [
     "transform_sf",
     "unpack_e2m1",
     "unpack_ue8m0_words",
+    "unswizzle_sf",
 ]

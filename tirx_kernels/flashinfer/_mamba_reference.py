@@ -59,11 +59,11 @@ def selective_state_update(
     cache_steps: int | None = None,
     cu_seqlens: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
+    algorithm: str = "simple",
     **_unused,
 ) -> torch.Tensor:
     """Evaluate fixed- or variable-length selective state update in FP32."""
 
-    del cache_steps
     original_x_ndim = x.ndim
     if out is None:
         out = torch.empty_like(x)
@@ -95,6 +95,12 @@ def selective_state_update(
     A_f = A.float()
     D_f = None if D is None else D.float()
     bias_f = None if dt_bias is None else dt_bias.float()
+    fixed_specialized_mtp = (
+        fixed
+        and cache_steps is not None
+        and cache_steps >= 1
+        and algorithm in {"horizontal", "vertical"}
+    )
 
     for row, begin, end in bounds:
         length = end - begin
@@ -102,7 +108,10 @@ def selective_state_update(
             continue
         accepted = int(num_accepted_tokens[row].item()) if num_accepted_tokens is not None else 1
         initial_token = max(accepted - 1, 0)
-        source_slot = _index(state_batch_indices, row, initial_token, row)
+        if fixed_specialized_mtp and state_batch_indices is not None:
+            source_slot = int(state_batch_indices.reshape(-1)[row].item())
+        else:
+            source_slot = _index(state_batch_indices, row, initial_token, row)
         is_pad = source_slot == pad_slot_id
         if is_pad:
             current = torch.zeros_like(state[0], dtype=torch.float32)
@@ -144,11 +153,7 @@ def selective_state_update(
             output_t.copy_(output_value.to(output_t.dtype))
 
             destination_slot = -1
-            if dst_state_batch_indices is not None:
-                destination_slot = _index(dst_state_batch_indices, row, local_token, -1)
-                destination = state
-                destination_scales = state_scale
-            elif intermediate_states_buffer is not None:
+            if intermediate_states_buffer is not None:
                 cache_row = (
                     int(intermediate_state_indices[row].item())
                     if intermediate_state_indices is not None
@@ -163,6 +168,15 @@ def selective_state_update(
                     if intermediate_state_scales is None
                     else intermediate_state_scales.view(-1, *intermediate_state_scales.shape[2:])
                 )
+            elif fixed_specialized_mtp:
+                if local_token == length - 1 and not disable_state_update:
+                    destination_slot = source_slot
+                    destination = state
+                    destination_scales = state_scale
+            elif dst_state_batch_indices is not None:
+                destination_slot = _index(dst_state_batch_indices, row, local_token, -1)
+                destination = state
+                destination_scales = state_scale
             elif local_token == length - 1 and not disable_state_update:
                 destination_slot = source_slot
                 destination = state

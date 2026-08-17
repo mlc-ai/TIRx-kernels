@@ -1614,6 +1614,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     d_weight = d_base.as_strided((nheads, dim), (1, 0))
     bias_base = torch.rand((nheads,), dtype=weight_dtype, device=device, generator=generator) - 4.0
     dt_bias = bias_base.as_strided((nheads, dim), (1, 0))
+    if not bool(kwargs.get("dt_softplus", False)):
+        # Without softplus, dt + bias is already a conditioned positive step.
+        dt_base.copy_(-bias_base + 0.125)
     z = torch.randn_like(x) if bool(kwargs.get("has_z", False)) else None
 
     if bool(kwargs.get("shared_state_slot", False)):

@@ -998,7 +998,7 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
         read_indices=case["read_indices"],
         write_indices=case["read_indices"] if same_pool else case["write_indices"],
         intermediate_states=case["source_intermediate"] if cache else None,
-        disable_state_update=bool(config.get("disable_state_update", False)),
+        disable_state_update=bool(config.get("disable_state_update", False)) or cache,
         use_qk_l2norm=bool(config.get("use_qk_l2norm", True)),
         scale=SCALE,
         output=case["source_output"],

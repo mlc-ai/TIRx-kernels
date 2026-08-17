@@ -99,7 +99,6 @@ def gated_delta_rule_decode(
                 if (
                     token + 1 == phase_a
                     and not disable_state_update
-                    and intermediate_states is None
                     and (not negative_read_write_are_padding or bool(valid_writes[row]))
                 ):
                     state_pool[write_slots[row]].copy_(current[row].to(state_pool.dtype))
@@ -116,7 +115,6 @@ def gated_delta_rule_decode(
 
         if (
             not disable_state_update
-            and intermediate_states is None
             and recovery_steps == 0
             and not fused_accepted_steps
             and not (ssm_state_indices is not None and torch.equal(read_indices, write_indices))
@@ -142,7 +140,7 @@ def gated_delta_rule_prefill(
     final_state: torch.Tensor | None = None,
     state_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Ragged prefill recurrence with state stored as ``[head, K, V]``."""
+    """Ragged prefill recurrence with state stored as ``[head, V, K]``."""
 
     num_sequences = cu_seqlens.numel() - 1
     num_state_heads = alpha.shape[1]
@@ -168,7 +166,7 @@ def gated_delta_rule_prefill(
         state_slot = int(state_indices[sequence].item()) if state_indices is not None else sequence
         if initial_state is None:
             state = torch.zeros(
-                (num_state_heads, k.shape[-1], v.shape[-1]), dtype=torch.float32, device=q.device
+                (num_state_heads, v.shape[-1], k.shape[-1]), dtype=torch.float32, device=q.device
             )
             state_dtype = torch.float32
         else:
@@ -177,10 +175,10 @@ def gated_delta_rule_prefill(
 
         for token in range(begin, end):
             state = state * alpha[token].float()[:, None, None]
-            residual = v_f[token] - torch.einsum("hk,hkv->hv", k_f[token], state)
+            residual = v_f[token] - torch.einsum("hvk,hk->hv", state, k_f[token])
             residual = residual * beta[token].float()[:, None]
-            state = state + k_f[token].unsqueeze(-1) * residual.unsqueeze(-2)
-            output[token].copy_(torch.einsum("hk,hkv->hv", q_f[token], state).to(output.dtype))
+            state = state + residual.unsqueeze(-1) * k_f[token].unsqueeze(-2)
+            output[token].copy_(torch.einsum("hvk,hk->hv", state, q_f[token]).to(output.dtype))
         if final_state is not None:
             final_state[state_slot].copy_(state.to(final_state.dtype))
     return output

@@ -941,7 +941,7 @@ BENCH_CONFIGS = _build_bench_configs()
 
 
 # ---------------------------------------------------------------------------
-# Data preparation and the FlashInfer reference path.
+# Data preparation, in-tree correctness oracle, and FlashInfer benchmark reference.
 # ---------------------------------------------------------------------------
 def _torch_dtype(dtype: str):
     import torch
@@ -1165,17 +1165,13 @@ def _assert_device_matches_compile_profile() -> None:
 
 
 def run_test(**config):
-    """Compile, launch, and validate one config against the FlashInfer source."""
+    """Compile, launch, and validate one config with an in-tree Torch oracle."""
     import unittest
 
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
-    try:
-        import flashinfer  # noqa: F401
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"flashinfer unavailable: {exc}") from exc
     if not torch.cuda.is_available():  # pragma: no cover - environment dependent
         raise unittest.SkipTest("CUDA device unavailable")
 
@@ -1192,17 +1188,19 @@ def run_test(**config):
     )
 
     data = prepare_data(**cfg)
-    ref_out = _alloc_outputs(cfg)
-    run_reference(cfg, data, ref_out)
-
-    assert_reference_is_top_k(cfg, data, ref_out)
-
     ex = compile_kernel(get_kernel(**cfg))
     tirx_out = _alloc_outputs(cfg)
     _launch_tirx(ex, cfg, data, tirx_out)
     torch.cuda.synchronize()
+    assert_result_is_top_k(cfg, data, tirx_out)
 
-    _compare(cfg, data, ref_out, tirx_out)
+    if cfg["deterministic"]:
+        repeated = _alloc_outputs(cfg)
+        _launch_tirx(ex, cfg, data, repeated)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(repeated["indices"], tirx_out["indices"], rtol=0, atol=0)
+        if cfg["mode"] == "basic":
+            torch.testing.assert_close(repeated["values"], tirx_out["values"], rtol=0, atol=0)
 
 
 def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -1308,43 +1306,12 @@ def _selected_values(cfg: dict[str, Any], data: dict[str, Any], out_indices):
     return torch.sort(vals, dim=-1, descending=True).values
 
 
-def _compare(
-    cfg: dict[str, Any], data: dict[str, Any], ref: dict[str, Any], got: dict[str, Any]
+def assert_result_is_top_k(
+    cfg: dict[str, Any], data: dict[str, Any], result: dict[str, Any]
 ) -> None:
-    """Compare a TIRx launch against the FlashInfer launch.
-
-    Ties make the selected *index set* ambiguous, so the criterion is the
-    multiset of selected score values, which every valid top-k shares.  For
-    deterministic configs both sides run the same fixed-order collect, so the
-    raw outputs must additionally match element for element.
-    """
+    """Validate one launch against Torch's tie-robust top-k value multiset."""
     import torch
 
-    if cfg["deterministic"]:
-        torch.testing.assert_close(got["indices"], ref["indices"], rtol=0, atol=0)
-        if cfg["mode"] == "basic":
-            torch.testing.assert_close(got["values"], ref["values"], rtol=0, atol=0)
-        return
-
-    ref_vals = _selected_values(cfg, data, ref["indices"])
-    got_vals = _selected_values(cfg, data, got["indices"])
-    torch.testing.assert_close(got_vals, ref_vals, rtol=0, atol=0)
-    if cfg["mode"] == "basic":
-        ref_out = torch.sort(ref["values"].to(torch.float32), dim=-1, descending=True).values
-        got_out = torch.sort(got["values"].to(torch.float32), dim=-1, descending=True).values
-        torch.testing.assert_close(got_out, ref_out, rtol=0, atol=0)
-        # The emitted values must be the scores at the emitted indices.
-        torch.testing.assert_close(got_out, got_vals, rtol=0, atol=0)
-
-
-def assert_reference_is_top_k(
-    cfg: dict[str, Any], data: dict[str, Any], ref: dict[str, Any]
-) -> None:
-    """Independent oracle on the reference launch itself (tie-robust)."""
-    import torch
-
-    if cfg["trivial"]:
-        return
     scores = data["scores"].to(torch.float32)
     row_starts = data.get("row_starts")
     lengths = data.get("lengths")
@@ -1368,8 +1335,16 @@ def assert_reference_is_top_k(
         del k
     expect = torch.topk(window, cfg["k"], dim=-1).values
     expect = torch.sort(expect, dim=-1, descending=True).values
-    actual = _selected_values(cfg, data, ref["indices"])
+    actual = _selected_values(cfg, data, result["indices"])
     torch.testing.assert_close(actual, expect, rtol=0, atol=0)
+    local_indices, padding = _row_local_indices(cfg, data, result["indices"])
+    for row in range(cfg["num_rows"]):
+        selected = local_indices[row, ~padding[row]]
+        if selected.unique().numel() != selected.numel():
+            raise AssertionError(f"row {row} contains duplicate top-k indices")
+    if cfg["mode"] == "basic":
+        emitted = torch.sort(result["values"].to(torch.float32), dim=-1, descending=True).values
+        torch.testing.assert_close(emitted, actual, rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------

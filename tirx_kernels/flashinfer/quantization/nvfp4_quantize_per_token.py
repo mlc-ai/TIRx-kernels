@@ -29,9 +29,11 @@ helpers live in ``tirx_kernels/flashinfer/utils/fp_quant.py``.
 from typing import Any
 
 from tirx_kernels._torch_quant import (
-    nvfp4_per_token_scaled_values,
+    nvfp4_per_token_scale_values,
+    quantize_e2m1,
     quantize_nvfp4_per_token,
     unpack_e2m1,
+    unswizzle_sf,
 )
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_8,
@@ -304,19 +306,41 @@ def run_test(
     ex(a.view(-1), out_tirx.view(-1), sf_tirx, pts_tirx, m, gs_inv)
     torch.cuda.synchronize()
 
-    ref_fp4, ref_sf, ref_pts = quantize_nvfp4_per_token(a, gs_inv, sf_layout=sf_layout)
-    torch.testing.assert_close(sf_tirx, ref_sf, rtol=0, atol=0)
+    _, ref_sf, ref_pts = quantize_nvfp4_per_token(a, gs_inv, sf_layout=sf_layout)
+    exact_sf = sf_tirx == ref_sf
+    if not torch.all(exact_sf):
+        actual_value = sf_tirx.contiguous().view(torch.float8_e4m3fn).float()
+        reference_value = ref_sf.contiguous().view(torch.float8_e4m3fn).float()
+        adjacent = sf_tirx.to(torch.int16).sub(ref_sf.to(torch.int16)).abs() == 1
+        midpoint = (actual_value + reference_value) * 0.5
+        unquantized_sf = nvfp4_per_token_scale_values(a, gs_inv, sf_layout=sf_layout)
+        epsilon = 4 * torch.finfo(torch.float32).eps
+        near_midpoint = torch.isclose(unquantized_sf, midpoint, rtol=epsilon, atol=epsilon)
+        invalid_sf = ~exact_sf & ~(adjacent & near_midpoint)
+        if torch.any(invalid_sf):
+            count = int(invalid_sf.sum())
+            first = invalid_sf.nonzero()[0].tolist()
+            raise AssertionError(
+                f"{count} E4M3 scale factors differ outside an rcp.approx "
+                f"rounding boundary; first mismatch at {first}"
+            )
     torch.testing.assert_close(pts_tirx, ref_pts, rtol=0, atol=0)
 
     actual_codes = unpack_e2m1(out_tirx)
-    reference_codes = unpack_e2m1(ref_fp4)
+    logical_sf = unswizzle_sf(sf_tirx, rows=m, columns=k // NVFP4_SF_VEC_SIZE, layout=sf_layout)
+    decoded_sf = logical_sf.view(torch.float8_e4m3fn).float()
+    encode_scale = torch.where(ref_pts != 0, ref_pts.reciprocal(), 0.0)
+    output_scale = torch.where(decoded_sf != 0, encode_scale.unsqueeze(1) / decoded_sf, 0.0)
+    scaled = a.float().view(m, k // NVFP4_SF_VEC_SIZE, NVFP4_SF_VEC_SIZE)
+    scaled = (scaled * output_scale.unsqueeze(-1)).view_as(a)
+    reference_codes = quantize_e2m1(scaled)
     exact = actual_codes == reference_codes
     if not torch.all(exact):
         # The kernel deliberately uses rcp.approx.ftz for the encode and
         # output scales.  Exact Torch division can land a few FP32 ulps on the
         # other side of an E2M1 midpoint, so accept only the adjacent code at
         # such a boundary; signs and all non-boundary codes remain bit-exact.
-        scaled = nvfp4_per_token_scaled_values(a, gs_inv).abs()
+        scaled = scaled.abs()
         actual_magnitude = actual_codes & 7
         reference_magnitude = reference_codes & 7
         lower = torch.minimum(actual_magnitude, reference_magnitude).to(torch.long)

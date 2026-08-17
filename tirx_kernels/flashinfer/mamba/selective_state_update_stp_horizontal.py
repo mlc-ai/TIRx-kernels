@@ -1150,6 +1150,7 @@ def _run_reference(case: dict[str, Any], oracle=None) -> torch.Tensor:
             case["dst_indices"] if bool(kwargs.get("has_dst_indices", False)) else None
         ),
         pad_slot_id=case["pad_slot_id"],
+        state_scale=None,
         out=source_out,
         disable_state_update=not bool(kwargs.get("update_state", True)),
         rand_seed=case["seed"] if spec["PHILOX_ROUNDS"] else None,

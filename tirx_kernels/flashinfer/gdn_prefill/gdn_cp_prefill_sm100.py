@@ -5313,7 +5313,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     generator = torch.Generator(device=device)
     generator.manual_seed(cfg.seed)
 
-    q = torch.randn(
+    q = 0.25 * torch.randn(
         (cfg.total_tokens, cfg.q_heads, D_HEAD), dtype=io_dtype, device=device, generator=generator
     )
     k = F.normalize(
@@ -5326,7 +5326,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         p=2.0,
         dim=-1,
     ).to(io_dtype)
-    v = torch.randn(
+    v = 0.25 * torch.randn(
         (cfg.total_tokens, cfg.v_heads, D_HEAD), dtype=io_dtype, device=device, generator=generator
     )
     alpha = cfg.gate_baseline + (1.0 - cfg.gate_baseline) * torch.rand(

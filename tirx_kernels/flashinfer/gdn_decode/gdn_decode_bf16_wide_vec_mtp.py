@@ -1352,6 +1352,10 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
         case["accepted_steps"] if config.get("per_request_accepted_steps", False) else None
     )
     scatter = case["ssm_state_indices"] if config.get("per_token_pool_scatter", False) else None
+    cache_intermediate_states = bool(config.get("cache_intermediate_states", False))
+    effective_disable_state_update = bool(config.get("disable_state_update", False)) or (
+        cache_intermediate_states
+    )
     return gated_delta_rule_decode(
         A_log=case["A_log"],
         a=case["a"],
@@ -1366,13 +1370,11 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
             case["read_indices"] if bool(config.get("same_pool", True)) else case["write_indices"]
         ),
         intermediate_states=(
-            case["source_intermediate"]
-            if bool(config.get("cache_intermediate_states", False))
-            else None
+            case["source_intermediate"] if cache_intermediate_states else None
         ),
         accepted_steps=accepted_steps,
         ssm_state_indices=scatter,
-        disable_state_update=bool(config.get("disable_state_update", False)),
+        disable_state_update=effective_disable_state_update,
         use_qk_l2norm=bool(config.get("use_qk_l2norm", True)),
         scale=SCALE,
         output=case["source_output"],
@@ -1381,7 +1383,7 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
         fused_accepted_steps=(
             accepted_steps is not None
             and not bool(config.get("disable_output", False))
-            and not bool(config.get("disable_state_update", False))
+            and not effective_disable_state_update
             and scatter is None
         ),
     )

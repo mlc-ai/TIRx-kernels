@@ -454,7 +454,9 @@ def _bench_megamoe_mode(
     """Run the exact benchmark protocol used by latest DeepGEMM MegaMoE."""
     if funcs.keys() != kernel_names.keys():
         raise ValueError("MegaMoE benchmark funcs and kernel_names must have identical keys")
-    num_tests = int(inspect.signature(bench_kineto).parameters["num_tests"].default)
+    timer_parameters = inspect.signature(bench_kineto).parameters
+    num_tests = int(timer_parameters["num_tests"].default)
+    timer_accepts_barrier = "barrier" in timer_parameters
     round_samples: dict[str, list[float]] = {name: [] for name in funcs}
     round_orders: list[list[str]] = []
     items = list(funcs.items())
@@ -469,9 +471,14 @@ def _bench_megamoe_mode(
                 if impl_idx > 0:
                     between_impls()
                 fn()
+            if not timer_accepts_barrier:
+                barrier()
 
         round_kernel_names = tuple(kernel_names[name] for name, _ in round_items)
-        round_times = bench_kineto(run_all, round_kernel_names, barrier=barrier)
+        if timer_accepts_barrier:
+            round_times = bench_kineto(run_all, round_kernel_names, barrier=barrier)
+        else:
+            round_times = bench_kineto(run_all, round_kernel_names)
         for (name, _), seconds in zip(round_items, round_times):
             seconds = float(seconds)
             if not math.isfinite(seconds) or seconds <= 0:

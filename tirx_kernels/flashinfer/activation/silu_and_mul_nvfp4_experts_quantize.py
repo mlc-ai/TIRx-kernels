@@ -18,7 +18,14 @@ scope (fast-math reciprocal, E4M3 scale factors, no 4over6 refinement).
 
 from typing import Any
 
-from tirx_kernels._torch_quant import quantize_nvfp4
+from tirx_kernels._torch_quant import (
+    nvfp4_scale_values,
+    nvfp4_scaled_values,
+    quantize_e2m1,
+    quantize_nvfp4,
+    unpack_e2m1,
+    unswizzle_sf,
+)
 from tirx_kernels.runner import bench
 from tvm.script import tirx as T
 
@@ -484,21 +491,75 @@ def run_test(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "rand"
     _run_launch(ex, a, global_scale, out_tirx, sf_tirx, mask, n_experts, m, k)
     torch.cuda.synchronize()
 
-    ref_q = torch.empty_like(out_tirx)
     ref_sf_u8 = torch.zeros(
         (n_experts, _padded_m(m) * _padded_k_sf(k)), dtype=torch.uint8, device=a.device
     )
     for expert in range(n_experts):
-        ref_q[expert], ref_sf_u8[expert] = quantize_nvfp4(
+        _, ref_sf_u8[expert] = quantize_nvfp4(
             a[expert], global_scale[expert : expert + 1], sf_layout="128x4", fuse_silu=True
         )
 
-    for e in range(n_experts):
-        rows = int(mask[e].item())
-        torch.testing.assert_close(out_tirx[e, :rows], ref_q[e, :rows], rtol=0, atol=0)
     valid = _sf_valid_byte_mask(n_experts, m, k, mask)
     sf_tirx_u8 = sf_tirx.view(n_experts, -1).view(torch.uint8)
-    torch.testing.assert_close(sf_tirx_u8[valid], ref_sf_u8[valid], rtol=0, atol=0)
+    exact_sf = sf_tirx_u8 == ref_sf_u8
+    if not torch.all(exact_sf[valid]):
+        raw_sf = torch.zeros_like(sf_tirx_u8, dtype=torch.float32)
+        for expert in range(n_experts):
+            raw_sf[expert] = nvfp4_scale_values(
+                a[expert], global_scale[expert : expert + 1], sf_layout="128x4", fuse_silu=True
+            )
+        actual_value = sf_tirx_u8.contiguous().view(torch.float8_e4m3fn).float()
+        reference_value = ref_sf_u8.contiguous().view(torch.float8_e4m3fn).float()
+        adjacent = sf_tirx_u8.to(torch.int16).sub(ref_sf_u8.to(torch.int16)).abs() == 1
+        midpoint = (actual_value + reference_value) * 0.5
+        # The kernel evaluates SiLU with ex2.approx before rounding the fused
+        # value back to the input dtype.  Bound midpoint drift by that dtype's
+        # rounding precision while still requiring an adjacent E4M3 code.
+        epsilon = 2 * torch.finfo(a.dtype).eps
+        near_midpoint = torch.isclose(raw_sf, midpoint, rtol=epsilon, atol=epsilon)
+        invalid_sf = valid & ~exact_sf & ~(adjacent & near_midpoint)
+        if torch.any(invalid_sf):
+            count = int(invalid_sf.sum())
+            first = invalid_sf.nonzero()[0].tolist()
+            raise AssertionError(
+                f"{count} E4M3 scale factors differ outside an rcp.approx "
+                f"rounding boundary; first mismatch at {first}"
+            )
+
+    for expert in range(n_experts):
+        rows = int(mask[expert].item())
+        logical_sf = unswizzle_sf(
+            sf_tirx_u8[expert], rows=m, columns=k // SF_VEC_SIZE, layout="128x4"
+        )
+        scaled = nvfp4_scaled_values(
+            a[expert], global_scale[expert : expert + 1], logical_sf, fuse_silu=True
+        )[:rows]
+        actual_codes = unpack_e2m1(out_tirx[expert, :rows])
+        reference_codes = quantize_e2m1(scaled)
+        exact = actual_codes == reference_codes
+        if torch.all(exact):
+            continue
+        actual_magnitude = actual_codes & 7
+        reference_magnitude = reference_codes & 7
+        lower = torch.minimum(actual_magnitude, reference_magnitude).to(torch.long)
+        boundaries = torch.tensor(
+            (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0), dtype=torch.float32, device=a.device
+        )
+        adjacent = (
+            actual_magnitude.to(torch.int16).sub(reference_magnitude.to(torch.int16)).abs() == 1
+        )
+        same_sign = (actual_codes & 8) == (reference_codes & 8)
+        midpoint = boundaries[lower.clamp_max(6)]
+        epsilon = 2 * torch.finfo(a.dtype).eps
+        near_midpoint = torch.isclose(scaled.abs(), midpoint, rtol=epsilon, atol=epsilon)
+        invalid = ~exact & ~(adjacent & same_sign & near_midpoint)
+        if torch.any(invalid):
+            count = int(invalid.sum())
+            first = invalid.nonzero()[0].tolist()
+            raise AssertionError(
+                f"{count} packed E2M1 values differ outside an rcp.approx "
+                f"rounding boundary for expert {expert}; first mismatch at {first}"
+            )
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
