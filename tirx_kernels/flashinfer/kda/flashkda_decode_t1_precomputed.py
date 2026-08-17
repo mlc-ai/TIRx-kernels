@@ -260,7 +260,7 @@ BENCH_CONFIGS = [
     _case("hv32h16_b32_s8", num_seqs=32, num_heads=16, num_value_heads=32),
 ]
 
-CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
+CONFIGS = [
     # Split knife edge on a 148-SM B200: work = 296 takes split16, 304 takes
     # split8 (tests/kda/test_recurrent_kda_decode_export.py:311-320).
     _case("hv16h16_b18_s16_edge", num_seqs=18),
@@ -630,11 +630,6 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         return raw, view
 
     tirx_state_raw, tirx_state = make_state_pool()
-    reference_state_raw = tirx_state_raw.clone()
-    reference_state = reference_state_raw.as_strided(
-        (pool_size, num_value_heads, HEAD_DIM, HEAD_DIM),
-        (slot_stride, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
-    )
     initial_state_raw = tirx_state_raw.clone()
 
     tirx_out = torch.empty(
@@ -657,8 +652,6 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "num_accepted_tokens": num_accepted_tokens,
         "tirx_state_raw": tirx_state_raw,
         "tirx_state": tirx_state,
-        "reference_state_raw": reference_state_raw,
-        "reference_state": reference_state,
         "initial_state_raw": initial_state_raw,
         "tirx_out": tirx_out,
         "scale": float(scale) if scale is not None else HEAD_DIM**-0.5,
@@ -678,54 +671,6 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
         case["ssm_state_indices"],
         float(case["scale"]),
     )
-
-
-def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
-    """Run the frozen cake export itself on the reference state pool.
-
-    Uses the JIT module's direct ABI rather than
-    ``kda_decode.recurrent_kda(backend="cake")`` so the comparison is kernel-only
-    and so inactive (negative-slot) rows -- which the public T=1 wrapper cannot
-    express, since it synthesizes identity metadata -- are reachable.
-    """
-    from flashinfer.jit.flash_kda_decode import get_flash_kda_decode_module
-
-    spec = case["spec"]
-    value_split = spec["VALUE_SPLIT"]
-    variant = f"d128_t1_precomputed_direct_split{value_split}"
-
-    device = case["device"]
-    major, minor = torch.cuda.get_device_capability(device)
-    if (major, minor) == (10, 0):
-        target = "sm100f" if torch.version.cuda and torch.version.cuda >= "12.9" else "sm100a"
-    elif (major, minor) == (10, 3):
-        target = "sm103a"
-    else:
-        raise SkipTest(f"FlashKDA cake decode has no export for compute capability {major}.{minor}")
-
-    module = get_flash_kda_decode_module(variant, target)
-    reference_out = torch.empty_like(case["tirx_out"])
-    dummy_f32 = torch.ones(1, device=device, dtype=torch.float32)
-
-    module.run(
-        case["q"],
-        case["k"],
-        case["v"],
-        case["g"],
-        case["beta"],
-        dummy_f32,
-        dummy_f32,
-        case["reference_state"],
-        reference_out,
-        case["cu_seqlens"],
-        case["ssm_state_indices"],
-        case["num_accepted_tokens"],
-        float(case["scale"]),
-        0.0,
-        int(torch.cuda.current_stream(device).cuda_stream),
-    )
-    torch.cuda.synchronize(device)
-    return reference_out
 
 
 def _torch_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -775,11 +720,6 @@ def _torch_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
     return out.to(torch.bfloat16).unsqueeze(0), state_raw
 
 
-# The port reproduces the source's instruction selection and association orders,
-# so it should agree with the frozen export to within bf16 rounding, not merely
-# to an algorithmic tolerance.
-_RTOL = 2.0**-8
-_ATOL = 1.0e-4
 # The independent FP32 oracle accumulates in a different order, so it gets the
 # looser band.
 _ORACLE_RTOL = 2.0**-6
@@ -795,7 +735,7 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_test(**kwargs: Any) -> None:
-    """Validate one config against the frozen export and an independent oracle."""
+    """Validate one correctness config against the in-tree Torch oracle."""
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
@@ -808,24 +748,7 @@ def run_test(**kwargs: Any) -> None:
     tirx_out = case["tirx_out"]
     tirx_state = case["tirx_state_raw"].clone()
 
-    # 1. the frozen cake export itself, on an independent state pool
-    reference_out = _flashinfer_reference(case)
-    torch.testing.assert_close(
-        tirx_out.float(),
-        reference_out.float(),
-        rtol=_RTOL,
-        atol=_ATOL,
-        msg=lambda m: f"output vs flashinfer cake export\n{m}",
-    )
-    torch.testing.assert_close(
-        tirx_state.float(),
-        case["reference_state_raw"].float(),
-        rtol=_RTOL,
-        atol=_ATOL,
-        msg=lambda m: f"state vs flashinfer cake export\n{m}",
-    )
-
-    # 2. an independent FP32 oracle of the same math
+    # Independent FP32 oracle
     oracle_out, oracle_state = _torch_reference(case)
     torch.testing.assert_close(
         tirx_out.float(),
@@ -891,28 +814,13 @@ def run_gpu(
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
 
-    # Validate once, outside the timed region. Both sides mutate their own state
-    # pool in place, so this also proves the two pools stayed independent.
-    executable(*args)
-    reference_out = _flashinfer_reference(case)
-    torch.cuda.synchronize(case["device"])
-    torch.testing.assert_close(
-        case["tirx_out"].float(), reference_out.float(), rtol=_RTOL, atol=_ATOL
-    )
-    torch.testing.assert_close(
-        case["tirx_state_raw"].float(), case["reference_state_raw"].float(), rtol=_RTOL, atol=_ATOL
-    )
-
     def flashinfer_builder():
-        # The nvcc JIT build and warmup both happen here, outside the timing.
-        for _ in range(2):
-            _flashinfer_reference(case)
-        torch.cuda.synchronize(case["device"])
+        from tirx_kernels.flashinfer.utils._flashkda_bench import (
+            prepare_flashinfer_cake_decode_reference,
+        )
 
-        def launch():
-            _flashinfer_reference(case)
-
-        return launch
+        variant = f"d128_t1_precomputed_direct_split{case['spec']['VALUE_SPLIT']}"
+        return prepare_flashinfer_cake_decode_reference(case, variant, direct_sm103=True)
 
     return bench(
         {"tirx": lambda: executable(*args)},

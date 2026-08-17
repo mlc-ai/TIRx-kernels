@@ -792,7 +792,12 @@ class _PreparedAttempt:
 
 
 def _prepared_child_command(
-    workload: dict, *, control_fd: int, rounds: int, cooldown: float
+    workload: dict,
+    *,
+    control_fd: int,
+    rounds: int,
+    cooldown: float,
+    with_references: bool,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -817,6 +822,8 @@ def _prepared_child_command(
         command += ["--repeat", str(workload["repeat"])]
     if workload.get("timer") is not None:
         command += ["--timer", workload["timer"]]
+    if with_references:
+        command.append("--with-references")
     return command
 
 
@@ -828,6 +835,7 @@ def _spawn_prepared_attempt(
     rounds: int,
     cooldown: float,
     compile_profile: dict,
+    with_references: bool,
 ) -> _PreparedAttempt:
     """Spawn a GPU-unbound child that immediately begins CPU prepare."""
     parent_control, child_control = socket.socketpair()
@@ -855,7 +863,11 @@ def _spawn_prepared_attempt(
     cache_dir.mkdir(parents=True, exist_ok=True)
     env["TIRX_BENCH_CACHE_DIR"] = str(cache_dir)
     command = _prepared_child_command(
-        workload, control_fd=child_control.fileno(), rounds=rounds, cooldown=cooldown
+        workload,
+        control_fd=child_control.fileno(),
+        rounds=rounds,
+        cooldown=cooldown,
+        with_references=with_references,
     )
     process_started = time.time()
     try:
@@ -1261,6 +1273,7 @@ def write_run(
     stamp: str,
     results: list[dict],
     label: str | None,
+    references_enabled: bool,
     probe: dict | None = None,
     pipeline: dict | None = None,
 ) -> Path:
@@ -1269,9 +1282,10 @@ def write_run(
     payload = {
         "timestamp": stamp,
         "label": label,
+        "references_enabled": references_enabled,
         "git": collect_repo_git(),
         "kernel_tree": collect_kernel_fingerprint(),
-        "baselines": collect_baseline_provenance(),
+        "baselines": collect_baseline_provenance() if references_enabled else {},
         "probe": probe or {},
         "pipeline": pipeline or {},
         "results": results,
@@ -1447,7 +1461,9 @@ def load_baseline(path=None):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-def _finalize_bench_record(row: dict, *, rounds: int, cooldown: float) -> None:
+def _finalize_bench_record(
+    row: dict, *, rounds: int, cooldown: float, references_enabled: bool
+) -> None:
     """Validate in-bench round samples and write aggregated impl times (microseconds)."""
     required_fields = ("round_samples", "errors", "timer", "benchmark_protocol")
     missing_fields = [field for field in required_fields if field not in row]
@@ -1503,6 +1519,15 @@ def _finalize_bench_record(row: dict, *, rounds: int, cooldown: float) -> None:
         row["status"] = "FAIL"
         row["error"] = "bench result field 'round_samples' must be a non-empty mapping"
         return
+    if not references_enabled:
+        external_impls = [name for name in samples if name not in our_impls(samples)]
+        if external_impls:
+            row["status"] = "FAIL"
+            row["error"] = (
+                "reference-disabled benchmark reported external implementation(s): "
+                f"{external_impls}"
+            )
+            return
     bad = {
         impl: len(vals) if isinstance(vals, list) else type(vals).__name__
         for impl, vals in samples.items()
@@ -1565,6 +1590,7 @@ def run_scheduled_jobs(
     rounds: int,
     cooldown: float,
     compile_profile: dict,
+    with_references: bool,
     max_prepare_processes: int | None = None,
     ready_backlog: int | None = None,
 ) -> tuple[list[dict], list[dict[str, Any]], dict]:
@@ -1681,6 +1707,7 @@ def run_scheduled_jobs(
                 rounds=rounds,
                 cooldown=cooldown,
                 compile_profile=compile_profile,
+                with_references=with_references,
             )
             active[item.control.fileno()] = item
             log(f"[bench-suite] {now_iso()} prepare pid={item.process.pid} START {item.label}")
@@ -1876,7 +1903,12 @@ def run_scheduled_jobs(
                         if status in ("SKIP", "FAIL"):
                             record.update(result)
                         else:
-                            _finalize_bench_record(result, rounds=rounds, cooldown=cooldown)
+                            _finalize_bench_record(
+                                result,
+                                rounds=rounds,
+                                cooldown=cooldown,
+                                references_enabled=with_references,
+                            )
                             record.update(result)
                         record.setdefault("label", item.workload["config"])
                         record["finished_at"] = now_iso()
@@ -2005,6 +2037,11 @@ def main() -> None:
         help="Free-form label for this run (default: git short sha)",
     )
     ap.add_argument("--no-report", action="store_true", help="Skip regression report generation")
+    ap.add_argument(
+        "--with-references",
+        action="store_true",
+        help="Import and benchmark external reference implementations (off by default)",
+    )
     ap.add_argument(
         "--no-probe",
         action="store_true",
@@ -2227,6 +2264,7 @@ def main() -> None:
         rounds=args.rounds,
         cooldown=args.cooldown,
         compile_profile=compile_profile,
+        with_references=args.with_references,
         max_prepare_processes=args.max_prepare_processes,
         ready_backlog=args.ready_backlog,
     )
@@ -2243,7 +2281,15 @@ def main() -> None:
 
     results.sort(key=lambda r: (r["kernel"], r.get("label") or r.get("config")))
     probe_meta = {"enabled": not args.no_probe, "usable": sorted(usable), "failed": probe_failures}
-    run_path = write_run(out_dir, stamp, results, label, probe=probe_meta, pipeline=pipeline_meta)
+    run_path = write_run(
+        out_dir,
+        stamp,
+        results,
+        label,
+        args.with_references,
+        probe=probe_meta,
+        pipeline=pipeline_meta,
+    )
     current = json.loads(run_path.read_text())
 
     latest = out_dir / "latest.json"
@@ -2266,6 +2312,13 @@ def main() -> None:
         sys.exit(1)
 
     if args.no_report:
+        return
+
+    if not args.with_references:
+        print(
+            "[bench-suite] references are disabled; skipping the reference-ratio "
+            "regression report (rerun with --with-references to compare ratios)"
+        )
         return
 
     # Single pinned baseline (baseline.json). Promote a fresh run over it via

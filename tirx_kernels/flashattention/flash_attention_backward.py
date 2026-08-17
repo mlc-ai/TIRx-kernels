@@ -1934,7 +1934,7 @@ KERNEL_META = {
     "compute_capability": 10,
 }
 
-CONFIGS = [
+BENCH_CONFIGS = [
     {
         "batch_size": batch_size,
         "seq_len": seq_len,
@@ -1960,6 +1960,20 @@ CONFIGS = [
     )
 ]
 
+# Correctness uses small semantic cases; production shapes remain in
+# BENCH_CONFIGS and never construct an O(S²) oracle.
+CONFIGS = [
+    {
+        "batch_size": 1,
+        "seq_len": seq_len,
+        "num_heads": 16,
+        "head_dim": 128,
+        "is_causal": is_causal,
+        "label": f"b1_s{seq_len}_h16_{'causal' if is_causal else 'noncausal'}",
+    }
+    for seq_len, is_causal in ((256, True), (256, False))
+]
+
 
 def get_kernel(
     batch_size: int,
@@ -1978,6 +1992,63 @@ def get_kernel(
         causal=is_causal,
         attention_scale=1.0 / math.sqrt(head_dim),
     )
+
+
+def _prepare_workload(
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int,
+    is_causal: bool,
+    *,
+    compute_reference: bool,
+):
+    """Create backward inputs and, for small tests, a Torch math oracle."""
+    torch.manual_seed(0)
+    shape = (batch_size, seq_len, num_heads, head_dim)
+    q = (torch.randn(shape, dtype=torch.float32, device="cuda") * 0.5).half()
+    k = (torch.randn(shape, dtype=torch.float32, device="cuda") * 0.5).half()
+    v = (torch.randn(shape, dtype=torch.float32, device="cuda") * 0.5).half()
+    dout = (torch.randn(shape, dtype=torch.float32, device="cuda") * 0.25).half()
+    scale = 1.0 / math.sqrt(head_dim)
+    expected = None
+    if compute_reference:
+        q_ref = q.float().detach().requires_grad_(True)
+        k_ref = k.float().detach().requires_grad_(True)
+        v_ref = v.float().detach().requires_grad_(True)
+        scores = (
+            torch.matmul(q_ref.transpose(1, 2), k_ref.transpose(1, 2).transpose(-2, -1)) * scale
+        )
+        if is_causal:
+            mask = torch.triu(
+                torch.ones(seq_len, seq_len, dtype=torch.bool, device="cuda"), diagonal=1
+            )
+            scores = scores.masked_fill(mask, float("-inf"))
+        lse = torch.logsumexp(scores, dim=-1)
+        probabilities = torch.softmax(scores, dim=-1)
+        out_ref = torch.matmul(probabilities, v_ref.transpose(1, 2)).transpose(1, 2)
+        expected = torch.autograd.grad(out_ref, (q_ref, k_ref, v_ref), grad_outputs=dout.float())
+        out = out_ref.detach().half().contiguous()
+        lse = lse.detach()
+    else:
+        # Backward timing needs shape-correct saved forward tensors, not a
+        # forward implementation. Values do not alter the instruction path.
+        out = torch.randn(shape, dtype=torch.float16, device="cuda")
+        lse = torch.randn((batch_size, num_heads, seq_len), dtype=torch.float32, device="cuda")
+    data = {
+        "Q": q,
+        "K": k,
+        "V": v,
+        "O": out,
+        "dO": dout,
+        "LSE": lse,
+        "dQ": torch.empty_like(q),
+        "dK": torch.empty_like(k),
+        "dV": torch.empty_like(v),
+        "causal": is_causal,
+        "softmax_scale": scale,
+    }
+    return data, expected
 
 
 def _prepare_official_workload(
@@ -2024,8 +2095,11 @@ def run_test(
     is_causal: bool = False,
     **kwargs,
 ):
-    """Compile the three-kernel pipeline and compare it with current FA4."""
-    data, expected = _prepare_official_workload(batch_size, seq_len, num_heads, head_dim, is_causal)
+    """Compile the three-kernel pipeline and compare it with Torch math."""
+    data, expected = _prepare_workload(
+        batch_size, seq_len, num_heads, head_dim, is_causal, compute_reference=True
+    )
+    assert expected is not None
     setup(data, batch_size, num_heads, seq_len, head_dim)
     torch.cuda.synchronize()
     for name, actual, reference in zip(
@@ -2033,7 +2107,9 @@ def run_test(
     ):
         if not torch.isfinite(actual).all():
             raise AssertionError(f"{name} contains a non-finite value")
-        matched = torch.isclose(actual, reference, rtol=0.1, atol=0.1).float().mean()
+        matched = torch.isclose(
+            actual.float(), reference.float(), rtol=0.1, atol=0.1
+        ).float().mean()
         if matched.item() < 0.995:
             raise AssertionError(f"{name} matched ratio {matched.item():.6f} is below 0.995")
 
@@ -2068,9 +2144,7 @@ def prepare_bench(
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     """Benchmark the full preprocess/core/cast pipeline against current FA4."""
-    from flash_attn.cute.interface import _flash_attn_bwd
-
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     config = {**prepared["config"], **kwargs}
     batch_size = config.pop("batch_size")
@@ -2078,12 +2152,21 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     num_heads = config.pop("num_heads")
     head_dim = config.pop("head_dim")
     is_causal = config.pop("is_causal")
-    data, _ = _prepare_official_workload(batch_size, seq_len, num_heads, head_dim, is_causal)
+    if external_references_enabled():
+        data, _ = _prepare_official_workload(
+            batch_size, seq_len, num_heads, head_dim, is_causal
+        )
+    else:
+        data, _ = _prepare_workload(
+            batch_size, seq_len, num_heads, head_dim, is_causal, compute_reference=False
+        )
     candidate = setup(
         data, batch_size, num_heads, seq_len, head_dim, executables=prepared["executables"]
     )
 
     def official_factory():
+        from flash_attn.cute.interface import _flash_attn_bwd
+
         def run():
             return _flash_attn_bwd(
                 q=data["Q"],

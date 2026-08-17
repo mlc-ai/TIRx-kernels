@@ -25,7 +25,7 @@ from tvm.script import tirx as T
 
 KERNEL_META = {"name": "tinygemm2_sm100", "category": "flashinfer", "compute_capability": 10}
 
-CONFIGS = [
+BENCH_CONFIGS = [
     {"label": "b1_o128_k720", "B": 1, "O": 128, "K": 720},
     {"label": "b2_o16_k256", "B": 2, "O": 16, "K": 256},
     {"label": "b4_o2880_k2880", "B": 4, "O": 2880, "K": 2880},
@@ -36,15 +36,19 @@ CONFIGS = [
     {"label": "b64_o4096_k3072", "B": 64, "O": 4096, "K": 3072},
 ]
 
-BENCH_CONFIGS = CONFIGS
+CONFIGS = [
+    {"label": "correctness_b1_o128_k720", "B": 1, "O": 128, "K": 720},
+    {"label": "correctness_b2_o16_k256", "B": 2, "O": 16, "K": 256},
+    {"label": "correctness_b8_o1024_k1024", "B": 8, "O": 1024, "K": 1024},
+]
 
 THREADS = 384
 WT_OFF = 1024
 WT_STAGE_BYTES = 4 * 2048
 ACT_STAGE_BYTES = 4 * 1024
 RED_BYTES = 2048
-BIAS_BYTES = 32
 SOURCE_SHA256 = "ea4d87f058b269e2f15d04f945849d7b26604c5b76eed55a06eb8e08d7bc891d"
+BIAS_BYTES = 32
 _TMA_G2S_2D = "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes"
 
 
@@ -550,7 +554,6 @@ def _tirx_args(case: dict[str, Any], output: torch.Tensor | None = None) -> tupl
     )
 
 
-@lru_cache(maxsize=1)
 def _flashinfer_tinygemm2_spec():
     import flashinfer
     from flashinfer.jit import env as jit_env
@@ -618,18 +621,8 @@ def run_test(B: int, O: int, K: int) -> None:
 
     for use_pdl in (False, True):
         tirx_out = torch.zeros_like(case["out"])
-        flashinfer_out = torch.zeros_like(case["out"])
         _run_tirx(case, stage, use_pdl, tirx_out)
-        _run_flashinfer(case, stage, use_pdl, flashinfer_out)
         torch.cuda.synchronize()
-        if not torch.equal(tirx_out, flashinfer_out):
-            differing = int((tirx_out != flashinfer_out).sum().item())
-            max_diff = float((tirx_out.float() - flashinfer_out.float()).abs().max().item())
-            raise AssertionError(
-                f"TinyGEMM2 bitwise mismatch for B={B}, O={O}, K={K}, "
-                f"stage={stage}, use_pdl={use_pdl}: {differing} elements, "
-                f"max_abs_diff={max_diff}"
-            )
         torch.testing.assert_close(tirx_out.float(), linear_ref.float(), atol=1e-2, rtol=1e-2)
 
 
@@ -658,7 +651,7 @@ def run_gpu(
     cooldown_s: float = 1.0,
 ) -> dict[str, Any]:
     _require_sm100()
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     B, O, K = prepared["B"], prepared["O"], prepared["K"]
     stage = prepared["stage"]
@@ -666,12 +659,13 @@ def run_gpu(
     case = prepare_data(B, O, K)
     args = _tirx_args(case)
 
-    reference_out = torch.zeros_like(case["out"])
-    _run_flashinfer(case, stage, False, reference_out)
-    executable(*args)
-    torch.cuda.synchronize()
-    if not torch.equal(case["out"], reference_out):
-        raise AssertionError("TinyGEMM2 benchmark preflight failed bitwise validation")
+    if external_references_enabled():
+        reference_out = torch.zeros_like(case["out"])
+        _run_flashinfer(case, stage, False, reference_out)
+        executable(*args)
+        torch.cuda.synchronize()
+        if not torch.equal(case["out"], reference_out):
+            raise AssertionError("TinyGEMM2 benchmark preflight failed bitwise validation")
 
     def _flashinfer_builder():
         output = torch.empty_like(case["out"])

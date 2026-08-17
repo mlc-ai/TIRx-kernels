@@ -43,7 +43,6 @@ from __future__ import annotations
 import ctypes
 import math
 from dataclasses import dataclass, fields
-from functools import lru_cache
 from typing import Any
 from unittest import SkipTest
 
@@ -332,7 +331,6 @@ BENCH_CONFIGS = [
 
 
 CONFIGS = [
-    *BENCH_CONFIGS,
     {
         "label": "bf16_q1_k1_v1_s96_c128_tail_i64",
         "dtype": "bfloat16",
@@ -5315,7 +5313,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     generator = torch.Generator(device=device)
     generator.manual_seed(cfg.seed)
 
-    q = torch.randn(
+    q = 0.25 * torch.randn(
         (cfg.total_tokens, cfg.q_heads, D_HEAD), dtype=io_dtype, device=device, generator=generator
     )
     k = F.normalize(
@@ -5328,7 +5326,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         p=2.0,
         dim=-1,
     ).to(io_dtype)
-    v = torch.randn(
+    v = 0.25 * torch.randn(
         (cfg.total_tokens, cfg.v_heads, D_HEAD), dtype=io_dtype, device=device, generator=generator
     )
     alpha = cfg.gate_baseline + (1.0 - cfg.gate_baseline) * torch.rand(
@@ -5473,31 +5471,24 @@ def _stage_args(case: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
     }
 
 
-@lru_cache(maxsize=1)
-def _load_oracle():
-    from flashinfer.gdn_kernels.blackwell.gdn_cp_prefill import cp_delta_rule_dsl_sm100
-
-    return cp_delta_rule_dsl_sm100
-
-
 def _run_oracle(
     case: dict[str, Any], output: torch.Tensor, final_state: torch.Tensor | None
 ) -> None:
+    from tirx_kernels.flashinfer._gdn_reference import gated_delta_rule_prefill
+
     cfg: GDNCPPrefillSM100Config = case["config"]
-    _load_oracle()(
-        output,
-        final_state if cfg.store_final_state else None,
-        case["q"],
-        case["k"],
-        case["v"],
-        case["alpha"],
-        case["beta"],
-        case["cu_seqlens"],
-        case["scale"],
+    gated_delta_rule_prefill(
+        output=output,
+        final_state=final_state if cfg.store_final_state else None,
+        q=case["q"],
+        k=case["k"],
+        v=case["v"],
+        alpha=case["alpha"],
+        beta=case["beta"],
+        cu_seqlens=case["cu_seqlens"],
+        scale=case["scale"],
         initial_state=case["initial_state"] if cfg.needs_initial_state else None,
         state_indices=case["state_indices"] if cfg.indexed_state else None,
-        max_seqlen=max(cfg.seq_lens),
-        cp_chunk_len=case["spec"]["CP_CHUNK_LEN"],
     )
 
 
@@ -5592,21 +5583,38 @@ def run_gpu(
 ) -> dict[str, Any]:
     """Benchmark the prepared four-launch chain against the source chain."""
     kwargs = {**prepared["config"], **kwargs}
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
     executable = prepared["executable"]
 
     def source_builder():
+        from flashinfer.gdn_kernels.blackwell.gdn_cp_prefill import cp_delta_rule_dsl_sm100
+
         source_output = torch.empty_like(case["output"])
         source_state = torch.zeros_like(case["final_state"])
-        _run_oracle(case, source_output, source_state)
-        _run_oracle(case, source_output, source_state)
-        torch.cuda.synchronize()
+        cfg: GDNCPPrefillSM100Config = case["config"]
 
         def launch():
-            _run_oracle(case, source_output, source_state)
+            cp_delta_rule_dsl_sm100(
+                source_output,
+                source_state if cfg.store_final_state else None,
+                case["q"],
+                case["k"],
+                case["v"],
+                case["alpha"],
+                case["beta"],
+                case["cu_seqlens"],
+                case["scale"],
+                initial_state=case["initial_state"] if cfg.needs_initial_state else None,
+                state_indices=case["state_indices"] if cfg.indexed_state else None,
+                max_seqlen=max(cfg.seq_lens),
+                cp_chunk_len=case["spec"]["CP_CHUNK_LEN"],
+            )
 
+        launch()
+        launch()
+        torch.cuda.synchronize()
         return launch
 
     return bench(

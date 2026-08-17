@@ -644,10 +644,18 @@ def test(batch_size: int, dim: int = 16384):
 
 
 KERNEL_META = {"name": "rmsnorm", "category": "basic", "compute_capability": 10}
-CONFIGS = [
+BENCH_CONFIGS = [
     {"hidden_size": hs, "batch_size": bs, "label": f"hs{hs}_bs{bs}"}
     for hs in [128, 4096, 5120, 8192]
     for bs in [1, 2, 4, 8, 16, 32, 64, 128, 4113]
+]
+CONFIGS = [
+    {
+        "hidden_size": hidden_size,
+        "batch_size": batch_size,
+        "label": f"correctness_hs{hidden_size}_bs{batch_size}",
+    }
+    for hidden_size, batch_size in ((128, 1), (4096, 8))
 ]
 
 

@@ -312,7 +312,7 @@ _CORRECTNESS_MODES = (
 
 _BOUNDARY_CASES = ((16, 16, 32, 64), (32, 16, 32, 128))
 
-CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
+CONFIGS = [
     _case(
         f"b{batch}_h{num_heads}_hv{num_v_heads}_tv{tile_v}_{mode}",
         batch=batch,
@@ -906,13 +906,6 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 
 @functools.cache
-def _load_oracle():
-    import flashinfer.gdn_kernels.gdn_decode_bf16_state as source_module
-
-    return source_module.gated_delta_rule_t1_wide_vec
-
-
-@functools.cache
 def _compile_tirx(
     num_heads: int,
     num_v_heads: int,
@@ -988,31 +981,28 @@ def _tirx_executable(case: dict[str, Any]):
 
 
 def _run_reference(case: dict[str, Any]) -> torch.Tensor:
+    from tirx_kernels.flashinfer._gdn_reference import gated_delta_rule_decode
+
     config = case["config"]
     cache = bool(config.get("cache_intermediate_states", False))
     same_pool = bool(config.get("same_pool", True))
-    oracle = _load_oracle()
-    result = oracle(
+    return gated_delta_rule_decode(
         A_log=case["A_log"],
         a=case["a"],
         dt_bias=case["dt_bias"],
-        softplus_beta=1.0,
-        softplus_threshold=20.0,
         q=case["q"],
         k=case["k"],
         v=case["v"],
         b=case["b_gate"],
-        initial_state_source=case["source_state"],
-        initial_state_indices=case["read_indices"],
-        output_state_indices=(case["read_indices"] if same_pool else case["write_indices"]),
-        intermediate_states_buffer=(case["source_intermediate"] if cache else None),
-        disable_state_update=bool(config.get("disable_state_update", False)),
-        use_qk_l2norm_in_kernel=bool(config.get("use_qk_l2norm", True)),
+        state_pool=case["source_state"],
+        read_indices=case["read_indices"],
+        write_indices=case["read_indices"] if same_pool else case["write_indices"],
+        intermediate_states=case["source_intermediate"] if cache else None,
+        disable_state_update=bool(config.get("disable_state_update", False)) or cache,
+        use_qk_l2norm=bool(config.get("use_qk_l2norm", True)),
         scale=SCALE,
         output=case["source_output"],
-        tile_v=int(config["tile_v"]),
     )
-    return result
 
 
 def _assert_untouched_slots(case: dict[str, Any], state_key: str) -> None:
@@ -1093,19 +1083,49 @@ def run_gpu(
     case = prepare_data(**kwargs)
     executable = prepared["executable"]
     args = _tirx_args(case)
-    executable(*args)
-    _run_reference(case)
-    torch.cuda.synchronize()
-    _assert_case_close(case)
 
     def source_builder():
-        for _ in range(2):
-            _run_reference(case)
-        torch.cuda.synchronize()
+        from flashinfer.gdn_kernels.gdn_decode_bf16_state import gated_delta_rule_t1_wide_vec
+
+        config = case["config"]
 
         def launch():
-            _run_reference(case)
+            gated_delta_rule_t1_wide_vec(
+                A_log=case["A_log"],
+                a=case["a"],
+                dt_bias=case["dt_bias"],
+                softplus_beta=1.0,
+                softplus_threshold=20.0,
+                q=case["q"],
+                k=case["k"],
+                v=case["v"],
+                b=case["b_gate"],
+                initial_state_source=case["source_state"],
+                initial_state_indices=case["read_indices"],
+                output_state_indices=(
+                    case["read_indices"]
+                    if bool(config.get("same_pool", True))
+                    else case["write_indices"]
+                ),
+                intermediate_states_buffer=(
+                    case["source_intermediate"]
+                    if bool(config.get("cache_intermediate_states", False))
+                    else None
+                ),
+                disable_state_update=bool(config.get("disable_state_update", False)),
+                use_qk_l2norm_in_kernel=bool(config.get("use_qk_l2norm", True)),
+                scale=SCALE,
+                output=case["source_output"],
+                tile_v=int(config["tile_v"]),
+            )
 
+        executable(*args)
+        launch()
+        torch.cuda.synchronize()
+        _assert_case_close(case)
+        for _ in range(2):
+            launch()
+        torch.cuda.synchronize()
         return launch
 
     return bench(

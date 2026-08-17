@@ -382,6 +382,11 @@ def main():
         "activity span, 'megamoe' = DeepGEMM bench_kineto protocol for MegaMoE",
     )
     parser.add_argument(
+        "--with-references",
+        action="store_true",
+        help="Explicitly import and time external reference implementations (off by default)",
+    )
+    parser.add_argument(
         "--rounds",
         type=int,
         default=None,
@@ -402,6 +407,10 @@ def main():
 
     if args.json or args.json_file:
         os.environ["TIRX_BENCH_JSON"] = "1"
+
+    from tirx_kernels.runner import set_external_references_enabled
+
+    set_external_references_enabled(args.with_references)
 
     if args.prepared_control_fd is not None:
         sys.exit(_prepared_child_main(args, child_started=child_started))

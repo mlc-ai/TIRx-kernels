@@ -25,12 +25,8 @@ from tvm_ffi import Shape
 import tvm
 from tvm.tirx.bench import DistributedBenchContext
 
-_LOCKED_LIBRARY_ENVS = {
-    "nccl": "TIRX_NCCL_LIBRARY",
-    "cublas": "TIRX_CUBLAS_LIBRARY",
-    "cublasmp": "TIRX_CUBLASMP_LIBRARY",
-    "nvshmem": "TIRX_NVSHMEM_LIBRARY",
-}
+_LOCKED_LIBRARY_ENVS = {"nccl": "TIRX_NCCL_LIBRARY", "nvshmem": "TIRX_NVSHMEM_LIBRARY"}
+_REFERENCE_LIBRARY_ENVS = {"cublas": "TIRX_CUBLAS_LIBRARY", "cublasmp": "TIRX_CUBLASMP_LIBRARY"}
 _PROCESS_GROUP_TIMEOUT = timedelta(seconds=60)
 
 
@@ -244,9 +240,14 @@ def _rank_library_preload(*, required: bool = False):
 def _locked_library_paths(*, required: bool) -> dict[str, Path]:
     """Resolve the exact shared-library files selected for rank workers."""
 
+    from tirx_kernels.runner import external_references_enabled
+
+    library_envs = dict(_LOCKED_LIBRARY_ENVS)
+    if external_references_enabled():
+        library_envs.update(_REFERENCE_LIBRARY_ENVS)
     result: dict[str, Path] = {}
     missing = []
-    for name, env_name in _LOCKED_LIBRARY_ENVS.items():
+    for name, env_name in library_envs.items():
         configured = os.environ.get(env_name)
         if not configured:
             if required:

@@ -235,7 +235,7 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
-    """Compile, launch, and validate one config against the flashinfer source."""
+    """Compile, launch, and validate one config against the mathematical definition."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -247,15 +247,22 @@ def run_test(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     ex(input_data, out_tirx)
     torch.cuda.synchronize()
 
-    import flashinfer
-
-    ref = getattr(flashinfer.activation, _FI_API[act])(input_data, enable_pdl=False)
-    # Source test tolerance (tests/utils/test_activation.py): rtol=1e-3, atol=1e-3.
-    torch.testing.assert_close(out_tirx, ref, rtol=1e-3, atol=1e-3)
+    x, y = input_data.float().chunk(2, dim=-1)
+    if act == "silu":
+        activated = torch.nn.functional.silu(x)
+    elif act == "gelu":
+        activated = torch.nn.functional.gelu(x, approximate="none")
+    else:
+        activated = torch.nn.functional.gelu(x, approximate="tanh")
+    ref = (activated * y).to(_torch_dtype(dtype))
+    # The kernel uses tanh.approx.f32; the independent Torch oracle uses the
+    # precise tanh and can round the BF16 result to the adjacent value.
+    rtol = 1e-2 if act == "gelu_tanh" and dtype == "bfloat16" else 1e-3
+    torch.testing.assert_close(out_tirx, ref, rtol=rtol, atol=1e-3)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
-    """Benchmark the TIRx port against the flashinfer source kernel."""
+    """Benchmark only the TIRx kernel."""
     config = dict(prepared["config"])
     act = config.pop("act")
     dtype = config.pop("dtype")
@@ -270,8 +277,6 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     ex = executable
     out_tirx = torch.empty((num_tokens, d), dtype=_torch_dtype(dtype), device="cuda")
 
-    funcs = {"tirx": lambda: ex(input_data, out_tirx)}
-
     def build_reference():
         import flashinfer
 
@@ -280,7 +285,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         return lambda: fn(input_data, out=out_fi, enable_pdl=False)
 
     return bench(
-        funcs,
+        {"tirx": lambda: ex(input_data, out_tirx)},
         references={"flashinfer": build_reference},
         warmup=warmup,
         repeat=repeat,

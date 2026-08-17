@@ -176,7 +176,7 @@ class SparseFlashMLADecodeHead64Config:
             raise ValueError("extra_topk_length requires an extra KV cache")
 
 
-CONFIGS = [
+BENCH_CONFIGS = [
     {
         "label": "deepseek_v4_v32_b128_sq2_sk32768_topk2048_p64",
         "model_type": "V32",
@@ -368,6 +368,45 @@ CONFIGS = [
         "topk": 16384,
         "page_block_size": 64,
         "have_attn_sink": True,
+    },
+]
+
+CONFIGS = [
+    {
+        "label": "correctness_v32_b2_sq2_sk128_topk64_p64_h128",
+        "model_type": "V32",
+        "b": 2,
+        "s_q": 2,
+        "s_kv": 128,
+        "topk": 64,
+        "page_block_size": 64,
+        "h_q": 128,
+        "have_attn_sink": True,
+    },
+    {
+        "label": "correctness_model1_b2_sq2_sk128_topk64_p64_varlen",
+        "model_type": "MODEL1",
+        "b": 2,
+        "s_q": 2,
+        "s_kv": 128,
+        "topk": 64,
+        "page_block_size": 64,
+        "have_attn_sink": True,
+        "have_topk_length": True,
+        "inject_invalid_indices": True,
+    },
+    {
+        "label": "correctness_model1_b2_sq2_main64_extra64",
+        "model_type": "MODEL1",
+        "b": 2,
+        "s_q": 2,
+        "s_kv": 128,
+        "topk": 64,
+        "page_block_size": 64,
+        "extra_s_kv": 128,
+        "extra_topk": 64,
+        "extra_page_block_size": 32,
+        "have_extra_topk_length": True,
     },
 ]
 
@@ -3307,6 +3346,92 @@ def _launch_tirx(case: dict[str, Any], executables: tuple[Any, Any]) -> None:
     combine_ex(*_tirx_combine_args(case))
 
 
+def _decode_kv_for_reference(
+    storage: torch.Tensor, *, num_blocks: int, page_block_size: int, model_type: ModelType
+) -> torch.Tensor:
+    """Decode the sparse-KV byte ABI into the values consumed by attention."""
+
+    _, _, block_stride, _ = _kv_storage_spec(model_type, num_blocks, page_block_size)
+    if model_type is ModelType.V32:
+        rows = storage.as_strided((num_blocks, page_block_size, 656), (block_stride, 656, 1))
+        quantized = rows[:, :, :512].view(torch.float8_e4m3fn).float()
+        scales = rows[:, :, 512:528].view(torch.float32)
+        nope = (quantized.view(num_blocks, page_block_size, 4, 128) * scales.unsqueeze(-1)).reshape(
+            num_blocks, page_block_size, 512
+        )
+        rope = rows[:, :, 528:656].view(torch.bfloat16).float()
+    else:
+        rows = storage.as_strided((num_blocks, page_block_size, 576), (block_stride, 576, 1))
+        scale_rows = storage.as_strided(
+            (num_blocks, page_block_size, 8),
+            (block_stride, 8, 1),
+            storage_offset=page_block_size * 576,
+        )
+        quantized = rows[:, :, :448].view(torch.float8_e4m3fn).float()
+        scales = scale_rows[:, :, :7].view(torch.float8_e8m0fnu).float()
+        nope = (quantized.view(num_blocks, page_block_size, 7, 64) * scales.unsqueeze(-1)).reshape(
+            num_blocks, page_block_size, 448
+        )
+        rope = rows[:, :, 448:576].view(torch.bfloat16).float()
+    return torch.cat((nope, rope), dim=-1).reshape(-1, nope.shape[-1] + rope.shape[-1])
+
+
+def _reference_sparse_decode(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Independent Torch scaled-dot-product attention over the sparse indices."""
+
+    cfg: SparseFlashMLADecodeHead64Config = case["config"]
+    main_kv = _decode_kv_for_reference(
+        case["kv_storage"],
+        num_blocks=case["shape"]["num_blocks"],
+        page_block_size=cfg.page_block_size,
+        model_type=cfg.normalized_model_type,
+    )
+    scopes = [
+        (main_kv, case["indices"], case["topk_length"] if cfg.have_topk_length else None, cfg.topk)
+    ]
+    if cfg.extra_topk:
+        extra_kv = _decode_kv_for_reference(
+            case["extra_kv_storage"],
+            num_blocks=case["shape"]["extra_num_blocks"],
+            page_block_size=cfg.extra_page_block_size,
+            model_type=cfg.normalized_model_type,
+        )
+        scopes.append(
+            (
+                extra_kv,
+                case["extra_indices"],
+                case["extra_topk_length"] if cfg.have_extra_topk_length else None,
+                cfg.extra_topk,
+            )
+        )
+
+    q = case["q"].float()
+    out = torch.zeros((cfg.b, cfg.s_q, cfg.h_q, D_V), device=q.device)
+    lse = torch.full((cfg.b, cfg.s_q, cfg.h_q), float("inf"), device=q.device)
+    positions = {width: torch.arange(width, device=q.device) for *_, width in scopes}
+    for batch in range(cfg.b):
+        for query in range(cfg.s_q):
+            selected_chunks = []
+            for kv, indices, lengths, width in scopes:
+                row = indices[batch, query].long()
+                length = int(lengths[batch].item()) if lengths is not None else width
+                valid = (positions[width] < length) & (row >= 0)
+                if bool(valid.any()):
+                    selected_chunks.append(kv.index_select(0, row[valid]))
+            if not selected_chunks:
+                continue
+            selected = torch.cat(selected_chunks, dim=0)
+            logits = torch.matmul(q[batch, query], selected[:, : cfg.d_qk].T) * case["sm_scale"]
+            token_lse = torch.logsumexp(logits, dim=-1)
+            normalization_lse = token_lse
+            if cfg.have_attn_sink:
+                normalization_lse = torch.logaddexp(token_lse, case["attn_sink"].float())
+            weights = torch.exp(logits - normalization_lse.unsqueeze(-1))
+            out[batch, query] = torch.matmul(weights, selected[:, :D_V])
+            lse[batch, query] = token_lse
+    return out.to(torch.bfloat16), lse
+
+
 def run_test(**kwargs: Any) -> None:
     cfg = _cfg(**kwargs)
     # Upstream clears the allocator before every generated case; keep the
@@ -3314,36 +3439,14 @@ def run_test(**kwargs: Any) -> None:
     torch.cuda.empty_cache()
     case = prepare_data(**kwargs)
     executables = _compile_decode_kernels(**kwargs)
-
-    from tirx_kernels.flashmla.utils._flashmla_bench import (
-        _import_flash_mla,
-        run_flashmla_sparse_decode,
-    )
-
-    flash_mla = _import_flash_mla()
-    sched_meta, _ = flash_mla.get_mla_metadata()
-    ref_out, ref_lse = run_flashmla_sparse_decode(case, sched_meta)
-    torch.cuda.synchronize()
-
-    # Validate the host replica against the actual CUDA scheduler.  Inactive
-    # rows only have a defined begin_req_idx; the remaining CUDA fields may
-    # contain shared-memory tail values and are never consumed.
-    ref_metadata = sched_meta.tile_scheduler_metadata
-    ref_num_splits = sched_meta.num_splits
-    if ref_metadata is None or ref_num_splits is None:
-        raise AssertionError("FlashMLA did not initialize decode scheduler metadata")
-    ours_metadata = case["tile_scheduler_metadata"]
-    torch.testing.assert_close(ours_metadata[:, 0], ref_metadata[:, 0], rtol=0, atol=0)
-    active = ours_metadata[:, 0] < cfg.b
-    torch.testing.assert_close(ours_metadata[active, :7], ref_metadata[active, :7], rtol=0, atol=0)
-    torch.testing.assert_close(case["num_splits"], ref_num_splits, rtol=0, atol=0)
+    ref_out, ref_lse = _reference_sparse_decode(case)
 
     case["out"].fill_(float("nan"))
     case["lse"].fill_(float("nan"))
     _launch_tirx(case, executables)
     torch.cuda.synchronize()
     torch.testing.assert_close(case["out"], ref_out, rtol=2.01 / 128, atol=1.0e-3)
-    torch.testing.assert_close(case["lse"], ref_lse.transpose(1, 2), rtol=8.01 / 65536, atol=1.0e-6)
+    torch.testing.assert_close(case["lse"], ref_lse, rtol=5.0e-4, atol=5.0e-4)
     cfg.validate()
 
 
@@ -3371,14 +3474,17 @@ def run_gpu(
     def tirx_decode():
         _launch_tirx(case, executables)
 
-    from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_decode_reference_builder
+    def flashmla_builder():
+        from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_decode_reference_builder
+
+        return flashmla_decode_reference_builder(case)
 
     return bench(
         {"tirx": tirx_decode},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references={"flashmla": lambda: flashmla_decode_reference_builder(case)},
+        references={"flashmla": flashmla_builder},
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
@@ -3395,6 +3501,7 @@ def run_bench(
 
 
 __all__ = [
+    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "ModelType",

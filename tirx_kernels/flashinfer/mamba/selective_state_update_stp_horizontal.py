@@ -526,7 +526,7 @@ BENCH_CONFIGS = [
 ]
 
 
-CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
+CONFIGS = [
     _case("b1_h64_d64_s128_r8", batch=1),
     _case("b64_h64_d64_s128_r8_no_d", has_d=False),
     _case("b64_h64_d64_s128_r8_out_allocated", use_out_tensor=False),
@@ -1126,10 +1126,10 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _run_reference(case: dict[str, Any]) -> torch.Tensor:
+def _run_reference(case: dict[str, Any], oracle=None) -> torch.Tensor:
     kwargs = case["kwargs"]
     spec = case["spec"]
-    oracle = _simple._load_oracle()
+    oracle = _simple._load_oracle() if oracle is None else oracle
     state_view = _simple._view_state(case["reference_state_raw"], spec, case["state_stride"])
     source_out = case["reference_output"] if bool(kwargs.get("use_out_tensor", True)) else None
     result = oracle(
@@ -1150,6 +1150,7 @@ def _run_reference(case: dict[str, Any]) -> torch.Tensor:
             case["dst_indices"] if bool(kwargs.get("has_dst_indices", False)) else None
         ),
         pad_slot_id=case["pad_slot_id"],
+        state_scale=None,
         out=source_out,
         disable_state_update=not bool(kwargs.get("update_state", True)),
         rand_seed=case["seed"] if spec["PHILOX_ROUNDS"] else None,
@@ -1198,19 +1199,20 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
-    executable(*args)
-    _run_reference(case)
-    torch.cuda.synchronize()
-    _simple._assert_case_close(case)
 
     def source_builder():
-        for _ in range(2):
-            _run_reference(case)
-        torch.cuda.synchronize()
+        from flashinfer.mamba import selective_state_update
 
         def launch():
-            _run_reference(case)
+            _run_reference(case, selective_state_update)
 
+        executable(*args)
+        launch()
+        torch.cuda.synchronize()
+        _simple._assert_case_close(case)
+        for _ in range(2):
+            launch()
+        torch.cuda.synchronize()
         return launch
 
     return bench(

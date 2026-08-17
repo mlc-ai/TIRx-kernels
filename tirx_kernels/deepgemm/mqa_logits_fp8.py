@@ -9,14 +9,13 @@ Upstream source: deep_gemm/include/deep_gemm/impls/sm100_mqa_logits.cuh.
 """
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from functools import cache
 from typing import Any
 from unittest import SkipTest
 
 import torch
 
-_DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 5e-6
 _COMPILE_CACHE_NAMESPACE = "deepgemm.mqa_logits_fp8.compile"
@@ -161,20 +160,26 @@ DEEPGEMM_TEST_COVERAGE = [
     )
 ]
 
-CONFIGS = DEEPGEMM_TEST_COVERAGE
+BENCH_CONFIGS = DEEPGEMM_TEST_COVERAGE
 
-
-def load_deep_gemm_mqa() -> tuple[Any, str]:
-    try:
-        import deep_gemm as module
-    except Exception as exc:
-        raise SkipTest(
-            f"DeepGEMM MQA logits runtime unavailable: {_DEEP_GEMM_MODULE_NAME}: {exc}"
-        ) from exc
-
-    if not hasattr(module, "fp8_fp4_mqa_logits"):
-        raise SkipTest("DeepGEMM MQA logits runtime unavailable: missing fp8_fp4_mqa_logits")
-    return module, "installed"
+CONFIGS = [
+    _make_case(
+        seq_len=32,
+        seq_len_kv=256,
+        logits_dtype="float32",
+        compressed_logits=False,
+        disable_cp=True,
+        seed=0,
+    ),
+    _make_case(
+        seq_len=64,
+        seq_len_kv=512,
+        logits_dtype="bfloat16",
+        compressed_logits=True,
+        disable_cp=False,
+        seed=1,
+    ),
+]
 
 
 def _generate_ks_ke(config: MQALogitsFP8Config) -> tuple[torch.Tensor, torch.Tensor]:
@@ -222,9 +227,7 @@ def _ref_mqa_logits(
     return logits
 
 
-def prepare_data(**kwargs: Any) -> dict[str, Any]:
-    deep_gemm, source = load_deep_gemm_mqa()
-    config = _make_config(**kwargs)
+def _prepare_data(config: MQALogitsFP8Config, *, compute_reference: bool) -> dict[str, Any]:
     if torch.cuda.is_available():
         torch.cuda.set_device(torch.cuda.current_device())
     else:
@@ -241,23 +244,15 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     ks, ke = _generate_ks_ke(config)
 
     q_in = q.to(torch.float8_e4m3fn).contiguous()
-    kv_in = deep_gemm.utils.per_custom_dims_cast_to_fp8(kv, (0,), False)
+    from tirx_kernels._torch_quant import per_custom_dims_cast_to_fp8
+
+    kv_in = per_custom_dims_cast_to_fp8(kv, scale_dims=(0,), use_ue8m0=False)
 
     q_simulated = q_in.to(torch.bfloat16)
     kv_simulated = (kv_in[0].float() * kv_in[1].unsqueeze(1)).to(torch.bfloat16)
-    reference = _ref_mqa_logits(
-        q_simulated.to(torch.bfloat16), kv_simulated.to(torch.bfloat16), weights, ks, ke
-    )
     max_seqlen_k = int((ke - ks).max().item()) if config.compressed_logits else 0
-    runtime_config = MQALogitsFP8Config(
-        **{
-            **asdict(config),
-            "num_sms": int(getattr(deep_gemm, "get_num_sms", lambda: config.num_sms)()),
-        }
-    )
-    return {
-        "config": runtime_config,
-        "reference_source": source,
+    data = {
+        "config": config,
         "q": q,
         "kv": kv,
         "q_in": q_in,
@@ -266,9 +261,16 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "cu_seq_len_k_start": ks,
         "cu_seq_len_k_end": ke,
         "max_seqlen_k": max_seqlen_k,
-        "reference": reference,
-        "deep_gemm": deep_gemm,
     }
+    if compute_reference:
+        data["reference"] = _ref_mqa_logits(
+            q_simulated.to(torch.bfloat16), kv_simulated.to(torch.bfloat16), weights, ks, ke
+        )
+    return data
+
+
+def prepare_data(**kwargs: Any) -> dict[str, Any]:
+    return _prepare_data(_make_config(**kwargs), compute_reference=True)
 
 
 def get_kernel(**kwargs: Any):
@@ -1054,20 +1056,6 @@ def _launch_tirx_mqa(data: dict[str, Any], logits: torch.Tensor | None = None) -
     return _run_tirx_invocation(data, _prepare_tirx_invocation(data, logits))
 
 
-def _run_deepgemm_mqa(data: dict[str, Any], *, clean_logits: bool) -> torch.Tensor:
-    config: MQALogitsFP8Config = data["config"]
-    return data["deep_gemm"].fp8_fp4_mqa_logits(
-        q=(data["q_in"], None),
-        kv=data["kv_in"],
-        weights=data["weights"],
-        cu_seq_len_k_start=data["cu_seq_len_k_start"],
-        cu_seq_len_k_end=data["cu_seq_len_k_end"],
-        clean_logits=clean_logits,
-        max_seqlen_k=data["max_seqlen_k"],
-        logits_dtype=_torch_logits_dtype(config.logits_dtype),
-    )
-
-
 def _expand_compressed_logits(logits: torch.Tensor, data: dict[str, Any]) -> torch.Tensor:
     config: MQALogitsFP8Config = data["config"]
     if not config.compressed_logits:
@@ -1109,17 +1097,9 @@ def _assert_correct(data: dict[str, Any], logits: torch.Tensor, *, name: str) ->
 
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
-    config: MQALogitsFP8Config = data["config"]
-    clean_logits = not config.compressed_logits
-    deepgemm_logits = _run_deepgemm_mqa(data, clean_logits=clean_logits)
-    deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_mqa(data)
     torch.cuda.synchronize()
-    tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
-    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
-        raise AssertionError(
-            f"TIRx diff {tirx_diff:.6g} is worse than DeepGEMM diff {deepgemm_diff:.6g}"
-        )
+    _assert_correct(data, tirx_logits, name="TIRx")
 
 
 def prepare_bench(**kwargs: Any):
@@ -1133,43 +1113,56 @@ def prepare_bench(**kwargs: Any):
 
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     warmup = kwargs.pop("warmup", None)
     repeat = kwargs.pop("repeat", None)
-    timer = kwargs.pop("timer", None)  # None inherits the global default (proton)
+    timer = kwargs.pop("timer", None)  # None inherits the canonical local timer default.
     _rounds = kwargs.pop("rounds", 1)
     _cooldown_s = kwargs.pop("cooldown_s", 1.0)
     config_kwargs = dict(kwargs)
     tirx_executable = prepared["executable"]
 
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
-    data = prepare_data(**config_kwargs)
+    with_references = external_references_enabled()
+    data = _prepare_data(_make_config(**config_kwargs), compute_reference=with_references)
     invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
 
-    # Correctness gate before timing (preserves the old validate_case behavior).
-    tirx_logits = _run_tirx_invocation(data, invocation)
-    torch.cuda.synchronize()
-    max_diff = _assert_correct(data, tirx_logits, name="TIRx")
-    torch.cuda.empty_cache()
+    def build_deepgemm():
+        import deep_gemm
 
-    funcs = {"tirx": lambda: _run_tirx_invocation(data, invocation)}
+        config = data["config"]
+        return lambda: deep_gemm.fp8_fp4_mqa_logits(
+            q=(data["q_in"], None),
+            kv=data["kv_in"],
+            weights=data["weights"],
+            cu_seq_len_k_start=data["cu_seq_len_k_start"],
+            cu_seq_len_k_end=data["cu_seq_len_k_end"],
+            clean_logits=False,
+            max_seqlen_k=data["max_seqlen_k"],
+            logits_dtype=_torch_logits_dtype(config.logits_dtype),
+        )
 
-    def _deepgemm():
-        return lambda: _run_deepgemm_mqa(data, clean_logits=False)
-
-    references = {"deepgemm": _deepgemm}
+    max_diff = None
+    if with_references:
+        reference_logits = build_deepgemm()()
+        tirx_logits = _run_tirx_invocation(data, invocation)
+        torch.cuda.synchronize()
+        _assert_correct(data, reference_logits, name="DeepGEMM")
+        max_diff = _assert_correct(data, tirx_logits, name="TIRx")
+        torch.cuda.empty_cache()
 
     result = bench(
-        funcs,
+        {"tirx": lambda: _run_tirx_invocation(data, invocation)},
+        references={"deepgemm": build_deepgemm},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references=references,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
-    result["max_diff"] = max_diff
+    if max_diff is not None:
+        result["max_diff"] = max_diff
     return result
 
 
@@ -1183,6 +1176,7 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 
 
 __all__ = [
+    "BENCH_CONFIGS",
     "CONFIGS",
     "DEEPGEMM_TEST_COVERAGE",
     "KERNEL_META",

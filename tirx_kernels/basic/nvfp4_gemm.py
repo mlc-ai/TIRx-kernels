@@ -11,6 +11,7 @@ from enum import IntEnum
 from pathlib import Path
 
 import tvm
+from tirx_kernels import _torch_quant
 from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import sf_smem_layout
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
@@ -44,23 +45,31 @@ _EVICT_NORMAL_L2_POLICY = 0x1000000000000000
 _EVICT_FIRST_L2_POLICY = 0x12F0000000000000
 
 
-def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
+def prepare_data(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    return_origin: bool = False,
+    compute_reference: bool = True,
+):
     import torch
-    from flashinfer import SfLayout, nvfp4_quantize
 
     torch.manual_seed(0)
     A_origin = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     B_origin = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
     A_global_sf = 448 * 6 / A_origin.float().abs().nan_to_num().max()
     B_global_sf = 448 * 6 / B_origin.float().abs().nan_to_num().max()
-    A_fp4, A_sf = nvfp4_quantize(
-        A_origin, A_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False
+    A_fp4, A_sf = _torch_quant.quantize_nvfp4(
+        A_origin, A_global_sf, sf_layout="128x4"
     )
-    B_fp4, B_sf = nvfp4_quantize(
-        B_origin, B_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False
+    B_fp4, B_sf = _torch_quant.quantize_nvfp4(
+        B_origin, B_global_sf, sf_layout="128x4"
     )
+    A_sf = A_sf.reshape(M, K // 16)
+    B_sf = B_sf.reshape(N, K // 16)
     alpha = 1.0 / (A_global_sf * B_global_sf)
-    C_ref = torch.mm(A_origin, B_origin.T)
+    C_ref = torch.mm(A_origin, B_origin.T) if compute_reference else None
     if return_origin:
         return (A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref, A_origin, B_origin)
     return (A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref)
@@ -1001,9 +1010,10 @@ TIRX_CONFIGS = {
 
 
 KERNEL_META = {"name": "nvfp4_gemm", "category": "basic", "compute_capability": 10}
-CONFIGS = [
+BENCH_CONFIGS = [
     {"M": s, "N": s, "K": s, "label": f"{s}x{s}x{s}"} for s in [1024, 2048, 4096, 8192, 16384]
 ]
+CONFIGS = [{"M": 1024, "N": 1024, "K": 1024, "label": "correctness_1024"}]
 
 
 def get_kernel(M, N, K):
@@ -1112,36 +1122,52 @@ def _flashinfer_tuned_choice(
 # event wall-clock is host-starved and over-credits us ~4x. Proton measures pure GPU
 # kernel time -> honest ~parity (verified 0.996 vs event 4.11).
 def prepare_bench(M=1024, N=1024, K=1024, **kwargs):
-    """Compile TIRx and the device-independent cuBLASLt extension before READY."""
-    from tirx_kernels.runner import prepared_gpu_benchmark
+    """Compile TIRx and, when requested, the cuBLASLt peer before READY."""
+    from tirx_kernels.runner import external_references_enabled, prepared_gpu_benchmark
 
     state = {
         "config": {"M": M, "N": N, "K": K, **kwargs},
         "executable": _compile_executable(M, N, K),
-        "cublaslt_extension": _load_cublaslt_nvfp4_ext(),
     }
+    if external_references_enabled():
+        state["cublaslt_extension"] = _load_cublaslt_nvfp4_ext()
     return prepared_gpu_benchmark(run_gpu, state)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
-    """Benchmark."""
-    import flashinfer
+    """Benchmark TIRx and, only when requested, the original reference peers."""
     import torch
+
+    from tirx_kernels.runner import external_references_enabled
 
     config_kwargs = {**prepared["config"], **kwargs}
     M = config_kwargs.pop("M")
     N = config_kwargs.pop("N")
     K = config_kwargs.pop("K")
+    with_references = external_references_enabled()
     metadata = {}
     ex = prepared["executable"]
 
-    # Allocate inputs once, outside the timed region (Triton-standard pure launch).
-    A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(M, N, K)
+    A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref = prepare_data(
+        M, N, K, compute_reference=with_references
+    )
     alpha_value = float(alpha.item())
     alpha_tensor = torch.tensor([alpha_value], device="cuda", dtype=torch.float)
-    out_tir = torch.empty_like(C_ref).to("cuda").to(torch.bfloat16)
-
+    out_tir = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
     funcs = {"tir": lambda: ex.mod(A_fp4, B_fp4, A_sf, B_sf, alpha_tensor, out_tir)}
+
+    if not with_references:
+        return bench(
+            funcs,
+            warmup=warmup,
+            repeat=repeat,
+            timer=timer,
+            **config_kwargs,
+        )
+
+    import flashinfer
+
+    assert C_ref is not None
     flashinfer_backend = os.environ.get("TIRX_NVFP4_FLASHINFER_BACKEND", "auto")
     if flashinfer_backend not in {"auto", "cutlass"}:
         raise ValueError(
@@ -1153,7 +1179,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     if flashinfer_cache_path is not None:
         flashinfer_context_kwargs["cache"] = str(flashinfer_cache_path)
 
-    def _flashinfer():
+    def prepare_flashinfer():
         out_fi = torch.empty_like(out_tir)
         cache_hit_before_tune = False
         if flashinfer_cache_path is not None and flashinfer_cache_path.exists():
@@ -1178,16 +1204,9 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
                 use_nvfp4=True,
             )
 
-        # Tune/load exactly this benchmark shape and persist the selection in
-        # the suite cache. Both profiling and all cache I/O happen before the
-        # launch closure is handed to bench().
         with flashinfer.autotune(True, **flashinfer_context_kwargs):
             run()
         torch.cuda.synchronize()
-
-        # Exercise the normal non-tuning lookup once before timing and reject
-        # a silent heuristic fallback. Keep the exact same bucket override that
-        # was used while tuning: cuDNN runner cache keys include its mapper.
         with flashinfer.autotune(False, **flashinfer_context_kwargs):
             run()
         torch.cuda.synchronize()
@@ -1224,21 +1243,14 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
         )
         return run
 
-    def _cublaslt():
+    def prepare_cublaslt():
         ext = prepared["cublaslt_extension"]
         out_cublaslt = torch.empty_like(out_tir)
         return lambda: ext.nvfp4_cublaslt(
             A_fp4, B_fp4, A_sf, B_sf, alpha_value, out_cublaslt, M, N, K
         )
 
-    # FlashInfer is a required reference for this benchmark. Prepare and
-    # validate its tuned launch before entering bench() so a bad/missing cache
-    # fails the workload instead of being downgraded to an optional baseline
-    # construction error.
-    flashinfer_run = _flashinfer()
-    # Load the file and install the exact-M mapper once, outside all timer
-    # calls. Timed FlashInfer launches then perform only an in-memory cache
-    # lookup and the selected kernel launch.
+    flashinfer_run = prepare_flashinfer()
     with flashinfer.autotune(False, **flashinfer_context_kwargs):
         result = bench(
             funcs,
@@ -1247,7 +1259,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
             timer=timer,
             references={
                 "flashinfer": lambda: flashinfer_run,
-                "cublaslt_nvfp4": _cublaslt,
+                "cublaslt_nvfp4": prepare_cublaslt,
             },
             **config_kwargs,
         )

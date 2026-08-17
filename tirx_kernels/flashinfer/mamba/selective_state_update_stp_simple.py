@@ -369,7 +369,7 @@ BENCH_CONFIGS = [
 # one-axis rows covered by FlashInfer's upstream STP tests.  The public
 # FlashInfer API requires D, so its nullable device branch is correctness-only:
 # a source/TIRx benchmark row could not exercise matching implementation paths.
-CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
+CONFIGS = [
     _case("b64_h64_d64_s128_r8_no_d", has_d=False),
     _case("b64_h64_d64_s128_r8_out_allocated", use_out_tensor=False),
     *[
@@ -1026,7 +1026,7 @@ _TORCH_DTYPES = {
 
 @functools.cache
 def _load_oracle():
-    from flashinfer.mamba import selective_state_update
+    from tirx_kernels.flashinfer._mamba_reference import selective_state_update
 
     return selective_state_update
 
@@ -1235,10 +1235,10 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _run_reference(case: dict[str, Any]) -> torch.Tensor:
+def _run_reference(case: dict[str, Any], oracle=None) -> torch.Tensor:
     kwargs = case["kwargs"]
     spec = case["spec"]
-    oracle = _load_oracle()
+    oracle = _load_oracle() if oracle is None else oracle
     state_view = _view_state(case["reference_state_raw"], spec, case["state_stride"])
     state_scale = (
         _view_scale(case["reference_scale_raw"], spec, case["scale_stride"])
@@ -1371,19 +1371,20 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
-    executable(*args)
-    _run_reference(case)
-    torch.cuda.synchronize()
-    _assert_case_close(case)
 
     def source_builder():
-        for _ in range(2):
-            _run_reference(case)
-        torch.cuda.synchronize()
+        from flashinfer.mamba import selective_state_update
 
         def launch():
-            _run_reference(case)
+            _run_reference(case, selective_state_update)
 
+        executable(*args)
+        launch()
+        torch.cuda.synchronize()
+        _assert_case_close(case)
+        for _ in range(2):
+            launch()
+        torch.cuda.synchronize()
         return launch
 
     return bench(

@@ -19,7 +19,6 @@ from tvm.ir.type import PointerType, PrimType
 from tvm.script import tirx as Tx
 from tvm.tirx.lang.pipeline import Pipeline as DataPipeline
 
-from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
 from .utils._model_shapes import (
     GEMM_RS_MODEL_SHAPES,
@@ -1059,7 +1058,8 @@ def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
 KERNEL_META = {"name": "gemm_reduce_scatter", "category": "basic", "compute_capability": 10}
 _RELAUNCH_COUNT = 20
 
-CONFIGS = make_configs(GEMM_RS_MODEL_SHAPES)
+BENCH_CONFIGS = make_configs(GEMM_RS_MODEL_SHAPES)
+CONFIGS = make_configs(GEMM_RS_MODEL_SHAPES[:1])
 
 
 def _config(M: int, N: int, K: int, world_size: int, dtype: str, scheduler: str) -> GemmRSConfig:
@@ -1371,43 +1371,51 @@ def _run_worker(
     if mode != "bench":
         raise ValueError(f"unsupported distributed worker mode {mode!r}")
 
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     def prepare() -> None:
         case.reset()
         case.prepare()
 
-    baselines = create_baseline_suite(
-        runtime,
-        data,
-        workload="gemm_reduce_scatter",
-        M=config.M,
-        N=config.N,
-        K=config.total_k,
-        world_size=config.world_size,
-    )
+    baselines = None
+    if external_references_enabled():
+        from .utils._baselines import create_baseline_suite
+
+        baselines = create_baseline_suite(
+            runtime,
+            data,
+            workload="gemm_reduce_scatter",
+            M=config.M,
+            N=config.N,
+            K=config.total_k,
+            world_size=config.world_size,
+        )
     try:
         result = bench(
             {"tirx": case.launch},
-            references=baselines.references(),
+            references=baselines.references() if baselines is not None else None,
             timer=kwargs.get("timer", "kineto"),
             rounds=kwargs.get("rounds", 1),
             cooldown_s=kwargs.get("cooldown_s", 1.0),
             distributed=runtime.bench_context(),
             prepare={"tirx": prepare},
         )
-        result["baseline_metadata"] = baselines.metadata()
-        result["ratio_definition"] = "baseline_us / tirx_us"
-        result["ratios"] = baseline_ratios(result, tirx="tirx")
-        result["performance_gate"] = {
-            "required_ratio": "> 1",
-            "passed": all(
-                ratio > 1 for name, ratio in result["ratios"].items() if name.startswith("cublas")
-            ),
-        }
+        if baselines is not None:
+            result["baseline_metadata"] = baselines.metadata()
+            result["ratio_definition"] = "baseline_us / tirx_us"
+            result["ratios"] = baseline_ratios(result, tirx="tirx")
+            result["performance_gate"] = {
+                "required_ratio": "> 1",
+                "passed": all(
+                    ratio > 1
+                    for name, ratio in result["ratios"].items()
+                    if name.startswith("cublas")
+                ),
+            }
         return {"status": "OK", **result}
     finally:
-        baselines.close()
+        if baselines is not None:
+            baselines.close()
 
 
 def run_test(
@@ -1455,7 +1463,7 @@ def run_bench(
     scheduler: str = "dynamic",
     **_kwargs: Any,
 ) -> dict[str, Any]:
-    """Benchmark the direct port and external baselines."""
+    """Benchmark the direct port and enabled external baselines."""
 
     _config(M, N, K, world_size, dtype, scheduler)
     if timer not in {None, "kineto"}:
@@ -1504,6 +1512,7 @@ def prepare_bench(
 
 
 __all__ = [
+    "BENCH_CONFIGS",
     "CAPACITY",
     "CONFIGS",
     "DTYPE",

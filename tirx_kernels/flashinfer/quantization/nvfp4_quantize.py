@@ -31,6 +31,7 @@ The implementation structure follows the reviewer-approved sketch
 
 from typing import Any
 
+from tirx_kernels._torch_quant import quantize_nvfp4
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_8,
     cvt_e2m1x8,
@@ -400,39 +401,6 @@ def _alloc_outputs(m: int, k: int, sf_layout: str):
     return out, sf
 
 
-def _sf_layout_enum(sf_layout: str):
-    from flashinfer.tllm_enums import SfLayout
-
-    return {
-        "linear": SfLayout.layout_linear,
-        "128x4": SfLayout.layout_128x4,
-        "8x4": SfLayout.layout_8x4,
-    }[sf_layout]
-
-
-def _run_reference(a, global_scale, sf_layout: str, fuse_silu: bool, enable_pdl: bool):
-    """Run the FlashInfer CuTe-DSL source wrapper (allocates its own outputs)."""
-    if fuse_silu:
-        from flashinfer.quantization import silu_and_mul_nvfp4_quantize
-
-        return silu_and_mul_nvfp4_quantize(
-            a,
-            global_scale,
-            is_sf_swizzled_layout=sf_layout != "linear",
-            is_sf_8x4_layout=sf_layout == "8x4",
-            enable_pdl=enable_pdl,
-        )
-    from flashinfer.quantization import nvfp4_quantize
-
-    return nvfp4_quantize(
-        a,
-        global_scale,
-        sfLayout=_sf_layout_enum(sf_layout),
-        backend="cute-dsl",
-        enable_pdl=enable_pdl,
-    )
-
-
 def _run_launch(ex, a, gs, out, sf, m, k, sf_layout):
     if sf_layout == "linear":
         ex(a.view(-1), out.view(-1), sf, m, m * (k // NVFP4_SF_VEC_SIZE), gs)
@@ -457,7 +425,7 @@ def run_test(
     enable_pdl: bool = False,
     **kwargs,
 ):
-    """Compile, launch, and validate one config against the flashinfer source."""
+    """Compile, launch, and validate one config against in-tree Torch math."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -471,13 +439,13 @@ def run_test(
     _run_launch(ex, a, gs, out_tirx, sf_tirx, m, k, sf_layout)
     torch.cuda.synchronize()
 
-    ref_fp4, ref_sf = _run_reference(a, gs, sf_layout, fuse_silu, enable_pdl)
+    ref_fp4, ref_sf = quantize_nvfp4(a, gs, sf_layout=sf_layout, fuse_silu=fuse_silu)
     torch.testing.assert_close(out_tirx, ref_fp4, rtol=0, atol=0)
-    torch.testing.assert_close(sf_tirx, ref_sf.reshape(-1), rtol=0, atol=0)
+    torch.testing.assert_close(sf_tirx, ref_sf, rtol=0, atol=0)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
-    """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
+    """Benchmark the TIRx kernel only."""
     config = dict(prepared["config"])
     dtype = config.pop("dtype")
     m = config.pop("m")
@@ -497,8 +465,6 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         _run_launch(ex, a, gs, out_tirx, sf_tirx, m, k, sf_layout)
 
     def build_reference():
-        # Bypass the allocating public wrapper: call the cached compiled source
-        # kernel directly with preallocated outputs (kernel-only timing).
         from flashinfer.quantization.kernels.nvfp4_quantize import (
             SF_LAYOUT_LINEAR,
             SF_LAYOUT_8x4,
@@ -510,14 +476,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
             sf_layout
         ]
         kernel_fn, _ = _get_compiled_kernel_nvfp4(
-            dtype,
-            k,
-            layout_code,
-            enable_pdl,
-            False,  # disable_fp4_quant_fast_math
-            None,  # nvfp4_4over6_config
-            fuse_silu,
-            True,  # global_scale_is_tensor
+            dtype, k, layout_code, enable_pdl, False, None, fuse_silu, True
         )
         out_ref, sf_ref = _alloc_outputs(m, k, sf_layout)
         if sf_layout == "linear":

@@ -74,9 +74,9 @@ collective sequence before timing; its measured closure is one CUDA Graph replay
 TIRx and cuBLASMp retain their direct launch closures. All headline values use
 the same Kineto full-span protocol, so ratios never mix timers.
 
-cuBLASMp 0.10 requires nvmath-python, NCCL4Py, and a compatible recent NCCL.
-Every benchmark requires absolute paths for all four runtime dependencies so a
-loader-path change cannot silently alter the comparison:
+Reference-enabled GemmComm benchmarks require cuBLASMp 0.10, nvmath-python,
+NCCL4Py, and a compatible recent NCCL. Use absolute paths for all four runtime
+dependencies so a loader-path change cannot silently alter the comparison:
 
 ```bash
 export TIRX_NCCL_LIBRARY=/path/to/libnccl.so.2
@@ -92,8 +92,8 @@ and NVSHMEM API symbol together with its runtime version, and fails if any
 loaded file differs from its configured lock. cuBLASMp builder failures remain
 visible in `errors`, which bench-suite treats as a failed workload.
 
-The result's `ratios` mapping is always `baseline_us / tirx_us`; values greater
-than one mean TIRx is faster.
+With `--with-references`, the result's `ratios` mapping is
+`baseline_us / tirx_us`; values greater than one mean TIRx is faster.
 
 For a B200 host, select any registered config explicitly when needed:
 

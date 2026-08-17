@@ -21,9 +21,11 @@ KERNEL_META : dict
     - "compute_capability" (int): minimum SM version (e.g. 10 for sm100a)
 
 CONFIGS : list[dict]
-    Each dict has a "label" key (str) plus arbitrary kernel-specific
-    parameters.  The same config matrix is used by correctness tests and
-    benchmark runs.
+    Correctness configurations.  Each dict has a "label" key plus arbitrary
+    kernel-specific parameters.
+
+BENCH_CONFIGS : list[dict]
+    Separate production benchmark configurations.
 
 Functions
 ---------
@@ -37,12 +39,13 @@ prepare_data(**cfg) -> dict[str, Any]
     to tensors (torch.Tensor or numpy.ndarray).
 
 check_correctness(outputs: dict, **cfg) -> None
-    Validate kernel outputs against a reference.
+    Validate kernel outputs against an in-tree math/Torch oracle.
     Raise AssertionError on mismatch.
 
 get_baselines(**cfg) -> dict[str, Callable]   (optional)
     Return {name: callable} for baseline implementations used in
     benchmarking (e.g. cublas, flashinfer).
+
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ class KernelModule(Protocol):
 
     KERNEL_META: dict[str, Any]
     CONFIGS: list[dict[str, Any]]
+    BENCH_CONFIGS: list[dict[str, Any]]
 
     @staticmethod
     def get_kernel(**kwargs: Any) -> Any: ...
