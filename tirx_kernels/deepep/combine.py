@@ -125,7 +125,9 @@ def _gptr(base_u64, byte_off):
 
 
 def _peer_u64(table, dst):
-    return T.cast(table[dst], "uint64")
+    value = T.alloc_local([1], "uint64")
+    T.evaluate(T.ptx.ld.global_.b64(value[0], table.ptr_to([dst])))
+    return value[0]
 
 
 def _ld_acquire_gpu_u64(dst, addr):
@@ -648,7 +650,11 @@ def _build_reduce_epilogue_kernel(
                             ),
                         )
                     )
-                combined_topk_weights[token_idx * NUM_TOPK + lane] = T.cuda.uint_as_float(w32[0])
+                T.evaluate(
+                    T.ptx.st.global_.b32(
+                        combined_topk_weights.ptr_to([token_idx * NUM_TOPK + lane]), w32[0]
+                    )
+                )
             T.cuda.warp_sync()
 
     return deepep_combine_reduce_epilogue.with_attr(

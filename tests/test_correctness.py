@@ -95,21 +95,35 @@ def _reserve_gpus(test_run_uid: str, count: int):
                     f"correctness case requires {count} GPUs, "
                     f"but only {len(gpu_memory)} are visible"
                 )
-            slots_per_gpu = max(1, math.ceil(worker_count / len(gpu_memory)))
-            for gpu, _free_memory in gpu_memory:
+            # Any four visible GPUs can absorb all xdist workers, while free
+            # cards remain eligible to take work from cards occupied externally.
+            active_gpu_target = min(4, len(gpu_memory))
+            slots_per_gpu = math.ceil(worker_count / active_gpu_target)
+            candidates = []
+            for gpu, free_memory in gpu_memory:
+                active_slots = 0
+                candidate_handle = None
                 for slot in range(slots_per_gpu):
                     slot_handle = _try_lock(lock_root / f"gpu-{gpu}-slot-{slot}.lock")
-                    if slot_handle is not None:
-                        selected.append(gpu)
-                        slot_handles.append(slot_handle)
-                        break
-                if len(selected) == count:
-                    break
-            if len(selected) != count:
-                selected.clear()
-                for slot_handle in slot_handles:
-                    slot_handle.close()
-                slot_handles.clear()
+                    if slot_handle is None:
+                        active_slots += 1
+                    elif candidate_handle is None:
+                        candidate_handle = slot_handle
+                    else:
+                        slot_handle.close()
+                if candidate_handle is not None:
+                    candidates.append(
+                        (free_memory // (active_slots + 1), free_memory, gpu, candidate_handle)
+                    )
+
+            candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            if len(candidates) >= count:
+                for _score, _free_memory, gpu, slot_handle in candidates[:count]:
+                    selected.append(gpu)
+                    slot_handles.append(slot_handle)
+                candidates = candidates[count:]
+            for _score, _free_memory, _gpu, slot_handle in candidates:
+                slot_handle.close()
         if not selected:
             time.sleep(0.1)
 
