@@ -236,27 +236,20 @@ __forceinline__ __device__ void enqueue_remote(
         : "memory");
 }
 """
-# Keep the acquire-load polling loop in one device helper.  Expanding the loop
-# into TIR can leave worker CTAs spinning indefinitely on queue publication.
-while_ld_global_acquire = """
-__forceinline__ __device__ int32_t while_ld_global_acquire(int32_t* addr) {
-    int32_t value;
-    asm volatile(
-        "ld.global.acquire.sys.b32 %0, [%1];"
-        : "=r"(value)
-        : "l"(addr)
-        : "memory");
-    while (value < 0) {
-        __nanosleep(40);
-        asm volatile(
-            "ld.global.acquire.sys.b32 %0, [%1];"
-            : "=r"(value)
-            : "l"(addr)
-            : "memory");
-    }
-    return value;
-}
-"""
+
+
+@Tx.prim_func(private=True)
+def while_ld_global_acquire(addr_h: Tx.handle("int32", "global")) -> Tx.int32:
+    addr = Tx.decl_buffer((1,), "int32", data=addr_h, scope="global")
+    value: Tx.int32
+    Tx.ptx.ld.acquire.sys.global_.b32(value, addr.ptr_to([0]))
+    while value < 0:
+        Tx.cuda.nano_sleep(40)
+        Tx.ptx.ld.acquire.sys.global_.b32(value, addr.ptr_to([0]))
+    return value
+
+
+_WHILE_LD_GLOBAL_ACQUIRE_GV = tvm.ir.GlobalVar("while_ld_global_acquire")
 
 
 @Tx.meta_class
@@ -388,11 +381,10 @@ class GEMMMPMCQueue(MPMCQueue):
         Tx.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Tx.int32(1))
         if self.head_r[0] < self.num_tot_tasks:
             self.masked_pos[0] = self.head_r[0] & self.mask
-            fetched_task_type[0] = Tx.cuda.func_call(
-                "while_ld_global_acquire",
-                self.task_types.ptr_to([self.masked_pos[0]]),
-                source_code=while_ld_global_acquire,
-                return_type="int32",
+            fetched_task_type[0] = tvm.ir.Call(
+                _WHILE_LD_GLOBAL_ACQUIRE_GV,
+                [self.task_types.ptr_to([self.masked_pos[0]])],
+                ret_ty="int32",
             )
             Tx.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), Tx.int32(-1))
             Tx.ptx.ld.global_.s32(
@@ -1053,7 +1045,12 @@ def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
             },
         )
         return specialized.build_kernel()
-    return tvm.IRModule({FUSED_DEVICE_ENTRYPOINT: test_mma_ss_tma_2sm_persistent})
+    return tvm.IRModule(
+        {
+            _WHILE_LD_GLOBAL_ACQUIRE_GV: while_ld_global_acquire,
+            FUSED_DEVICE_ENTRYPOINT: test_mma_ss_tma_2sm_persistent,
+        }
+    )
 
 
 KERNEL_META = {"name": "gemm_reduce_scatter", "category": "basic", "compute_capability": 10}
@@ -1254,8 +1251,7 @@ class _Case:
         )
         expected_exit_count = self.config.world_size if self.config.world_size > 1 else 0
         torch.testing.assert_close(
-            self.exit_barrier_torch,
-            torch.full_like(self.exit_barrier_torch, expected_exit_count),
+            self.exit_barrier_torch, torch.full_like(self.exit_barrier_torch, expected_exit_count)
         )
         if torch.isnan(self.gemm_out_torch).any() or torch.isnan(self.out).any():
             raise AssertionError("GemmRS output contains an uncovered tile")

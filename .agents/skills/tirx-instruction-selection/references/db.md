@@ -344,6 +344,100 @@ run-to-run drift, so that is where to stop.
 Confirm predicate polarity and inactive-lane memory behavior, then compare BRA,
 BSYNC, reconvergence, code size, registers, and both control-flow outcomes.
 
+## Preserve compiler visibility with a typed device helper
+
+**Symptoms:** `inline_asm_boundary`, `branch_reconvergence`, `excess_control_instructions`, `performance_regression`
+
+Expanding a long register-only sequence into one inline-asm wrapper per PTX
+instruction can change whole-function control-flow lowering even when the data
+path instructions are identical.  If the original compiler-visible function
+boundary is the only demonstrated difference, express the sequence as a
+private scalar-return PrimFunc whose body contains the ordinary typed PTX ops.
+Give pointer parameters their real storage scope and bind the helper to the
+same device target as its caller; otherwise the pipeline either invents global
+loads or treats the call as a cross-target launch.
+
+One measured packed reduction moved from 1080 instructions and one
+reconvergence region to 1088 and two when expanded directly.  A typed private
+device helper restored 1080 instructions, one reconvergence region, 168
+registers, zero stack, and the same packed arithmetic.  On one fixed GPU, the
+old-helper/current ratios were 38.130/38.087 = 1.0011 and
+184.346/182.235 = 1.0116 across the dense and compressed workloads.  NVVM
+inlined the helper without a force-inline attribute; do not add one unless a
+final-binary negative control shows a surviving device call.
+
+Use this only for a reusable typed function boundary, not to hide an arbitrary
+source string or make a workload-specific PTX bundle.  Confirm the final
+binary has no helper call, then compare control topology, registers, spills,
+correctness, and fixed-runner wall time across every affected workload.
+
+## Remove a volatile identity only after final-binary equivalence
+
+**Symptoms:** `volatile_identity`, `inline_asm_boundary`, `sass_equivalence`, `performance_regression`
+
+An inline `asm volatile("mov.u32")` identity may look like an intentional
+optimization barrier, but do not preserve or remove it based on source form
+alone.  Replace only the identity with the ordinary typed PTX move, keep the
+surrounding issue order unchanged, and compare correctness, final SASS,
+resources, and fixed-runner wall time.  Where the consumer uses a signed view,
+keep the `.u32` instruction operands as `uint32` and use a same-width cast for
+the consumer instead of weakening the PTX table's dtype contract.
+
+For one paged MQA kernel, replacing two volatile source helpers with
+non-volatile typed `mov.u32` produced byte-identical SASS at both affected
+bench-suite configs and retained 168 registers with zero stack and local
+memory.  On one fixed B200 using five Proton rounds and one-second cooldown,
+volatile/plain times were 4.459290/4.459954 us (ratio 0.999851) and
+6.350161/6.349622 us (ratio 1.000085); correctness was unchanged.  This proves
+those identities were redundant for that lowering, not that volatile asm is
+generally redundant.  If SASS, resources, correctness, or a reproducible
+wall-time gate changes, retain opacity through a general backend primitive
+rather than a workload-specific source helper.
+
+## Split predicated destination policies around the inactive-path merge
+
+**Symptoms:** `predicated_destination`, `inactive_lane_value`, `sass_divergence`, `performance_regression`
+
+A predicated instruction with a written destination needs the policy at that
+specific program point, not one policy for the whole expression chain.  Keep
+the default `preserve_dst=False` write-only destination when inactive lanes
+cannot be consumed before an explicit merge, perform that merge with `selp`,
+then use `preserve_dst=True` on a later predicated transform when inactive lanes
+must retain the merged value.  Applying read-write binding to the initial loads
+creates false input dependencies; applying write-only binding to the final
+transform loses the inactive value.
+
+One shared-memory gamma path recovered its original lowering with predicated
+undefined shared loads, an unconditional subtract, `selp` to zero inactive
+lanes, and a predicated read-write `ex2`.  The final SASS was byte-identical to
+the source-helper baseline.  Across its three bench-suite workloads,
+baseline/final times were 54.307/54.317 us, 119.646/119.631 us, and
+83.360/82.549 us, while correctness passed.  Verify predicate polarity,
+inactive-lane consumption, final SASS, and every control-flow shape; this
+sequence is valid only when the undefined values are dominated by the merge.
+
+## Keep acquire polling in a typed private function boundary
+
+**Symptoms:** `polling_loop_hang`, `acquire_load`, `device_function_boundary`, `unstable_benchmark_ratio`
+
+When a source helper contains an acquire load followed by a sleep-and-retry
+loop, replacing the arbitrary source call does not require flattening the loop
+into its caller.  Express it as a private scalar-return PrimFunc containing the
+typed acquire load, retry condition, sleep, and reload, and call that function
+through the IR module.  Bind the helper and entrypoint to the same CUDA target;
+the function boundary preserves compiler-visible control flow without keeping
+an arbitrary CUDA source string.
+
+For one distributed reduce-scatter polling loop, the typed private helper and
+the source helper produced byte-identical loadable SASS and kernel metadata.
+TP1 source/private timing was approximately 590.430/590.049 us, with a later
+final run at 590.412 us; TP4 source/private timing was 277.541/278.789 us
+(ratio 0.9955).  TP1 and TP4 correctness both completed without permanent
+spin.  Multi-reference TP4 campaigns were order-sensitive and unstable, so do
+not replace paired fixed-topology A/B or final-binary comparison with an
+unpaired aggregate.  Stop immediately on a hang, acquire-scope change,
+different final control flow, or a reproducible ratio at or below the gate.
+
 ## Materialize uniformity
 
 **Symptoms:** `warp_retry_region`, `vectorized_uniform_math`, `excess_address_instructions`
