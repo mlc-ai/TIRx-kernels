@@ -1036,3 +1036,38 @@ only the single-GPU sweep.
 
 Compile and export in prepare, spawn ranks in `run_gpu`, and make any
 shared launcher accept prebuilt libraries so the GPU stage never compiles.
+
+## Guard CUDA enum constants by toolkit version
+
+**Symptoms:** `unsupported_swizzle_enum`, `valid_driver_enum_rejected`, `descriptor_creation_failure`
+
+CUDA driver enum constants are C/C++ identifiers, not preprocessor macros, so
+`#ifdef CU_TENSOR_MAP_SWIZZLE_*` is always false even when `cuda.h` declares the
+enumerator. Guard toolkit-specific cases with `CUDA_VERSION` instead. On the
+SM100 target stack, the 128B atom swizzles are present in every inspected CUDA
+12.8 through 13.2 header, so `CUDA_VERSION >= 12080` admits values 4-6 while
+preserving builds against older headers.
+
+Do not change a kernel's shared-memory layout to work around this runtime
+validation failure. With the enum checks compiled under the version guard, a
+GDN prefill case that previously rejected swizzle value 4 passed unchanged;
+an NVSHMEM all-gather case passed against the same rebuilt runtime, confirming
+that the fix belongs to descriptor validation rather than kernel lowering.
+
+## Lower specialized global accesses explicitly
+
+**Symptoms:** `low_level_ir_contract_failure`, `config_specific_buffer_load`, `config_specific_buffer_store`
+
+TIRx configuration specialization can hide raw global `BufferLoad` and
+`BufferStore` nodes from the commonly exercised shape while leaving them in a
+less frequent branch. The low-level contract intentionally rejects those nodes:
+express the access with the kernel's typed `ld.global` / `st.global` helper and
+preserve signed values through bit reinterpretation rather than conversion.
+
+Configuration-wide inspection exposed this in 82 radix-top-k configurations
+and all four DeepEP combine configurations. Replacing only the raw accesses
+with existing typed PTX helpers left zero violations across the complete
+234-config radix and four-config DeepEP matrices; all 86 previously rejected
+configurations then passed their upstream oracles under a 16-worker run.
+Inspect every public configuration after specialization; validating only one
+default `get_kernel()` result is insufficient.

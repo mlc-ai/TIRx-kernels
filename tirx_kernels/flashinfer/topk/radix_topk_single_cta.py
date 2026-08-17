@@ -44,6 +44,7 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
     bar_sync,
     from_ordered_u16,
     from_ordered_u32,
+    ld_global_u32,
     ld_shared_pair_u32,
     ld_shared_quad_u32,
     ld_shared_u16,
@@ -398,13 +399,15 @@ def get_kernel(
             row_len: T.int32 = T.int32(length)
             if not basic:
                 if row_starts:
-                    row_start = row_starts_g[row_idx]
+                    row_start = T.reinterpret("int32", ld_global_u32(row_starts_g, row_idx))
                 if page_table:
                     if page_table_row_starts:
-                        page_start = pt_starts_g[row_idx]
+                        page_start = T.reinterpret(
+                            "int32", ld_global_u32(pt_starts_g, row_idx)
+                        )
                     else:
                         page_start = row_start
-                row_len = lengths_g[row_idx]
+                row_len = T.reinterpret("int32", ld_global_u32(lengths_g, row_idx))
             row_in: T.int64 = T.cast(row_idx, "int64") * T.int64(length) + T.cast(
                 row_start, "int64"
             )
@@ -417,32 +420,57 @@ def get_kernel(
                     take_main = T.int32(0)
                     for i0 in T.serial(tx, row_len, step=BLOCK_THREADS):
                         if i0 < k:
-                            out_idx[row_out + T.cast(i0, "int64")] = i0
-                            out_val[row_out + T.cast(i0, "int64")] = inp[
-                                T.cast(row_idx, "int64") * T.int64(length) + T.cast(i0, "int64")
-                            ]
+                            slot0: T.int64 = row_out + T.cast(i0, "int64")
+                            st_global_u32(out_idx, slot0, T.reinterpret("uint32", i0))
+                            bits0 = _ld_global_bits(
+                                inp,
+                                T.cast(row_idx, "int64") * T.int64(length)
+                                + T.cast(i0, "int64"),
+                                is32,
+                            )
+                            if is32:
+                                st_global_u32(out_val, slot0, bits0)
+                            else:
+                                st_global_u16(out_val, slot0, bits0)
             batch_idx: T.int32 = row_idx
             offset: T.int32 = T.int32(0)
             if page_table:
                 if row_to_batch:
-                    batch_idx = row_to_batch_g[row_idx]
+                    batch_idx = T.reinterpret(
+                        "int32", ld_global_u32(row_to_batch_g, row_idx)
+                    )
                 if row_len <= k:
                     take_main = T.int32(0)
                     src0: T.int64 = T.cast(batch_idx, "int64") * aux_stride
                     for i1 in T.serial(tx, k, step=BLOCK_THREADS):
                         page_id: T.int32 = T.int32(-1)
                         if i1 < row_len:
-                            page_id = aux[src0 + T.cast(page_start + i1, "int64")]
-                        out_idx[row_out + T.cast(i1, "int64")] = page_id
+                            page_id = T.reinterpret(
+                                "int32",
+                                ld_global_u32(
+                                    aux, src0 + T.cast(page_start + i1, "int64")
+                                ),
+                            )
+                        st_global_u32(
+                            out_idx,
+                            row_out + T.cast(i1, "int64"),
+                            T.reinterpret("uint32", page_id),
+                        )
             if ragged:
-                offset = aux[T.cast(row_idx, "int64")]
+                offset = T.reinterpret(
+                    "int32", ld_global_u32(aux, T.cast(row_idx, "int64"))
+                )
                 if row_len <= k:
                     take_main = T.int32(0)
                     for i2 in T.serial(tx, k, step=BLOCK_THREADS):
                         val2: T.int32 = T.int32(-1)
                         if i2 < row_len:
                             val2 = i2 + offset
-                        out_idx[row_out + T.cast(i2, "int64")] = val2
+                        st_global_u32(
+                            out_idx,
+                            row_out + T.cast(i2, "int64"),
+                            T.reinterpret("uint32", val2),
+                        )
 
             if take_main == 1:
                 # === Stage 1: stage the row as monotone keys (:605-623) ====
@@ -573,10 +601,14 @@ def get_kernel(
                 src_base: T.int64 = T.int64(0)
                 if page_table:
                     if row_to_batch:
-                        batch_idx = row_to_batch_g[row_idx]
+                        batch_idx = T.reinterpret(
+                            "int32", ld_global_u32(row_to_batch_g, row_idx)
+                        )
                     src_base = T.cast(batch_idx, "int64") * aux_stride
                 if ragged:
-                    offset = aux[T.cast(row_idx, "int64")]
+                    offset = T.reinterpret(
+                        "int32", ld_global_u32(aux, T.cast(row_idx, "int64"))
+                    )
 
                 if not deterministic:
                     # === Stage 4a: non-deterministic collect (:906-963) ====
@@ -777,10 +809,14 @@ def get_kernel(
                 if page_table:
                     bar_sync()
                     for ig in T.serial(tx, k, step=BLOCK_THREADS):
-                        gidx: T.int32 = out_idx[row_out + T.cast(ig, "int64")]
-                        out_idx[row_out + T.cast(ig, "int64")] = aux[
-                            src_base + T.cast(page_start + gidx, "int64")
-                        ]
+                        out_slot: T.int64 = row_out + T.cast(ig, "int64")
+                        gidx: T.int32 = T.reinterpret(
+                            "int32", ld_global_u32(out_idx, out_slot)
+                        )
+                        gathered: T.uint32 = ld_global_u32(
+                            aux, src_base + T.cast(page_start + gidx, "int64")
+                        )
+                        st_global_u32(out_idx, out_slot, gathered)
 
             row_idx = row_idx + grid
 

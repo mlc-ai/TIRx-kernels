@@ -13,6 +13,10 @@ license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
 # tvm, torch, triton are runtime dependencies managed externally (not on PyPI)
 dependencies = ["pyyaml>=6.0"]
 
+[tool.pytest.ini_options]
+addopts = "-n 16"
+testpaths = ["tests"]
+
 [tool.setuptools.packages.find]
 include = ["tirx_kernels*"]
 

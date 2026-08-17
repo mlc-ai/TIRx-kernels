@@ -1079,6 +1079,8 @@ def _run_worker(
     import torch
     import torch.distributed as dist
 
+    from tirx_kernels.runner import external_references_enabled
+
     from .utils._buffer import SymmetricWindow
 
     rank = runtime.rank
@@ -1095,22 +1097,25 @@ def _run_worker(
     x, topk_idx, topk_weights = data["x"], data["topk_idx"], data["topk_weights"]
     local_num_tokens = data["num_tokens"]
 
-    # The reference runtime needs GIN disabled on this host (verified in
-    # scaffolding: single-node NVLink LSA path works with EP_DISABLE_GIN=1).
-    import os
+    with_references = mode == "test" or external_references_enabled()
+    ref_buffer = None
+    if with_references:
+        # The reference runtime needs GIN disabled on this host (verified in
+        # scaffolding: single-node NVLink LSA path works with EP_DISABLE_GIN=1).
+        import os
 
-    os.environ.setdefault("EP_DISABLE_GIN", "1")
-    import deep_ep
+        os.environ.setdefault("EP_DISABLE_GIN", "1")
+        import deep_ep
 
-    ref_buffer = deep_ep.ElasticBuffer(
-        group,
-        num_max_tokens_per_rank=num_tokens_max,
-        hidden=hidden,
-        num_topk=num_topk,
-        # Match the source perf test (tests/elastic/test_ep.py defaults).
-        prefer_overlap_with_compute=False,
-        explicitly_destroy=True,
-    )
+        ref_buffer = deep_ep.ElasticBuffer(
+            group,
+            num_max_tokens_per_rank=num_tokens_max,
+            hidden=hidden,
+            num_topk=num_topk,
+            # Match the source perf test (tests/elastic/test_ep.py defaults).
+            prefer_overlap_with_compute=False,
+            explicitly_destroy=True,
+        )
 
     # TIRx-side symmetric window + metadata tensors.
     recv_region_bytes = world_size * num_tokens_max * TOKEN_BYTES_GMEM
@@ -1174,6 +1179,7 @@ def _run_worker(
         )
 
     def reference_launch():
+        assert ref_buffer is not None
         return ref_buffer.dispatch(
             x,
             topk_idx=topk_idx,
@@ -1263,7 +1269,7 @@ def _run_worker(
         with torch.cuda.stream(runtime.timing_stream):
             result = bench(
                 {"tirx": tirx_launch},
-                references={"deepep": build_reference},
+                references={"deepep": build_reference} if with_references else None,
                 timer="kineto",
                 rounds=kwargs.get("rounds", 1),
                 cooldown_s=kwargs.get("cooldown_s", 1.0),
@@ -1272,7 +1278,8 @@ def _run_worker(
         return {"status": "OK", **result}
     finally:
         window.destroy()
-        ref_buffer.destroy()
+        if ref_buffer is not None:
+            ref_buffer.destroy()
 
 
 def _resolve_num_sms(config: dict[str, Any]) -> int:

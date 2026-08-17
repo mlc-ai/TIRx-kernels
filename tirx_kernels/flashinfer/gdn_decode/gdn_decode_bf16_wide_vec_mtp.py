@@ -1446,12 +1446,11 @@ def run_gpu(
     case = prepare_data(**kwargs)
     executable = prepared["executable"]
     args = _tirx_args(case)
-    executable(*args)
-    _run_reference(case)
-    torch.cuda.synchronize(case["tirx_state"].device)
-    _assert_case_close(case)
-
     def source_builder():
+        executable(*args)
+        _run_reference(case)
+        torch.cuda.synchronize(case["tirx_state"].device)
+        _assert_case_close(case)
         for _ in range(2):
             _run_reference(case)
         torch.cuda.synchronize(case["source_state"].device)

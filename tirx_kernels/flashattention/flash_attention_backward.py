@@ -1981,7 +1981,13 @@ def get_kernel(
 
 
 def _prepare_official_workload(
-    batch_size: int, seq_len: int, num_heads: int, head_dim: int, is_causal: bool
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int,
+    is_causal: bool,
+    *,
+    compute_backward_reference: bool = True,
 ):
     """Create saved forward tensors and the current FA4 backward reference."""
     from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
@@ -1997,8 +2003,19 @@ def _prepare_official_workload(
         out, lse = _flash_attn_fwd(
             q=q, k=k, v=v, softmax_scale=scale, causal=is_causal, return_lse=True
         )[:2]
-        expected = _flash_attn_bwd(
-            q=q, k=k, v=v, out=out, dout=dout, lse=lse, softmax_scale=scale, causal=is_causal
+        expected = (
+            _flash_attn_bwd(
+                q=q,
+                k=k,
+                v=v,
+                out=out,
+                dout=dout,
+                lse=lse,
+                softmax_scale=scale,
+                causal=is_causal,
+            )
+            if compute_backward_reference
+            else None
         )
     data = {
         "Q": q,
@@ -2078,7 +2095,14 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
     num_heads = config.pop("num_heads")
     head_dim = config.pop("head_dim")
     is_causal = config.pop("is_causal")
-    data, _ = _prepare_official_workload(batch_size, seq_len, num_heads, head_dim, is_causal)
+    data, _ = _prepare_official_workload(
+        batch_size,
+        seq_len,
+        num_heads,
+        head_dim,
+        is_causal,
+        compute_backward_reference=False,
+    )
     candidate = setup(
         data, batch_size, num_heads, seq_len, head_dim, executables=prepared["executables"]
     )

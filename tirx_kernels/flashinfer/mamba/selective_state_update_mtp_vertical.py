@@ -1517,12 +1517,11 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
-    executable(*args)
-    _run_reference(case)
-    torch.cuda.synchronize()
-    _simple._assert_case_close(case)
-
     def source_builder():
+        executable(*args)
+        _run_reference(case)
+        torch.cuda.synchronize()
+        _simple._assert_case_close(case)
         for _ in range(2):
             _run_reference(case)
         torch.cuda.synchronize()

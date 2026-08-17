@@ -113,24 +113,36 @@ pip install -e .
 
 ### External dependencies
 
-These are **not on PyPI** and must be installed/available separately. They are
-imported lazily, so `import tirx_kernels` and kernel discovery work without
-them — they are only needed to actually compile/run a kernel:
+Correctness uses the original upstream implementations. Install the exact,
+mutually compatible revisions from the repository lock:
+
+```bash
+python scripts/install_reference_dependencies.py
+```
+
+[`reference-dependencies.json`](reference-dependencies.json) is the single
+source of truth for reference revisions and the shared CUTLASS DSL version.
+The same command installs the pinned pytest/xdist runner. `torch` and `tvm.tirx`
+remain externally managed runtime/compiler dependencies.
 
 | Dependency       | Needed by                          | Notes                                                  |
 | ---------------- | ---------------------------------- | ------------------------------------------------------ |
 | `tvm.tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tir/python`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
-| `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels. |
-| `flashinfer`     | `nvfp4_gemm` data/baseline | Used for nvfp4 quantization and reference impls. |
-| `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` data/baseline | Current SM100 forward/backward reference. |
-| `flash_kda`      | `flashkda_bf16_fused_m128` baseline | Uses the installed package; results record its package, source, extension, and CUTLASS provenance when available. |
-| `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` reference; checkout on `PYTHONPATH`. |
+| `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels and the MegaMoE timer. |
+| `flashinfer`     | `nvfp4_gemm` baseline | Used for reference implementations. |
+| `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` baseline | Current SM100 forward/backward reference. |
+| `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | Optional `sglang_cutedsl` benchmark reference. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
+| `deep_ep`        | `deepep_*` correctness and baselines | Reference implementation. |
+| `flash_kda`      | `flashkda_*` optional baselines | Raw FlashKDA benchmark peer. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
 
-The bench_suite **default sweep** hard-requires several of these (a missing
-reference fails the whole sweep) — see
+Correctness tests import and run these upstream implementations. The bench suite
+does not launch or time benchmark reference implementations by default (kernel
+data-preparation helpers may still import their upstream package). Pass
+`--with-references` to enable reference launches; a missing enabled reference
+fails its workload. See
 [`tirx_kernels/bench_suite/README.md`](tirx_kernels/bench_suite/README.md)
 for the prerequisites and workarounds.
 
@@ -143,12 +155,11 @@ for the prerequisites and workarounds.
 python -m tirx_kernels.registry --format json
 
 # Run correctness tests (optionally filter by kernel / config label)
-python -m tirx_kernels.test
-python -m tirx_kernels.test --kernel fp16_bf16_gemm
-python -m tirx_kernels.test --kernel fp16_bf16_gemm --config bf16_1024x1024x1024
+pytest -n 16 tests/test_correctness.py
 
 # Benchmark
 python -m tirx_kernels.bench --kernel nvfp4_gemm
+python -m tirx_kernels.bench --kernel nvfp4_gemm --with-references
 
 # Pre-commit regression benchmark sweep (see tirx_kernels/bench_suite/README.md)
 python -m tirx_kernels.bench_suite

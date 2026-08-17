@@ -4,9 +4,13 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 import ctypes
+import importlib
+import sys
+import types
 from dataclasses import asdict, dataclass
 from functools import cache
 from importlib.util import find_spec
+from pathlib import Path
 from typing import Any
 from unittest import SkipTest
 
@@ -1999,6 +2003,38 @@ def _sglang_cutedsl_available() -> bool:
     return find_spec("sglang") is not None and find_spec("cutlass") is not None
 
 
+@cache
+def _load_sglang_cutedsl_reference() -> tuple[Any, Any]:
+    """Load SGLang's kernel modules without initializing its unrelated frontend."""
+    spec = find_spec("sglang")
+    if spec is None or not spec.submodule_search_locations:
+        raise ImportError("cannot find the pinned SGLang source checkout")
+    root = Path(next(iter(spec.submodule_search_locations)))
+
+    package_paths = {
+        "sglang": root,
+        "sglang.kernels": root / "kernels",
+        "sglang.kernels.ops": root / "kernels" / "ops",
+        "sglang.kernels.ops.attention": root / "kernels" / "ops" / "attention",
+        "sglang.kernels.ops.attention.dsa": root / "kernels" / "ops" / "attention" / "dsa",
+        "sglang.srt": root / "srt",
+    }
+    for name, path in package_paths.items():
+        package = types.ModuleType(name)
+        package.__package__ = name
+        package.__path__ = [str(path)]
+        sys.modules[name] = package
+
+    utils = types.ModuleType("sglang.srt.utils")
+    utils.is_sm100_supported = lambda: torch.cuda.get_device_capability()[0] == 10
+    sys.modules[utils.__name__] = utils
+
+    module = importlib.import_module(
+        "sglang.kernels.ops.attention.dsa.cutedsl_paged_mqa_logits"
+    )
+    return module.CuteDSLPagedMQALogitsRunner, module.pick_dsl_expand
+
+
 def _make_sglang_cutedsl_runner(data: dict[str, Any]) -> Any:
     config: PagedMQALogitsFP8Config = data["config"]
     if config.context_pattern == "random_2d" and config.next_n > 1:
@@ -2007,10 +2043,7 @@ def _make_sglang_cutedsl_runner(data: dict[str, Any]) -> Any:
             "use context_pattern='sglang_fixed' or 'sglang_ragged'"
         )
 
-    from sglang.jit_kernel.dsa.cutedsl_paged_mqa_logits import (
-        CuteDSLPagedMQALogitsRunner,
-        pick_dsl_expand,
-    )
+    CuteDSLPagedMQALogitsRunner, pick_dsl_expand = _load_sglang_cutedsl_reference()
 
     expand_factor, atom = pick_dsl_expand(
         config.next_n,
@@ -2318,7 +2351,7 @@ def prepare_bench(**kwargs: Any):
 
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
-    from tirx_kernels.runner import bench
+    from tirx_kernels.runner import bench, external_references_enabled
 
     # Tiny (~8-11µs) paged kernel: event timing is launch-jitter-noisy (sporadic
     # 10-13% ratio spread) and ~2x inflated by launch overhead. timer=None inherits the
@@ -2340,16 +2373,22 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     # page-by-page and is prohibitively slow for SGLang's 131K-context sweep.
     data = _prepare_data(config, compute_reference=False)
     invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
-    deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
-    tirx_logits = _run_tirx_invocation(data, invocation)
-    torch.cuda.synchronize()
-    max_diff = _assert_valid_correct(data, tirx_logits, deepgemm_logits, name="TIRx vs DeepGEMM")
-    torch.cuda.empty_cache()
+    deepgemm_logits = None
+    max_diff = None
+    if external_references_enabled():
+        deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+        tirx_logits = _run_tirx_invocation(data, invocation)
+        torch.cuda.synchronize()
+        max_diff = _assert_valid_correct(
+            data, tirx_logits, deepgemm_logits, name="TIRx vs DeepGEMM"
+        )
+        torch.cuda.empty_cache()
 
     def _deepgemm():
         return lambda: _run_deepgemm_paged_mqa(data, clean_logits=False)
 
     def _sglang_cutedsl():
+        assert deepgemm_logits is not None
         cutedsl_runner = _make_sglang_cutedsl_runner(data)
         cutedsl_logits = cutedsl_runner()
         torch.cuda.synchronize()
@@ -2367,7 +2406,8 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         cooldown_s=_cooldown_s,
         references={"deepgemm": _deepgemm, "sglang_cutedsl": _sglang_cutedsl},
     )
-    result["max_diff"] = max_diff
+    if max_diff is not None:
+        result["max_diff"] = max_diff
     return result
 
 

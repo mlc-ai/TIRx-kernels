@@ -33,6 +33,22 @@ PREPARE_NUM_SMS_ENV = "TIRX_PREPARE_NUM_SMS"
 PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
 TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
 TVM_COMPILE_FORCE_FALLBACK_ENV = "TVM_COMPILE_FORCE_FALLBACK"
+_EXTERNAL_REFERENCES_ENV = "TIRX_INTERNAL_BENCH_REFERENCES"
+
+
+def set_external_references_enabled(enabled: bool) -> None:
+    """Select explicit diagnostic reference timing for the current process."""
+    if not isinstance(enabled, bool):
+        raise TypeError("external reference mode must be a bool")
+    if enabled:
+        os.environ[_EXTERNAL_REFERENCES_ENV] = "1"
+    else:
+        os.environ[_EXTERNAL_REFERENCES_ENV] = "0"
+
+
+def external_references_enabled() -> bool:
+    """Whether this process may prepare, launch, and time benchmark references."""
+    return os.environ.get(_EXTERNAL_REFERENCES_ENV) == "1"
 
 
 @runtime_checkable
@@ -127,7 +143,7 @@ class PreparedKernelBenchmark:
 class _CudaAssignment:
     indices: tuple[int, ...]
     uuids: tuple[str, ...]
-    previously_assigned: set[int]
+    previously_assigned_uuids: set[str]
 
 
 _NVML_LOCK = threading.Lock()
@@ -139,8 +155,8 @@ _ORIGINAL_TVM_COMPILE = tvm.compile
 _CUDA_ASSIGNMENT: _CudaAssignment | None = None
 
 
-def _current_process_cuda_gpus(*, required: bool = False) -> tuple[int, ...]:
-    """Return physical GPUs on which this PID owns a CUDA compute context."""
+def _current_process_cuda_gpu_uuids(*, required: bool = False) -> tuple[str, ...]:
+    """Return physical GPU UUIDs on which this PID owns a CUDA compute context."""
     global _NVML_MODULE, _NVML_UNAVAILABLE
     if _NVML_UNAVAILABLE:
         if required:
@@ -178,7 +194,8 @@ def _current_process_cuda_gpus(*, required: bool = False) -> tuple[int, ...]:
         for index in range(count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(index)
             if any(int(process.pid) == pid for process in process_query(handle)):
-                owned.append(index)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+                owned.append(uuid.decode() if isinstance(uuid, bytes) else str(uuid))
     except Exception as error:
         # Torch remains an independent oracle. NVML sampling failures must not
         # make ordinary standalone CPU tooling unusable.
@@ -192,7 +209,7 @@ def cuda_is_initialized() -> bool:
     """Report framework or driver-level CUDA initialization without creating it."""
     torch = sys.modules.get("torch")
     torch_initialized = bool(torch is not None and torch.cuda.is_initialized())
-    return torch_initialized or bool(_current_process_cuda_gpus())
+    return torch_initialized or bool(_current_process_cuda_gpu_uuids())
 
 
 def hardware_num_sms(default: int = 148) -> int:
@@ -279,10 +296,10 @@ def bind_cuda_assignment(
             f"late GPU assignment identity mismatch: requested {list(expected)}, "
             f"physical {list(actual)}"
         )
-    previously_assigned = set(indices)
+    previously_assigned_uuids = set(actual)
     if _CUDA_ASSIGNMENT is not None:
-        previously_assigned.update(_CUDA_ASSIGNMENT.previously_assigned)
-    _CUDA_ASSIGNMENT = _CudaAssignment(indices, actual, previously_assigned)
+        previously_assigned_uuids.update(_CUDA_ASSIGNMENT.previously_assigned_uuids)
+    _CUDA_ASSIGNMENT = _CudaAssignment(indices, actual, previously_assigned_uuids)
     validate_current_cuda_assignment("after ASSIGN")
     return actual
 
@@ -313,26 +330,26 @@ def validate_current_cuda_assignment(stage: str, *, restore: bool = False) -> tu
         raise RuntimeError(
             f"{stage}: assigned CUDA UUIDs changed from {_CUDA_ASSIGNMENT.uuids!r} to {actual!r}"
         )
-    unexpected = set(_current_process_cuda_gpus(required=True)) - (
-        _CUDA_ASSIGNMENT.previously_assigned
+    unexpected = set(_current_process_cuda_gpu_uuids(required=True)) - (
+        _CUDA_ASSIGNMENT.previously_assigned_uuids
     )
     if unexpected:
         raise RuntimeError(
-            f"{stage}: process owns CUDA context(s) on never-assigned physical GPU(s) "
+            f"{stage}: process owns CUDA context(s) on never-assigned physical GPU UUID(s) "
             f"{sorted(unexpected)}"
         )
     return actual
 
 
 def bench(*args: Any, references: Mapping[str, Any] | None = None, **kwargs: Any):
-    """Run the canonical timer with assignment checks around external setup."""
+    """Run the canonical timer, admitting references only in explicit diagnostic mode."""
     from tvm.tirx.bench import bench as canonical_bench
 
     if _CUDA_ASSIGNMENT is not None:
         validate_current_cuda_assignment("before benchmark setup", restore=True)
 
     checked_references = None
-    if references is not None:
+    if references is not None and external_references_enabled():
         checked_references = {}
         for name, builder in references.items():
 

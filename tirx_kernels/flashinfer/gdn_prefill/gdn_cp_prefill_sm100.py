@@ -5592,7 +5592,7 @@ def run_gpu(
 ) -> dict[str, Any]:
     """Benchmark the prepared four-launch chain against the source chain."""
     kwargs = {**prepared["config"], **kwargs}
-    from tvm.tirx.bench import bench
+    from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
     executable = prepared["executable"]

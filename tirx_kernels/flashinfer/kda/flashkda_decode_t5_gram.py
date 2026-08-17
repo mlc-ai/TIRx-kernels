@@ -1361,19 +1361,20 @@ def run_gpu(
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
 
-    # Validate once, outside the timed region. Both sides mutate their own state
-    # pool in place, so this also proves the pools stayed independent.
-    executable(*args)
-    reference_out = _flashinfer_reference(case)
-    torch.cuda.synchronize(case["device"])
-    torch.testing.assert_close(
-        case["tirx_out"].float(), reference_out.float(), rtol=_RTOL, atol=_ATOL
-    )
-    torch.testing.assert_close(
-        case["tirx_state_raw"].float(), case["reference_state_raw"].float(), rtol=_RTOL, atol=_ATOL
-    )
-
     def flashinfer_builder():
+        # Validate once outside the timed region. Both sides mutate independent state pools.
+        executable(*args)
+        reference_out = _flashinfer_reference(case)
+        torch.cuda.synchronize(case["device"])
+        torch.testing.assert_close(
+            case["tirx_out"].float(), reference_out.float(), rtol=_RTOL, atol=_ATOL
+        )
+        torch.testing.assert_close(
+            case["tirx_state_raw"].float(),
+            case["reference_state_raw"].float(),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
         # The nvcc JIT build and warmup both happen here, outside the timing.
         for _ in range(2):
             _flashinfer_reference(case)
