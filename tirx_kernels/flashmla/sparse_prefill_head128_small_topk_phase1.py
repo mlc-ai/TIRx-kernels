@@ -77,7 +77,8 @@ class SparseFlashMLAPrefillHead128SmallTopKConfig:
             raise ValueError("topk > 1280 dispatches outside the small-topk phase1 scope")
 
 
-BENCH_CONFIGS = [
+
+CONFIGS = [
     {
         "label": f"bench_smalltopk_dqk512_hq128_s4096_kv{s_kv}_topk1280",
         "s_q": 4096,
@@ -87,19 +88,6 @@ BENCH_CONFIGS = [
         "have_attn_sink": True,
     }
     for s_kv in (8192, 32768, 65536)
-]
-
-CONFIGS = [
-    {
-        "label": "correctness_smalltopk_dqk512_hq128_s2_kv256_topk128",
-        "s_q": 2,
-        "s_kv": 256,
-        "topk": 128,
-        "h_q": B_H,
-        "have_attn_sink": True,
-        "have_topk_length": True,
-        "inject_invalid_indices": True,
-    }
 ]
 
 KERNEL_META = {
@@ -1121,7 +1109,6 @@ def run_bench(
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "get_kernel",

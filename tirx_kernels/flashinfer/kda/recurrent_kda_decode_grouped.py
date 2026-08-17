@@ -344,7 +344,7 @@ BENCH_CONFIGS = [
     _case("ver_t2_hv16_b8", num_seqs=8, num_tokens=2),  # legal floor
 ]
 
-CONFIGS = [
+CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
     # Softplus gate (Kimi Linear): GATE_MODE=1, incl. the x>20 linear guard.
     _dec("dec_hv16_b4_sp", num_seqs=4, lower_bound=None),
     _case("ver_t8_hv16_b4_sp", num_seqs=4, lower_bound=None),

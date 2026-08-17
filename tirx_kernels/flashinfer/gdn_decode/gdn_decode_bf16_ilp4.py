@@ -320,7 +320,7 @@ def _correctness_case(
     }
 
 
-CONFIGS = [
+CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
     _correctness_case(
         "t1_tv64_source_picker", seq_len=1, batch=96, num_heads=2, num_v_heads=4, tile_v=64
     ),

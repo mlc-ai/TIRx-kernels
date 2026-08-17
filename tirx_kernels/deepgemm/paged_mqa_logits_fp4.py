@@ -237,39 +237,7 @@ DSA_INDEXER_LIKE_COVERAGE = [
     )
 ]
 
-BENCH_CONFIGS = DSA_INDEXER_LIKE_COVERAGE
-
-# Correctness covers the distinct page sizes, output dtypes, and multi-token
-# scheduling without allocating the production benchmark working sets.
-CONFIGS = [
-    _make_case(
-        batch_size=1,
-        next_n=1,
-        max_num_pages=4,
-        num_pages=128,
-        page_size=32,
-        logits_dtype="float32",
-        seed=0,
-    ),
-    _make_case(
-        batch_size=2,
-        next_n=1,
-        max_num_pages=4,
-        num_pages=128,
-        page_size=64,
-        logits_dtype="bfloat16",
-        seed=1,
-    ),
-    _make_case(
-        batch_size=2,
-        next_n=3,
-        max_num_pages=4,
-        num_pages=128,
-        page_size=64,
-        logits_dtype="float32",
-        seed=2,
-    ),
-]
+CONFIGS = DSA_INDEXER_LIKE_COVERAGE
 
 
 def _make_context_lens(config: PagedMQALogitsFP4Config) -> torch.Tensor:
@@ -2495,7 +2463,6 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "DSA_INDEXER_LIKE_COVERAGE",
     "KERNEL_META",

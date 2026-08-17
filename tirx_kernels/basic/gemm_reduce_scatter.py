@@ -1058,8 +1058,7 @@ def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
 KERNEL_META = {"name": "gemm_reduce_scatter", "category": "basic", "compute_capability": 10}
 _RELAUNCH_COUNT = 20
 
-BENCH_CONFIGS = make_configs(GEMM_RS_MODEL_SHAPES)
-CONFIGS = make_configs(GEMM_RS_MODEL_SHAPES[:1])
+CONFIGS = make_configs(GEMM_RS_MODEL_SHAPES)
 
 
 def _config(M: int, N: int, K: int, world_size: int, dtype: str, scheduler: str) -> GemmRSConfig:
@@ -1512,7 +1511,6 @@ def prepare_bench(
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CAPACITY",
     "CONFIGS",
     "DTYPE",

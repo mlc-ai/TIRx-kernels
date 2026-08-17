@@ -1934,7 +1934,10 @@ KERNEL_META = {
     "compute_capability": 10,
 }
 
-BENCH_CONFIGS = [
+
+# Correctness uses small semantic cases; production shapes remain in
+# BENCH_CONFIGS and never construct an O(S²) oracle.
+CONFIGS = [
     {
         "batch_size": batch_size,
         "seq_len": seq_len,
@@ -1958,20 +1961,6 @@ BENCH_CONFIGS = [
         (4, 8192, True),
         (4, 8192, False),
     )
-]
-
-# Correctness uses small semantic cases; production shapes remain in
-# BENCH_CONFIGS and never construct an O(S²) oracle.
-CONFIGS = [
-    {
-        "batch_size": 1,
-        "seq_len": seq_len,
-        "num_heads": 16,
-        "head_dim": 128,
-        "is_causal": is_causal,
-        "label": f"b1_s{seq_len}_h16_{'causal' if is_causal else 'noncausal'}",
-    }
-    for seq_len, is_causal in ((256, True), (256, False))
 ]
 
 

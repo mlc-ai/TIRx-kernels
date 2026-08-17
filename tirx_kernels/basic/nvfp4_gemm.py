@@ -1010,10 +1010,9 @@ TIRX_CONFIGS = {
 
 
 KERNEL_META = {"name": "nvfp4_gemm", "category": "basic", "compute_capability": 10}
-BENCH_CONFIGS = [
+CONFIGS = [
     {"M": s, "N": s, "K": s, "label": f"{s}x{s}x{s}"} for s in [1024, 2048, 4096, 8192, 16384]
 ]
-CONFIGS = [{"M": 1024, "N": 1024, "K": 1024, "label": "correctness_1024"}]
 
 
 def get_kernel(M, N, K):

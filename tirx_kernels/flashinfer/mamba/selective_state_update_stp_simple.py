@@ -369,7 +369,7 @@ BENCH_CONFIGS = [
 # one-axis rows covered by FlashInfer's upstream STP tests.  The public
 # FlashInfer API requires D, so its nullable device branch is correctness-only:
 # a source/TIRx benchmark row could not exercise matching implementation paths.
-CONFIGS = [
+CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
     _case("b64_h64_d64_s128_r8_no_d", has_d=False),
     _case("b64_h64_d64_s128_r8_out_allocated", use_out_tensor=False),
     *[

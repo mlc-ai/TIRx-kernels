@@ -142,7 +142,8 @@ def _case(
 # `_get_block_config_for_mega_moe` (16, 32, 64, 96, 128, 192), so a per-PR
 # sm100a run exercises every heuristic-selected path; each token count sits
 # just below its bucket boundary. The rest sweep production shapes.
-BENCH_CONFIGS = [
+
+CONFIGS = [
     _case("p1_tok2_h1024_i512_e2_k1_bm16", tok=2, max_tok=4, h=1024, i=512, e=2, k=1),
     _case("p2_tok2_h1024_i512_e4_k1_bm16", g=2, tok=2, max_tok=4, h=1024, i=512, e=4, k=1),
     _case("p4_tok2_h1024_i512_e8_k1_bm16", g=4, tok=2, max_tok=4, h=1024, i=512, e=8, k=1),
@@ -184,17 +185,6 @@ BENCH_CONFIGS = [
     _case("t8192_m8192_h7168_i3072_e384_k6_g2_s1", g=2, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
     _case("t8192_m8192_h7168_i3072_e384_k6_g4_s1", g=4, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
     _case("t8192_m8192_h7168_i3072_e384_k6_g6_s1", g=6, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
-]
-
-CONFIGS = [
-    _case("test_p1_bm16", tok=2, max_tok=4, h=1024, i=512, e=2, k=1),
-    _case("test_p1_bm32", tok=16, h=1024, i=512, e=2, k=2),
-    _case("test_p1_bm64", tok=32, h=1024, i=512, e=2, k=2),
-    _case("test_p1_bm96", tok=64, h=1024, i=512, e=2, k=2),
-    _case("test_p1_bm128", tok=96, h=1024, i=512, e=2, k=2),
-    _case("test_p1_bm192", tok=192, h=1024, i=512, e=2, k=2),
-    _case("test_p1_shared", tok=2, max_tok=4, h=1024, i=512, e=2, k=1, s=1),
-    _case("test_p2_routing", g=2, tok=2, max_tok=4, h=1024, i=512, e=4, k=1),
 ]
 
 

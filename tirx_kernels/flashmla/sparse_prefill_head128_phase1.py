@@ -179,7 +179,8 @@ class SparseFlashMLAPrefillHead128Config:
             raise ValueError("topk must be a multiple of 128")
 
 
-BENCH_CONFIGS = [
+
+CONFIGS = [
     {
         "label": f"bench_regular_dqk{d_qk}_hq128_s4096_kv{s_kv}_topk2048",
         "s_q": 4096,
@@ -191,29 +192,6 @@ BENCH_CONFIGS = [
     }
     for d_qk in (512, 576)
     for s_kv in (8192, 32768, 65536)
-]
-
-CONFIGS = [
-    {
-        "label": "correctness_regular_dqk512_hq128_s1_kv2048_topk1408",
-        "s_q": 1,
-        "s_kv": 2048,
-        "topk": 1408,
-        "d_qk": 512,
-        "h_q": B_H,
-        "have_attn_sink": True,
-        "have_topk_length": True,
-        "inject_invalid_indices": True,
-    },
-    {
-        "label": "correctness_regular_dqk576_hq128_s2_kv256_topk128",
-        "s_q": 2,
-        "s_kv": 256,
-        "topk": 128,
-        "d_qk": 576,
-        "h_q": B_H,
-        "have_attn_sink": True,
-    },
 ]
 
 KERNEL_META = {
@@ -1694,7 +1672,6 @@ def run_bench(
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "get_kernel",

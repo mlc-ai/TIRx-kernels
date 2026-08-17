@@ -229,7 +229,7 @@ def _mhc_pre_token_count_representatives(
 _PROD_HC_HIDDENS = (16384, 28672)
 _MHC_PRE_MAX_TOKENS = (2048, 4096, 8192)
 
-_PRODUCTION_BENCH_CONFIGS = [
+CONFIGS = [
     _make_case(m=m, n=24, k=k, num_splits=s, seed=3000 + i)
     for i, (m, k, s) in enumerate(
         sorted(
@@ -247,19 +247,13 @@ _PRODUCTION_BENCH_CONFIGS = [
 # k=7168/7680 ones are edge (hidden=1792/1920, non-production) and stay out of
 # the main set.
 LEGACY_CONFIGS = [
-    _make_case(m=13, n=24, k=7168, num_splits=1, seed=2000),
-    _make_case(m=137, n=24, k=7680, num_splits=16, seed=2001),
-    _make_case(m=4096, n=24, k=7168, num_splits=1, seed=2002),
+    _make_case(m=13, n=24, k=7168, num_splits=1, seed=2000),  # edge: hidden=1792
+    _make_case(m=137, n=24, k=7680, num_splits=16, seed=2001),  # edge: hidden=1920
+    _make_case(m=4096, n=24, k=7168, num_splits=1, seed=2002),  # edge: hidden=1792
     _make_case(m=4096, n=24, k=28672, num_splits=16, seed=2003),
 ]
 
-BENCH_CONFIGS = _PRODUCTION_BENCH_CONFIGS + LEGACY_CONFIGS
-
-CONFIGS = [
-    _make_case(m=13, n=24, k=512, num_splits=1, seed=0),
-    _make_case(m=137, n=24, k=1024, num_splits=4, seed=1),
-    _make_case(m=65, n=32, k=768, num_splits=3, seed=2),
-]
+BENCH_CONFIGS = CONFIGS + LEGACY_CONFIGS
 
 
 def _prepare_data(config: TF32HCPrenormGemmConfig, *, compute_reference: bool) -> dict[str, Any]:

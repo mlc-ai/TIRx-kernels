@@ -21,11 +21,9 @@ KERNEL_META : dict
     - "compute_capability" (int): minimum SM version (e.g. 10 for sm100a)
 
 CONFIGS : list[dict]
-    Correctness configurations.  Each dict has a "label" key plus arbitrary
-    kernel-specific parameters.
-
-BENCH_CONFIGS : list[dict]
-    Separate production benchmark configurations.
+    Each dict has a "label" key (str) plus arbitrary kernel-specific
+    parameters.  The same config matrix is used by correctness tests and
+    benchmark runs.
 
 Functions
 ---------
@@ -59,7 +57,6 @@ class KernelModule(Protocol):
 
     KERNEL_META: dict[str, Any]
     CONFIGS: list[dict[str, Any]]
-    BENCH_CONFIGS: list[dict[str, Any]]
 
     @staticmethod
     def get_kernel(**kwargs: Any) -> Any: ...

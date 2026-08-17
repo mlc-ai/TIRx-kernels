@@ -178,7 +178,7 @@ BENCH_CONFIGS = [
     _case("hv16h16_b16_t3", num_seqs=16),
 ]
 
-CONFIGS = [
+CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
     # nat selects the initial checkpoint slot as ssm_idx[n*3 + clamp(nat-1, 0, 2)];
     # the upstream test sweeps 0/1/3/10, covering both clamp edges (.cu:287-296).
     _case("hv16h16_b8_t3_nat0", num_seqs=8, accepted="zeros"),

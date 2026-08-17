@@ -312,7 +312,7 @@ _CORRECTNESS_MODES = (
 
 _BOUNDARY_CASES = ((16, 16, 32, 64), (32, 16, 32, 128))
 
-CONFIGS = [
+CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
     _case(
         f"b{batch}_h{num_heads}_hv{num_v_heads}_tv{tile_v}_{mode}",
         batch=batch,

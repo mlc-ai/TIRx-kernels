@@ -260,7 +260,7 @@ BENCH_CONFIGS = [
     _case("hv32h16_b32_s8", num_seqs=32, num_heads=16, num_value_heads=32),
 ]
 
-CONFIGS = [
+CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
     # Split knife edge on a 148-SM B200: work = 296 takes split16, 304 takes
     # split8 (tests/kda/test_recurrent_kda_decode_export.py:311-320).
     _case("hv16h16_b18_s16_edge", num_seqs=18),

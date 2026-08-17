@@ -176,7 +176,8 @@ class SparseFlashMLADecodeHead64Config:
             raise ValueError("extra_topk_length requires an extra KV cache")
 
 
-BENCH_CONFIGS = [
+
+CONFIGS = [
     {
         "label": "deepseek_v4_v32_b128_sq2_sk32768_topk2048_p64",
         "model_type": "V32",
@@ -368,45 +369,6 @@ BENCH_CONFIGS = [
         "topk": 16384,
         "page_block_size": 64,
         "have_attn_sink": True,
-    },
-]
-
-CONFIGS = [
-    {
-        "label": "correctness_v32_b2_sq2_sk128_topk64_p64_h128",
-        "model_type": "V32",
-        "b": 2,
-        "s_q": 2,
-        "s_kv": 128,
-        "topk": 64,
-        "page_block_size": 64,
-        "h_q": 128,
-        "have_attn_sink": True,
-    },
-    {
-        "label": "correctness_model1_b2_sq2_sk128_topk64_p64_varlen",
-        "model_type": "MODEL1",
-        "b": 2,
-        "s_q": 2,
-        "s_kv": 128,
-        "topk": 64,
-        "page_block_size": 64,
-        "have_attn_sink": True,
-        "have_topk_length": True,
-        "inject_invalid_indices": True,
-    },
-    {
-        "label": "correctness_model1_b2_sq2_main64_extra64",
-        "model_type": "MODEL1",
-        "b": 2,
-        "s_q": 2,
-        "s_kv": 128,
-        "topk": 64,
-        "page_block_size": 64,
-        "extra_s_kv": 128,
-        "extra_topk": 64,
-        "extra_page_block_size": 32,
-        "have_extra_topk_length": True,
     },
 ]
 
@@ -3501,7 +3463,6 @@ def run_bench(
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "ModelType",

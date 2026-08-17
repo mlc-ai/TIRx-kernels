@@ -526,7 +526,7 @@ BENCH_CONFIGS = [
 ]
 
 
-CONFIGS = [
+CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
     _case("b1_h64_d64_s128_r8", batch=1),
     _case("b64_h64_d64_s128_r8_no_d", has_d=False),
     _case("b64_h64_d64_s128_r8_out_allocated", use_out_tensor=False),

@@ -160,26 +160,8 @@ DEEPGEMM_TEST_COVERAGE = [
     )
 ]
 
-BENCH_CONFIGS = DEEPGEMM_TEST_COVERAGE
 
-CONFIGS = [
-    _make_case(
-        seq_len=32,
-        seq_len_kv=256,
-        logits_dtype="float32",
-        compressed_logits=False,
-        disable_cp=True,
-        seed=0,
-    ),
-    _make_case(
-        seq_len=64,
-        seq_len_kv=512,
-        logits_dtype="bfloat16",
-        compressed_logits=True,
-        disable_cp=False,
-        seed=1,
-    ),
-]
+CONFIGS = DEEPGEMM_TEST_COVERAGE
 
 
 def _generate_ks_ke(config: MQALogitsFP8Config) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1176,7 +1158,6 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "DEEPGEMM_TEST_COVERAGE",
     "KERNEL_META",

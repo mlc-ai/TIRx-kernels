@@ -146,7 +146,7 @@ python -m tirx_kernels.registry --format json
 # Run correctness tests (optionally filter by kernel / config label)
 python -m tirx_kernels.test
 python -m tirx_kernels.test --kernel fp16_bf16_gemm
-python -m tirx_kernels.test --kernel fp16_bf16_gemm --config bf16_correctness_1024
+python -m tirx_kernels.test --kernel fp16_bf16_gemm --config bf16_1024x1024x1024
 
 # Benchmark
 python -m tirx_kernels.bench --kernel nvfp4_gemm
@@ -174,7 +174,7 @@ func = mod.get_kernel(M=1024, N=1024, K=1024)  # the TIRx PrimFunc
 ```
 
 Each module also provides `KERNEL_META` (name / category / `compute_capability`)
-and separate `CONFIGS` correctness and `BENCH_CONFIGS` benchmark sweeps.
+and `CONFIGS` (the test/bench parameter sweeps) that the registry and CLI use.
 
 ## License
 

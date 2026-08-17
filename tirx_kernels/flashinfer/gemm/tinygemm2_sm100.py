@@ -25,7 +25,7 @@ from tvm.script import tirx as T
 
 KERNEL_META = {"name": "tinygemm2_sm100", "category": "flashinfer", "compute_capability": 10}
 
-BENCH_CONFIGS = [
+CONFIGS = [
     {"label": "b1_o128_k720", "B": 1, "O": 128, "K": 720},
     {"label": "b2_o16_k256", "B": 2, "O": 16, "K": 256},
     {"label": "b4_o2880_k2880", "B": 4, "O": 2880, "K": 2880},
@@ -36,11 +36,7 @@ BENCH_CONFIGS = [
     {"label": "b64_o4096_k3072", "B": 64, "O": 4096, "K": 3072},
 ]
 
-CONFIGS = [
-    {"label": "correctness_b1_o128_k720", "B": 1, "O": 128, "K": 720},
-    {"label": "correctness_b2_o16_k256", "B": 2, "O": 16, "K": 256},
-    {"label": "correctness_b8_o1024_k1024", "B": 8, "O": 1024, "K": 1024},
-]
+BENCH_CONFIGS = CONFIGS
 
 THREADS = 384
 WT_OFF = 1024

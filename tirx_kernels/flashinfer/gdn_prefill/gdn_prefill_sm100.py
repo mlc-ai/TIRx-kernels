@@ -106,7 +106,8 @@ class GDNPrefillSM100Config:
         return sum(self.seq_lens)
 
 
-BENCH_CONFIGS = [
+
+CONFIGS = [
     {
         "label": f"hq{hq}_hv{hv}_s{seq_label}",
         "hq": hq,
@@ -116,12 +117,6 @@ BENCH_CONFIGS = [
     }
     for head_idx, (hq, hv) in enumerate(HEAD_PAIRS)
     for seq_idx, (seq_lens, seq_label) in enumerate(SEQ_CASES)
-]
-
-CONFIGS = [
-    {"label": "test_hq2_hv8_s128", "hq": 2, "hv": 8, "seq_lens": (128,), "seed": 0},
-    {"label": "test_hq16_hv16_s64+192", "hq": 16, "hv": 16, "seq_lens": (64, 192), "seed": 1},
-    {"label": "test_hq16_hv48_s129", "hq": 16, "hv": 48, "seq_lens": (129,), "seed": 2},
 ]
 
 KERNEL_META = {"name": "gdn_prefill_sm100", "category": "flashinfer", "compute_capability": 10}
@@ -3055,7 +3050,6 @@ def run_bench(
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "get_kernel",

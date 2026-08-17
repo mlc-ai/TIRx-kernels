@@ -356,7 +356,7 @@ BENCH_CONFIGS = [
     _case("hv12_b64_tr16_lb", num_seqs=64, num_heads=12, num_value_heads=12),
 ]
 
-CONFIGS = [
+CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
     # Schedule-band boundaries: 176 is the largest TILE_ROWS = 8 shape and 192
     # the smallest that falls through to the TILE_ROWS = 16 else-branch.
     _case("hv16_b11_tr8_lb", num_seqs=11),

@@ -344,7 +344,7 @@ BENCH_CONFIGS = [
     _case("hv12h12_b64_t2", num_seqs=64, num_heads=12, num_value_heads=12),
 ]
 
-CONFIGS = [
+CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
     # num_accepted_tokens is live at T=2 (unlike t1_direct): it selects the
     # initial checkpoint slot as ssm_idx[n*2 + clamp(nat-1, 0, 1)]. The upstream
     # test sweeps 0/1/2/9, covering both clamp edges (.cu:279-286).

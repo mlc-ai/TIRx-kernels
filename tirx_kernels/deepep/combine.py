@@ -34,9 +34,9 @@ KERNEL_META = {"name": "deepep_combine", "category": "deepep", "compute_capabili
 # (bf16, non-expanded, allow_multiple_reduction, no bias) on `world_size` ranks.
 CONFIGS = [
     {
-        "label": "correctness_t16_h7168_e256_k6",
+        "label": "t128_h7168_e256_k6",
         "world_size": 8,
-        "num_tokens": 16,
+        "num_tokens": 128,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,
@@ -44,9 +44,19 @@ CONFIGS = [
         "masked_ratio": 0.0,
     },
     {
-        "label": "correctness_t32_h7168_e256_k6_masked",
+        "label": "t4096_h7168_e256_k6",
         "world_size": 8,
-        "num_tokens": 32,
+        "num_tokens": 4096,
+        "hidden": 7168,
+        "num_experts": 256,
+        "num_topk": 6,
+        "expert_alignment": 1,
+        "masked_ratio": 0.0,
+    },
+    {
+        "label": "t1024_h7168_e256_k6_masked",
+        "world_size": 8,
+        "num_tokens": 1024,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,
@@ -54,9 +64,9 @@ CONFIGS = [
         "masked_ratio": 0.3,
     },
     {
-        "label": "correctness_t128_h7168_e256_k6_align128",
+        "label": "t1024_h7168_e256_k6_align128",
         "world_size": 8,
-        "num_tokens": 128,
+        "num_tokens": 1024,
         "hidden": 7168,
         "num_experts": 256,
         "num_topk": 6,

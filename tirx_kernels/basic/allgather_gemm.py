@@ -1071,8 +1071,7 @@ def _build_kernel():
 
 KERNEL_META = {"name": "allgather_gemm", "category": "basic", "compute_capability": 10}
 
-BENCH_CONFIGS = make_configs(ALLGATHER_GEMM_MODEL_SHAPES)
-CONFIGS = make_configs(ALLGATHER_GEMM_MODEL_SHAPES[:1])
+CONFIGS = make_configs(ALLGATHER_GEMM_MODEL_SHAPES)
 
 
 def _check_config(M_: int, N_: int, K_: int, world_size: int, dtype: str) -> AllGatherGemmConfig:
@@ -1451,7 +1450,6 @@ def prepare_bench(
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "AllGatherGemmConfig",

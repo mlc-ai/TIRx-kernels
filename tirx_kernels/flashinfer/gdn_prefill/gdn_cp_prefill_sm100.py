@@ -331,6 +331,7 @@ BENCH_CONFIGS = [
 
 
 CONFIGS = [
+    *BENCH_CONFIGS,
     {
         "label": "bf16_q1_k1_v1_s96_c128_tail_i64",
         "dtype": "bfloat16",

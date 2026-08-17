@@ -322,8 +322,7 @@ _SMOKE_CONFIGS = [
     ),
 ]
 
-CONFIGS = _SMOKE_CONFIGS
-BENCH_CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SGLANG_BENCH_CONFIGS
+CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SGLANG_BENCH_CONFIGS
 
 
 def _make_context_lens(config: PagedMQALogitsFP8Config) -> torch.Tensor:
@@ -2345,7 +2344,6 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "DSA_INDEXER_LIKE_COVERAGE",
     "KERNEL_META",
