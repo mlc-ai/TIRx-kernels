@@ -115,7 +115,10 @@ def shfl_up_u32(value, delta):
 # nvcc lowers this to setp.gt.s32 + selp.b32(0x80000000, -1) + xor.b32.
 def to_ordered_u32(bits):
     signed = T.reinterpret("int32", bits)
-    mask = T.if_then_else(signed > T.int32(-1), T.uint32(0x80000000), T.uint32(0xFFFFFFFF))
+    # T.Select, not T.if_then_else: the latter lowers to an if/else statement in
+    # generated CUDA, which becomes a real branch with BSSY reconvergence. The
+    # source's ternary is a predicated `selp.b32`, which is what the sketch names.
+    mask = T.Select(signed > T.int32(-1), T.uint32(0x80000000), T.uint32(0xFFFFFFFF))
     return T.bitwise_xor(mask, bits)
 
 
@@ -123,21 +126,21 @@ def to_ordered_u32(bits):
 #   (ordered & 0x80000000) ? (ordered ^ 0x80000000) : ~ordered
 def from_ordered_u32(ordered):
     signed = T.reinterpret("int32", ordered)
-    mask = T.if_then_else(signed > T.int32(-1), T.uint32(0xFFFFFFFF), T.uint32(0x80000000))
+    mask = T.Select(signed > T.int32(-1), T.uint32(0xFFFFFFFF), T.uint32(0x80000000))
     return T.bitwise_xor(mask, ordered)
 
 
 # RadixTopKTraits<half|nv_bfloat16>::ToOrdered (topk_common.cuh:61-64, :87-90)
 def to_ordered_u16(bits):
     signed = T.reinterpret("int16", bits)
-    mask = T.if_then_else(signed > T.int16(-1), T.uint16(0x8000), T.uint16(0xFFFF))
+    mask = T.Select(signed > T.int16(-1), T.uint16(0x8000), T.uint16(0xFFFF))
     return T.bitwise_xor(mask, bits)
 
 
 # RadixTopKTraits<half|nv_bfloat16>::FromOrdered (topk_common.cuh:66-69, :92-95)
 def from_ordered_u16(ordered):
     signed = T.reinterpret("int16", ordered)
-    mask = T.if_then_else(signed > T.int16(-1), T.uint16(0xFFFF), T.uint16(0x8000))
+    mask = T.Select(signed > T.int16(-1), T.uint16(0xFFFF), T.uint16(0x8000))
     return T.bitwise_xor(mask, ordered)
 
 
@@ -172,5 +175,5 @@ def warp_inclusive_sum_u32(value, lane):
     acc = value
     for step in range(5):
         peer = shfl_up_u32(acc, 1 << step)
-        acc = T.if_then_else(lane >= T.int32(1 << step), acc + peer, acc)
+        acc = T.Select(lane >= T.int32(1 << step), acc + peer, acc)
     return acc
