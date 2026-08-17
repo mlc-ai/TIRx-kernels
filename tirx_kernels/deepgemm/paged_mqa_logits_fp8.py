@@ -4,8 +4,9 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 import ctypes
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import cache
+from importlib.util import find_spec
 from typing import Any
 from unittest import SkipTest
 
@@ -13,6 +14,7 @@ import torch
 
 from tvm.ir.type import PointerType, PrimType
 
+_DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
 _TEST_DIFF_THRESHOLD = 5e-6
 _CONTEXT_PATTERNS = ("random_2d", "sglang_fixed", "sglang_ragged")
@@ -322,8 +324,22 @@ _SMOKE_CONFIGS = [
     ),
 ]
 
-CONFIGS = _SMOKE_CONFIGS
-BENCH_CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SGLANG_BENCH_CONFIGS
+CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SGLANG_BENCH_CONFIGS
+
+
+def load_deep_gemm_paged_mqa() -> tuple[Any, str]:
+    try:
+        import deep_gemm as module
+    except Exception as exc:
+        raise SkipTest(
+            f"DeepGEMM paged MQA logits runtime unavailable: {_DEEP_GEMM_MODULE_NAME}: {exc}"
+        ) from exc
+
+    if not hasattr(module, "fp8_fp4_paged_mqa_logits"):
+        raise SkipTest("DeepGEMM runtime unavailable: missing fp8_fp4_paged_mqa_logits")
+    if not hasattr(module, "get_paged_mqa_logits_metadata"):
+        raise SkipTest("DeepGEMM runtime unavailable: missing get_paged_mqa_logits_metadata")
+    return module, "installed"
 
 
 def _make_context_lens(config: PagedMQALogitsFP8Config) -> torch.Tensor:
@@ -453,12 +469,19 @@ def _ref_paged_mqa_logits(
 
 
 def _prepare_data(config: PagedMQALogitsFP8Config, *, compute_reference: bool) -> dict[str, Any]:
+    deep_gemm, source = load_deep_gemm_paged_mqa()
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for SM100 FP8 paged MQA logits")
     if torch.cuda.get_device_capability()[0] < 10:
         raise SkipTest("SM100 FP8 paged MQA logits requires compute capability 10.x")
 
     torch.manual_seed(config.seed)
+    runtime_config = PagedMQALogitsFP8Config(
+        **{
+            **asdict(config),
+            "num_sms": int(getattr(deep_gemm, "get_num_sms", lambda: config.num_sms)()),
+        }
+    )
     q_bf16 = torch.randn(
         config.batch_size,
         config.next_n,
@@ -475,16 +498,15 @@ def _prepare_data(config: PagedMQALogitsFP8Config, *, compute_reference: bool) -
     context_lens = _make_context_lens(config)
     block_table = _make_block_table(config)
     indices = _make_indices(config)
-    from ._paged_mqa import make_schedule_metadata
-
-    tirx_schedule_meta = make_schedule_metadata(
-        context_lens, num_sms=config.num_sms, indices=indices
+    schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
+        context_lens, config.page_size, runtime_config.num_sms, indices
     )
+    tirx_schedule_meta = schedule_meta
     if not config.varlen and config.next_n >= 2:
         num_q_atoms = _align_up(config.next_n, 2) // 2
         atom_context_lens = context_lens[:, -1:].expand(config.batch_size, num_q_atoms).contiguous()
-        tirx_schedule_meta = make_schedule_metadata(
-            atom_context_lens.reshape(-1, 1), num_sms=config.num_sms
+        tirx_schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
+            atom_context_lens, config.page_size, runtime_config.num_sms
         )
         expected_end = config.batch_size * num_q_atoms
         if int(tirx_schedule_meta[-1, 0]) != expected_end:
@@ -493,14 +515,17 @@ def _prepare_data(config: PagedMQALogitsFP8Config, *, compute_reference: bool) -
                 f"expected {expected_end} q atoms"
             )
     data = {
-        "config": config,
+        "config": runtime_config,
+        "reference_source": source,
         "q": q_fp8,
         "fused_kv_cache": fused_kv_cache,
         "weights": weights,
         "context_lens": context_lens,
         "block_table": block_table,
         "indices": indices,
+        "schedule_meta": schedule_meta,
         "tirx_schedule_meta": tirx_schedule_meta,
+        "deep_gemm": deep_gemm,
     }
     if compute_reference:
         assert kv_dequant is not None
@@ -1954,6 +1979,76 @@ def _compile_tirx_paged_mqa(config: PagedMQALogitsFP8Config) -> Any:
     return _compile_tirx_paged_mqa_for_config(**compile_kwargs)
 
 
+def _run_deepgemm_paged_mqa(data: dict[str, Any], *, clean_logits: bool = False) -> torch.Tensor:
+    config: PagedMQALogitsFP8Config = data["config"]
+    return data["deep_gemm"].fp8_fp4_paged_mqa_logits(
+        q=(data["q"], None),
+        kv_cache=data["fused_kv_cache"],
+        weights=data["weights"],
+        context_lens=data["context_lens"],
+        block_table=data["block_table"],
+        schedule_meta=data["schedule_meta"],
+        max_context_len=config.max_context_len,
+        clean_logits=clean_logits,
+        logits_dtype=_torch_logits_dtype(config.logits_dtype),
+        indices=data["indices"],
+    )
+
+
+def _sglang_cutedsl_available() -> bool:
+    return find_spec("sglang") is not None and find_spec("cutlass") is not None
+
+
+def _make_sglang_cutedsl_runner(data: dict[str, Any]) -> Any:
+    config: PagedMQALogitsFP8Config = data["config"]
+    if config.context_pattern == "random_2d" and config.next_n > 1:
+        raise ValueError(
+            "SGLang CuTeDSL requires causal context lengths when next_n > 1; "
+            "use context_pattern='sglang_fixed' or 'sglang_ragged'"
+        )
+
+    from sglang.jit_kernel.dsa.cutedsl_paged_mqa_logits import (
+        CuteDSLPagedMQALogitsRunner,
+        pick_dsl_expand,
+    )
+
+    expand_factor, atom = pick_dsl_expand(
+        config.next_n,
+        batch_size=config.batch_size,
+        max_ctx=config.max_context_len,
+        num_sms=config.num_sms,
+        num_heads=config.num_heads,
+    )
+    expanded_batch = config.batch_size * expand_factor
+    q = data["q"].reshape(expanded_batch, atom, config.num_heads, config.head_dim)
+    context_lens = data["context_lens"][:, -1].contiguous()
+    block_table = data["block_table"]
+    if expand_factor > 1:
+        context_lens = context_lens.repeat_interleave(expand_factor)
+        block_table = block_table.repeat_interleave(expand_factor, dim=0)
+    block_table = block_table.contiguous()
+    schedule_meta = data["deep_gemm"].get_paged_mqa_logits_metadata(
+        context_lens.unsqueeze(-1), config.page_size, config.num_sms
+    )
+    output_dtype = _torch_logits_dtype(config.logits_dtype)
+
+    def _run():
+        return CuteDSLPagedMQALogitsRunner.forward(
+            q,
+            data["fused_kv_cache"],
+            data["weights"],
+            context_lens,
+            block_table,
+            schedule_meta,
+            config.max_context_len,
+            epi_dtype=torch.float32,
+            acc_dtype=torch.float32,
+            output_dtype=output_dtype,
+        )
+
+    return _run
+
+
 def _allocate_logits(config: PagedMQALogitsFP8Config) -> torch.Tensor:
     return torch.full(
         (config.batch_size * config.next_n, config.logits_stride),
@@ -2195,9 +2290,21 @@ def _assert_valid_correct(
 
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
+    config: PagedMQALogitsFP8Config = data["config"]
+    deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+    deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_paged_mqa(data)
     torch.cuda.synchronize()
-    _assert_correct(data, tirx_logits, name="TIRx")
+    tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
+    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
+        raise AssertionError(
+            f"TIRx diff {tirx_diff:.6g} is worse than DeepGEMM diff {deepgemm_diff:.6g}"
+        )
+    if config.context_pattern.startswith("sglang_") and _sglang_cutedsl_available():
+        cutedsl_runner = _make_sglang_cutedsl_runner(data)
+        cutedsl_logits = cutedsl_runner()
+        torch.cuda.synchronize()
+        _assert_correct(data, cutedsl_logits, name="SGLang CuTeDSL")
 
 
 def prepare_bench(**kwargs: Any):
@@ -2211,9 +2318,11 @@ def prepare_bench(**kwargs: Any):
 
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
-    from tirx_kernels.runner import bench, external_references_enabled
+    from tirx_kernels.runner import bench
 
-    # timer=None inherits the canonical local timer default.
+    # Tiny (~8-11µs) paged kernel: event timing is launch-jitter-noisy (sporadic
+    # 10-13% ratio spread) and ~2x inflated by launch overhead. timer=None inherits the
+    # global default (proton) -> pure per-kernel GPU time (~4.5µs, verified stable).
     timer = kwargs.pop("timer", None)
     # warmup/repeat: no hardcoded default here; pass through (None = defer to the
     # timer's own default; the graph timers ignore them anyway). Overridable via the
@@ -2229,109 +2338,36 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     # Allocate inputs once, outside the timed region (Triton-standard pure launch).
     # The independent Python reference is intentionally omitted here: it iterates
     # page-by-page and is prohibitively slow for SGLang's 131K-context sweep.
-    with_references = external_references_enabled()
     data = _prepare_data(config, compute_reference=False)
-    if with_references:
-        import deep_gemm
-
-        schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-            data["context_lens"], config.page_size, config.num_sms, data["indices"]
-        )
-        data["schedule_meta"] = schedule_meta
-        data["tirx_schedule_meta"] = schedule_meta
-        if not config.varlen and config.next_n >= 2:
-            num_q_atoms = _align_up(config.next_n, 2) // 2
-            atom_context_lens = data["context_lens"][:, -1:].expand(
-                config.batch_size, num_q_atoms
-            ).contiguous()
-            data["tirx_schedule_meta"] = deep_gemm.get_paged_mqa_logits_metadata(
-                atom_context_lens.reshape(-1, 1), config.page_size, config.num_sms
-            )
     invocation = _prepare_tirx_invocation(data, executable=tirx_executable)
+    deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+    tirx_logits = _run_tirx_invocation(data, invocation)
+    torch.cuda.synchronize()
+    max_diff = _assert_valid_correct(data, tirx_logits, deepgemm_logits, name="TIRx vs DeepGEMM")
+    torch.cuda.empty_cache()
 
-    def build_deepgemm():
-        import deep_gemm
+    def _deepgemm():
+        return lambda: _run_deepgemm_paged_mqa(data, clean_logits=False)
 
-        schedule_meta = data.get("schedule_meta")
-        if schedule_meta is None:
-            schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-                data["context_lens"], config.page_size, config.num_sms, data["indices"]
-            )
-        return lambda: deep_gemm.fp8_fp4_paged_mqa_logits(
-            q=(data["q"], None),
-            kv_cache=data["fused_kv_cache"],
-            weights=data["weights"],
-            context_lens=data["context_lens"],
-            block_table=data["block_table"],
-            schedule_meta=schedule_meta,
-            max_context_len=config.max_context_len,
-            clean_logits=False,
-            logits_dtype=_torch_logits_dtype(config.logits_dtype),
-            indices=data["indices"],
-        )
-
-    def build_sglang_cutedsl():
-        import deep_gemm
-        from sglang.jit_kernel.dsa.cutedsl_paged_mqa_logits import (
-            CuteDSLPagedMQALogitsRunner,
-            pick_dsl_expand,
-        )
-
-        if config.context_pattern == "random_2d" and config.next_n > 1:
-            raise ValueError("SGLang CuTeDSL requires causal context lengths when next_n > 1")
-        expand_factor, atom = pick_dsl_expand(
-            config.next_n,
-            batch_size=config.batch_size,
-            max_ctx=config.max_context_len,
-            num_sms=config.num_sms,
-            num_heads=config.num_heads,
-        )
-        expanded_batch = config.batch_size * expand_factor
-        q = data["q"].reshape(expanded_batch, atom, config.num_heads, config.head_dim)
-        context_lens = data["context_lens"][:, -1].contiguous()
-        block_table = data["block_table"]
-        if expand_factor > 1:
-            context_lens = context_lens.repeat_interleave(expand_factor)
-            block_table = block_table.repeat_interleave(expand_factor, dim=0)
-        block_table = block_table.contiguous()
-        schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-            context_lens.unsqueeze(-1), config.page_size, config.num_sms
-        )
-
-        return lambda: CuteDSLPagedMQALogitsRunner.forward(
-            q,
-            data["fused_kv_cache"],
-            data["weights"],
-            context_lens,
-            block_table,
-            schedule_meta,
-            config.max_context_len,
-            epi_dtype=torch.float32,
-            acc_dtype=torch.float32,
-            output_dtype=_torch_logits_dtype(config.logits_dtype),
-        )
-
-    max_diff = None
-    if with_references:
-        reference_logits = build_deepgemm()()
-        tirx_logits = _run_tirx_invocation(data, invocation)
+    def _sglang_cutedsl():
+        cutedsl_runner = _make_sglang_cutedsl_runner(data)
+        cutedsl_logits = cutedsl_runner()
         torch.cuda.synchronize()
-        max_diff = _assert_valid_correct(
-            data, tirx_logits, reference_logits, name="TIRx vs DeepGEMM"
+        _assert_valid_correct(
+            data, cutedsl_logits, deepgemm_logits, name="SGLang CuTeDSL vs DeepGEMM"
         )
-        torch.cuda.empty_cache()
+        return cutedsl_runner
 
     result = bench(
         {"tirx": lambda: _run_tirx_invocation(data, invocation)},
-        references={"deepgemm": build_deepgemm, "sglang_cutedsl": build_sglang_cutedsl},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
+        references={"deepgemm": _deepgemm, "sglang_cutedsl": _sglang_cutedsl},
     )
-    if max_diff is not None:
-        result["max_diff"] = max_diff
+    result["max_diff"] = max_diff
     return result
 
 
@@ -2345,7 +2381,6 @@ def run_bench(**kwargs: Any) -> dict[str, Any]:
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "DSA_INDEXER_LIKE_COVERAGE",
     "KERNEL_META",

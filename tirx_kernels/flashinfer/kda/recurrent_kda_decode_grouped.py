@@ -344,7 +344,7 @@ BENCH_CONFIGS = [
     _case("ver_t2_hv16_b8", num_seqs=8, num_tokens=2),  # legal floor
 ]
 
-CONFIGS = [
+CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
     # Softplus gate (Kimi Linear): GATE_MODE=1, incl. the x>20 linear guard.
     _dec("dec_hv16_b4_sp", num_seqs=4, lower_bound=None),
     _case("ver_t8_hv16_b4_sp", num_seqs=4, lower_bound=None),
@@ -928,6 +928,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
             slots[n_seq - padded_slots :] = -1
         ssm_idx = slots.reshape(n_seq, 1)
         tirx_state_raw = committed.reshape(-1).clone()
+        reference_state_raw = tirx_state_raw.clone()
         state_slots = pool_size
     else:
         base_rows = torch.arange(n_seq, device=device, dtype=torch.int32)
@@ -945,6 +946,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         scratch_view = scratch.reshape(n_seq, scratch_steps, slot_stride)
         scratch_view[:, 0, :] = seed_src
         tirx_state_raw = scratch
+        reference_state_raw = scratch.clone()
         state_slots = n_seq * scratch_steps
 
     initial_state_raw = tirx_state_raw.clone()
@@ -968,6 +970,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "nat": nat,
         "committed": committed,
         "tirx_state_raw": tirx_state_raw,
+        "reference_state_raw": reference_state_raw,
         "initial_state_raw": initial_state_raw,
         "state_slots": state_slots,
         "scratch_steps": scratch_steps,
@@ -1098,6 +1101,46 @@ def _torch_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
     return out.reshape(1, q_total, heads, HEAD_DIM), pool
 
 
+def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
+    """Run the FlashInfer CuTe DSL source on the reference state pool.
+
+    ``run_recurrent_kda`` derives ``NUM_TOKENS = 1 + num_spec_tokens``
+    (recurrent_kda.py:1779), so the verify family must pass it; the decode
+    family must not (:1298-1299).  ``num_accepted_tokens`` is deliberately left
+    unset, matching SGLang's ``target_verify`` -- FlashInfer then substitutes a
+    cached ones vector, which makes ``ic = 0`` and ``slot0 = ssm_idx[n, 0]``.
+    """
+    import importlib
+
+    # flashinfer.kda_kernels.__init__ rebinds ``recurrent_kda`` to the run
+    # function, so the submodule must be imported explicitly.
+    fi = importlib.import_module("flashinfer.kda_kernels.recurrent_kda")
+    spec = case["spec"]
+    tokens = spec["NUM_TOKENS"]
+    out, _ = fi.run_recurrent_kda(
+        q=case["q"],
+        k=case["k"],
+        v=case["v"],
+        g=case["g"],
+        beta=case["beta"],
+        A_log=case["a_log"],
+        dt_bias=case["dt_bias"],
+        scale=case["scale"],
+        initial_state=_state_view(case["reference_state_raw"], case),
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        lower_bound=case["lower_bound"],
+        cu_seqlens=case["cu_seqlens"],
+        ssm_state_indices=case["ssm_state_indices"],
+        num_spec_tokens=(tokens - 1) if tokens > 1 else None,
+    )
+    return out
+
+
+# Two bfloat16 ULP against the source, matching the one-warp sibling.
+_RTOL = 2.0**-7
+_ATOL = 1.0e-4
 # The FP32 oracle reassociates freely, so it only needs to agree to bf16 noise.
 _ORACLE_RTOL = 2.0**-6
 _ORACLE_ATOL = 3.0e-4
@@ -1138,7 +1181,13 @@ def run_test(**kwargs: Any) -> None:
     tirx_out = case["tirx_out"]
     tirx_state = _state_view(case["tirx_state_raw"], case)
 
-    # Independent dense FP32 Torch oracle
+    # Primary oracle: the CuTe DSL source itself, on its own pool clone.
+    ref_out = _flashinfer_reference(case)
+    ref_state = _state_view(case["reference_state_raw"], case)
+    _assert_close(tirx_out, ref_out, _RTOL, _ATOL, "output vs flashinfer")
+    _assert_close(tirx_state, ref_state, _RTOL, _ATOL, "state vs flashinfer")
+
+    # Secondary oracle: dense FP32 torch, from the untouched initial pool.
     oracle_out, oracle_state = _torch_reference(case)
     _assert_close(tirx_out, oracle_out, _ORACLE_RTOL, _ORACLE_ATOL, "output vs fp32 oracle")
     _assert_close(
@@ -1197,14 +1246,31 @@ def run_gpu(
     from tirx_kernels.runner import bench
 
     case = prepare_data(**kwargs)
+    spec = case["spec"]
     args = _tirx_args(case)
 
-    def flashinfer_builder():
-        from tirx_kernels.flashinfer.utils._flashkda_bench import (
-            prepare_flashinfer_cutedsl_reference,
-        )
+    # Validate once, outside the timed region.  Both implementations update
+    # their own state-pool clone in place, so repeated timed launches let the
+    # values drift; the work per launch is identical either way.
+    executable(*args)
+    shape = (1, spec["Q_TOTAL"], spec["NUM_VALUE_HEADS"], HEAD_DIM)
+    flashinfer_out = _flashinfer_reference(case).reshape(shape)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(case["tirx_out"], flashinfer_out, rtol=_RTOL, atol=_ATOL)
+    torch.testing.assert_close(
+        case["tirx_state_raw"], case["reference_state_raw"], rtol=_RTOL, atol=_ATOL
+    )
 
-        return prepare_flashinfer_cutedsl_reference(case)
+    def flashinfer_builder():
+        # Heavy import, CuTe JIT and warmup all happen here, outside the timing.
+        for _ in range(2):
+            _flashinfer_reference(case)
+        torch.cuda.synchronize()
+
+        def launch():
+            _flashinfer_reference(case)
+
+        return launch
 
     return bench(
         {"tirx": lambda: executable(*args)},

@@ -6,8 +6,8 @@
 """Fused MoE megakernel (MegaMoE) -- fp8 activations, fp4 weights, SM100.
 
 Reference: ``deep_gemm.fp8_fp4_mega_moe``.  The implementation lives in
-:mod:`tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe`; this module pins distinct
-correctness and benchmark matrices and the registry surface.
+:mod:`tirx_kernels.deepgemm._sm100_fp8_fp4_mega_moe`; this module pins the test
+and benchmark matrices and the registry surface.
 
 Upstream sources: deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh, csrc/apis/mega.h,
 csrc/jit_kernels/heuristics/mega_moe.h.
@@ -142,7 +142,7 @@ def _case(
 # `_get_block_config_for_mega_moe` (16, 32, 64, 96, 128, 192), so a per-PR
 # sm100a run exercises every heuristic-selected path; each token count sits
 # just below its bucket boundary. The rest sweep production shapes.
-BENCH_CONFIGS = [
+CONFIGS = [
     _case("p1_tok2_h1024_i512_e2_k1_bm16", tok=2, max_tok=4, h=1024, i=512, e=2, k=1),
     _case("p2_tok2_h1024_i512_e4_k1_bm16", g=2, tok=2, max_tok=4, h=1024, i=512, e=4, k=1),
     _case("p4_tok2_h1024_i512_e8_k1_bm16", g=4, tok=2, max_tok=4, h=1024, i=512, e=8, k=1),
@@ -184,17 +184,6 @@ BENCH_CONFIGS = [
     _case("t8192_m8192_h7168_i3072_e384_k6_g2_s1", g=2, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
     _case("t8192_m8192_h7168_i3072_e384_k6_g4_s1", g=4, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
     _case("t8192_m8192_h7168_i3072_e384_k6_g6_s1", g=6, tok=8192, h=7168, i=3072, e=384, k=6, s=1),
-]
-
-CONFIGS = [
-    _case("test_p1_bm16", tok=2, max_tok=4, h=1024, i=512, e=2, k=1),
-    _case("test_p1_bm32", tok=16, h=1024, i=512, e=2, k=2),
-    _case("test_p1_bm64", tok=32, h=1024, i=512, e=2, k=2),
-    _case("test_p1_bm96", tok=64, h=1024, i=512, e=2, k=2),
-    _case("test_p1_bm128", tok=96, h=1024, i=512, e=2, k=2),
-    _case("test_p1_bm192", tok=192, h=1024, i=512, e=2, k=2),
-    _case("test_p1_shared", tok=2, max_tok=4, h=1024, i=512, e=2, k=1, s=1),
-    _case("test_p2_routing", g=2, tok=2, max_tok=4, h=1024, i=512, e=4, k=1),
 ]
 
 
@@ -256,13 +245,16 @@ def prepare_data(
 
 def _assert_correctness_result(result: dict[str, Any]) -> None:
     if result["status"] == "SKIP":
-        raise SkipTest(result["reason"])
-    assert result["torch_relative_l2_diff"] <= 0.03, (
-        "TIRx MegaMoE differs from its quantized Torch oracle: relative L2 diff="
-        f"{result['torch_relative_l2_diff']}"
+        raise SkipTest(
+            f"{result['reason']} DeepGEMM reference source={result['reference_source']} "
+            f"checksum={result['reference_checksum']:.4f}"
+        )
+    assert result["deepgemm_max_abs_diff"] == 0.0, (
+        f"Expected bitwise parity with DeepGEMM reference, got deepgemm_max_abs_diff="
+        f"{result['deepgemm_max_abs_diff']}"
     )
     assert result["stats_max_abs_diff"] == 0, (
-        "cumulative_local_expert_recv_stats differs from the routed-token count, got "
+        "Expected cumulative_local_expert_recv_stats parity with DeepGEMM, got "
         f"stats_max_abs_diff={result['stats_max_abs_diff']}"
     )
 

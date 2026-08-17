@@ -28,13 +28,6 @@ helpers live in ``tirx_kernels/flashinfer/utils/fp_quant.py``.
 
 from typing import Any
 
-from tirx_kernels._torch_quant import (
-    nvfp4_per_token_scale_values,
-    quantize_e2m1,
-    quantize_nvfp4_per_token,
-    unpack_e2m1,
-    unswizzle_sf,
-)
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_8,
     cvt_e2m1x8,
@@ -277,6 +270,30 @@ def _alloc_outputs(m: int, k: int, sf_layout: str):
     return out, sf, pts
 
 
+def _sf_layout_enum(sf_layout: str):
+    from flashinfer.tllm_enums import SfLayout
+
+    return {
+        "linear": SfLayout.layout_linear,
+        "128x4": SfLayout.layout_128x4,
+        "8x4": SfLayout.layout_8x4,
+    }[sf_layout]
+
+
+def _run_reference(a, gs_inv, sf_layout: str, enable_pdl: bool):
+    """Run the FlashInfer CuTe-DSL source wrapper (allocates its own outputs)."""
+    from flashinfer.quantization import nvfp4_quantize
+
+    return nvfp4_quantize(
+        a,
+        gs_inv,
+        sfLayout=_sf_layout_enum(sf_layout),
+        backend="cute-dsl",
+        per_token_activation=True,
+        enable_pdl=enable_pdl,
+    )
+
+
 def prepare_bench(**kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
@@ -294,7 +311,7 @@ def run_test(
     zero_row: bool = False,
     **kwargs,
 ):
-    """Compile, launch, and validate one config against in-tree Torch math."""
+    """Compile, launch, and validate one config against the flashinfer source."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -306,66 +323,14 @@ def run_test(
     ex(a.view(-1), out_tirx.view(-1), sf_tirx, pts_tirx, m, gs_inv)
     torch.cuda.synchronize()
 
-    _, ref_sf, ref_pts = quantize_nvfp4_per_token(a, gs_inv, sf_layout=sf_layout)
-    exact_sf = sf_tirx == ref_sf
-    if not torch.all(exact_sf):
-        actual_value = sf_tirx.contiguous().view(torch.float8_e4m3fn).float()
-        reference_value = ref_sf.contiguous().view(torch.float8_e4m3fn).float()
-        adjacent = sf_tirx.to(torch.int16).sub(ref_sf.to(torch.int16)).abs() == 1
-        midpoint = (actual_value + reference_value) * 0.5
-        unquantized_sf = nvfp4_per_token_scale_values(a, gs_inv, sf_layout=sf_layout)
-        epsilon = 4 * torch.finfo(torch.float32).eps
-        near_midpoint = torch.isclose(unquantized_sf, midpoint, rtol=epsilon, atol=epsilon)
-        invalid_sf = ~exact_sf & ~(adjacent & near_midpoint)
-        if torch.any(invalid_sf):
-            count = int(invalid_sf.sum())
-            first = invalid_sf.nonzero()[0].tolist()
-            raise AssertionError(
-                f"{count} E4M3 scale factors differ outside an rcp.approx "
-                f"rounding boundary; first mismatch at {first}"
-            )
+    ref_fp4, ref_sf, ref_pts = _run_reference(a, gs_inv, sf_layout, enable_pdl)
+    torch.testing.assert_close(out_tirx, ref_fp4, rtol=0, atol=0)
+    torch.testing.assert_close(sf_tirx, ref_sf.reshape(-1), rtol=0, atol=0)
     torch.testing.assert_close(pts_tirx, ref_pts, rtol=0, atol=0)
-
-    actual_codes = unpack_e2m1(out_tirx)
-    logical_sf = unswizzle_sf(sf_tirx, rows=m, columns=k // NVFP4_SF_VEC_SIZE, layout=sf_layout)
-    decoded_sf = logical_sf.view(torch.float8_e4m3fn).float()
-    encode_scale = torch.where(ref_pts != 0, ref_pts.reciprocal(), 0.0)
-    output_scale = torch.where(decoded_sf != 0, encode_scale.unsqueeze(1) / decoded_sf, 0.0)
-    scaled = a.float().view(m, k // NVFP4_SF_VEC_SIZE, NVFP4_SF_VEC_SIZE)
-    scaled = (scaled * output_scale.unsqueeze(-1)).view_as(a)
-    reference_codes = quantize_e2m1(scaled)
-    exact = actual_codes == reference_codes
-    if not torch.all(exact):
-        # The kernel deliberately uses rcp.approx.ftz for the encode and
-        # output scales.  Exact Torch division can land a few FP32 ulps on the
-        # other side of an E2M1 midpoint, so accept only the adjacent code at
-        # such a boundary; signs and all non-boundary codes remain bit-exact.
-        scaled = scaled.abs()
-        actual_magnitude = actual_codes & 7
-        reference_magnitude = reference_codes & 7
-        lower = torch.minimum(actual_magnitude, reference_magnitude).to(torch.long)
-        boundaries = torch.tensor(
-            (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0), dtype=torch.float32, device=a.device
-        )
-        adjacent = (
-            actual_magnitude.to(torch.int16).sub(reference_magnitude.to(torch.int16)).abs() == 1
-        )
-        same_sign = (actual_codes & 8) == (reference_codes & 8)
-        midpoint = boundaries[lower.clamp_max(6)]
-        epsilon = 4 * torch.finfo(torch.float32).eps
-        near_midpoint = torch.isclose(scaled, midpoint, rtol=epsilon, atol=epsilon)
-        invalid = ~exact & ~(adjacent & same_sign & near_midpoint)
-        if torch.any(invalid):
-            count = int(invalid.sum())
-            first = invalid.nonzero()[0].tolist()
-            raise AssertionError(
-                f"{count} packed E2M1 values differ outside the rcp.approx "
-                f"rounding boundary; first mismatch at {first}"
-            )
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
-    """Benchmark the TIRx kernel only."""
+    """Benchmark the TIRx port against the CuTe-DSL source (kernel-only)."""
     config = dict(prepared["config"])
     dtype = config.pop("dtype")
     m = config.pop("m")
@@ -385,6 +350,8 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         ex(a.view(-1), out_tirx.view(-1), sf_tirx, pts_tirx, m, gs_inv)
 
     def build_reference():
+        # Bypass the allocating public wrapper: call the cached compiled source
+        # kernel directly with preallocated outputs (kernel-only timing).
         from flashinfer.quantization.kernels.nvfp4_quantize import (
             SF_LAYOUT_LINEAR,
             SF_LAYOUT_8x4,
@@ -396,7 +363,12 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
             sf_layout
         ]
         kernel_fn = _get_compiled_kernel_nvfp4_per_token(
-            dtype, k, layout_code, enable_pdl, False, None
+            dtype,
+            k,
+            layout_code,
+            enable_pdl,
+            False,  # disable_fp4_quant_fast_math
+            None,  # nvfp4_4over6_config
         )
         out_ref, sf_ref, pts_ref = _alloc_outputs(m, k, sf_layout)
         return lambda: kernel_fn(a, out_ref, sf_ref, pts_ref, m, gs_inv)

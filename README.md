@@ -114,24 +114,23 @@ pip install -e .
 ### External dependencies
 
 These are **not on PyPI** and must be installed/available separately. They are
-imported lazily and are only needed when a benchmark is run with
-`--with-references` (except runtime dependencies listed for the TIRx kernel itself):
+imported lazily, so `import tirx_kernels` and kernel discovery work without
+them — they are only needed to actually compile/run a kernel:
 
 | Dependency       | Needed by                          | Notes                                                  |
 | ---------------- | ---------------------------------- | ------------------------------------------------------ |
 | `tvm.tirx`       | all kernels (compile + run)        | The TIRx compiler. Put it on `PYTHONPATH`, e.g. `/path/to/tir/python`. |
 | `torch`          | all kernels                        | CUDA build matching your GPU.                          |
-| `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels and the MegaMoE timer. |
-| `flashinfer`     | `nvfp4_gemm` baseline | Used for reference implementations. |
-| `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` baseline | Current SM100 forward/backward reference. |
+| `deep_gemm`      | FP8 GEMM and `deepgemm_*` baselines | Used for optimized reference kernels. |
+| `flashinfer`     | `nvfp4_gemm` data/baseline | Used for nvfp4 quantization and reference impls. |
+| `flash-attn` + CUTLASS DSL | `flash_attention_backward_sm100` data/baseline | Current SM100 forward/backward reference. |
 | `flash_kda`      | `flashkda_bf16_fused_m128` baseline | Uses the installed package; results record its package, source, extension, and CUTLASS provenance when available. |
 | `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | `sglang_cutedsl` reference; checkout on `PYTHONPATH`. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
 
-The bench suite does not import or run reference implementations by default.
-Pass `--with-references` to enable them; a missing enabled reference fails its
-workload. See
+The bench_suite **default sweep** hard-requires several of these (a missing
+reference fails the whole sweep) — see
 [`tirx_kernels/bench_suite/README.md`](tirx_kernels/bench_suite/README.md)
 for the prerequisites and workarounds.
 
@@ -146,11 +145,10 @@ python -m tirx_kernels.registry --format json
 # Run correctness tests (optionally filter by kernel / config label)
 python -m tirx_kernels.test
 python -m tirx_kernels.test --kernel fp16_bf16_gemm
-python -m tirx_kernels.test --kernel fp16_bf16_gemm --config bf16_correctness_1024
+python -m tirx_kernels.test --kernel fp16_bf16_gemm --config bf16_1024x1024x1024
 
 # Benchmark
 python -m tirx_kernels.bench --kernel nvfp4_gemm
-python -m tirx_kernels.bench --kernel nvfp4_gemm --with-references
 
 # Pre-commit regression benchmark sweep (see tirx_kernels/bench_suite/README.md)
 python -m tirx_kernels.bench_suite
@@ -174,7 +172,7 @@ func = mod.get_kernel(M=1024, N=1024, K=1024)  # the TIRx PrimFunc
 ```
 
 Each module also provides `KERNEL_META` (name / category / `compute_capability`)
-and separate `CONFIGS` correctness and `BENCH_CONFIGS` benchmark sweeps.
+and `CONFIGS` (the test/bench parameter sweeps) that the registry and CLI use.
 
 ## License
 

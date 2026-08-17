@@ -54,15 +54,6 @@ CONFIGS = [
     *[_config(cfg, h_q=_small_topk.B_H, d_qk=_small_topk.D_QK) for cfg in _small_topk.CONFIGS],
 ]
 
-BENCH_CONFIGS = [
-    *[_config(cfg, h_q=_head64.B_H) for cfg in _head64.BENCH_CONFIGS],
-    *[_config(cfg, h_q=_head128.B_H) for cfg in _head128.BENCH_CONFIGS],
-    *[
-        _config(cfg, h_q=_small_topk.B_H, d_qk=_small_topk.D_QK)
-        for cfg in _small_topk.BENCH_CONFIGS
-    ],
-]
-
 
 def _required_int(kwargs: dict[str, Any], name: str) -> int:
     value = kwargs.get(name)
@@ -313,7 +304,6 @@ def main() -> None:
 
 
 __all__ = [
-    "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
     "dispatch_reason",

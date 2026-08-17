@@ -1614,9 +1614,6 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     d_weight = d_base.as_strided((nheads, dim), (1, 0))
     bias_base = torch.rand((nheads,), dtype=weight_dtype, device=device, generator=generator) - 4.0
     dt_bias = bias_base.as_strided((nheads, dim), (1, 0))
-    if not bool(kwargs.get("dt_softplus", False)):
-        # Without softplus, dt + bias is already a conditioned positive step.
-        dt_base.copy_(-bias_base + 0.125)
     z = torch.randn_like(x) if bool(kwargs.get("has_z", False)) else None
 
     if bool(kwargs.get("shared_state_slot", False)):
@@ -1725,7 +1722,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 @functools.cache
 def _load_oracle():
-    from tirx_kernels.flashinfer._mamba_reference import selective_state_update
+    from flashinfer.mamba import selective_state_update
 
     return selective_state_update
 
@@ -1835,13 +1832,13 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _run_reference(case: dict[str, Any], oracle=None) -> torch.Tensor:
+def _run_reference(case: dict[str, Any]) -> torch.Tensor:
     config = case["config"]
     stride_factor = int(config.get("state_stride_factor", 1))
     state_view = case["flashinfer_state_storage"][::stride_factor]
     scale_state = str(config["state_dtype"]) == "int16"
     source_out = case["flashinfer_output"] if bool(config.get("use_out_tensor", True)) else None
-    oracle = _load_oracle() if oracle is None else oracle
+    oracle = _load_oracle()
     result = oracle(
         state_view,
         case["x"],
@@ -1979,20 +1976,19 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
+    executable(*args)
+    _run_reference(case)
+    torch.cuda.synchronize()
+    _assert_case_close(case)
 
     def source_builder():
-        from flashinfer.mamba import selective_state_update
+        for _ in range(2):
+            _run_reference(case)
+        torch.cuda.synchronize()
 
         def launch():
-            _run_reference(case, selective_state_update)
+            _run_reference(case)
 
-        executable(*args)
-        launch()
-        torch.cuda.synchronize()
-        _assert_case_close(case)
-        for _ in range(2):
-            launch()
-        torch.cuda.synchronize()
         return launch
 
     return bench(

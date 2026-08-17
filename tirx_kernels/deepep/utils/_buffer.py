@@ -78,29 +78,22 @@ class SymmetricWindow:
     """One NCCL-registered symmetric window: [workspace | recv buffer]."""
 
     def __init__(self, group: dist.ProcessGroup, num_buffer_bytes: int) -> None:
+        # Lazy import: optional reference dependency.
+        from deep_ep.utils.comm import get_nccl_comm_handle
+
         self.group = group
         self.rank = group.rank()
         self.world_size = group.size()
-        from tirx_kernels.runner import external_references_enabled
-
-        if external_references_enabled():
-            # Keep the original dedicated communicator when DeepEP is present,
-            # so the TIRx window does not share reference communication state.
-            from deep_ep.utils.comm import get_nccl_comm_handle
-
-            self._comm_handle = get_nccl_comm_handle(group, force_new_comm=True)
-            comm = ctypes.c_void_p(self._comm_handle.get())
-        else:
-            device = torch.device("cuda", self.rank)
-            backend = group._get_backend(device)
-            comm = ctypes.c_void_p(backend._comm_ptr())
+        # A dedicated communicator so window registration does not interact
+        # with the reference ElasticBuffer's comm state.
+        self._comm_handle = get_nccl_comm_handle(group, force_new_comm=True)
         self._nccl = _load_nccl()
 
         self.workspace_bytes = WORKSPACE_ALIGNED_BYTES
         self.buffer_bytes = align_up(num_buffer_bytes, SYMMETRIC_ALIGNMENT)
         self.total_bytes = self.workspace_bytes + self.buffer_bytes
 
-        device = torch.device("cuda", self.rank)
+        comm = ctypes.c_void_p(self._comm_handle.get())
 
         base = ctypes.c_void_p()
         _check(
@@ -151,6 +144,7 @@ class SymmetricWindow:
                 "ncclGetLsaDevicePointer",
             )
             peer_ws.append(int(ptr.value))
+        device = torch.device("cuda", self.rank)
         self.peer_ws_ptrs = torch.tensor(peer_ws, dtype=torch.int64, device=device)
         self.peer_buf_ptrs = torch.tensor(
             [p + self.workspace_bytes for p in peer_ws], dtype=torch.int64, device=device
@@ -171,24 +165,23 @@ class SymmetricWindow:
 def get_theoretical_num_sms(
     world_size: int, num_experts: int, num_topk: int, prefer_overlap_with_compute: bool = True
 ) -> int:
-    """Return the launch width for the ported e256/k6 single-node path.
+    """Reuse the source's own SM-count model without constructing an ElasticBuffer."""
 
-    The retained specialization always uses the source model's non-overlap
-    floor of 64 SMs.  Keeping that invariant here avoids importing a runtime
-    package merely to rediscover a constant already fixed by the kernel port.
-    """
+    from deep_ep.buffers.elastic import ElasticBuffer
 
-    if (world_size, num_experts, num_topk) != (8, 256, 6):
-        raise ValueError("DeepEP ports are specialized to world=8, experts=256, topk=6")
-    from tirx_kernels.runner import PREPARE_NUM_SMS_ENV
+    class _FakeSelf:  # supports weakref (required by the semantic wrapper)
+        num_rdma_ranks = 1
+        num_scaleout_ranks = 1
+        prefer_overlap_with_compute = True
 
-    prepared_sms = os.environ.get(PREPARE_NUM_SMS_ENV)
-    device_sms = (
-        int(prepared_sms)
-        if prepared_sms
-        else torch.cuda.get_device_properties(0).multi_processor_count
-    )
-    return min(64, device_sms)
+        def __init__(self, world_size: int, prefer_overlap: bool) -> None:
+            self.num_ranks = world_size
+            self.num_scaleup_ranks = world_size
+            self.num_nvlink_ranks = world_size
+            self.prefer_overlap_with_compute = prefer_overlap
+
+    fake_self = _FakeSelf(world_size, prefer_overlap_with_compute)
+    return int(ElasticBuffer.get_theoretical_num_sms(fake_self, num_experts, num_topk))
 
 
 __all__ = [

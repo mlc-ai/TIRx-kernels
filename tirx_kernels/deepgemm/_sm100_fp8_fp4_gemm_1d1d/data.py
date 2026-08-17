@@ -3,11 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Operand construction, scale-factor packing and Torch correctness oracles.
+"""Operand construction, scale-factor packing and correctness oracles.
 
-Everything here runs outside timed closures.  Quantization and the scale-factor
-layout are owned by :mod:`tirx_kernels._torch_quant`, so neither correctness nor
-benchmark preparation depends on an installed DeepGEMM build.
+Everything here runs on the host, outside any timed closure.  The scale-factor
+layout is produced by DeepGEMM's own `transform_sf_into_required_layout`, so our
+kernel and the reference consume a byte-identical tensor and the TMA descriptors
+we build cannot drift from the layout the reference expects.
+
+`deep_gemm` is imported lazily inside each function: kernel discovery must work
+on hosts without it.
 
 Upstream sources: deep_gemm/utils/math.py, csrc/apis/layout.hpp, deep_gemm/testing/numeric.py.
 """
@@ -28,17 +32,6 @@ __all__ = [
 ]
 
 
-def require_deep_gemm():
-    """Return the `deep_gemm` module, or skip if it is not installed."""
-    from unittest import SkipTest
-
-    try:
-        import deep_gemm
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise SkipTest(f"deep_gemm is not installed: {exc}") from exc
-    return deep_gemm
-
-
 def require_sm100() -> None:
     """Skip rather than fail when the host cannot run the kernel."""
     from unittest import SkipTest
@@ -51,6 +44,17 @@ def require_sm100() -> None:
         raise SkipTest(
             f"needs SM100, got sm_{''.join(map(str, torch.cuda.get_device_capability()))}"
         )
+
+
+def require_deep_gemm():
+    """Return the `deep_gemm` module, or skip if it is not installed."""
+    from unittest import SkipTest
+
+    try:
+        import deep_gemm
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise SkipTest(f"deep_gemm is not installed: {exc}") from exc
+    return deep_gemm
 
 
 def calc_diff(x, y) -> float:
@@ -78,12 +82,12 @@ def max_diff_threshold(a_dtype: str, b_dtype: str) -> float:
 
 def quantize_a(x, *, gran_k: int = 128, dtype: str = "fp8") -> tuple:
     """Per-token quantization of the A operand (`recipe_a = (1, gran_k)`)."""
-    from tirx_kernels._torch_quant import per_token_cast_to_fp4, per_token_cast_to_fp8
+    from deep_gemm.utils.math import per_token_cast_to_fp4, per_token_cast_to_fp8
 
     if dtype == "fp8":
-        return per_token_cast_to_fp8(x, gran_k=gran_k)
+        return per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=gran_k)
     if dtype == "fp4":
-        return per_token_cast_to_fp4(x, gran_k=gran_k)
+        return per_token_cast_to_fp4(x, use_ue8m0=True, gran_k=gran_k)
     raise ValueError(f"unsupported A dtype: {dtype}")
 
 
@@ -94,7 +98,7 @@ def quantize_b(x, *, gran_k: int = 128, dtype: str = "fp8", per_block: bool | No
     per-token `(1, gran_k)` recipe (`QuantConfig.get_recipes`), so `per_block`
     defaults to "FP8 and not FP4".
     """
-    from tirx_kernels._torch_quant import (
+    from deep_gemm.utils.math import (
         per_block_cast_to_fp8,
         per_token_cast_to_fp4,
         per_token_cast_to_fp8,
@@ -105,12 +109,12 @@ def quantize_b(x, *, gran_k: int = 128, dtype: str = "fp8", per_block: bool | No
     if dtype == "fp4":
         if per_block:
             raise ValueError("FP4 operands use a per-token recipe")
-        return per_token_cast_to_fp4(x, gran_k=gran_k)
+        return per_token_cast_to_fp4(x, use_ue8m0=True, gran_k=gran_k)
     if dtype != "fp8":
         raise ValueError(f"unsupported B dtype: {dtype}")
     if per_block:
-        return per_block_cast_to_fp8(x, gran_k=gran_k)
-    return per_token_cast_to_fp8(x, gran_k=gran_k)
+        return per_block_cast_to_fp8(x, use_ue8m0=True, gran_k=gran_k)
+    return per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=gran_k)
 
 
 def recipe_for(dtype: str, gran_k: int, *, is_a: bool, is_wgrad: bool = False) -> tuple[int, int]:
@@ -123,11 +127,15 @@ def recipe_for(dtype: str, gran_k: int, *, is_a: bool, is_wgrad: bool = False) -
 
 
 def transform_sf(sf, mn: int, k: int, recipe: tuple[int, int], num_groups: int | None = None):
-    """Pack scales into the MN-major, TMA-aligned UE8M0-in-int32 ABI."""
+    """Pack scales into the MN-major, TMA-aligned, `ue8m0`-in-`int32` layout.
 
-    from tirx_kernels._torch_quant import transform_sf as pack_sf
-
-    return pack_sf(sf, mn=mn, gran_mn=recipe[0], num_groups=num_groups)
+    Delegating to DeepGEMM guarantees our kernel and the reference read the exact
+    same bytes; `csrc/apis/layout.hpp:49-53` is the SM100 branch that runs.
+    """
+    deep_gemm = require_deep_gemm()
+    if num_groups is None:
+        return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
+    return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe, num_groups)
 
 
 def broadcast_block_sf(sf, mn: int, gran_mn: int):
@@ -162,7 +170,7 @@ def to_major(x, major: str):
 
 def dequantize(quantized, sf_raw, *, dtype: str, gran_k: int, gran_mn: int = 1):
     """Reconstruct the value a perfect GEMM would consume from this operand."""
-    from tirx_kernels._torch_quant import cast_back_from_fp4, cast_back_from_fp8
+    from deep_gemm.utils.math import cast_back_from_fp4, cast_back_from_fp8
 
     sf_rows = broadcast_block_sf(sf_raw, quantized.size(0), gran_mn)
     if dtype == "fp8":
@@ -403,12 +411,22 @@ def prepare_m_grouped_contiguous(
 def transform_sf_psum(sf, mn: int, k: int, recipe, psum_layout, alignment: int | None = None):
     """`transform_sf` plus the optional psum layout that makes SFA skip gap rows.
 
-    The input rows already include the alignment gaps described by
-    ``psum_layout``.  Packing the physical row tensor is therefore sufficient;
-    no process-global external layout setting participates in the ABI.
+    The psum group starts are aligned by `smxx_layout.hpp:195`, which reads the
+    *process-global* MK alignment rather than taking it as an argument.  The
+    kernel places group `j` at `align(end[j-1], BLOCK_M)`, so the packing has to
+    see the same value; leaving it at DeepGEMM's default silently lays the scale
+    factors out on a different grid than A and D.
     """
-    del psum_layout, alignment
-    return transform_sf(sf, mn, k, recipe)
+    deep_gemm = require_deep_gemm()
+    if alignment is not None:
+        deep_gemm.set_mk_alignment_for_contiguous_layout(alignment)
+    if psum_layout is None:
+        return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
+    # Positional signature: (sf, mn, k, recipe, num_groups, is_sfa,
+    #                        disable_ue8m0_cast, psum_layout)
+    return deep_gemm.transform_sf_into_required_layout(
+        sf, mn, k, recipe, None, None, False, psum_layout
+    )
 
 
 def to_major_grouped(x, major: str):
@@ -509,6 +527,17 @@ def prepare_m_grouped_masked(
     }
 
 
+# --------------------------------------------------------------------------------------
+# Reference launch closures
+# --------------------------------------------------------------------------------------
+#
+# Each builder performs every piece of one-off work -- global alignment state, a
+# warm-up call that triggers DeepGEMM's JIT compile, and output allocation --
+# and then returns a no-argument closure that issues exactly one GEMM.  That is
+# what `tvm.tirx.bench.bench` expects from a `references={...}` entry, and it
+# keeps compilation and setup out of the timed region on both sides.
+
+
 def assert_within_threshold(diff, data, *, kernel: str, detail: str, **extra) -> dict:
     """Raise unless `diff` clears the dtype-derived threshold; else return the row.
 
@@ -525,11 +554,16 @@ def assert_within_threshold(diff, data, *, kernel: str, detail: str, **extra) ->
 def bench_against_deepgemm(
     tirx_launch, reference_launcher, data, *, warmup, repeat, timer, rounds, cooldown_s, **extra
 ) -> dict:
-    """Time TIRx and lazily build the matching DeepGEMM launch when enabled."""
+    """Time our launch against the DeepGEMM entry `reference_launcher` wraps.
+
+    The reference is built lazily, so a missing or failing DeepGEMM is reported
+    by `bench` as a baseline error instead of losing our own measurement.
+    `extra` is merged into the result as the shape columns the report prints.
+    """
     from tirx_kernels.runner import bench
 
     def build_reference():
-        launch, _output = reference_launcher(data)
+        launch, _out = reference_launcher(data)
         return launch
 
     result = bench(
@@ -553,23 +587,33 @@ def _warm_up(launch) -> None:
 
 
 def deepgemm_launch_normal(data, *, out=None):
+    """`deep_gemm.fp8_fp4_gemm_nt` over an already-prepared normal case."""
     import torch
 
     deep_gemm = require_deep_gemm()
     out = torch.empty_like(data["d"]) if out is None else out
-    if data["c"] is not None:
-        out.copy_(data["c"])
+    a, sfa = data["a"], data["sfa"]
+    b, sfb = data["b"], data["sfb"]
+    # Our kernel accumulates in place into a D that already holds C.  Handing
+    # DeepGEMM a *separate* C makes `gemm.hpp:43` run a full `d.copy_(c)` inside
+    # the launch: the copy is a second kernel that per-kernel attribution does not
+    # charge to the GEMM, but it leaves D hot in L2 and measures ~2.4% faster than
+    # the same GEMM run in place.  Pass the output as C so both sides do the same
+    # read-modify-write on the same bytes.
     c = out if data["c"] is not None else None
+    if c is not None:
+        out.copy_(data["c"])
+    recipe_a, recipe_b = data["dg_recipe_a"], data["dg_recipe_b"]
 
     def launch():
         deep_gemm.fp8_fp4_gemm_nt(
-            (data["a"], data["sfa"]),
-            (data["b"], data["sfb"]),
+            (a, sfa),
+            (b, sfb),
             out,
             c=c,
             disable_ue8m0_cast=False,
-            recipe_a=data["dg_recipe_a"],
-            recipe_b=data["dg_recipe_b"],
+            recipe_a=recipe_a,
+            recipe_b=recipe_b,
         )
 
     _warm_up(launch)
@@ -577,23 +621,30 @@ def deepgemm_launch_normal(data, *, out=None):
 
 
 def deepgemm_launch_m_grouped_contiguous(data, *, out=None):
+    """`deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous`."""
     import torch
 
     deep_gemm = require_deep_gemm()
+    # The alignment is process-global state that selects BLOCK_M; set it once,
+    # outside timing, and identically for our kernel.
     deep_gemm.set_mk_alignment_for_contiguous_layout(data["alignment"])
     out = torch.empty_like(data["d"]) if out is None else out
+    a, sfa, b, sfb = data["a"], data["sfa"], data["b"], data["sfb"]
+    layout = data["grouped_layout"]
+    use_psum, zero_pad = data["use_psum_layout"], data["ensure_zero_padding"]
+    recipe_a, recipe_b = data["dg_recipe_a"], data["dg_recipe_b"]
 
     def launch():
         deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
-            (data["a"], data["sfa"]),
-            (data["b"], data["sfb"]),
+            (a, sfa),
+            (b, sfb),
             out,
-            data["grouped_layout"],
+            layout,
             disable_ue8m0_cast=False,
-            use_psum_layout=data["use_psum_layout"],
-            ensure_zero_padding=data["ensure_zero_padding"],
-            recipe_a=data["dg_recipe_a"],
-            recipe_b=data["dg_recipe_b"],
+            use_psum_layout=use_psum,
+            ensure_zero_padding=zero_pad,
+            recipe_a=recipe_a,
+            recipe_b=recipe_b,
         )
 
     _warm_up(launch)
@@ -601,66 +652,26 @@ def deepgemm_launch_m_grouped_contiguous(data, *, out=None):
 
 
 def deepgemm_launch_m_grouped_masked(data, *, out=None):
+    """`deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked`."""
     import torch
 
     deep_gemm = require_deep_gemm()
     deep_gemm.set_mk_alignment_for_contiguous_layout(data["alignment"])
     out = torch.empty_like(data["d"]) if out is None else out
+    a, sfa, b, sfb = data["a"], data["sfa"], data["b"], data["sfb"]
+    masked_m, expected_m = data["masked_m"], data["expected_m"]
+    recipe_a, recipe_b = data["dg_recipe_a"], data["dg_recipe_b"]
 
     def launch():
         deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
-            (data["a"], data["sfa"]),
-            (data["b"], data["sfb"]),
+            (a, sfa),
+            (b, sfb),
             out,
-            data["masked_m"],
-            data["expected_m"],
+            masked_m,
+            expected_m,
             disable_ue8m0_cast=False,
-            recipe_a=data["dg_recipe_a"],
-            recipe_b=data["dg_recipe_b"],
-        )
-
-    _warm_up(launch)
-    return launch, out
-
-
-def deepgemm_launch_bmm(data, *, out=None):
-    import torch
-
-    deep_gemm = require_deep_gemm()
-    out = torch.empty_like(data["z"]) if out is None else out
-
-    def launch():
-        if data["c"] is not None:
-            deep_gemm.fp8_einsum(
-                data["expr"], data["x_fp8"], data["y_fp8"], out, out, recipe=data["dg_recipe"]
-            )
-        else:
-            deep_gemm.fp8_einsum(
-                data["expr"], data["x_fp8"], data["y_fp8"], out, recipe=data["dg_recipe"]
-            )
-
-    _warm_up(launch)
-    return launch, out
-
-
-def deepgemm_launch_k_grouped(data, *, out=None):
-    import torch
-
-    deep_gemm = require_deep_gemm()
-    deep_gemm.set_mk_alignment_for_contiguous_layout(data["k_alignment"])
-    out = torch.empty_like(data["d"]) if out is None else out
-    out.copy_(data["c"])
-
-    def launch():
-        deep_gemm.k_grouped_fp8_gemm_tn_contiguous(
-            (data["a_store"], data["sfa"]),
-            (data["b_store"], data["sfb"]),
-            out,
-            data["aligned_ks"],
-            data["grouped_layout"],
-            out,
-            recipe=data["dg_recipe"],
-            use_psum_layout=data["use_psum_layout"],
+            recipe_a=recipe_a,
+            recipe_b=recipe_b,
         )
 
     _warm_up(launch)
@@ -718,8 +729,7 @@ def prepare_bmm(*, expr: str, H: int, R: int, D: int, B: int, seed: int = 0) -> 
     read their strides rather than assume packing.
     """
     import torch
-
-    from tirx_kernels._torch_quant import ceil_div, per_block_cast_to_fp8, per_token_cast_to_fp8
+    from deep_gemm.utils.math import ceil_div, per_block_cast_to_fp8, per_token_cast_to_fp8
 
     require_sm100()
     torch.manual_seed(seed)
@@ -736,7 +746,7 @@ def prepare_bmm(*, expr: str, H: int, R: int, D: int, B: int, seed: int = 0) -> 
     x = torch.randn((B, H, R), device="cuda", dtype=torch.bfloat16)
     y = torch.randn((H, D, R), device="cuda", dtype=torch.bfloat16)
 
-    x_q, x_sf = per_token_cast_to_fp8(x.view(-1, R))
+    x_q, x_sf = per_token_cast_to_fp8(x.view(-1, R), use_ue8m0=True)
     x_q = x_q.view(B, H, R)
     x_sf = x_sf.view(B, H, ceil_div(R, gran_k))
     y_q = torch.empty_like(y, dtype=torch.float8_e4m3fn)
@@ -744,7 +754,7 @@ def prepare_bmm(*, expr: str, H: int, R: int, D: int, B: int, seed: int = 0) -> 
         (H, ceil_div(D, gran_k), ceil_div(R, gran_k)), device="cuda", dtype=torch.float
     )
     for i in range(H):
-        y_q[i], y_sf[i] = per_block_cast_to_fp8(y[i])
+        y_q[i], y_sf[i] = per_block_cast_to_fp8(y[i], use_ue8m0=True)
 
     x_ref = dequantize(
         x_q.view(-1, R), x_sf.view(-1, ceil_div(R, gran_k)), dtype="fp8", gran_k=gran_k
@@ -797,16 +807,39 @@ def prepare_bmm(*, expr: str, H: int, R: int, D: int, B: int, seed: int = 0) -> 
     }
 
 
+def deepgemm_launch_bmm(data, *, out=None):
+    """`deep_gemm.fp8_einsum` over an already-prepared batched case."""
+    import torch
+
+    deep_gemm = require_deep_gemm()
+    out = torch.empty_like(data["z"]) if out is None else out
+    expr, x_fp8, y_fp8 = data["expr"], data["x_fp8"], data["y_fp8"]
+    accumulate = data["c"] is not None
+    # `(gran_mn_a, gran_mn_b, gran_k)`.  Both MN granularities are 1 because the
+    # scales arrive already packed and the int32 branch of `check_sf_layout`
+    # asserts `gran_mn == 1` -- the same rule the four non-batched entries follow
+    # with their `(1, gran_k)` pairs.
+    recipe = data["dg_recipe"]
+
+    def launch():
+        if accumulate:
+            deep_gemm.fp8_einsum(expr, x_fp8, y_fp8, out, out, recipe=recipe)
+        else:
+            deep_gemm.fp8_einsum(expr, x_fp8, y_fp8, out, recipe=recipe)
+
+    _warm_up(launch)
+    return launch, out
+
+
 def _prepare_bmm_bhd_hdr_bhr(*, H: int, R: int, D: int, B: int, gran_k: int) -> dict:
     """`bhd,hdr->bhr` -> `(batch, m, n, k) = (H, B, R, D)`, B is MN-major."""
     import torch
-
-    from tirx_kernels._torch_quant import ceil_div, per_block_cast_to_fp8, per_token_cast_to_fp8
+    from deep_gemm.utils.math import ceil_div, per_block_cast_to_fp8, per_token_cast_to_fp8
 
     x = torch.randn((B, H, D), device="cuda", dtype=torch.bfloat16)
     y = torch.randn((H, D, R), device="cuda", dtype=torch.bfloat16)
 
-    x_q, x_sf = per_token_cast_to_fp8(x.view(-1, D))
+    x_q, x_sf = per_token_cast_to_fp8(x.view(-1, D), use_ue8m0=True)
     x_q = x_q.view(B, H, D)
     x_sf = x_sf.view(B, H, ceil_div(D, gran_k))
     y_q = torch.empty_like(y, dtype=torch.float8_e4m3fn)
@@ -814,7 +847,7 @@ def _prepare_bmm_bhd_hdr_bhr(*, H: int, R: int, D: int, B: int, gran_k: int) -> 
         (H, ceil_div(D, gran_k), ceil_div(R, gran_k)), device="cuda", dtype=torch.float
     )
     for i in range(H):
-        y_q[i], y_sf[i] = per_block_cast_to_fp8(y[i])
+        y_q[i], y_sf[i] = per_block_cast_to_fp8(y[i], use_ue8m0=True)
 
     x_ref = dequantize(
         x_q.view(-1, D), x_sf.view(-1, ceil_div(D, gran_k)), dtype="fp8", gran_k=gran_k
@@ -861,15 +894,14 @@ def _prepare_bmm_bhd_hdr_bhr(*, H: int, R: int, D: int, B: int, gran_k: int) -> 
 def _prepare_bmm_bhd_bhr_hdr(*, H: int, R: int, D: int, B: int, gran_k: int) -> dict:
     """`bhd,bhr->hdr` -> `(H, D, R, B)`: both operands MN-major, FP32 + accumulate."""
     import torch
-
-    from tirx_kernels._torch_quant import ceil_div, per_channel_cast_to_fp8
+    from deep_gemm.utils.math import ceil_div, per_channel_cast_to_fp8
 
     x = torch.randn((B, H, D), device="cuda", dtype=torch.bfloat16)
     y = torch.randn((B, H, R), device="cuda", dtype=torch.bfloat16)
     z0 = torch.randn((H, D, R), device="cuda", dtype=torch.float32) * 10
 
-    x_q, x_sf = per_channel_cast_to_fp8(x.view(B, -1))
-    y_q, y_sf = per_channel_cast_to_fp8(y.view(B, -1))
+    x_q, x_sf = per_channel_cast_to_fp8(x.view(B, -1), use_ue8m0=True)
+    y_q, y_sf = per_channel_cast_to_fp8(y.view(B, -1), use_ue8m0=True)
     x_q, x_sf = x_q.view(B, H, D), x_sf.view(ceil_div(B, gran_k), H, D)
     y_q, y_sf = y_q.view(B, H, R), y_sf.view(ceil_div(B, gran_k), H, R)
 
@@ -934,8 +966,7 @@ def k_grouped_quantize(x, ks: list[int], *, gran_k: int, group_ends: list[int] |
     import itertools
 
     import torch
-
-    from tirx_kernels._torch_quant import align_up, per_channel_cast_to_fp8
+    from deep_gemm.utils.math import align, per_channel_cast_to_fp8
 
     if x.dim() != 2:
         raise ValueError("k-grouped operands are 2-D `[sum_k, mn]`")
@@ -951,9 +982,9 @@ def k_grouped_quantize(x, ks: list[int], *, gran_k: int, group_ends: list[int] |
         if k == 0:
             continue
         start = end - k
-        padded = torch.zeros((align_up(k, gran_k), n), dtype=x.dtype, device=x.device)
+        padded = torch.zeros((align(k, gran_k), n), dtype=x.dtype, device=x.device)
         padded[:k] = x[start:end]
-        q, sf = per_channel_cast_to_fp8(padded, gran_k=gran_k)
+        q, sf = per_channel_cast_to_fp8(padded, use_ue8m0=True, gran_k=gran_k)
         quantized[start:end] = q[:k]
         sf_groups.append(sf)
     sf = (
@@ -969,8 +1000,7 @@ def k_grouped_dequantize(q, sf, ks: list[int], *, gran_k: int, group_ends: list[
     import itertools
 
     import torch
-
-    from tirx_kernels._torch_quant import ceil_div
+    from deep_gemm.utils.math import ceil_div
 
     if group_ends is None:
         group_ends = list(itertools.accumulate(ks))
@@ -1004,8 +1034,7 @@ def prepare_k_grouped(
     import torch
 
     require_sm100()
-    from tirx_kernels._torch_quant import pack_k_grouped_ue8m0
-
+    deep_gemm = require_deep_gemm()
     from ..k_grouped_fp8_gemm_contiguous import make_ks
     from .spec import align_up
 
@@ -1051,8 +1080,12 @@ def prepare_k_grouped(
         ref[i] += a_ref[end - k : end].t() @ b_ref[end - k : end]
     d = c.clone()
 
-    sfa = pack_k_grouped_ue8m0(a_sf, ks, mn=M, gran_k=gran_k)
-    sfb = pack_k_grouped_ue8m0(b_sf, ks, mn=N, gran_k=gran_k)
+    sfa = deep_gemm.get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor(
+        a_sf, layout, aligned_ks, gran_k, k_alignment, use_psum_layout
+    )
+    sfb = deep_gemm.get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor(
+        b_sf, layout, aligned_ks, gran_k, k_alignment, use_psum_layout
+    )
 
     return {
         "num_groups": num_groups,
@@ -1085,3 +1118,40 @@ def prepare_k_grouped(
         "major_b": "mn",
         "dg_recipe": (1, 1, gran_k),
     }
+
+
+def deepgemm_launch_k_grouped(data, *, out=None):
+    """`deep_gemm.k_grouped_fp8_gemm_tn_contiguous`."""
+    import torch
+
+    deep_gemm = require_deep_gemm()
+    deep_gemm.set_mk_alignment_for_contiguous_layout(data["k_alignment"])
+    # Its own accumulator: sharing `data["d"]` with our launch would put two
+    # implementations' read-modify-writes on one buffer, which the other four
+    # entries avoid.
+    out = torch.empty_like(data["d"]) if out is None else out
+    # DeepGEMM takes the `[sum_k, MN]` storage view, not the transposed one our
+    # descriptors address.
+    a, sfa, b, sfb = data["a_store"], data["sfa"], data["b_store"], data["sfb"]
+    aligned_ks, layout, c = data["aligned_ks"], data["grouped_layout"], data["c"]
+    recipe, use_psum = data["dg_recipe"], data["use_psum_layout"]
+
+    # Seed the accumulator once, outside the timed closure: our kernel is handed a
+    # D that already holds C, so charging the reference for the copy -- or letting
+    # the copy warm its output in L2 -- would compare different work.
+    out.copy_(c)
+
+    def launch():
+        deep_gemm.k_grouped_fp8_gemm_tn_contiguous(
+            (a, sfa),
+            (b, sfb),
+            out,
+            aligned_ks,
+            layout,
+            out,
+            recipe=recipe,
+            use_psum_layout=use_psum,
+        )
+
+    _warm_up(launch)
+    return launch, out

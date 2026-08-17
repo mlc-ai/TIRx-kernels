@@ -1240,6 +1240,13 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 
 @functools.cache
+def _load_oracle():
+    import flashinfer.gdn_kernels.gdn_decode_bf16_state as source_module
+
+    return source_module.gated_delta_rule_mtp_wide_vec
+
+
+@functools.cache
 def _compile_tirx(
     seq_len: int,
     num_heads: int,
@@ -1345,47 +1352,41 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _run_reference(case: dict[str, Any]) -> torch.Tensor:
-    from tirx_kernels.flashinfer._gdn_reference import gated_delta_rule_decode
-
     config = case["config"]
-    accepted_steps = (
-        case["accepted_steps"] if config.get("per_request_accepted_steps", False) else None
-    )
-    scatter = case["ssm_state_indices"] if config.get("per_token_pool_scatter", False) else None
-    cache_intermediate_states = bool(config.get("cache_intermediate_states", False))
-    effective_disable_state_update = bool(config.get("disable_state_update", False)) or (
-        cache_intermediate_states
-    )
-    return gated_delta_rule_decode(
+    oracle = _load_oracle()
+    return oracle(
         A_log=case["A_log"],
         a=case["a"],
         dt_bias=case["dt_bias"],
+        softplus_beta=1.0,
+        softplus_threshold=20.0,
         q=case["q"],
         k=case["k"],
         v=case["v"],
         b=case["b_gate"],
-        state_pool=case["source_state"],
-        read_indices=case["read_indices"],
-        write_indices=(
+        initial_state_source=case["source_state"],
+        initial_state_indices=case["read_indices"],
+        output_state_indices=(
             case["read_indices"] if bool(config.get("same_pool", True)) else case["write_indices"]
         ),
-        intermediate_states=(
-            case["source_intermediate"] if cache_intermediate_states else None
+        intermediate_states_buffer=(
+            case["source_intermediate"]
+            if bool(config.get("cache_intermediate_states", False))
+            else None
         ),
-        accepted_steps=accepted_steps,
-        ssm_state_indices=scatter,
-        disable_state_update=effective_disable_state_update,
-        use_qk_l2norm=bool(config.get("use_qk_l2norm", True)),
+        accepted_steps=(
+            case["accepted_steps"] if config.get("per_request_accepted_steps", False) else None
+        ),
+        ssm_state_indices=(
+            case["ssm_state_indices"] if config.get("per_token_pool_scatter", False) else None
+        ),
+        disable_state_update=bool(config.get("disable_state_update", False)),
+        use_qk_l2norm_in_kernel=bool(config.get("use_qk_l2norm", True)),
         scale=SCALE,
         output=case["source_output"],
+        tile_v=int(config["tile_v"]),
         disable_output=bool(config.get("disable_output", False)),
         recovery_steps=int(config.get("recovery_steps", 0)),
-        fused_accepted_steps=(
-            accepted_steps is not None
-            and not bool(config.get("disable_output", False))
-            and not effective_disable_state_update
-            and scatter is None
-        ),
     )
 
 
@@ -1445,61 +1446,19 @@ def run_gpu(
     case = prepare_data(**kwargs)
     executable = prepared["executable"]
     args = _tirx_args(case)
+    executable(*args)
+    _run_reference(case)
+    torch.cuda.synchronize(case["tirx_state"].device)
+    _assert_case_close(case)
 
     def source_builder():
-        from flashinfer.gdn_kernels.gdn_decode_bf16_state import gated_delta_rule_mtp_wide_vec
-
-        config = case["config"]
+        for _ in range(2):
+            _run_reference(case)
+        torch.cuda.synchronize(case["source_state"].device)
 
         def launch():
-            gated_delta_rule_mtp_wide_vec(
-                A_log=case["A_log"],
-                a=case["a"],
-                dt_bias=case["dt_bias"],
-                softplus_beta=1.0,
-                softplus_threshold=20.0,
-                q=case["q"],
-                k=case["k"],
-                v=case["v"],
-                b=case["b_gate"],
-                initial_state_source=case["source_state"],
-                initial_state_indices=case["read_indices"],
-                output_state_indices=(
-                    case["read_indices"]
-                    if bool(config.get("same_pool", True))
-                    else case["write_indices"]
-                ),
-                intermediate_states_buffer=(
-                    case["source_intermediate"]
-                    if bool(config.get("cache_intermediate_states", False))
-                    else None
-                ),
-                accepted_steps=(
-                    case["accepted_steps"]
-                    if config.get("per_request_accepted_steps", False)
-                    else None
-                ),
-                ssm_state_indices=(
-                    case["ssm_state_indices"]
-                    if config.get("per_token_pool_scatter", False)
-                    else None
-                ),
-                disable_state_update=bool(config.get("disable_state_update", False)),
-                use_qk_l2norm_in_kernel=bool(config.get("use_qk_l2norm", True)),
-                scale=SCALE,
-                output=case["source_output"],
-                tile_v=int(config["tile_v"]),
-                disable_output=bool(config.get("disable_output", False)),
-                recovery_steps=int(config.get("recovery_steps", 0)),
-            )
+            _run_reference(case)
 
-        executable(*args)
-        launch()
-        torch.cuda.synchronize(case["tirx_state"].device)
-        _assert_case_close(case)
-        for _ in range(2):
-            launch()
-        torch.cuda.synchronize(case["source_state"].device)
         return launch
 
     return bench(
