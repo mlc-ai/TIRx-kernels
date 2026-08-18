@@ -1211,3 +1211,27 @@ with existing typed PTX helpers left zero violations across the complete
 configurations then passed their upstream oracles under a 16-worker run.
 Inspect every public configuration after specialization; validating only one
 default `get_kernel()` result is insufficient.
+
+## Profile the launch closure, not just the kernel
+
+**Symptoms:** `slow_small_shape`, `fixed_overhead`, `extra_kernels_in_profile`, `ratio_scales_with_shape`
+
+A per-kernel timer charges a workload for *every* kernel its closure enqueues.
+Tensors materialized inside the timed closure -- placeholder index buffers, a
+`lengths` fallback, a mode-specific `aux` -- each launch a fill kernel, and those
+land in the measured time.
+
+The signature is a ratio that tracks shape size rather than any property of the
+kernel: a port measured 0.54-0.63x on 7-15us shapes while already passing at
+1.03-1.09x on 120-190us ones. That is a constant addend, not a kernel defect, and
+it is easy to misread as latency-bound behavior on a small grid and then chase
+unrolls and stall counters. NCU settled it in one run: the reference profiled as
+one kernel, the port as four, the extra three being `FillFunctor`. Hoisting the
+argument materialization into a builder called once outside the closure moved the
+same shapes to 1.08-1.16x.
+
+Check the kernel count in the profile before forming any hypothesis about a
+small-shape deficit. `grep` the closure for allocation calls -- `torch.zeros`,
+`torch.full`, `.reshape` on a non-contiguous view -- and bind every argument in a
+prepare step. The same discipline applies to the reference closure: it must
+enqueue exactly what the dispatcher enqueues and nothing else.

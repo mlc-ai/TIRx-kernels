@@ -22,6 +22,7 @@ from typing import Any
 
 SOURCE_ALGO_ENV = "FLASHINFER_TOPK_ALGO"
 SOURCE_ALGO_VALUE = "multi_cta"
+SOURCE_ALGO_FILTERED = "filtered"
 
 WORKSPACE_BYTES = 1024 * 1024
 
@@ -39,16 +40,24 @@ def source_module():
     return gen_topk_module().build_and_load()
 
 
-def pin_source_algo() -> None:
-    """Force dispatch onto the radix family this port targets.
+def pin_source_algo(value: str = SOURCE_ALGO_VALUE) -> None:
+    """Force ``TopKDispatch`` onto one algorithm family.
 
-    ``GetTopKAlgoOverride`` (``topk.cuh``) maps this value to
-    ``TopKAlgoOverride::MULTI_CTA``, which makes ``ShouldUseFilteredTopK``
-    return false so FilteredTopK is never selected.  Which radix
-    specialization then runs is decided by ``ctas_per_group`` inside the
-    launcher, i.e. by the shape.
+    ``GetTopKAlgoOverride`` (``topk.cuh``) recognizes exactly two values:
+
+    ``"multi_cta"`` maps to ``TopKAlgoOverride::MULTI_CTA``, which makes
+    ``ShouldUseFilteredTopK`` return false so FilteredTopK is never selected;
+    which radix specialization then runs is decided by ``ctas_per_group``
+    inside the launcher, i.e. by the shape.
+
+    ``"filtered"`` maps to ``TopKAlgoOverride::FILTERED``, selecting the
+    FilteredTopK path past the ``num_rows``/``max_len`` heuristics (the
+    ``k <= FILTERED_TOPK_MAX_K`` and ``max_len > k`` preconditions still
+    apply).  It also keeps the SM100 cluster kernel out of the reference path,
+    since the Python-side ``can_use_clusters_topk`` requires the override to be
+    unset or ``"clusters"``.
     """
-    os.environ[SOURCE_ALGO_ENV] = SOURCE_ALGO_VALUE
+    os.environ[SOURCE_ALGO_ENV] = value
 
 
 def row_states_buffer(nbytes: int = WORKSPACE_BYTES):
