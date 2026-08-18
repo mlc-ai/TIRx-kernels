@@ -39,11 +39,22 @@ import math
 import os
 from typing import Any
 
+from tirx_kernels.flashinfer.utils.topk_harness import (
+    alloc_outputs,
+    assert_device_matches_compile_profile,
+    compare_outputs,
+    pin_source_algo,
+    selected_values,
+    source_module,
+    torch_dtype,
+)
 from tirx_kernels.flashinfer.utils.topk_radix import (
     atom_shared_add_u32,
     bar_sync,
+    emit_selected,
     from_ordered_u16,
     from_ordered_u32,
+    ld_global_bits,
     ld_global_u32,
     ld_shared_pair_u32,
     ld_shared_quad_u32,
@@ -57,6 +68,7 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
     st_shared_quad_u32,
     st_shared_u16,
     st_shared_u32,
+    stage_vector,
     to_ordered_u16,
     to_ordered_u32,
     u64_hi,
@@ -99,8 +111,6 @@ DTYPES = ("float32", "float16", "bfloat16")
 MODES = ("basic", "page_table", "ragged")
 
 _TIE_BREAK_NONE = 0
-_SOURCE_ALGO_ENV = "FLASHINFER_TOPK_ALGO"
-_SOURCE_ALGO_VALUE = "multi_cta"
 
 
 def hardware_max_smem_optin(default: int = DEFAULT_MAX_SMEM_OPTIN) -> int:
@@ -229,81 +239,6 @@ def aux_elements(mode: str, num_rows: int, length: int, row_to_batch: bool) -> i
     if mode == "ragged":
         return num_rows
     return 1
-
-
-def _ld_global_bits(buf, elem_index, is32):
-    """One scalar element's raw bits (``ld.global.b32`` | ``ld.global.b16``)."""
-    if is32:
-        out = T.alloc_local((1,), "uint32")
-        T.evaluate(T.ptx.ld.global_.b32(out[0], buf.ptr_to([elem_index])))
-        return out[0]
-    out16 = T.alloc_local((1,), "uint16")
-    T.evaluate(T.ptx.ld.global_.b16(out16[0], buf.ptr_to([elem_index])))
-    return out16[0]
-
-
-def _ld_global_words(buf, elem_index, load_bytes):
-    """One vector load of ``load_bytes`` bytes, returned as 32-bit words."""
-    if load_bytes == 16:
-        w = T.alloc_local((4,), "uint32", align=16)
-        T.evaluate(T.ptx["ld.global.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index])))
-        return [w[0], w[1], w[2], w[3]]
-    if load_bytes == 8:
-        w = T.alloc_local((2,), "uint32", align=8)
-        T.evaluate(T.ptx["ld.global.v2.b32"](w[0], w[1], buf.ptr_to([elem_index])))
-        return [w[0], w[1]]
-    w = T.alloc_local((1,), "uint32")
-    T.evaluate(T.ptx.ld.global_.b32(w[0], buf.ptr_to([elem_index])))
-    return [w[0]]
-
-
-def _stage_vector(buf, s_ordered, row_in, i, vec, load_bytes, is32, to_ordered, st_key):
-    """LoadToSharedOrdered's vector body (:612-617).
-
-    One vector load, ``VEC_SIZE`` monotone key conversions, then a single shared
-    store as wide as the load. The source stores element-by-element and lets nvcc
-    coalesce the contiguous group (its PTX shows one ``st.shared.v4.b32``);
-    opaque ``T.ptx`` intrinsics cannot be merged after the fact, so the wide form
-    is requested directly.
-    """
-    base = row_in + T.cast(i, "int64")
-    if load_bytes == 2:
-        st_key(s_ordered, i, to_ordered(_ld_global_bits(buf, base, False)))
-        return
-    words = _ld_global_words(buf, base, load_bytes)
-    if is32:
-        keys = [to_ordered(w) for w in words]
-    else:
-        # Each loaded word holds two 16-bit lanes; convert both and repack so the
-        # shared store keeps the same width as the global load.
-        keys = []
-        for word in words:
-            lo = to_ordered(T.cast(T.bitwise_and(word, T.uint32(0xFFFF)), "uint16"))
-            hi = to_ordered(T.cast(T.shift_right(word, T.uint32(16)), "uint16"))
-            keys.append(
-                T.bitwise_or(T.cast(lo, "uint32"), T.shift_left(T.cast(hi, "uint32"), T.uint32(16)))
-            )
-    if len(keys) == 4:
-        st_shared_quad_u32(s_ordered, i, keys[0], keys[1], keys[2], keys[3])
-    elif len(keys) == 2:
-        st_shared_pair_u32(s_ordered, i, keys[0], keys[1])
-    else:
-        st_shared_u32(s_ordered, i, keys[0])
-
-
-def _emit(out_idx, out_val, row_out, i, key, pos, offset, basic, ragged, is32, dtype):
-    """The mode epilogue the collect passes call per selected element (:1339-1375)."""
-    slot = row_out + T.cast(pos, "int64")
-    if basic:
-        st_global_u32(out_idx, slot, T.reinterpret("uint32", i))
-        if is32:
-            st_global_u32(out_val, slot, from_ordered_u32(key))
-        else:
-            st_global_u16(out_val, slot, from_ordered_u16(T.cast(key, "uint16")))
-    elif ragged:
-        st_global_u32(out_idx, slot, T.reinterpret("uint32", i + offset))
-    else:
-        st_global_u32(out_idx, slot, T.reinterpret("uint32", i))
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +373,7 @@ def get_kernel(
                         if i0 < k:
                             slot0: T.int64 = row_out + T.cast(i0, "int64")
                             st_global_u32(out_idx, slot0, T.reinterpret("uint32", i0))
-                            bits0 = _ld_global_bits(
+                            bits0 = ld_global_bits(
                                 inp,
                                 T.cast(row_idx, "int64") * T.int64(length) + T.cast(i0, "int64"),
                                 is32,
@@ -487,14 +422,14 @@ def get_kernel(
                     aligned_rt: T.int32 = T.truncdiv(row_len, T.int32(vec)) * T.int32(vec)
                     aligned = aligned_rt
                 for iv in T.serial(tx * vec, aligned, step=BLOCK_THREADS * vec, unroll=2):
-                    _stage_vector(
+                    stage_vector(
                         inp, s_ordered, row_in, iv, vec, load_bytes, is32, to_ordered, st_key
                     )
                 for it_tail in T.serial(aligned + tx, row_len, step=BLOCK_THREADS):
                     st_key(
                         s_ordered,
                         it_tail,
-                        to_ordered(_ld_global_bits(inp, row_in + T.cast(it_tail, "int64"), is32)),
+                        to_ordered(ld_global_bits(inp, row_in + T.cast(it_tail, "int64"), is32)),
                     )
                 bar_sync()
 
@@ -625,7 +560,7 @@ def get_kernel(
                         if key3 > pivot:
                             local_pos: T.uint32 = atom_shared_add_u32(s_hist, 0, T.uint32(1))
                             pos: T.int32 = T.cast(ld_shared_u32(s_hist, 1) + local_pos, "int32")
-                            _emit(
+                            emit_selected(
                                 out_idx,
                                 out_val,
                                 row_out,
@@ -646,7 +581,7 @@ def get_kernel(
                                 atom_shared_add_u32(s_scalars, 4, T.uint32(1)), "int32"
                             )
                             if pos2 < k:
-                                _emit(
+                                emit_selected(
                                     out_idx,
                                     out_val,
                                     row_out,
@@ -713,7 +648,7 @@ def get_kernel(
                                 if done == 0:
                                     key6: T.uint32 = T.cast(ld_key(s_ordered, id3), "uint32")
                                     if key6 > pivot:
-                                        _emit(
+                                        emit_selected(
                                             out_idx,
                                             out_val,
                                             row_out,
@@ -774,7 +709,7 @@ def get_kernel(
                             # if / else-if pair (:1130-1136) is two conjunctions
                             # rather than four nested branches.
                             if T.And(key8 > pivot, cur_gt < gt_limit):
-                                _emit(
+                                emit_selected(
                                     out_idx,
                                     out_val,
                                     row_out,
@@ -789,7 +724,7 @@ def get_kernel(
                                 )
                                 cur_gt = cur_gt + T.uint32(1)
                             elif T.And(key8 == pivot, cur_eq < eq_limit):
-                                _emit(
+                                emit_selected(
                                     out_idx,
                                     out_val,
                                     row_out,
@@ -977,12 +912,6 @@ BENCH_CONFIGS = _build_bench_configs()
 # ---------------------------------------------------------------------------
 # Data preparation and the FlashInfer reference path.
 # ---------------------------------------------------------------------------
-def _torch_dtype(dtype: str):
-    import torch
-
-    return {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
-
-
 def prepare_data(
     dtype: str = "float32",
     mode: str = "basic",
@@ -1011,7 +940,7 @@ def prepare_data(
     rows = num_rows
     generator = torch.Generator(device=device).manual_seed(1234)
     scores = torch.randn(rows, length, dtype=torch.float32, device=device, generator=generator)
-    scores = scores.to(_torch_dtype(dtype)).contiguous()
+    scores = scores.to(torch_dtype(dtype)).contiguous()
 
     data: dict[str, Any] = {"scores": scores}
     if mode != "basic":
@@ -1050,30 +979,12 @@ def prepare_data(
     return data
 
 
-def _source_module():
-    """Raw FlashInfer topk FFI module (no allocating Python wrapper)."""
-    from flashinfer.jit.topk import gen_topk_module
-
-    return gen_topk_module().build_and_load()
-
-
-def _pin_source_algo() -> None:
-    """Force ``TopKDispatch`` onto the radix path this port targets."""
-    os.environ[_SOURCE_ALGO_ENV] = _SOURCE_ALGO_VALUE
-
-
-def _row_states_buffer():
-    import torch
-
-    return torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
-
-
 def run_reference(config: dict[str, Any], data: dict[str, Any], outputs: dict[str, Any]) -> None:
     """One launch of the FlashInfer source kernel with preallocated outputs."""
     import torch
 
-    _pin_source_algo()
-    module = _source_module()
+    pin_source_algo()
+    module = source_module()
     mode = config["mode"]
     k = config["k"]
     det = config["deterministic"]
@@ -1127,8 +1038,8 @@ def build_reference_launch(config: dict[str, Any], data: dict[str, Any], outputs
     The timed closure must enqueue exactly one kernel and nothing else -- no env
     writes, no module lookup, no host synchronize.
     """
-    _pin_source_algo()
-    module = _source_module()
+    pin_source_algo()
+    module = source_module()
     mode = config["mode"]
     k = config["k"]
     det = config["deterministic"]
@@ -1172,32 +1083,6 @@ def build_reference_launch(config: dict[str, Any], data: dict[str, Any], outputs
     return lambda: fn(*args)
 
 
-def _alloc_outputs(config: dict[str, Any]):
-    import torch
-
-    rows = config["num_rows"]
-    k = config["k"]
-    return {
-        "indices": torch.empty(rows, k, dtype=torch.int32, device="cuda"),
-        "values": torch.empty(rows, k, dtype=_torch_dtype(config["dtype"]), device="cuda"),
-        "row_states": _row_states_buffer(),
-    }
-
-
-def _assert_device_matches_compile_profile() -> None:
-    import torch
-
-    optin = torch.cuda.get_device_properties(
-        torch.cuda.current_device()
-    ).shared_memory_per_block_optin
-    expected = hardware_max_smem_optin()
-    if optin != expected:
-        raise AssertionError(
-            f"device optin shared memory {optin} != compile profile {expected}; "
-            "the single-CTA dispatch domain would differ from the configured matrix"
-        )
-
-
 def run_test(**config):
     """Compile, launch, and validate one config against the FlashInfer source."""
     import unittest
@@ -1214,7 +1099,7 @@ def run_test(**config):
         raise unittest.SkipTest("CUDA device unavailable")
 
     cfg = _normalize_config(config)
-    _assert_device_matches_compile_profile()
+    assert_device_matches_compile_profile(hardware_max_smem_optin(), "single-CTA")
     _validate(
         cfg["dtype"],
         cfg["mode"],
@@ -1226,17 +1111,17 @@ def run_test(**config):
     )
 
     data = prepare_data(**cfg)
-    ref_out = _alloc_outputs(cfg)
+    ref_out = alloc_outputs(cfg)
     run_reference(cfg, data, ref_out)
 
     assert_reference_is_top_k(cfg, data, ref_out)
 
     ex = compile_kernel(get_kernel(**cfg))
-    tirx_out = _alloc_outputs(cfg)
+    tirx_out = alloc_outputs(cfg)
     _launch_tirx(ex, cfg, data, tirx_out)
     torch.cuda.synchronize()
 
-    _compare(cfg, data, ref_out, tirx_out)
+    compare_outputs(cfg, data, ref_out, tirx_out)
 
 
 def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -1296,81 +1181,6 @@ def _launch_tirx(ex, cfg: dict[str, Any], data: dict[str, Any], outputs: dict[st
     ex(*build_tirx_args(cfg, data, outputs))
 
 
-def _row_local_indices(cfg: dict[str, Any], data: dict[str, Any], out_indices):
-    """Map one launch's raw output back to row-local score offsets.
-
-    Basic returns the index directly; Ragged adds a per-row offset; PageTable
-    returns an injective page id (``batch * length + slot``).  ``-1`` marks the
-    padding the trivial branches write when a row is shorter than ``k``.
-    """
-    import torch
-
-    rows = cfg["num_rows"]
-    length = cfg["length"]
-    idx = out_indices.to(torch.int64)
-    pad = idx < 0
-    if cfg["mode"] == "ragged":
-        idx = idx - data["offsets"].to(torch.int64).unsqueeze(-1)
-    elif cfg["mode"] == "page_table":
-        row_to_batch = data.get("row_to_batch")
-        if row_to_batch is None:
-            batch = torch.arange(rows, dtype=torch.int64, device=idx.device)
-        else:
-            batch = row_to_batch.to(torch.int64)
-        idx = idx - batch.unsqueeze(-1) * length
-        pt_starts = data.get("page_table_row_starts")
-        if pt_starts is None:
-            pt_starts = data.get("row_starts")
-        if pt_starts is not None:
-            idx = idx - pt_starts.to(torch.int64).unsqueeze(-1)
-    return idx, pad
-
-
-def _selected_values(cfg: dict[str, Any], data: dict[str, Any], out_indices):
-    """Sorted-descending scores of the selected elements, padding removed."""
-    import torch
-
-    idx, pad = _row_local_indices(cfg, data, out_indices)
-    row_starts = data.get("row_starts")
-    if row_starts is not None:
-        idx = idx + row_starts.to(torch.int64).unsqueeze(-1)
-    scores = data["scores"].to(torch.float32)
-    safe = idx.clamp_(0, scores.size(1) - 1)
-    vals = torch.gather(scores, 1, safe)
-    # Padding slots carry no score; sort them to the bottom deterministically.
-    vals = torch.where(pad, torch.full_like(vals, float("-inf")), vals)
-    return torch.sort(vals, dim=-1, descending=True).values
-
-
-def _compare(
-    cfg: dict[str, Any], data: dict[str, Any], ref: dict[str, Any], got: dict[str, Any]
-) -> None:
-    """Compare a TIRx launch against the FlashInfer launch.
-
-    Ties make the selected *index set* ambiguous, so the criterion is the
-    multiset of selected score values, which every valid top-k shares.  For
-    deterministic configs both sides run the same fixed-order collect, so the
-    raw outputs must additionally match element for element.
-    """
-    import torch
-
-    if cfg["deterministic"]:
-        torch.testing.assert_close(got["indices"], ref["indices"], rtol=0, atol=0)
-        if cfg["mode"] == "basic":
-            torch.testing.assert_close(got["values"], ref["values"], rtol=0, atol=0)
-        return
-
-    ref_vals = _selected_values(cfg, data, ref["indices"])
-    got_vals = _selected_values(cfg, data, got["indices"])
-    torch.testing.assert_close(got_vals, ref_vals, rtol=0, atol=0)
-    if cfg["mode"] == "basic":
-        ref_out = torch.sort(ref["values"].to(torch.float32), dim=-1, descending=True).values
-        got_out = torch.sort(got["values"].to(torch.float32), dim=-1, descending=True).values
-        torch.testing.assert_close(got_out, ref_out, rtol=0, atol=0)
-        # The emitted values must be the scores at the emitted indices.
-        torch.testing.assert_close(got_out, got_vals, rtol=0, atol=0)
-
-
 def assert_reference_is_top_k(
     cfg: dict[str, Any], data: dict[str, Any], ref: dict[str, Any]
 ) -> None:
@@ -1402,7 +1212,7 @@ def assert_reference_is_top_k(
         del k
     expect = torch.topk(window, cfg["k"], dim=-1).values
     expect = torch.sort(expect, dim=-1, descending=True).values
-    actual = _selected_values(cfg, data, ref["indices"])
+    actual = selected_values(cfg, data, ref["indices"])
     torch.testing.assert_close(actual, expect, rtol=0, atol=0)
 
 
@@ -1424,14 +1234,14 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     ex = prepared["executable"]
 
     data = prepare_data(**cfg)
-    tirx_out = _alloc_outputs(cfg)
+    tirx_out = alloc_outputs(cfg)
     tirx_args = build_tirx_args(cfg, data, tirx_out)
 
     def tirx_launch():
         ex(*tirx_args)
 
     def build_reference():
-        ref_out = _alloc_outputs(cfg)
+        ref_out = alloc_outputs(cfg)
         return build_reference_launch(cfg, data, ref_out)
 
     return bench(

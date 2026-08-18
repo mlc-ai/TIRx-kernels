@@ -237,6 +237,33 @@ single output buffer shared by two implementations biases the same way, in
 favour of whichever runs second. Read what the reference wrapper does inside the
 timed region, and give each implementation its own output.
 
+## Scale a staged-load unroll to the loop's trip count
+
+**Symptoms:** `long_scoreboard`, `exposed_load_latency`, `insufficient_memory_parallelism`, `slow_small_shape`
+
+A reference's `#pragma unroll N` encodes how many independent global loads it
+wants in flight, not a portable constant. This toolchain can extract less
+memory parallelism from the same factor than nvcc does, leaving the load
+latency exposed while the instruction count actually drops.
+
+A chunk-staging loop transcribed with the reference's `unroll=2` executed 11%
+fewer instructions than the reference yet ran 6% slower; the whole gap was
+`long_scoreboard`, 7.12 warp-cycles per issued instruction against 3.74.
+Raising only that loop to `unroll=4` moved it to 2.89 and 41.2us to 33.5us.
+Unroll 6 and 8 regressed back to 5.75 and 6.26 on register pressure, so sweep
+rather than assume monotonicity.
+
+The factor must scale with the per-thread trip count, not be applied globally.
+At 28 iterations per thread the deeper unroll took four shapes from 0.91-0.98x
+to 1.18-1.21x; at 6.8 iterations the remainder dominated and the same change
+took one shape from 1.11x to 0.95x. Derive the choice from the compile-time
+trip count (`chunk / (threads * vec)`) and confirm the two regimes are actually
+separated in the config domain before picking a threshold.
+
+Diagnose this with paired stall breakdowns, not instruction counts: fewer
+instructions and more time is the signature. Profiling the same kernel on a
+fast and a slow shape isolates whether the cost is in staging or elsewhere.
+
 ## Issue loads before conversions
 
 **Symptoms:** `long_scoreboard`, `insufficient_memory_parallelism`, `exposed_load_latency`

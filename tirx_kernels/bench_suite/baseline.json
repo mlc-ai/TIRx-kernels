@@ -3,12 +3,12 @@
   "label": "post-refactor",
   "git": {
     "tir": "5f901d39",
-    "tirx-kernels": "3c6cd7ef",
+    "tirx-kernels": "bfda68bb-dirty",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "d096d7e560035cd9760c2dbcfd75490253792cc1"
+    "tirx-kernels:tirx_kernels": "bbec2597d14718e31f46e6379af4064e42b0ace7"
   },
   "baselines": {
     "torch": {
@@ -3450,6 +3450,48 @@
       "impls": {
         "tirx": 17.34466253221987,
         "flashinfer": 19.51631078654821
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "radix_topk_multi_cta",
+      "config": "f32_basic_r2_l524288_k256_large",
+      "label": "f32_basic_r2_l524288_k256_large",
+      "status": "ok",
+      "impls": {
+        "tirx": 41.364342740848215,
+        "flashinfer": 42.88360400321807
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "radix_topk_multi_cta",
+      "config": "f32_basic_r4_l115188_k256_ctas3",
+      "label": "f32_basic_r4_l115188_k256_ctas3",
+      "status": "ok",
+      "impls": {
+        "tirx": 34.65635158641088,
+        "flashinfer": 35.5113124483128
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "radix_topk_multi_cta",
+      "config": "f32_basic_r4_l57596_k256_vec4",
+      "label": "f32_basic_r4_l57596_k256_vec4",
+      "status": "ok",
+      "impls": {
+        "tirx": 29.87169685656104,
+        "flashinfer": 31.979396742514172
       },
       "aggregated": {
         "rounds": 5,

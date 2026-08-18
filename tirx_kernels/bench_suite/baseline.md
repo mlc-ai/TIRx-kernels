@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '5f901d39', 'tirx-kernels': '3c6cd7ef', 'tirx-bench-ci': None}`
-- Workloads: 330 ok, 0 failed
+- Git:       `{'tir': '5f901d39', 'tirx-kernels': 'bfda68bb-dirty', 'tirx-bench-ci': None}`
+- Workloads: 333 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -400,6 +400,14 @@ Grouped workloads show one row per config and one timing column per implementati
 | `fp16_linear_m128_k1024` | tirx | 2.9066 | flashinfer | 3.0670 | 1.055 | — |
 | `fp16_linear_m16384_k7168` | tirx | 55.8258 | flashinfer | 57.4695 | 1.029 | — |
 | `fp16_linear_m4096_k4096` | tirx | 17.3447 | flashinfer | 19.5163 | 1.125 | — |
+
+## radix_topk_multi_cta
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `f32_basic_r2_l524288_k256_large` | tirx | 41.3643 | flashinfer | 42.8836 | 1.037 | — |
+| `f32_basic_r4_l115188_k256_ctas3` | tirx | 34.6564 | flashinfer | 35.5113 | 1.025 | — |
+| `f32_basic_r4_l57596_k256_vec4` | tirx | 29.8717 | flashinfer | 31.9794 | 1.071 | — |
 
 ## radix_topk_single_cta
 
