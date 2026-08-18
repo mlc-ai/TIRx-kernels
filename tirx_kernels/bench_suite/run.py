@@ -12,7 +12,7 @@ Quick start:
 
 Exit codes:
     0  no regressions (or no baseline yet)
-    1  workload failure (suite stopped immediately)
+    1  one or more workloads failed
     2  config error (no workloads / bad YAML)
     3  one or more regressions exceeded the threshold
 """
@@ -1613,7 +1613,6 @@ def run_scheduled_jobs(
     records: list[dict] = []
     retry_log: list[dict[str, Any]] = []
     completed = 0
-    failed = False
     last_interference_poll = 0.0
     physical_uuid_by_index = dict(pool._all_gpus())
 
@@ -1635,16 +1634,15 @@ def run_scheduled_jobs(
             item.gpu_ownership_released = True
 
     def fail(item: _PreparedAttempt, message: dict | None = None) -> None:
-        nonlocal completed, failed
+        nonlocal completed
         if item.state == "FAILED":
             return
         item.state = "FAILED"
         record = _record_child_failure(item, message)
         records.append(record)
         completed += 1
-        failed = True
         detail = record.get("error") or "unknown workload failure"
-        log(f"[bench-suite] >>> FAIL-FAST {item.label} attempt {item.attempt}: {detail[:160]} <<<")
+        log(f"[bench-suite] >>> FAIL {item.label} attempt {item.attempt}: {detail[:160]} <<<")
 
     def request_interference_stop(
         item: _PreparedAttempt, intruders: list[int], detail: str
@@ -1694,7 +1692,6 @@ def run_scheduled_jobs(
     def spawn_available() -> None:
         while (
             pending
-            and not failed
             and preparing_count() < max_prepare_processes
             and buffered_count() < ready_backlog
             and len(active) < ready_backlog + visible
@@ -1713,8 +1710,6 @@ def run_scheduled_jobs(
             log(f"[bench-suite] {now_iso()} prepare pid={item.process.pid} START {item.label}")
 
     def dispatch_ready() -> None:
-        if failed:
-            return
         ordered = sorted(
             ready,
             key=lambda item: (
@@ -1784,7 +1779,7 @@ def run_scheduled_jobs(
     occupancy_thread.start()
     dispatch_thread.start()
     try:
-        while completed < n_jobs and not failed:
+        while completed < n_jobs:
             spawn_available()
             dispatch_ready()
 
@@ -1817,8 +1812,6 @@ def run_scheduled_jobs(
                         },
                     )
                     break
-            if failed:
-                break
 
             sockets = [dispatch_reader, *(item.control for item in active.values())]
             readable, _, _ = select.select(sockets, [], [], 0.1)
@@ -1923,7 +1916,11 @@ def run_scheduled_jobs(
                             f"{item.label} {impl_str}"
                         )
                         if record.get("status") not in ("ok", "SKIP"):
-                            failed = True
+                            detail = record.get("error") or "unknown workload failure"
+                            log(
+                                f"[bench-suite] >>> FAIL {item.label} attempt {item.attempt}: "
+                                f"{detail[:160]} <<<"
+                            )
                     elif message_type == "FAIL":
                         fail(item, message)
                         break
@@ -1936,15 +1933,20 @@ def run_scheduled_jobs(
                             },
                         )
                         break
-                if failed:
-                    break
                 if eof and item.state not in ("RESULT", "FAILED"):
                     item.process.poll()
                     fail(item)
                     break
 
             for item in list(active.values()):
-                if item.state == "RESULT" and item.process.poll() is not None:
+                if item.state == "FAILED":
+                    if item.process.poll() is None:
+                        _terminate_subprocess(item.process)
+                    release_gpus(item)
+                    fd = item.control.fileno()
+                    _finish_attempt_process(item)
+                    active.pop(fd, None)
+                elif item.state == "RESULT" and item.process.poll() is not None:
                     fd = item.control.fileno()
                     _finish_attempt_process(item)
                     active.pop(fd, None)
@@ -1958,7 +1960,7 @@ def run_scheduled_jobs(
         dispatch_writer.close()
         for item in list(active.values()):
             fd = item.control.fileno()
-            if item.process.poll() is None and item.state == "RESULT" and not failed:
+            if item.process.poll() is None and item.state == "RESULT":
                 try:
                     item.process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
@@ -1989,6 +1991,7 @@ def run_scheduled_jobs(
         },
         "interference_retry_count": len(retry_log),
         "interference_retries": retry_log,
+        "failure_count": sum(record.get("status") == "FAIL" for record in records),
     }
     return records, retry_log, pipeline
 
@@ -2303,12 +2306,14 @@ def main() -> None:
 
     failures = [record for record in results if record.get("status") == "FAIL"]
     if failures:
-        first = failures[0]
-        print(
-            f"[bench-suite] stopped after workload failure: "
-            f"{first['kernel']}/{first.get('config') or first.get('label')}",
-            file=sys.stderr,
-        )
+        print(f"[bench-suite] workload failure summary: {len(failures)}", file=sys.stderr)
+        for failure in failures:
+            detail = (failure.get("error") or "unknown workload failure").splitlines()[0]
+            print(
+                f"[bench-suite]   - {failure['kernel']}/"
+                f"{failure.get('config') or failure.get('label')}: {detail}",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
     if args.no_report:
