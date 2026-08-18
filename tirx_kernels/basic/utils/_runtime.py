@@ -10,7 +10,7 @@ import gc
 import os
 import tempfile
 from collections.abc import Callable, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -223,7 +223,8 @@ def sync_communication_to_compute(runtime: DistributedRuntime) -> None:
 def _rank_library_preload(*, required: bool = False):
     """Preload explicitly selected communication libraries in spawned ranks."""
 
-    libraries = _locked_library_paths(required=required)
+    required_libraries = ("nccl", "nvshmem") if required else ()
+    libraries = _locked_library_paths(required=required_libraries)
     if not libraries:
         yield
         return
@@ -241,15 +242,34 @@ def _rank_library_preload(*, required: bool = False):
             os.environ["LD_PRELOAD"] = original
 
 
-def _locked_library_paths(*, required: bool) -> dict[str, Path]:
+@contextmanager
+def _rank_cuda_visibility(device_indices: Sequence[int]):
+    """Expose a late physical assignment as dense rank-local CUDA indices."""
+
+    original = os.environ.get("CUDA_VISIBLE_DEVICES")
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in device_indices)
+    try:
+        yield tuple(range(len(device_indices)))
+    finally:
+        if original is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original
+
+
+def _locked_library_paths(*, required: Sequence[str] = ()) -> dict[str, Path]:
     """Resolve the exact shared-library files selected for rank workers."""
+
+    unknown = set(required).difference(_LOCKED_LIBRARY_ENVS)
+    if unknown:
+        raise ValueError(f"unknown locked libraries: {', '.join(sorted(unknown))}")
 
     result: dict[str, Path] = {}
     missing = []
     for name, env_name in _LOCKED_LIBRARY_ENVS.items():
         configured = os.environ.get(env_name)
         if not configured:
-            if required:
+            if name in required:
                 missing.append(env_name)
             continue
         path = Path(configured)
@@ -312,9 +332,11 @@ def _cleanup_runtime(runtime: DistributedRuntime | None) -> None:
             runtime.device.sync(stream)
         except Exception:
             pass
-    runtime.device.set_raw_stream(0)
-    runtime.device.free_raw_stream(runtime.communication_stream)
-    runtime.device.free_raw_stream(runtime.compute_stream)
+    with suppress(Exception):
+        runtime.device.set_raw_stream(0)
+    for stream in (runtime.communication_stream, runtime.compute_stream):
+        with suppress(Exception):
+            runtime.device.free_raw_stream(stream)
 
 
 def _rank_entry(
@@ -474,7 +496,10 @@ def _run_distributed_library(
     result_queue = context.SimpleQueue()
     with tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-ranks-") as tmpdir:
         init_method = f"file://{Path(tmpdir) / 'torch-distributed-init'}"
-        with _rank_library_preload(required=mode == "bench"):
+        with (
+            _rank_library_preload(required=mode == "bench"),
+            _rank_cuda_visibility(device_indices) as rank_device_indices,
+        ):
             mp.spawn(
                 _rank_entry,
                 args=(
@@ -485,7 +510,7 @@ def _run_distributed_library(
                     mode,
                     worker_kwargs,
                     result_queue,
-                    tuple(device_indices),
+                    rank_device_indices,
                     tuple(device_uuids),
                 ),
                 nprocs=world_size,

@@ -132,15 +132,16 @@ Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.bench-suite/` and 
    and, with `--with-references`, every reference implementation, retaining the original implementation
    order, correctness/reference setup, timer, warmup/repeat, five rounds, 1.0s
    cooldown before every implementation/round, raw samples, and arithmetic mean.
-5. **Fail fast**: the first workload/subprocess `FAIL` stops new scheduling,
-   terminates the suite's in-flight subprocesses, writes the partial run for
-   diagnosis, and exits with code 1. `INTERFERED` is not a workload failure and
-   is retried in the same child without repeating CPU prepare; `SKIP` is accepted
-   without retry. The old claim is released before reassignment, and the child
-   rebuilds all GPU tensors, references, workspaces, and timer state on the newly
-   assigned card. Every interference retry records the workload, attempt,
-   intruder PIDs, and `retry_in_place: true`; retried results otherwise follow
-   the ordinary measurement path.
+5. **Collect every failure**: a workload/subprocess `FAIL` is recorded and its
+   resources are released without stopping other pending or in-flight workloads.
+   After the complete sweep, the suite prints every failed workload and exits with
+   code 1. `INTERFERED` is not a workload failure and is retried in the same child
+   without repeating CPU prepare; `SKIP` is accepted without retry. The old claim
+   is released before reassignment, and the child rebuilds all GPU tensors,
+   references, workspaces, and timer state on the newly assigned card. Every
+   interference retry records the workload, attempt, intruder PIDs, and
+   `retry_in_place: true`; retried results otherwise follow the ordinary
+   measurement path.
 6. **Ratio regression report** is generated only by `--with-references` and
    compares current ref/ours ratio vs the pinned `baseline.json` ratio. Only a
    reference-enabled run can be promoted with `promote_baseline.py`.
@@ -279,6 +280,6 @@ remain in the run JSON for variance and outlier inspection.
 | Code | Meaning |
 |------|---------|
 | `0` | No regressions over threshold (or no baseline yet) |
-| `1` | A workload failed; the suite stopped immediately |
+| `1` | One or more workloads failed; all workloads were allowed to finish |
 | `2` | Config error |
 | `3` | One or more regressions exceeded `--threshold` |

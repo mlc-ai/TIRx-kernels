@@ -65,6 +65,8 @@ WARP_NUMBER = 4
 NUM_CONSUMER = 2
 NUM_THREADS = 32 * WARP_NUMBER * WG_NUMBER
 SM_NUMBER = 148
+NUM_CLUSTERS = SM_NUMBER // M_CLUSTER
+assert NUM_CLUSTERS * M_CLUSTER == SM_NUMBER
 PIPELINE_DEPTH = 4
 F16_BYTES = 2
 F128_BYTES = 16
@@ -199,23 +201,28 @@ ld_reduce_8xfp16 = '\n__forceinline__ __device__ void ld_reduce_8_fp16(void* src
 semaphore_notify_remote = "\n__forceinline__ __device__ uint64_t semaphore_notify_remote(int32_t signal_rank, uint64_t* addr, uint64_t signal_value) {\n    auto dst_addr = reinterpret_cast<unsigned long long*>(nvshmem_ptr(addr, signal_rank));\n    return atomicAdd_system(dst_addr, signal_value);\n}\n"
 exit_barrier_arrive_and_wait = """
 __forceinline__ __device__ void exit_barrier_arrive_and_wait(
-        uint32_t* flags, int32_t worker_idx, int32_t expected) {
-    uint32_t* flag = flags + worker_idx;
-    auto mc_flag = reinterpret_cast<uint32_t*>(
-        nvshmemx_mc_ptr(NVSHMEM_TEAM_WORLD, flag));
+        uint32_t* flags, int32_t local_expected, int32_t rank_expected) {
+    __threadfence_system();
+    uint32_t local_arrivals = atomicAdd_system(flags, 1) + 1;
+    if (local_arrivals != static_cast<uint32_t>(local_expected)) {
+        return;
+    }
+    uint32_t* rank_arrivals = flags + 1;
+    auto mc_rank_arrivals = reinterpret_cast<uint32_t*>(
+        nvshmemx_mc_ptr(NVSHMEM_TEAM_WORLD, rank_arrivals));
     asm volatile(
         "multimem.red.release.sys.global.add.u32 [%0], 1;"
         :
-        : "l"(mc_flag)
+        : "l"(mc_rank_arrivals)
         : "memory");
     uint32_t value;
     do {
         asm volatile(
             "ld.global.acquire.sys.b32 %0, [%1];"
             : "=r"(value)
-            : "l"(flag)
+            : "l"(rank_arrivals)
             : "memory");
-    } while (value != static_cast<uint32_t>(expected));
+    } while (value != static_cast<uint32_t>(rank_expected));
 }
 """
 enqueue_remote = """
@@ -577,7 +584,7 @@ def test_mma_ss_tma_2sm_persistent(
     rs_task_idxs: Tx.Buffer((CAPACITY, 2), "int32"),
     rs_head: Tx.Buffer((1,), "int32"),
     rs_tail: Tx.Buffer((1,), "int32"),
-    exit_barrier: Tx.Buffer((SM_NUMBER,), "uint32"),
+    exit_barrier: Tx.Buffer((2,), "uint32"),
 ):
     A_tensor_map: Tx.let[Tx.handle("tensormap")] = Tx.tvm_stack_alloca("tensormap", 1)
     B_tensor_map: Tx.let[Tx.handle("tensormap")] = Tx.tvm_stack_alloca("tensormap", 1)
@@ -1009,14 +1016,17 @@ def test_mma_ss_tma_2sm_persistent(
     Tx.ptx.barrier.cluster.arrive()
     Tx.ptx.barrier.cluster.wait()
     if WORLD_SIZE > 1:
-        if tid == 0:
+        if (cbx == 0) & (tid == 0):
             Tx.cuda.func_call(
                 "exit_barrier_arrive_and_wait",
-                exit_barrier.ptr_to([bx]),
-                Tx.int32(0),
+                exit_barrier.ptr_to([0]),
+                Tx.int32(NUM_CLUSTERS),
                 Tx.int32(WORLD_SIZE),
                 source_code=exit_barrier_arrive_and_wait,
             )
+        Tx.cuda.cta_sync()
+        Tx.ptx.barrier.cluster.arrive()
+        Tx.ptx.barrier.cluster.wait()
     if (wg_id == 0) & (warp_id == 0):
         Tx.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
         Tx.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0]))
@@ -1249,9 +1259,16 @@ class _Case:
             self.semaphore_torch,
             torch.full_like(self.semaphore_torch, self.config.completion_count),
         )
-        expected_exit_count = self.config.world_size if self.config.world_size > 1 else 0
+        expected_exit_state = (
+            (NUM_CLUSTERS, self.config.world_size) if self.config.world_size > 1 else (0, 0)
+        )
         torch.testing.assert_close(
-            self.exit_barrier_torch, torch.full_like(self.exit_barrier_torch, expected_exit_count)
+            self.exit_barrier_torch,
+            torch.tensor(
+                expected_exit_state,
+                dtype=self.exit_barrier_torch.dtype,
+                device=self.exit_barrier_torch.device,
+            ),
         )
         if torch.isnan(self.gemm_out_torch).any() or torch.isnan(self.out).any():
             raise AssertionError("GemmRS output contains an uncovered tile")
@@ -1272,7 +1289,7 @@ def _allocate_case(
     rs_task_idxs = symmetric_empty(runtime, (CAPACITY, TASK_IDX_LEN), "int32")
     rs_head = symmetric_empty(runtime, (1,), "int32")
     rs_tail = symmetric_empty(runtime, (1,), "int32")
-    exit_barrier = symmetric_empty(runtime, (SM_NUMBER,), "uint32")
+    exit_barrier = symmetric_empty(runtime, (2,), "uint32")
     exit_barrier_torch = torch_view(exit_barrier)
     initial_queues = tuple(
         torch.from_numpy(array[runtime.rank].copy()).to(device) for array in queue_state

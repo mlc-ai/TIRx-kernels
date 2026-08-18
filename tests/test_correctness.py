@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import fcntl
 import json
-import math
 import os
 import subprocess
 import sys
@@ -40,7 +39,7 @@ def _correctness_cases() -> list[Any]:
     return cases
 
 
-def _visible_gpu_memory() -> list[tuple[str, int]]:
+def _visible_gpu_memory() -> list[tuple[str, int, bool]]:
     output = subprocess.check_output(
         [
             "nvidia-smi",
@@ -49,10 +48,22 @@ def _visible_gpu_memory() -> list[tuple[str, int]]:
         ],
         text=True,
     )
+    compute_processes = {
+        line.strip()
+        for line in subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+        ).splitlines()
+        if line.strip()
+    }
     rows = []
     for line in output.splitlines():
         index, uuid, free_memory = (field.strip() for field in line.split(","))
-        rows.append((index, uuid, int(free_memory)))
+        rows.append((index, uuid, int(free_memory), uuid in compute_processes))
 
     configured = os.environ.get("CUDA_VISIBLE_DEVICES")
     if configured is None:
@@ -60,8 +71,8 @@ def _visible_gpu_memory() -> list[tuple[str, int]]:
     else:
         visible = {token.strip() for token in configured.split(",") if token.strip()}
     return [
-        (uuid if uuid in visible else index, free_memory)
-        for index, uuid, free_memory in rows
+        (uuid if uuid in visible else index, free_memory, has_compute_process)
+        for index, uuid, free_memory, has_compute_process in rows
         if index in visible or uuid in visible
     ]
 
@@ -80,10 +91,8 @@ def _try_lock(path: Path):
 def _reserve_gpus(test_run_uid: str, count: int):
     lock_root = Path("/tmp") / f"tirx-correctness-{test_run_uid}"
     lock_root.mkdir(parents=True, exist_ok=True)
-    worker_count = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
-
     selected: list[str] = []
-    slot_handles = []
+    gpu_handles = []
     while not selected:
         with (lock_root / "allocator.lock").open("a+") as allocator:
             fcntl.flock(allocator, fcntl.LOCK_EX)
@@ -95,43 +104,35 @@ def _reserve_gpus(test_run_uid: str, count: int):
                     f"correctness case requires {count} GPUs, "
                     f"but only {len(gpu_memory)} are visible"
                 )
-            # Any four visible GPUs can absorb all xdist workers, while free
-            # cards remain eligible to take work from cards occupied externally.
-            active_gpu_target = min(4, len(gpu_memory))
-            slots_per_gpu = math.ceil(worker_count / active_gpu_target)
+            # Kernel resource use has no divisible per-card contract: one case
+            # may consume all memory, SMs, or TMEM. Own each assigned GPU as a
+            # unit and reject externally occupied cards.
             candidates = []
-            for gpu, free_memory in gpu_memory:
-                active_slots = 0
-                candidate_handle = None
-                for slot in range(slots_per_gpu):
-                    slot_handle = _try_lock(lock_root / f"gpu-{gpu}-slot-{slot}.lock")
-                    if slot_handle is None:
-                        active_slots += 1
-                    elif candidate_handle is None:
-                        candidate_handle = slot_handle
-                    else:
-                        slot_handle.close()
-                if candidate_handle is not None:
-                    candidates.append(
-                        (free_memory // (active_slots + 1), free_memory, gpu, candidate_handle)
-                    )
+            for gpu, free_memory, has_compute_process in gpu_memory:
+                gpu_handle = _try_lock(lock_root / f"gpu-{gpu}.lock")
+                if gpu_handle is None:
+                    continue
+                if has_compute_process:
+                    gpu_handle.close()
+                    continue
+                candidates.append((free_memory, gpu, gpu_handle))
 
-            candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            candidates.sort(key=lambda item: item[0], reverse=True)
             if len(candidates) >= count:
-                for _score, _free_memory, gpu, slot_handle in candidates[:count]:
+                for _free_memory, gpu, gpu_handle in candidates[:count]:
                     selected.append(gpu)
-                    slot_handles.append(slot_handle)
+                    gpu_handles.append(gpu_handle)
                 candidates = candidates[count:]
-            for _score, _free_memory, _gpu, slot_handle in candidates:
-                slot_handle.close()
+            for _free_memory, _gpu, gpu_handle in candidates:
+                gpu_handle.close()
         if not selected:
             time.sleep(0.1)
 
     try:
         yield selected
     finally:
-        for slot_handle in slot_handles:
-            slot_handle.close()
+        for gpu_handle in gpu_handles:
+            gpu_handle.close()
 
 
 def _last_json_object(output: str) -> dict[str, Any]:
@@ -174,7 +175,12 @@ def test_kernel_correctness(
         )
 
     payload = _last_json_object(completed.stdout)
-    assert completed.returncode == 0, completed.stdout[-12000:] + completed.stderr[-12000:]
+    diagnostic = (
+        f"assigned GPUs: {','.join(selected_gpus)}\n"
+        + completed.stdout[-12000:]
+        + completed.stderr[-12000:]
+    )
+    assert completed.returncode == 0, diagnostic
     assert payload["passed"] == 1, payload
     assert payload["failed"] == 0, payload
     assert payload["skipped"] == 0, payload
