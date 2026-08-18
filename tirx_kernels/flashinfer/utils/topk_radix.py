@@ -44,6 +44,25 @@ def st_shared_u16(buffer, index, value):
     T.evaluate(T.ptx.st.shared.b16(buffer.ptr_to([index]), value))
 
 
+def ld_global_pair_u16(buffer, index):
+    """``ld.global.v2.b16``; returns the two 16-bit lanes as separate registers.
+
+    The source's ``vec_t<DType, 2>::cast_load`` lands both halves in 16-bit
+    registers directly, so the monotone key flip runs on 16-bit operands with no
+    extract or repack arithmetic.  Loading one 32-bit word instead costs an
+    ``and``/``shr`` pair to split it and a ``shl``/``or`` pair to reassemble it,
+    on every element of the chunk.
+    """
+    out = T.alloc_local((2,), "uint16")
+    T.evaluate(T.ptx["ld.global.v2.b16"](out[0], out[1], buffer.ptr_to([index])))
+    return out[0], out[1]
+
+
+def st_shared_pair_u16(buffer, index, v0, v1):
+    """``st.shared.v2.b16``, the store width the source's element pair coalesces to."""
+    T.evaluate(T.ptx["st.shared.v2.b16"](buffer.ptr_to([index]), v0, v1))
+
+
 def ld_shared_u64(buffer, index):
     """``ld.shared.b64`` -- reads two adjacent u32 scalars as one 64-bit access."""
     out = T.alloc_local((1,), "uint64")
@@ -177,3 +196,135 @@ def warp_inclusive_sum_u32(value, lane):
         peer = shfl_up_u32(acc, 1 << step)
         acc = T.Select(lane >= T.int32(1 << step), acc + peer, acc)
     return acc
+
+
+# --- inter-CTA synchronization -----------------------------------------------
+# The multi-CTA radix kernel synchronizes the CTAs of one row group through a
+# monotonically increasing arrival counter in global memory, with absolute phase
+# targets. These mirror `ld_acquire` / `red_release` / `st_release` /
+# `atom_add_release` (topk.cuh:63-121).
+def ld_acquire_gpu_s32(buffer, index):
+    """``ld.global.acquire.gpu.b32`` -- the acquire half of the group barrier."""
+    out = T.alloc_local((1,), "int32")
+    T.evaluate(T.ptx.ld.acquire.gpu.global_.b32(out[0], buffer.ptr_to([index])))
+    return out[0]
+
+
+def fence_acq_rel_gpu():
+    """``fence.acq_rel.gpu``; the release half is always fence-then-atomic."""
+    T.evaluate(T.ptx.fence.acq_rel.gpu())
+
+
+def red_release_gpu_add_s32(buffer, index, value):
+    """``fence.acq_rel.gpu`` + ``red.relaxed.gpu.global.add.s32`` (no result)."""
+    fence_acq_rel_gpu()
+    T.evaluate(T.ptx.red.relaxed.gpu.global_.add.s32(buffer.ptr_to([index]), value))
+
+
+def atom_add_release_gpu_s32(buffer, index, value):
+    """``fence.acq_rel.gpu`` + ``atom.relaxed.gpu.global.add.s32``; returns the old value."""
+    fence_acq_rel_gpu()
+    out = T.alloc_local((1,), "int32")
+    T.evaluate(T.ptx.atom.relaxed.gpu.global_.add.s32(out[0], buffer.ptr_to([index]), value))
+    return out[0]
+
+
+def st_release_gpu_s32(buffer, index, value):
+    """``fence.acq_rel.gpu`` + ``st.release.gpu.global.b32``."""
+    fence_acq_rel_gpu()
+    T.evaluate(T.ptx.st.release.gpu.global_.b32(buffer.ptr_to([index]), value))
+
+
+def atom_global_add_u32(buffer, index, value):
+    """Plain relaxed ``atom.global.add.u32``; returns the value held before the add.
+
+    Used for the non-deterministic collect's output counter, where the source
+    calls `atomicAdd` with no ordering qualifier.
+    """
+    out = T.alloc_local((1,), "uint32")
+    T.evaluate(T.ptx.atom.global_.add.u32(out[0], buffer.ptr_to([index]), value))
+    return out[0]
+
+
+# --- staged-key load/convert/store and collect emit ---------------------------
+def ld_global_bits(buf, elem_index, is32):
+    """One scalar element's raw bits (``ld.global.b32`` | ``ld.global.b16``)."""
+    if is32:
+        out = T.alloc_local((1,), "uint32")
+        T.evaluate(T.ptx.ld.global_.b32(out[0], buf.ptr_to([elem_index])))
+        return out[0]
+    out16 = T.alloc_local((1,), "uint16")
+    T.evaluate(T.ptx.ld.global_.b16(out16[0], buf.ptr_to([elem_index])))
+    return out16[0]
+
+
+def ld_global_words(buf, elem_index, load_bytes):
+    """One vector load of ``load_bytes`` bytes, returned as 32-bit words."""
+    if load_bytes == 16:
+        w = T.alloc_local((4,), "uint32", align=16)
+        T.evaluate(T.ptx["ld.global.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index])))
+        return [w[0], w[1], w[2], w[3]]
+    if load_bytes == 8:
+        w = T.alloc_local((2,), "uint32", align=8)
+        T.evaluate(T.ptx["ld.global.v2.b32"](w[0], w[1], buf.ptr_to([elem_index])))
+        return [w[0], w[1]]
+    w = T.alloc_local((1,), "uint32")
+    T.evaluate(T.ptx.ld.global_.b32(w[0], buf.ptr_to([elem_index])))
+    return [w[0]]
+
+
+def stage_vector(buf, s_ordered, row_in, i, vec, load_bytes, is32, to_ordered, st_key):
+    """LoadToSharedOrdered's vector body (:612-617).
+
+    One vector load, ``VEC_SIZE`` monotone key conversions, then a single shared
+    store as wide as the load. The source stores element-by-element and lets nvcc
+    coalesce the contiguous group (its PTX shows one ``st.shared.v4.b32``);
+    opaque ``T.ptx`` intrinsics cannot be merged after the fact, so the wide form
+    is requested directly.
+    """
+    base = row_in + T.cast(i, "int64")
+    if load_bytes == 2:
+        st_key(s_ordered, i, to_ordered(ld_global_bits(buf, base, False)))
+        return
+    if not is32 and load_bytes == 4:
+        # VEC_SIZE == 2 on a 16-bit dtype: mirror the source's native 16-bit
+        # vector pair (`ld.global.v2.b16` / `st.shared.v2.b16`) so the flip stays
+        # in 16-bit registers.  Going through one 32-bit word here would add an
+        # extract and a repack per element.
+        lo_bits, hi_bits = ld_global_pair_u16(buf, base)
+        st_shared_pair_u16(s_ordered, i, to_ordered(lo_bits), to_ordered(hi_bits))
+        return
+    words = ld_global_words(buf, base, load_bytes)
+    if is32:
+        keys = [to_ordered(w) for w in words]
+    else:
+        # Each loaded word holds two 16-bit lanes; convert both and repack so the
+        # shared store keeps the same width as the global load.
+        keys = []
+        for word in words:
+            lo = to_ordered(T.cast(T.bitwise_and(word, T.uint32(0xFFFF)), "uint16"))
+            hi = to_ordered(T.cast(T.shift_right(word, T.uint32(16)), "uint16"))
+            keys.append(
+                T.bitwise_or(T.cast(lo, "uint32"), T.shift_left(T.cast(hi, "uint32"), T.uint32(16)))
+            )
+    if len(keys) == 4:
+        st_shared_quad_u32(s_ordered, i, keys[0], keys[1], keys[2], keys[3])
+    elif len(keys) == 2:
+        st_shared_pair_u32(s_ordered, i, keys[0], keys[1])
+    else:
+        st_shared_u32(s_ordered, i, keys[0])
+
+
+def emit_selected(out_idx, out_val, row_out, i, key, pos, offset, basic, ragged, is32, dtype):
+    """The mode epilogue the collect passes call per selected element (:1339-1375)."""
+    slot = row_out + T.cast(pos, "int64")
+    if basic:
+        st_global_u32(out_idx, slot, T.reinterpret("uint32", i))
+        if is32:
+            st_global_u32(out_val, slot, from_ordered_u32(key))
+        else:
+            st_global_u16(out_val, slot, from_ordered_u16(T.cast(key, "uint16")))
+    elif ragged:
+        st_global_u32(out_idx, slot, T.reinterpret("uint32", i + offset))
+    else:
+        st_global_u32(out_idx, slot, T.reinterpret("uint32", i))
