@@ -528,16 +528,19 @@ freedom before profiling wait stalls and tail-dominated shapes.
 **Symptoms:** `illegal_instruction`, `unspecified_launch_failure`, `multimem_early_exit`, `distributed_flake`
 
 A host barrier after launch cannot keep a rank's device workers alive while
-peer ranks are still issuing `multimem.ld_reduce`.  Give every persistent
-worker its own symmetric exit flag, release-increment the multicast flag after
-all local multimem users finish, and acquire-wait on the local flag until every
-rank arrives before releasing device resources or exiting the kernel.
+peer ranks are still issuing `multimem.ld_reduce`.  Establish rank-local
+all-worker completion on device, then release-increment a multicast rank flag
+and acquire-wait on the local flag until every rank arrives before releasing
+the final device resources or exiting the kernel.
 
 Keep this barrier outside the tile protocol: first complete the local CTA or
 cluster drain, then perform the system-scope rank rendezvous, then deallocate
-TMEM and exit.  A single flag per rank is insufficient when independently
-scheduled persistent workers can finish at different times; index the flags by
-the physical worker or SM identity used by the grid.
+TMEM and exit.  A bare single flag per rank is insufficient when independently
+scheduled persistent workers can finish at different times.  Two correct forms
+are known: index symmetric flags by physical worker, or first release-aggregate
+every local cluster into a rank-local counter and let only the last cluster
+perform the cross-rank rendezvous.  In the aggregate form, keep both CTAs of
+that last cluster behind a cluster barrier until the rank rendezvous completes.
 
 The missing exit rendezvous presented as two different asynchronous CUDA
 faults at two different TP4 shapes across two full correctness matrices, while
@@ -546,6 +549,22 @@ non-blocking relaunches across both failing shapes, the complete 16-shape
 TP1/TP4 matrix, and a 1402-configuration full suite.  Launch blocking is a
 localization tool here, not a fix: it passed 200 relaunches but does not prove
 the cross-rank kernel-exit invariant.
+
+A later full sweep still observed one standalone-unreproducible TP4 launch
+failure with the per-worker form.  Replacing 148 multicast arrivals per rank
+with a 74-cluster local completion counter plus one multicast arrival per rank
+passed the failing shape for 20 relaunches and the complete 16-shape matrix for
+320 relaunches, including 160 TP4 launches.  The terminal-state oracle checked
+both the 74 local cluster arrivals and all rank arrivals on every launch.
+
+Do not interpret an isolated `illegal_instruction` from a full-TMEM persistent
+kernel until the runner has excluded co-runners.  A subsequent shared-runner
+sweep allowed single-GPU cases to overlap and admitted GPUs already owned by
+external processes.  Its TP1 failure localized to the kernel's intentional
+`trap` when a 512-column allocation did not start at TMEM column zero; two TP4
+launch faults were likewise collected without a valid exclusive-device
+invariant.  Make full-resource kernels exclusive and reject externally occupied
+cards before treating a remaining failure as evidence about the exit barrier.
 
 ## Size swizzles and fragments physically
 
