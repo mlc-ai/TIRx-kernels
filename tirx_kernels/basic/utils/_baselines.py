@@ -114,7 +114,7 @@ def _read_nvshmem_version() -> tuple[str, str]:
 def _library_provenance() -> dict[str, dict[str, Any]]:
     """Verify every configured lock against the library resolving its API symbol."""
 
-    configured = _locked_library_paths(required=True)
+    configured = _locked_library_paths(required=tuple(_LIBRARY_SYMBOLS))
     result = {}
     for name, symbol in _LIBRARY_SYMBOLS.items():
         actual = _symbol_library_path(symbol)
