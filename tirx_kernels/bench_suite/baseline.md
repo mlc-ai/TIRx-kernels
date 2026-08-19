@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': 'f20fa692', 'tirx-kernels': 'e45bf633-dirty', 'tirx-bench-ci': None}`
-- Workloads: 344 ok, 0 failed
+- Git:       `{'tir': '3df3e86a', 'tirx-kernels': '919f1c6b-dirty', 'tirx-bench-ci': None}`
+- Workloads: 347 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -200,6 +200,14 @@ Grouped workloads show one row per config and one timing column per implementati
 | `b2_s4096_h16_causal` | tir | 388.0339 | flashattn_sm100 | 390.3185 | 1.006 | — |
 | `b4_s8192_h16_causal` | tir | 2473.1056 | flashattn_sm100 | 2496.3857 | 1.009 | — |
 | `b4_s8192_h16_noncausal` | tir | 5549.1120 | flashattn_sm100 | 5662.1554 | 1.020 | — |
+
+## flashinfer_qk_rmsnorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `gemma_bf16_b32_n32_h128_xc_yc_pdl0` | tirx | 2.7996 | flashinfer_cutedsl | 2.8285 | 1.010 | — |
+| `rms_bf16_b32_n32_h128_xc_yc_pdl0` | tirx | 2.8140 | flashinfer_cutedsl | 2.8320 | 1.006 | — |
+| `rms_f16_b16_n64_h128_xc_yc_pdl0` | tirx | 2.8184 | flashinfer_cutedsl | 2.8270 | 1.003 | — |
 
 ## flashinfer_rmsnorm
 

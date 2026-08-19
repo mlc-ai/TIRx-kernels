@@ -2,8 +2,8 @@
   "timestamp": "14",
   "label": "post-refactor",
   "git": {
-    "tir": "f20fa692",
-    "tirx-kernels": "e45bf633-dirty",
+    "tir": "3df3e86a",
+    "tirx-kernels": "919f1c6b-dirty",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
@@ -1606,6 +1606,48 @@
       "impls": {
         "tir": 5549.111992647058,
         "flashattn_sm100": 5662.155411764706
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_qk_rmsnorm",
+      "config": "gemma_bf16_b32_n32_h128_xc_yc_pdl0",
+      "label": "gemma_bf16_b32_n32_h128_xc_yc_pdl0",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.7995781554448302,
+        "flashinfer_cutedsl": 2.8284792865098316
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_qk_rmsnorm",
+      "config": "rms_bf16_b32_n32_h128_xc_yc_pdl0",
+      "label": "rms_bf16_b32_n32_h128_xc_yc_pdl0",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.81395213561397,
+        "flashinfer_cutedsl": 2.8319596705043817
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_qk_rmsnorm",
+      "config": "rms_f16_b16_n64_h128_xc_yc_pdl0",
+      "label": "rms_f16_b16_n64_h128_xc_yc_pdl0",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.818395580977495,
+        "flashinfer_cutedsl": 2.827004542309699
       },
       "aggregated": {
         "rounds": 5,
