@@ -47,6 +47,26 @@ The store keeps its own width independent of both:
 T.evaluate(T.ptx.st.global_.v4.b32(buf.ptr_to([index]), w[0], w[1], w[2], w[3]))
 ```
 
+Keep the conversion selector independent from the store selector. A fragment
+may require scalar narrowing and still use a packed transaction after an
+explicit register pack:
+
+```python
+if PACKED_NARROW:
+    for pair in T.unroll(NUM_PAIRS):
+        words[pair] = _cvt_pair(reg_f32[2 * pair + 1], reg_f32[2 * pair])
+else:
+    for value in T.unroll(NUM_VALUES):
+        halves[value] = _cvt_scalar(reg_f32[value])
+    if PACKED_STORE:
+        for pair in T.unroll(NUM_VALUES // 2):
+            T.ptx.mov.b32(words[pair], halves[2 * pair], halves[2 * pair + 1])
+```
+
+Derive both selectors from fresh reference PTX for the complete static fragment
+family. Do not infer packed narrowing merely from an element vector width above
+one.
+
 ## Rationale
 
 Keep conversion width, packing width, and transaction width independent. A
@@ -55,8 +75,26 @@ two-input `mov.b32` packs, and one `st.global.v4.b32`; ptxas then selected
 paired `F2FP.*.F32.PACK_AB` instructions feeding the 128-bit SASS store. A
 packed PTX conversion is therefore not required to obtain a packed store.
 
+One measured fragment family made this independence non-monotonic: two- and
+four-element vectors used packed conversions for some fragment extents and
+scalar conversions for neighboring extents. A six-value FP16 fragment emitted
+six `cvt.rn.f16.f32` instructions rather than three packed conversions, while a
+scalar-narrowed eight-element path still repacked its results for a
+`st.global.v4.b32`. Matching those two selectors separately passed the complete
+correctness matrix and retained a final 1.003-1.010x three-shape benchmark
+matrix.
+
+## Boundary
+
+The exact packed/scalar selector is a property of the source fragment layout
+and compiler version, not a universal power-of-two or vector-width rule. Record
+the observed selector as compile-time specialization data and re-probe its
+boundary when either changes.
+
 ## Verification
 
 Confirm packed words bitwise before judging instruction count. Trace the
 conversion-to-store def-use chain in SASS instead of comparing conversion
-mnemonics in isolation.
+mnemonics in isolation. Probe adjacent fragment extents and both dtypes, then
+count scalar conversions, packed conversions, explicit packs, and final store
+transactions independently.
