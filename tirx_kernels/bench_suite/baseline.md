@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '3df3e86a', 'tirx-kernels': 'abb50263-dirty', 'tirx-bench-ci': None}`
-- Workloads: 341 ok, 0 failed
+- Git:       `{'tir': 'f20fa692', 'tirx-kernels': 'e45bf633-dirty', 'tirx-bench-ci': None}`
+- Workloads: 344 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -584,6 +584,14 @@ Grouped workloads show one row per config and one timing column per implementati
 | `bench_dqk576_hq64_s4096_kv49152_topk512` | tirx | 584.6850 | flashmla | 605.9564 | 1.036 | trtllm_gen=719.6944 |
 | `bench_dqk576_hq64_s4096_kv65536_topk512` | tirx | 405.1609 | flashmla | 418.7721 | 1.034 | trtllm_gen=488.0644 |
 | `bench_dqk576_hq64_s4096_kv8192_topk512` | tirx | 372.2002 | flashmla | 381.5993 | 1.025 | trtllm_gen=447.2225 |
+
+## stable_sort_topk_by_value
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `f32_r4_k128` | tirx | 5.2716 | flashinfer | 5.3166 | 1.009 | — |
+| `f32_r64_k2048` | tirx | 11.8269 | flashinfer | 11.9164 | 1.008 | — |
+| `f32_r64_k256` | tirx | 6.3832 | flashinfer | 6.8481 | 1.073 | — |
 
 ## tinygemm2_sm100
 

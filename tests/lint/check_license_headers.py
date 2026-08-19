@@ -104,6 +104,14 @@ FILE_OVERRIDES = {
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
+    # Transcribes cub::BlockRadixSort, which FlashInfer's topk kernels instantiate.
+    "tirx_kernels/flashinfer/utils/block_radix_sort.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
 }
 
 # Native modules inside port buckets — package markers and our own harnesses.

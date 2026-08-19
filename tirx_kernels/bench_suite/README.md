@@ -266,6 +266,53 @@ remain in the run JSON for variance and outlier inspection.
 - **ratio Δ** in `bench.md` = current ratio vs the baseline ratio (computed from
   `baseline.json`'s ours + ref impls).
 
+## Reading a ratio you do not trust
+
+Small, short kernels expose measurement effects that larger ones average away.
+Three are worth knowing before attributing a ratio to the kernel.
+
+**A per-implementation buffer allocation is a placement draw.** An in-place
+kernel needs its own working set per implementation, and cloning once per side
+puts the copies in different allocations, hence different L2 partitions. On a
+grid too small to spread across the device one side is local and the other
+remote, and remote-partition latency -- fixed in nanoseconds -- lands entirely on
+whichever side drew it. One shape measured 0.957, 0.974, 1.058 and 1.099 across
+four allocation arrangements with **no code change**, and two byte-identical
+kernels read 0.937 and 1.082. In the low mode both sides are faster in absolute
+time and only the ratio moves, so absolute times look innocent.
+
+It bites when all three hold: the kernel is in place, so the per-side allocation
+is on the read path rather than a shared input or write-only output; the working
+set fits in one partition (a few KB); and the kernel is short enough that a
+fixed latency term is a visible fraction. Sibling kernels failing any of these
+showed at most 0.005. To cancel it, have both implementations alternate over the
+same two working sets in opposite phase, so each spends half its calls on each
+buffer, then **run the swap test**: exchange which side gets which buffer and
+confirm the ratio does not move. A contiguous split of one buffer looks
+symmetric and fails that test.
+
+**Absolute microseconds do not survive a session boundary.** They drift between
+sessions while ratios hold: one kernel read 7.746-7.773 us in one session and
+8.238 us in another, both tight, at a ratio of 1.160-1.164 throughout. Compare
+ratios, or measure both sides in one process.
+
+**A complete matrix is the acceptance instrument, not the iteration
+instrument.** Isolated single-config repeats reproduced to about +/-0.001 where
+the matrix carried about +/-0.05 on the same shapes, and the matrix inflated
+individual rows. Decide changes on isolated repeats; accept on the matrix.
+
+Two controls make all three visible: keep a pair of configs that compile to
+byte-identical code, since any spread between them is measurement rather than
+kernel; and sweep the grid, since a deficit that disappears once the SM array
+fills is occupancy, not code.
+
+When a profiler and the suite disagree about the same two kernels, check the
+instrument settings before either result. NCU locks clocks to base and flushes
+caches by default; the suite runs at boost, warm. Memory latency costs more SM
+cycles the faster the clock runs, so a kernel with exposed latency can lead at
+base and trail at boost. Reproduce the suite's regime with
+`ncu --cache-control none --clock-control none`.
+
 ## Outputs
 
 | Path | Description |
