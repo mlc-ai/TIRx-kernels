@@ -1,9 +1,9 @@
 ---
-name: tirx-finegrain-tuning
-description: Use when porting, tuning, or diagnosing TIRx CUDA kernels, especially for perf-gate failures, PTX/SASS divergence, bitwise mismatches, register spills, scoreboard stalls, address arithmetic, predication, uniformity, pipeline depth, TMA, shared-memory conflicts, exact floating-point semantics, or packing. Provides a symptom-indexed database of fine-grained kernel-code changes with measured mechanisms.
+name: tirx-codegen-tuning
+description: Use when porting, tuning, or diagnosing TIRx CUDA kernels, especially for perf-gate failures, PTX/SASS divergence, bitwise mismatches, register spills, scoreboard stalls, address arithmetic, predication, uniformity, pipeline depth, TMA, shared-memory conflicts, exact floating-point semantics, or packing. Provides a symptom-indexed database of generated-code changes with measured mechanisms.
 ---
 
-# TIRx fine-grained tuning
+# TIRx codegen tuning
 
 Use this workflow for TIRx -> TVM CUDA codegen -> nvcc/ptxas -> SASS work when
 matching a hand-written CUDA, CuTe-DSL, or inline-assembly reference.
@@ -17,7 +17,7 @@ matching a hand-written CUDA, CuTe-DSL, or inline-assembly reference.
 
    ```bash
    rg -l -i '^\*\*Symptoms:\*\*.*long_scoreboard' \
-     .agents/skills/tirx-finegrain-tuning/references/db/
+     .agents/skills/tirx-codegen-tuning/references/db/
    ```
 
 3. Read each matching file in full. If no exact tag matches, search the
@@ -32,7 +32,7 @@ requires `> 0.99x`.
 
 One entry per file in `references/db/`, filename the kebab-case of the entry
 title. Add or update an entry only after correctness passes and a measured
-experiment shows a reusable fine-grained kernel-code change. Structure each
+experiment shows a reusable generated-code change. Structure each
 file as:
 
 ```markdown
