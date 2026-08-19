@@ -51,3 +51,16 @@ Before spending another change, list the countable quantities side by side --
 PTX and SASS totals, dynamic instructions, registers, shared bytes, barriers,
 bank conflicts, parameters, launch bounds. If none of them is worse, the next
 measurement to take is not of the kernel.
+
+Count them correctly. A `grep`-based opcode histogram undercounts a cub-style
+reference twice over: predicated instructions begin with `@%p` rather than an
+opcode, so a `^\s+[a-z]` pattern drops them, and an inline `asm` block's line
+begins with `{`, hiding several instructions behind one unmatched line -- cub's
+warp-scan shuffle hides three that way. Both bit here, and an early table
+claiming the reference emitted zero `shfl.sync.up` when it emits five nearly
+became the basis of a hypothesis.
+
+Keep PTX-level and SASS-level claims separate as well. An absent opcode in PTX
+says nothing about ptxas's own selection: one sketch recorded `prmt` as absent,
+which was true of the PTX while ptxas still chose `PRMT` for a 16-bit sign
+extension. That is not a divergence.
