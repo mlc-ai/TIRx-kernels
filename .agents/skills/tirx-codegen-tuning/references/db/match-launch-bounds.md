@@ -45,10 +45,25 @@ nine on the larger block cut its allocation to 32 registers before timing. The
 shape-aware 9/1 selector cleared its five-workload boundary matrix at
 1.003-1.028x.
 
+In a measured 128-thread single-wave family, setting the minimum-block count to
+one moved the allocation from 63 to 90 registers, reduced static SASS from 664
+to 656 instructions, and introduced no spill. Two non-protocol paths reached
+1.016x and 1.005x, while the dependency-protocol path improved from about
+0.945x to 0.959x.
+
 ## Boundary
 
 Treat a large allocation shift as a separate shape A/B even when neither variant
 spills: ptxas can trade registers for recomputation and address instructions.
+
+Lower allocation is not the objective. In the same family, a minimum-block
+count of six later realized 80 registers with zero stack and local traffic, yet
+regressed the gate from 0.981x to 0.976x. Match an occupancy mechanism, not the
+reference's register number.
+
+Use `tirx.max_registers` when an exact per-specialization ceiling, rather than a
+minimum resident-block target, is the demonstrated lever. The two contracts are
+mutually exclusive.
 
 ## Verification
 

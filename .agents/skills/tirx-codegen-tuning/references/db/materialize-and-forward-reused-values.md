@@ -73,8 +73,16 @@ The reverse direction has a limit. Hoisting address invariants the backend
 already merges changes almost nothing: one such hoist moved static SASS by five
 instructions and left the shift count untouched.
 
+A smaller generated program is not sufficient evidence to keep this rewrite.
+In one dependency-protocol specialization, forwarding a row predicate removed
+eight static instructions but raised registers from 96 to 98 and left the gate
+unchanged at 0.979-0.980x. A broader address-base materialization removed 16
+static instructions and reduced registers from 92 to 88 with no spill, yet the
+affected path still regressed to 0.985x. Both changes were reverted.
+
 ## Verification
 
 Count instructions in the corresponding PTX/SASS basic block and inspect ptxas
 resources and SASS; source or PTX size can remain unchanged while registers and
-SASS move.
+SASS move. Treat those changes as mechanism evidence, then require a measured
+gain on the affected and guard workloads before retaining the materialization.

@@ -66,6 +66,12 @@ The measurement that does answer it is the scheduled-SASS distance from the last
 load to its first consumer, which moved from 17 to 215 instructions when the
 conversion was written later.
 
+Source and PTX order are not enough. Separating a complete shared-word load
+phase from its unpack phase made one PTX stream match the reference more closely,
+but the final cubin remained identical at 661 instructions, 92 registers, and
+the same relevant opcode counts. With no generated-code lever left, the rewrite
+was reverted before timing.
+
 ## Verification
 
 Confirm the load issue window and load-to-first-consumer distance in SASS, then

@@ -36,7 +36,18 @@ for no in T.unroll(MMA_N // EPI_TILE):
 One measured FP32 bias hoist regressed 6.6%; by contrast, staging a larger load
 set won when it created enough outstanding DRAM misses.
 
+## Boundary
+
+Do not shorten a fragment lifetime across an ordering that belongs to the
+correctness contract. One vector-at-a-time epilogue reduced registers from 96
+to 94 and moved a ratio from 0.979x to 0.981x, but it also stored each vector
+before the remaining fragment had completed its multiply, bias, and narrowing
+phases. The measured gain was rejected and the full-fragment phase order was
+restored.
+
 ## Verification
 
 Compare registers and dynamic LDL/STL before instruction count, and sweep the
-tightest specialization where one spill can reverse the result.
+tightest specialization where one spill can reverse the result. Verify the
+compute and store order in emitted PTX/SASS before treating a shorter lifetime
+as a legal candidate.

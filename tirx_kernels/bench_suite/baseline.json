@@ -2,13 +2,13 @@
   "timestamp": "14",
   "label": "post-refactor",
   "git": {
-    "tir": "f20fa692",
-    "tirx-kernels": "b74762d3-dirty",
+    "tir": "3df3e86a",
+    "tirx-kernels": "abb50263-dirty",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "5a92f7b6847eed22f86bbae1ea6d70e43e8a3307"
+    "tirx-kernels:tirx_kernels": "4d0584f1fc0655f65f541190d8af337a69b759db"
   },
   "baselines": {
     "torch": {
@@ -1606,6 +1606,76 @@
       "impls": {
         "tir": 5549.111992647058,
         "flashattn_sm100": 5662.155411764706
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_rmsnorm",
+      "config": "gemma_bf16_m32_h4096_xc_yc_pdl0",
+      "label": "gemma_bf16_m32_h4096_xc_yc_pdl0",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.3629560297147543,
+        "flashinfer_cutedsl": 3.4510390326071674
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_rmsnorm",
+      "config": "gemma_bf16_m64_h8192_xc_yc_pdl0",
+      "label": "gemma_bf16_m64_h8192_xc_yc_pdl0",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.4773465698180908,
+        "flashinfer_cutedsl": 3.452984607375942
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_rmsnorm",
+      "config": "rms_bf16_m32_h4096_xc_yc_pdl0",
+      "label": "rms_bf16_m32_h4096_xc_yc_pdl0",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.364439676928304,
+        "flashinfer_cutedsl": 3.452695622404946
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_rmsnorm",
+      "config": "rms_bf16_m32_h4096_xc_yc_pdl1",
+      "label": "rms_bf16_m32_h4096_xc_yc_pdl1",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.3515764867977045,
+        "flashinfer_cutedsl": 3.3558080135711537
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_rmsnorm",
+      "config": "rms_bf16_m64_h8192_xc_yc_pdl0",
+      "label": "rms_bf16_m64_h8192_xc_yc_pdl0",
+      "status": "ok",
+      "impls": {
+        "tirx": 3.4584417197769426,
+        "flashinfer_cutedsl": 3.4412295032725257
       },
       "aggregated": {
         "rounds": 5,

@@ -1,0 +1,8 @@
+kernel: flashinfer_rmsnorm
+selection_rationale: The small non-PDL RMS case, otherwise-identical PDL RMS case, and largest Gemma case span launch dependency, variant, and workload scale.
+configs:
+  - {config: rms_bf16_m32_h4096_xc_yc_pdl0, default: true, selection_role: small}
+  - {config: rms_bf16_m64_h8192_xc_yc_pdl0, default: false}
+  - {config: rms_bf16_m32_h4096_xc_yc_pdl1, default: true, selection_role: medium}
+  - {config: gemma_bf16_m32_h4096_xc_yc_pdl0, default: false}
+  - {config: gemma_bf16_m64_h8192_xc_yc_pdl0, default: true, selection_role: large}
