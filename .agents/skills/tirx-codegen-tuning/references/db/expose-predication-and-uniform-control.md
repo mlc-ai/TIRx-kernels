@@ -76,6 +76,11 @@ no spill.
   reconvergence per CTA; reissuing it as a predicated store matched the
   reference exactly at BSYNC 9216 to 6144 and BRA 7680 to 6144, and moved two
   shapes from 0.982x and 0.988x to 1.007-1.019x and 1.012x.
+- In a measured 128-thread dependency-protocol path, moving the same tail guard
+  from an outer C++ branch onto the vector stores removed the remaining BSSY and
+  BSYNC, reduced registers from 105 to 96 with no spill, and moved the gate from
+  0.959x to 0.976x. The change was useful even though another register-budget
+  change was still needed to clear the final threshold.
 - Guarding a block of single-issue matrix and copy instructions on the elected
   lane costs a reconvergence pair per iteration, measured at 4.53 instructions
   per K block against the reference's roughly zero, because the reference's
@@ -106,6 +111,12 @@ totals. Check the lowering before assuming the written form survived.
 
 In the elected-lane case, extending the rewrite to the epilogue produced no
 separation from run-to-run drift; that is where to stop.
+
+Hoisting a uniform guard can be execution-path-specific. Replacing eight
+repeated asynchronous-copy branches with one outer branch improved the
+non-protocol path but moved the dependency-protocol path from 3.386 to 3.425
+microseconds, so the shared rewrite was reverted. Match the source topology,
+then retain the hoist only on the paths where the gate confirms it.
 
 ## Verification
 

@@ -49,7 +49,21 @@ no consistent full-matrix gain. ptxas had already strength-reduced much of the
 original indexing, while the explicit cursors extended five live ranges and
 added loop-back updates.
 
+The reverse static win can also lose. One grouped native-offset rewrite issued
+eight asynchronous copies from one base plus immediates, removed 16 static SASS
+instructions, and moved the first copy earlier without changing the floating
+point, copy, or store counts. It still measured only 0.980x, so the shorter
+instruction stream did not translate to a shorter timed path and the rewrite
+was reverted.
+
+## Boundary
+
+Native offsets, explicit arithmetic, and cursor induction are alternative
+dependency graphs, not an ordering from worse to better. Do not retain one from
+instruction count or first-issue position alone.
+
 ## Verification
 
 Confirm normalized PTX/SASS addresses, register counts, integer address ops,
-spills, and latency per specialization.
+spills, and latency per specialization. Require the affected performance path
+and its guard shapes to agree with the static diagnosis.

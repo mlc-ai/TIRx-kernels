@@ -43,6 +43,11 @@ The selected cap of 64 subsequently cleared a five-shape guard matrix at
 caps of 93 and 96 for two non-protocol 128-thread shape regimes, while its
 256-thread regime retained a launch bound instead of a static cap.
 
+The wider 128-thread regime had a separate hard boundary: every cap below 92
+produced 8-40 bytes of stack, while cap 96 kept both guarded variants spill-free
+and measured 0.992x. Cap 104 also passed but with less margin, so the selector
+retained 96 rather than applying the dependency-protocol cap globally.
+
 ## Boundary
 
 `tirx.max_registers` and `tirx.launch_bounds_*` are alternative static codegen
@@ -51,6 +56,12 @@ and dependency-protocol families separate when their live ranges differ. A cap
 that is too low can introduce spills or recomputation; a cap that is too high
 can reduce occupancy or produce a worse schedule. Re-sweep after any change to
 fragment lifetime, instruction ordering, or launch protocol.
+
+Do not copy the reference's realized register count into the cap. One
+source-like cap of 74 moved a wide-fragment path to 4.7-4.9 microseconds, and a
+cap matching the reference's 56-register dependency path improved the target
+only slightly without clearing the gate. The two instruction streams can need
+different budgets to realize comparable schedules.
 
 ## Verification
 
