@@ -45,7 +45,27 @@ to zero (50 address-only pointer operands remained), passed all four correctness
 configurations, and retained 0.993x and 1.022x in stable five-round 8-GPU
 campaigns.
 
+## Boundary
+
+Accept that this forfeits displacement addressing. The intrinsics take the
+address as a register operand, so ptxas cannot fold a constant offset into the
+addressing mode: where a reference keeps one base and reaches its items by
+`[%rd3+2]`, `[%rd3+4]`, ... or `[%r7]`, `[%r7+128]`, ..., the port computes one
+full address per access. Indexing the buffer directly does restore the
+displacement form and did measure fractionally faster, but the contract rejects
+it, so the cost is not tradeable. Rebasing every item on a per-thread base
+recovers part of the arithmetic -- 17 address ops to 12 on one entry -- and left
+the ratio unchanged, so spend the effort only where address math is provably the
+bottleneck.
+
+Direct indexing is also not a route to wider accesses. Replacing the intrinsics
+with buffer indexing to obtain a vectorized shared gather produced scalar
+accesses that nvcc did not re-vectorize: the `ld.shared.v4.b32` disappeared and
+the entry grew from 288 to 542 instructions.
+
 ## Verification
 
 Re-run the contract check over every public function, then the full correctness
-matrix.
+matrix. Note that a module's own `run_test` does not run the contract check --
+only the repo test entry point does -- so a spot check cannot stand in for the
+matrix when instruction selection changes.
