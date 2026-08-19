@@ -1,0 +1,4 @@
+interface:
+  display_name: "TIRx Codegen Tuning"
+  short_description: "Symptom-indexed CUDA kernel tuning field notes"
+  default_prompt: "Use $tirx-codegen-tuning to diagnose this TIRx performance or codegen gap."
