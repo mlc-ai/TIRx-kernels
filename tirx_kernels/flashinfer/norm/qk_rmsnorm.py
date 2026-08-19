@@ -15,18 +15,9 @@ from __future__ import annotations
 from typing import Any
 
 from tirx_kernels.runner import bench
-from tvm.backend.cuda.op import cuda_func_call
 from tvm.script import tirx as T
 
 KERNEL_META = {"name": "flashinfer_qk_rmsnorm", "category": "flashinfer", "compute_capability": 10}
-LOW_LEVEL_IR_FUNC_CALLS = frozenset(
-    {
-        "tvm_builtin_qk_rmsnorm_zero_float",
-        "tvm_builtin_qk_rmsnorm_zero_float_pair",
-        "tvm_builtin_qk_rmsnorm_zero_half",
-        "tvm_builtin_qk_rmsnorm_zero_packed_half",
-    }
-)
 
 _VARIANT_CODE = {"rmsnorm": "rms", "gemma_rmsnorm": "gemma"}
 _DTYPE_CODE = {"float16": "f16", "bfloat16": "bf16"}
@@ -43,75 +34,26 @@ def _ceil_div(lhs: int, rhs: int) -> int:
     return (lhs + rhs - 1) // rhs
 
 
-def _zero_half_helper_source(count: int) -> tuple[str, str]:
-    name = "tvm_builtin_qk_rmsnorm_zero_half"
-    statements = "\n".join(
-        f'    asm volatile("mov.b16 %0, 0;" : "=h"(values[{index}]) :: "memory");'
-        for index in range(count)
-    )
-    source = f"\n__forceinline__ __device__ void {name}(uint16_t* values) {{\n{statements}\n}}\n"
-    return name, source
-
-
 def _zero_half_values(values, count: int) -> None:
-    name, source = _zero_half_helper_source(count)
-    T.evaluate(cuda_func_call(name, values.ptr_to([0]), source_code=source))
-
-
-def _zero_packed_half_helper_source(count: int) -> tuple[str, str]:
-    name = "tvm_builtin_qk_rmsnorm_zero_packed_half"
-    statements = "\n".join(
-        (
-            '    asm volatile("mov.b32 %0, 0;" : "=r"('
-            f'*reinterpret_cast<uint32_t*>(values + {pair * 2})) :: "memory");'
-        )
-        for pair in range(count)
-    )
-    source = f"\n__forceinline__ __device__ void {name}(uint16_t* values) {{\n{statements}\n}}\n"
-    return name, source
+    for index in range(count):
+        T.evaluate(T.ptx.mov.b16(values[index], T.uint16(0)))
 
 
 def _zero_packed_half_values(values, count: int) -> None:
-    name, source = _zero_packed_half_helper_source(count)
-    T.evaluate(cuda_func_call(name, values.ptr_to([0]), source_code=source))
-
-
-def _zero_float_helper_source(count: int) -> tuple[str, str]:
-    name = "tvm_builtin_qk_rmsnorm_zero_float"
-    statements = "\n".join(
-        (f'    asm volatile("mov.b32 %0, 0f00000000;" : "=f"(values[{index}]) :: "memory");')
-        for index in range(count)
-    )
-    source = f"\n__forceinline__ __device__ void {name}(float* values) {{\n{statements}\n}}\n"
-    return name, source
+    for pair in range(count):
+        T.evaluate(T.ptx.mov.b32(values[pair * 2], values[pair * 2 + 1], T.uint32(0)))
 
 
 def _zero_float_values(values, count: int) -> None:
-    name, source = _zero_float_helper_source(count)
-    T.evaluate(cuda_func_call(name, values.ptr_to([0]), source_code=source))
-
-
-def _zero_float_pair_helper_source(count: int) -> tuple[str, str]:
-    name = "tvm_builtin_qk_rmsnorm_zero_float_pair"
-    statements = "\n".join(
-        (
-            '    asm volatile("mov.b64 %0, {%1, %1};" : "=l"('
-            f'values[{pair}]) : "f"(zero) : "memory");'
-        )
-        for pair in range(count)
-    )
-    source = (
-        f"\n__forceinline__ __device__ void {name}(uint64_t* values) {{\n"
-        '    float zero;\n    asm volatile("mov.b32 %0, 0f00000000;" : "=f"(zero) :: "memory");\n'
-        f"{statements}\n"
-        "}\n"
-    )
-    return name, source
+    for index in range(count):
+        T.evaluate(T.ptx.mov.b32(values[index], T.float32(0)))
 
 
 def _zero_float_pair_values(values, count: int) -> None:
-    name, source = _zero_float_pair_helper_source(count)
-    T.evaluate(cuda_func_call(name, values.ptr_to([0]), source_code=source))
+    zero = T.alloc_local((1,), "float32")
+    T.evaluate(T.ptx.mov.b32(zero[0], T.float32(0)))
+    for pair in range(count):
+        T.evaluate(T.ptx.mov.b64(values[pair], zero[0], zero[0]))
 
 
 def _threads_per_row(H: int) -> int:
@@ -1250,7 +1192,6 @@ __all__ = [
     "BENCH_CONFIGS",
     "CONFIGS",
     "KERNEL_META",
-    "LOW_LEVEL_IR_FUNC_CALLS",
     "get_kernel",
     "prepare_bench",
     "prepare_data",

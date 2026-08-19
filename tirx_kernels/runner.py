@@ -588,10 +588,10 @@ def run_kernel_test(kernel_name: str, config: dict[str, Any], *, registry=None):
 
     mod = registry[kernel_name]
     params = {k: v for k, v in config.items() if k != "label"}
-    allowed_func_calls = frozenset(
-        LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL.get(kernel_name, ())
-    ) | frozenset(getattr(mod, "LOW_LEVEL_IR_FUNC_CALLS", ()))
-    check_low_level_ir(mod.get_kernel(**params), allowed_func_calls=allowed_func_calls)
+    check_low_level_ir(
+        mod.get_kernel(**params),
+        allowed_func_calls=LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL.get(kernel_name, ()),
+    )
     mod.run_test(**params)
 
 
