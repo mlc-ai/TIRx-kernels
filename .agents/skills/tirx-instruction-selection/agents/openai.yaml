@@ -1,4 +1,0 @@
-interface:
-  display_name: "TIRx Instruction Selection"
-  short_description: "Symptom-indexed CUDA tuning field notes"
-  default_prompt: "Use $tirx-instruction-selection to diagnose this TIRx performance or codegen gap."
