@@ -48,6 +48,12 @@ produced 8-40 bytes of stack, while cap 96 kept both guarded variants spill-free
 and measured 0.992x. Cap 104 also passed but with less margin, so the selector
 retained 96 rather than applying the dependency-protocol cap globally.
 
+A paired compiler and repository update invalidated an earlier margin without
+changing the mathematical kernel: the dependency-protocol path moved from
+0.992x to 0.984x. Repeating the specialization sweep restored that path to
+1.001x in the final complete matrix. A static cap is a contract with the
+current allocator and scheduler, not a stable source-level constant.
+
 ## Boundary
 
 `tirx.max_registers` and `tirx.launch_bounds_*` are alternative static codegen
@@ -55,7 +61,8 @@ contracts and must not be declared together. Keep block-size, fragment-width,
 and dependency-protocol families separate when their live ranges differ. A cap
 that is too low can introduce spills or recomputation; a cap that is too high
 can reduce occupancy or produce a worse schedule. Re-sweep after any change to
-fragment lifetime, instruction ordering, or launch protocol.
+fragment lifetime, instruction ordering, launch protocol, compiler, or codegen
+pipeline.
 
 Do not copy the reference's realized register count into the cap. One
 source-like cap of 74 moved a wide-fragment path to 4.7-4.9 microseconds, and a
