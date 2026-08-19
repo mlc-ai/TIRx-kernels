@@ -27,7 +27,7 @@ upstream project.
 | `flash_attention_backward_sm100` | `flash_attention_backward.py` | Two-CTA FlashAttention backward (D=128); [schedule sketch](tirx_kernels/flashattention/flash_attention_backward_sm100_sketch.md) |
 
 `flashinfer/` — FlashInfer ports, sub-bucketed by the FlashInfer Python entry
-point each port backs (`activation`, `quantization` — CuTe-DSL backend —,
+point each port backs (`activation`, `quantization`, `norm` — CuTe-DSL backend —,
 `mamba`, `kda`, `gdn_decode`, `gdn_prefill`, `gemm`):
 
 | Kernel                                  | Module                                              | What it is |
@@ -38,6 +38,7 @@ point each port backs (`activation`, `quantization` — CuTe-DSL backend —,
 | `nvfp4_quantize_per_token`              | `quantization/nvfp4_quantize_per_token.py`          | Per-token-activation quantization |
 | `mxfp4_quantize`                        | `quantization/mxfp4_quantize.py`                    | Block quantization with UE8M0 scales |
 | `mxfp8_quantize`                        | `quantization/mxfp8_quantize.py`                    | Block quantization with UE8M0 scales |
+| `flashinfer_rmsnorm`                    | `norm/rmsnorm.py`                                   | Shared 2-D RMSNorm / Gemma RMSNorm family with compact, int64-strided, PDL, async-copy, and cluster-reduction paths |
 | `selective_state_update_stp_simple`     | `mamba/selective_state_update_stp_simple.py`        | Single-token, `algorithm="simple"` |
 | `selective_state_update_stp_vertical`   | `mamba/selective_state_update_stp_vertical.py`      | Single-token, `algorithm="vertical"` |
 | `selective_state_update_stp_horizontal` | `mamba/selective_state_update_stp_horizontal.py`    | Single-token, `algorithm="horizontal"` |
