@@ -284,9 +284,26 @@ def alloc_local(shape, dtype="float32", *, align=-1, annotations=None):
     return alloc_buffer(shape, dtype, scope="local", align=align, annotations=annotations)
 
 
-def local_scalar(dtype="float32"):
-    """Allocate one default-layout local scalar and return its writable element."""
-    return alloc_local([1], dtype)[0]
+def local_scalar(dtype="float32", init=None):
+    """Allocate one default-layout local scalar and return its writable element.
+
+    ``init`` performs one immediate ``K.assign`` into the fresh element; the
+    emitted TIR is identical to the two-statement declare-then-assign form.
+    """
+    element = alloc_local([1], dtype)[0]
+    if init is not None:
+        assign(element, init)
+    return element
+
+
+def stack_alloca(kind, size=1):
+    """Allocate host-stack storage and return its handle, bound exactly once.
+
+    The sanctioned spelling for ``tvm_stack_alloca``: the handle names an
+    allocation, so it must be materialized as a single binding rather than
+    re-evaluated per use.
+    """
+    return _I.Bind(_T.tvm_stack_alloca(kind, size))
 
 
 def assign(dst, value):
@@ -413,6 +430,7 @@ __all__ = [
     "smem_pool",
     "smem_desc_add_16B_offset",
     "specialize",
+    "stack_alloca",
     "thread_id",
     "tid_in_role",
     "u8",

@@ -354,6 +354,44 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     }
 
 
+def _weighted_relu_reduce(accum, weights, weight_row, num_values):
+    """Packed weighted-ReLU reduction over the per-row accumulators.
+
+    relu-like term (x + |x|) accumulates as f32x2 pairs across two
+    interleaved sums; the final scalar halves the doubled result.
+    """
+    regs = K.alloc_local((7,), "uint64")
+    scalars = K.alloc_local((3,), "float32")
+    sum_0, sum_1 = regs[0], regs[1]
+    accum_pair, abs_pair, relu_pair, weight_pair = regs[2], regs[3], regs[4], regs[5]
+    total = regs[6]
+    abs_lo, abs_hi, result = scalars[0], scalars[1], scalars[2]
+    K.ptx.mov.b64(sum_0, K.float32(0), K.float32(0))
+    K.ptx.mov.b64(sum_1, K.float32(0), K.float32(0))
+    for head_group in range(num_values // 4):
+        head = head_group * 4
+        K.ptx.mov.b64(accum_pair, accum[head], accum[head + 1])
+        K.ptx.abs.f32(abs_lo, accum[head])
+        K.ptx.abs.f32(abs_hi, accum[head + 1])
+        K.ptx.mov.b64(abs_pair, abs_lo, abs_hi)
+        K.ptx.add.rn.f32x2(relu_pair, accum_pair, abs_pair)
+        K.ptx.mov.b64(weight_pair, weights[weight_row, head], weights[weight_row, head + 1])
+        K.ptx.fma.rn.f32x2(sum_0, relu_pair, weight_pair, sum_0)
+
+        K.ptx.mov.b64(accum_pair, accum[head + 2], accum[head + 3])
+        K.ptx.abs.f32(abs_lo, accum[head + 2])
+        K.ptx.abs.f32(abs_hi, accum[head + 3])
+        K.ptx.mov.b64(abs_pair, abs_lo, abs_hi)
+        K.ptx.add.rn.f32x2(relu_pair, accum_pair, abs_pair)
+        K.ptx.mov.b64(weight_pair, weights[weight_row, head + 2], weights[weight_row, head + 3])
+        K.ptx.fma.rn.f32x2(sum_1, relu_pair, weight_pair, sum_1)
+    K.ptx.add.rn.f32x2(total, sum_0, sum_1)
+    K.ptx.mov.b64(abs_lo, abs_hi, total)
+    K.ptx.add.rn.f32(result, abs_lo, abs_hi)
+    K.ptx.mul.rn.f32(result, result, K.float32(0.5))
+    return result
+
+
 def get_kernel(**kwargs: Any):
     config = _make_config(**kwargs)
     num_heads = config.num_heads
@@ -964,7 +1002,7 @@ def get_kernel(**kwargs: Any):
                             K.ptx.tcgen05.wait__ld.sync.aligned()
                             if q_inner_i == block_q - 1:
                                 tmem_pipe.empty.arrive(tmem_state.stage)
-                            result_f32 = K.idioms.weighted_relu_reduce(
+                            result_f32 = _weighted_relu_reduce(
                                 accum,
                                 cached_weights,
                                 q_inner_i,
