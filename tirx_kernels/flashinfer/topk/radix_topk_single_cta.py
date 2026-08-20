@@ -235,26 +235,26 @@ def aux_elements(mode: str, num_rows: int, length: int, row_to_batch: bool) -> i
 def _ld_global_bits(buf, elem_index, is32):
     """One scalar element's raw bits (``ld.global.b32`` | ``ld.global.b16``)."""
     if is32:
-        out = K.alloc_local((1,), "uint32")
-        K.evaluate(K.ptx.ld.global_.b32(out[0], buf.ptr_to([elem_index])))
-        return out[0]
-    out16 = K.alloc_local((1,), "uint16")
-    K.evaluate(K.ptx.ld.global_.b16(out16[0], buf.ptr_to([elem_index])))
-    return out16[0]
+        out = K.local_scalar("uint32")
+        K.ptx.ld.global_.b32(out, buf.ptr_to([elem_index]))
+        return out
+    out16 = K.local_scalar("uint16")
+    K.ptx.ld.global_.b16(out16, buf.ptr_to([elem_index]))
+    return out16
 
 
 def _ld_global_words(buf, elem_index, load_bytes):
     """One vector load of ``load_bytes`` bytes, returned as 32-bit words."""
     if load_bytes == 16:
         w = K.alloc_local((4,), "uint32", align=16)
-        K.evaluate(K.ptx["ld.global.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index])))
+        K.ptx["ld.global.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index]))
         return [w[0], w[1], w[2], w[3]]
     if load_bytes == 8:
         w = K.alloc_local((2,), "uint32", align=8)
-        K.evaluate(K.ptx["ld.global.v2.b32"](w[0], w[1], buf.ptr_to([elem_index])))
+        K.ptx["ld.global.v2.b32"](w[0], w[1], buf.ptr_to([elem_index]))
         return [w[0], w[1]]
     w = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.ld.global_.b32(w[0], buf.ptr_to([elem_index])))
+    K.ptx.ld.global_.b32(w[0], buf.ptr_to([elem_index]))
     return [w[0]]
 
 
@@ -398,24 +398,23 @@ def get_kernel(
             s_scan = pool.alloc((scan_elems,), "uint32", align=16)
 
         # --- persistent row loop (:1218-1220) -----------------------------
-        row_idx = K.alloc_local([1], "int32")
-        K.assign(row_idx[0], group_id)
-        with K.While(row_idx[0] < num_rows):
+        row_idx = K.local_scalar("int32", init=group_id)
+        with K.While(row_idx < num_rows):
             # --- per-row header (:1221-1247) ------------------------------
             row_start = K.int32(0)
             page_start = K.int32(0)
             row_len = length
             if not basic:
                 if row_starts:
-                    row_start = ld_i32(row_starts_g, row_idx[0])
+                    row_start = ld_i32(row_starts_g, row_idx)
                 if page_table:
                     if page_table_row_starts:
-                        page_start = ld_i32(pt_starts_g, row_idx[0])
+                        page_start = ld_i32(pt_starts_g, row_idx)
                     else:
                         page_start = row_start
-                row_len = ld_i32(lengths_g, row_idx[0])
-            row_in = K.cast(row_idx[0], "int64") * K.int64(length) + K.cast(row_start, "int64")
-            row_out = K.cast(row_idx[0], "int64") * K.int64(k)
+                row_len = ld_i32(lengths_g, row_idx)
+            row_in = K.cast(row_idx, "int64") * K.int64(length) + K.cast(row_start, "int64")
+            row_out = K.cast(row_idx, "int64") * K.int64(k)
 
             # --- mode trivial early-out (:1243-1307) ----------------------
             take_main = None
@@ -433,34 +432,30 @@ def get_kernel(
                                 out_val,
                                 out_i,
                                 inp,
-                                K.cast(row_idx[0], "int64") * K.int64(length) + K.cast(i0, "int64"),
+                                K.cast(row_idx, "int64") * K.int64(length) + K.cast(i0, "int64"),
                             )
-            batch_idx = row_idx[0]
+            batch_idx = row_idx
             offset = K.int32(0)
             if page_table:
                 if row_to_batch:
-                    batch_idx = ld_i32(row_to_batch_g, row_idx[0])
+                    batch_idx = ld_i32(row_to_batch_g, row_idx)
                 with K.If(row_len <= k), K.Then():
                     K.assign(take_main[0], K.int32(0))
                     src0 = K.cast(batch_idx, "int64") * aux_stride
                     with K.serial(tx, k, step=BLOCK_THREADS) as i1:
-                        page_id = K.alloc_local([1], "int32")
-                        K.assign(page_id[0], K.int32(-1))
+                        page_id = K.local_scalar("int32", init=K.int32(-1))
                         with K.If(i1 < row_len), K.Then():
-                            K.assign(
-                                page_id[0], ld_i32(aux, src0 + K.cast(page_start + i1, "int64"))
-                            )
-                        st_i32(out_idx, row_out + K.cast(i1, "int64"), page_id[0])
+                            K.assign(page_id, ld_i32(aux, src0 + K.cast(page_start + i1, "int64")))
+                        st_i32(out_idx, row_out + K.cast(i1, "int64"), page_id)
             if ragged:
-                offset = ld_i32(aux, K.cast(row_idx[0], "int64"))
+                offset = ld_i32(aux, K.cast(row_idx, "int64"))
                 with K.If(row_len <= k), K.Then():
                     K.assign(take_main[0], K.int32(0))
                     with K.serial(tx, k, step=BLOCK_THREADS) as i2:
-                        val2 = K.alloc_local([1], "int32")
-                        K.assign(val2[0], K.int32(-1))
+                        val2 = K.local_scalar("int32", init=K.int32(-1))
                         with K.If(i2 < row_len), K.Then():
-                            K.assign(val2[0], i2 + offset)
-                        st_i32(out_idx, row_out + K.cast(i2, "int64"), val2[0])
+                            K.assign(val2, i2 + offset)
+                        st_i32(out_idx, row_out + K.cast(i2, "int64"), val2)
 
             static_main = basic and not basic_trivial
             with (
@@ -493,11 +488,10 @@ def get_kernel(
                 # === Stage 2: NUM_ROUNDS radix-select rounds (:690-774) ====
                 with K.serial(0, rounds) as rnd:
                     shift = K.int32(obits) - (rnd + 1) * 8
-                    mask = K.alloc_local([1], "uint32")
-                    K.assign(mask[0], K.uint32(0))
+                    mask = K.local_scalar("uint32", init=K.uint32(0))
                     with K.If(rnd != 0), K.Then():
                         K.assign(
-                            mask[0],
+                            mask,
                             K.shift_left(
                                 K.uint32(0xFFFFFFFF), K.cast(K.int32(obits) - rnd * 8, "uint32")
                             ),
@@ -512,7 +506,7 @@ def get_kernel(
 
                     with K.serial(tx, row_len, step=BLOCK_THREADS, unroll=2) as ih:
                         key = K.cast(ld_key(s_ordered, ih), "uint32")
-                        with K.If(K.bitwise_and(key, mask[0]) == prefix), K.Then():
+                        with K.If(K.bitwise_and(key, mask) == prefix), K.Then():
                             bucket = K.bitwise_and(
                                 K.shift_right(key, K.cast(shift, "uint32")), K.uint32(0xFF)
                             )
@@ -528,15 +522,14 @@ def get_kernel(
                     # RadixSuffixSum (:389-406)
                     with K.unroll(8) as step:
                         stride = K.shift_left(K.int32(1), step)
-                        acc = K.alloc_local([1], "uint32")
-                        K.assign(acc[0], K.uint32(0))
+                        acc = K.local_scalar("uint32", init=K.uint32(0))
                         with K.If(tx < RADIX), K.Then():
-                            K.assign(acc[0], ld_shared_u32(s_suffix, tx))
+                            K.assign(acc, ld_shared_u32(s_suffix, tx))
                             with K.If(tx + stride < RADIX), K.Then():
-                                K.assign(acc[0], acc[0] + ld_shared_u32(s_suffix, tx + stride))
+                                K.assign(acc, acc + ld_shared_u32(s_suffix, tx + stride))
                         bar_sync()
                         with K.If(tx < RADIX), K.Then():
-                            st_shared_u32(s_suffix, tx, acc[0])
+                            st_shared_u32(s_suffix, tx, acc)
                         bar_sync()
 
                     # threshold bucket (:753-767)
@@ -545,16 +538,12 @@ def get_kernel(
                     bar_sync()
                     with K.If(tx < RADIX), K.Then():
                         count_ge = ld_shared_u32(s_suffix, tx)
-                        count_gt = K.alloc_local([1], "uint32")
-                        K.assign(count_gt[0], K.uint32(0))
+                        count_gt = K.local_scalar("uint32", init=K.uint32(0))
                         with K.If(tx + 1 < RADIX), K.Then():
-                            K.assign(count_gt[0], ld_shared_u32(s_suffix, tx + 1))
-                        with (
-                            K.If(K.And(count_ge >= remaining_k, count_gt[0] < remaining_k)),
-                            K.Then(),
-                        ):
+                            K.assign(count_gt, ld_shared_u32(s_suffix, tx + 1))
+                        with K.If(K.And(count_ge >= remaining_k, count_gt < remaining_k)), K.Then():
                             st_shared_pair_u32(
-                                s_scalars, 2, K.cast(tx, "uint32"), remaining_k - count_gt[0]
+                                s_scalars, 2, K.cast(tx, "uint32"), remaining_k - count_gt
                             )
                     bar_sync()
                     with K.If(tx == 0), K.Then():
@@ -578,28 +567,26 @@ def get_kernel(
                     else:
                         st_shared_u32(s_suffix, 0, K.uint32(0))
                 bar_sync()
-                my_gt = K.alloc_local([1], "uint32")
-                my_eq = K.alloc_local([1], "uint32")
-                K.assign(my_gt[0], K.uint32(0))
-                K.assign(my_eq[0], K.uint32(0))
+                my_gt = K.local_scalar("uint32")
+                my_eq = K.local_scalar("uint32")
+                K.assign(my_gt, K.uint32(0))
+                K.assign(my_eq, K.uint32(0))
                 with K.serial(tx, row_len, step=BLOCK_THREADS, unroll=2) as ic:
                     key2 = K.cast(ld_key(s_ordered, ic), "uint32")
-                    K.assign(my_gt[0], my_gt[0] + K.Select(key2 > pivot, K.uint32(1), K.uint32(0)))
+                    K.assign(my_gt, my_gt + K.Select(key2 > pivot, K.uint32(1), K.uint32(0)))
                     if deterministic:
-                        K.assign(
-                            my_eq[0], my_eq[0] + K.Select(key2 == pivot, K.uint32(1), K.uint32(0))
-                        )
+                        K.assign(my_eq, my_eq + K.Select(key2 == pivot, K.uint32(1), K.uint32(0)))
                 with K.unroll(5) as step:
                     delta = K.shift_right(K.int32(16), step)
-                    K.assign(my_gt[0], my_gt[0] + shfl_down_u32(my_gt[0], delta))
+                    K.assign(my_gt, my_gt + shfl_down_u32(my_gt, delta))
                     if deterministic:
-                        K.assign(my_eq[0], my_eq[0] + shfl_down_u32(my_eq[0], delta))
+                        K.assign(my_eq, my_eq + shfl_down_u32(my_eq, delta))
                 lane = K.bitwise_and(tx, K.int32(31))
-                with K.If(K.And(lane == 0, my_gt[0] > K.uint32(0))), K.Then():
-                    K.evaluate(atom_shared_add_u32(s_suffix, 0, my_gt[0]))
+                with K.If(K.And(lane == 0, my_gt > K.uint32(0))), K.Then():
+                    K.evaluate(atom_shared_add_u32(s_suffix, 0, my_gt))
                 if deterministic:
-                    with K.If(K.And(lane == 0, my_eq[0] > K.uint32(0))), K.Then():
-                        K.evaluate(atom_shared_add_u32(s_suffix, 1, my_eq[0]))
+                    with K.If(K.And(lane == 0, my_eq > K.uint32(0))), K.Then():
+                        K.evaluate(atom_shared_add_u32(s_suffix, 1, my_eq))
                 bar_sync()
                 gt_count = ld_shared_u32(s_suffix, 0)
 
@@ -607,10 +594,10 @@ def get_kernel(
                 src_base = K.int64(0)
                 if page_table:
                     if row_to_batch:
-                        batch_idx = ld_i32(row_to_batch_g, row_idx[0])
+                        batch_idx = ld_i32(row_to_batch_g, row_idx)
                     src_base = K.cast(batch_idx, "int64") * aux_stride
                 if ragged:
-                    offset = ld_i32(aux, K.cast(row_idx[0], "int64"))
+                    offset = ld_i32(aux, K.cast(row_idx, "int64"))
 
                 if not deterministic:
                     # === Stage 4a: non-deterministic collect (:906-963) ====
@@ -660,31 +647,27 @@ def get_kernel(
                     # === Stage 4b: deterministic collect (:1023-1138) ======
                     eq_count = ld_shared_u32(s_suffix, 1)
                     with K.If(tx == 0), K.Then():
-                        need = K.alloc_local([1], "uint32")
-                        K.assign(need[0], K.uint32(0))
+                        need = K.local_scalar("uint32", init=K.uint32(0))
                         with K.If(K.uint32(k) > gt_count), K.Then():
-                            K.assign(need[0], K.uint32(k) - gt_count)
-                        st_shared_quad_u32(s_hist, 0, K.uint32(0), K.uint32(0), gt_count, need[0])
+                            K.assign(need, K.uint32(k) - gt_count)
+                        st_shared_quad_u32(s_hist, 0, K.uint32(0), K.uint32(0), gt_count, need)
                         st_shared_u32(s_hist, 4, K.uint32(0))
                     bar_sync()
                     collect_plan = ld_shared_quad_u32(s_hist, 0)
                     gt_base = collect_plan[0]
                     eq_base = collect_plan[2]
                     eq_limit = collect_plan[3]
-                    gt_limit = K.alloc_local([1], "uint32")
-                    K.assign(gt_limit[0], K.uint32(0))
+                    gt_limit = K.local_scalar("uint32", init=K.uint32(0))
                     with K.If(K.uint32(k) > gt_base), K.Then():
-                        K.assign(gt_limit[0], K.uint32(k) - gt_base)
+                        K.assign(gt_limit, K.uint32(k) - gt_base)
 
                     with K.If(eq_limit == K.uint32(0)):
                         with K.Then():
-                            sel = K.alloc_local([1], "uint32")
-                            K.assign(sel[0], K.uint32(0))
+                            sel = K.local_scalar("uint32", init=K.uint32(0))
                             with K.serial(tx, row_len, step=BLOCK_THREADS) as id1:
                                 key5 = K.cast(ld_key(s_ordered, id1), "uint32")
                                 K.assign(
-                                    sel[0],
-                                    sel[0] + K.Select(key5 > pivot, K.uint32(1), K.uint32(0)),
+                                    sel, sel + K.Select(key5 > pivot, K.uint32(1), K.uint32(0))
                                 )
                             # cub BLOCK_SCAN_RAKING_MEMOIZE exclusive sum (:268-270):
                             # place into the padded raking grid, one warp serially
@@ -692,36 +675,33 @@ def get_kernel(
                             # registers, a warp shuffle scan runs over the segment
                             # totals, then the same warp scatters the prefixes back.
                             rake_off = _raking_offset(tx)
-                            st_shared_u32(s_scan, rake_off, sel[0])
+                            st_shared_u32(s_scan, rake_off, sel)
                             bar_sync()
                             with K.If(tx < RAKING_THREADS), K.Then():
                                 rake_base = tx * RAKING_STRIDE
                                 cache = K.alloc_local([RAKING_SEGMENT], "uint32")
-                                total = K.alloc_local([1], "uint32")
-                                K.assign(total[0], K.uint32(0))
+                                total = K.local_scalar("uint32", init=K.uint32(0))
                                 with K.unroll(RAKING_SEGMENT) as j:
                                     K.ptx.mov.b32(cache[j], ld_shared_u32(s_scan, rake_base + j))
-                                    K.assign(total[0], total[0] + cache[j])
-                                scan_run = K.alloc_local([1], "uint32")
-                                K.assign(
-                                    scan_run[0], warp_inclusive_sum_u32(total[0], tx) - total[0]
-                                )
+                                    K.assign(total, total + cache[j])
+                                scan_run = K.local_scalar("uint32")
+                                K.assign(scan_run, warp_inclusive_sum_u32(total, tx) - total)
                                 with K.unroll(RAKING_SEGMENT) as j:
-                                    st_shared_u32(s_scan, rake_base + j, scan_run[0])
-                                    K.assign(scan_run[0], scan_run[0] + cache[j])
+                                    st_shared_u32(s_scan, rake_base + j, scan_run)
+                                    K.assign(scan_run, scan_run + cache[j])
                             bar_sync()
                             pre = ld_shared_u32(s_scan, rake_off)
-                            with K.If(K.And(sel[0] > K.uint32(0), pre < gt_limit[0])), K.Then():
-                                emit_pos = K.alloc_local([1], "uint32")
-                                emit_end = K.alloc_local([1], "uint32")
-                                done = K.alloc_local([1], "int32")
-                                K.assign(emit_pos[0], pre)
-                                K.assign(emit_end[0], pre + sel[0])
-                                with K.If(emit_end[0] > gt_limit[0]), K.Then():
-                                    K.assign(emit_end[0], gt_limit[0])
-                                K.assign(done[0], 0)
+                            with K.If(K.And(sel > K.uint32(0), pre < gt_limit)), K.Then():
+                                emit_pos = K.local_scalar("uint32")
+                                emit_end = K.local_scalar("uint32")
+                                done = K.local_scalar("int32")
+                                K.assign(emit_pos, pre)
+                                K.assign(emit_end, pre + sel)
+                                with K.If(emit_end > gt_limit), K.Then():
+                                    K.assign(emit_end, gt_limit)
+                                K.assign(done, 0)
                                 with K.serial(tx, row_len, step=BLOCK_THREADS) as id3:
-                                    with K.If(done[0] == 0), K.Then():
+                                    with K.If(done == 0), K.Then():
                                         key6 = K.cast(ld_key(s_ordered, id3), "uint32")
                                         with K.If(key6 > pivot), K.Then():
                                             _emit(
@@ -730,73 +710,67 @@ def get_kernel(
                                                 row_out,
                                                 id3,
                                                 key6,
-                                                K.cast(gt_base + emit_pos[0], "int32"),
+                                                K.cast(gt_base + emit_pos, "int32"),
                                                 offset,
                                                 basic,
                                                 ragged,
                                                 is32,
                                                 dtype,
                                             )
-                                            K.assign(emit_pos[0], emit_pos[0] + K.uint32(1))
-                                            with K.If(emit_pos[0] == emit_end[0]), K.Then():
-                                                K.assign(done[0], 1)
+                                            K.assign(emit_pos, emit_pos + K.uint32(1))
+                                            with K.If(emit_pos == emit_end), K.Then():
+                                                K.assign(done, 1)
                             bar_sync()
                         with K.Else():
-                            sel_gt = K.alloc_local([1], "uint32")
-                            sel_eq = K.alloc_local([1], "uint32")
-                            K.assign(sel_gt[0], K.uint32(0))
-                            K.assign(sel_eq[0], K.uint32(0))
+                            sel_gt = K.local_scalar("uint32")
+                            sel_eq = K.local_scalar("uint32")
+                            K.assign(sel_gt, K.uint32(0))
+                            K.assign(sel_eq, K.uint32(0))
                             with K.serial(tx, row_len, step=BLOCK_THREADS) as id4:
                                 key7 = K.cast(ld_key(s_ordered, id4), "uint32")
                                 K.assign(
-                                    sel_gt[0],
-                                    sel_gt[0] + K.Select(key7 > pivot, K.uint32(1), K.uint32(0)),
+                                    sel_gt,
+                                    sel_gt + K.Select(key7 > pivot, K.uint32(1), K.uint32(0)),
                                 )
                                 K.assign(
-                                    sel_eq[0],
-                                    sel_eq[0] + K.Select(key7 == pivot, K.uint32(1), K.uint32(0)),
+                                    sel_eq,
+                                    sel_eq + K.Select(key7 == pivot, K.uint32(1), K.uint32(0)),
                                 )
                             # The same raking scan over the {gt, eq} pair (:1122-1125).
                             rake_off2 = _raking_offset(tx) * 2
-                            st_shared_pair_u32(s_scan, rake_off2, sel_gt[0], sel_eq[0])
+                            st_shared_pair_u32(s_scan, rake_off2, sel_gt, sel_eq)
                             bar_sync()
                             with K.If(tx < RAKING_THREADS), K.Then():
                                 rake_base2 = tx * RAKING_STRIDE * 2
                                 cache_gt = K.alloc_local([RAKING_SEGMENT], "uint32")
                                 cache_eq = K.alloc_local([RAKING_SEGMENT], "uint32")
-                                total_gt = K.alloc_local([1], "uint32")
-                                total_eq = K.alloc_local([1], "uint32")
-                                K.assign(total_gt[0], K.uint32(0))
-                                K.assign(total_eq[0], K.uint32(0))
+                                total_gt = K.local_scalar("uint32")
+                                total_eq = K.local_scalar("uint32")
+                                K.assign(total_gt, K.uint32(0))
+                                K.assign(total_eq, K.uint32(0))
                                 with K.unroll(RAKING_SEGMENT) as j:
                                     seg = ld_shared_pair_u32(s_scan, rake_base2 + j * 2)
                                     K.ptx.mov.b32(cache_gt[j], seg[0])
                                     K.ptx.mov.b32(cache_eq[j], seg[1])
-                                    K.assign(total_gt[0], total_gt[0] + cache_gt[j])
-                                    K.assign(total_eq[0], total_eq[0] + cache_eq[j])
-                                run_gt = K.alloc_local([1], "uint32")
-                                run_eq = K.alloc_local([1], "uint32")
-                                K.assign(
-                                    run_gt[0], warp_inclusive_sum_u32(total_gt[0], tx) - total_gt[0]
-                                )
-                                K.assign(
-                                    run_eq[0], warp_inclusive_sum_u32(total_eq[0], tx) - total_eq[0]
-                                )
+                                    K.assign(total_gt, total_gt + cache_gt[j])
+                                    K.assign(total_eq, total_eq + cache_eq[j])
+                                run_gt = K.local_scalar("uint32")
+                                run_eq = K.local_scalar("uint32")
+                                K.assign(run_gt, warp_inclusive_sum_u32(total_gt, tx) - total_gt)
+                                K.assign(run_eq, warp_inclusive_sum_u32(total_eq, tx) - total_eq)
                                 with K.unroll(RAKING_SEGMENT) as j:
-                                    st_shared_pair_u32(
-                                        s_scan, rake_base2 + j * 2, run_gt[0], run_eq[0]
-                                    )
-                                    K.assign(run_gt[0], run_gt[0] + cache_gt[j])
-                                    K.assign(run_eq[0], run_eq[0] + cache_eq[j])
+                                    st_shared_pair_u32(s_scan, rake_base2 + j * 2, run_gt, run_eq)
+                                    K.assign(run_gt, run_gt + cache_gt[j])
+                                    K.assign(run_eq, run_eq + cache_eq[j])
                             bar_sync()
                             seg_out = ld_shared_pair_u32(s_scan, rake_off2)
-                            cur_gt = K.alloc_local([1], "uint32")
-                            cur_eq = K.alloc_local([1], "uint32")
-                            K.assign(cur_gt[0], seg_out[0])
-                            K.assign(cur_eq[0], seg_out[1])
+                            cur_gt = K.local_scalar("uint32")
+                            cur_eq = K.local_scalar("uint32")
+                            K.assign(cur_gt, seg_out[0])
+                            K.assign(cur_eq, seg_out[1])
                             with K.serial(tx, row_len, step=BLOCK_THREADS) as i8:
                                 key8 = K.cast(ld_key(s_ordered, i8), "uint32")
-                                with K.If(K.And(key8 > pivot, cur_gt[0] < gt_limit[0])):
+                                with K.If(K.And(key8 > pivot, cur_gt < gt_limit)):
                                     with K.Then():
                                         _emit(
                                             out_idx,
@@ -804,17 +778,17 @@ def get_kernel(
                                             row_out,
                                             i8,
                                             key8,
-                                            K.cast(gt_base + cur_gt[0], "int32"),
+                                            K.cast(gt_base + cur_gt, "int32"),
                                             offset,
                                             basic,
                                             ragged,
                                             is32,
                                             dtype,
                                         )
-                                        K.assign(cur_gt[0], cur_gt[0] + K.uint32(1))
+                                        K.assign(cur_gt, cur_gt + K.uint32(1))
                                     with K.Else():
                                         with (
-                                            K.If(K.And(key8 == pivot, cur_eq[0] < eq_limit)),
+                                            K.If(K.And(key8 == pivot, cur_eq < eq_limit)),
                                             K.Then(),
                                         ):
                                             _emit(
@@ -823,14 +797,14 @@ def get_kernel(
                                                 row_out,
                                                 i8,
                                                 key8,
-                                                K.cast(eq_base + cur_eq[0], "int32"),
+                                                K.cast(eq_base + cur_eq, "int32"),
                                                 offset,
                                                 basic,
                                                 ragged,
                                                 is32,
                                                 dtype,
                                             )
-                                            K.assign(cur_eq[0], cur_eq[0] + K.uint32(1))
+                                            K.assign(cur_eq, cur_eq + K.uint32(1))
                             bar_sync()
 
                 # === Stage 5: PageTable in-place gather (:1352-1358) =======
@@ -845,7 +819,7 @@ def get_kernel(
                             ld_i32(aux, src_base + K.cast(page_start + gidx, "int64")),
                         )
 
-            K.assign(row_idx[0], row_idx[0] + grid)
+            K.assign(row_idx, row_idx + grid)
 
     return radix_topk_single_cta.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 

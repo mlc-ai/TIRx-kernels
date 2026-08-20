@@ -109,32 +109,32 @@ def ordered_key(bits, is32):
 # `utils/topk_radix.py`.
 def ld_global_nc_u32(buffer, index):
     """``ld.global.nc.b32``."""
-    out = K.alloc_local([1], "uint32")
-    K.evaluate(K.ptx.ld.global_.nc.b32(out[0], buffer.ptr_to([index])))
-    return out[0]
+    out = K.local_scalar("uint32")
+    K.ptx.ld.global_.nc.b32(out, buffer.ptr_to([index]))
+    return out
 
 
 def ld_global_nc_bits(buf, elem_index, is32):
     """One scalar element's raw bits: ``ld.global.nc.b32`` | ``ld.global.nc.b16``."""
     if is32:
         return ld_global_nc_u32(buf, elem_index)
-    out16 = K.alloc_local([1], "uint16")
-    K.evaluate(K.ptx.ld.global_.nc.b16(out16[0], buf.ptr_to([elem_index])))
-    return out16[0]
+    out16 = K.local_scalar("uint16")
+    K.ptx.ld.global_.nc.b16(out16, buf.ptr_to([elem_index]))
+    return out16
 
 
 def ld_global_nc_words(buf, elem_index, load_bytes):
     """One vector load of ``load_bytes`` bytes, returned as 32-bit words."""
     if load_bytes == 16:
         w = K.alloc_local([4], "uint32", align=16)
-        K.evaluate(K.ptx["ld.global.nc.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index])))
+        K.ptx["ld.global.nc.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index]))
         return [w[0], w[1], w[2], w[3]]
     if load_bytes == 8:
         w = K.alloc_local([2], "uint32", align=8)
-        K.evaluate(K.ptx["ld.global.nc.v2.b32"](w[0], w[1], buf.ptr_to([elem_index])))
+        K.ptx["ld.global.nc.v2.b32"](w[0], w[1], buf.ptr_to([elem_index]))
         return [w[0], w[1]]
     w = K.alloc_local([1], "uint32")
-    K.evaluate(K.ptx.ld.global_.nc.b32(w[0], buf.ptr_to([elem_index])))
+    K.ptx.ld.global_.nc.b32(w[0], buf.ptr_to([elem_index]))
     return [w[0]]
 
 
@@ -145,7 +145,7 @@ def ld_global_nc_pair_u16(buffer, index):
     16-bit operands with no extract or repack arithmetic.
     """
     out = K.alloc_local([2], "uint16")
-    K.evaluate(K.ptx["ld.global.nc.v2.b16"](out[0], out[1], buffer.ptr_to([index])))
+    K.ptx["ld.global.nc.v2.b16"](out[0], out[1], buffer.ptr_to([index]))
     return out[0], out[1]
 
 
@@ -165,9 +165,9 @@ def atom_shared_or_b32(buffer, index, value):
     reduction form -- the export shows ``atom.shared.or.b32`` 20/29 times and
     ``red.shared.or.b32`` zero times, so the return operand is kept here too.
     """
-    out = K.alloc_local([1], "uint32")
-    K.evaluate(K.ptx.atom.shared.or_.b32(out[0], buffer.ptr_to([index]), value))
-    return out[0]
+    out = K.local_scalar("uint32")
+    K.ptx.atom.shared.or_.b32(out, buffer.ptr_to([index]), value)
+    return out
 
 
 # --- scalar slots -----------------------------------------------------------
