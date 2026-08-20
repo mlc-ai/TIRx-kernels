@@ -9,7 +9,7 @@ import ctypes
 import gc
 import os
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import timedelta
@@ -244,12 +244,18 @@ def _rank_library_preload(*, required: bool = False):
 
 @contextmanager
 def _rank_cuda_visibility(device_indices: Sequence[int]):
-    """Expose a late physical assignment as dense rank-local CUDA indices."""
-
+    """Map scheduler-owned physical devices to contiguous rank-local ordinals."""
+    assigned = tuple(int(index) for index in device_indices)
+    if not assigned or len(set(assigned)) != len(assigned):
+        raise ValueError(f"rank devices must be unique, got {device_indices!r}")
     original = os.environ.get("CUDA_VISIBLE_DEVICES")
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in device_indices)
+    visible = original.split(",") if original else ()
+    physical = tuple(
+        visible[index] if 0 <= index < len(visible) else str(index) for index in assigned
+    )
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(physical)
     try:
-        yield tuple(range(len(device_indices)))
+        yield tuple(range(len(physical)))
     finally:
         if original is None:
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -343,17 +349,17 @@ def _rank_entry(
     rank: int,
     world_size: int,
     init_method: str,
-    library_path: str,
+    library_paths: Mapping[str, str],
     worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]],
     mode: str,
     worker_kwargs: dict[str, Any],
     result_queue: Any,
     device_indices: Sequence[int],
     device_uuids: Sequence[str],
+    worker_receives_mapping: bool,
 ) -> None:
     runtime = None
-    module = None
-    nvshmem_initialized = False
+    modules = None
     succeeded = False
     result = None
     try:
@@ -372,22 +378,25 @@ def _rank_entry(
         validate_current_cuda_assignment("after distributed process-group init", restore=True)
         uid = _broadcast_nvshmem_uid(rank, device_index)
         tvm.get_global_func("runtime.disco.nvshmem.init_nvshmem")(uid, world_size, rank)
-        nvshmem_initialized = True
 
         runtime = _create_runtime(rank, world_size, device_index)
-        module = tvm.runtime.load_module(library_path)
+        modules = {
+            name: tvm.runtime.load_module(library_path)
+            for name, library_path in library_paths.items()
+        }
+        worker_modules = modules if worker_receives_mapping else modules["main"]
         validate_current_cuda_assignment("before distributed worker", restore=True)
-        result = worker(runtime, module, mode, worker_kwargs)
+        result = worker(runtime, worker_modules, mode, worker_kwargs)
         validate_current_cuda_assignment("after distributed worker", restore=True)
         runtime.barrier()
         succeeded = True
     finally:
         if runtime is not None:
             _cleanup_runtime(runtime)
-        module = None
+        modules = None
         gc.collect()
-        if nvshmem_initialized:
-            tvm.get_global_func("runtime.disco.nvshmem.finalize_nvshmem")()
+        # Each spawned rank is one-shot. Process teardown owns NVSHMEM cleanup;
+        # explicit finalize aborts after cuBLASMp changes the CUDA context stack.
         if dist.is_available() and dist.is_initialized():
             dist.destroy_process_group()
 
@@ -404,6 +413,47 @@ def run_distributed(
     worker_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Compile once in the parent, then execute one rank-local worker per GPU."""
+
+    return _run_distributed_modules(
+        {"main": ir_module},
+        world_size=world_size,
+        worker=worker,
+        mode=mode,
+        worker_kwargs=worker_kwargs,
+        worker_receives_mapping=False,
+    )
+
+
+def run_distributed_modules(
+    ir_modules: Mapping[str, Any],
+    *,
+    world_size: int,
+    worker: Callable[[DistributedRuntime, Mapping[str, Any], str, dict[str, Any]], dict[str, Any]],
+    mode: str,
+    worker_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Compile named modules and load them together in each rank worker."""
+
+    return _run_distributed_modules(
+        ir_modules,
+        world_size=world_size,
+        worker=worker,
+        mode=mode,
+        worker_kwargs=worker_kwargs,
+        worker_receives_mapping=True,
+    )
+
+
+def _run_distributed_modules(
+    ir_modules: Mapping[str, Any],
+    *,
+    world_size: int,
+    worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]],
+    mode: str,
+    worker_kwargs: dict[str, Any],
+    worker_receives_mapping: bool,
+) -> dict[str, Any]:
+    """Shared synchronous path for one or more named modules."""
     from tirx_kernels.runner import cuda_target, physical_cuda_uuids
 
     device_indices = tuple(range(world_size))
@@ -411,40 +461,31 @@ def run_distributed(
     require_sm100(device_indices)
     if not callable(worker):
         raise TypeError("worker must be callable")
+    ir_modules = dict(ir_modules)
+    if not ir_modules:
+        raise ValueError("ir_modules must contain at least one named module")
+    if any(not isinstance(name, str) or not name for name in ir_modules):
+        raise ValueError("ir_modules keys must be non-empty strings")
+    if not worker_receives_mapping and set(ir_modules) != {"main"}:
+        raise ValueError("single-module workers require exactly the key 'main'")
 
     with tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-") as tmpdir:
-        library_path = Path(tmpdir) / "kernel.so"
-        executable = tvm.compile(ir_module, target=cuda_target(), tir_pipeline="tirx")
-        executable.export_library(str(library_path))
-
-        context = mp.get_context("spawn")
-        result_queue = context.SimpleQueue()
-        # Every GemmComm workload is single-host. A unique FileStore avoids the
-        # bind-after-probe race of selecting a free TCP port before concurrent
-        # rank groups start listening on it.
-        init_method = f"file://{Path(tmpdir) / 'torch-distributed-init'}"
-        with _rank_library_preload(required=mode == "bench"):
-            mp.spawn(
-                _rank_entry,
-                args=(
-                    world_size,
-                    init_method,
-                    str(library_path),
-                    worker,
-                    mode,
-                    worker_kwargs,
-                    result_queue,
-                    device_indices,
-                    device_uuids,
-                ),
-                nprocs=world_size,
-                join=True,
-            )
-        result = result_queue.get()
-
-    if not isinstance(result, dict):
-        raise TypeError("distributed worker must return a result dictionary")
-    return result
+        library_paths = {}
+        for index, (name, ir_module) in enumerate(ir_modules.items()):
+            library_path = Path(tmpdir) / f"kernel-{index}.so"
+            executable = tvm.compile(ir_module, target=cuda_target(), tir_pipeline="tirx")
+            executable.export_library(str(library_path))
+            library_paths[name] = str(library_path)
+        return _run_distributed_libraries(
+            library_paths,
+            world_size=world_size,
+            worker=worker,
+            mode=mode,
+            worker_kwargs=worker_kwargs,
+            device_indices=device_indices,
+            device_uuids=device_uuids,
+            worker_receives_mapping=worker_receives_mapping,
+        )
 
 
 def prepare_distributed_bench(
@@ -492,26 +533,52 @@ def _run_distributed_library(
     device_uuids: Sequence[str],
 ) -> dict[str, Any]:
     """Start rank CUDA/NCCL/NVSHMEM state after the complete claim exists."""
+
+    return _run_distributed_libraries(
+        {"main": str(library_path)},
+        world_size=world_size,
+        worker=worker,
+        mode=mode,
+        worker_kwargs=worker_kwargs,
+        device_indices=device_indices,
+        device_uuids=device_uuids,
+        worker_receives_mapping=False,
+    )
+
+
+def _run_distributed_libraries(
+    library_paths: Mapping[str, str],
+    *,
+    world_size: int,
+    worker: Callable[[DistributedRuntime, Any, str, dict[str, Any]], dict[str, Any]],
+    mode: str,
+    worker_kwargs: dict[str, Any],
+    device_indices: Sequence[int],
+    device_uuids: Sequence[str],
+    worker_receives_mapping: bool,
+) -> dict[str, Any]:
+    """Start rank CUDA/NCCL/NVSHMEM state for precompiled named modules."""
     context = mp.get_context("spawn")
     result_queue = context.SimpleQueue()
     with tempfile.TemporaryDirectory(prefix="tirx-gemm-comm-ranks-") as tmpdir:
         init_method = f"file://{Path(tmpdir) / 'torch-distributed-init'}"
         with (
             _rank_library_preload(required=mode == "bench"),
-            _rank_cuda_visibility(device_indices) as rank_device_indices,
+            _rank_cuda_visibility(device_indices) as local_device_indices,
         ):
             mp.spawn(
                 _rank_entry,
                 args=(
                     world_size,
                     init_method,
-                    str(library_path),
+                    dict(library_paths),
                     worker,
                     mode,
                     worker_kwargs,
                     result_queue,
-                    rank_device_indices,
+                    local_device_indices,
                     tuple(device_uuids),
+                    worker_receives_mapping,
                 ),
                 nprocs=world_size,
                 join=True,
@@ -530,6 +597,7 @@ __all__ = [
     "require_nvls_multicast",
     "require_sm100",
     "run_distributed",
+    "run_distributed_modules",
     "symmetric_empty",
     "sync_communication_to_compute",
     "sync_compute_to_communication",

@@ -31,6 +31,7 @@ The implementation structure follows the reviewer-approved sketch
 
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_8,
     cvt_e2m1x8,
@@ -51,7 +52,6 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     st_global_u64,
 )
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 
 KERNEL_META = {"name": "nvfp4_quantize", "category": "flashinfer", "compute_capability": 10}
 
@@ -157,18 +157,18 @@ def _process_block(in_global, row_idx, col_idx, gs, *, dtype, k, fuse_silu):
     in_cols = 2 * k if fuse_silu else k
     elem_base = col_idx * NVFP4_SF_VEC_SIZE
     base = row_idx * in_cols + elem_base
-    v0 = ld_global_v4_u32(T.address_of(in_global[base]))
-    v1 = ld_global_v4_u32(T.address_of(in_global[base + 8]))
+    v0 = ld_global_v4_u32(K.address_of(in_global[base]))
+    v1 = ld_global_v4_u32(K.address_of(in_global[base + 8]))
     words = [v0[i] for i in range(4)] + [v1[i] for i in range(4)]
     if fuse_silu:
-        u0 = ld_global_v4_u32(T.address_of(in_global[base + k]))
-        u1 = ld_global_v4_u32(T.address_of(in_global[base + k + 8]))
+        u0 = ld_global_v4_u32(K.address_of(in_global[base + k]))
+        u1 = ld_global_v4_u32(K.address_of(in_global[base + k + 8]))
         uwords = [u0[i] for i in range(4)] + [u1[i] for i in range(4)]
         words = [silu_and_mul_pair(words[i], uwords[i], dtype) for i in range(8)]
 
     block_max = pair_max_to_f32(absmax_8(words, dtype), dtype)
     # _nvfp4_standard_quant_from_amax, fast-math path (utils:1588).
-    scale_float = mul_f32(gs, mul_f32(block_max, rcp_approx_ftz(T.float32(6.0))))
+    scale_float = mul_f32(gs, mul_f32(block_max, rcp_approx_ftz(K.float32(6.0))))
     scale_fp8_u32 = cvt_f32_to_e4m3(scale_float)
     output_scale = nvfp4_compute_output_scale(scale_fp8_u32, gs)
 
@@ -180,7 +180,13 @@ def _process_block(in_global, row_idx, col_idx, gs, *, dtype, k, fuse_silu):
     packed_lo = cvt_e2m1x8(s[0:8])
     packed_hi = cvt_e2m1x8(s[8:16])
     packed64 = pack_u32x2_to_u64(packed_lo, packed_hi)
-    return T.cast(scale_fp8_u32, "uint8"), packed64
+    return K.cast(scale_fp8_u32, "uint8"), packed64
+
+
+def _materialize(value):
+    local = K.alloc_local((1,), str(value.ty.dtype))
+    K.assign(local[0], value)
+    return local[0]
 
 
 def get_kernel(
@@ -205,32 +211,20 @@ def get_kernel(
     if sf_layout == "linear":
         grid_x, block_x, total_sf_blocks = _linear_launch(m, k)
 
-        @T.prim_func
+        @K.kernel(warps=block_x // 32, arch="sm_100a", min_blocks_per_sm=2, grid=grid_x)
         def nvfp4_quantize_linear(
-            in_ptr: T.handle,
-            out_ptr: T.handle,
-            sf_ptr: T.handle,
-            m_rows: T.int32,
-            total_sf: T.int32,
-            gs_ptr: T.handle,
+            in_global: K.gptr[dtype],
+            out_global: K.gptr[K.u8],
+            sf_out: K.gptr[K.u8],
+            m_rows: K.i32,
+            total_sf: K.i32,
+            gs: K.gptr[K.f32],
         ):
-            in_global = T.match_buffer(
-                in_ptr, shape=[m * k * (2 if fuse_silu else 1)], dtype=dtype, scope="global"
-            )
-            out_global = T.match_buffer(
-                out_ptr, shape=[m * (k // 2)], dtype="uint8", scope="global"
-            )
-            sf_out = T.match_buffer(
-                sf_ptr, shape=[m * (k // NVFP4_SF_VEC_SIZE)], dtype="uint8", scope="global"
-            )
-            gs = T.match_buffer(gs_ptr, shape=[1], dtype="float32", scope="global")
-            T.device_entry()
-            T.attr({"tirx.launch_bounds_min_blocks_per_sm": 2})
-            bx = T.cta_id([grid_x])
-            tx = T.thread_id([block_x])
+            bx = K.cta_id()
+            tx = K.thread_id()
 
             if enable_pdl:
-                T.evaluate(T.ptx.griddepcontrol.wait())
+                K.ptx.griddepcontrol.wait()
 
             # Device global scale: one broadcast load per thread (:322-325).
             gs_val = ld_global_f32(gs, 0)
@@ -240,136 +234,158 @@ def get_kernel(
             # into up-front pointer-induction chains; the source binary
             # recomputes addresses per iteration.
             stride = opaque_i32(grid_x * _LINEAR_SF_BLOCKS_PER_TB)
-            sf_idx: T.int32 = bx * _LINEAR_SF_BLOCKS_PER_TB + tx
-            while sf_idx < total_sf:
-                row_idx = T.truncdiv(sf_idx, T.int32(nsb))
-                col_idx = T.truncmod(sf_idx, T.int32(nsb))
+            sf_idx = K.alloc_local([1], "int32")
+            K.assign(sf_idx[0], bx * _LINEAR_SF_BLOCKS_PER_TB + tx)
+            with K.While(sf_idx[0] < total_sf):
+                row_idx = K.truncdiv(sf_idx[0], K.int32(nsb))
+                col_idx = K.truncmod(sf_idx[0], K.int32(nsb))
                 scale_fp8, packed64 = _process_block(
                     in_global, row_idx, col_idx, gs_val, dtype=dtype, k=k, fuse_silu=fuse_silu
                 )
                 # Source order: SF byte store, then the output store (:351/:357).
-                st_global_u8(T.address_of(sf_out[sf_idx]), scale_fp8)
+                st_global_u8(K.address_of(sf_out[sf_idx[0]]), scale_fp8)
                 out_off = row_idx * (k // 2) + col_idx * 8
-                st_global_u64(T.address_of(out_global[out_off]), packed64)
-                sf_idx = sf_idx + stride
+                st_global_u64(K.address_of(out_global[out_off]), packed64)
+                K.assign(sf_idx[0], sf_idx[0] + stride)
 
             if enable_pdl:
-                T.evaluate(T.ptx.griddepcontrol.launch_dependents())
+                K.ptx.griddepcontrol.launch_dependents()
 
-        return nvfp4_quantize_linear
+        return nvfp4_quantize_linear.func
 
     grid_x, block_x, padded_m = _swizzled_launch(m, k, sf_layout)
     needs_col_loop = nsb > block_x
     rows_per_block = 1 if needs_col_loop else block_x // nsb
 
-    @T.prim_func
+    @K.kernel(warps=(block_x + 31) // 32, arch="sm_100a", min_blocks_per_sm=2, grid=grid_x)
     def nvfp4_quantize_swizzled(
-        in_ptr: T.handle,
-        out_ptr: T.handle,
-        sf_ptr: T.handle,
-        m_rows: T.int32,
-        padded_rows: T.int32,
-        gs_ptr: T.handle,
+        in_global: K.gptr[dtype],
+        out_global: K.gptr[K.u8],
+        sf_out: K.gptr[K.u8],
+        m_rows: K.i32,
+        padded_rows: K.i32,
+        gs: K.gptr[K.f32],
     ):
-        in_global = T.match_buffer(
-            in_ptr, shape=[m * k * (2 if fuse_silu else 1)], dtype=dtype, scope="global"
-        )
-        out_global = T.match_buffer(out_ptr, shape=[m * (k // 2)], dtype="uint8", scope="global")
-        sf_out = T.match_buffer(
-            sf_ptr,
-            shape=[_padded_m(m, sf_layout) * _padded_sf_cols(k)],
-            dtype="uint8",
-            scope="global",
-        )
-        gs = T.match_buffer(gs_ptr, shape=[1], dtype="float32", scope="global")
-        T.device_entry()
-        T.attr({"tirx.launch_bounds_min_blocks_per_sm": 2})
-        bx = T.cta_id([grid_x])
-        tx = T.thread_id([block_x])
+        bx = K.cta_id()
+        tx = K.thread_id()
 
         if enable_pdl:
-            T.evaluate(T.ptx.griddepcontrol.wait())
+            K.ptx.griddepcontrol.wait()
 
         gs_val = ld_global_f32(gs, 0)
 
-        if needs_col_loop:
+        def col_body():
             # Large K (K/16 > 512): one row per block iteration with a column
             # loop (nvfp4_quantize.py:523-576).
-            row_idx: T.int32 = bx
-            while row_idx < padded_rows:
-                if row_idx >= m_rows:
-                    # Padding row: zero-fill by ALL threads, stride block_x.
-                    sc_pad: T.int32 = tx
-                    while sc_pad < pad_cols:
-                        st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sc_pad)]), T.uint8(0))
-                        sc_pad = sc_pad + block_x
-                else:
-                    sc: T.int32 = tx
-                    while sc < nsb:
-                        scale_fp8, packed64 = _process_block(
-                            in_global, row_idx, sc, gs_val, dtype=dtype, k=k, fuse_silu=fuse_silu
-                        )
-                        # Source order: SF byte store, then output (:557/:563).
-                        st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sc)]), scale_fp8)
-                        out_off = row_idx * (k // 2) + sc * 8
-                        st_global_u64(T.address_of(out_global[out_off]), packed64)
-                        sc = sc + block_x
-                    # Padding SF columns of a data row (:568-574).
-                    sc_tail: T.int32 = nsb + tx
-                    while sc_tail < pad_cols:
-                        st_global_u8(T.address_of(sf_out[sf_offset(row_idx, sc_tail)]), T.uint8(0))
-                        sc_tail = sc_tail + block_x
-                row_idx = row_idx + grid_x
-        else:
-            # Small K: multi-row processing (nvfp4_quantize.py:577-642).
-            row_in_block = T.truncdiv(tx, T.int32(nsb))
-            sf_idx_in_row = T.truncmod(tx, T.int32(nsb))
-
-            row_batch_idx: T.int32 = bx
-            row_idx2: T.int32 = row_batch_idx * rows_per_block + row_in_block
-            while row_batch_idx * rows_per_block < padded_rows:
-                if row_idx2 < padded_rows:
-                    if row_idx2 >= m_rows:
-                        # Padding row: zero ALL padded SF columns; stride is
-                        # threads_per_row == nsb (:597-603).
-                        local_sf: T.int32 = sf_idx_in_row
-                        while local_sf < pad_cols:
+            row_idx = K.alloc_local([1], "int32")
+            K.assign(row_idx[0], bx)
+            with K.While(row_idx[0] < padded_rows):
+                with K.If(row_idx[0] >= m_rows):
+                    with K.Then():
+                        # Padding row: zero-fill by ALL threads, stride block_x.
+                        sc_pad = K.alloc_local([1], "int32")
+                        K.assign(sc_pad[0], tx)
+                        with K.While(sc_pad[0] < pad_cols):
                             st_global_u8(
-                                T.address_of(sf_out[sf_offset(row_idx2, local_sf)]), T.uint8(0)
+                                K.address_of(sf_out[sf_offset(row_idx[0], sc_pad[0])]), K.uint8(0)
                             )
-                            local_sf = local_sf + nsb
-                    else:
-                        if sf_idx_in_row < nsb:
+                            K.assign(sc_pad[0], sc_pad[0] + block_x)
+                    with K.Else():
+                        sc = K.alloc_local([1], "int32")
+                        K.assign(sc[0], tx)
+                        with K.While(sc[0] < nsb):
                             scale_fp8, packed64 = _process_block(
                                 in_global,
-                                row_idx2,
-                                sf_idx_in_row,
+                                row_idx[0],
+                                sc[0],
                                 gs_val,
                                 dtype=dtype,
                                 k=k,
                                 fuse_silu=fuse_silu,
                             )
-                            # Source order: SF byte store, then output (:619/:625).
+                            # Source order: SF byte store, then output (:557/:563).
                             st_global_u8(
-                                T.address_of(sf_out[sf_offset(row_idx2, sf_idx_in_row)]), scale_fp8
+                                K.address_of(sf_out[sf_offset(row_idx[0], sc[0])]), scale_fp8
                             )
-                            out_off = row_idx2 * (k // 2) + sf_idx_in_row * 8
-                            st_global_u64(T.address_of(out_global[out_off]), packed64)
-                        # Padding SF columns of a data row (:627-638).
-                        if pad_cols != nsb:
-                            pad_col: T.int32 = nsb + sf_idx_in_row
-                            while pad_col < pad_cols:
+                            out_off = row_idx[0] * (k // 2) + sc[0] * 8
+                            st_global_u64(K.address_of(out_global[out_off]), packed64)
+                            K.assign(sc[0], sc[0] + block_x)
+                        # Padding SF columns of a data row (:568-574).
+                        sc_tail = K.alloc_local([1], "int32")
+                        K.assign(sc_tail[0], nsb + tx)
+                        with K.While(sc_tail[0] < pad_cols):
+                            st_global_u8(
+                                K.address_of(sf_out[sf_offset(row_idx[0], sc_tail[0])]), K.uint8(0)
+                            )
+                            K.assign(sc_tail[0], sc_tail[0] + block_x)
+                K.assign(row_idx[0], row_idx[0] + grid_x)
+
+        def small_body():
+            # Small K: multi-row processing (nvfp4_quantize.py:577-642).
+            row_in_block = _materialize(K.truncdiv(tx, K.int32(nsb)))
+            sf_idx_in_row = _materialize(K.truncmod(tx, K.int32(nsb)))
+
+            row_batch_idx = K.alloc_local([1], "int32")
+            row_idx2 = K.alloc_local([1], "int32")
+            K.assign(row_batch_idx[0], bx)
+            K.assign(row_idx2[0], row_batch_idx[0] * rows_per_block + row_in_block)
+            with K.While(row_batch_idx[0] * rows_per_block < padded_rows):
+                with K.If(row_idx2[0] < padded_rows), K.Then():
+                    with K.If(row_idx2[0] >= m_rows):
+                        with K.Then():
+                            # Padding row: zero ALL padded SF columns; stride is
+                            # threads_per_row == nsb (:597-603).
+                            local_sf = K.alloc_local([1], "int32")
+                            K.assign(local_sf[0], sf_idx_in_row)
+                            with K.While(local_sf[0] < pad_cols):
                                 st_global_u8(
-                                    T.address_of(sf_out[sf_offset(row_idx2, pad_col)]), T.uint8(0)
+                                    K.address_of(sf_out[sf_offset(row_idx2[0], local_sf[0])]),
+                                    K.uint8(0),
                                 )
-                                pad_col = pad_col + nsb
-                row_batch_idx = row_batch_idx + grid_x
-                row_idx2 = row_batch_idx * rows_per_block + row_in_block
+                                K.assign(local_sf[0], local_sf[0] + nsb)
+                        with K.Else():
+                            with K.If(sf_idx_in_row < nsb), K.Then():
+                                scale_fp8, packed64 = _process_block(
+                                    in_global,
+                                    row_idx2[0],
+                                    sf_idx_in_row,
+                                    gs_val,
+                                    dtype=dtype,
+                                    k=k,
+                                    fuse_silu=fuse_silu,
+                                )
+                                # Source order: SF byte store, then output (:619/:625).
+                                st_global_u8(
+                                    K.address_of(sf_out[sf_offset(row_idx2[0], sf_idx_in_row)]),
+                                    scale_fp8,
+                                )
+                                out_off = row_idx2[0] * (k // 2) + sf_idx_in_row * 8
+                                st_global_u64(K.address_of(out_global[out_off]), packed64)
+                            # Padding SF columns of a data row (:627-638).
+                            if pad_cols != nsb:
+                                pad_col = K.alloc_local([1], "int32")
+                                K.assign(pad_col[0], nsb + sf_idx_in_row)
+                                with K.While(pad_col[0] < pad_cols):
+                                    st_global_u8(
+                                        K.address_of(sf_out[sf_offset(row_idx2[0], pad_col[0])]),
+                                        K.uint8(0),
+                                    )
+                                    K.assign(pad_col[0], pad_col[0] + nsb)
+                K.assign(row_batch_idx[0], row_batch_idx[0] + grid_x)
+                K.assign(row_idx2[0], row_batch_idx[0] * rows_per_block + row_in_block)
+
+        if block_x % 32:
+            with K.If(tx < block_x), K.Then():
+                col_body() if needs_col_loop else small_body()
+        elif needs_col_loop:
+            col_body()
+        else:
+            small_body()
 
         if enable_pdl:
-            T.evaluate(T.ptx.griddepcontrol.launch_dependents())
+            K.ptx.griddepcontrol.launch_dependents()
 
-    return nvfp4_quantize_swizzled
+    return nvfp4_quantize_swizzled.func
 
 
 def prepare_data(

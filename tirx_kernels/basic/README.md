@@ -45,6 +45,10 @@ broadcasts the NVSHMEM UID; every worker explicitly initializes NVSHMEM, loads
 the local module, and owns its Device API streams. No Disco session or remote
 runtime object is created. Mutable queues, semaphores, workspaces, and outputs
 are reset independently on every rank before each measured launch.
+The AllGather run keeps reset, preparation, and launch under each worker's
+compute-stream context. Its terminal check requires the exact remote-source
+semaphore map, complete queue-slot consumption, and a queue head that has
+reached the initial tail.
 
 Both registry entries are direct kernel ports. This PR contains no megakernel
 DSL, scheduling policy, execution region, or MoE change. AllGather+GEMM keeps

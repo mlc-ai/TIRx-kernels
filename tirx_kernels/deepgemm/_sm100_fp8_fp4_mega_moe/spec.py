@@ -1633,7 +1633,7 @@ def _launch_tirx_mega_moe(
     tensor_maps = invocation.tensor_maps
     _prepare_global_barrier(invocation.executable)
     invocation.executable.mod(
-        invocation.y,
+        invocation.y.view(-1),
         invocation.cumulative_local_expert_recv_stats,
         case.symm_buffer.buffer,
         *invocation.symm_buffer_offsets,

@@ -3,8 +3,6 @@
 
 """Direct TP1/TP4 port of the fused persistent dynamic-multimem GemmRS kernel."""
 
-from __future__ import annotations
-
 import os
 from dataclasses import dataclass
 from enum import Enum
@@ -14,10 +12,10 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+import tirx_kernels.kern as Kern
 import tvm
 from tvm.ir.type import PointerType, PrimType
-from tvm.script import tirx as Tx
-from tvm.tirx.lang.pipeline import Pipeline as DataPipeline
+from tvm.tirx.script.builder import ir as I
 
 from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
@@ -79,14 +77,7 @@ MMA_M, MMA_N, MMA_K = (256, 256, 16)
 EPI_TILE = 64
 SWIZZLE = 3
 SMEM_RESERVED_BYTES = 1024
-SMEM_SIZE = (
-    PIPELINE_DEPTH * NUM_CONSUMER * BLK_M * BLK_K * F16_BYTES
-    + PIPELINE_DEPTH * BLK_N * BLK_K * F16_BYTES
-    + NUM_CONSUMER * BLK_M * EPI_TILE * F16_BYTES
-    + SMEM_RESERVED_BYTES
-)
 SM100_SMEM_CAPACITY = 232448
-assert SMEM_SIZE <= SM100_SMEM_CAPACITY, "GemmRS shared-memory usage exceeds the SM100 limit"
 TMEM_LD_SIZE = 64
 N_COLS = 512
 CTA_GROUP = 2
@@ -141,8 +132,8 @@ class GemmRSConfig:
 def _mapa_u64_tx(ptr, rank):
     """`mapa.u64` into a declared register, returned as an ordinary value."""
 
-    mapped = Tx.alloc_local([1], "uint64")
-    Tx.evaluate(Tx.ptx.mapa.u64(mapped[0], ptr, Tx.uint32(rank)))
+    mapped = Kern.alloc_local([1], "uint64")
+    Kern.evaluate(Kern.ptx.mapa.u64(mapped[0], ptr, Kern.uint32(rank)))
     return mapped[0]
 
 
@@ -243,108 +234,31 @@ __forceinline__ __device__ void enqueue_remote(
         : "memory");
 }
 """
+class SchedulerPipeline:
+    """One CTA0 producer publishes each task to both cluster CTAs."""
 
-
-@Tx.prim_func(private=True)
-def while_ld_global_acquire(addr_h: Tx.handle("int32", "global")) -> Tx.int32:
-    addr = Tx.decl_buffer((1,), "int32", data=addr_h, scope="global")
-    value: Tx.int32
-    Tx.ptx.ld.acquire.sys.global_.b32(value, addr.ptr_to([0]))
-    while value < 0:
-        Tx.cuda.nano_sleep(40)
-        Tx.ptx.ld.acquire.sys.global_.b32(value, addr.ptr_to([0]))
-    return value
-
-
-_WHILE_LD_GLOBAL_ACQUIRE_GV = tvm.ir.GlobalVar("while_ld_global_acquire")
-
-
-@Tx.meta_class
-class Pipeline:
-    def __init__(
-        self,
-        shared_buf,
-        base_offset,
-        pipeline_depth: int,
-        pipeline_num: int,
-        p_single_cta: bool = False,
-        c_single_cta: bool = False,
-    ):
-        self.pipeline_depth = pipeline_depth
-        self.pipeline_num = pipeline_num
-        self.mbar_p2c = Tx.decl_buffer(
-            (pipeline_depth, pipeline_num), "uint64", shared_buf, elem_offset=base_offset
-        )
-        self.mbar_c2p = Tx.decl_buffer(
-            (pipeline_depth, pipeline_num),
-            "uint64",
-            shared_buf,
-            elem_offset=base_offset + pipeline_depth * pipeline_num,
-        )
-        self.idx = Tx.local_scalar("int32")
-        self.p2c_phase = Tx.local_scalar("int32")
-        self.c2p_phase = Tx.local_scalar("int32")
-        self.p_single_cta = p_single_cta
-        self.c_single_cta = c_single_cta
-
-    @Tx.inline
-    def init(self, p2c_thread_count: int = 1, c2p_thread_count: int = 1):
-        tid = Tx.thread_id([NUM_THREADS])
-        self.idx = 0
-        self.p2c_phase = 0
-        self.c2p_phase = 1
-        if tid == 0:
-            for cbx in Tx.thread_binding(M_CLUSTER, "clusterCtaIdx.x"):
-                for i in Tx.serial(0, self.pipeline_depth):
-                    for j in Tx.serial(0, self.pipeline_num):
-                        if not self.c_single_cta or cbx == 0:
-                            Tx.ptx.mbarrier.init.shared.b64(
-                                self.mbar_p2c.ptr_to([i, j]), Tx.uint32(p2c_thread_count)
-                            )
-                        if not self.p_single_cta or cbx == 0:
-                            Tx.ptx.mbarrier.init.shared.b64(
-                                self.mbar_c2p.ptr_to([i, j]), Tx.uint32(c2p_thread_count)
-                            )
-        Tx.ptx.fence.proxy.async_.shared__cta()
-
-    @Tx.inline
-    def advance(self):
-        self.idx = (self.idx + 1) % self.pipeline_depth
-        if self.idx == 0:
-            self.p2c_phase = self.p2c_phase ^ 1
-            self.c2p_phase = self.c2p_phase ^ 1
-
-    @Tx.inline
-    def producer_wait(self, pipeline_idx):
-        for cbx in Tx.thread_binding(M_CLUSTER, "clusterCtaIdx.x"):
-            if not self.p_single_cta or cbx == 0:
-                Tx.cuda.mbarrier_wait(
-                    self.mbar_c2p.ptr_to([self.idx, pipeline_idx]), self.c2p_phase
-                )
-
-    @Tx.inline
-    def consumer_wait(self, pipeline_idx):
-        for cbx in Tx.thread_binding(M_CLUSTER, "clusterCtaIdx.x"):
-            if not self.c_single_cta or cbx == 0:
-                Tx.cuda.mbarrier_wait(
-                    self.mbar_p2c.ptr_to([self.idx, pipeline_idx]), self.p2c_phase
-                )
+    def __init__(self, smem, cbx):
+        self.p2c = Kern.MBarrier(smem.pool, 1)
+        self.p2c.init(1)
+        self.c2p = Kern.MBarrier(smem.pool, 1, leader=(Kern.thread_id() == 0) & (cbx == 0))
+        self.c2p.init(C2P_THREAD_COUNT)
+        self.p2c_state = Kern.PipelineState(1, phase=0)
+        self.c2p_state = Kern.PipelineState(1, phase=1)
 
 
 def int_var(scope="local", dtype="int32", align=4):
-    buf = Tx.alloc_buffer([1], dtype, scope=scope, align=align)
+    buf = Kern.alloc_buffer([1], dtype, scope=scope, align=align)
     return buf
 
 
-@Tx.meta_class
 class MPMCQueue:
     def __init__(
         self,
         capacity: int,
-        task_types: Tx.Buffer,
-        task_idxs: Tx.Buffer,
-        head: Tx.Buffer,
-        tail: Tx.Buffer,
+        task_types: Kern.Buffer,
+        task_idxs: Kern.Buffer,
+        head: Kern.Buffer,
+        tail: Kern.Buffer,
         num_tot_tasks: int,
     ):
         if capacity & capacity - 1:
@@ -358,9 +272,8 @@ class MPMCQueue:
         self.masked_pos = int_var()
         self.num_tot_tasks = num_tot_tasks
 
-    @Tx.inline
     def enqueue(self, signal_rank: int, task_type: int, *task_idx: int):
-        Tx.cuda.func_call(
+        Kern.cuda.func_call(
             "enqueue_remote",
             self.task_types.ptr_to([0]),
             self.task_idxs.ptr_to([0, 0]),
@@ -374,100 +287,81 @@ class MPMCQueue:
 
 
 class GEMMMPMCQueue(MPMCQueue):
-    @Tx.inline
     def dequeue(
         self,
-        fetched_task_type: Tx.Buffer,
-        fetched_task_idx0: Tx.Buffer,
-        fetched_task_idx1: Tx.Buffer,
-        rs_rem: Tx.Buffer,
-        cbx,
-        bx,
-        rank,
+        fetched_task_type: Kern.Buffer,
+        fetched_task_idx0: Kern.Buffer,
+        fetched_task_idx1: Kern.Buffer,
     ):
-        Tx.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Tx.int32(1))
-        if self.head_r[0] < self.num_tot_tasks:
-            self.masked_pos[0] = self.head_r[0] & self.mask
-            fetched_task_type[0] = tvm.ir.Call(
-                _WHILE_LD_GLOBAL_ACQUIRE_GV,
-                [self.task_types.ptr_to([self.masked_pos[0]])],
-                ret_ty="int32",
-            )
-            Tx.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), Tx.int32(-1))
-            Tx.ptx.ld.global_.s32(
-                fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
-            )
-            Tx.ptx.ld.global_.s32(
-                fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
-            )
-        else:
-            fetched_task_type[0] = -1
+        Kern.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Kern.int32(1))
+        with Kern.If(self.head_r[0] < self.num_tot_tasks):
+            with Kern.Then():
+                Kern.assign(self.masked_pos[0], self.head_r[0] & self.mask)
+                Kern.ptx.ld.acquire.sys.global_.b32(
+                    fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+                )
+                with Kern.While(fetched_task_type[0] < 0):
+                    Kern.cuda.nano_sleep(40)
+                    Kern.ptx.ld.acquire.sys.global_.b32(
+                        fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
+                    )
+                Kern.ptx.st.global_.s32(
+                    self.task_types.ptr_to([self.masked_pos[0]]), Kern.int32(-1)
+                )
+                Kern.ptx.ld.global_.s32(
+                    fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
+                )
+                Kern.ptx.ld.global_.s32(
+                    fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
+                )
+            with Kern.Else():
+                Kern.assign(fetched_task_type[0], -1)
 
 
 class RSMPMCQueue(MPMCQueue):
-    @Tx.inline
     def dequeue(
         self,
-        fetched_task_type: Tx.Buffer,
-        fetched_task_idx0: Tx.Buffer,
-        fetched_task_idx1: Tx.Buffer,
-        rs_rem: Tx.Buffer,
-        cbx,
-        bx,
-        rank,
+        fetched_task_type: Kern.Buffer,
+        fetched_task_idx0: Kern.Buffer,
+        fetched_task_idx1: Kern.Buffer,
+        rs_rem: Kern.Buffer,
     ):
-        if rs_rem[0] >= 0:
-            self.head_r[0] = rs_rem[0]
-            rs_rem[0] = -1
-        else:
-            Tx.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Tx.int32(1))
-        if self.head_r[0] < self.num_tot_tasks:
-            self.masked_pos[0] = self.head_r[0] & self.mask
-            Tx.ptx.ld.global_.acquire.sys.b32(
-                fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
-            )
-            if fetched_task_type[0] < 0:
-                rs_rem[0] = self.head_r[0]
-            else:
-                Tx.ptx.st.global_.s32(self.task_types.ptr_to([self.masked_pos[0]]), Tx.int32(-1))
-                Tx.ptx.ld.global_.s32(
-                    fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
+        with Kern.If(rs_rem[0] >= 0):
+            with Kern.Then():
+                Kern.assign(self.head_r[0], rs_rem[0])
+                Kern.assign(rs_rem[0], -1)
+            with Kern.Else():
+                Kern.ptx.atom.global_.add.s32(self.head_r[0], self.head.ptr_to([0]), Kern.int32(1))
+        with Kern.If(self.head_r[0] < self.num_tot_tasks):
+            with Kern.Then():
+                Kern.assign(self.masked_pos[0], self.head_r[0] & self.mask)
+                Kern.ptx.ld.global_.acquire.sys.b32(
+                    fetched_task_type[0], self.task_types.ptr_to([self.masked_pos[0]])
                 )
-                Tx.ptx.ld.global_.s32(
-                    fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
-                )
-        else:
-            fetched_task_type[0] = -1
+                with Kern.If(fetched_task_type[0] < 0):
+                    with Kern.Then():
+                        Kern.assign(rs_rem[0], self.head_r[0])
+                    with Kern.Else():
+                        Kern.ptx.st.global_.s32(
+                            self.task_types.ptr_to([self.masked_pos[0]]), Kern.int32(-1)
+                        )
+                        Kern.ptx.ld.global_.s32(
+                            fetched_task_idx0[0], self.task_idxs.ptr_to([self.masked_pos[0], 0])
+                        )
+                        Kern.ptx.ld.global_.s32(
+                            fetched_task_idx1[0], self.task_idxs.ptr_to([self.masked_pos[0], 1])
+                        )
+            with Kern.Else():
+                Kern.assign(fetched_task_type[0], -1)
 
 
-@Tx.inline
-def consumer_fetch(
-    sch_pipe, packed_value, rs_rem, fetched_task_type, fetched_task_idx0, fetched_task_idx1
-):
-    sch_pipe.consumer_wait(0)
-    Tx.ptx.ld.shared__cluster.v4.b32(
-        rs_rem[0],
-        fetched_task_type[0],
-        fetched_task_idx0[0],
-        fetched_task_idx1[0],
-        packed_value.ptr_to([0]),
-    )
-    mapped = Tx.alloc_local([1], "uint64")
-    Tx.ptx.mapa.shared__cluster.u64(
-        mapped[0], sch_pipe.mbar_c2p.ptr_to([sch_pipe.idx, 0]), Tx.uint32(0)
-    )
-    Tx.ptx.mbarrier.arrive.b64(mapped[0], Tx.uint32(1), pred=Tx.bool(True))
-    sch_pipe.p2c_phase = sch_pipe.p2c_phase ^ 1
-
-
-@Tx.meta_class
 class MixedDynamicTileScheduler:
     def __init__(
         self,
         gemm_queue: GEMMMPMCQueue,
         rs_queue: RSMPMCQueue,
-        packed_value: Tx.Buffer,
-        sch_pipe: Pipeline,
+        packed_value: Kern.Buffer,
+        sch_pipe: SchedulerPipeline,
     ):
         self.gemm_queue = gemm_queue
         self.rs_queue = rs_queue
@@ -478,224 +372,253 @@ class MixedDynamicTileScheduler:
         self.rs_rem = int_var()
         self.packed_value = packed_value
 
-    @Tx.inline
-    def _fetch_from_queue(self, cbx, bx, rank, warp_id_in_cta, lane_id):
-        if (warp_id_in_cta == 11) & (lane_id == 0):
-            if cbx == 0:
-                self.sch_pipe.producer_wait(0)
-                self.rs_queue.dequeue(
-                    self.fetched_task_type,
-                    self.fetched_task_idx0,
-                    self.fetched_task_idx1,
-                    self.rs_rem,
-                    cbx,
-                    bx,
-                    rank,
-                )
-                if self.fetched_task_type[0] < 0:
-                    self.gemm_queue.dequeue(
-                        self.fetched_task_type,
-                        self.fetched_task_idx0,
-                        self.fetched_task_idx1,
-                        self.rs_rem,
-                        cbx,
-                        bx,
-                        rank,
-                    )
-                Tx.ptx.st.shared__cluster.v4.b32(
-                    self.packed_value.ptr_to([0]),
-                    self.rs_rem[0],
-                    self.fetched_task_type[0],
-                    self.fetched_task_idx0[0],
-                    self.fetched_task_idx1[0],
-                )
-                Tx.cuda.thread_fence()
-                mapped0 = Tx.alloc_local([1], "uint64")
-                Tx.ptx.mapa.shared__cluster.u64(
-                    mapped0[0], self.sch_pipe.mbar_p2c.ptr_to([self.sch_pipe.idx, 0]), Tx.uint32(0)
-                )
-                Tx.ptx.mbarrier.arrive.b64(mapped0[0], Tx.uint32(1), pred=Tx.bool(True))
-                mapped1 = Tx.alloc_local([1], "uint64")
-                Tx.ptx.mapa.shared__cluster.u64(
-                    mapped1[0], self.sch_pipe.mbar_p2c.ptr_to([self.sch_pipe.idx, 0]), Tx.uint32(1)
-                )
-                Tx.ptx.mbarrier.arrive.b64(mapped1[0], Tx.uint32(1), pred=Tx.bool(True))
-                self.sch_pipe.c2p_phase = self.sch_pipe.c2p_phase ^ 1
-        consumer_fetch(
-            self.sch_pipe,
-            self.packed_value,
-            self.rs_rem,
-            self.fetched_task_type,
-            self.fetched_task_idx0,
-            self.fetched_task_idx1,
+    def publish(self, cbx, lane_id):
+        with Kern.If(lane_id == 0):
+            with Kern.Then():
+                with Kern.If(cbx == 0):
+                    with Kern.Then():
+                        self.sch_pipe.c2p.wait(0, self.sch_pipe.c2p_state.phase)
+                        self.rs_queue.dequeue(
+                            self.fetched_task_type,
+                            self.fetched_task_idx0,
+                            self.fetched_task_idx1,
+                            self.rs_rem,
+                        )
+                        with Kern.If(self.fetched_task_type[0] < 0):
+                            with Kern.Then():
+                                self.gemm_queue.dequeue(
+                                    self.fetched_task_type,
+                                    self.fetched_task_idx0,
+                                    self.fetched_task_idx1,
+                                )
+                        Kern.ptx.st.shared__cluster.v4.b32(
+                            self.packed_value.ptr_to([0]),
+                            self.rs_rem[0],
+                            self.fetched_task_type[0],
+                            self.fetched_task_idx0[0],
+                            self.fetched_task_idx1[0],
+                        )
+                        Kern.cuda.thread_fence()
+                        self.sch_pipe.p2c.arrive(0, remote=0)
+                        self.sch_pipe.p2c.arrive(0, remote=1)
+                        self.sch_pipe.c2p_state.advance()
+
+    def receive(self):
+        self.sch_pipe.p2c.wait(0, self.sch_pipe.p2c_state.phase)
+        Kern.ptx.ld.shared__cluster.v4.b32(
+            self.rs_rem[0],
+            self.fetched_task_type[0],
+            self.fetched_task_idx0[0],
+            self.fetched_task_idx1[0],
+            self.packed_value.ptr_to([0]),
         )
+        self.sch_pipe.c2p.arrive(0, remote=0)
+        self.sch_pipe.p2c_state.advance()
 
-    @Tx.inline
-    def init(self, cbx, bx, rank, warp_id_in_cta, lane_id):
-        self.rs_rem[0] = -1
-        self._fetch_from_queue(cbx, bx, rank, warp_id_in_cta, lane_id)
-
-    @Tx.inline
-    def next_tile(self, cbx, bx, rank, warp_id_in_cta, lane_id):
-        self._fetch_from_queue(cbx, bx, rank, warp_id_in_cta, lane_id)
+    def init(self):
+        Kern.assign(self.rs_rem[0], -1)
 
     def valid(self):
         return tvm.tirx.any(self.fetched_task_type[0] >= 0, self.rs_rem[0] >= 0)
 
 
-@Tx.meta_class
 class Semaphore:
     def __init__(self, cnt, buffer):
         self.cnt = cnt
         self.sem = buffer
-        self.state = Tx.alloc_buffer([1], "uint64", scope="local", align=8)
+        self.state = Kern.alloc_buffer([1], "uint64", scope="local", align=8)
 
-    @Tx.inline
     def semaphore_notify(self, signal_rank, tid, m_idx, n_idx, rs_queue):
-        if tid % 128 == 0:
-            Tx.ptx.fence.sc.sys()
-            self.state[0] = (
-                Tx.cuda.func_call(
-                    "semaphore_notify_remote",
-                    signal_rank,
-                    self.sem.ptr_to([m_idx, n_idx]),
-                    Tx.uint64(1),
-                    source_code=semaphore_notify_remote,
-                    return_type="uint64",
+        with Kern.If(tid % 128 == 0):
+            with Kern.Then():
+                Kern.ptx.fence.sc.sys()
+                Kern.assign(
+                    self.state[0],
+                    (
+                        Kern.cuda.func_call(
+                            "semaphore_notify_remote",
+                            signal_rank,
+                            self.sem.ptr_to([m_idx, n_idx]),
+                            Kern.uint64(1),
+                            source_code=semaphore_notify_remote,
+                            return_type="uint64",
+                        )
+                        + 1
+                    ),
                 )
-                + 1
+                with Kern.If(self.state[0] == self.cnt):
+                    with Kern.Then():
+                        rs_queue.enqueue(signal_rank, TaskType.RS.value, m_idx, n_idx)
+
+
+def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
+    """Trace one direct K specialization with its frozen host ABI."""
+
+    M = config.M
+    N = config.N
+    K_LOCAL = config.k_local
+    WORLD_SIZE = config.world_size
+    LOCAL_M = config.local_m
+    PIPE_CYCLE = config.pipe_cycle
+    PIPE_REMAIN_NUM = config.pipe_remainder
+    GEMM_M_CLUSTERS = config.gemm_m_clusters
+    GEMM_N_CLUSTERS = config.gemm_n_clusters
+    RS_M_CLUSTERS = config.rs_m_clusters
+    RS_N_CLUSTERS = config.rs_n_clusters
+
+    def host_prelude(params):
+        A_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
+        B_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
+        D_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
+        Kern.evaluate(
+            Kern.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                A_tensor_map,
+                a_type,
+                2,
+                params["A"].data,
+                K_LOCAL,
+                M,
+                K_LOCAL * F16_BYTES,
+                BLK_K,
+                BLK_M,
+                1,
+                1,
+                0,
+                SWIZZLE,
+                0,
+                0,
             )
-            if self.state[0] == self.cnt:
-                rs_queue.enqueue(signal_rank, TaskType.RS.value, m_idx, n_idx)
+        )
+        Kern.evaluate(
+            Kern.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                B_tensor_map,
+                b_type,
+                2,
+                params["B"].data,
+                K_LOCAL,
+                N,
+                K_LOCAL * F16_BYTES,
+                BLK_K,
+                BLK_N,
+                1,
+                1,
+                0,
+                SWIZZLE,
+                0,
+                0,
+            )
+        )
+        Kern.evaluate(
+            Kern.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                D_tensor_map,
+                d_type,
+                2,
+                params["gemm_out"].data,
+                N,
+                M,
+                N * F16_BYTES,
+                EPI_TILE,
+                BLK_M,
+                1,
+                1,
+                0,
+                SWIZZLE,
+                0,
+                0,
+            )
+        )
+        return A_tensor_map, B_tensor_map, D_tensor_map
 
+    @Kern.kernel(warps=NUM_THREADS // 32, arch="sm_100a", grid=SM_NUMBER, host_prelude=host_prelude)
+    def test_mma_ss_tma_2sm_persistent(
+        A: Kern.gptr[Kern.f16, (M, K_LOCAL)],
+        B: Kern.gptr[Kern.f16, (N, K_LOCAL)],
+        gemm_out: Kern.gptr[Kern.f16, (M, N)],
+        semaphore: Kern.gptr[Kern.u64, (LOCAL_M // TILE_M, N // TILE_N)],
+        out: Kern.gptr[Kern.f16, (LOCAL_M, N)],
+        gemm_task_types: Kern.gptr[Kern.i32, (CAPACITY,)],
+        gemm_task_idxs: Kern.gptr[Kern.i32, (CAPACITY, 2)],
+        gemm_head: Kern.gptr[Kern.i32, (1,)],
+        gemm_tail: Kern.gptr[Kern.i32, (1,)],
+        rs_task_types: Kern.gptr[Kern.i32, (CAPACITY,)],
+        rs_task_idxs: Kern.gptr[Kern.i32, (CAPACITY, 2)],
+        rs_head: Kern.gptr[Kern.i32, (1,)],
+        rs_tail: Kern.gptr[Kern.i32, (1,)],
+        exit_barrier: Kern.gptr[Kern.u32, (2,)],
+        *,
+        host,
+    ):
+        A_tensor_map, B_tensor_map, D_tensor_map = host
+        gemm_out = gemm_out.view(M, N)
+        semaphore = semaphore.view(LOCAL_M // TILE_M, N // TILE_N)
+        out = out.view(LOCAL_M, N)
+        gemm_task_types = gemm_task_types.view(CAPACITY)
+        gemm_task_idxs = gemm_task_idxs.view(CAPACITY, 2)
+        gemm_head = gemm_head.view(1)
+        gemm_tail = gemm_tail.view(1)
+        rs_task_types = rs_task_types.view(CAPACITY)
+        rs_task_idxs = rs_task_idxs.view(CAPACITY, 2)
+        rs_head = rs_head.view(1)
+        rs_tail = rs_tail.view(1)
+        exit_barrier = exit_barrier.view(2)
 
-@Tx.prim_func
-def test_mma_ss_tma_2sm_persistent(
-    A: Tx.Buffer((M, K), a_type),
-    B: Tx.Buffer((N, K), b_type),
-    gemm_out: Tx.Buffer((M, N), d_type),
-    semaphore: Tx.Buffer((LOCAL_M // TILE_M, N // TILE_N), "uint64"),
-    out: Tx.Buffer((LOCAL_M, N), d_type),
-    gemm_task_types: Tx.Buffer((CAPACITY,), "int32"),
-    gemm_task_idxs: Tx.Buffer((CAPACITY, 2), "int32"),
-    gemm_head: Tx.Buffer((1,), "int32"),
-    gemm_tail: Tx.Buffer((1,), "int32"),
-    rs_task_types: Tx.Buffer((CAPACITY,), "int32"),
-    rs_task_idxs: Tx.Buffer((CAPACITY, 2), "int32"),
-    rs_head: Tx.Buffer((1,), "int32"),
-    rs_tail: Tx.Buffer((1,), "int32"),
-    exit_barrier: Tx.Buffer((2,), "uint32"),
-):
-    A_tensor_map: Tx.let[Tx.handle("tensormap")] = Tx.tvm_stack_alloca("tensormap", 1)
-    B_tensor_map: Tx.let[Tx.handle("tensormap")] = Tx.tvm_stack_alloca("tensormap", 1)
-    D_tensor_map: Tx.let[Tx.handle("tensormap")] = Tx.tvm_stack_alloca("tensormap", 1)
-    Tx.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        A_tensor_map,
-        a_type,
-        2,
-        A.data,
-        K,
-        M,
-        K * F16_BYTES,
-        BLK_K,
-        BLK_M,
-        1,
-        1,
-        0,
-        SWIZZLE,
-        0,
-        0,
-    )
-    Tx.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        B_tensor_map,
-        b_type,
-        2,
-        B.data,
-        K,
-        N,
-        K * F16_BYTES,
-        BLK_K,
-        BLK_N,
-        1,
-        1,
-        0,
-        SWIZZLE,
-        0,
-        0,
-    )
-    Tx.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        D_tensor_map,
-        d_type,
-        2,
-        gemm_out.data,
-        N,
-        M,
-        N * F16_BYTES,
-        EPI_TILE,
-        BLK_M,
-        1,
-        1,
-        0,
-        SWIZZLE,
-        0,
-        0,
-    )
-    Tx.device_entry()
-    cbx, cby = Tx.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
-    bx = Tx.cta_id([SM_NUMBER])
-    wg_id = Tx.warpgroup_id([WG_NUMBER])
-    warp_id = Tx.warp_id_in_wg([WARP_NUMBER])
-    warp_id_in_cta = Tx.warp_id([WG_NUMBER * WARP_NUMBER])
-    lane_id = Tx.lane_id([32])
-    tid = Tx.thread_id([NUM_THREADS])
-    rank = Tx.nvshmem.my_pe()
-    pool = Tx.SMEMPool()
-    tmem_addr = pool.alloc([1], "uint32", align=4)
-    tmem_pool = Tx.TMEMPool(pool, total_cols=N_COLS, cta_group=CTA_GROUP, tmem_addr=tmem_addr)
-    smem_pipe = DataPipeline(
-        pool,
-        PIPELINE_DEPTH,
-        full="tma",
-        empty="tcgen05",
-        init_empty=NUM_CONSUMER,
-        empty_phase_offset=1,
-    )
-    tmem_pipe = DataPipeline(
-        pool,
-        NUM_CONSUMER,
-        full="tcgen05",
-        empty="mbar",
-        init_empty=128 * NUM_CONSUMER,
-        empty_phase_offset=1,
-    )
-    packed_buf = pool.alloc((1,), "uint64", align=16)
-    sch_pipe_base = pool.offset // 8
-    pool.move_base_to(pool.offset + 2 * 1 * 1 * 8)
-    pool.move_base_to(SMEM_RESERVED_BYTES)
-    A_smem = pool.alloc_tcgen05_mma_AB((PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type)
-    B_smem = pool.alloc_tcgen05_mma_AB((PIPELINE_DEPTH, BLK_N, BLK_K), b_type)
-    D_smem = pool.alloc_tcgen05_mma_AB((NUM_CONSUMER, BLK_M, EPI_TILE), d_type)
-    pool.commit()
-    reg = Tx.alloc_buffer((TMEM_LD_SIZE,), "float32", scope="local")
-    reg_fp16 = Tx.alloc_buffer((TMEM_LD_SIZE // 2,), "uint32", scope="local", align=16)
-    copy_word0: Tx.uint32
-    copy_word1: Tx.uint32
-    copy_word2: Tx.uint32
-    copy_word3: Tx.uint32
-    descA: Tx.uint64
-    descB: Tx.uint64
-    descI: Tx.uint32
-    phase: Tx.int32
-    phase_tmem: Tx.int32
-    stage: Tx.int32
-    tmem_addr_local: Tx.uint32
-    sem = Tx.meta_var(Semaphore(cnt=2 * WORLD_SIZE, buffer=semaphore))
-    offset: Tx.int32
-    gemm_queue = Tx.meta_var(
-        GEMMMPMCQueue(
+        cbx_expr, _ = I.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
+        cbx = Kern.Bind(cbx_expr)
+        bx = Kern.cta_id()
+        warp_id_in_cta = Kern.warp_id()
+        wg_id = warp_id_in_cta // WARP_NUMBER
+        warp_id = warp_id_in_cta % WARP_NUMBER
+        tid = Kern.thread_id()
+        lane_id = Kern.lane_id()
+        rank = Kern.alloc_local((1,), Kern.i32)
+        Kern.assign(rank[0], Kern.nvshmem.my_pe())
+
+        smem = Kern.smem_pool()
+        pool = smem.pool
+        tmem_addr = smem.alloc((1,), Kern.u32, align=4)
+        smem_pipe = Kern.Pipeline(
+            smem,
+            PIPELINE_DEPTH,
+            full="tma",
+            empty="tcgen05",
+            init_empty=NUM_CONSUMER,
+            empty_phase_offset=1,
+        )
+        tmem_pipe = Kern.Pipeline(
+            smem,
+            NUM_CONSUMER,
+            full="tcgen05",
+            empty="mbar",
+            init_empty=128 * NUM_CONSUMER,
+            empty_phase_offset=1,
+        )
+        packed_buf = smem.alloc((4,), Kern.u32, align=16)
+        sch_pipe = SchedulerPipeline(smem, cbx)
+        pool.move_base_to(SMEM_RESERVED_BYTES)
+        A_smem = smem.alloc(
+            (PIPELINE_DEPTH, NUM_CONSUMER, BLK_M, BLK_K), a_type, swizzle=Kern.SW128B
+        )
+        B_smem = smem.alloc((PIPELINE_DEPTH, BLK_N, BLK_K), b_type, swizzle=Kern.SW128B).buf
+        D_smem = smem.alloc((NUM_CONSUMER, BLK_M, EPI_TILE), d_type, swizzle=Kern.SW128B).buf
+        if smem.bytes > SM100_SMEM_CAPACITY:
+            raise ValueError(
+                f"GemmRS shared-memory usage {smem.bytes} exceeds {SM100_SMEM_CAPACITY} bytes"
+            )
+
+        reg = Kern.alloc_local((TMEM_LD_SIZE,), Kern.f32)
+        reg_fp16 = Kern.alloc_local((TMEM_LD_SIZE // 2,), Kern.u32, align=16)
+        copy_words = Kern.alloc_local((4,), Kern.u32)
+        descA = Kern.alloc_local((1,), Kern.u64)
+        descB = Kern.alloc_local((1,), Kern.u64)
+        descI = Kern.alloc_local((1,), Kern.u32)
+        stage = Kern.alloc_local((1,), Kern.i32)
+        tmem_addr_local = Kern.alloc_local((1,), Kern.u32)
+        offset = Kern.alloc_local((1,), Kern.i32)
+        sem = Semaphore(cnt=2 * WORLD_SIZE, buffer=semaphore)
+        gemm_queue = GEMMMPMCQueue(
             CAPACITY,
             gemm_task_types,
             gemm_task_idxs,
@@ -703,69 +626,94 @@ def test_mma_ss_tma_2sm_persistent(
             gemm_tail,
             GEMM_M_CLUSTERS * GEMM_N_CLUSTERS,
         )
-    )
-    rs_queue = Tx.meta_var(
-        RSMPMCQueue(
+        rs_queue = RSMPMCQueue(
             CAPACITY, rs_task_types, rs_task_idxs, rs_head, rs_tail, RS_M_CLUSTERS * RS_N_CLUSTERS
         )
-    )
-    packed_ptr: Tx.let[Tx.Var(name="packed_ptr", ty=PointerType(PrimType("uint64")))] = (
-        Tx.reinterpret(PointerType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0))
-    )
-    packed_value = Tx.decl_buffer([1], "uint64", data=packed_ptr, scope="shared")
-    sch_pipe = Pipeline(
-        pool.ptr,
-        sch_pipe_base,
-        pipeline_depth=1,
-        pipeline_num=1,
-        p_single_cta=True,
-        c_single_cta=False,
-    )
-    tile_scheduler = MixedDynamicTileScheduler(gemm_queue, rs_queue, packed_value, sch_pipe)
-    ptr: Tx.let[Tx.Var(name="ptr", ty=PointerType(PrimType("uint64")))] = Tx.reinterpret(
-        PointerType(PrimType("uint64")), _mapa_u64_tx(smem_pipe.full.ptr_to([0]), 0)
-    )
-    tma_finished = Tx.decl_buffer([PIPELINE_DEPTH], "uint64", data=ptr, scope="shared")
-    phase = 0
-    phase_tmem = 0
-    sch_pipe.init(c2p_thread_count=C2P_THREAD_COUNT, p2c_thread_count=1)
-    Tx.cuda.tcgen05.encode_instr_descriptor(
-        Tx.address_of(descI),
-        d_dtype="float32",
-        a_dtype=a_type,
-        b_dtype=b_type,
-        M=MMA_M,
-        N=MMA_N,
-        K=MMA_K,
-        trans_a=False,
-        trans_b=False,
-        n_cta_groups=CTA_GROUP,
-    )
-    tmem = tmem_pool.alloc((128, N_COLS), "float32")
-    tmem_pool.commit()
-    Tx.ptx.barrier.cluster.arrive()
-    Tx.ptx.barrier.cluster.wait()
-    Tx.cuda.cta_sync()
-    Tx.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0]))
-    Tx.cuda.trap_when_assert_failed(tmem_addr_local == 0)
-    Tx.ptx.fence.proxy.async_.shared__cta()
-    Tx.ptx.fence.mbarrier_init.release.cluster()
-    tile_scheduler.init(cbx, bx, rank, warp_id_in_cta, lane_id)
-    while tile_scheduler.valid():
-        if tile_scheduler.fetched_task_type[0] == TaskType.RS.value:
-            m_idx = Tx.meta_var(tile_scheduler.fetched_task_idx0[0])
-            n_idx = Tx.meta_var(tile_scheduler.fetched_task_idx1[0])
-            offset = tid
-            while True:
-                if offset < TILE_M // 2 * TILE_N // 8:
-                    m_start = Tx.meta_var(offset // (TILE_N // 8))
-                    n_start = Tx.meta_var(offset % (TILE_N // 8) * 8)
+
+        packed_ptr = Kern.reinterpret(
+            PointerType(PrimType("uint32")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
+        )
+        packed_value = Kern.decl_buffer((4,), "uint32", data=packed_ptr, scope="shared")
+        tile_scheduler = MixedDynamicTileScheduler(gemm_queue, rs_queue, packed_value, sch_pipe)
+        smem_full_cta0 = smem_pipe.full.remote_view(0)
+        smem_cycle = Kern.PipelineState(1, phase=0)
+        tmem_cycle = Kern.PipelineState(1, phase=0)
+
+        specialization = Kern.specialize(chain_dispatch=chain_dispatch)
+        consumer = specialization.role("consumer", range(8), regs=None)
+        mma_role = specialization.role("mma", [8, 9], regs=None, when=cbx == 0)
+        specialization.role("idle", [10], regs=None)
+        tma_scheduler_role = specialization.role("tma_scheduler", [11], regs=None)
+        producer_regs = specialization.register_scope(
+            "producer_regs", warps=range(8, 12), regs=56, direction="dec"
+        )
+        consumer_regs = specialization.register_scope(
+            "consumer_regs", warps=range(8), regs=224, direction="inc"
+        )
+
+        def fetch_next():
+            with tma_scheduler_role:
+                tile_scheduler.publish(cbx, lane_id)
+            tile_scheduler.receive()
+
+        Kern.cuda.tcgen05.encode_instr_descriptor(
+            Kern.address_of(descI[0]),
+            d_dtype="float32",
+            a_dtype=a_type,
+            b_dtype=b_type,
+            M=MMA_M,
+            N=MMA_N,
+            K=MMA_K,
+            trans_a=False,
+            trans_b=False,
+            n_cta_groups=CTA_GROUP,
+        )
+        with Kern.If((wg_id == 0) & (warp_id == 0)), Kern.Then():
+            Kern.ptx[f"tcgen05.alloc.cta_group::{CTA_GROUP}.sync.aligned.shared::cta.b32"](
+                Kern.address_of(tmem_addr[0]), Kern.uint32(N_COLS)
+            )
+            Kern.cuda.warp_sync()
+        Kern.ptx.barrier.cluster.arrive()
+        Kern.ptx.barrier.cluster.wait()
+        Kern.cuda.cta_sync()
+        Kern.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
+        Kern.cuda.trap_when_assert_failed(tmem_addr_local[0] == 0)
+        Kern.ptx.fence.proxy.async_.shared__cta()
+        Kern.ptx.fence.mbarrier_init.release.cluster()
+        tile_scheduler.init()
+        fetch_next()
+
+        def partitioned_loop(main_loop, epilogue1, epilogue2):
+            with Kern.serial(PIPE_CYCLE) as ko:
+                with Kern.unroll(PIPELINE_DEPTH) as ks:
+                    Kern.assign(stage[0], ko * PIPELINE_DEPTH + ks)
+                    main_loop(False, ks)
+                smem_cycle.advance()
+            if PIPE_REMAIN_NUM > 0:
+                with Kern.unroll(PIPE_REMAIN_NUM) as ks:
+                    Kern.assign(stage[0], PIPE_CYCLE * PIPELINE_DEPTH + ks)
+                    main_loop(True, ks)
+                epilogue1()
+                with Kern.unroll(PIPE_REMAIN_NUM, PIPELINE_DEPTH) as ks:
+                    epilogue2(ks)
+                smem_cycle.advance()
+            else:
+                epilogue1()
+
+        with Kern.While(tile_scheduler.valid()):
+            with Kern.If(tile_scheduler.fetched_task_type[0] == TaskType.RS.value), Kern.Then():
+                m_idx = Kern.Bind(tile_scheduler.fetched_task_idx0[0])
+                n_idx = Kern.Bind(tile_scheduler.fetched_task_idx1[0])
+                Kern.assign(offset[0], tid)
+                with Kern.While(offset[0] < TILE_M // 2 * TILE_N // 8):
+                    m_start = Kern.Bind(offset[0] // (TILE_N // 8))
+                    n_start = Kern.Bind(offset[0] % (TILE_N // 8) * 8)
                     if WORLD_SIZE == 1:
-                        Tx.ptx.ld.global_.v4.b32(
-                            copy_word0,
-                            copy_word1,
-                            copy_word2,
-                            copy_word3,
+                        Kern.ptx.ld.global_.v4.b32(
+                            copy_words[0],
+                            copy_words[1],
+                            copy_words[2],
+                            copy_words[3],
                             gemm_out.ptr_to(
                                 [
                                     TILE_M * m_idx + TILE_M // 2 * cbx + m_start,
@@ -773,24 +721,27 @@ def test_mma_ss_tma_2sm_persistent(
                                 ]
                             ),
                         )
-                        Tx.ptx.st.global_.v4.b32(
+                        Kern.ptx.st.global_.v4.b32(
                             out.ptr_to(
                                 [
                                     TILE_M * m_idx + TILE_M // 2 * cbx + m_start,
                                     TILE_N * n_idx + n_start,
                                 ]
                             ),
-                            copy_word0,
-                            copy_word1,
-                            copy_word2,
-                            copy_word3,
+                            copy_words[0],
+                            copy_words[1],
+                            copy_words[2],
+                            copy_words[3],
                         )
                     else:
-                        Tx.cuda.func_call(
+                        Kern.cuda.func_call(
                             "ld_reduce_8_fp16",
                             gemm_out.ptr_to(
                                 [
-                                    rank * LOCAL_M + TILE_M * m_idx + TILE_M // 2 * cbx + m_start,
+                                    rank[0] * LOCAL_M
+                                    + TILE_M * m_idx
+                                    + TILE_M // 2 * cbx
+                                    + m_start,
                                     TILE_N * n_idx + n_start,
                                 ]
                             ),
@@ -802,242 +753,215 @@ def test_mma_ss_tma_2sm_persistent(
                             ),
                             source_code=ld_reduce_8xfp16,
                         )
-                    offset += NUM_THREADS
-                else:
-                    break
-        elif tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value:
-            m_idx = Tx.meta_var(tile_scheduler.fetched_task_idx0[0])
-            n_idx = Tx.meta_var(tile_scheduler.fetched_task_idx1[0])
-            if (NUM_CONSUMER <= wg_id) & (wg_id < NUM_CONSUMER + 1):
-                Tx.ptx.setmaxnreg.dec.sync.aligned.u32(56)
-                if warp_id == 3:
-                    if Tx.filter(lane_id, Tx.cuda.elect_sync()):
-                        for ko in Tx.serial(PIPE_CYCLE):
-                            for ks in Tx.unroll(PIPELINE_DEPTH):
-                                stage = ko * PIPELINE_DEPTH + ks
-                                smem_pipe.empty.wait(ks, phase)
-                                Tx.ptx[_TMA_G2S_CG2](
+                    Kern.assign(offset[0], offset[0] + NUM_THREADS)
+
+            with Kern.If(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value), Kern.Then():
+                m_idx = Kern.Bind(tile_scheduler.fetched_task_idx0[0])
+                n_idx = Kern.Bind(tile_scheduler.fetched_task_idx1[0])
+
+                def emit_producer_roles():
+                    def tma_body():
+                        with Kern.If(Kern.cuda.elect_sync()), Kern.Then():
+
+                            def tma_load(_is_remain, ks):
+                                smem_pipe.empty.wait(ks, smem_cycle.phase)
+                                stage_k = Kern.Bind(stage[0] * BLK_K)
+                                Kern.ptx[_TMA_G2S_CG2](
                                     A_smem.ptr_to([ks, 0, 0, 0]),
-                                    Tx.address_of(A_tensor_map),
-                                    stage * BLK_K,
+                                    Kern.address_of(A_tensor_map),
+                                    stage_k,
                                     (m_idx * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M,
-                                    tma_finished.ptr_to([ks]),
+                                    smem_full_cta0.ptr_to([ks]),
                                 )
-                                Tx.ptx[_TMA_G2S_CG2](
+                                Kern.ptx[_TMA_G2S_CG2](
                                     A_smem.ptr_to([ks, 1, 0, 0]),
-                                    Tx.address_of(A_tensor_map),
-                                    stage * BLK_K,
+                                    Kern.address_of(A_tensor_map),
+                                    stage_k,
                                     (m_idx * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M,
-                                    tma_finished.ptr_to([ks]),
+                                    smem_full_cta0.ptr_to([ks]),
                                 )
-                                Tx.ptx[_TMA_G2S_CG2](
+                                Kern.ptx[_TMA_G2S_CG2](
                                     B_smem.ptr_to([ks, 0, 0]),
-                                    Tx.address_of(B_tensor_map),
-                                    stage * BLK_K,
+                                    Kern.address_of(B_tensor_map),
+                                    stage_k,
                                     (n_idx * CTA_GROUP + cbx) * BLK_N,
-                                    tma_finished.ptr_to([ks]),
+                                    smem_full_cta0.ptr_to([ks]),
                                 )
-                                if cbx == 0:
-                                    smem_pipe.full.arrive(
-                                        ks,
-                                        NUM_CONSUMER
-                                        * BLK_K
-                                        * (BLK_M * NUM_CONSUMER + BLK_N)
-                                        * F16_BYTES,
-                                    )
-                            phase = phase ^ 1
-                        if PIPE_REMAIN_NUM > 0:
-                            for ks in Tx.unroll(PIPE_REMAIN_NUM):
-                                stage = PIPE_CYCLE * PIPELINE_DEPTH + ks
-                                smem_pipe.empty.wait(ks, phase)
-                                Tx.ptx[_TMA_G2S_CG2](
-                                    A_smem.ptr_to([ks, 0, 0, 0]),
-                                    Tx.address_of(A_tensor_map),
-                                    stage * BLK_K,
-                                    (m_idx * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M,
-                                    tma_finished.ptr_to([ks]),
-                                )
-                                Tx.ptx[_TMA_G2S_CG2](
-                                    A_smem.ptr_to([ks, 1, 0, 0]),
-                                    Tx.address_of(A_tensor_map),
-                                    stage * BLK_K,
-                                    (m_idx * NUM_CONSUMER * CTA_GROUP + CTA_GROUP + cbx) * BLK_M,
-                                    tma_finished.ptr_to([ks]),
-                                )
-                                Tx.ptx[_TMA_G2S_CG2](
-                                    B_smem.ptr_to([ks, 0, 0]),
-                                    Tx.address_of(B_tensor_map),
-                                    stage * BLK_K,
-                                    (n_idx * CTA_GROUP + cbx) * BLK_N,
-                                    tma_finished.ptr_to([ks]),
-                                )
-                                if cbx == 0:
-                                    smem_pipe.full.arrive(
-                                        ks,
-                                        NUM_CONSUMER
-                                        * BLK_K
-                                        * (BLK_M * NUM_CONSUMER + BLK_N)
-                                        * F16_BYTES,
-                                    )
-                            for ks in Tx.unroll(PIPE_REMAIN_NUM, PIPELINE_DEPTH):
-                                smem_pipe.empty.wait(ks, phase)
-                                if cbx == 0:
-                                    smem_pipe.full.arrive(ks, remote=0)
-                            phase = phase ^ 1
-                elif (warp_id < 2) & (cbx == 0):
-                    if Tx.filter(lane_id, Tx.cuda.elect_sync()):
-                        tmem_pipe.empty.wait(warp_id, phase_tmem)
-                        Tx.ptx.tcgen05.fence__after_thread_sync()
-                        for ko in Tx.serial(PIPE_CYCLE):
-                            for ks in Tx.unroll(PIPELINE_DEPTH):
-                                stage = ko * PIPELINE_DEPTH + ks
-                                smem_pipe.full.wait(ks, phase)
-                                for ki in Tx.unroll(BLK_K // MMA_K):
-                                    Tx.cuda.tcgen05.encode_matrix_descriptor(
-                                        Tx.address_of(descA),
-                                        A_smem.ptr_to([ks, warp_id, 0, ki * MMA_K]),
+                                with Kern.If(cbx == 0):
+                                    with Kern.Then():
+                                        smem_pipe.full.arrive(
+                                            ks,
+                                            NUM_CONSUMER
+                                            * BLK_K
+                                            * (BLK_M * NUM_CONSUMER + BLK_N)
+                                            * F16_BYTES,
+                                        )
+
+                            def tma_done():
+                                pass
+
+                            def tma_drain(ks):
+                                smem_pipe.empty.wait(ks, smem_cycle.phase)
+                                with Kern.If(cbx == 0):
+                                    with Kern.Then():
+                                        smem_pipe.full.arrive(ks, remote=0)
+
+                            partitioned_loop(tma_load, tma_done, tma_drain)
+
+                    def mma_body():
+                        # Preserve the source's warpgroup-local lowering in the
+                        # descriptor/TMEM address path.
+                        pw = warp_id
+                        with Kern.If(Kern.cuda.elect_sync()), Kern.Then():
+                            tmem_pipe.empty.wait(pw, tmem_cycle.phase)
+                            Kern.ptx.tcgen05.fence__after_thread_sync()
+
+                            def mma(_is_remain, ks):
+                                smem_pipe.full.wait(ks, smem_cycle.phase)
+                                with Kern.unroll(BLK_K // MMA_K) as ki:
+                                    Kern.cuda.tcgen05.encode_matrix_descriptor(
+                                        Kern.address_of(descA[0]),
+                                        A_smem.ptr_to([ks, pw, 0, ki * MMA_K]),
                                         ldo=1,
                                         sdo=8 * BLK_K * F16_BYTES // F128_BYTES,
                                         swizzle=SWIZZLE,
                                     )
-                                    Tx.cuda.tcgen05.encode_matrix_descriptor(
-                                        Tx.address_of(descB),
+                                    Kern.cuda.tcgen05.encode_matrix_descriptor(
+                                        Kern.address_of(descB[0]),
                                         B_smem.ptr_to([ks, 0, ki * MMA_K]),
                                         ldo=1,
                                         sdo=8 * BLK_K * F16_BYTES // F128_BYTES,
                                         swizzle=SWIZZLE,
                                     )
-                                    if stage == 0 and ki == 0:
-                                        Tx.ptx[_MMA_CHAIN](
-                                            Tx.cast(warp_id * MMA_N, "uint32"),
-                                            descA,
-                                            descB,
-                                            descI,
-                                            *_MMA_ZERO_MASKS,
-                                            False,
-                                        )
-                                    else:
-                                        Tx.ptx[_MMA_CHAIN](
-                                            Tx.cast(warp_id * MMA_N, "uint32"),
-                                            descA,
-                                            descB,
-                                            descI,
-                                            *_MMA_ZERO_MASKS,
-                                            True,
-                                        )
+                                    with Kern.If(ki == 0):
+                                        with Kern.Then():
+                                            with Kern.If(stage[0] == 0):
+                                                with Kern.Then():
+                                                    Kern.ptx[_MMA_CHAIN](
+                                                        Kern.cast(pw * MMA_N, "uint32"),
+                                                        descA[0],
+                                                        descB[0],
+                                                        descI[0],
+                                                        *_MMA_ZERO_MASKS,
+                                                        False,
+                                                    )
+                                                with Kern.Else():
+                                                    Kern.ptx[_MMA_CHAIN](
+                                                        Kern.cast(pw * MMA_N, "uint32"),
+                                                        descA[0],
+                                                        descB[0],
+                                                        descI[0],
+                                                        *_MMA_ZERO_MASKS,
+                                                        True,
+                                                    )
+                                        with Kern.Else():
+                                            Kern.ptx[_MMA_CHAIN](
+                                                Kern.cast(pw * MMA_N, "uint32"),
+                                                descA[0],
+                                                descB[0],
+                                                descI[0],
+                                                *_MMA_ZERO_MASKS,
+                                                True,
+                                            )
                                 smem_pipe.empty.arrive(ks, cta_group=CTA_GROUP, cta_mask=3)
-                            phase = phase ^ 1
-                        if PIPE_REMAIN_NUM > 0:
-                            for ks in Tx.unroll(PIPE_REMAIN_NUM):
-                                smem_pipe.full.wait(ks, phase)
-                                for ki in Tx.unroll(BLK_K // MMA_K):
-                                    Tx.cuda.tcgen05.encode_matrix_descriptor(
-                                        Tx.address_of(descA),
-                                        A_smem.ptr_to([ks, warp_id, 0, ki * MMA_K]),
-                                        ldo=1,
-                                        sdo=8 * BLK_K * F16_BYTES // F128_BYTES,
-                                        swizzle=SWIZZLE,
-                                    )
-                                    Tx.cuda.tcgen05.encode_matrix_descriptor(
-                                        Tx.address_of(descB),
-                                        B_smem.ptr_to([ks, 0, ki * MMA_K]),
-                                        ldo=1,
-                                        sdo=8 * BLK_K * F16_BYTES // F128_BYTES,
-                                        swizzle=SWIZZLE,
-                                    )
-                                    if PIPE_CYCLE == 0 and ks == 0 and (ki == 0):
-                                        Tx.ptx[_MMA_CHAIN](
-                                            Tx.cast(warp_id * MMA_N, "uint32"),
-                                            descA,
-                                            descB,
-                                            descI,
-                                            *_MMA_ZERO_MASKS,
-                                            False,
-                                        )
-                                    else:
-                                        Tx.ptx[_MMA_CHAIN](
-                                            Tx.cast(warp_id * MMA_N, "uint32"),
-                                            descA,
-                                            descB,
-                                            descI,
-                                            *_MMA_ZERO_MASKS,
-                                            True,
-                                        )
+
+                            def mma_done():
+                                tmem_pipe.full.arrive(pw, cta_group=CTA_GROUP, cta_mask=3)
+
+                            def mma_drain(ks):
+                                smem_pipe.full.wait(ks, smem_cycle.phase)
                                 smem_pipe.empty.arrive(ks, cta_group=CTA_GROUP, cta_mask=3)
-                            tmem_pipe.full.arrive(warp_id, cta_group=CTA_GROUP, cta_mask=3)
-                            for ks in Tx.unroll(PIPE_REMAIN_NUM, PIPELINE_DEPTH):
-                                smem_pipe.full.wait(ks, phase)
-                                smem_pipe.empty.arrive(ks, cta_group=CTA_GROUP, cta_mask=3)
-                            phase = phase ^ 1
-                        else:
-                            tmem_pipe.full.arrive(warp_id, cta_group=CTA_GROUP, cta_mask=3)
-                        phase_tmem = phase_tmem ^ 1
-            if (0 <= wg_id) & (wg_id < NUM_CONSUMER):
-                Tx.ptx.setmaxnreg.inc.sync.aligned.u32(224)
-                tmem_pipe.full.wait(wg_id, phase_tmem)
-                phase_tmem = phase_tmem ^ 1
-                Tx.ptx.tcgen05.fence__after_thread_sync()
-                for i in Tx.unroll(MMA_N // TMEM_LD_SIZE):
-                    col_st = Tx.meta_var(wg_id * MMA_N + i * TMEM_LD_SIZE)
-                    Tx.ptx[_TMEM_LD_64](
-                        *[reg[j] for j in range(TMEM_LD_SIZE)], Tx.cast(col_st, "uint32")
-                    )
-                    Tx.ptx.tcgen05.wait__ld.sync.aligned()
-                    for j in Tx.unroll(TMEM_LD_SIZE // 2):
-                        Tx.ptx[_CVT_F32X2](reg_fp16[j], reg[j * 2 + 1], reg[j * 2])
-                    for jv in Tx.unroll(EPI_TILE // 8):
-                        r0 = Tx.meta_var(jv * 4)
-                        Tx.ptx.st.shared.v4.u32(
-                            D_smem.ptr_to([wg_id, warp_id * 32 + lane_id, jv * 8]),
-                            reg_fp16[r0],
-                            reg_fp16[r0 + 1],
-                            reg_fp16[r0 + 2],
-                            reg_fp16[r0 + 3],
+
+                            partitioned_loop(mma, mma_done, mma_drain)
+                            tmem_cycle.advance()
+
+                    with tma_scheduler_role:
+                        tma_body()
+                    with mma_role:
+                        mma_body()
+
+                # setmaxnreg is warpgroup-collective. Preserve the original
+                # producer scope, with K owning its TMA/scheduler/MMA/idle partition.
+                with Kern.If(wg_id == NUM_CONSUMER), Kern.Then():
+                    producer_regs.emit()
+                    emit_producer_roles()
+
+                with consumer:
+                    consumer_regs.emit()
+                    consumer_warp = Kern.warp_id_in_role()
+                    consumer_wg = consumer_warp >> 2
+                    consumer_wid = consumer_warp & 3
+                    consumer_lane = Kern.lane_id()
+                    tmem_pipe.full.wait(consumer_wg, tmem_cycle.phase)
+                    tmem_cycle.advance()
+                    Kern.ptx.tcgen05.fence__after_thread_sync()
+                    for i in range(MMA_N // TMEM_LD_SIZE):
+                        col_st = Kern.Bind(consumer_wg * MMA_N + i * TMEM_LD_SIZE)
+                        Kern.ptx[_TMEM_LD_64](
+                            *[reg[j] for j in range(TMEM_LD_SIZE)], Kern.cast(col_st, "uint32")
                         )
-                    Tx.cuda.warpgroup_sync(wg_id)
-                    Tx.ptx.fence.proxy.async_.shared__cta()
-                    if (lane_id == 0) & (warp_id == 0):
-                        Tx.ptx[_TMA_S2G](
-                            Tx.address_of(D_tensor_map),
-                            n_idx * BLK_N * CTA_GROUP + i * EPI_TILE,
-                            (m_idx * NUM_CONSUMER * CTA_GROUP + wg_id * CTA_GROUP + cbx) * BLK_M,
-                            D_smem.ptr_to([wg_id, 0, 0]),
-                        )
-                        Tx.ptx.cp.async_.bulk.commit_group()
-                        Tx.ptx.cp.async_.bulk.wait_group(0)
-                    Tx.cuda.warpgroup_sync(wg_id)
-                tmem_pipe.empty.arrive(wg_id, remote=0)
-                comm_m_idx = Tx.meta_var(m_idx * 2 + wg_id)
-                comm_m_idx_local = Tx.meta_var(comm_m_idx % (LOCAL_M // TILE_M))
-                signal_rank = Tx.meta_var(comm_m_idx // (LOCAL_M // TILE_M))
-                sem.semaphore_notify(signal_rank, tid, comm_m_idx_local, n_idx, rs_queue)
-        tile_scheduler.next_tile(cbx, bx, rank, warp_id_in_cta, lane_id)
-    # Synchronize every local and peer-CTA TMEM user before collective deallocation.
-    Tx.ptx.barrier.cluster.arrive()
-    Tx.ptx.barrier.cluster.wait()
-    if WORLD_SIZE > 1:
-        if (cbx == 0) & (tid == 0):
-            Tx.cuda.func_call(
-                "exit_barrier_arrive_and_wait",
-                exit_barrier.ptr_to([0]),
-                Tx.int32(NUM_CLUSTERS),
-                Tx.int32(WORLD_SIZE),
-                source_code=exit_barrier_arrive_and_wait,
+                        Kern.ptx.tcgen05.wait__ld.sync.aligned()
+                        for j in range(TMEM_LD_SIZE // 2):
+                            Kern.ptx[_CVT_F32X2](reg_fp16[j], reg[j * 2 + 1], reg[j * 2])
+                        for jv in range(EPI_TILE // 8):
+                            r0 = jv * 4
+                            Kern.ptx.st.shared.v4.u32(
+                                D_smem.ptr_to(
+                                    [consumer_wg, consumer_wid * 32 + consumer_lane, jv * 8]
+                                ),
+                                reg_fp16[r0],
+                                reg_fp16[r0 + 1],
+                                reg_fp16[r0 + 2],
+                                reg_fp16[r0 + 3],
+                            )
+                        Kern.cuda.warpgroup_sync(consumer_wg)
+                        Kern.ptx.fence.proxy.async_.shared__cta()
+                        with Kern.If((consumer_lane == 0) & (consumer_wid == 0)), Kern.Then():
+                            Kern.ptx[_TMA_S2G](
+                                Kern.address_of(D_tensor_map),
+                                n_idx * BLK_N * CTA_GROUP + i * EPI_TILE,
+                                (m_idx * NUM_CONSUMER * CTA_GROUP + consumer_wg * CTA_GROUP + cbx)
+                                * BLK_M,
+                                D_smem.ptr_to([consumer_wg, 0, 0]),
+                            )
+                            Kern.ptx.cp.async_.bulk.commit_group()
+                            Kern.ptx.cp.async_.bulk.wait_group(0)
+                        Kern.cuda.warpgroup_sync(consumer_wg)
+                    tmem_pipe.empty.arrive(consumer_wg, remote=0)
+                    comm_m_idx = Kern.Bind(m_idx * 2 + consumer_wg)
+                    comm_m_idx_local = Kern.Bind(comm_m_idx % (LOCAL_M // TILE_M))
+                    signal_rank = Kern.Bind(comm_m_idx // (LOCAL_M // TILE_M))
+                    sem.semaphore_notify(signal_rank, tid, comm_m_idx_local, n_idx, rs_queue)
+
+            fetch_next()
+
+        Kern.ptx.barrier.cluster.arrive()
+        Kern.ptx.barrier.cluster.wait()
+        if WORLD_SIZE > 1:
+            with Kern.If((cbx == 0) & (tid == 0)), Kern.Then():
+                Kern.cuda.func_call(
+                    "exit_barrier_arrive_and_wait",
+                    exit_barrier.ptr_to([0]),
+                    Kern.int32(NUM_CLUSTERS),
+                    Kern.int32(WORLD_SIZE),
+                    source_code=exit_barrier_arrive_and_wait,
+                )
+            Kern.cuda.cta_sync()
+            Kern.ptx.barrier.cluster.arrive()
+            Kern.ptx.barrier.cluster.wait()
+        # Spell the teardown boundary exactly as the original: shared load to a
+        # register, then collective relinquish/dealloc after every local and peer user.
+        with Kern.If((wg_id == 0) & (warp_id == 0)), Kern.Then():
+            Kern.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
+            Kern.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
+            Kern.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
+                tmem_addr_local[0], Kern.uint32(N_COLS)
             )
-        Tx.cuda.cta_sync()
-        Tx.ptx.barrier.cluster.arrive()
-        Tx.ptx.barrier.cluster.wait()
-    if (wg_id == 0) & (warp_id == 0):
-        Tx.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
-        Tx.ptx.ld.shared.u32(tmem_addr_local, tmem_addr.ptr_to([0]))
-        Tx.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
-            tmem_addr_local, Tx.uint32(N_COLS)
-        )
+
+    return test_mma_ss_tma_2sm_persistent
 
 
 def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
-    """Return the directly ported fused persistent GemmRS kernel."""
-
     config = config or derive_config()
     requested = (config.M, config.N, config.total_k, config.world_size)
     active = (M, N, TOTAL_K, WORLD_SIZE)
@@ -1055,12 +979,8 @@ def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
             },
         )
         return specialized.build_kernel()
-    return tvm.IRModule(
-        {
-            _WHILE_LD_GLOBAL_ACQUIRE_GV: while_ld_global_acquire,
-            FUSED_DEVICE_ENTRYPOINT: test_mma_ss_tma_2sm_persistent,
-        }
-    )
+    device = _make_device_kernel(config)
+    return tvm.IRModule({FUSED_DEVICE_ENTRYPOINT: device.func})
 
 
 KERNEL_META = {"name": "gemm_reduce_scatter", "category": "basic", "compute_capability": 10}

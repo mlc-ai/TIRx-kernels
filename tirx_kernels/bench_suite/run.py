@@ -8,7 +8,7 @@ See README.md in this directory for setup, baseline workflow, and flags.
 
 Quick start:
     python -m tirx_kernels.bench_suite
-    python tirx_kernels/bench_suite/promote_baseline.py .bench-suite/runs/<id>.json --merge
+    python tirx_kernels/bench_suite/promote_baseline.py .bench-suite/runs/<id>.json
 
 Exit codes:
     0  no regressions (or no baseline yet)
@@ -44,6 +44,7 @@ from typing import Any, ClassVar
 
 import yaml
 
+from tirx_kernels.registry import kernel_index
 from tirx_kernels.runner import DEFAULT_BENCH_COOLDOWN_S as DEFAULT_COOLDOWN_S
 from tirx_kernels.runner import DEFAULT_BENCH_ROUNDS as DEFAULT_ROUNDS
 from tirx_kernels.runner import (
@@ -73,8 +74,8 @@ CONFIG_DIR = SCRIPT_DIR / "config"
 GENERATED_WORKLOADS_NAME = "workloads.generated.yaml"
 MAX_DEFAULT_CONFIGS_PER_KERNEL = 3
 DEFAULT_SELECTION_ROLES = ("small", "medium", "large")
-# Single pinned baseline: every run benches our kernel + all reference impls,
-# so one JSON holds both. Promote a run over it via promote_baseline.py.
+# Single pinned baseline: every suite run benches our kernel directly. External
+# references remain an explicit diagnostic in ``python -m tirx_kernels.bench``.
 DEFAULT_BASELINE = SCRIPT_DIR / "baseline.json"
 DEFAULT_REGRESSION_THRESHOLD = 1.0
 POLL_INTERVAL = 5.0  # seconds between GPU re-checks when none is free
@@ -134,6 +135,11 @@ def _read_kernel_config(path: Path) -> tuple[str, list[dict], str | None]:
     kernel = data.get("kernel")
     if not kernel:
         raise ValueError(f"{path.name}: missing top-level 'kernel'")
+    if path.stem != kernel:
+        raise ValueError(f"{path.name}: kernel {kernel!r} must match the file stem")
+    default_suite = data.get("default_suite", True)
+    if type(default_suite) is not bool:
+        raise ValueError(f"{path.name}: default_suite must be true or false")
     defaults = data.get("defaults") or {}
     entries = []
     labels: set[str] = set()
@@ -145,9 +151,11 @@ def _read_kernel_config(path: Path) -> tuple[str, list[dict], str | None]:
         if not isinstance(label, str) or not label:
             raise ValueError(f"{path.name}: config label must be a non-empty string: {entry}")
         if label in labels:
-            raise ValueError(f"{path.name}: duplicate config label {label!r}")
+            raise ValueError(f"{path.name}: duplicate config key {kernel}/{label}")
         labels.add(label)
-        if entry.get("default", False):
+        if type(entry.get("default")) is not bool:
+            raise ValueError(f"{path.name}: config {label!r} must declare default: true or false")
+        if entry["default"]:
             default_count += 1
         selection_role = entry.get("selection_role")
         if selection_role is not None and selection_role not in DEFAULT_SELECTION_ROLES:
@@ -156,6 +164,12 @@ def _read_kernel_config(path: Path) -> tuple[str, list[dict], str | None]:
                 f"{DEFAULT_SELECTION_ROLES}, got {selection_role!r}"
             )
         entries.append({"kernel": kernel, **defaults, **entry})
+    if not default_suite and default_count:
+        raise ValueError(
+            f"{path.name}: default_suite=false requires every config to be non-default"
+        )
+    if default_suite and not default_count:
+        raise ValueError(f"{path.name}: default_suite kernels require at least one default config")
     if default_count > MAX_DEFAULT_CONFIGS_PER_KERNEL:
         raise ValueError(
             f"{path.name}: kernel {kernel!r} has {default_count} default configs; "
@@ -231,8 +245,13 @@ def load_config_dir(config_dir: Path = CONFIG_DIR) -> list[dict]:
     if not files:
         raise FileNotFoundError(f"no kernel config files under {config_dir}")
     out: list[dict] = []
+    configured: dict[str, Path] = {}
     for path in files:
-        _, entries, _selection_rationale = _read_kernel_config(path)
+        kernel, entries, _selection_rationale = _read_kernel_config(path)
+        previous = configured.get(kernel)
+        if previous is not None:
+            raise ValueError(f"kernel {kernel!r} has more than one config file: {previous}, {path}")
+        configured[kernel] = path
         for entry in entries:
             if not entry.pop("default", False):
                 continue
@@ -244,6 +263,18 @@ def load_config_dir(config_dir: Path = CONFIG_DIR) -> list[dict]:
                     f"workload explicitly instead: {workload}"
                 )
             out.append(workload)
+
+    registered = set(kernel_index(strict=True))
+    configured_names = set(configured)
+    if registered != configured_names:
+        missing = sorted(registered - configured_names)
+        unknown = sorted(configured_names - registered)
+        details = []
+        if missing:
+            details.append(f"missing config YAML for: {', '.join(missing)}")
+        if unknown:
+            details.append(f"config YAML has unregistered kernel(s): {', '.join(unknown)}")
+        raise ValueError("registry/config mismatch: " + "; ".join(details))
     return out
 
 
@@ -781,6 +812,8 @@ class _PreparedAttempt:
     gpus: tuple[str, ...] = ()
     gpu_affinity: tuple[str, ...] = ()
     physical_gpu_uuids: tuple[str, ...] = ()
+    nvml_owned_pids: set[int] = field(default_factory=set)
+    nvml_ownership_pending: bool = False
     gpu_ownership_released: bool = False
     pending_interference: dict[str, Any] | None = None
     ready_since: float | None = None
@@ -791,8 +824,33 @@ class _PreparedAttempt:
         return f"{self.workload['kernel']}/{self.workload['config']}"
 
 
+def _attempt_strangers(
+    item: _PreparedAttempt, snapshot: dict[int, float], local_pids: set[int], sm_threshold: float
+) -> dict[int, float]:
+    """Classify active NVML PIDs for one GPU attempt.
+
+    NVML reports host PIDs, while ``/proc`` may expose only this container's PID
+    namespace. The pool proves the assigned GPU quiet before dispatch, so the
+    first active host-PID set belongs to the attempt. Later additions remain
+    interference. When the namespaces already match, preserve exact PID
+    matching and classify unknown PIDs immediately.
+    """
+
+    active = {pid: sm for pid, sm in snapshot.items() if sm > sm_threshold}
+    unknown = {pid: sm for pid, sm in active.items() if pid not in local_pids}
+    if not item.nvml_ownership_pending:
+        return {pid: sm for pid, sm in unknown.items() if pid not in item.nvml_owned_pids}
+    if active.keys() & local_pids:
+        item.nvml_ownership_pending = False
+        return unknown
+    if unknown:
+        item.nvml_owned_pids.update(unknown)
+        item.nvml_ownership_pending = False
+    return {}
+
+
 def _prepared_child_command(
-    workload: dict, *, control_fd: int, rounds: int, cooldown: float, with_references: bool
+    workload: dict, *, control_fd: int, rounds: int, cooldown: float
 ) -> list[str]:
     command = [
         sys.executable,
@@ -817,8 +875,6 @@ def _prepared_child_command(
         command += ["--repeat", str(workload["repeat"])]
     if workload.get("timer") is not None:
         command += ["--timer", workload["timer"]]
-    if with_references:
-        command.append("--with-references")
     return command
 
 
@@ -830,7 +886,6 @@ def _spawn_prepared_attempt(
     rounds: int,
     cooldown: float,
     compile_profile: dict,
-    with_references: bool,
 ) -> _PreparedAttempt:
     """Spawn a GPU-unbound child that immediately begins CPU prepare."""
     parent_control, child_control = socket.socketpair()
@@ -858,11 +913,7 @@ def _spawn_prepared_attempt(
     cache_dir.mkdir(parents=True, exist_ok=True)
     env["TIRX_BENCH_CACHE_DIR"] = str(cache_dir)
     command = _prepared_child_command(
-        workload,
-        control_fd=child_control.fileno(),
-        rounds=rounds,
-        cooldown=cooldown,
-        with_references=with_references,
+        workload, control_fd=child_control.fileno(), rounds=rounds, cooldown=cooldown
     )
     process_started = time.time()
     try:
@@ -1202,6 +1253,7 @@ def package_provenance(import_name: str) -> dict | None:
     # This catches the editable case (the package lives outside the repo it
     # was built from, so the __file__ walk below misses it). dist resolution:
     # prefer `info["dist"]` if we set it above, else default to import_name.
+    direct_source = False
     try:
         from importlib.metadata import distribution as _meta_dist
 
@@ -1222,7 +1274,10 @@ def package_provenance(import_name: str) -> dict | None:
                 url = direct.get("url") or ""
                 if url.startswith("file://"):
                     src_path = Path(url[len("file://") :]).resolve()
+                    direct_source = True
                     info["source_dir"] = str(src_path)
+                    info.pop("git_dir", None)
+                    info.pop("git_sha", None)
                     if direct.get("dir_info", {}).get("editable"):
                         info["editable"] = True
                     _record_git(src_path, info)
@@ -1251,7 +1306,7 @@ def package_provenance(import_name: str) -> dict | None:
                     break
             except Exception:
                 continue
-    if pkg_file:
+    if pkg_file and not direct_source:
         pkg_dir = Path(pkg_file).resolve().parent
         # Walk up looking for a git repo. .git can be a dir (regular clone)
         # or a file (worktree); both are fine for `git rev-parse`.
@@ -1268,7 +1323,8 @@ def write_run(
     stamp: str,
     results: list[dict],
     label: str | None,
-    references_enabled: bool,
+    *,
+    selection: dict,
     probe: dict | None = None,
     pipeline: dict | None = None,
 ) -> Path:
@@ -1277,10 +1333,10 @@ def write_run(
     payload = {
         "timestamp": stamp,
         "label": label,
-        "references_enabled": references_enabled,
         "git": collect_repo_git(),
         "kernel_tree": collect_kernel_fingerprint(),
-        "baselines": collect_baseline_provenance() if references_enabled else {},
+        "baselines": collect_baseline_provenance(),
+        "selection": selection,
         "probe": probe or {},
         "pipeline": pipeline or {},
         "results": results,
@@ -1456,9 +1512,7 @@ def load_baseline(path=None):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-def _finalize_bench_record(
-    row: dict, *, rounds: int, cooldown: float, references_enabled: bool
-) -> None:
+def _finalize_bench_record(row: dict, *, rounds: int, cooldown: float) -> None:
     """Validate in-bench round samples and write aggregated impl times (microseconds)."""
     required_fields = ("round_samples", "errors", "timer", "benchmark_protocol")
     missing_fields = [field for field in required_fields if field not in row]
@@ -1514,15 +1568,6 @@ def _finalize_bench_record(
         row["status"] = "FAIL"
         row["error"] = "bench result field 'round_samples' must be a non-empty mapping"
         return
-    if not references_enabled:
-        external_impls = [name for name in samples if name not in our_impls(samples)]
-        if external_impls:
-            row["status"] = "FAIL"
-            row["error"] = (
-                "reference-disabled benchmark reported external implementation(s): "
-                f"{external_impls}"
-            )
-            return
     bad = {
         impl: len(vals) if isinstance(vals, list) else type(vals).__name__
         for impl, vals in samples.items()
@@ -1585,7 +1630,6 @@ def run_scheduled_jobs(
     rounds: int,
     cooldown: float,
     compile_profile: dict,
-    with_references: bool,
     max_prepare_processes: int | None = None,
     ready_backlog: int | None = None,
 ) -> tuple[list[dict], list[dict[str, Any]], dict]:
@@ -1674,7 +1718,8 @@ def run_scheduled_jobs(
         release_gpus(item)
         item.gpus = ()
         item.physical_gpu_uuids = ()
-        item.gpu_affinity = ()
+        item.nvml_owned_pids.clear()
+        item.nvml_ownership_pending = False
         item.pending_interference = None
         item.interference_stop_deadline = None
         item.attempt += 1
@@ -1697,7 +1742,6 @@ def run_scheduled_jobs(
                 rounds=rounds,
                 cooldown=cooldown,
                 compile_profile=compile_profile,
-                with_references=with_references,
             )
             active[item.control.fileno()] = item
             log(f"[bench-suite] {now_iso()} prepare pid={item.process.pid} START {item.label}")
@@ -1727,6 +1771,8 @@ def run_scheduled_jobs(
             if not item.gpu_affinity:
                 item.gpu_affinity = gpus
             item.gpus = gpus
+            item.nvml_owned_pids.clear()
+            item.nvml_ownership_pending = True
             item.gpu_ownership_released = False
             item.state = "ASSIGNED"
             _send_child(
@@ -1782,7 +1828,12 @@ def run_scheduled_jobs(
                 for item in active.values():
                     if item.state != "RUNNING_GPU" or not item.gpus:
                         continue
-                    strangers = _active_strangers(item.gpus, _our_pids(), pool.util_threshold)
+                    snapshot = _pid_sm_on_gpus(item.gpus)
+                    strangers = (
+                        None
+                        if snapshot is None
+                        else _attempt_strangers(item, snapshot, _our_pids(), pool.util_threshold)
+                    )
                     if strangers is None or strangers:
                         detail = (
                             "could not sample assigned GPU utilization"
@@ -1889,12 +1940,7 @@ def run_scheduled_jobs(
                         if status in ("SKIP", "FAIL"):
                             record.update(result)
                         else:
-                            _finalize_bench_record(
-                                result,
-                                rounds=rounds,
-                                cooldown=cooldown,
-                                references_enabled=with_references,
-                            )
+                            _finalize_bench_record(result, rounds=rounds, cooldown=cooldown)
                             record.update(result)
                         record.setdefault("label", item.workload["config"])
                         record["finished_at"] = now_iso()
@@ -2036,11 +2082,6 @@ def main() -> None:
     )
     ap.add_argument("--no-report", action="store_true", help="Skip regression report generation")
     ap.add_argument(
-        "--with-references",
-        action="store_true",
-        help="Run and benchmark external reference implementations (off by default)",
-    )
-    ap.add_argument(
         "--no-probe",
         action="store_true",
         help="Skip the per-GPU probe (use nvidia-smi free-status only)",
@@ -2144,6 +2185,11 @@ def main() -> None:
     if not workloads:
         print("[bench-suite] no workloads to run.", file=sys.stderr)
         sys.exit(2)
+
+    selection = {
+        "mode": "default" if args.workloads is None and args.filter is None else "targeted",
+        "keys": [[workload["kernel"], workload["config"]] for workload in workloads],
+    }
 
     if args.check_imports:
         from tirx_kernels.registry import check_workload_imports
@@ -2262,7 +2308,6 @@ def main() -> None:
         rounds=args.rounds,
         cooldown=args.cooldown,
         compile_profile=compile_profile,
-        with_references=args.with_references,
         max_prepare_processes=args.max_prepare_processes,
         ready_backlog=args.ready_backlog,
     )
@@ -2284,7 +2329,7 @@ def main() -> None:
         stamp,
         results,
         label,
-        args.with_references,
+        selection=selection,
         probe=probe_meta,
         pipeline=pipeline_meta,
     )
@@ -2314,19 +2359,12 @@ def main() -> None:
     if args.no_report:
         return
 
-    if not args.with_references:
-        print(
-            "[bench-suite] references are disabled; skipping the reference-ratio "
-            "regression report (rerun with --with-references to compare ratios)"
-        )
-        return
-
     # Single pinned baseline (baseline.json). Promote a fresh run over it via
     # promote_baseline.py.
     baseline = load_baseline(args.baseline)
     if baseline is None:
         print("[bench-suite] no baseline (baseline.json) — skipping regression report")
-        print(f"[bench-suite]   set baseline: promote_baseline.py {run_path} --merge")
+        print(f"[bench-suite]   set baseline: promote_baseline.py {run_path}")
         return
 
     reports_dir = out_dir / "reports" / current["timestamp"]

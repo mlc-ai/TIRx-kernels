@@ -8,15 +8,13 @@
 Upstream source: include/flashinfer/mamba/kernel_selective_state_update_mtp_horizontal.cuh.
 """
 
-from __future__ import annotations
-
 import ctypes
 import functools
 from typing import Any
 
 import torch
 
-from tvm.script import tirx as T
+import tirx_kernels.kern as K
 
 from . import selective_state_update_mtp_simple as _simple
 from . import selective_state_update_mtp_vertical as _vertical
@@ -54,57 +52,65 @@ _bf16_word_to_f32x2 = _simple._bf16_word_to_f32x2
 _global_load_nc_s32 = _vertical._global_load_nc_s32
 _global_load_nc_s64 = _vertical._global_load_nc_s64
 _philox4x32 = _vertical._philox4x32
-_tma_g2s_4d = _vertical._tma_g2s_4d
 
 
-def _mbarrier_arrive(smem_raw, offset):
-    T.evaluate(T.ptx.mbarrier.arrive.shared__cta.b64(smem_raw.ptr_to([offset])))
+def _mbarrier_arrive(barrier):
+    K.evaluate(K.ptx.mbarrier.arrive.shared__cta.b64(barrier))
 
 
-def _mbarrier_arrive_expect_tx(smem_raw, offset, num_bytes):
-    T.evaluate(
-        T.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
-            smem_raw.ptr_to([offset]), T.uint32(num_bytes)
+def _mbarrier_arrive_expect_tx(barrier, num_bytes):
+    K.evaluate(
+        K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(barrier, K.uint32(num_bytes))
+    )
+
+
+def _mbarrier_arrive_wait_parity(barrier, parity):
+    _mbarrier_arrive(barrier)
+    ready = K.alloc_local((1,), "uint32")
+    K.assign(ready[0], K.uint32(0))
+    with K.While(True):
+        K.evaluate(
+            K.ptx.mbarrier.try_wait.parity.shared__cta.b64(ready[0], barrier, K.uint32(parity))
+        )
+        with K.If(ready[0] != K.uint32(0)):
+            with K.Then():
+                K.Break()
+
+
+def _tma_g2s_4d(dst, tensor_map, c0, c1, c2, c3, barrier):
+    K.evaluate(
+        K.ptx[_vertical._TMA_G2S_4D](
+            dst,
+            K.address_of(tensor_map),
+            K.cast(c0, "int32"),
+            K.cast(c1, "int32"),
+            K.cast(c2, "int32"),
+            K.cast(c3, "int32"),
+            barrier,
         )
     )
 
 
-@T.inline
-def _mbarrier_arrive_wait_parity(smem_raw, offset, parity):
-    _mbarrier_arrive(smem_raw, offset)
-    ready = T.alloc_local((1,), "uint32")
-    ready[0] = T.uint32(0)
-    while True:
-        T.evaluate(
-            T.ptx.mbarrier.try_wait.parity.shared__cta.b64(
-                ready[0], smem_raw.ptr_to([offset]), T.uint32(parity)
-            )
-        )
-        if ready[0] != T.uint32(0):
-            break
-
-
 def _shared_load_v2_b32(buffer, index, values):
-    T.evaluate(T.ptx.ld.shared.v2.b32(values[0], values[1], buffer.ptr_to([index])))
+    K.evaluate(K.ptx.ld.shared.v2.b32(values[0], values[1], buffer.ptr_to([index])))
 
 
 def _shared_load_v4_b32(buffer, index, values):
-    T.evaluate(
-        T.ptx.ld.shared.v4.b32(values[0], values[1], values[2], values[3], buffer.ptr_to([index]))
+    K.evaluate(
+        K.ptx.ld.shared.v4.b32(values[0], values[1], values[2], values[3], buffer.ptr_to([index]))
     )
 
 
 def _global_load_v2_b16(buffer, index, values):
-    T.evaluate(T.ptx.ld.global_.v2.b16(values[0], values[1], buffer.ptr_to([index])))
+    K.evaluate(K.ptx.ld.global_.v2.b16(values[0], values[1], buffer.ptr_to([index])))
 
 
 def _global_load_v4_b16(buffer, index, values):
-    T.evaluate(
-        T.ptx.ld.global_.v4.b16(values[0], values[1], values[2], values[3], buffer.ptr_to([index]))
+    K.evaluate(
+        K.ptx.ld.global_.v4.b16(values[0], values[1], values[2], values[3], buffer.ptr_to([index]))
     )
 
 
-@T.inline
 def _store_state_tile(
     values,
     pair_base,
@@ -118,456 +124,56 @@ def _store_state_tile(
     PHILOX_ROUNDS,
 ):
     if STATE_DTYPE == "float32":
-        words = T.alloc_local((4,), "uint32")
-        for pair in T.unroll(2):
+        words = K.alloc_local((4,), "uint32")
+        with K.unroll(2) as pair:
             packed = values[pair_base + pair]
-            words[pair * 2] = T.reinterpret("uint32", T.cuda.float2_x(packed))
-            words[pair * 2 + 1] = T.reinterpret("uint32", T.cuda.float2_y(packed))
-        T.evaluate(
-            T.ptx.st.global_.v4.b32(
+            K.ptx.mov.b32(words[pair * 2], K.reinterpret("uint32", K.cuda.float2_x(packed)))
+            K.ptx.mov.b32(words[pair * 2 + 1], K.reinterpret("uint32", K.cuda.float2_y(packed)))
+        K.evaluate(
+            K.ptx.st.global_.v4.b32(
                 destination.ptr_to([destination_base]), words[0], words[1], words[2], words[3]
-            )
-        )
-    elif PHILOX_ROUNDS > 0:
-        packed_words = T.alloc_local((4,), "uint32")
-        for pair in T.unroll(4):
-            packed = values[pair_base + pair]
-            T.evaluate(
-                T.ptx.cvt.rs.f16x2.f32(
-                    packed_words[pair],
-                    T.cuda.float2_y(packed),
-                    T.cuda.float2_x(packed),
-                    random_words[random_base + pair // 2 * 4 + pair % 2],
-                )
-            )
-        T.evaluate(
-            T.ptx.st.global_.v4.b32(
-                destination.ptr_to([destination_base]),
-                packed_words[0],
-                packed_words[1],
-                packed_words[2],
-                packed_words[3],
             )
         )
     else:
-        bits = T.alloc_local((8,), "uint16")
-        words = T.alloc_local((4,), "uint32")
-        for pair in T.unroll(PAIRS_PER_TILE_MEMBER):
-            packed = values[pair_base + pair]
-            if STATE_DTYPE == "bfloat16":
-                bits[pair * 2] = _f32_to_bf16(T.cuda.float2_x(packed))
-                bits[pair * 2 + 1] = _f32_to_bf16(T.cuda.float2_y(packed))
-            else:
-                bits[pair * 2] = _f32_to_f16(T.cuda.float2_x(packed))
-                bits[pair * 2 + 1] = _f32_to_f16(T.cuda.float2_y(packed))
-        for word in T.unroll(4):
-            T.evaluate(T.ptx.mov.b32(words[word], bits[word * 2], bits[word * 2 + 1]))
-        T.evaluate(
-            T.ptx.st.global_.v4.b32(
-                destination.ptr_to([destination_base]), words[0], words[1], words[2], words[3]
-            )
-        )
-
-
-@T.inline
-def _role_load_horizontal(
-    smem_raw,
-    tensor_state,
-    tensor_b,
-    tensor_c,
-    tensor_x,
-    lane,
-    batch_i,
-    head,
-    kv_group,
-    state_batch,
-    *,
-    IS_PAD,
-    NTOKENS,
-    NUM_TMA_LOADS,
-    DSTATE_PAD,
-    STATE_STAGE_BYTES,
-    STATE_BYTES,
-    DIM,
-    OFF_B,
-    OFF_C,
-    OFF_STATE,
-    OFF_X,
-    OFF_EMPTY,
-    OFF_FULL,
-):
-    if lane == 0:
-        _tma_g2s_4d(smem_raw, OFF_B, tensor_b, 0, kv_group, 0, batch_i, OFF_FULL)
-        _tma_g2s_4d(smem_raw, OFF_C, tensor_c, 0, kv_group, 0, batch_i, OFF_FULL)
-        _tma_g2s_4d(smem_raw, OFF_X, tensor_x, 0, head, 0, batch_i, OFF_FULL)
-
-    bcx_bytes: T.int32 = 2 * NTOKENS * DSTATE_PAD * 2 + NTOKENS * DIM * 2
-    for tl in T.unroll(NUM_TMA_LOADS):
-        stage: T.int32 = tl % 2
-        parity: T.int32 = tl // 2
-        _mbarrier_arrive_wait_parity(smem_raw, OFF_EMPTY + stage * 8, parity)
-        if lane == 0:
-            if not IS_PAD:
-                _tma_g2s_4d(
-                    smem_raw,
-                    OFF_STATE + stage * STATE_STAGE_BYTES,
-                    tensor_state,
-                    0,
-                    tl * 32,
-                    head,
-                    state_batch,
-                    OFF_FULL + stage * 8,
+        if PHILOX_ROUNDS > 0:
+            packed_words = K.alloc_local((4,), "uint32")
+            with K.unroll(4) as pair:
+                packed = values[pair_base + pair]
+                K.evaluate(
+                    K.ptx.cvt.rs.f16x2.f32(
+                        packed_words[pair],
+                        K.cuda.float2_y(packed),
+                        K.cuda.float2_x(packed),
+                        random_words[random_base + pair // 2 * 4 + pair % 2],
+                    )
                 )
-                transaction_bytes: T.int32 = STATE_STAGE_BYTES
-                if tl == 0:
-                    transaction_bytes = transaction_bytes + bcx_bytes
-                _mbarrier_arrive_expect_tx(smem_raw, OFF_FULL + stage * 8, transaction_bytes)
-            else:
-                transaction_bytes: T.int32 = 0
-                if tl == 0:
-                    transaction_bytes = bcx_bytes
-                _mbarrier_arrive_expect_tx(smem_raw, OFF_FULL + stage * 8, transaction_bytes)
-
-
-@T.inline
-def _role_update_horizontal(
-    smem_raw,
-    s_u16,
-    s_u32,
-    state,
-    intermediate_states,
-    dt,
-    matrix_a,
-    d_weight,
-    z,
-    dt_bias,
-    intermediate_indices,
-    rand_seed,
-    output,
-    lane,
-    compute_warp,
-    batch_i,
-    head,
-    state_batch,
-    state_stride_batch,
-    dt_stride_batch,
-    dt_stride_mtp,
-    z_stride_batch,
-    z_stride_mtp,
-    out_stride_batch,
-    out_stride_mtp,
-    dt_softplus,
-    update_state,
-    *,
-    IS_PAD,
-    NHEADS,
-    DIM,
-    DSTATE,
-    NTOKENS,
-    NUM_TMA_LOADS,
-    DSTATE_PAD,
-    STATE_DTYPE,
-    WEIGHT_DTYPE,
-    INDEX_DTYPE,
-    STATE_BYTES,
-    ELEMS_PER_TILE_MEMBER,
-    PAIRS_PER_TILE_MEMBER,
-    ELEMS_PER_TILE,
-    NUM_TILES,
-    HAS_INTERMEDIATE_STATES,
-    HAS_Z,
-    HAS_D,
-    HAS_DT_BIAS,
-    UPDATE_STATE,
-    PHILOX_ROUNDS,
-    OFF_B,
-    OFF_C,
-    OFF_STATE,
-    OFF_X,
-    OFF_DT,
-    OFF_OUT,
-    OFF_EMPTY,
-    OFF_FULL,
-    OFF_OUT_READY,
-    STATE_STAGE_BYTES,
-):
-    random_seed: T.int64 = 0
-    if PHILOX_ROUNDS > 0 and not IS_PAD:
-        random_seed = _global_load_s64(rand_seed, 0)
-
-    icache_idx: T.int64 = state_batch
-    if HAS_INTERMEDIATE_STATES and not IS_PAD:
-        icache_idx = _global_load_index_s64(intermediate_indices, batch_i, INDEX_DTYPE)
-
-    a_value: T.float32 = T.reinterpret("float32", _global_load_u32(matrix_a, head))
-    d_value: T.float32 = 0.0
-    if HAS_D:
-        d_value = _load_weight(d_weight, head, WEIGHT_DTYPE)
-    bias_value: T.float32 = 0.0
-    if HAS_DT_BIAS:
-        bias_value = _load_weight(dt_bias, head, WEIGHT_DTYPE)
-
-    _mbarrier_arrive(smem_raw, OFF_EMPTY)
-    _mbarrier_arrive(smem_raw, OFF_EMPTY + 8)
-
-    flat_thread: T.int32 = compute_warp * 32 + lane
-    if flat_thread < NTOKENS:
-        dt_value: T.float32 = _load_weight(
-            dt,
-            T.cast(batch_i, "int64") * dt_stride_batch
-            + T.cast(flat_thread, "int64") * dt_stride_mtp
-            + head,
-            WEIGHT_DTYPE,
-        )
-        if HAS_DT_BIAS:
-            dt_value = _add(dt_value, bias_value)
-        if dt_softplus != 0 and dt_value <= T.float32(20.0):
-            exp_value: T.float32 = _exp2(_mul(dt_value, T.float32(_LOG2_E)))
-            log_value: T.float32 = _log2(_add(T.float32(1.0), exp_value))
-            dt_value = _mul(log_value, T.float32(_LN_2))
-        T.evaluate(
-            T.ptx.st.shared.b32(
-                s_u32.ptr_to([OFF_DT // 4 + flat_thread]), T.reinterpret("uint32", dt_value)
+            K.evaluate(
+                K.ptx.st.global_.v4.b32(
+                    destination.ptr_to([destination_base]),
+                    packed_words[0],
+                    packed_words[1],
+                    packed_words[2],
+                    packed_words[3],
+                )
             )
-        )
-
-    member: T.int32 = lane % 8
-    row_group: T.int32 = lane // 8
-    state_ptr_offset_i32: T.int32 = T.cast(
-        state_batch * state_stride_batch + T.cast(head * DIM * DSTATE, "int64"), "int32"
-    )
-
-    for tl in T.unroll(NUM_TMA_LOADS):
-        stage: T.int32 = tl % 2
-        parity: T.int32 = tl // 2
-        _mbarrier_arrive_wait_parity(smem_raw, OFF_FULL + stage * 8, parity)
-
-        for sp in T.serial(2):
-            sram_row: T.int32 = sp * 16 + compute_warp * 4 + row_group
-            dd: T.int32 = tl * 32 + sram_row
-            state_values = T.alloc_local((NUM_TILES * PAIRS_PER_TILE_MEMBER,), "uint64")
-
-            for tile in T.unroll(NUM_TILES):
-                member_col: T.int32 = tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
-                pair_base: T.int32 = tile * PAIRS_PER_TILE_MEMBER
-                if not IS_PAD and member_col < DSTATE:
-                    state_words = T.alloc_local((4,), "uint32")
-                    state_word_index: T.int32 = (
-                        OFF_STATE
-                        + stage * STATE_STAGE_BYTES
-                        + (sram_row * DSTATE_PAD + member_col) * STATE_BYTES
-                    ) // 4
-                    _shared_load_v4_b32(s_u32, state_word_index, state_words)
-                    for pair in T.unroll(PAIRS_PER_TILE_MEMBER):
-                        if STATE_DTYPE == "bfloat16":
-                            state_values[pair_base + pair] = _bf16_word_to_f32x2(state_words[pair])
-                        elif STATE_DTYPE == "float16":
-                            state_values[pair_base + pair] = T.cuda.make_float2(
-                                _f16_to_f32(_extract_u16(state_words[pair], False)),
-                                _f16_to_f32(_extract_u16(state_words[pair], True)),
-                            )
-                        else:
-                            state_values[pair_base + pair] = T.cuda.make_float2(
-                                T.reinterpret("float32", state_words[pair * 2]),
-                                T.reinterpret("float32", state_words[pair * 2 + 1]),
-                            )
+        else:
+            bits = K.alloc_local((8,), "uint16")
+            words = K.alloc_local((4,), "uint32")
+            with K.unroll(PAIRS_PER_TILE_MEMBER) as pair:
+                packed = values[pair_base + pair]
+                if STATE_DTYPE == "bfloat16":
+                    K.ptx.mov.b16(bits[pair * 2], _f32_to_bf16(K.cuda.float2_x(packed)))
+                    K.ptx.mov.b16(bits[pair * 2 + 1], _f32_to_bf16(K.cuda.float2_y(packed)))
                 else:
-                    for pair in T.unroll(PAIRS_PER_TILE_MEMBER):
-                        state_values[pair_base + pair] = T.cuda.make_float2(
-                            T.float32(0.0), T.float32(0.0)
-                        )
-
-            random_words = T.alloc_local((16,), "uint32")
-            if PHILOX_ROUNDS > 0 and not IS_PAD:
-                seed_lo: T.uint32 = T.cast(random_seed, "uint32")
-                seed_hi: T.uint32 = T.cast(
-                    T.shift_right(T.reinterpret("uint64", random_seed), T.uint32(32)), "uint32"
+                    K.ptx.mov.b16(bits[pair * 2], _f32_to_f16(K.cuda.float2_x(packed)))
+                    K.ptx.mov.b16(bits[pair * 2 + 1], _f32_to_f16(K.cuda.float2_y(packed)))
+            with K.unroll(4) as word:
+                K.evaluate(K.ptx.mov.b32(words[word], bits[word * 2], bits[word * 2 + 1]))
+            K.evaluate(
+                K.ptx.st.global_.v4.b32(
+                    destination.ptr_to([destination_base]), words[0], words[1], words[2], words[3]
                 )
-                for random_group in T.unroll(4):
-                    random_tile: T.int32 = random_group // 2
-                    random_e: T.int32 = (random_group % 2) * 4
-                    random_col: T.int32 = (
-                        random_tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER + random_e
-                    )
-                    counter: T.int32 = state_ptr_offset_i32 + dd * DSTATE + random_col
-                    group_words = T.alloc_local((4,), "uint32")
-                    _philox4x32(group_words, seed_lo, seed_hi, counter, PHILOX_ROUNDS=PHILOX_ROUNDS)
-                    for random_word in T.unroll(4):
-                        random_words[random_group * 4 + random_word] = group_words[random_word]
-
-            bc_step_words: T.int32 = 0
-            x_step: T.int32 = 0
-            dt_step: T.int32 = 0
-            out_step: T.int32 = 0
-            intermediate_step_base: T.int64 = icache_idx * T.int64(
-                NTOKENS * NHEADS * DIM * DSTATE
-            ) + T.cast(head * DIM * DSTATE + dd * DSTATE, "int64")
-
-            for step in T.serial(NTOKENS):
-                dt_value: T.float32 = T.reinterpret(
-                    "float32", _shared_load_u32(s_u32, OFF_DT // 4 + dt_step)
-                )
-                da_value: T.float32 = _exp2(_mul(_mul(a_value, dt_value), T.float32(_LOG2_E)))
-                x_value: T.float32 = _bf16_to_f32(_shared_load_u16(s_u16, OFF_X // 2 + x_step + dd))
-                dtx_value: T.float32 = _mul(dt_value, x_value)
-                out_pair: T.uint64 = T.cuda.make_float2(T.float32(0.0), T.float32(0.0))
-
-                for tile in T.unroll(NUM_TILES):
-                    member_col: T.int32 = tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
-                    if member_col < DSTATE:
-                        b_words = T.alloc_local((4,), "uint32")
-                        c_words = T.alloc_local((4,), "uint32")
-                        b_word_index: T.int32 = OFF_B // 4 + bc_step_words + member_col // 2
-                        c_word_index: T.int32 = OFF_C // 4 + bc_step_words + member_col // 2
-                        if PAIRS_PER_TILE_MEMBER == 2:
-                            _shared_load_v2_b32(s_u32, b_word_index, b_words)
-                            _shared_load_v2_b32(s_u32, c_word_index, c_words)
-                        else:
-                            _shared_load_v4_b32(s_u32, b_word_index, b_words)
-                            _shared_load_v4_b32(s_u32, c_word_index, c_words)
-                        for pair in T.unroll(PAIRS_PER_TILE_MEMBER):
-                            b_pair: T.uint64 = _bf16_word_to_f32x2(b_words[pair])
-                            c_pair: T.uint64 = _bf16_word_to_f32x2(c_words[pair])
-                            dbx_pair: T.uint64
-                            T.ptx.mul.f32x2(
-                                dbx_pair, b_pair, T.cuda.make_float2(dtx_value, dtx_value)
-                            )
-                            pair_index: T.int32 = tile * PAIRS_PER_TILE_MEMBER + pair
-                            updated_state: T.uint64
-                            T.ptx.fma.rn.f32x2(
-                                updated_state,
-                                T.cuda.make_float2(da_value, da_value),
-                                state_values[pair_index],
-                                dbx_pair,
-                            )
-                            state_values[pair_index] = updated_state
-                            T.ptx.fma.rn.f32x2(out_pair, updated_state, c_pair, out_pair)
-
-                out_value: T.float32 = _add(T.cuda.float2_x(out_pair), T.cuda.float2_y(out_pair))
-                for delta_idx in T.unroll(3):
-                    peer_out: T.float32 = T.cuda.__shfl_down_sync(
-                        T.uint32(0xFFFFFFFF), out_value, T.shift_right(T.int32(4), delta_idx), 32
-                    )
-                    out_value = _add(out_value, peer_out)
-                if member == 0:
-                    T.evaluate(
-                        T.ptx.st.shared.b32(
-                            s_u32.ptr_to([OFF_OUT // 4 + out_step + dd]),
-                            T.reinterpret("uint32", _fma(d_value, x_value, out_value)),
-                        )
-                    )
-
-                bc_step_words = bc_step_words + DSTATE_PAD // 2
-                x_step = x_step + DIM
-                dt_step = dt_step + 1
-                out_step = out_step + DIM
-
-                if HAS_INTERMEDIATE_STATES and not IS_PAD:
-                    for tile in T.unroll(NUM_TILES):
-                        member_col: T.int32 = tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
-                        if member_col < DSTATE:
-                            _store_state_tile(
-                                state_values,
-                                tile * PAIRS_PER_TILE_MEMBER,
-                                random_words,
-                                tile * 8,
-                                intermediate_states,
-                                intermediate_step_base + member_col,
-                                STATE_DTYPE=STATE_DTYPE,
-                                PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
-                                PHILOX_ROUNDS=PHILOX_ROUNDS,
-                            )
-                    intermediate_step_base = intermediate_step_base + T.int64(NHEADS * DIM * DSTATE)
-
-                if UPDATE_STATE and step == NTOKENS - 1 and not IS_PAD:
-                    final_base: T.int64 = state_batch * state_stride_batch + T.cast(
-                        head * DIM * DSTATE + dd * DSTATE, "int64"
-                    )
-                    for tile in T.unroll(NUM_TILES):
-                        member_col: T.int32 = tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
-                        if member_col < DSTATE:
-                            _store_state_tile(
-                                state_values,
-                                tile * PAIRS_PER_TILE_MEMBER,
-                                random_words,
-                                tile * 8,
-                                state,
-                                final_base + member_col,
-                                STATE_DTYPE=STATE_DTYPE,
-                                PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
-                                PHILOX_ROUNDS=PHILOX_ROUNDS,
-                            )
-
-        _mbarrier_arrive(smem_raw, OFF_EMPTY + stage * 8)
-
-    _mbarrier_arrive_wait_parity(smem_raw, OFF_OUT_READY, 0)
-    for episode in T.unroll((NTOKENS + 3) // 4):
-        step: T.int32 = compute_warp + episode * 4
-        if step < NTOKENS:
-            out_base: T.int64 = (
-                T.cast(batch_i, "int64") * out_stride_batch
-                + T.cast(step, "int64") * out_stride_mtp
-                + head * DIM
             )
-            z_base: T.int64 = (
-                T.cast(batch_i, "int64") * z_stride_batch
-                + T.cast(step, "int64") * z_stride_mtp
-                + head * DIM
-            )
-            if DIM == 64:
-                d: T.int32 = lane * 2
-                out_words = T.alloc_local((2,), "uint32")
-                if NTOKENS == 1:
-                    out_words[0] = _shared_load_u32(s_u32, OFF_OUT // 4 + step * DIM + d)
-                    out_words[1] = _shared_load_u32(s_u32, OFF_OUT // 4 + step * DIM + d + 1)
-                else:
-                    _shared_load_v2_b32(s_u32, OFF_OUT // 4 + step * DIM + d, out_words)
-                z_bits = T.alloc_local((2,), "uint16")
-                output_bits = T.alloc_local((2,), "uint16")
-                if HAS_Z:
-                    _global_load_v2_b16(z, z_base + d, z_bits)
-                for k in T.unroll(2):
-                    out_value: T.float32 = T.reinterpret("float32", out_words[k])
-                    if HAS_Z:
-                        z_value: T.float32 = _bf16_to_f32(z_bits[k])
-                        exp_neg: T.float32 = _exp2(
-                            _mul(_sub(T.float32(0.0), z_value), T.float32(_LOG2_E))
-                        )
-                        sigmoid: T.float32 = _div(T.float32(1.0), _add(T.float32(1.0), exp_neg))
-                        out_value = _mul(out_value, _mul(z_value, sigmoid))
-                    output_bits[k] = _f32_to_bf16(out_value)
-                T.evaluate(
-                    T.ptx.st.global_.v2.b16(
-                        output.ptr_to([out_base + d]), output_bits[0], output_bits[1]
-                    )
-                )
-            else:
-                d: T.int32 = lane * 4
-                out_words = T.alloc_local((4,), "uint32")
-                _shared_load_v4_b32(s_u32, OFF_OUT // 4 + step * DIM + d, out_words)
-                z_bits = T.alloc_local((4,), "uint16")
-                output_bits = T.alloc_local((4,), "uint16")
-                if HAS_Z:
-                    _global_load_v4_b16(z, z_base + d, z_bits)
-                for k in T.unroll(4):
-                    out_value: T.float32 = T.reinterpret("float32", out_words[k])
-                    if HAS_Z:
-                        z_value: T.float32 = _bf16_to_f32(z_bits[k])
-                        exp_neg: T.float32 = _exp2(
-                            _mul(_sub(T.float32(0.0), z_value), T.float32(_LOG2_E))
-                        )
-                        sigmoid: T.float32 = _div(T.float32(1.0), _add(T.float32(1.0), exp_neg))
-                        out_value = _mul(out_value, _mul(z_value, sigmoid))
-                    output_bits[k] = _f32_to_bf16(out_value)
-                T.evaluate(
-                    T.ptx.st.global_.v4.b16(
-                        output.ptr_to([out_base + d]),
-                        output_bits[0],
-                        output_bits[1],
-                        output_bits[2],
-                        output_bits[3],
-                    )
-                )
 
 
 BENCH_CONFIGS = [
@@ -653,260 +259,6 @@ REJECTION_CONFIGS = [
 ]
 
 
-@T.jit
-def _selective_state_update_mtp_horizontal(
-    tensor_state: T.TensorMap(),
-    tensor_b: T.TensorMap(),
-    tensor_c: T.TensorMap(),
-    tensor_x: T.TensorMap(),
-    state_h: T.handle,
-    state_scale_h: T.handle,
-    x_h: T.handle,
-    dt_h: T.handle,
-    matrix_a_h: T.handle,
-    matrix_b_h: T.handle,
-    matrix_c_h: T.handle,
-    d_h: T.handle,
-    z_h: T.handle,
-    dt_bias_h: T.handle,
-    state_indices_h: T.handle,
-    dst_indices_h: T.handle,
-    intermediate_states_h: T.handle,
-    intermediate_indices_h: T.handle,
-    intermediate_scales_h: T.handle,
-    cu_seqlens_h: T.handle,
-    num_accepted_tokens_h: T.handle,
-    rand_seed_h: T.handle,
-    output_h: T.handle,
-    state_stride_batch: T.int64,
-    state_scale_stride_batch: T.int64,
-    x_stride_batch: T.int64,
-    x_stride_mtp: T.int64,
-    dt_stride_batch: T.int64,
-    dt_stride_mtp: T.int64,
-    b_stride_batch: T.int64,
-    b_stride_mtp: T.int64,
-    c_stride_batch: T.int64,
-    c_stride_mtp: T.int64,
-    z_stride_batch: T.int64,
-    z_stride_mtp: T.int64,
-    out_stride_batch: T.int64,
-    out_stride_mtp: T.int64,
-    state_indices_stride_batch: T.int64,
-    state_indices_stride_t: T.int64,
-    dst_indices_stride_batch: T.int64,
-    dst_indices_stride_t: T.int64,
-    cache_steps: T.int32,
-    nheads_runtime: T.int32,
-    ngroups_runtime: T.int32,
-    dt_softplus: T.int32,
-    update_state: T.int32,
-    pad_slot_id: T.int32,
-    *,
-    BATCH: T.constexpr,
-    NHEADS: T.constexpr,
-    DIM: T.constexpr,
-    DSTATE: T.constexpr,
-    NTOKENS: T.constexpr,
-    HEADS_PER_GROUP: T.constexpr,
-    NUM_TMA_LOADS: T.constexpr,
-    DSTATE_PAD: T.constexpr,
-    STATE_BYTES: T.constexpr,
-    STATE_STAGE_BYTES: T.constexpr,
-    ELEMS_PER_TILE_MEMBER: T.constexpr,
-    PAIRS_PER_TILE_MEMBER: T.constexpr,
-    ELEMS_PER_TILE: T.constexpr,
-    NUM_TILES: T.constexpr,
-    HAS_STATE_INDICES: T.constexpr,
-    HAS_INTERMEDIATE_STATES: T.constexpr,
-    HAS_Z: T.constexpr,
-    HAS_D: T.constexpr,
-    HAS_DT_BIAS: T.constexpr,
-    UPDATE_STATE: T.constexpr,
-    PHILOX_ROUNDS: T.constexpr,
-    OFF_B: T.constexpr,
-    OFF_C: T.constexpr,
-    OFF_STATE: T.constexpr,
-    OFF_X: T.constexpr,
-    OFF_DT: T.constexpr,
-    OFF_OUT: T.constexpr,
-    OFF_EMPTY: T.constexpr,
-    OFF_FULL: T.constexpr,
-    OFF_OUT_READY: T.constexpr,
-    SHARED_BYTES: T.constexpr,
-    STATE_ELEMENTS: T.constexpr,
-    X_ELEMENTS: T.constexpr,
-    DT_ELEMENTS: T.constexpr,
-    BC_ELEMENTS: T.constexpr,
-    INDEX_ELEMENTS: T.constexpr,
-    INTERMEDIATE_ELEMENTS: T.constexpr,
-    ACCEPTED_ELEMENTS: T.constexpr,
-    STATE_DTYPE: T.constexpr,
-    WEIGHT_DTYPE: T.constexpr,
-    INDEX_DTYPE: T.constexpr,
-):
-    state = T.match_buffer(state_h, (STATE_ELEMENTS,), STATE_DTYPE, scope="global")
-    x = T.match_buffer(x_h, (X_ELEMENTS,), "bfloat16", scope="global")
-    dt = T.match_buffer(dt_h, (DT_ELEMENTS,), WEIGHT_DTYPE, scope="global")
-    matrix_a = T.match_buffer(matrix_a_h, (NHEADS,), "float32", scope="global")
-    matrix_b = T.match_buffer(matrix_b_h, (BC_ELEMENTS,), "bfloat16", scope="global")
-    matrix_c = T.match_buffer(matrix_c_h, (BC_ELEMENTS,), "bfloat16", scope="global")
-    d_weight = T.match_buffer(d_h, (NHEADS,), WEIGHT_DTYPE, scope="global")
-    z = T.match_buffer(z_h, (X_ELEMENTS,), "bfloat16", scope="global")
-    dt_bias = T.match_buffer(dt_bias_h, (NHEADS,), WEIGHT_DTYPE, scope="global")
-    state_indices = T.match_buffer(state_indices_h, (INDEX_ELEMENTS,), INDEX_DTYPE, scope="global")
-    intermediate_states = T.match_buffer(
-        intermediate_states_h, (INTERMEDIATE_ELEMENTS,), STATE_DTYPE, scope="global"
-    )
-    intermediate_indices = T.match_buffer(
-        intermediate_indices_h, (ACCEPTED_ELEMENTS,), INDEX_DTYPE, scope="global"
-    )
-    rand_seed = T.match_buffer(rand_seed_h, (1,), "int64", scope="global")
-    output = T.match_buffer(output_h, (X_ELEMENTS,), "bfloat16", scope="global")
-    T.device_entry()
-    T.attr({"tirx.launch_bounds_min_blocks_per_sm": 6})
-    # TIRX_TRANSCRIBE_START selective_state_update_mtp_horizontal
-
-    batch_i, head = T.cta_id([BATCH, NHEADS])
-    lane, warp = T.thread_id([32, 5])
-
-    state_batch: T.int64
-    if HAS_STATE_INDICES:
-        if INDEX_DTYPE == "int32":
-            state_batch = T.cast(_global_load_nc_s32(state_indices, batch_i), "int64")
-        else:
-            state_batch = _global_load_nc_s64(state_indices, batch_i)
-    else:
-        state_batch = T.cast(batch_i, "int64")
-
-    smem_raw = T.alloc_buffer((SHARED_BYTES,), "uint8", scope="shared.dyn", align=128)
-    s_u16 = T.decl_buffer(
-        (SHARED_BYTES // 2,),
-        "uint16",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=0,
-        align=128,
-    )
-    s_u32 = T.decl_buffer(
-        (SHARED_BYTES // 4,),
-        "uint32",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=0,
-        align=128,
-    )
-    if warp == 0 and lane == 0:
-        for stage in T.unroll(2):
-            T.evaluate(
-                T.ptx.mbarrier.init.shared.b64(
-                    smem_raw.ptr_to([OFF_EMPTY + stage * 8]), T.uint32(160)
-                )
-            )
-            T.evaluate(
-                T.ptx.mbarrier.init.shared.b64(
-                    smem_raw.ptr_to([OFF_FULL + stage * 8]), T.uint32(129)
-                )
-            )
-        T.evaluate(T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([OFF_OUT_READY]), T.uint32(128)))
-    T.cuda.cta_sync()
-
-    @T.inline
-    def dispatch_pad(*, IS_PAD):
-        if warp < 4:
-            _role_update_horizontal(
-                smem_raw,
-                s_u16,
-                s_u32,
-                state,
-                intermediate_states,
-                dt,
-                matrix_a,
-                d_weight,
-                z,
-                dt_bias,
-                intermediate_indices,
-                rand_seed,
-                output,
-                lane,
-                warp,
-                batch_i,
-                head,
-                state_batch,
-                state_stride_batch,
-                dt_stride_batch,
-                dt_stride_mtp,
-                z_stride_batch,
-                z_stride_mtp,
-                out_stride_batch,
-                out_stride_mtp,
-                dt_softplus,
-                update_state,
-                IS_PAD=IS_PAD,
-                NHEADS=NHEADS,
-                DIM=DIM,
-                DSTATE=DSTATE,
-                NTOKENS=NTOKENS,
-                NUM_TMA_LOADS=NUM_TMA_LOADS,
-                DSTATE_PAD=DSTATE_PAD,
-                STATE_DTYPE=STATE_DTYPE,
-                WEIGHT_DTYPE=WEIGHT_DTYPE,
-                INDEX_DTYPE=INDEX_DTYPE,
-                STATE_BYTES=STATE_BYTES,
-                ELEMS_PER_TILE_MEMBER=ELEMS_PER_TILE_MEMBER,
-                PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
-                ELEMS_PER_TILE=ELEMS_PER_TILE,
-                NUM_TILES=NUM_TILES,
-                HAS_INTERMEDIATE_STATES=HAS_INTERMEDIATE_STATES,
-                HAS_Z=HAS_Z,
-                HAS_D=HAS_D,
-                HAS_DT_BIAS=HAS_DT_BIAS,
-                UPDATE_STATE=UPDATE_STATE,
-                PHILOX_ROUNDS=PHILOX_ROUNDS,
-                OFF_B=OFF_B,
-                OFF_C=OFF_C,
-                OFF_STATE=OFF_STATE,
-                OFF_X=OFF_X,
-                OFF_DT=OFF_DT,
-                OFF_OUT=OFF_OUT,
-                OFF_EMPTY=OFF_EMPTY,
-                OFF_FULL=OFF_FULL,
-                OFF_OUT_READY=OFF_OUT_READY,
-                STATE_STAGE_BYTES=STATE_STAGE_BYTES,
-            )
-        else:
-            _role_load_horizontal(
-                smem_raw,
-                tensor_state,
-                tensor_b,
-                tensor_c,
-                tensor_x,
-                lane,
-                batch_i,
-                head,
-                head // HEADS_PER_GROUP,
-                state_batch,
-                IS_PAD=IS_PAD,
-                NTOKENS=NTOKENS,
-                NUM_TMA_LOADS=NUM_TMA_LOADS,
-                DSTATE_PAD=DSTATE_PAD,
-                STATE_STAGE_BYTES=STATE_STAGE_BYTES,
-                STATE_BYTES=STATE_BYTES,
-                DIM=DIM,
-                OFF_B=OFF_B,
-                OFF_C=OFF_C,
-                OFF_STATE=OFF_STATE,
-                OFF_X=OFF_X,
-                OFF_EMPTY=OFF_EMPTY,
-                OFF_FULL=OFF_FULL,
-            )
-
-    if state_batch == T.cast(pad_slot_id, "int64"):
-        dispatch_pad(IS_PAD=True)
-    else:
-        dispatch_pad(IS_PAD=False)
-
-
 def _validate_dispatch(config: dict[str, Any]) -> None:
     if str(config.get("mode", "fixed")).startswith("varlen"):
         raise ValueError("MTP horizontal does not support varlen inputs")
@@ -951,17 +303,6 @@ def _specialization(config: dict[str, Any]) -> dict[str, Any]:
     num_tiles = (dstate_pad // 8) // elems_per_tile_member
     state_stage_bytes = 32 * dstate_pad * state_bytes
 
-    off_b = 0
-    off_c = _simple._align_up(off_b + tokens * dstate_pad * 2, 128)
-    off_state = _simple._align_up(off_c + tokens * dstate_pad * 2, 128)
-    off_x = _simple._align_up(off_state + 2 * state_stage_bytes, 128)
-    off_dt = off_x + tokens * dim * 2
-    off_out = off_dt + tokens * 4
-    off_empty = _simple._align_up(off_out + tokens * dim * 4, 8)
-    off_full = off_empty + 16
-    off_out_ready = off_full + 16
-    shared_bytes = _simple._align_up(off_out_ready + 8, 128)
-
     return {
         "BATCH": batch,
         "NHEADS": nheads,
@@ -984,16 +325,6 @@ def _specialization(config: dict[str, Any]) -> dict[str, Any]:
         "HAS_DT_BIAS": bool(config.get("has_dt_bias", True)),
         "UPDATE_STATE": bool(config.get("update_state", True)),
         "PHILOX_ROUNDS": int(config.get("philox_rounds", 0)),
-        "OFF_B": off_b,
-        "OFF_C": off_c,
-        "OFF_STATE": off_state,
-        "OFF_X": off_x,
-        "OFF_DT": off_dt,
-        "OFF_OUT": off_out,
-        "OFF_EMPTY": off_empty,
-        "OFF_FULL": off_full,
-        "OFF_OUT_READY": off_out_ready,
-        "SHARED_BYTES": shared_bytes,
         "STATE_ELEMENTS": base["STATE_ELEMENTS"],
         "X_ELEMENTS": base["X_ELEMENTS"],
         "DT_ELEMENTS": base["DT_ELEMENTS"],
@@ -1008,11 +339,571 @@ def _specialization(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_kernel(**kwargs: Any):
-    kernel = _selective_state_update_mtp_horizontal.specialize(**_specialization(kwargs))
-    return kernel.with_attr(
-        "tirx.kernel_launch_params",
-        ["blockIdx.x", "blockIdx.y", "threadIdx.x", "threadIdx.y", "tirx.use_dyn_shared_memory"],
+    spec = _specialization(kwargs)
+    NHEADS = spec["NHEADS"]
+    DIM = spec["DIM"]
+    DSTATE = spec["DSTATE"]
+    NTOKENS = spec["NTOKENS"]
+    HEADS_PER_GROUP = spec["HEADS_PER_GROUP"]
+    NUM_TMA_LOADS = spec["NUM_TMA_LOADS"]
+    DSTATE_PAD = spec["DSTATE_PAD"]
+    STATE_BYTES = spec["STATE_BYTES"]
+    STATE_STAGE_BYTES = spec["STATE_STAGE_BYTES"]
+    STATE_STAGE_WORDS = STATE_STAGE_BYTES // 4
+    ELEMS_PER_TILE_MEMBER = spec["ELEMS_PER_TILE_MEMBER"]
+    PAIRS_PER_TILE_MEMBER = spec["PAIRS_PER_TILE_MEMBER"]
+    ELEMS_PER_TILE = spec["ELEMS_PER_TILE"]
+    NUM_TILES = spec["NUM_TILES"]
+    HAS_INTERMEDIATE_STATES = spec["HAS_INTERMEDIATE_STATES"]
+    HAS_Z = spec["HAS_Z"]
+    HAS_D = spec["HAS_D"]
+    HAS_DT_BIAS = spec["HAS_DT_BIAS"]
+    UPDATE_STATE = spec["UPDATE_STATE"]
+    PHILOX_ROUNDS = spec["PHILOX_ROUNDS"]
+    STATE_DTYPE = spec["STATE_DTYPE"]
+    WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
+    INDEX_DTYPE = spec["INDEX_DTYPE"]
+
+    @K.kernel(
+        warps=5,
+        arch="sm_100a",
+        min_blocks_per_sm=6,
+        grid=(spec["BATCH"], spec["NHEADS"]),
+        thread_layout="lane_warp",
     )
+    def selective_state_update_mtp_horizontal(
+        tensor_state: K.TensorMap,
+        tensor_b: K.TensorMap,
+        tensor_c: K.TensorMap,
+        tensor_x: K.TensorMap,
+        state: K.gptr[spec["STATE_DTYPE"]],
+        state_scale: K.gptr[K.f32],
+        x: K.gptr[K.bf16],
+        dt: K.gptr[spec["WEIGHT_DTYPE"]],
+        matrix_a: K.gptr[K.f32],
+        matrix_b: K.gptr[K.bf16],
+        matrix_c: K.gptr[K.bf16],
+        d_weight: K.gptr[spec["WEIGHT_DTYPE"]],
+        z: K.gptr[K.bf16],
+        dt_bias: K.gptr[spec["WEIGHT_DTYPE"]],
+        state_indices: K.gptr[spec["INDEX_DTYPE"]],
+        dst_indices: K.gptr[spec["INDEX_DTYPE"]],
+        intermediate_states: K.gptr[spec["STATE_DTYPE"]],
+        intermediate_indices: K.gptr[spec["INDEX_DTYPE"]],
+        intermediate_scales: K.gptr[K.f32],
+        cu_seqlens: K.gptr[str(kwargs["cu_seqlens_dtype"])],
+        num_accepted_tokens: K.gptr[str(kwargs["accepted_dtype"])],
+        rand_seed: K.gptr[K.i64],
+        output: K.gptr[K.bf16],
+        state_stride_batch: K.i64,
+        state_scale_stride_batch: K.i64,
+        x_stride_batch: K.i64,
+        x_stride_mtp: K.i64,
+        dt_stride_batch: K.i64,
+        dt_stride_mtp: K.i64,
+        b_stride_batch: K.i64,
+        b_stride_mtp: K.i64,
+        c_stride_batch: K.i64,
+        c_stride_mtp: K.i64,
+        z_stride_batch: K.i64,
+        z_stride_mtp: K.i64,
+        out_stride_batch: K.i64,
+        out_stride_mtp: K.i64,
+        state_indices_stride_batch: K.i64,
+        state_indices_stride_t: K.i64,
+        dst_indices_stride_batch: K.i64,
+        dst_indices_stride_t: K.i64,
+        cache_steps: K.i32,
+        nheads_runtime: K.i32,
+        ngroups_runtime: K.i32,
+        dt_softplus: K.i32,
+        update_state: K.i32,
+        pad_slot_id: K.i32,
+    ):
+        batch_i, head = K.cta_id()
+        if spec["HAS_STATE_INDICES"]:
+            if spec["INDEX_DTYPE"] == "int32":
+                state_batch = K.cast(_global_load_nc_s32(state_indices, batch_i), "int64")
+            else:
+                state_batch = _global_load_nc_s64(state_indices, batch_i)
+        else:
+            state_batch = K.cast(batch_i, "int64")
+
+        smem = K.smem_pool()
+        s_b = smem.alloc((spec["NTOKENS"] * spec["DSTATE_PAD"],), K.bf16, align=128)
+        s_c = smem.alloc((spec["NTOKENS"] * spec["DSTATE_PAD"],), K.bf16, align=128)
+        s_state_words = smem.alloc((2 * spec["STATE_STAGE_BYTES"] // 4,), K.u32, align=128)
+        s_x = smem.alloc((spec["NTOKENS"] * spec["DIM"],), K.bf16, align=128)
+        s_dt = smem.alloc((spec["NTOKENS"],), K.f32, align=4)
+        s_out = smem.alloc((spec["NTOKENS"] * spec["DIM"],), K.f32, align=4)
+        empty = K.MBarrier(smem, 2, leader=True)
+        full = K.MBarrier(smem, 2, leader=True)
+        out_ready = K.MBarrier(smem, 1, leader=True)
+        with K.If(K.thread_id() == 0):
+            with K.Then():
+                empty.init(160)
+                full.init(129)
+                out_ready.init(128)
+        K.cuda.cta_sync()
+
+        roles = K.specialize()
+        update = roles.role("update", warps=[0, 1, 2, 3])
+        load = roles.role("load", warps=[4])
+
+        s_b_words = s_b.view("uint32")
+        s_c_words = s_c.view("uint32")
+        empty_barriers = empty.buf
+        full_barriers = full.buf
+        out_ready_barrier = out_ready.buf
+
+        def run_update(IS_PAD: K.constexpr):
+            lane: K.int32 = K.tid_in_role() & 31
+            compute_warp: K.int32 = K.warp_id_in_role()
+            random_seed = K.local_scalar("int64")
+            K.assign(random_seed, 0)
+            if PHILOX_ROUNDS > 0 and not IS_PAD:
+                K.assign(random_seed, _global_load_s64(rand_seed, 0))
+
+            icache_idx = K.local_scalar("int64")
+            K.assign(icache_idx, state_batch)
+            if HAS_INTERMEDIATE_STATES and not IS_PAD:
+                K.assign(
+                    icache_idx, _global_load_index_s64(intermediate_indices, batch_i, INDEX_DTYPE)
+                )
+
+            a_value: K.float32 = K.reinterpret("float32", _global_load_u32(matrix_a, head))
+            d_value = K.local_scalar("float32")
+            K.assign(d_value, 0.0)
+            if HAS_D:
+                K.assign(d_value, _load_weight(d_weight, head, WEIGHT_DTYPE))
+            bias_value = K.local_scalar("float32")
+            K.assign(bias_value, 0.0)
+            if HAS_DT_BIAS:
+                K.assign(bias_value, _load_weight(dt_bias, head, WEIGHT_DTYPE))
+
+            _mbarrier_arrive(empty_barriers.ptr_to([0]))
+            _mbarrier_arrive(empty_barriers.ptr_to([1]))
+
+            flat_thread: K.int32 = compute_warp * 32 + lane
+            with K.If(flat_thread < NTOKENS):
+                with K.Then():
+                    dt_value = K.local_scalar("float32")
+                    K.assign(
+                        dt_value,
+                        _load_weight(
+                            dt,
+                            K.cast(batch_i, "int64") * dt_stride_batch
+                            + K.cast(flat_thread, "int64") * dt_stride_mtp
+                            + head,
+                            WEIGHT_DTYPE,
+                        ),
+                    )
+                    if HAS_DT_BIAS:
+                        K.assign(dt_value, _add(dt_value, bias_value))
+                    with K.If(K.And(dt_softplus != 0, dt_value <= K.float32(20.0))):
+                        with K.Then():
+                            exp_value: K.float32 = _exp2(_mul(dt_value, K.float32(_LOG2_E)))
+                            log_value: K.float32 = _log2(_add(K.float32(1.0), exp_value))
+                            K.assign(dt_value, _mul(log_value, K.float32(_LN_2)))
+                    K.evaluate(
+                        K.ptx.st.shared.b32(
+                            s_dt.ptr_to([flat_thread]), K.reinterpret("uint32", dt_value)
+                        )
+                    )
+
+            member: K.int32 = lane % 8
+            row_group: K.int32 = lane // 8
+            state_ptr_offset_i32: K.int32 = K.cast(
+                state_batch * state_stride_batch + K.cast(head * DIM * DSTATE, "int64"), "int32"
+            )
+
+            state_pipe = K.PipelineState(2, phase=0)
+            with K.unroll(NUM_TMA_LOADS) as tl:
+                _mbarrier_arrive_wait_parity(
+                    full_barriers.ptr_to([state_pipe.stage]), state_pipe.phase
+                )
+
+                with K.serial(2) as sp:
+                    sram_row: K.int32 = sp * 16 + compute_warp * 4 + row_group
+                    dd: K.int32 = tl * 32 + sram_row
+                    state_values = K.alloc_local((NUM_TILES * PAIRS_PER_TILE_MEMBER,), "uint64")
+
+                    with K.unroll(NUM_TILES) as tile:
+                        member_col: K.int32 = tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
+                        pair_base: K.int32 = tile * PAIRS_PER_TILE_MEMBER
+                        with K.If(K.And(K.Not(IS_PAD), member_col < DSTATE)):
+                            with K.Then():
+                                state_words = K.alloc_local((4,), "uint32")
+                                state_word_index: K.int32 = (
+                                    state_pipe.stage * STATE_STAGE_BYTES
+                                    + (sram_row * DSTATE_PAD + member_col) * STATE_BYTES
+                                ) // 4
+                                _shared_load_v4_b32(s_state_words, state_word_index, state_words)
+                                with K.unroll(PAIRS_PER_TILE_MEMBER) as pair:
+                                    if STATE_DTYPE == "bfloat16":
+                                        K.ptx.mov.b64(
+                                            state_values[pair_base + pair],
+                                            _bf16_word_to_f32x2(state_words[pair]),
+                                        )
+                                    else:
+                                        if STATE_DTYPE == "float16":
+                                            K.ptx.mov.b64(
+                                                state_values[pair_base + pair],
+                                                (
+                                                    K.cuda.make_float2(
+                                                        _f16_to_f32(
+                                                            _extract_u16(state_words[pair], False)
+                                                        ),
+                                                        _f16_to_f32(
+                                                            _extract_u16(state_words[pair], True)
+                                                        ),
+                                                    )
+                                                ),
+                                            )
+                                        else:
+                                            K.ptx.mov.b64(
+                                                state_values[pair_base + pair],
+                                                (
+                                                    K.cuda.make_float2(
+                                                        K.reinterpret(
+                                                            "float32", state_words[pair * 2]
+                                                        ),
+                                                        K.reinterpret(
+                                                            "float32", state_words[pair * 2 + 1]
+                                                        ),
+                                                    )
+                                                ),
+                                            )
+                            with K.Else():
+                                with K.unroll(PAIRS_PER_TILE_MEMBER) as pair:
+                                    K.ptx.mov.b64(
+                                        state_values[pair_base + pair],
+                                        K.cuda.make_float2(K.float32(0.0), K.float32(0.0)),
+                                    )
+
+                    random_words = K.alloc_local((16,), "uint32")
+                    if PHILOX_ROUNDS > 0 and not IS_PAD:
+                        seed_lo: K.uint32 = K.cast(random_seed, "uint32")
+                        seed_hi: K.uint32 = K.cast(
+                            K.shift_right(K.reinterpret("uint64", random_seed), K.uint32(32)),
+                            "uint32",
+                        )
+                        with K.unroll(4) as random_group:
+                            random_tile: K.int32 = random_group // 2
+                            random_e: K.int32 = (random_group % 2) * 4
+                            random_col: K.int32 = (
+                                random_tile * ELEMS_PER_TILE
+                                + member * ELEMS_PER_TILE_MEMBER
+                                + random_e
+                            )
+                            counter: K.int32 = state_ptr_offset_i32 + dd * DSTATE + random_col
+                            group_words = K.alloc_local((4,), "uint32")
+                            _philox4x32(
+                                group_words, seed_lo, seed_hi, counter, PHILOX_ROUNDS=PHILOX_ROUNDS
+                            )
+                            with K.unroll(4) as random_word:
+                                K.ptx.mov.b32(
+                                    random_words[random_group * 4 + random_word],
+                                    group_words[random_word],
+                                )
+
+                    bc_step_words = K.local_scalar("int32")
+                    K.assign(bc_step_words, 0)
+                    x_step = K.local_scalar("int32")
+                    K.assign(x_step, 0)
+                    dt_step = K.local_scalar("int32")
+                    K.assign(dt_step, 0)
+                    out_step = K.local_scalar("int32")
+                    K.assign(out_step, 0)
+                    intermediate_step_base = K.local_scalar("int64")
+                    K.assign(
+                        intermediate_step_base,
+                        icache_idx * K.int64(NTOKENS * NHEADS * DIM * DSTATE)
+                        + K.cast(head * DIM * DSTATE + dd * DSTATE, "int64"),
+                    )
+
+                    with K.serial(NTOKENS) as step:
+                        dt_value = K.local_scalar("float32")
+                        K.assign(
+                            dt_value, K.reinterpret("float32", _shared_load_u32(s_dt, dt_step))
+                        )
+                        da_value: K.float32 = _exp2(
+                            _mul(_mul(a_value, dt_value), K.float32(_LOG2_E))
+                        )
+                        x_value: K.float32 = _bf16_to_f32(_shared_load_u16(s_x, x_step + dd))
+                        dtx_value: K.float32 = _mul(dt_value, x_value)
+                        out_pair = K.local_scalar("uint64")
+                        K.assign(out_pair, K.cuda.make_float2(K.float32(0.0), K.float32(0.0)))
+
+                        with K.unroll(NUM_TILES) as tile:
+                            member_col: K.int32 = (
+                                tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
+                            )
+                            with K.If(member_col < DSTATE):
+                                with K.Then():
+                                    b_words = K.alloc_local((4,), "uint32")
+                                    c_words = K.alloc_local((4,), "uint32")
+                                    b_word_index: K.int32 = bc_step_words + member_col // 2
+                                    c_word_index: K.int32 = bc_step_words + member_col // 2
+                                    if PAIRS_PER_TILE_MEMBER == 2:
+                                        _shared_load_v2_b32(s_b_words, b_word_index, b_words)
+                                        _shared_load_v2_b32(s_c_words, c_word_index, c_words)
+                                    else:
+                                        _shared_load_v4_b32(s_b_words, b_word_index, b_words)
+                                        _shared_load_v4_b32(s_c_words, c_word_index, c_words)
+                                    with K.unroll(PAIRS_PER_TILE_MEMBER) as pair:
+                                        b_pair: K.uint64 = _bf16_word_to_f32x2(b_words[pair])
+                                        c_pair: K.uint64 = _bf16_word_to_f32x2(c_words[pair])
+                                        dbx_pair = K.local_scalar("uint64")
+                                        K.ptx.mul.f32x2(
+                                            dbx_pair,
+                                            b_pair,
+                                            K.cuda.make_float2(dtx_value, dtx_value),
+                                        )
+                                        pair_index: K.int32 = tile * PAIRS_PER_TILE_MEMBER + pair
+                                        updated_state = K.local_scalar("uint64")
+                                        K.ptx.fma.rn.f32x2(
+                                            updated_state,
+                                            K.cuda.make_float2(da_value, da_value),
+                                            state_values[pair_index],
+                                            dbx_pair,
+                                        )
+                                        K.ptx.mov.b64(state_values[pair_index], updated_state)
+                                        K.ptx.fma.rn.f32x2(
+                                            out_pair, updated_state, c_pair, out_pair
+                                        )
+
+                        out_value = K.local_scalar("float32")
+                        K.assign(
+                            out_value, _add(K.cuda.float2_x(out_pair), K.cuda.float2_y(out_pair))
+                        )
+                        with K.unroll(3) as delta_idx:
+                            peer_out: K.float32 = K.cuda.__shfl_down_sync(
+                                K.uint32(0xFFFFFFFF),
+                                out_value,
+                                K.shift_right(K.int32(4), delta_idx),
+                                32,
+                            )
+                            K.assign(out_value, _add(out_value, peer_out))
+                        with K.If(member == 0):
+                            with K.Then():
+                                K.evaluate(
+                                    K.ptx.st.shared.b32(
+                                        s_out.ptr_to([out_step + dd]),
+                                        K.reinterpret("uint32", _fma(d_value, x_value, out_value)),
+                                    )
+                                )
+
+                        K.assign(bc_step_words, bc_step_words + DSTATE_PAD // 2)
+                        K.assign(x_step, x_step + DIM)
+                        K.assign(dt_step, dt_step + 1)
+                        K.assign(out_step, out_step + DIM)
+
+                        if HAS_INTERMEDIATE_STATES and not IS_PAD:
+                            with K.unroll(NUM_TILES) as tile:
+                                member_col: K.int32 = (
+                                    tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
+                                )
+                                with K.If(member_col < DSTATE):
+                                    with K.Then():
+                                        _store_state_tile(
+                                            state_values,
+                                            tile * PAIRS_PER_TILE_MEMBER,
+                                            random_words,
+                                            tile * 8,
+                                            intermediate_states,
+                                            intermediate_step_base + member_col,
+                                            STATE_DTYPE=STATE_DTYPE,
+                                            PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
+                                            PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                        )
+                            K.assign(
+                                intermediate_step_base,
+                                intermediate_step_base + K.int64(NHEADS * DIM * DSTATE),
+                            )
+
+                        with K.If(K.And(K.And(UPDATE_STATE, step == NTOKENS - 1), K.Not(IS_PAD))):
+                            with K.Then():
+                                final_base: K.int64 = state_batch * state_stride_batch + K.cast(
+                                    head * DIM * DSTATE + dd * DSTATE, "int64"
+                                )
+                                with K.unroll(NUM_TILES) as tile:
+                                    member_col: K.int32 = (
+                                        tile * ELEMS_PER_TILE + member * ELEMS_PER_TILE_MEMBER
+                                    )
+                                    with K.If(member_col < DSTATE):
+                                        with K.Then():
+                                            _store_state_tile(
+                                                state_values,
+                                                tile * PAIRS_PER_TILE_MEMBER,
+                                                random_words,
+                                                tile * 8,
+                                                state,
+                                                final_base + member_col,
+                                                STATE_DTYPE=STATE_DTYPE,
+                                                PAIRS_PER_TILE_MEMBER=PAIRS_PER_TILE_MEMBER,
+                                                PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                            )
+
+                _mbarrier_arrive(empty_barriers.ptr_to([state_pipe.stage]))
+                state_pipe.advance()
+
+            _mbarrier_arrive_wait_parity(out_ready_barrier.ptr_to([0]), 0)
+            with K.unroll((NTOKENS + 3) // 4) as episode:
+                step: K.int32 = compute_warp + episode * 4
+                with K.If(step < NTOKENS):
+                    with K.Then():
+                        out_base: K.int64 = (
+                            K.cast(batch_i, "int64") * out_stride_batch
+                            + K.cast(step, "int64") * out_stride_mtp
+                            + head * DIM
+                        )
+                        z_base: K.int64 = (
+                            K.cast(batch_i, "int64") * z_stride_batch
+                            + K.cast(step, "int64") * z_stride_mtp
+                            + head * DIM
+                        )
+                        if DIM == 64:
+                            d: K.int32 = lane * 2
+                            out_words = K.alloc_local((2,), "uint32")
+                            if NTOKENS == 1:
+                                K.ptx.mov.b32(out_words[0], _shared_load_u32(s_out, step * DIM + d))
+                                K.ptx.mov.b32(
+                                    out_words[1], _shared_load_u32(s_out, step * DIM + d + 1)
+                                )
+                            else:
+                                _shared_load_v2_b32(s_out, step * DIM + d, out_words)
+                            z_bits = K.alloc_local((2,), "uint16")
+                            output_bits = K.alloc_local((2,), "uint16")
+                            if HAS_Z:
+                                _global_load_v2_b16(z, z_base + d, z_bits)
+                            with K.unroll(2) as k:
+                                out_value = K.local_scalar("float32")
+                                K.assign(out_value, K.reinterpret("float32", out_words[k]))
+                                if HAS_Z:
+                                    z_value: K.float32 = _bf16_to_f32(z_bits[k])
+                                    exp_neg: K.float32 = _exp2(
+                                        _mul(_sub(K.float32(0.0), z_value), K.float32(_LOG2_E))
+                                    )
+                                    sigmoid: K.float32 = _div(
+                                        K.float32(1.0), _add(K.float32(1.0), exp_neg)
+                                    )
+                                    K.assign(out_value, _mul(out_value, _mul(z_value, sigmoid)))
+                                K.ptx.mov.b16(output_bits[k], _f32_to_bf16(out_value))
+                            K.evaluate(
+                                K.ptx.st.global_.v2.b16(
+                                    output.ptr_to([out_base + d]), output_bits[0], output_bits[1]
+                                )
+                            )
+                        else:
+                            d: K.int32 = lane * 4
+                            out_words = K.alloc_local((4,), "uint32")
+                            _shared_load_v4_b32(s_out, step * DIM + d, out_words)
+                            z_bits = K.alloc_local((4,), "uint16")
+                            output_bits = K.alloc_local((4,), "uint16")
+                            if HAS_Z:
+                                _global_load_v4_b16(z, z_base + d, z_bits)
+                            with K.unroll(4) as k:
+                                out_value = K.local_scalar("float32")
+                                K.assign(out_value, K.reinterpret("float32", out_words[k]))
+                                if HAS_Z:
+                                    z_value: K.float32 = _bf16_to_f32(z_bits[k])
+                                    exp_neg: K.float32 = _exp2(
+                                        _mul(_sub(K.float32(0.0), z_value), K.float32(_LOG2_E))
+                                    )
+                                    sigmoid: K.float32 = _div(
+                                        K.float32(1.0), _add(K.float32(1.0), exp_neg)
+                                    )
+                                    K.assign(out_value, _mul(out_value, _mul(z_value, sigmoid)))
+                                K.ptx.mov.b16(output_bits[k], _f32_to_bf16(out_value))
+                            K.evaluate(
+                                K.ptx.st.global_.v4.b16(
+                                    output.ptr_to([out_base + d]),
+                                    output_bits[0],
+                                    output_bits[1],
+                                    output_bits[2],
+                                    output_bits[3],
+                                )
+                            )
+
+        def run_load(IS_PAD: K.constexpr):
+            lane: K.int32 = K.tid_in_role()
+            kv_group: K.int32 = head // HEADS_PER_GROUP
+            with K.If(lane == 0):
+                with K.Then():
+                    _tma_g2s_4d(
+                        s_b.ptr_to([0]),
+                        tensor_b,
+                        0,
+                        kv_group,
+                        0,
+                        batch_i,
+                        full_barriers.ptr_to([0]),
+                    )
+                    _tma_g2s_4d(
+                        s_c.ptr_to([0]),
+                        tensor_c,
+                        0,
+                        kv_group,
+                        0,
+                        batch_i,
+                        full_barriers.ptr_to([0]),
+                    )
+                    _tma_g2s_4d(
+                        s_x.ptr_to([0]), tensor_x, 0, head, 0, batch_i, full_barriers.ptr_to([0])
+                    )
+
+            bcx_bytes: K.int32 = 2 * NTOKENS * DSTATE_PAD * 2 + NTOKENS * DIM * 2
+            state_pipe = K.PipelineState(2, phase=0)
+            with K.unroll(NUM_TMA_LOADS) as tl:
+                _mbarrier_arrive_wait_parity(
+                    empty_barriers.ptr_to([state_pipe.stage]), state_pipe.phase
+                )
+                with K.If(lane == 0):
+                    with K.Then():
+                        if not IS_PAD:
+                            _tma_g2s_4d(
+                                s_state_words.ptr_to([state_pipe.stage * STATE_STAGE_WORDS]),
+                                tensor_state,
+                                0,
+                                tl * 32,
+                                head,
+                                state_batch,
+                                full_barriers.ptr_to([state_pipe.stage]),
+                            )
+                            transaction_bytes = K.local_scalar("int32")
+                            K.assign(transaction_bytes, STATE_STAGE_BYTES)
+                            with K.If(tl == 0):
+                                with K.Then():
+                                    K.assign(transaction_bytes, transaction_bytes + bcx_bytes)
+                            _mbarrier_arrive_expect_tx(
+                                full_barriers.ptr_to([state_pipe.stage]), transaction_bytes
+                            )
+                        else:
+                            transaction_bytes = K.local_scalar("int32")
+                            K.assign(transaction_bytes, 0)
+                            with K.If(tl == 0):
+                                with K.Then():
+                                    K.assign(transaction_bytes, bcx_bytes)
+                            _mbarrier_arrive_expect_tx(
+                                full_barriers.ptr_to([state_pipe.stage]), transaction_bytes
+                            )
+                state_pipe.advance()
+
+        with update:
+            with K.If(state_batch == K.cast(pad_slot_id, "int64")):
+                with K.Then():
+                    run_update(True)
+                with K.Else():
+                    run_update(False)
+        with load:
+            with K.If(state_batch == K.cast(pad_slot_id, "int64")):
+                with K.Then():
+                    run_load(True)
+                with K.Else():
+                    run_load(False)
+
+    return selective_state_update_mtp_horizontal.func
 
 
 class _AlignedTensorMap:
@@ -1247,6 +1138,7 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
+
     def source_builder():
         executable(*args)
         _run_reference(case)
