@@ -538,7 +538,7 @@ def get_kernel(
         x_sq = K.alloc_local([pair_values], K.f32)
         # The odd upper half of the last pair is a don't-care lane the source
         # leaves uninitialized; reading it keeps the packed shape intact.
-        undefined_f32 = K.alloc_local([1], K.f32)
+        undefined_f32 = K.local_scalar(K.f32)
         packed = K.local_scalar(K.u64)
 
         if compact:
@@ -653,7 +653,7 @@ def get_kernel(
                     peer_reduce, warp_sum, peer_mbar
                 )
 
-            K.evaluate(K.cuda.mbarrier_wait(shared_raw.ptr_to([mbar_offset]), K.int32(0)))
+            K.cuda.mbarrier_wait(shared_raw.ptr_to([mbar_offset]), K.int32(0))
 
             final_sum = K.local_scalar(K.f32, init=K.float32(0.0))
             for iteration in range(_ceil_div(total_partials_per_row, 32)):
@@ -702,7 +702,7 @@ def get_kernel(
             K.ptx[cvt_to_f32](w_f32[value], w_bits[value])
 
         for pair in range(packed_pairs):
-            high_scale = rstd if pair * 2 + 1 < total_values else undefined_f32[0]
+            high_scale = rstd if pair * 2 + 1 < total_values else undefined_f32
             K.ptx.mul.f32x2(
                 packed,
                 K.cuda.make_float2(x_f32[pair * 2], x_f32[pair * 2 + 1]),
@@ -711,7 +711,7 @@ def get_kernel(
             K.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
 
         for pair in range(packed_pairs):
-            high_bias = K.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32[0]
+            high_bias = K.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32
             K.ptx.add.f32x2(
                 packed,
                 K.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),

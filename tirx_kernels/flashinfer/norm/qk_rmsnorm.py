@@ -480,7 +480,7 @@ def get_kernel(
         w_f32 = K.alloc_local([pair_values], K.f32)
         # The odd upper half of the last pair is a don't-care lane the source
         # leaves uninitialized; reading it keeps the packed shape intact.
-        undefined_f32 = K.alloc_local([1], K.f32)
+        undefined_f32 = K.local_scalar(K.f32)
         packed = K.local_scalar(K.u64)
 
         if not use_async:
@@ -634,7 +634,7 @@ def get_kernel(
             K.ptx.mul.f32(x_f32[0], x_f32[0], w_f32[0])
         else:
             for pair in range(packed_pairs):
-                high_scale = rstd if pair * 2 + 1 < total_values else undefined_f32[0]
+                high_scale = rstd if pair * 2 + 1 < total_values else undefined_f32
                 x_pair = (
                     x_f32_pairs[pair]
                     if packed_x_pairs
@@ -644,9 +644,7 @@ def get_kernel(
                 K.ptx.mov.b64(x_f32[pair * 2], x_f32[pair * 2 + 1], packed)
 
             for pair in range(packed_pairs):
-                high_bias = (
-                    K.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32[0]
-                )
+                high_bias = K.float32(weight_bias) if pair * 2 + 1 < total_values else undefined_f32
                 K.ptx.add.f32x2(
                     packed,
                     K.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),
