@@ -10,7 +10,7 @@ tree, so a kernel's configs sit at `config/<bucket>/<kernel>.yaml`. With no
 `--workloads`, the flagged configs across all files are assembled into
 `.bench-suite/workloads.generated.yaml` and that is what runs. The generated
 file is the inspectable source of truth for the current representative sweep.
-Every kernel has at most three default small/medium/large representatives; the current tree assembles 133
+Every kernel has at most three default small/medium/large representatives; the current tree assembles 170
 workloads. Widening or narrowing the sweep is a YAML `default`
 flag flip, not a scheduler rule or a second selection file. Multi-GPU configs
 are deliberately absent from the default measured sweep but remain available

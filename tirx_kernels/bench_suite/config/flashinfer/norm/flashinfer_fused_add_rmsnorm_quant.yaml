@@ -1,0 +1,5 @@
+kernel: flashinfer_fused_add_rmsnorm_quant
+configs:
+  - {config: bf16_e4m3_m32_h4096_xc_rc_yc_pdl0_s1, default: true}
+  - {config: bf16_e4m3_m64_h8192_xc_rc_yc_pdl0_s1, default: true}
+  - {config: bf16_e4m3_m32_h4096_xc_rc_yc_pdl1_s1, default: true}
