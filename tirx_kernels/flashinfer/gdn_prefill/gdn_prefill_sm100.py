@@ -267,9 +267,9 @@ def make_kernel(HQ: int, HV: int):
             helper is called, including inside a guard). One of these per chain
             reproduces the frozen kernel's leader for every phase of that chain.
             """
-            e = K.alloc_local([1], "uint32")
-            K.assign(e[0], K.cuda.elect_sync())
-            return e[0]
+            e = K.local_scalar("uint32")
+            K.assign(e, K.cuda.elect_sync())
+            return e
 
         def mma_desc(view, *, transpose=False):
             addr = K.cuda.cvta_generic_to_shared(view.ptr_to(0, 0))
@@ -383,20 +383,20 @@ def make_kernel(HQ: int, HV: int):
             away. Each factor is itself 64-bit — f2(...) or a uint64 loaded
             straight out of smem (orig:L1691).
             """
-            t = K.alloc_local([1], "uint64")
-            K.ptx.mul.rn.f32x2(t[0], f2(vals[2 * i], vals[2 * i + 1]), factors[0])
+            t = K.local_scalar("uint64")
+            K.ptx.mul.rn.f32x2(t, f2(vals[2 * i], vals[2 * i + 1]), factors[0])
             for factor2 in factors[1:]:
-                K.ptx.mul.rn.f32x2(t[0], t[0], factor2)
-            K.assign(vals[2 * i], K.cuda.float2_x(t[0]))
-            K.assign(vals[2 * i + 1], K.cuda.float2_y(t[0]))
+                K.ptx.mul.rn.f32x2(t, t, factor2)
+            K.assign(vals[2 * i], K.cuda.float2_x(t))
+            K.assign(vals[2 * i + 1], K.cuda.float2_y(t))
 
         def neg_pack(dst_word, a, b):  # orig:L486-497
             # One sub.rn.f32x2 (from +0) + one cvt.rn.f16x2.f32. DPS keeps the
             # CUDA bridge from duplicating the expression (orig's own comment):
             # the value-returning form emits two standalone PTX subs.
-            neg = K.alloc_local([1], "uint64")
-            K.ptx.sub.rn.f32x2(neg[0], f2(K.float32(0.0), K.float32(0.0)), f2(a, b))
-            pack_f16x2(dst_word, K.cuda.float2_x(neg[0]), K.cuda.float2_y(neg[0]))
+            neg = K.local_scalar("uint64")
+            K.ptx.sub.rn.f32x2(neg, f2(K.float32(0.0), K.float32(0.0)), f2(a, b))
+            pack_f16x2(dst_word, K.cuda.float2_x(neg), K.cuda.float2_y(neg))
 
         def udiv_const(value, divisor):
             """value // divisor for a NONNEGATIVE value and a constant divisor.
@@ -481,13 +481,10 @@ def make_kernel(HQ: int, HV: int):
             # Per-thread coordinate algebra of the CG0 fragment: USER code,
             # logical coords only — the tile applies atom tiling + the
             # intra-atom xor.                            orig:L1530-1533
-            row0 = K.local_scalar("int32")
-            K.assign(row0, ((tid0 >> 1) & 48) | (tid0 & 15))
-            cb0 = K.local_scalar("int32")
-            K.assign(cb0, tid0 & 16)
+            row0 = K.local_scalar("int32", init=((tid0 >> 1) & 48) | (tid0 & 15))
+            cb0 = K.local_scalar("int32", init=tid0 & 16)
             # tmem row field: (thread << 16) & 0x600000 == warp_in_role * 32
-            rowbits0 = K.local_scalar("int32")
-            K.assign(rowbits0, (tid0 << 16) & 0x600000)
+            rowbits0 = K.local_scalar("int32", init=(tid0 << 16) & 0x600000)
 
             def cg0_acc_ld(frag, stage):  # orig:L541-552
                 # Ld16x32bx2/Repetition16 is two native x16 loads; `16` is
@@ -538,12 +535,12 @@ def make_kernel(HQ: int, HV: int):
                 for i in range(8):
                     with K.If((lane & 7) == i), K.Then():
                         K.assign(row[i], K.float32(1.0))
-                rs = K.alloc_local([1], "float32")
-                pv = K.alloc_local([1], "float32")
+                rs = K.local_scalar("float32")
+                pv = K.local_scalar("float32")
                 for src in range(7):
                     # CuTe emits exact neg.f32 here; neg.ftz.f32 cannot be
                     # folded into its select/conversion consumers by ptxas.
-                    K.ptx.neg.f32(rs[0], row[src])
+                    K.ptx.neg.f32(rs, row[src])
                     for i in range(7):
                         if i < src:  # Python-const compare
                             # The shuffle MUST be materialized into a local
@@ -553,11 +550,11 @@ def make_kernel(HQ: int, HV: int):
                             # USE site -- inside `(lane & 7) > src`, where the
                             # excluded lanes never reach the warp-collective
                             # __shfl_sync and the whole CTA deadlocks.
-                            K.assign(pv[0], K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), row[i], src, 8))
+                            K.assign(pv, K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), row[i], src, 8))
                             with K.If((lane & 7) > src), K.Then():
-                                K.assign(row[i], row[i] + rs[0] * pv[0])
+                                K.assign(row[i], row[i] + rs * pv)
                     with K.If((lane & 7) > src), K.Then():
-                        K.assign(row[src], rs[0])
+                        K.assign(row[src], rs)
                 for p in range(4):
                     pack_f16x2(words[p], row[2 * p], row[2 * p + 1])
                 K.ptx["st.shared.v4.b32"](
@@ -610,20 +607,20 @@ def make_kernel(HQ: int, HV: int):
                 a = K.alloc_local([2], "uint32")
                 b = K.alloc_local([1], "uint32")
                 acc = K.alloc_local([4], "float32")
-                dm = K.alloc_local([1], "uint32")
-                cm = K.alloc_local([1], "uint32")
-                K.ptx[LDM_X1](dm[0], av.ptr_to(b16 + 8 + (lane & 7), b16 + 8))
-                K.ptx[LDM_X1T](cm[0], av.ptr_to(b16 + 8 + (lane & 7), b16))
-                K.assign(a[0], dm[0])
-                K.assign(a[1], dm[0])
-                K.assign(b[0], cm[0])
+                dm = K.local_scalar("uint32")
+                cm = K.local_scalar("uint32")
+                K.ptx[LDM_X1](dm, av.ptr_to(b16 + 8 + (lane & 7), b16 + 8))
+                K.ptx[LDM_X1T](cm, av.ptr_to(b16 + 8 + (lane & 7), b16))
+                K.assign(a[0], dm)
+                K.assign(a[1], dm)
+                K.assign(b[0], cm)
                 mma_k8_zero(acc, a, b)
                 neg_pack(a[0], acc[0], acc[1])
                 neg_pack(a[1], acc[2], acc[3])
                 K.ptx[LDM_X1T](b[0], av.ptr_to(b16 + (lane & 7), b16))
                 mma_k8_zero(acc, a, b)
-                pack_f16x2(dm[0], acc[0], acc[1])
-                K.ptx[STM_X1](av.ptr_to(b16 + 8 + (lane & 7), b16), dm[0])
+                pack_f16x2(dm, acc[0], acc[1])
+                K.ptx[STM_X1](av.ptr_to(b16 + 8 + (lane & 7), b16), dm)
 
             def inverse_16_to_32(av, b32):  # orig:L687-705
                 a = K.alloc_local([4], "uint32")
@@ -758,35 +755,34 @@ def make_kernel(HQ: int, HV: int):
                         cg0_store_frag(s_ainv[a2[j]], kk)
 
                     # hierarchical inverse on both stages      orig:L1663-1680
-                    my = K.alloc_local([1], "int32")
-                    K.assign(my[0], a2[0])
+                    my = K.local_scalar("int32", init=a2[0])
                     with K.If((lw >> 1) == 1), K.Then():
-                        K.assign(my[0], a2[1])
+                        K.assign(my, a2[1])
                     bar_inv()
                     # a2[j] / my[0] are int LOCALS, not PipelineState vars: a
                     # view captures the stage EXPRESSION, so a view of
                     # st_ainv.stage would rebind under the advance() above.
                     # Copying the stage out first is what makes these views
                     # safe to build here.
-                    invert_diag_8x8(s_ainv[my[0]], (((lw & 1) * 32 + lane) >> 3) * 8)
+                    invert_diag_8x8(s_ainv[my], (((lw & 1) * 32 + lane) >> 3) * 8)
                     bar_inv()
                     inverse_8_to_16(s_ainv[a2[0]], lw * 16)
                     inverse_8_to_16(s_ainv[a2[1]], lw * 16)
                     bar_inv()
-                    inverse_16_to_32(s_ainv[my[0]], (lw & 1) * 32)
+                    inverse_16_to_32(s_ainv[my], (lw & 1) * 32)
                     bar_inv()
-                    inverse_32_to_64(s_ainv[my[0]], lw & 1)
+                    inverse_32_to_64(s_ainv[my], lw & 1)
                     bar_inv()
 
                     # publish Ainv_j * beta_col, release beta  orig:L1682-1737
                     inv = K.alloc_local([32], "float32")
-                    bcol = K.alloc_local([1], "uint64")
+                    bcol = K.local_scalar("uint64")
                     for j in range(2):
                         cg0_load_frag(s_ainv[a2[j]], inv)
                         for p in range(16):
                             c = cb0 + p * 2 + (16 if p >= 8 else 0)  # orig:L1687
-                            K.ptx.ld.shared.u64(bcol[0], K.address_of(s_beta[b2s[j], c]))
-                            scale_pair(inv, p, bcol[0])
+                            K.ptx.ld.shared.u64(bcol, K.address_of(s_beta[b2s[j], c]))
+                            scale_pair(inv, p, bcol)
                         cg0_store_frag(s_ainv[a2[j]], inv)
                         K.ptx[FENCE_ASYNC]()
                         p_ainv.full.arrive(a2[j])  # commit
@@ -948,17 +944,17 @@ def make_kernel(HQ: int, HV: int):
                 with K.If(chunks > 0):
                     with K.Then():
                         load_initial_state(batch, head)
-                        cp2 = K.alloc_local([1], "float32")
+                        cp2 = K.local_scalar("float32")
                         sv = K.alloc_local([128], "float32")
                         sw = K.alloc_local([64], "uint32")
                         cumprod_f = K.alloc_local([16], "float32")
                         decay_f = K.alloc_local([16], "float32")
                         cl2 = K.alloc_local([2], "float32")
-                        ll = K.alloc_local([1], "float32")
-                        dd = K.alloc_local([1], "uint64")
+                        ll = K.local_scalar("float32")
+                        dd = K.local_scalar("uint64")
                         fr = K.alloc_local([64], "float32")
                         vw = K.alloc_local([32], "uint32")
-                        w1 = K.alloc_local([1], "uint32")
+                        w1 = K.local_scalar("uint32")
                         nvw = K.alloc_local([32], "uint32")
                         dw = K.alloc_local([32], "uint32")
                         cbase = (tid1 << 1) & 6
@@ -972,7 +968,7 @@ def make_kernel(HQ: int, HV: int):
 
                             p_gate.full.wait(st_g1.stage, st_g1.phase)
                             K.ptx.ld.shared.f32(
-                                cp2[0], K.address_of(s_cumprod[st_g1.stage, 63])
+                                cp2, K.address_of(s_cumprod[st_g1.stage, 63])
                             )  # cumprod_all — orig:L1861-1864
 
                             # state -> f16 state-input tmem; decay in place
@@ -994,7 +990,7 @@ def make_kernel(HQ: int, HV: int):
                             p_sinp.full.arrive(st_sinp.stage)  # commit, all 128
                             st_sinp.advance()
                             for p in range(64):  # orig:L1896-1907
-                                scale_pair(sv, p, f2(cp2[0], cp2[0]))
+                                scale_pair(sv, p, f2(cp2, cp2))
                             for s in range(4):
                                 K.ptx[TC_ST_32](
                                     tmem_at(tmem, TM_STATE + s * 32, rowbits1),
@@ -1005,7 +1001,7 @@ def make_kernel(HQ: int, HV: int):
                             st_kvc.advance()
 
                             # per-column decay factors        orig:L1921-1960
-                            K.ptx.ld.shared.f32(ll[0], K.address_of(s_cumsumlog[st_g1.stage, 63]))
+                            K.ptx.ld.shared.f32(ll, K.address_of(s_cumsumlog[st_g1.stage, 63]))
                             for g in range(8):
                                 col = cbase + g * 8
                                 K.ptx["ld.shared.v2.f32"](
@@ -1019,9 +1015,9 @@ def make_kernel(HQ: int, HV: int):
                                 # Frozen PTX spells this as scalar negations
                                 # feeding add.rn.f32x2; ptxas folds them into
                                 # the packed subtraction, so express that.
-                                K.ptx.sub.rn.f32x2(dd[0], f2(ll[0], ll[0]), f2(cl2[0], cl2[1]))
-                                K.ptx.ex2.approx.ftz.f32(decay_f[2 * g], K.cuda.float2_x(dd[0]))
-                                K.ptx.ex2.approx.ftz.f32(decay_f[2 * g + 1], K.cuda.float2_y(dd[0]))
+                                K.ptx.sub.rn.f32x2(dd, f2(ll, ll), f2(cl2[0], cl2[1]))
+                                K.ptx.ex2.approx.ftz.f32(decay_f[2 * g], K.cuda.float2_x(dd))
+                                K.ptx.ex2.approx.ftz.f32(decay_f[2 * g + 1], K.cuda.float2_y(dd))
                             p_gate.empty.arrive(st_g1.stage)  # release gate
                             st_g1.advance()
 
@@ -1040,8 +1036,8 @@ def make_kernel(HQ: int, HV: int):
                             p_cg1.empty.arrive(st_cg1c.stage)  # release KS
                             st_cg1c.advance()
                             for p in range(32):  # orig:L1998-2002
-                                pack_f16x2(w1[0], fr[2 * p], fr[2 * p + 1])
-                                K.ptx.sub.f16x2(vw[p], vw[p], w1[0])
+                                pack_f16x2(w1, fr[2 * p], fr[2 * p + 1])
+                                K.ptx.sub.f16x2(vw[p], vw[p], w1)
                             # VKS lands in the SHARED-input slot, not the Sf16
                             # slot. orig:L2003 stores to TMEM_SHARED_INPUT_COL;
                             # the sketch aliased it onto TM_SINPUT, which is
@@ -1111,14 +1107,14 @@ def make_kernel(HQ: int, HV: int):
                         store_final_state(batch, head)
                     with K.Else():  # orig:L2132-2134
                         base = state_gidx(batch, head)
-                        sval = K.alloc_local([1], "float32")
+                        sval = K.local_scalar("float32")
                         # The source deliberately keeps this loop rolled.
                         with K.serial(D_HEAD) as key:
                             K.ptx.ld.global_.f32(
-                                sval[0], initial_state.ptr_to([base + K.Cast("int64", key)])
+                                sval, initial_state.ptr_to([base + K.Cast("int64", key)])
                             )
                             K.ptx.st.global_.f32(
-                                final_state.ptr_to([base + K.Cast("int64", key)]), sval[0]
+                                final_state.ptr_to([base + K.Cast("int64", key)]), sval
                             )
                 K.assign(work[0], work[0] + grid_x)
             # tmem dealloc by owner at role exit — orig:L2136-2143
