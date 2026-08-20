@@ -153,6 +153,50 @@ def _selected_after_keys(
     return set(default_keys), "invalid", errors
 
 
+def _paired_expected_keys(before: dict, after: dict) -> tuple[set[tuple[str, str]], list[str]]:
+    """Return the exact workload set declared by a paired A/B campaign."""
+
+    errors: list[str] = []
+
+    def parse(payload: dict, label: str) -> set[tuple[str, str]]:
+        selection = payload.get("selection")
+        if not isinstance(selection, dict):
+            errors.append(f"{label}: selection must be a mapping")
+            return set()
+        raw_keys = selection.get("keys")
+        if not isinstance(raw_keys, list):
+            errors.append(f"{label}: selection.keys must be a list")
+            return set()
+        parsed: list[tuple[str, str]] = []
+        for index, item in enumerate(raw_keys):
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+                or not all(isinstance(value, str) and value for value in item)
+            ):
+                errors.append(
+                    f"{label}: selection.keys[{index}] must be a [kernel, config] string pair"
+                )
+                continue
+            parsed.append((item[0], item[1]))
+        duplicates = sorted(key for key, count in Counter(parsed).items() if count > 1)
+        for kernel, config in duplicates:
+            errors.append(f"{label}: duplicate selected workload {kernel}/{config}")
+        if not parsed:
+            errors.append(f"{label}: selection must not be empty")
+        return set(parsed)
+
+    before_keys = parse(before, "before")
+    after_keys = parse(after, "after")
+    if before_keys != after_keys:
+        errors.append(
+            "paired selection differs between before and after: "
+            f"before-only={sorted(before_keys - after_keys)}, "
+            f"after-only={sorted(after_keys - before_keys)}"
+        )
+    return before_keys | after_keys, errors
+
+
 def _records(payload: Any, label: str) -> tuple[dict[tuple[str, str], list[dict]], list[str]]:
     if not isinstance(payload, dict):
         return {}, [f"{label}: payload must be a JSON object"]
@@ -277,7 +321,9 @@ def pick_ref(base_impls: dict[str, float]) -> str | None:
     return min(refs, key=refs.__getitem__) if refs else None
 
 
-def _validate_git(payload: dict, label: str) -> list[str]:
+def _validate_git(
+    payload: dict, label: str, *, allowed_dirty_keys: set[str] = frozenset()
+) -> list[str]:
     git = payload.get("git")
     if not isinstance(git, dict) or not git:
         return [f"{label}: git provenance must be a non-empty mapping"]
@@ -287,7 +333,7 @@ def _validate_git(payload: dict, label: str) -> list[str]:
             continue
         if not isinstance(value, str) or not value.strip():
             errors.append(f"{label}: git[{name!r}] must be null or a non-empty string")
-        elif value.strip().endswith("-dirty"):
+        elif value.strip().endswith("-dirty") and name not in allowed_dirty_keys:
             errors.append(f"{label}: dirty git provenance for {name}")
     for name in _REQUIRED_GIT_KEYS:
         value = git.get(name)
@@ -321,8 +367,13 @@ def _compare_mapping(
     return []
 
 
-def _compare_run_provenance(before: dict, after: dict) -> list[str]:
-    errors = [*_validate_git(before, "before"), *_validate_git(after, "after")]
+def _compare_run_provenance(
+    before: dict, after: dict, *, allowed_shared_dirty_git_keys: set[str] = frozenset()
+) -> list[str]:
+    errors = [
+        *_validate_git(before, "before", allowed_dirty_keys=allowed_shared_dirty_git_keys),
+        *_validate_git(after, "after", allowed_dirty_keys=allowed_shared_dirty_git_keys),
+    ]
     errors.extend(
         _compare_mapping(before, after, "git", ignored_keys=_INTENTIONALLY_CHANGED_GIT_KEYS)
     )
@@ -431,6 +482,7 @@ def build_report(
     current: dict | Path | str,
     *,
     threshold_pct: float = DEFAULT_RATIO_THRESHOLD,
+    paired: bool = False,
 ) -> tuple[str, int]:
     """Return the direct-gate markdown and its total failure count.
 
@@ -440,16 +492,31 @@ def build_report(
 
     before_payload, before_label = _load_payload(baseline_path)
     after_payload, after_label = _load_payload(current)
-    default_keys, failures = _expected_keys()
-    expected, selection_mode, selection_errors = _selected_after_keys(after_payload, default_keys)
-    failures.extend(selection_errors)
+    default_keys: set[tuple[str, str]] = set()
+    if paired:
+        expected, failures = _paired_expected_keys(before_payload, after_payload)
+        selection_mode = "paired"
+    else:
+        default_keys, failures = _expected_keys()
+        expected, selection_mode, selection_errors = _selected_after_keys(
+            after_payload, default_keys
+        )
+        failures.extend(selection_errors)
     before_records, before_errors = _records(before_payload, "before")
     after_records, after_errors = _records(after_payload, "after")
     failures.extend(before_errors)
     failures.extend(after_errors)
-    failures.extend(_validate_record_set(before_records, default_keys, "before"))
+    failures.extend(
+        _validate_record_set(before_records, expected if paired else default_keys, "before")
+    )
     failures.extend(_validate_record_set(after_records, expected, "after"))
-    failures.extend(_compare_run_provenance(before_payload, after_payload))
+    failures.extend(
+        _compare_run_provenance(
+            before_payload,
+            after_payload,
+            allowed_shared_dirty_git_keys={"tir"} if paired else frozenset(),
+        )
+    )
 
     before_interfered = _interfered_keys(before_payload)
     after_interfered = _interfered_keys(after_payload)
@@ -486,10 +553,12 @@ def build_report(
 
         before_refs = set(_refs_only(before_means))
         after_refs = set(_refs_only(after_means))
-        missing_ref_sides = [
-            label for label, refs in (("before", before_refs), ("after", after_refs)) if not refs
-        ]
-        if missing_ref_sides:
+        if not paired and (not before_refs or not after_refs):
+            missing_ref_sides = [
+                label
+                for label, refs in (("before", before_refs), ("after", after_refs))
+                if not refs
+            ]
             failures.append(
                 f"{row_name}: external reference required in {' and '.join(missing_ref_sides)}"
             )
@@ -547,10 +616,13 @@ def build_report(
     write()
     write(f"- Before: `{before_label}`")
     write(f"- After: `{after_label}`")
-    write(
-        f"- Scope: {selection_mode}; {len(expected)} after row(s) selected against "
-        f"a complete {len(default_keys)}-row before baseline."
-    )
+    if paired:
+        write(f"- Scope: paired; the same {len(expected)} row(s) ran on both sides.")
+    else:
+        write(
+            f"- Scope: {selection_mode}; {len(expected)} after row(s) selected against "
+            f"a complete {len(default_keys)}-row before baseline."
+        )
     write(
         f"- Gate: arithmetic mean of raw samples for the same ours implementation; "
         f"strict `after/before < {MAX_AFTER_OVER_BEFORE}`."
@@ -559,7 +631,10 @@ def build_report(
         f"- Summary: {len(rows)}/{len(expected)} expected rows evaluated; "
         f"{sum(row['passed'] for row in rows)} direct passes; {len(failures)} failure(s)."
     )
-    write("- External reference ratios and drift are diagnostic only.")
+    if paired:
+        write("- Each before/after row must identify the same physical GPU(s).")
+    else:
+        write("- External reference ratios and drift are diagnostic only.")
     write()
 
     if rows:

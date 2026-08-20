@@ -271,10 +271,17 @@ def make_kernel(HQ: int, HV: int):
             K.assign(e[0], K.cuda.elect_sync())
             return e[0]
 
+        def mma_desc(view, *, transpose=False):
+            addr = K.cuda.cvta_generic_to_shared(view.ptr_to(0, 0))
+            desc_lo = K.Cast("uint64", (addr >> 4) & K.uint32(0x3FFF))
+            if transpose:
+                return K.uint64(0x4000404002000000) | (desc_lo + K.uint64(0x02000000))
+            return K.uint64(0x4000404000010000) | desc_lo
+
         def mma0_chain(d, a, b, pred):
             """The frozen MMA0 chain: one descriptor pair, eight runtime phases."""
-            a_desc = a.mma_desc(major="k", mma_k=16)
-            b_desc = a_desc if a is b else b.mma_desc(major="k", mma_k=16)
+            a_desc = mma_desc(a)
+            b_desc = a_desc if a is b else mma_desc(b)
             with K.serial(8) as kp:
                 phase_off = K.Cast("uint64", (kp & 3) * 2 + (kp >> 2) * 512)
                 K.ptx[MMA_SS](
@@ -287,6 +294,29 @@ def make_kernel(HQ: int, HV: int):
                     K.uint32(0),
                     K.uint32(0),
                     K.ptx.pred(K.Cast("uint32", kp != 0)),
+                    pred=pred,
+                )
+
+        def mma1_chain(d, a, b, *, phases, transpose_b, accumulate, pred):
+            """The frozen MMA1 chain, kept rolled in the emitted CUDA."""
+            b_desc = mma_desc(b, transpose=transpose_b)
+            with K.serial(phases) as kp:
+                phase_off = (
+                    K.Cast("uint64", kp * 128)
+                    if transpose_b
+                    else K.Cast("uint64", (kp & 3) * 2 + (kp >> 2) * 512)
+                )
+                enable_input_d = K.uint32(1) if accumulate else K.Cast("uint32", kp != 0)
+                K.ptx[MMA_SS](
+                    K.Cast("uint32", d),
+                    K.Cast("uint32", a + kp * 8),
+                    b_desc + phase_off,
+                    K.uint32(ID_KV if transpose_b else ID_TS),
+                    K.uint32(0),
+                    K.uint32(0),
+                    K.uint32(0),
+                    K.uint32(0),
+                    K.ptx.pred(enable_input_d),
                     pred=pred,
                 )
 
@@ -357,8 +387,8 @@ def make_kernel(HQ: int, HV: int):
             K.ptx.mul.rn.f32x2(t[0], f2(vals[2 * i], vals[2 * i + 1]), factors[0])
             for factor2 in factors[1:]:
                 K.ptx.mul.rn.f32x2(t[0], t[0], factor2)
-            K.ptx.mov.b32(vals[2 * i], K.cuda.float2_x(t[0]))
-            K.ptx.mov.b32(vals[2 * i + 1], K.cuda.float2_y(t[0]))
+            K.assign(vals[2 * i], K.cuda.float2_x(t[0]))
+            K.assign(vals[2 * i + 1], K.cuda.float2_y(t[0]))
 
         def neg_pack(dst_word, a, b):  # orig:L486-497
             # One sub.rn.f32x2 (from +0) + one cvt.rn.f16x2.f32. DPS keeps the
@@ -451,10 +481,13 @@ def make_kernel(HQ: int, HV: int):
             # Per-thread coordinate algebra of the CG0 fragment: USER code,
             # logical coords only — the tile applies atom tiling + the
             # intra-atom xor.                            orig:L1530-1533
-            row0 = ((tid0 >> 1) & 48) | (tid0 & 15)
-            cb0 = tid0 & 16
+            row0 = K.local_scalar("int32")
+            K.assign(row0, ((tid0 >> 1) & 48) | (tid0 & 15))
+            cb0 = K.local_scalar("int32")
+            K.assign(cb0, tid0 & 16)
             # tmem row field: (thread << 16) & 0x600000 == warp_in_role * 32
-            rowbits0 = (tid0 << 16) & 0x600000
+            rowbits0 = K.local_scalar("int32")
+            K.assign(rowbits0, (tid0 << 16) & 0x600000)
 
             def cg0_acc_ld(frag, stage):  # orig:L541-552
                 # Ld16x32bx2/Repetition16 is two native x16 loads; `16` is
@@ -499,12 +532,12 @@ def make_kernel(HQ: int, HV: int):
                 K.ptx["ld.shared.v4.b32"](
                     words[0], words[1], words[2], words[3], av.ptr_to(r, block8)
                 )
-                row = K.alloc_local([8], "float32")
+                row = [K.local_scalar("float32") for _ in range(8)]
                 for p in range(4):
                     K.idioms.cast_f16x2_to_f32x2(row, p, words[p])
                 for i in range(8):
                     with K.If((lane & 7) == i), K.Then():
-                        K.ptx.mov.b32(row[i], K.float32(1.0))
+                        K.assign(row[i], K.float32(1.0))
                 rs = K.alloc_local([1], "float32")
                 pv = K.alloc_local([1], "float32")
                 for src in range(7):
@@ -522,9 +555,9 @@ def make_kernel(HQ: int, HV: int):
                             # __shfl_sync and the whole CTA deadlocks.
                             K.assign(pv[0], K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), row[i], src, 8))
                             with K.If((lane & 7) > src), K.Then():
-                                K.ptx.mov.b32(row[i], row[i] + rs[0] * pv[0])
+                                K.assign(row[i], row[i] + rs[0] * pv[0])
                     with K.If((lane & 7) > src), K.Then():
-                        K.ptx.mov.b32(row[src], rs[0])
+                        K.assign(row[src], rs[0])
                 for p in range(4):
                     pack_f16x2(words[p], row[2 * p], row[2 * p + 1])
                 K.ptx["st.shared.v4.b32"](
@@ -581,9 +614,9 @@ def make_kernel(HQ: int, HV: int):
                 cm = K.alloc_local([1], "uint32")
                 K.ptx[LDM_X1](dm[0], av.ptr_to(b16 + 8 + (lane & 7), b16 + 8))
                 K.ptx[LDM_X1T](cm[0], av.ptr_to(b16 + 8 + (lane & 7), b16))
-                K.ptx.mov.b32(a[0], dm[0])
-                K.ptx.mov.b32(a[1], dm[0])
-                K.ptx.mov.b32(b[0], cm[0])
+                K.assign(a[0], dm[0])
+                K.assign(a[1], dm[0])
+                K.assign(b[0], cm[0])
                 mma_k8_zero(acc, a, b)
                 neg_pack(a[0], acc[0], acc[1])
                 neg_pack(a[1], acc[2], acc[3])
@@ -643,8 +676,8 @@ def make_kernel(HQ: int, HV: int):
                 ldm_x4(LDM_X4T, b10, av, 16, 0)
                 ldm_x4(LDM_X4T, b11, av, 16, 16)
                 for i in range(4):
-                    K.ptx.mov.b32(a0[i], pa[i])
-                    K.ptx.mov.b32(a1[i], pa[4 + i])
+                    K.assign(a0[i], pa[i])
+                    K.assign(a1[i], pa[4 + i])
                 mma_k16(acc, a0, b00, 0, 0, False)
                 mma_k16(acc, a0, b00, 4, 2, False)
                 mma_k16(acc, a0, b01, 8, 0, False)
@@ -670,7 +703,7 @@ def make_kernel(HQ: int, HV: int):
                     # copy each stage, then advance.          orig:L1537-1580
                     g2 = K.alloc_local([2], "int32")
                     for j in range(2):
-                        K.ptx.mov.b32(g2[j], st_gate.stage)
+                        K.assign(g2[j], st_gate.stage)
                         p_gate.full.wait(g2[j], st_gate.phase)
                         st_gate.advance()
                     transfer = [K.alloc_local([32], "float32") for _ in range(2)]
@@ -681,7 +714,7 @@ def make_kernel(HQ: int, HV: int):
                     for i in range(32):
                         col = cb0 + i + (16 if i >= 16 else 0)  # orig:L1558
                         for j in range(2):
-                            K.ptx.mov.b32(transfer[j][i], K.float32(0.0))
+                            K.assign(transfer[j][i], K.float32(0.0))
                         # The frozen source guards the LDS + MUFU behind the
                         # Select's short-circuit; ex2's DPS shape would
                         # otherwise hoist both out unconditionally, so keep
@@ -696,7 +729,7 @@ def make_kernel(HQ: int, HV: int):
 
                     b2s = K.alloc_local([2], "int32")  # orig:L1582-1595
                     for j in range(2):
-                        K.ptx.mov.b32(b2s[j], st_beta.stage)
+                        K.assign(b2s[j], st_beta.stage)
                         p_beta.full.wait(b2s[j], st_beta.phase)
                         st_beta.advance()
                     brow = K.alloc_local([2], "float32")
@@ -707,7 +740,7 @@ def make_kernel(HQ: int, HV: int):
                     a2 = K.alloc_local([2], "int32")  # held p_ainv stages
                     kk = K.alloc_local([32], "float32")
                     for j in range(2):
-                        K.ptx.mov.b32(a2[j], st_ainv.stage)
+                        K.assign(a2[j], st_ainv.stage)
                         p_ainv.empty.wait(a2[j], st_ainv.phase)  # acquire
                         st_ainv.advance()
                         p_cg0.full.wait(st_acc.stage, st_acc.phase)
@@ -1122,7 +1155,7 @@ def make_kernel(HQ: int, HV: int):
                     kviews = []
                     for j in range(2):  # KK_j = Kj @ Kj^T
                         p_cg0.empty.wait(st_ap.stage, st_ap.phase)  # acquire
-                        K.ptx.mov.b32(ks2[j], st_k.stage)
+                        K.assign(ks2[j], st_k.stage)
                         p_k.full.wait(ks2[j], st_k.phase)
                         st_k.advance()
                         # ks2[j] is an int local, so this view stays valid for
@@ -1138,7 +1171,7 @@ def make_kernel(HQ: int, HV: int):
                         st_ap.advance()
                         kviews.append(kv)
                     for j in range(2):  # QK_j = Qj @ Kj^T
-                        K.ptx.mov.b32(qs2[j], st_q.stage)
+                        K.assign(qs2[j], st_q.stage)
                         p_q.full.wait(qs2[j], st_q.phase)
                         st_q.advance()
                         p_cg0.empty.wait(st_ap.stage, st_ap.phase)
@@ -1314,29 +1347,27 @@ def make_kernel(HQ: int, HV: int):
 
                     p_cg1.empty.wait(st_c1p.stage, st_c1p.phase)  # KS acquire
                     p_sinp.full.wait(st_sc.stage, st_sc.phase)  # Sf16 ready
-                    K.idioms.mma_chain(  # KS = Sf16 @ K
-                        MMA_SS,
+                    mma1_chain(  # KS = Sf16 @ K
                         tmem[0] + TM_CG1,
                         a=tmem[0] + TM_SINPUT,
                         b=kv,
-                        idesc=ID_TS,
+                        phases=8,
+                        transpose_b=False,
                         pred=elect_local(),
                         accumulate=False,
-                        guard="pred",
                     )
                     p_cg1.full.arrive(st_c1p.stage, pred=elect())  # tcgen05.commit
                     st_c1p.advance()
 
                     p_qs.empty.wait(st_qsp.stage, st_qsp.phase)  # QS acquire
-                    K.idioms.mma_chain(  # QS = Sf16 @ Q
-                        MMA_SS,
+                    mma1_chain(  # QS = Sf16 @ Q
                         tmem[0] + TM_QSTATE,
                         a=tmem[0] + TM_SINPUT,
                         b=qv,
-                        idesc=ID_TS,
+                        phases=8,
+                        transpose_b=False,
                         pred=elect_local(),
                         accumulate=False,
-                        guard="pred",
                     )
                     p_qs.full.arrive(st_qsp.stage, pred=elect())
                     st_qsp.advance()
@@ -1349,15 +1380,14 @@ def make_kernel(HQ: int, HV: int):
                     m_vks.wait(0, st_vks.phase)
                     st_vks.advance()
                     p_ainv.full.wait(st_ac.stage, st_ac.phase)
-                    K.idioms.mma_chain(  # NV = VKS @ Ainv -- A is the SHARED slot
-                        MMA_SS,
+                    mma1_chain(  # NV = VKS @ Ainv -- A is the SHARED slot
                         tmem[0] + TM_CG1,
                         a=tmem[0] + TM_SHARED,
                         b=s_ainv[st_ac.stage],
-                        idesc=ID_TS,
+                        phases=4,
+                        transpose_b=False,
                         pred=elect_local(),
                         accumulate=False,  # NV overwrites
-                        guard="pred",
                     )
                     p_cg1.full.arrive(st_c1p.stage, pred=elect())
                     st_c1p.advance()
@@ -1369,15 +1399,14 @@ def make_kernel(HQ: int, HV: int):
                     qkv = s_qk[st_qkc.stage]
                     m_nv.wait(0, st_nv.phase)
                     st_nv.advance()
-                    K.idioms.mma_chain(  # QKV += QK @ NV
-                        MMA_SS,
+                    mma1_chain(  # QKV += QK @ NV
                         tmem[0] + TM_QSTATE,
                         a=tmem[0] + TM_SHARED,
                         b=qkv,
-                        idesc=ID_TS,
+                        phases=4,
+                        transpose_b=False,
                         pred=elect_local(),
                         accumulate=True,  # always accumulates QS
-                        guard="pred",
                     )
                     p_qk.empty.arrive(st_qkc.stage, pred=elect())
                     st_qkc.advance()
@@ -1389,18 +1418,16 @@ def make_kernel(HQ: int, HV: int):
                     p_kv.empty.wait(st_kvp.stage, st_kvp.phase)
                     m_dcy.wait(0, st_dcy.phase)
                     st_dcy.advance()
-                    K.idioms.mma_chain(  # S += decayV @ K^T
+                    mma1_chain(  # S += decayV @ K^T
                         # ID_KV's trans_b bit is what makes this B mn-major;
-                        # the chain decodes it, so there is no second place to
-                        # state it and no way for the two to disagree.
-                        MMA_SS,
+                        # the descriptor and phase walk both use that form.
                         tmem[0] + TM_STATE,
                         a=tmem[0] + TM_SHARED + 32,
                         b=s_k[st_k1.stage],
-                        idesc=ID_KV,
+                        phases=4,
+                        transpose_b=True,
                         pred=elect_local(),
                         accumulate=True,
-                        guard="pred",
                     )
                     p_kv.full.arrive(st_kvp.stage, pred=elect())
                     st_kvp.advance()
@@ -1435,12 +1462,12 @@ def make_kernel(HQ: int, HV: int):
                 g = K.alloc_local([2], "float32")
                 valid = K.alloc_local([2], "int32")
                 for i in range(2):
-                    K.ptx.mov.b32(g[i], K.float32(1.0))
-                    K.ptx.mov.b32(valid[i], K.int32(1))
+                    K.assign(g[i], K.float32(1.0))
+                    K.assign(valid[i], K.int32(1))
                 with K.If(is_last):
                     with K.Then():
                         for i in range(2):
-                            K.ptx.mov.b32(valid[i], K.Cast("int32", pos[i] < hi))
+                            K.assign(valid[i], K.Cast("int32", pos[i] < hi))
                         for i in range(2):
                             with K.If(valid[i] != 0), K.Then():
                                 K.ptx.ld.global_.f32(g[i], gsrc[i])

@@ -111,6 +111,7 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             from tirx_kernels.runner import (
                 DEFAULT_BENCH_COOLDOWN_S,
                 DEFAULT_BENCH_ROUNDS,
+                ab_current_benchmark_module,
                 bind_cuda_assignment,
                 close_prepared_kernel_bench,
                 cuda_is_initialized,
@@ -134,7 +135,7 @@ def _prepared_child_main(args, *, child_started: float) -> int:
                 raise RuntimeError("CUDA was initialized before CPU prepare")
             module = load_kernel(args.kernel, strict=True)
             module_loaded = time.time()
-            config = _find_bench_config(module, args.config)
+            config = _find_bench_config(ab_current_benchmark_module(module), args.config)
             config_resolved = time.time()
             prepared = prepare_kernel_bench(
                 args.kernel, config, module=module, require_cuda_uninitialized=True

@@ -290,12 +290,11 @@ def local_scalar(dtype="float32"):
 
 
 def assign(dst, value):
-    """Store into a writable scalar returned by :func:`local_scalar`."""
+    """Store into one writable scalar element of a local register tensor."""
     if not isinstance(dst, tvm.tirx.BufferLoad):
         raise TypeError(f"K.assign destination must be a writable scalar, got {type(dst).__name__}")
-    shape = dst.buffer.shape
-    if dst.buffer.scope() != "local" or len(shape) != 1 or getattr(shape[0], "value", None) != 1:
-        raise TypeError("K.assign destination must come from K.local_scalar")
+    if dst.buffer.scope() != "local":
+        raise TypeError("K.assign destination must be a local scalar element")
     return _I.buffer_store(dst.buffer, value, list(dst.indices))
 
 

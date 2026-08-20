@@ -21,6 +21,8 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from importlib import util as importlib_util
+from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol, runtime_checkable
 
@@ -37,6 +39,8 @@ PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
 TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
 TVM_COMPILE_FORCE_FALLBACK_ENV = "TVM_COMPILE_FORCE_FALLBACK"
 _EXTERNAL_REFERENCES_ENV = "TIRX_INTERNAL_BENCH_REFERENCES"
+AB_CURRENT_BENCHMARK_ROOT_ENV = "TIRX_INTERNAL_AB_CURRENT_BENCHMARK_ROOT"
+_AB_CURRENT_MODULES: dict[tuple[Path, str], ModuleType] = {}
 
 
 def set_external_references_enabled(enabled: bool) -> None:
@@ -107,6 +111,64 @@ def prepared_gpu_benchmark(
     if close is not None and not callable(close):
         raise TypeError("close must be callable")
     return ExplicitPreparedBenchmark(run_gpu, state, required_num_gpus, close)
+
+
+def ab_current_benchmark_module(module: ModuleType) -> ModuleType:
+    """Load the current benchmark contract while an A/B child imports old kernel code."""
+    configured_root = os.environ.get(AB_CURRENT_BENCHMARK_ROOT_ENV)
+    if configured_root is None:
+        return module
+    if not module.__name__.startswith("tirx_kernels."):
+        raise ValueError(f"A/B kernel module has non-canonical name {module.__name__!r}")
+
+    current_root = Path(configured_root).resolve()
+    key = (current_root, module.__name__)
+    cached = _AB_CURRENT_MODULES.get(key)
+    if cached is not None:
+        return cached
+
+    relative = Path(*module.__name__.split("."))
+    source_path = current_root / relative.with_suffix(".py")
+    if not source_path.is_file():
+        source_path = current_root / relative / "__init__.py"
+    if not source_path.is_file():
+        raise FileNotFoundError(
+            f"current A/B benchmark module {module.__name__!r} is missing under {current_root}"
+        )
+
+    alias = f"_tirx_ab_current_{module.__name__.replace('.', '_')}"
+    spec = importlib_util.spec_from_file_location(alias, source_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load current A/B benchmark module from {source_path}")
+    current_module = importlib_util.module_from_spec(spec)
+    current_module.__package__ = module.__package__
+    sys.modules[alias] = current_module
+    try:
+        spec.loader.exec_module(current_module)
+    except BaseException:
+        sys.modules.pop(alias, None)
+        raise
+    _AB_CURRENT_MODULES[key] = current_module
+    return current_module
+
+
+def _apply_ab_benchmark_contract(
+    module: ModuleType, benchmark: PreparedBenchmark
+) -> PreparedBenchmark:
+    current_module = ab_current_benchmark_module(module)
+    if current_module is module:
+        return benchmark
+    if not isinstance(benchmark, ExplicitPreparedBenchmark):
+        raise TypeError(
+            f"kernel {module.__name__!r} must return ExplicitPreparedBenchmark for paired A/B"
+        )
+    # The current module is the sole authority for the benchmark *config*
+    # (resolved via ab_current_benchmark_module before prepare), but the old
+    # module keeps its own run_gpu: launch argument packing must match the old
+    # executables' ABI, and every supported before revision already follows the
+    # pinned wrapper contract (validation outside the timed region, references
+    # opt-in through the shared bench()).
+    return benchmark
 
 
 @dataclass(frozen=True)
@@ -686,6 +748,7 @@ def prepare_kernel_bench(
         raise TypeError(
             f"kernel {kernel_name!r} prepare_bench() must return an object with run_gpu()"
         )
+    benchmark = _apply_ab_benchmark_contract(module, benchmark)
     return PreparedKernelBenchmark(kernel=kernel_name, label=label, benchmark=benchmark)
 
 
