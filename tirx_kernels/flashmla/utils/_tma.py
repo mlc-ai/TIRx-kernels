@@ -9,15 +9,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from tvm.script import tirx as T
+import tirx_kernels.kern as K
 
 
 def leader_mbar(bar_ptr: Any) -> Any:
     # cta_group::2 completion routes to the CTA the mbar names; map to the pair
     # leader (rank 0) so both CTAs' issues aggregate on one barrier.
-    mapped = T.alloc_local([1], "uint64")
-    T.evaluate(T.ptx.mapa.u64(mapped[0], bar_ptr, T.uint32(0)))
-    return T.reinterpret("handle", mapped[0])
+    mapped = K.local_scalar("uint64")
+    K.ptx.mapa.u64(mapped, bar_ptr, K.uint32(0))
+    return K.reinterpret("handle", mapped)
 
 
 def tma_config(
