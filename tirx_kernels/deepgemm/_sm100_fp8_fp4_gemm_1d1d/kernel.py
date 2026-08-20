@@ -1238,7 +1238,7 @@ def build_kernel(spec: GemmSpec):
                                             # steps of a partial final K block are valid.
                                             with (
                                                 K.If(
-                                                    (
+                                                    
                                                         K.Or(
                                                             mma_k < mma_kblocks - 1,
                                                             ki * UMMA_K
@@ -1251,7 +1251,7 @@ def build_kernel(spec: GemmSpec):
                                                         )
                                                         if may_have_tail_k
                                                         else ki < umma_k_steps
-                                                    )
+                                                    
                                                 ),
                                                 K.Then(),
                                             ):
