@@ -28,26 +28,7 @@ KERNEL_META = {
 
 _LOG2_E = _simple._LOG2_E
 _LN_2 = _simple._LN_2
-_mul = _simple._mul
-_add = _simple._add
-_sub = _simple._sub
-_fma = _simple._fma
-_exp2 = _simple._exp2
-_log2 = _simple._log2
-_div = _simple._div
-_mul_hi_u32 = _simple._mul_hi_u32
-_mul_lo_s32 = _simple._mul_lo_s32
-_add_s32 = _simple._add_s32
-_global_load_u16 = _simple._global_load_u16
-_global_load_u32 = _simple._global_load_u32
-_global_load_s64 = _simple._global_load_s64
 _global_load_index_s64 = _simple._global_load_index_s64
-_shared_load_u16 = _simple._shared_load_u16
-_shared_load_u32 = _simple._shared_load_u32
-_bf16_to_f32 = _simple._bf16_to_f32
-_f16_to_f32 = _simple._f16_to_f32
-_f32_to_bf16 = _simple._f32_to_bf16
-_f32_to_f16 = _simple._f32_to_f16
 _load_weight = _simple._load_weight
 
 _TMA_G2S_4D = "cp.async.bulk.tensor.4d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
@@ -141,71 +122,14 @@ REJECTION_CONFIGS = [
 ]
 
 
-def _shared_load_v2_b16(buffer, index, values):
-    K.evaluate(K.ptx.ld.shared.v2.b16(values[0], values[1], buffer.ptr_to([index])))
-
-
-def _shared_load_v4_b16(buffer, index, values):
-    K.evaluate(
-        K.ptx.ld.shared.v4.b16(values[0], values[1], values[2], values[3], buffer.ptr_to([index]))
-    )
-
-
-def _shared_load_v4_b32(buffer, index, values):
-    K.evaluate(
-        K.ptx.ld.shared.v4.b32(values[0], values[1], values[2], values[3], buffer.ptr_to([index]))
-    )
-
-
-def _global_load_v2_b16(buffer, index, values):
-    K.evaluate(K.ptx.ld.global_.v2.b16(values[0], values[1], buffer.ptr_to([index])))
-
-
-def _global_load_v4_b16(buffer, index, values):
-    K.evaluate(
-        K.ptx.ld.global_.v4.b16(values[0], values[1], values[2], values[3], buffer.ptr_to([index]))
-    )
-
-
-def _global_load_nc_s32(buffer, index):
-    out = K.alloc_local((1,), "int32")
-    K.evaluate(K.ptx.ld.global_.nc.b32(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _global_load_nc_s64(buffer, index):
-    out = K.alloc_local((1,), "int64")
-    K.evaluate(K.ptx.ld.global_.nc.b64(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
 def _mbarrier_arrive_wait(barrier):
     token = K.alloc_local((1,), "uint64")
     done = K.alloc_local((1,), "uint32")
     K.evaluate(K.ptx.mbarrier.arrive.shared__cta.b64(token[0], barrier, K.uint32(1)))
     with K.While(True):
         K.evaluate(K.ptx.mbarrier.try_wait.shared__cta.b64(done[0], barrier, token[0]))
-        with K.If(done[0] != K.uint32(0)):
-            with K.Then():
-                K.Break()
-
-
-def _mbarrier_arrive(barrier):
-    K.evaluate(K.ptx.mbarrier.arrive.shared__cta.b64(barrier, K.uint32(1)))
-
-
-def _mbarrier_arrive_count_release(barrier, count):
-    K.evaluate(K.ptx.mbarrier.arrive.release.cta.shared__cta.b64(barrier, K.uint32(count)))
-
-
-def _mbarrier_expect_tx_relaxed(barrier, num_bytes):
-    K.evaluate(K.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(barrier, K.uint32(num_bytes)))
-
-
-def _mbarrier_arrive_expect_tx(barrier, num_bytes):
-    K.evaluate(
-        K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(barrier, K.uint32(num_bytes))
-    )
+        with K.If(done[0] != K.uint32(0)), K.Then():
+            K.Break()
 
 
 def _tma_g2s_4d(dst, tensor_map, c0, c1, c2, c3, barrier):
@@ -243,21 +167,25 @@ def _philox4x32(random_words, seed_lo, seed_hi, counter, *, PHILOX_ROUNDS):
         old_c2 = K.local_scalar("uint32")
         K.assign(old_c2, c2)
         next_c0 = K.local_scalar("uint32")
-        K.assign(
-            next_c0, K.bitwise_xor(K.bitwise_xor(_mul_hi_u32(K.uint32(0xCD9E8D57), old_c2), c1), k0)
-        )
+        mul_hi_0 = K.alloc_local((1,), "uint32")
+        K.evaluate(K.ptx["mul.hi.u32"](mul_hi_0[0], K.uint32(0xCD9E8D57), old_c2))
+        K.assign(next_c0, K.bitwise_xor(K.bitwise_xor(mul_hi_0[0], c1), k0))
         next_c2 = K.local_scalar("uint32")
-        K.assign(
-            next_c2, K.bitwise_xor(K.bitwise_xor(_mul_hi_u32(K.uint32(0xD2511F53), old_c0), c3), k1)
-        )
+        mul_hi_1 = K.alloc_local((1,), "uint32")
+        K.evaluate(K.ptx["mul.hi.u32"](mul_hi_1[0], K.uint32(0xD2511F53), old_c0))
+        K.assign(next_c2, K.bitwise_xor(K.bitwise_xor(mul_hi_1[0], c3), k1))
         next_c1 = K.local_scalar("int32")
-        K.assign(next_c1, _mul_lo_s32(K.int32(-845247145), K.reinterpret("int32", old_c2)))
+        K.evaluate(
+            K.ptx["mul.lo.s32"](next_c1, K.int32(-845247145), K.reinterpret("int32", old_c2))
+        )
         next_c3 = K.local_scalar("int32")
-        K.assign(next_c3, _mul_lo_s32(K.int32(-766435501), K.reinterpret("int32", old_c0)))
+        K.evaluate(
+            K.ptx["mul.lo.s32"](next_c3, K.int32(-766435501), K.reinterpret("int32", old_c0))
+        )
         next_k0 = K.local_scalar("int32")
-        K.assign(next_k0, _add_s32(K.reinterpret("int32", k0), K.int32(-1640531527)))
+        K.evaluate(K.ptx["add.s32"](next_k0, K.reinterpret("int32", k0), K.int32(-1640531527)))
         next_k1 = K.local_scalar("int32")
-        K.assign(next_k1, _add_s32(K.reinterpret("int32", k1), K.int32(-1150833019)))
+        K.evaluate(K.ptx["add.s32"](next_k1, K.reinterpret("int32", k1), K.int32(-1150833019)))
         K.assign(c0, next_c0)
         K.assign(c1, K.reinterpret("uint32", next_c1))
         K.assign(c2, next_c2)
@@ -297,147 +225,118 @@ def _store_state_row(
                     intermediate_states.ptr_to([intermediate_base]), pair0[0], pair1[0]
                 )
             )
+            with K.If(write_final != 0), K.Then():
+                K.evaluate(K.ptx.st.global_.v2.b32(state.ptr_to([final_base]), pair0[0], pair1[0]))
+        else:
+            with K.If(write_final != 0), K.Then():
+                K.evaluate(K.ptx.st.global_.v2.b32(state.ptr_to([final_base]), pair0[0], pair1[0]))
+    elif STATE_DTYPE == "float32":
+        words = K.alloc_local((4,), "uint32")
+        with K.unroll(4) as k:
+            K.ptx.mov.b32(words[k], K.reinterpret("uint32", values[wr, k]))
+        if HAS_INTERMEDIATE_STATES:
             with K.If(write_final != 0):
                 with K.Then():
+                    lo = K.alloc_local((1,), "uint64")
+                    hi = K.alloc_local((1,), "uint64")
+                    K.evaluate(K.ptx.mov.b64(lo[0], words[0], words[1]))
+                    K.evaluate(K.ptx.mov.b64(hi[0], words[2], words[3]))
                     K.evaluate(
-                        K.ptx.st.global_.v2.b32(state.ptr_to([final_base]), pair0[0], pair1[0])
+                        K.ptx.st.global_.v2.b64(
+                            intermediate_states.ptr_to([intermediate_base]), lo[0], hi[0]
+                        )
+                    )
+                    K.evaluate(K.ptx.st.global_.v2.b64(state.ptr_to([final_base]), lo[0], hi[0]))
+                with K.Else():
+                    K.evaluate(
+                        K.ptx.st.global_.v4.b32(
+                            intermediate_states.ptr_to([intermediate_base]),
+                            words[0],
+                            words[1],
+                            words[2],
+                            words[3],
+                        )
                     )
         else:
-            with K.If(write_final != 0):
-                with K.Then():
-                    K.evaluate(
-                        K.ptx.st.global_.v2.b32(state.ptr_to([final_base]), pair0[0], pair1[0])
+            with K.If(write_final != 0), K.Then():
+                K.evaluate(
+                    K.ptx.st.global_.v4.b32(
+                        state.ptr_to([final_base]), words[0], words[1], words[2], words[3]
                     )
+                )
     else:
-        if STATE_DTYPE == "float32":
-            words = K.alloc_local((4,), "uint32")
-            with K.unroll(4) as k:
-                K.ptx.mov.b32(words[k], K.reinterpret("uint32", values[wr, k]))
+        bits = K.alloc_local((4,), "uint16")
+        with K.unroll(STATE_VALUES_PER_THREAD) as k:
+            if STATE_DTYPE == "bfloat16":
+                K.evaluate(K.ptx.cvt.rn.bf16.f32(bits[k], values[wr, k]))
+            else:
+                K.evaluate(K.ptx.cvt.rn.f16.f32(bits[k], values[wr, k]))
+        if DSTATE == 64:
             if HAS_INTERMEDIATE_STATES:
                 with K.If(write_final != 0):
                     with K.Then():
-                        lo = K.alloc_local((1,), "uint64")
-                        hi = K.alloc_local((1,), "uint64")
-                        K.evaluate(K.ptx.mov.b64(lo[0], words[0], words[1]))
-                        K.evaluate(K.ptx.mov.b64(hi[0], words[2], words[3]))
+                        word = K.alloc_local((1,), "uint32")
+                        K.evaluate(K.ptx.mov.b32(word[0], bits[0], bits[1]))
                         K.evaluate(
-                            K.ptx.st.global_.v2.b64(
-                                intermediate_states.ptr_to([intermediate_base]), lo[0], hi[0]
+                            K.ptx.st.global_.b32(
+                                intermediate_states.ptr_to([intermediate_base]), word[0]
                             )
                         )
-                        K.evaluate(
-                            K.ptx.st.global_.v2.b64(state.ptr_to([final_base]), lo[0], hi[0])
-                        )
+                        K.evaluate(K.ptx.st.global_.b32(state.ptr_to([final_base]), word[0]))
                     with K.Else():
                         K.evaluate(
-                            K.ptx.st.global_.v4.b32(
-                                intermediate_states.ptr_to([intermediate_base]),
-                                words[0],
-                                words[1],
-                                words[2],
-                                words[3],
+                            K.ptx.st.global_.v2.b16(
+                                intermediate_states.ptr_to([intermediate_base]), bits[0], bits[1]
                             )
                         )
             else:
-                with K.If(write_final != 0):
-                    with K.Then():
-                        K.evaluate(
-                            K.ptx.st.global_.v4.b32(
-                                state.ptr_to([final_base]), words[0], words[1], words[2], words[3]
-                            )
+                with K.If(write_final != 0), K.Then():
+                    K.evaluate(
+                        K.ptx.st.global_.v2.b16(state.ptr_to([final_base]), bits[0], bits[1])
+                    )
+        elif DSTATE == 96:
+            if HAS_INTERMEDIATE_STATES:
+                with K.unroll(3) as k:
+                    K.evaluate(
+                        K.ptx.st.global_.b16(
+                            intermediate_states.ptr_to([intermediate_base + k]), bits[k]
                         )
+                    )
+            with K.If(write_final != 0), K.Then():
+                with K.unroll(3) as k:
+                    K.evaluate(K.ptx.st.global_.b16(state.ptr_to([final_base + k]), bits[k]))
+        elif HAS_INTERMEDIATE_STATES:
+            with K.If(write_final != 0):
+                with K.Then():
+                    word0 = K.alloc_local((1,), "uint32")
+                    word1 = K.alloc_local((1,), "uint32")
+                    K.evaluate(K.ptx.mov.b32(word1[0], bits[2], bits[3]))
+                    K.evaluate(K.ptx.mov.b32(word0[0], bits[0], bits[1]))
+                    K.evaluate(
+                        K.ptx.st.global_.v2.b32(
+                            intermediate_states.ptr_to([intermediate_base]), word0[0], word1[0]
+                        )
+                    )
+                    K.evaluate(
+                        K.ptx.st.global_.v2.b32(state.ptr_to([final_base]), word0[0], word1[0])
+                    )
+                with K.Else():
+                    K.evaluate(
+                        K.ptx.st.global_.v4.b16(
+                            intermediate_states.ptr_to([intermediate_base]),
+                            bits[0],
+                            bits[1],
+                            bits[2],
+                            bits[3],
+                        )
+                    )
         else:
-            bits = K.alloc_local((4,), "uint16")
-            with K.unroll(STATE_VALUES_PER_THREAD) as k:
-                if STATE_DTYPE == "bfloat16":
-                    K.ptx.mov.b16(bits[k], _f32_to_bf16(values[wr, k]))
-                else:
-                    K.ptx.mov.b16(bits[k], _f32_to_f16(values[wr, k]))
-            if DSTATE == 64:
-                if HAS_INTERMEDIATE_STATES:
-                    with K.If(write_final != 0):
-                        with K.Then():
-                            word = K.alloc_local((1,), "uint32")
-                            K.evaluate(K.ptx.mov.b32(word[0], bits[0], bits[1]))
-                            K.evaluate(
-                                K.ptx.st.global_.b32(
-                                    intermediate_states.ptr_to([intermediate_base]), word[0]
-                                )
-                            )
-                            K.evaluate(K.ptx.st.global_.b32(state.ptr_to([final_base]), word[0]))
-                        with K.Else():
-                            K.evaluate(
-                                K.ptx.st.global_.v2.b16(
-                                    intermediate_states.ptr_to([intermediate_base]),
-                                    bits[0],
-                                    bits[1],
-                                )
-                            )
-                else:
-                    with K.If(write_final != 0):
-                        with K.Then():
-                            K.evaluate(
-                                K.ptx.st.global_.v2.b16(
-                                    state.ptr_to([final_base]), bits[0], bits[1]
-                                )
-                            )
-            else:
-                if DSTATE == 96:
-                    if HAS_INTERMEDIATE_STATES:
-                        with K.unroll(3) as k:
-                            K.evaluate(
-                                K.ptx.st.global_.b16(
-                                    intermediate_states.ptr_to([intermediate_base + k]), bits[k]
-                                )
-                            )
-                    with K.If(write_final != 0):
-                        with K.Then():
-                            with K.unroll(3) as k:
-                                K.evaluate(
-                                    K.ptx.st.global_.b16(state.ptr_to([final_base + k]), bits[k])
-                                )
-                else:
-                    if HAS_INTERMEDIATE_STATES:
-                        with K.If(write_final != 0):
-                            with K.Then():
-                                word0 = K.alloc_local((1,), "uint32")
-                                word1 = K.alloc_local((1,), "uint32")
-                                K.evaluate(K.ptx.mov.b32(word1[0], bits[2], bits[3]))
-                                K.evaluate(K.ptx.mov.b32(word0[0], bits[0], bits[1]))
-                                K.evaluate(
-                                    K.ptx.st.global_.v2.b32(
-                                        intermediate_states.ptr_to([intermediate_base]),
-                                        word0[0],
-                                        word1[0],
-                                    )
-                                )
-                                K.evaluate(
-                                    K.ptx.st.global_.v2.b32(
-                                        state.ptr_to([final_base]), word0[0], word1[0]
-                                    )
-                                )
-                            with K.Else():
-                                K.evaluate(
-                                    K.ptx.st.global_.v4.b16(
-                                        intermediate_states.ptr_to([intermediate_base]),
-                                        bits[0],
-                                        bits[1],
-                                        bits[2],
-                                        bits[3],
-                                    )
-                                )
-                    else:
-                        with K.If(write_final != 0):
-                            with K.Then():
-                                K.evaluate(
-                                    K.ptx.st.global_.v4.b16(
-                                        state.ptr_to([final_base]),
-                                        bits[0],
-                                        bits[1],
-                                        bits[2],
-                                        bits[3],
-                                    )
-                                )
+            with K.If(write_final != 0), K.Then():
+                K.evaluate(
+                    K.ptx.st.global_.v4.b16(
+                        state.ptr_to([final_base]), bits[0], bits[1], bits[2], bits[3]
+                    )
+                )
 
 
 def _specialization(config: dict[str, Any]) -> dict[str, Any]:
@@ -576,9 +475,13 @@ def get_kernel(**kwargs: Any):
         head_base = head_chunk * 3
         if spec["HAS_STATE_INDICES"]:
             if spec["INDEX_DTYPE"] == "int32":
-                state_batch = K.cast(_global_load_nc_s32(state_indices, batch_i), "int64")
+                _t1 = K.alloc_local((1,), "int32")
+                K.evaluate(K.ptx.ld.global_.nc.b32(_t1[0], state_indices.ptr_to([batch_i])))
+                state_batch = K.cast(_t1[0], "int64")
             else:
-                state_batch = _global_load_nc_s64(state_indices, batch_i)
+                _t2 = K.alloc_local((1,), "int64")
+                K.evaluate(K.ptx.ld.global_.nc.b64(_t2[0], state_indices.ptr_to([batch_i])))
+                state_batch = _t2[0]
         else:
             state_batch = K.cast(batch_i, "int64")
 
@@ -621,7 +524,7 @@ def get_kernel(**kwargs: Any):
             random_seed = K.local_scalar("int64")
             K.assign(random_seed, 0)
             if PHILOX_ROUNDS > 0 and not IS_PAD:
-                K.assign(random_seed, _global_load_s64(rand_seed, 0))
+                K.evaluate(K.ptx.ld.global_.s64(random_seed, rand_seed.ptr_to([0])))
             icache_idx = K.local_scalar("int64")
             K.assign(icache_idx, state_batch)
             if HAS_INTERMEDIATE_STATES and not IS_PAD:
@@ -629,7 +532,9 @@ def get_kernel(**kwargs: Any):
                     icache_idx, _global_load_index_s64(intermediate_indices, batch_i, INDEX_DTYPE)
                 )
 
-            a_value: K.float32 = K.reinterpret("float32", _global_load_u32(matrix_a, head))
+            gload_0 = K.alloc_local((1,), "uint32")
+            K.evaluate(K.ptx.ld.global_.b32(gload_0[0], matrix_a.ptr_to([head])))
+            a_value: K.float32 = K.reinterpret("float32", gload_0[0])
             d_value = K.local_scalar("float32")
             K.assign(d_value, 0.0)
             if HAS_D:
@@ -639,38 +544,46 @@ def get_kernel(**kwargs: Any):
             if HAS_DT_BIAS:
                 K.assign(bias_value, _load_weight(dt_bias, head, WEIGHT_DTYPE))
 
-            _mbarrier_arrive(bar_empty_buf.ptr_to([group]))
+            K.evaluate(
+                K.ptx.mbarrier.arrive.shared__cta.b64(bar_empty_buf.ptr_to([group]), K.uint32(1))
+            )
             _mbarrier_arrive_wait(bar_bc_buf.ptr_to([group]))
 
             with K.serial((NTOKENS + 3) // 4) as step_iter:
                 dt_step: K.int32 = compute_warp + step_iter * 4
-                with K.If(K.And(dt_step < NTOKENS, lane == 0)):
-                    with K.Then():
-                        dt_value = K.local_scalar("float32")
-                        K.assign(
-                            dt_value,
-                            _load_weight(
-                                dt,
-                                K.cast(batch_i, "int64") * dt_stride_batch
-                                + K.cast(dt_step, "int64") * dt_stride_mtp
-                                + head,
-                                WEIGHT_DTYPE,
-                            ),
+                with K.If(K.And(dt_step < NTOKENS, lane == 0)), K.Then():
+                    dt_value = K.local_scalar("float32")
+                    K.assign(
+                        dt_value,
+                        _load_weight(
+                            dt,
+                            K.cast(batch_i, "int64") * dt_stride_batch
+                            + K.cast(dt_step, "int64") * dt_stride_mtp
+                            + head,
+                            WEIGHT_DTYPE,
+                        ),
+                    )
+                    if HAS_DT_BIAS:
+                        K.evaluate(K.ptx["add.ftz.f32"](dt_value, dt_value, bias_value))
+                    with K.If(K.And(dt_softplus != 0, dt_value <= K.float32(20.0))), K.Then():
+                        mul_0 = K.alloc_local((1,), "float32")
+                        K.evaluate(K.ptx["mul.ftz.f32"](mul_0[0], dt_value, K.float32(_LOG2_E)))
+                        exp_arg: K.float32 = mul_0[0]
+                        exp2_0 = K.alloc_local((1,), "float32")
+                        K.evaluate(K.ptx["ex2.approx.ftz.f32"](exp2_0[0], exp_arg))
+                        exp_value: K.float32 = exp2_0[0]
+                        add_0 = K.alloc_local((1,), "float32")
+                        K.evaluate(K.ptx["add.ftz.f32"](add_0[0], K.float32(1.0), exp_value))
+                        log2_0 = K.alloc_local((1,), "float32")
+                        K.evaluate(K.ptx["lg2.approx.ftz.f32"](log2_0[0], add_0[0]))
+                        log_value: K.float32 = log2_0[0]
+                        K.evaluate(K.ptx["mul.ftz.f32"](dt_value, log_value, K.float32(_LN_2)))
+                    K.evaluate(
+                        K.ptx.st.shared.b32(
+                            s_dt.ptr_to([group * NTOKENS + dt_step]),
+                            K.reinterpret("uint32", dt_value),
                         )
-                        if HAS_DT_BIAS:
-                            K.assign(dt_value, _add(dt_value, bias_value))
-                        with K.If(K.And(dt_softplus != 0, dt_value <= K.float32(20.0))):
-                            with K.Then():
-                                exp_arg: K.float32 = _mul(dt_value, K.float32(_LOG2_E))
-                                exp_value: K.float32 = _exp2(exp_arg)
-                                log_value: K.float32 = _log2(_add(K.float32(1.0), exp_value))
-                                K.assign(dt_value, _mul(log_value, K.float32(_LN_2)))
-                        K.evaluate(
-                            K.ptx.st.shared.b32(
-                                s_dt.ptr_to([group * NTOKENS + dt_step]),
-                                K.reinterpret("uint32", dt_value),
-                            )
-                        )
+                    )
 
             _mbarrier_arrive_wait(bar_full_buf.ptr_to([group]))
             lane_indicator: K.float32 = K.if_then_else(lane == 0, K.float32(1.0), K.float32(0.0))
@@ -691,47 +604,90 @@ def get_kernel(**kwargs: Any):
                     if IS_PAD:
                         with K.unroll(STATE_VALUES_PER_THREAD) as ii:
                             K.ptx.mov.b32(r_state[wr, ii], K.float32(0.0))
-                    else:
-                        if STATE_DTYPE == "float32":
-                            state_words = K.alloc_local((4,), "uint32")
-                            _shared_load_v4_b32(
-                                s_state_u32,
-                                group * DIM * DSTATE + dd * DSTATE + lane * STATE_VALUES_PER_THREAD,
-                                state_words,
-                            )
-                            with K.unroll(4) as ii:
-                                K.ptx.mov.b32(
-                                    r_state[wr, ii], K.reinterpret("float32", state_words[ii])
-                                )
-                        else:
-                            state_bits = K.alloc_local((4,), "uint16")
-                            state_index: K.int32 = (
-                                group * DIM * DSTATE + dd * DSTATE + lane * STATE_VALUES_PER_THREAD
-                            )
-                            if DSTATE == 64:
-                                _shared_load_v2_b16(s_state_u16, state_index, state_bits)
-                            else:
-                                if DSTATE == 96:
-                                    with K.unroll(3) as ii:
-                                        K.ptx.mov.b16(
-                                            state_bits[ii],
-                                            _shared_load_u16(s_state_u16, state_index + ii),
+                    elif STATE_DTYPE == "float32":
+                        state_words = K.alloc_local((4,), "uint32")
+                        K.evaluate(
+                            K.ptx.ld.shared.v4.b32(
+                                state_words[0],
+                                state_words[1],
+                                state_words[2],
+                                state_words[3],
+                                s_state_u32.ptr_to(
+                                    [
+                                        (
+                                            group * DIM * DSTATE
+                                            + dd * DSTATE
+                                            + lane * STATE_VALUES_PER_THREAD
                                         )
-                                else:
-                                    _shared_load_v4_b16(s_state_u16, state_index, state_bits)
-                            with K.unroll(STATE_VALUES_PER_THREAD) as ii:
-                                if STATE_DTYPE == "bfloat16":
-                                    K.ptx.mov.b32(r_state[wr, ii], _bf16_to_f32(state_bits[ii]))
-                                else:
-                                    K.ptx.mov.b32(r_state[wr, ii], _f16_to_f32(state_bits[ii]))
+                                    ]
+                                ),
+                            )
+                        )
+                        with K.unroll(4) as ii:
+                            K.ptx.mov.b32(
+                                r_state[wr, ii], K.reinterpret("float32", state_words[ii])
+                            )
+                    else:
+                        state_bits = K.alloc_local((4,), "uint16")
+                        state_index: K.int32 = (
+                            group * DIM * DSTATE + dd * DSTATE + lane * STATE_VALUES_PER_THREAD
+                        )
+                        if DSTATE == 64:
+                            K.evaluate(
+                                K.ptx.ld.shared.v2.b16(
+                                    state_bits[0], state_bits[1], s_state_u16.ptr_to([state_index])
+                                )
+                            )
+                        elif DSTATE == 96:
+                            with K.unroll(3) as ii:
+                                sload_0 = K.alloc_local((1,), "uint16")
+                                K.evaluate(
+                                    K.ptx.ld.shared.b16(
+                                        sload_0[0], s_state_u16.ptr_to([state_index + ii])
+                                    )
+                                )
+                                K.ptx.mov.b16(state_bits[ii], sload_0[0])
+                        else:
+                            K.evaluate(
+                                K.ptx.ld.shared.v4.b16(
+                                    state_bits[0],
+                                    state_bits[1],
+                                    state_bits[2],
+                                    state_bits[3],
+                                    s_state_u16.ptr_to([state_index]),
+                                )
+                            )
+                        with K.unroll(STATE_VALUES_PER_THREAD) as ii:
+                            if STATE_DTYPE == "bfloat16":
+                                bf16_f32_0 = K.alloc_local((1,), "float32")
+                                K.evaluate(
+                                    K.ptx.cvt.f32.bf16(
+                                        bf16_f32_0[0], K.cast(state_bits[ii], "uint16")
+                                    )
+                                )
+                                K.ptx.mov.b32(r_state[wr, ii], bf16_f32_0[0])
+                            else:
+                                f16_f32_0 = K.alloc_local((1,), "float32")
+                                K.evaluate(
+                                    K.ptx.cvt.f32.f16(
+                                        f16_f32_0[0], K.cast(state_bits[ii], "uint16")
+                                    )
+                                )
+                                K.ptx.mov.b32(r_state[wr, ii], f16_f32_0[0])
 
                 row_random = K.alloc_local((4, 4), "uint32")
                 if PHILOX_ROUNDS > 0 and not IS_PAD:
                     with K.unroll(4) as wr:
                         dd: K.int32 = row_offset + wr
-                        random_counter: K.int32 = _add_s32(
-                            state_head_i32, dd * DSTATE + lane * STATE_VALUES_PER_THREAD
+                        add_s32_0 = K.alloc_local((1,), "int32")
+                        K.evaluate(
+                            K.ptx["add.s32"](
+                                add_s32_0[0],
+                                state_head_i32,
+                                dd * DSTATE + lane * STATE_VALUES_PER_THREAD,
+                            )
                         )
+                        random_counter: K.int32 = add_s32_0[0]
                         random_words = K.alloc_local((4,), "uint32")
                         _philox4x32(
                             random_words,
@@ -746,10 +702,18 @@ def get_kernel(**kwargs: Any):
                 step = K.local_scalar("int32")
                 K.assign(step, 0)
                 with K.While(step < NTOKENS):
-                    shared_dt: K.float32 = K.reinterpret(
-                        "float32", _shared_load_u32(s_dt, group * NTOKENS + step)
+                    sload_1 = K.alloc_local((1,), "uint32")
+                    K.evaluate(
+                        K.ptx.ld.shared.b32(sload_1[0], s_dt.ptr_to([group * NTOKENS + step]))
                     )
-                    da_value: K.float32 = _exp2(_mul(_mul(a_value, shared_dt), K.float32(_LOG2_E)))
+                    shared_dt: K.float32 = K.reinterpret("float32", sload_1[0])
+                    mul_1 = K.alloc_local((1,), "float32")
+                    K.evaluate(K.ptx["mul.ftz.f32"](mul_1[0], a_value, shared_dt))
+                    mul_2 = K.alloc_local((1,), "float32")
+                    K.evaluate(K.ptx["mul.ftz.f32"](mul_2[0], mul_1[0], K.float32(_LOG2_E)))
+                    exp2_1 = K.alloc_local((1,), "float32")
+                    K.evaluate(K.ptx["ex2.approx.ftz.f32"](exp2_1[0], mul_2[0]))
+                    da_value: K.float32 = exp2_1[0]
                     b_values = K.alloc_local((STATE_VALUES_PER_THREAD,), "float32")
                     c_values = K.alloc_local((STATE_VALUES_PER_THREAD,), "float32")
                     b_bits = K.alloc_local((4,), "uint16")
@@ -758,53 +722,91 @@ def get_kernel(**kwargs: Any):
                     b_index: K.int32 = group * NTOKENS * DSTATE + step * DSTATE + bc_col
                     c_index: K.int32 = group * NTOKENS * DSTATE + step * DSTATE + bc_col
                     if DSTATE == 64:
-                        _shared_load_v2_b16(s_b, b_index, b_bits)
-                        _shared_load_v2_b16(s_c, c_index, c_bits)
+                        K.evaluate(
+                            K.ptx.ld.shared.v2.b16(b_bits[0], b_bits[1], s_b.ptr_to([b_index]))
+                        )
+                        K.evaluate(
+                            K.ptx.ld.shared.v2.b16(c_bits[0], c_bits[1], s_c.ptr_to([c_index]))
+                        )
+                    elif DSTATE == 96:
+                        with K.unroll(3) as ii:
+                            K.evaluate(K.ptx.ld.shared.b16(b_bits[ii], s_b.ptr_to([b_index + ii])))
+                            K.evaluate(K.ptx.ld.shared.b16(c_bits[ii], s_c.ptr_to([c_index + ii])))
                     else:
-                        if DSTATE == 96:
-                            with K.unroll(3) as ii:
-                                K.ptx.mov.b16(b_bits[ii], _shared_load_u16(s_b, b_index + ii))
-                                K.ptx.mov.b16(c_bits[ii], _shared_load_u16(s_c, c_index + ii))
-                        else:
-                            _shared_load_v4_b16(s_b, b_index, b_bits)
-                            _shared_load_v4_b16(s_c, c_index, c_bits)
+                        K.evaluate(
+                            K.ptx.ld.shared.v4.b16(
+                                b_bits[0], b_bits[1], b_bits[2], b_bits[3], s_b.ptr_to([b_index])
+                            )
+                        )
+                        K.evaluate(
+                            K.ptx.ld.shared.v4.b16(
+                                c_bits[0], c_bits[1], c_bits[2], c_bits[3], s_c.ptr_to([c_index])
+                            )
+                        )
                     with K.unroll(STATE_VALUES_PER_THREAD) as ii:
-                        K.ptx.mov.b32(b_values[ii], _bf16_to_f32(b_bits[ii]))
-                        K.ptx.mov.b32(c_values[ii], _bf16_to_f32(c_bits[ii]))
+                        K.evaluate(K.ptx.cvt.f32.bf16(b_values[ii], K.cast(b_bits[ii], "uint16")))
+                        K.evaluate(K.ptx.cvt.f32.bf16(c_values[ii], K.cast(c_bits[ii], "uint16")))
 
                     with K.unroll(4) as wr:
                         dd: K.int32 = row_offset + wr
-                        x_value: K.float32 = _bf16_to_f32(
-                            _shared_load_u16(s_x, group * NTOKENS * DIM + step * DIM + dd)
+                        sload_2 = K.alloc_local((1,), "uint16")
+                        K.evaluate(
+                            K.ptx.ld.shared.b16(
+                                sload_2[0], s_x.ptr_to([group * NTOKENS * DIM + step * DIM + dd])
+                            )
                         )
-                        d_times_x: K.float32 = _mul(d_value, x_value)
+                        bf16_f32_1 = K.alloc_local((1,), "float32")
+                        K.evaluate(K.ptx.cvt.f32.bf16(bf16_f32_1[0], K.cast(sload_2[0], "uint16")))
+                        x_value: K.float32 = bf16_f32_1[0]
+                        mul_3 = K.alloc_local((1,), "float32")
+                        K.evaluate(K.ptx["mul.ftz.f32"](mul_3[0], d_value, x_value))
+                        d_times_x: K.float32 = mul_3[0]
                         out_value = K.local_scalar("float32")
                         K.assign(out_value, 0.0)
                         with K.unroll(STATE_VALUES_PER_THREAD) as ii:
-                            db_value: K.float32 = _mul(b_values[ii], shared_dt)
-                            db_x: K.float32 = _mul(db_value, x_value)
-                            new_state: K.float32 = _fma(r_state[wr, ii], da_value, db_x)
+                            mul_4 = K.alloc_local((1,), "float32")
+                            K.evaluate(K.ptx["mul.ftz.f32"](mul_4[0], b_values[ii], shared_dt))
+                            db_value: K.float32 = mul_4[0]
+                            mul_5 = K.alloc_local((1,), "float32")
+                            K.evaluate(K.ptx["mul.ftz.f32"](mul_5[0], db_value, x_value))
+                            db_x: K.float32 = mul_5[0]
+                            fma_0 = K.alloc_local((1,), "float32")
+                            K.evaluate(
+                                K.ptx["fma.rn.ftz.f32"](fma_0[0], r_state[wr, ii], da_value, db_x)
+                            )
+                            new_state: K.float32 = fma_0[0]
                             K.ptx.mov.b32(r_state[wr, ii], new_state)
                             with K.If(ii == 0):
                                 with K.Then():
-                                    state_c: K.float32 = _mul(new_state, c_values[ii])
-                                    K.assign(out_value, _fma(d_times_x, lane_indicator, state_c))
+                                    mul_6 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["mul.ftz.f32"](mul_6[0], new_state, c_values[ii])
+                                    )
+                                    state_c: K.float32 = mul_6[0]
+                                    K.evaluate(
+                                        K.ptx["fma.rn.ftz.f32"](
+                                            out_value, d_times_x, lane_indicator, state_c
+                                        )
+                                    )
                                 with K.Else():
-                                    K.assign(out_value, _fma(new_state, c_values[ii], out_value))
+                                    K.evaluate(
+                                        K.ptx["fma.rn.ftz.f32"](
+                                            out_value, new_state, c_values[ii], out_value
+                                        )
+                                    )
                         with K.unroll(5) as delta_i:
                             delta: K.int32 = K.shift_right(K.int32(16), delta_i)
                             peer: K.float32 = K.cuda.__shfl_down_sync(
                                 K.uint32(0xFFFFFFFF), out_value, delta, 32
                             )
-                            K.assign(out_value, _add(out_value, peer))
-                        with K.If(lane == 0):
-                            with K.Then():
-                                K.evaluate(
-                                    K.ptx.st.shared.b32(
-                                        s_out.ptr_to([group * NTOKENS * DIM + step * DIM + dd]),
-                                        K.reinterpret("uint32", out_value),
-                                    )
+                            K.evaluate(K.ptx["add.ftz.f32"](out_value, out_value, peer))
+                        with K.If(lane == 0), K.Then():
+                            K.evaluate(
+                                K.ptx.st.shared.b32(
+                                    s_out.ptr_to([group * NTOKENS * DIM + step * DIM + dd]),
+                                    K.reinterpret("uint32", out_value),
                                 )
+                            )
 
                     if not IS_PAD:
                         write_final: K.int32 = K.if_then_else(
@@ -875,38 +877,39 @@ def get_kernel(**kwargs: Any):
                                             PHILOX_ROUNDS=PHILOX_ROUNDS,
                                         )
                         else:
-                            with K.If(write_final != 0):
-                                with K.Then():
-                                    with K.unroll(4) as wr:
-                                        dd: K.int32 = row_offset + wr
-                                        final_base: K.int64 = (
-                                            state_batch * state_stride_batch
-                                            + head * DIM * DSTATE
-                                            + dd * DSTATE
-                                            + lane * STATE_VALUES_PER_THREAD
-                                        )
-                                        random_words = K.alloc_local((4,), "uint32")
-                                        with K.unroll(4) as ri:
-                                            K.ptx.mov.b32(random_words[ri], row_random[wr, ri])
-                                        _store_state_row(
-                                            r_state,
-                                            wr,
-                                            random_words,
-                                            state,
-                                            intermediate_states,
-                                            K.int64(0),
-                                            final_base,
-                                            K.int32(1),
-                                            DSTATE=DSTATE,
-                                            STATE_DTYPE=STATE_DTYPE,
-                                            STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
-                                            HAS_INTERMEDIATE_STATES=False,
-                                            PHILOX_ROUNDS=PHILOX_ROUNDS,
-                                        )
+                            with K.If(write_final != 0), K.Then():
+                                with K.unroll(4) as wr:
+                                    dd: K.int32 = row_offset + wr
+                                    final_base: K.int64 = (
+                                        state_batch * state_stride_batch
+                                        + head * DIM * DSTATE
+                                        + dd * DSTATE
+                                        + lane * STATE_VALUES_PER_THREAD
+                                    )
+                                    random_words = K.alloc_local((4,), "uint32")
+                                    with K.unroll(4) as ri:
+                                        K.ptx.mov.b32(random_words[ri], row_random[wr, ri])
+                                    _store_state_row(
+                                        r_state,
+                                        wr,
+                                        random_words,
+                                        state,
+                                        intermediate_states,
+                                        K.int64(0),
+                                        final_base,
+                                        K.int32(1),
+                                        DSTATE=DSTATE,
+                                        STATE_DTYPE=STATE_DTYPE,
+                                        STATE_VALUES_PER_THREAD=STATE_VALUES_PER_THREAD,
+                                        HAS_INTERMEDIATE_STATES=False,
+                                        PHILOX_ROUNDS=PHILOX_ROUNDS,
+                                    )
                     K.assign(step, step + 1)
                 K.assign(pass_idx, pass_idx + 1)
 
-            _mbarrier_arrive(bar_out_buf.ptr_to([group]))
+            K.evaluate(
+                K.ptx.mbarrier.arrive.shared__cta.b64(bar_out_buf.ptr_to([group]), K.uint32(1))
+            )
             _mbarrier_arrive_wait(bar_done_buf.ptr_to([group]))
 
         def run_update(is_pad):
@@ -918,60 +921,70 @@ def get_kernel(**kwargs: Any):
         def load_head(group, head, IS_PAD: K.constexpr):
             lane: K.int32 = K.tid_in_role() & 31
             kv_group: K.int32 = head // HEADS_PER_GROUP
-            with K.If(lane == 0):
-                with K.Then():
-                    _tma_g2s_4d(
-                        s_b.ptr_to([group * NTOKENS * DSTATE]),
-                        tensor_b,
-                        0,
-                        kv_group,
-                        0,
-                        batch_i,
-                        bar_bc_buf.ptr_to([group]),
+            with K.If(lane == 0), K.Then():
+                _tma_g2s_4d(
+                    s_b.ptr_to([group * NTOKENS * DSTATE]),
+                    tensor_b,
+                    0,
+                    kv_group,
+                    0,
+                    batch_i,
+                    bar_bc_buf.ptr_to([group]),
+                )
+                _tma_g2s_4d(
+                    s_c.ptr_to([group * NTOKENS * DSTATE]),
+                    tensor_c,
+                    0,
+                    kv_group,
+                    0,
+                    batch_i,
+                    bar_bc_buf.ptr_to([group]),
+                )
+                K.evaluate(
+                    K.ptx.mbarrier.expect_tx.relaxed.cta.shared__cta.b64(
+                        bar_bc_buf.ptr_to([group]), K.uint32(2 * NTOKENS * DSTATE * 2)
                     )
-                    _tma_g2s_4d(
-                        s_c.ptr_to([group * NTOKENS * DSTATE]),
-                        tensor_c,
-                        0,
-                        kv_group,
-                        0,
-                        batch_i,
-                        bar_bc_buf.ptr_to([group]),
+                )
+                K.evaluate(
+                    K.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
+                        bar_bc_buf.ptr_to([group]), K.uint32(32)
                     )
-                    _mbarrier_expect_tx_relaxed(
-                        bar_bc_buf.ptr_to([group]), 2 * NTOKENS * DSTATE * 2
-                    )
-                    _mbarrier_arrive_count_release(bar_bc_buf.ptr_to([group]), 32)
+                )
 
             _mbarrier_arrive_wait(bar_empty_buf.ptr_to([group]))
-            with K.If(lane == 0):
-                with K.Then():
-                    if not IS_PAD:
-                        _tma_g2s_4d(
-                            s_state.ptr_to([group * STATE_STAGE_VALUES]),
-                            tensor_state,
-                            0,
-                            0,
-                            head,
-                            state_batch,
-                            bar_full_buf.ptr_to([group]),
-                        )
+            with K.If(lane == 0), K.Then():
+                if not IS_PAD:
                     _tma_g2s_4d(
-                        s_x.ptr_to([group * NTOKENS * DIM]),
-                        tensor_x,
+                        s_state.ptr_to([group * STATE_STAGE_VALUES]),
+                        tensor_state,
+                        0,
                         0,
                         head,
-                        0,
-                        batch_i,
+                        state_batch,
                         bar_full_buf.ptr_to([group]),
                     )
-                    if IS_PAD:
-                        _mbarrier_arrive_expect_tx(bar_full_buf.ptr_to([group]), NTOKENS * DIM * 2)
-                    else:
-                        _mbarrier_arrive_expect_tx(
-                            bar_full_buf.ptr_to([group]),
-                            DIM * DSTATE * STATE_BYTES + NTOKENS * DIM * 2,
+                _tma_g2s_4d(
+                    s_x.ptr_to([group * NTOKENS * DIM]),
+                    tensor_x,
+                    0,
+                    head,
+                    0,
+                    batch_i,
+                    bar_full_buf.ptr_to([group]),
+                )
+                if IS_PAD:
+                    K.evaluate(
+                        K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                            bar_full_buf.ptr_to([group]), K.uint32(NTOKENS * DIM * 2)
                         )
+                    )
+                else:
+                    K.evaluate(
+                        K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                            bar_full_buf.ptr_to([group]),
+                            K.uint32(DIM * DSTATE * STATE_BYTES + NTOKENS * DIM * 2),
+                        )
+                    )
 
         def run_load(is_pad):
             group = K.warp_id_in_role()
@@ -983,88 +996,153 @@ def get_kernel(**kwargs: Any):
             lane: K.int32 = K.tid_in_role()
             with K.serial(3) as group:
                 head: K.int32 = head_base + group
-                with K.If(head < NHEADS):
-                    with K.Then():
-                        _mbarrier_arrive_wait(bar_out_buf.ptr_to([group]))
-                        with K.unroll(NTOKENS) as step:
-                            out_base: K.int64 = (
-                                K.cast(batch_i, "int64") * out_stride_batch
-                                + K.cast(step, "int64") * out_stride_mtp
-                                + head * DIM
+                with K.If(head < NHEADS), K.Then():
+                    _mbarrier_arrive_wait(bar_out_buf.ptr_to([group]))
+                    with K.unroll(NTOKENS) as step:
+                        out_base: K.int64 = (
+                            K.cast(batch_i, "int64") * out_stride_batch
+                            + K.cast(step, "int64") * out_stride_mtp
+                            + head * DIM
+                        )
+                        z_base: K.int64 = (
+                            K.cast(batch_i, "int64") * z_stride_batch
+                            + K.cast(step, "int64") * z_stride_mtp
+                            + head * DIM
+                        )
+                        out_words = K.alloc_local((4,), "uint32")
+                        z_bits = K.alloc_local((4,), "uint16")
+                        output_bits = K.alloc_local((4,), "uint16")
+                        if DIM == 64:
+                            d: K.int32 = lane * 2
+                            K.evaluate(
+                                K.ptx.ld.shared.v2.b32(
+                                    out_words[0],
+                                    out_words[1],
+                                    s_out.ptr_to([group * NTOKENS * DIM + step * DIM + d]),
+                                )
                             )
-                            z_base: K.int64 = (
-                                K.cast(batch_i, "int64") * z_stride_batch
-                                + K.cast(step, "int64") * z_stride_mtp
-                                + head * DIM
+                            if HAS_Z:
+                                K.evaluate(
+                                    K.ptx.ld.global_.v2.b16(
+                                        z_bits[0], z_bits[1], z.ptr_to([(z_base + d)])
+                                    )
+                                )
+                            with K.unroll(2) as k:
+                                out_value = K.local_scalar("float32")
+                                K.assign(out_value, K.reinterpret("float32", out_words[k]))
+                                if HAS_Z:
+                                    bf16_f32_2 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx.cvt.f32.bf16(
+                                            bf16_f32_2[0], K.cast(z_bits[k], "uint16")
+                                        )
+                                    )
+                                    z_value: K.float32 = bf16_f32_2[0]
+                                    sub_0 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["sub.ftz.f32"](sub_0[0], K.float32(0.0), z_value)
+                                    )
+                                    mul_7 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["mul.ftz.f32"](mul_7[0], sub_0[0], K.float32(_LOG2_E))
+                                    )
+                                    exp2_2 = K.alloc_local((1,), "float32")
+                                    K.evaluate(K.ptx["ex2.approx.ftz.f32"](exp2_2[0], mul_7[0]))
+                                    exp_neg_z: K.float32 = exp2_2[0]
+                                    add_1 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["add.ftz.f32"](add_1[0], K.float32(1.0), exp_neg_z)
+                                    )
+                                    div_0 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["div.approx.ftz.f32"](
+                                            div_0[0], K.float32(1.0), add_1[0]
+                                        )
+                                    )
+                                    sigmoid_z: K.float32 = div_0[0]
+                                    mul_8 = K.alloc_local((1,), "float32")
+                                    K.evaluate(K.ptx["mul.ftz.f32"](mul_8[0], z_value, sigmoid_z))
+                                    K.evaluate(K.ptx["mul.ftz.f32"](out_value, out_value, mul_8[0]))
+                                K.evaluate(K.ptx.cvt.rn.bf16.f32(output_bits[k], out_value))
+                            K.evaluate(
+                                K.ptx.st.global_.v2.b16(
+                                    output.ptr_to([out_base + d]), output_bits[0], output_bits[1]
+                                )
                             )
-                            out_words = K.alloc_local((4,), "uint32")
-                            z_bits = K.alloc_local((4,), "uint16")
-                            output_bits = K.alloc_local((4,), "uint16")
-                            if DIM == 64:
-                                d: K.int32 = lane * 2
+                        else:
+                            d: K.int32 = lane * 4
+                            K.evaluate(
+                                K.ptx.ld.shared.v4.b32(
+                                    out_words[0],
+                                    out_words[1],
+                                    out_words[2],
+                                    out_words[3],
+                                    s_out.ptr_to([(group * NTOKENS * DIM + step * DIM + d)]),
+                                )
+                            )
+                            if HAS_Z:
                                 K.evaluate(
-                                    K.ptx.ld.shared.v2.b32(
-                                        out_words[0],
-                                        out_words[1],
-                                        s_out.ptr_to([group * NTOKENS * DIM + step * DIM + d]),
+                                    K.ptx.ld.global_.v4.b16(
+                                        z_bits[0],
+                                        z_bits[1],
+                                        z_bits[2],
+                                        z_bits[3],
+                                        z.ptr_to([(z_base + d)]),
                                     )
                                 )
+                            with K.unroll(4) as k:
+                                out_value = K.local_scalar("float32")
+                                K.assign(out_value, K.reinterpret("float32", out_words[k]))
                                 if HAS_Z:
-                                    _global_load_v2_b16(z, z_base + d, z_bits)
-                                with K.unroll(2) as k:
-                                    out_value = K.local_scalar("float32")
-                                    K.assign(out_value, K.reinterpret("float32", out_words[k]))
-                                    if HAS_Z:
-                                        z_value: K.float32 = _bf16_to_f32(z_bits[k])
-                                        exp_neg_z: K.float32 = _exp2(
-                                            _mul(_sub(K.float32(0.0), z_value), K.float32(_LOG2_E))
+                                    bf16_f32_3 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx.cvt.f32.bf16(
+                                            bf16_f32_3[0], K.cast(z_bits[k], "uint16")
                                         )
-                                        sigmoid_z: K.float32 = _div(
-                                            K.float32(1.0), _add(K.float32(1.0), exp_neg_z)
-                                        )
-                                        K.assign(
-                                            out_value, _mul(out_value, _mul(z_value, sigmoid_z))
-                                        )
-                                    K.ptx.mov.b16(output_bits[k], _f32_to_bf16(out_value))
-                                K.evaluate(
-                                    K.ptx.st.global_.v2.b16(
-                                        output.ptr_to([out_base + d]),
-                                        output_bits[0],
-                                        output_bits[1],
                                     )
-                                )
-                            else:
-                                d: K.int32 = lane * 4
-                                _shared_load_v4_b32(
-                                    s_out, group * NTOKENS * DIM + step * DIM + d, out_words
-                                )
-                                if HAS_Z:
-                                    _global_load_v4_b16(z, z_base + d, z_bits)
-                                with K.unroll(4) as k:
-                                    out_value = K.local_scalar("float32")
-                                    K.assign(out_value, K.reinterpret("float32", out_words[k]))
-                                    if HAS_Z:
-                                        z_value: K.float32 = _bf16_to_f32(z_bits[k])
-                                        exp_neg_z: K.float32 = _exp2(
-                                            _mul(_sub(K.float32(0.0), z_value), K.float32(_LOG2_E))
-                                        )
-                                        sigmoid_z: K.float32 = _div(
-                                            K.float32(1.0), _add(K.float32(1.0), exp_neg_z)
-                                        )
-                                        K.assign(
-                                            out_value, _mul(out_value, _mul(z_value, sigmoid_z))
-                                        )
-                                    K.ptx.mov.b16(output_bits[k], _f32_to_bf16(out_value))
-                                K.evaluate(
-                                    K.ptx.st.global_.v4.b16(
-                                        output.ptr_to([out_base + d]),
-                                        output_bits[0],
-                                        output_bits[1],
-                                        output_bits[2],
-                                        output_bits[3],
+                                    z_value: K.float32 = bf16_f32_3[0]
+                                    sub_1 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["sub.ftz.f32"](sub_1[0], K.float32(0.0), z_value)
                                     )
+                                    mul_9 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["mul.ftz.f32"](mul_9[0], sub_1[0], K.float32(_LOG2_E))
+                                    )
+                                    exp2_3 = K.alloc_local((1,), "float32")
+                                    K.evaluate(K.ptx["ex2.approx.ftz.f32"](exp2_3[0], mul_9[0]))
+                                    exp_neg_z: K.float32 = exp2_3[0]
+                                    add_2 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["add.ftz.f32"](add_2[0], K.float32(1.0), exp_neg_z)
+                                    )
+                                    div_1 = K.alloc_local((1,), "float32")
+                                    K.evaluate(
+                                        K.ptx["div.approx.ftz.f32"](
+                                            div_1[0], K.float32(1.0), add_2[0]
+                                        )
+                                    )
+                                    sigmoid_z: K.float32 = div_1[0]
+                                    mul_10 = K.alloc_local((1,), "float32")
+                                    K.evaluate(K.ptx["mul.ftz.f32"](mul_10[0], z_value, sigmoid_z))
+                                    K.evaluate(
+                                        K.ptx["mul.ftz.f32"](out_value, out_value, mul_10[0])
+                                    )
+                                K.evaluate(K.ptx.cvt.rn.bf16.f32(output_bits[k], out_value))
+                            K.evaluate(
+                                K.ptx.st.global_.v4.b16(
+                                    output.ptr_to([out_base + d]),
+                                    output_bits[0],
+                                    output_bits[1],
+                                    output_bits[2],
+                                    output_bits[3],
                                 )
-                        _mbarrier_arrive(bar_done_buf.ptr_to([group]))
+                            )
+                    K.evaluate(
+                        K.ptx.mbarrier.arrive.shared__cta.b64(
+                            bar_done_buf.ptr_to([group]), K.uint32(1)
+                        )
+                    )
 
         with update:
             with K.If(state_batch == K.cast(pad_slot_id, "int64")):
