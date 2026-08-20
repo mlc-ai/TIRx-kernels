@@ -849,50 +849,9 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
             _I.buffer_store(vals, vals[i] + carry[0], [i])
 
 
-def weighted_relu_reduce(accum, weights, weight_row, num_values):
-    """Emit the packed weighted-ReLU reduction used by FP4 MQA."""
-    regs = T.alloc_local((7,), "uint64")
-    scalars = T.alloc_local((3,), "float32")
-    sum_0, sum_1 = regs[0], regs[1]
-    accum_pair, abs_pair, relu_pair, weight_pair = regs[2], regs[3], regs[4], regs[5]
-    total = regs[6]
-    abs_lo, abs_hi, result = scalars[0], scalars[1], scalars[2]
-    _I.evaluate(T.ptx.mov.b64(sum_0, T.float32(0), T.float32(0)))
-    _I.evaluate(T.ptx.mov.b64(sum_1, T.float32(0), T.float32(0)))
-    for head_group in range(num_values // 4):
-        head = head_group * 4
-        _I.evaluate(T.ptx.mov.b64(accum_pair, accum[head], accum[head + 1]))
-        _I.evaluate(T.ptx.abs.f32(abs_lo, accum[head]))
-        _I.evaluate(T.ptx.abs.f32(abs_hi, accum[head + 1]))
-        _I.evaluate(T.ptx.mov.b64(abs_pair, abs_lo, abs_hi))
-        _I.evaluate(T.ptx.add.rn.f32x2(relu_pair, accum_pair, abs_pair))
-        _I.evaluate(
-            T.ptx.mov.b64(weight_pair, weights[weight_row, head], weights[weight_row, head + 1])
-        )
-        _I.evaluate(T.ptx.fma.rn.f32x2(sum_0, relu_pair, weight_pair, sum_0))
-
-        _I.evaluate(T.ptx.mov.b64(accum_pair, accum[head + 2], accum[head + 3]))
-        _I.evaluate(T.ptx.abs.f32(abs_lo, accum[head + 2]))
-        _I.evaluate(T.ptx.abs.f32(abs_hi, accum[head + 3]))
-        _I.evaluate(T.ptx.mov.b64(abs_pair, abs_lo, abs_hi))
-        _I.evaluate(T.ptx.add.rn.f32x2(relu_pair, accum_pair, abs_pair))
-        _I.evaluate(
-            T.ptx.mov.b64(
-                weight_pair, weights[weight_row, head + 2], weights[weight_row, head + 3]
-            )
-        )
-        _I.evaluate(T.ptx.fma.rn.f32x2(sum_1, relu_pair, weight_pair, sum_1))
-    _I.evaluate(T.ptx.add.rn.f32x2(total, sum_0, sum_1))
-    _I.evaluate(T.ptx.mov.b64(abs_lo, abs_hi, total))
-    _I.evaluate(T.ptx.add.rn.f32(result, abs_lo, abs_hi))
-    _I.evaluate(T.ptx.mul.rn.f32(result, result, T.float32(0.5)))
-    return result
-
-
 __all__ = [
     "cast_f16x2_to_f32x2",
     "decode_instr_descriptor",
     "mma_chain",
-    "weighted_relu_reduce",
     "warp_scan_add",
 ]
