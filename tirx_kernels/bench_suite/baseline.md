@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '3df3e86a', 'tirx-kernels': '82f32d84-dirty', 'tirx-bench-ci': None}`
-- Workloads: 406 ok, 0 failed
+- Git:       `{'tir': '3df3e86a', 'tirx-kernels': '521f16bf-dirty', 'tirx-bench-ci': None}`
+- Workloads: 422 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -258,6 +258,27 @@ Grouped workloads show one row per config and one timing column per implementati
 | `bf16_e4m3_m32_h4096_xc_rc_yc_pdl0_s1` | tirx | 3.3662 | flashinfer_cutedsl | 3.4006 | 1.010 | — |
 | `bf16_e4m3_m32_h4096_xc_rc_yc_pdl1_s1` | tirx | 3.7142 | flashinfer_cutedsl | 3.7284 | 1.004 | — |
 | `bf16_e4m3_m64_h8192_xc_rc_yc_pdl0_s1` | tirx | 3.8163 | flashinfer_cutedsl | 3.8988 | 1.022 | — |
+
+## flashinfer_layernorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_m128_h1024_xc_yc_pdl0_eps1e6` | tirx | 3.0780 | flashinfer_cutedsl | 3.0617 | 0.995 | — |
+| `bf16_m128_h128_xc_yc_pdl0_eps1e6` | tirx | 2.4435 | flashinfer_cutedsl | 2.4455 | 1.001 | — |
+| `bf16_m128_h129_xc_yc_pdl0_eps1e6` | tirx | 2.8535 | flashinfer_cutedsl | 2.8579 | 1.002 | — |
+| `bf16_m128_h16384_xc_yc_pdl0_eps1e6` | tirx | 8.9484 | flashinfer_cutedsl | 8.9428 | 0.999 | — |
+| `bf16_m1_h1024_xc_yc_pdl0_eps1e6` | tirx | 2.9720 | flashinfer_cutedsl | 2.9680 | 0.999 | — |
+| `bf16_m1_h128_xc_yc_pdl0_eps1e6` | tirx | 2.0493 | flashinfer_cutedsl | 2.0524 | 1.002 | — |
+| `bf16_m1_h129_xc_yc_pdl0_eps1e6` | tirx | 2.7931 | flashinfer_cutedsl | 2.7960 | 1.001 | — |
+| `bf16_m1_h16384_xc_yc_pdl0_eps1e6` | tirx | 8.2575 | flashinfer_cutedsl | 8.2507 | 0.999 | — |
+| `bf16_m2_h1024_xc_yc_pdl0_eps1e6` | tirx | 2.7966 | flashinfer_cutedsl | 2.8083 | 1.004 | — |
+| `bf16_m2_h128_xc_yc_pdl0_eps1e6` | tirx | 2.0360 | flashinfer_cutedsl | 2.0560 | 1.010 | — |
+| `bf16_m2_h129_xc_yc_pdl0_eps1e6` | tirx | 3.0462 | flashinfer_cutedsl | 3.0447 | 1.000 | — |
+| `bf16_m2_h16384_xc_yc_pdl0_eps1e6` | tirx | 7.6095 | flashinfer_cutedsl | 7.6246 | 1.002 | — |
+| `bf16_m3_h1024_xc_yc_pdl0_eps1e6` | tirx | 3.1947 | flashinfer_cutedsl | 3.1884 | 0.998 | — |
+| `bf16_m3_h128_xc_yc_pdl0_eps1e6` | tirx | 2.2445 | flashinfer_cutedsl | 2.2463 | 1.001 | — |
+| `bf16_m3_h129_xc_yc_pdl0_eps1e6` | tirx | 2.8113 | flashinfer_cutedsl | 2.8115 | 1.000 | — |
+| `bf16_m3_h16384_xc_yc_pdl0_eps1e6` | tirx | 8.0211 | flashinfer_cutedsl | 8.0604 | 1.005 | — |
 
 ## flashinfer_qk_rmsnorm
 
