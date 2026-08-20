@@ -37,12 +37,37 @@ thread the deeper unroll took four shapes from 0.91-0.98x to 1.18-1.21x; at 6.8
 iterations the remainder dominated and the same change took one shape from 1.11x
 to 0.95x.
 
+A second kernel reproduced the scaling law with a different threshold, so derive
+it per kernel rather than reusing a number. A clustered radix select swept the
+factor against its per-thread trip count and found the crossover at 8, not 28:
+
+| trips/thread | unroll 4 | unroll 6 | unroll 8 |
+| ---: | --- | --- | --- |
+| 4 | **1.083, 1.032** | - | 0.896, 0.955 |
+| 8 | 0.977 | 0.959 | **0.995** |
+| 16 | 0.987, 1.006 | 0.924, 0.969 | **1.060, 1.011** |
+| 32 | 0.963 | 0.970 | **1.009**, and 12 fell back to 0.920 |
+
+`unroll = 8 if trips >= 8 else min(4, trips)` took that kernel's whole matrix
+from three failing shapes to zero.
+
 ## Boundary
 
 Do not assume monotonicity: unroll 6 and 8 regressed back to 5.75 and 6.26
 warp-cycles on register pressure. Sweep instead. Confirm the two trip-count
 regimes are actually separated in the config domain before picking a threshold,
 and do not apply the factor globally.
+
+The non-monotonicity is not only at the top of the range. In the sweep above,
+unroll 6 was worse than BOTH 4 and 8 on every shape tested, at every trip count.
+A three-point sweep that brackets the current factor can therefore point the
+wrong way; sweep the endpoints you would actually ship.
+
+The lever also does not transfer between loops in the same kernel. Applying the
+same staging to a loop whose bound is a runtime value, rather than an exact
+multiple of the stride, regressed three shapes (0.966 -> 0.946, 0.984 -> 0.944,
+0.988 -> 0.863): the per-element bounds re-check the runtime bound forces costs
+more than the added parallelism returns.
 
 ## Verification
 

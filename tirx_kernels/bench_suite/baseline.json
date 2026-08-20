@@ -2,13 +2,13 @@
   "timestamp": "14",
   "label": "post-refactor",
   "git": {
-    "tir": "3df3e86a",
-    "tirx-kernels": "919f1c6b-dirty",
+    "tir": "f20fa692",
+    "tirx-kernels": "fc344e9e-dirty",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "48e74a7a7521932b7124d6ed1cae9eaee3954b27"
+    "tirx-kernels:tirx_kernels": "4a09dabf5bb867211c1f794472733fdac2f87a31"
   },
   "baselines": {
     "torch": {
@@ -1018,6 +1018,482 @@
       "impls": {
         "tirx": 83.96102247146229,
         "deepgemm": 91.63302354900253
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "bf16_plain_b16_l16384_k256",
+      "label": "bf16_plain_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.315430039853691,
+        "flashinfer": 10.636390047572817
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "bf16_plain_b64_l16384_k1024_tie_heavy",
+      "label": "bf16_plain_b64_l16384_k1024_tie_heavy",
+      "status": "ok",
+      "impls": {
+        "tirx": 11.808709440817704,
+        "flashinfer": 12.889005253321622
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "bf16_plain_b64_l65536_k1024",
+      "label": "bf16_plain_b64_l65536_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 15.98384416324642,
+        "flashinfer": 17.379626806477507
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "bf16_pt_b16_l16384_k256",
+      "label": "bf16_pt_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.135281795175032,
+        "flashinfer": 11.315999284079126
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "bf16_rag_b16_l16384_k256",
+      "label": "bf16_rag_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.148079509086005,
+        "flashinfer": 10.141660470624371
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "bf16_rag_b300_l16384_k256",
+      "label": "bf16_rag_b300_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 17.736769374056607,
+        "flashinfer": 18.811297763426722
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f16_plain_b16_l16384_k256",
+      "label": "f16_plain_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.330373941198276,
+        "flashinfer": 10.367677404945761
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f16_plain_b16_l4096_k256",
+      "label": "f16_plain_b16_l4096_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 4.7626278062022385,
+        "flashinfer": 5.720782937867246
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f16_plain_b64_l16384_k1024_tie_heavy",
+      "label": "f16_plain_b64_l16384_k1024_tie_heavy",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.310705824602685,
+        "flashinfer": 10.834010305937683
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f16_plain_b64_l65536_k2048_i64",
+      "label": "f16_plain_b64_l65536_k2048_i64",
+      "status": "ok",
+      "impls": {
+        "tirx": 17.86619196443973,
+        "flashinfer": 18.91182523135481
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f16_pt_b16_l16384_k256",
+      "label": "f16_pt_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.990122267768026,
+        "flashinfer": 10.891726528891365
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f16_rag_b16_l16384_k256",
+      "label": "f16_rag_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 9.095775680713702,
+        "flashinfer": 9.904250605408697
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b16_l16384_k2048_all_equal",
+      "label": "f32_plain_b16_l16384_k2048_all_equal",
+      "status": "ok",
+      "impls": {
+        "tirx": 17.02906334374407,
+        "flashinfer": 18.84488740855133
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b16_l16384_k256",
+      "label": "f32_plain_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 13.466725761891453,
+        "flashinfer": 14.399956962439427
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b16_l16384_k256_all_equal",
+      "label": "f32_plain_b16_l16384_k256_all_equal",
+      "status": "ok",
+      "impls": {
+        "tirx": 16.623915558773916,
+        "flashinfer": 18.154122963852434
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b16_l16384_k256_i64",
+      "label": "f32_plain_b16_l16384_k256_i64",
+      "status": "ok",
+      "impls": {
+        "tirx": 13.420686040314143,
+        "flashinfer": 14.482802491022296
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b16_l16384_k256_neg",
+      "label": "f32_plain_b16_l16384_k256_neg",
+      "status": "ok",
+      "impls": {
+        "tirx": 13.569874037143865,
+        "flashinfer": 15.402587414600815
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b16_l16384_k256_tie_heavy",
+      "label": "f32_plain_b16_l16384_k256_tie_heavy",
+      "status": "ok",
+      "impls": {
+        "tirx": 15.36879530372728,
+        "flashinfer": 16.350402340406173
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b16_l4096_k256",
+      "label": "f32_plain_b16_l4096_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 6.705360241543075,
+        "flashinfer": 7.298516449760636
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b200_l16384_k256",
+      "label": "f32_plain_b200_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 24.860179582464507,
+        "flashinfer": 25.405898567657005
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b200_l65536_k1024",
+      "label": "f32_plain_b200_l65536_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 45.58549359469851,
+        "flashinfer": 46.1854230209686
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b300_l16384_k256",
+      "label": "f32_plain_b300_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 20.97409959806401,
+        "flashinfer": 22.08633863271252
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b64_l16384_k1024",
+      "label": "f32_plain_b64_l16384_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 14.871124585168214,
+        "flashinfer": 15.65283767985314
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b64_l16384_k2048",
+      "label": "f32_plain_b64_l16384_k2048",
+      "status": "ok",
+      "impls": {
+        "tirx": 15.051104769999581,
+        "flashinfer": 15.801412140170715
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b64_l16384_k256",
+      "label": "f32_plain_b64_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 13.65114702208196,
+        "flashinfer": 14.268870524209298
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b64_l65536_k1024",
+      "label": "f32_plain_b64_l65536_k1024",
+      "status": "ok",
+      "impls": {
+        "tirx": 20.9927620851139,
+        "flashinfer": 21.414696338019116
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_plain_b8_l4096_k4096",
+      "label": "f32_plain_b8_l4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.672630117828723,
+        "flashinfer": 2.711304928986408
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_pt_b16_l16384_k256",
+      "label": "f32_pt_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 14.176903112475797,
+        "flashinfer": 15.382819182524589
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_pt_b16_l16384_k256_rowvar",
+      "label": "f32_pt_b16_l16384_k256_rowvar",
+      "status": "ok",
+      "impls": {
+        "tirx": 12.433105173142899,
+        "flashinfer": 12.903365349462904
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_pt_b200_l16384_k256",
+      "label": "f32_pt_b200_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 26.733519204956824,
+        "flashinfer": 26.79326579260196
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_pt_b8_l4096_k4096",
+      "label": "f32_pt_b8_l4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.9397018277168736,
+        "flashinfer": 2.933718772726037
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_rag_b16_l16384_k256",
+      "label": "f32_rag_b16_l16384_k256",
+      "status": "ok",
+      "impls": {
+        "tirx": 13.351923925198077,
+        "flashinfer": 13.930256621474793
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_rag_b16_l16384_k256_rowvar",
+      "label": "f32_rag_b16_l16384_k256_rowvar",
+      "status": "ok",
+      "impls": {
+        "tirx": 11.592190640733152,
+        "flashinfer": 11.901982678247125
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "fast_topk_clusters",
+      "config": "f32_rag_b8_l4096_k4096",
+      "label": "f32_rag_b8_l4096_k4096",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.101097896651712,
+        "flashinfer": 2.2161202971603635
       },
       "aggregated": {
         "rounds": 5,
