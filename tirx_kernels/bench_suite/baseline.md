@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': 'f20fa692', 'tirx-kernels': 'fc344e9e-dirty', 'tirx-bench-ci': None}`
-- Workloads: 381 ok, 0 failed
+- Git:       `{'tir': '0d695aa0', 'tirx-kernels': 'fc344e9e-dirty', 'tirx-bench-ci': None}`
+- Workloads: 389 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -393,6 +393,19 @@ Grouped workloads show one row per config and one timing column per implementati
 | `tp1_m8192_n4096_k12288_fp16_dynamic` | tirx | 1000.4833 | cublas_nccl_cudagraph | 943.5559 | 0.943 | cublasmp_split_p2p=1243.5105 |
 | `tp1_m8192_n5120_k25600_fp16_dynamic` | tirx | 1493.2130 | cublas_nccl_cudagraph | 1436.5057 | 0.962 | cublasmp_split_p2p=1840.6237 |
 | `tp1_m8192_n8192_k28672_fp16_dynamic` | tirx | 2402.0207 | cublas_nccl_cudagraph | 2383.3390 | 0.992 | cublasmp_split_p2p=2819.7509 |
+
+## msa_sparse_prepare_flat_schedule_sm100
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `decode_b128_k65536_h4` | tirx | 8696.1643 | msa | 12215.6348 | 1.405 | — |
+| `decode_b32_k8192_h4` | tirx | 64.8933 | msa | 88.7769 | 1.368 | — |
+| `decode_b64_k16384_h4_varlen` | tirx | 313.4035 | msa | 433.9132 | 1.385 | — |
+| `edge_b1_k512_h1` | tirx | 3.4553 | msa | 4.0778 | 1.180 | — |
+| `prefill_b1_k131072_h1` | tirx | 5.0327 | msa | 5.4474 | 1.082 | — |
+| `prefill_b1_k32768_h2` | tirx | 4.4183 | msa | 4.7939 | 1.085 | — |
+| `prefill_b1_k8192_h2` | tirx | 3.9548 | msa | 4.2960 | 1.086 | — |
+| `prefill_b3_k8192_h2_varlen` | tirx | 5.1043 | msa | 5.9817 | 1.172 | — |
 
 ## mxfp4_quantize
 

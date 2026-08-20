@@ -68,6 +68,13 @@
       "url": "https://github.com/MoonshotAI/FlashKDA.git",
       "revision": "1ce47ea3bb22c84eb9cc665028399cf35e8ffb0b",
       "install_subdirectory": "."
+    },
+    {
+      "name": "msa",
+      "import_name": "fmha_sm100",
+      "url": "https://github.com/MiniMax-AI/MSA.git",
+      "revision": "80434d7f67877c6570ca19cac444b84bc9855dac",
+      "install_subdirectory": "python"
     }
   ]
 }

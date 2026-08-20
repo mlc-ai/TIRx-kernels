@@ -84,6 +84,7 @@ PORT_BUCKETS = {
         "https://github.com/flashinfer-ai/flashinfer",
         "Apache-2.0",
     ),
+    "tirx_kernels/msa/": ("MSA", "https://github.com/MiniMax-AI/MSA", "Apache-2.0 AND MIT"),
 }
 
 # Files whose terms differ from their bucket, with header text the upstream
@@ -121,6 +122,7 @@ PORT_DIR_EXCEPTIONS = {
     "tirx_kernels/flashinfer/utils/_flashkda_bench.py",
     "tirx_kernels/flashmla/utils/_flashmla_bench.py",
     "tirx_kernels/flashmla/utils/_trtllm_gen_bench.py",
+    "tirx_kernels/msa/utils/_msa_bench.py",
 }
 
 # Retired: the old per-file "Modifications" block and the pointer paragraph that
@@ -218,6 +220,7 @@ def self_test() -> int:
     )
     dg = dict(project="DeepGEMM", url="https://github.com/deepseek-ai/DeepGEMM")
     fi = dict(project="FlashInfer", url="https://github.com/flashinfer-ai/flashinfer")
+    msa = dict(project="MSA", url="https://github.com/MiniMax-AI/MSA")
     gdn = "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py"
     gdn_cp = "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py"
     bsd_port = (
@@ -256,6 +259,46 @@ def self_test() -> int:
             "flashinfer tagged AND MIT",
             "tirx_kernels/flashinfer/x.py",
             port.format(spdx="Apache-2.0 AND MIT", **fi),
+            True,
+        ),
+        (
+            "valid msa port",
+            "tirx_kernels/msa/x.py",
+            port.format(spdx="Apache-2.0 AND MIT", **msa),
+            False,
+        ),
+        (
+            "msa tagged plain Apache-2.0",
+            "tirx_kernels/msa/x.py",
+            port.format(spdx="Apache-2.0", **msa),
+            True,
+        ),
+        (
+            "msa port citing another upstream URL",
+            "tirx_kernels/msa/x.py",
+            port.format(
+                spdx="Apache-2.0 AND MIT",
+                project="MSA",
+                url="https://github.com/deepseek-ai/DeepGEMM",
+            ),
+            True,
+        ),
+        (
+            "msa port naming another project",
+            "tirx_kernels/msa/x.py",
+            port.format(
+                spdx="Apache-2.0 AND MIT",
+                project="DeepGEMM",
+                url="https://github.com/MiniMax-AI/MSA",
+            ),
+            True,
+        ),
+        (
+            "msa port with no upstream copyright",
+            "tirx_kernels/msa/x.py",
+            port.format(spdx="Apache-2.0 AND MIT", **msa).replace(
+                ", Copyright (c) 2025 Upstream", ""
+            ),
             True,
         ),
         (
