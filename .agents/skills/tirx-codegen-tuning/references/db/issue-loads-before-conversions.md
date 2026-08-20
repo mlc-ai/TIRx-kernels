@@ -54,9 +54,18 @@ gains when multiple token loads were previously serialized. In the
 matching-counters case above, the lever that worked was raising the number of
 outstanding misses.
 
+One eight-token KDA decode showed the mechanism across ten independent BF16
+value loads: issuing every raw 16-bit load before conversion and recurrence
+removed the failing cold-cache gap. All 28 correctness configurations passed,
+and the affected clean 45-round same-GPU row moved from 7.548 to 7.056
+microseconds, 0.93482 after/before.
+
 ## Boundary
 
 It can regress when the staged raw values spill or the loads usually hit cache.
+The decode result above held with a final build at 56 registers, zero stack, and
+zero local memory; it does not extend to a specialization whose raw staging set
+spills.
 
 Design the ablation carefully. Deleting the conversion arithmetic to test
 whether it costs anything removed 95 instructions and changed the time by

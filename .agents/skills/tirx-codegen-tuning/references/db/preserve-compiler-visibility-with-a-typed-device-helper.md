@@ -46,6 +46,18 @@ a final-binary negative control shows a surviving device call.
 Use this only for a reusable typed function boundary, not to hide an arbitrary
 source string or to make a workload-specific PTX bundle.
 
+Re-check that the active backend can compile a private device call before
+relying on this entry. As of 2026-08-18 the sibling TVM pipeline rejects a
+private scalar-return PrimFunc with `Device kernel may only contain ... return
+0`, and converting the helper to void with a local-scope pointer result
+advances lowering only as far as `Unknown device id in current IR`. For one
+packed FP4 reduction, expanding the same typed PTX sequence through an ordinary
+tracing function instead produced one entry PrimFunc, zero
+`tirx.cuda.func_call` nodes, and passed the formerly failing correctness case.
+Until private device calls carry a supported target/device contract, prefer
+direct tracing and remeasure the control-flow cost rather than preserving a
+boundary the backend cannot compile.
+
 ## Verification
 
 Confirm the final binary has no helper call, then compare control topology,
