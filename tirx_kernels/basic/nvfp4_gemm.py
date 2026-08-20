@@ -489,15 +489,13 @@ def make_kernel(M, N, KDIM):
         with K.If(tid_in_cta < 32), K.Then():
             K.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
 
-        pair_mask = K.local_scalar("int32")
-        K.assign(pair_mask, K.int32(0))
+        pair_mask = K.local_scalar("int32", init=K.int32(0))
         K.assign(pair_mask, pair_mask | (K.int32(1) << pair_leader_rank))
         K.assign(pair_mask, pair_mask | (K.int32(1) << (pair_leader_rank + 1)))
         tma_cur = PipelineState(PIPE_DEPTH, 1)
         mma_smem = PipelineState(PIPE_DEPTH, 0)
         mma_tmem = PipelineState(TMEM_PIPE_DEPTH, 1)
-        accum = K.local_scalar("int32")
-        K.assign(accum, 0)
+        accum = K.local_scalar("int32", init=0)
         epi_cur = PipelineState(TMEM_PIPE_DEPTH, 0)
         epi_wb_state = PipelineState(WB_PIPE_DEPTH, 1)
         alpha_local = K.local_scalar("float32")
@@ -616,10 +614,9 @@ def make_kernel(M, N, KDIM):
                     tile_full_bar.wait(mma_smem.stage, mma_smem.phase)
                     for flat in range(CTA_M // 32):
                         sfa_row = flat % 4 * 32
-                        sfa_shared_addr = K.local_scalar("uint32")
-                        K.assign(
-                            sfa_shared_addr,
-                            K.cuda.cvta_generic_to_shared(
+                        sfa_shared_addr = K.local_scalar(
+                            "uint32",
+                            init=K.cuda.cvta_generic_to_shared(
                                 K.ptr_byte_offset(
                                     SFA_smem.ptr_to([0, 0, 0]),
                                     (stage * CTA_M + sfa_row) * SF_CTA_K,
@@ -627,10 +624,9 @@ def make_kernel(M, N, KDIM):
                                 )
                             ),
                         )
-                        sfa_cp_desc = K.local_scalar("uint64")
-                        K.assign(
-                            sfa_cp_desc,
-                            K.bitwise_or(
+                        sfa_cp_desc = K.local_scalar(
+                            "uint64",
+                            init=K.bitwise_or(
                                 K.bitwise_and(sf_desc.desc, K.bitwise_not(K.uint64(0x3FFF))),
                                 K.Cast(
                                     "uint64",
@@ -646,10 +642,9 @@ def make_kernel(M, N, KDIM):
                         )
                     for flat in range(SFB_N // 32):
                         sfb_row = flat % 4 * 32 + flat // 4 * 128
-                        sfb_shared_addr = K.local_scalar("uint32")
-                        K.assign(
-                            sfb_shared_addr,
-                            K.cuda.cvta_generic_to_shared(
+                        sfb_shared_addr = K.local_scalar(
+                            "uint32",
+                            init=K.cuda.cvta_generic_to_shared(
                                 K.ptr_byte_offset(
                                     SFB_smem.ptr_to([0, 0, 0]),
                                     (stage * SFB_N + sfb_row) * SF_CTA_K,
@@ -657,10 +652,9 @@ def make_kernel(M, N, KDIM):
                                 )
                             ),
                         )
-                        sfb_cp_desc = K.local_scalar("uint64")
-                        K.assign(
-                            sfb_cp_desc,
-                            K.bitwise_or(
+                        sfb_cp_desc = K.local_scalar(
+                            "uint64",
+                            init=K.bitwise_or(
                                 K.bitwise_and(sf_desc.desc, K.bitwise_not(K.uint64(0x3FFF))),
                                 K.Cast(
                                     "uint64",

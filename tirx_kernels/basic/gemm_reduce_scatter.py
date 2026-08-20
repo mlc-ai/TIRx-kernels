@@ -133,7 +133,7 @@ def _mapa_u64_tx(ptr, rank):
     """`mapa.u64` into a declared register, returned as an ordinary value."""
 
     mapped = Kern.local_scalar("uint64")
-    Kern.evaluate(Kern.ptx.mapa.u64(mapped, ptr, Kern.uint32(rank)))
+    Kern.ptx.mapa.u64(mapped, ptr, Kern.uint32(rank))
     return mapped
 
 
