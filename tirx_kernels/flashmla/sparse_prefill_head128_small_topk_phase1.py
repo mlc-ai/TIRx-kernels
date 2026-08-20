@@ -53,19 +53,11 @@ def _add_smem_desc_offset(desc, offset):
 
 
 def _tmem_load_32(dst, col):
-    K.evaluate(
-        K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
-            *[dst[i] for i in range(32)], col
-        )
-    )
+    K.evaluate(K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](*[dst[i] for i in range(32)], col))
 
 
 def _tmem_store_32(src, col):
-    K.evaluate(
-        K.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
-            col, *[src[i] for i in range(32)]
-        )
-    )
+    K.evaluate(K.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](col, *[src[i] for i in range(32)]))
 
 
 @dataclass(frozen=True)
@@ -95,9 +87,7 @@ class SparseFlashMLAPrefillHead128SmallTopKConfig:
         if self.topk % B_TOPK != 0:
             raise ValueError("small-topk phase1 requires topk to be a multiple of 64")
         if self.topk > 1280:
-            raise ValueError(
-                "topk > 1280 dispatches outside the small-topk phase1 scope"
-            )
+            raise ValueError("topk > 1280 dispatches outside the small-topk phase1 scope")
 
 
 CONFIGS = [
@@ -120,9 +110,7 @@ KERNEL_META = {
 
 
 def _cfg(**kwargs: Any) -> SparseFlashMLAPrefillHead128SmallTopKConfig:
-    cfg_fields = {
-        field.name for field in fields(SparseFlashMLAPrefillHead128SmallTopKConfig)
-    }
+    cfg_fields = {field.name for field in fields(SparseFlashMLAPrefillHead128SmallTopKConfig)}
     cfg_kwargs = {key: value for key, value in kwargs.items() if key in cfg_fields}
     if "label" not in cfg_kwargs:
         cfg_kwargs["label"] = "custom"
@@ -131,9 +119,7 @@ def _cfg(**kwargs: Any) -> SparseFlashMLAPrefillHead128SmallTopKConfig:
     return cfg
 
 
-def _flashmla_small_topk_dispatch_reason(
-    cfg: SparseFlashMLAPrefillHead128SmallTopKConfig,
-) -> str:
+def _flashmla_small_topk_dispatch_reason(cfg: SparseFlashMLAPrefillHead128SmallTopKConfig) -> str:
     if cfg.h_q != B_H:
         return "out_of_scope: h_q != 128 dispatches to head64 or unsupported path"
     if cfg.h_kv != 1:
@@ -144,9 +130,7 @@ def _flashmla_small_topk_dispatch_reason(
         return "out_of_scope: d_v != 512"
     if cfg.topk > 1280:
         return "out_of_scope: topk > 1280 dispatches to regular head128 when supported"
-    return (
-        "small_topk: sm100 head128 run_fwd_for_small_topk_phase1_kernel<Prefill, 512>"
-    )
+    return "small_topk: sm100 head128 run_fwd_for_small_topk_phase1_kernel<Prefill, 512>"
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
@@ -159,10 +143,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         (cfg.s_q, cfg.h_q, cfg.d_qk), device=device, dtype=torch.bfloat16, generator=gen
     )
     kv = torch.randn(
-        (cfg.s_kv, cfg.h_kv, cfg.d_qk),
-        device=device,
-        dtype=torch.bfloat16,
-        generator=gen,
+        (cfg.s_kv, cfg.h_kv, cfg.d_qk), device=device, dtype=torch.bfloat16, generator=gen
     )
     out = torch.empty((cfg.s_q, cfg.h_q, cfg.d_v), device=device, dtype=torch.bfloat16)
     max_logits = torch.empty((cfg.s_q, cfg.h_q), device=device, dtype=torch.float32)
@@ -223,18 +204,12 @@ def _reference_sparse_prefill(
     kv = case["kv"][:, 0, :].float()
     indices = case["indices"][:, 0, :].to(torch.long)
     sm_scale = case["sm_scale"]
-    ref_out = torch.zeros(
-        (cfg.s_q, cfg.h_q, cfg.d_v), device=q.device, dtype=torch.float32
-    )
+    ref_out = torch.zeros((cfg.s_q, cfg.h_q, cfg.d_v), device=q.device, dtype=torch.float32)
     ref_max_logits = torch.full((cfg.s_q, cfg.h_q), -float("inf"), device=q.device)
     ref_lse = torch.full((cfg.s_q, cfg.h_q), float("inf"), device=q.device)
 
     for s_q_idx in range(cfg.s_q):
-        length = (
-            int(case["topk_length"][s_q_idx].item())
-            if cfg.have_topk_length
-            else cfg.topk
-        )
+        length = int(case["topk_length"][s_q_idx].item()) if cfg.have_topk_length else cfg.topk
         row_indices = indices[s_q_idx]
         pos = torch.arange(cfg.topk, device=q.device)
         valid = (pos < length) & (row_indices >= 0) & (row_indices < cfg.s_kv)
@@ -253,9 +228,7 @@ def _reference_sparse_prefill(
             denom_with_sink = denom + torch.exp(sink - max_logits)
         else:
             denom_with_sink = denom
-        ref_out[s_q_idx] = (
-            torch.matmul(exp_logits, k_full[:, : cfg.d_v]) / denom_with_sink[:, None]
-        )
+        ref_out[s_q_idx] = torch.matmul(exp_logits, k_full[:, : cfg.d_v]) / denom_with_sink[:, None]
         ref_max_logits[s_q_idx] = max_logits
         ref_lse[s_q_idx] = max_logits + torch.log(denom)
     return ref_out.to(torch.bfloat16), ref_max_logits, ref_lse
@@ -296,12 +269,7 @@ def make_kernel(
             descriptor = K.Bind(K.tvm_stack_alloca("tensormap", 1))
             K.evaluate(
                 K.call_packed(
-                    "runtime.cuTensorMapEncodeTiled",
-                    descriptor,
-                    "bfloat16",
-                    rank,
-                    data,
-                    *shape,
+                    "runtime.cuTensorMapEncodeTiled", descriptor, "bfloat16", rank, data, *shape
                 )
             )
             return descriptor
@@ -397,11 +365,7 @@ def make_kernel(
         return kv_tma, out_tma, out_tma_1, q_tma
 
     @K.kernel(
-        warps=16,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=2 * s_q,
-        host_prelude=host_prelude,
+        warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=2 * s_q, host_prelude=host_prelude
     )
     def sparse_flashmla_prefill_head128_small_topk_phase1_kern(
         q: K.gptr[K.bf16, (s_q, B_H, D_QK)],
@@ -519,13 +483,10 @@ def make_kernel(
                 with K.If(cta_idx == 0):
                     with K.Then():
                         K.cuda.mbarrier_wait(
-                            K.address_of(bar_clc_empty_buf[0]),
-                            K.bitwise_xor(self.epoch.phase, 1),
+                            K.address_of(bar_clc_empty_buf[0]), K.bitwise_xor(self.epoch.phase, 1)
                         )
                         K.ptx.clusterlaunchcontrol(
-                            K.cuda.cvta_generic_to_shared(
-                                K.address_of(clc_response[0])
-                            ),
+                            K.cuda.cvta_generic_to_shared(K.address_of(clc_response[0])),
                             K.cuda.cvta_generic_to_shared(K.address_of(buffer_8[0])),
                             "try_cancel",
                             "async",
@@ -585,9 +546,7 @@ def make_kernel(
                         with K.Then():
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(buffer[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer[i])),
                                     K.uint32(1),
                                     "init",
                                     "shared",
@@ -596,9 +555,7 @@ def make_kernel(
                                 )
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(buffer_1[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_1[i])),
                                     K.uint32(1),
                                     "init",
                                     "shared",
@@ -607,9 +564,7 @@ def make_kernel(
                                 )
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(buffer_2[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_2[i])),
                                     K.uint32(1),
                                     "init",
                                     "shared",
@@ -618,9 +573,7 @@ def make_kernel(
                                 )
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(buffer_3[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_3[i])),
                                     K.uint32(1),
                                     "init",
                                     "shared",
@@ -640,9 +593,7 @@ def make_kernel(
                                 )
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(bar_P_empty_buf[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(bar_P_empty_buf[i])),
                                     K.uint32(256),
                                     "init",
                                     "shared",
@@ -651,9 +602,7 @@ def make_kernel(
                                 )
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(buffer_6[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_6[i])),
                                     K.uint32(1),
                                     "init",
                                     "shared",
@@ -662,9 +611,7 @@ def make_kernel(
                                 )
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(buffer_7[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_7[i])),
                                     K.uint32(1),
                                     "init",
                                     "shared",
@@ -684,9 +631,7 @@ def make_kernel(
                                 )
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(bar_li_full_buf[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(bar_li_full_buf[i])),
                                     K.uint32(64),
                                     "init",
                                     "shared",
@@ -706,9 +651,7 @@ def make_kernel(
                                 )
                             with K.unroll(1) as i:
                                 K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(buffer_8[i])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_8[i])),
                                     K.uint32(1),
                                     "init",
                                     "shared",
@@ -743,9 +686,7 @@ def make_kernel(
                     with K.If(warp_idx == 2):
                         with K.Then():
                             K.ptx.tcgen05(
-                                K.cuda.cvta_generic_to_shared(
-                                    K.address_of(tmem_start_addr[0])
-                                ),
+                                K.cuda.cvta_generic_to_shared(K.address_of(tmem_start_addr[0])),
                                 K.uint32(512),
                                 "alloc",
                                 "cta_group::2",
@@ -756,18 +697,10 @@ def make_kernel(
                                 "",
                             )
                             allocated_tmem_addr = K.local_scalar("uint32")
-                            K.ptx.ld.shared.u32(
-                                allocated_tmem_addr, tmem_start_addr.ptr_to([0])
-                            )
-                            K.cuda.trap_when_assert_failed(
-                                allocated_tmem_addr == K.uint32(0)
-                            )
+                            K.ptx.ld.shared.u32(allocated_tmem_addr, tmem_start_addr.ptr_to([0]))
+                            K.cuda.trap_when_assert_failed(allocated_tmem_addr == K.uint32(0))
                             K.ptx.tcgen05(
-                                "relinquish_alloc_permit",
-                                "cta_group::2",
-                                "sync",
-                                "aligned",
-                                "",
+                                "relinquish_alloc_permit", "cta_group::2", "sync", "aligned", ""
                             )
                         with K.Else():
                             with K.If(warp_idx == 3):
@@ -777,9 +710,7 @@ def make_kernel(
                                             with K.unroll(4) as init_stage:
                                                 K.ptx.mbarrier(
                                                     K.cuda.cvta_generic_to_shared(
-                                                        K.address_of(
-                                                            buffer_4[init_stage]
-                                                        )
+                                                        K.address_of(buffer_4[init_stage])
                                                     ),
                                                     K.uint32(1),
                                                     "init",
@@ -789,9 +720,7 @@ def make_kernel(
                                                 )
                                                 K.ptx.mbarrier(
                                                     K.cuda.cvta_generic_to_shared(
-                                                        K.address_of(
-                                                            buffer_5[init_stage]
-                                                        )
+                                                        K.address_of(buffer_5[init_stage])
                                                     ),
                                                     K.uint32(1),
                                                     "init",
@@ -828,12 +757,7 @@ def make_kernel(
                                                     "b64",
                                                     "",
                                                 )
-                                            K.ptx.fence(
-                                                "mbarrier_init",
-                                                "release",
-                                                "cluster",
-                                                "",
-                                            )
+                                            K.ptx.fence("mbarrier_init", "release", "cluster", "")
             K.cuda.cluster_sync()
 
         initialize_protocol()
@@ -848,9 +772,7 @@ def make_kernel(
         ):
             K.cuda.mbarrier_wait(K.address_of(bar_li_full_buf[0]), output_epoch)
             output_scale = K.local_scalar("float32")
-            K.ptx.ld.shared.f32(
-                output_scale, rowwise_li_buf.ptr_to([idx_in_warpgroup % 64])
-            )
+            K.ptx.ld.shared.f32(output_scale, rowwise_li_buf.ptr_to([idx_in_warpgroup % 64]))
             K.ptx.mbarrier(
                 K.cuda.cvta_generic_to_shared(K.address_of(bar_li_empty_buf[0])),
                 K.uint32(1),
@@ -967,36 +889,20 @@ def make_kernel(
                                         "",
                                     )
                                     K.ptx.mbarrier(
-                                        q_consumed,
-                                        "arrive",
-                                        "",
-                                        "",
-                                        "shared::cluster",
-                                        "b64",
-                                        "",
+                                        q_consumed, "arrive", "", "", "shared::cluster", "b64", ""
                                     )
                 with K.If(epi_k == 3):
                     with K.Then():
                         output_empty = K.local_scalar("uint32")
                         K.ptx.mapa(
                             output_empty,
-                            K.cuda.cvta_generic_to_shared(
-                                K.address_of(bar_tOut_empty_buf[0])
-                            ),
+                            K.cuda.cvta_generic_to_shared(K.address_of(bar_tOut_empty_buf[0])),
                             K.uint32(0),
                             "shared::cluster",
                             "u32",
                             "",
                         )
-                        K.ptx.mbarrier(
-                            output_empty,
-                            "arrive",
-                            "",
-                            "",
-                            "shared::cluster",
-                            "b64",
-                            "",
-                        )
+                        K.ptx.mbarrier(output_empty, "arrive", "", "", "shared::cluster", "b64", "")
 
                 scaled = output_storage
                 unscaled = output_storage
@@ -1006,14 +912,7 @@ def make_kernel(
                     K.ptx.mov.b64(packed_values, unscaled[f * 2], unscaled[f * 2 + 1])
                     K.ptx.mov.b64(packed_scale, output_scale, output_scale)
                     K.ptx.mul(
-                        packed_values,
-                        packed_values,
-                        packed_scale,
-                        "rz",
-                        "ftz",
-                        "",
-                        "f32x2",
-                        "",
+                        packed_values, packed_values, packed_scale, "rz", "ftz", "", "f32x2", ""
                     )
                     K.ptx.mov.b64(scaled[f * 2], scaled[f * 2 + 1], packed_values)
 
@@ -1021,9 +920,7 @@ def make_kernel(
                 scaled_for_convert = output_storage
                 for f in range(32):
                     K.ptx.cvt.rn.bf16x2.f32(
-                        bf16_words[f],
-                        scaled_for_convert[f * 2 + 1],
-                        scaled_for_convert[f * 2],
+                        bf16_words[f], scaled_for_convert[f * 2 + 1], scaled_for_convert[f * 2]
                     )
 
                 r_words = bf16_storage
@@ -1109,20 +1006,11 @@ def make_kernel(
                                 K.ptx.cp(0, "async", "bulk", "wait_group", "", "")
                                 buffer_17 = K.local_scalar("uint64")
                                 K.ptx.mapa(
-                                    buffer_17,
-                                    K.address_of(buffer[0]),
-                                    K.uint32(0),
-                                    "",
-                                    "u64",
-                                    "",
+                                    buffer_17, K.address_of(buffer[0]), K.uint32(0), "", "u64", ""
                                 )
                                 K.ptx.cp(
-                                    K.cuda.cvta_generic_to_shared(
-                                        q_smem.ptr_to([0, 0])
-                                    ),
-                                    K.reinterpret(
-                                        K.handle().ty, K.address_of(q_tma_tensormap)
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(q_smem.ptr_to([0, 0])),
+                                    K.reinterpret(K.handle().ty, K.address_of(q_tma_tensormap)),
                                     0,
                                     block_idx % 2 * 64,
                                     0,
@@ -1151,15 +1039,11 @@ def make_kernel(
                                         with K.If(last_valid != 0):
                                             with K.Then():
                                                 K.cuda.mbarrier_wait(
-                                                    K.address_of(
-                                                        bar_tQ_consumed_buf[0]
-                                                    ),
+                                                    K.address_of(bar_tQ_consumed_buf[0]),
                                                     previous_epoch,
                                                 )
                                         K.ptx.mbarrier(
-                                            K.cuda.cvta_generic_to_shared(
-                                                K.address_of(buffer[0])
-                                            ),
+                                            K.cuda.cvta_generic_to_shared(K.address_of(buffer[0])),
                                             K.uint32(131072),
                                             "arrive",
                                             "expect_tx",
@@ -1188,16 +1072,11 @@ def make_kernel(
                                             K.ptx.tcgen05(
                                                 K.Cast(
                                                     "uint32",
-                                                    256
-                                                    + (
-                                                        flat % 4 * 32
-                                                        + flat // 4 % 4 * 8
-                                                    ),
+                                                    256 + (flat % 4 * 32 + flat // 4 % 4 * 8),
                                                 ),
                                                 K.bitwise_or(
                                                     K.bitwise_and(
-                                                        cp_desc,
-                                                        K.bitwise_not(K.uint64(16383)),
+                                                        cp_desc, K.bitwise_not(K.uint64(16383))
                                                     ),
                                                     K.Cast(
                                                         "uint64",
@@ -1205,17 +1084,10 @@ def make_kernel(
                                                             K.shift_right(
                                                                 K.cuda.cvta_generic_to_shared(
                                                                     K.ptr_byte_offset(
-                                                                        q_smem.ptr_to(
-                                                                            [0, 0]
-                                                                        ),
+                                                                        q_smem.ptr_to([0, 0]),
                                                                         (
-                                                                            flat
-                                                                            % 4
-                                                                            * 1024
-                                                                            + flat
-                                                                            // 4
-                                                                            % 4
-                                                                            * 2
+                                                                            flat % 4 * 1024
+                                                                            + flat // 4 % 4 * 2
                                                                         )
                                                                         * 16,
                                                                         K.type_annotation(
@@ -1261,9 +1133,7 @@ def make_kernel(
                             launch_dependents=False,
                         )
                     with K.Else():
-                        K.cuda.mbarrier_wait(
-                            K.address_of(buffer_2[0]), jobs.epoch.phase
-                        )
+                        K.cuda.mbarrier_wait(K.address_of(buffer_2[0]), jobs.epoch.phase)
                         with K.If(K.cuda.elect_sync()):
                             with K.Then():
                                 buffer_13 = K.local_scalar("uint32")
@@ -1278,13 +1148,7 @@ def make_kernel(
                                     "",
                                 )
                                 K.ptx.mbarrier(
-                                    buffer_13,
-                                    "arrive",
-                                    "",
-                                    "",
-                                    "shared::cluster",
-                                    "b64",
-                                    "",
+                                    buffer_13, "arrive", "", "", "shared::cluster", "b64", ""
                                 )
                 K.assign(last_valid, 1)
                 K.assign(last_s_q_idx, wg0_s_q_idx)
@@ -1336,19 +1200,13 @@ def make_kernel(
                                 K.ptx.ld.global_.s32(
                                     wg1_topk_len, topk_length.ptr_to([wg1_s_q_idx])
                                 )
-                        wg1_num_k_blocks: K.let[K.int32] = K.max(
-                            (wg1_topk_len + 64 - 1) // 64, 1
-                        )
-                        wg1_g_indices_base: K.let[K.int32] = (
-                            wg1_s_q_idx * stride_indices_s_q
-                        )
+                        wg1_num_k_blocks: K.let[K.int32] = K.max((wg1_topk_len + 64 - 1) // 64, 1)
+                        wg1_g_indices_base: K.let[K.int32] = wg1_s_q_idx * stride_indices_s_q
                         with K.serial(wg1_num_k_blocks, unroll=False) as k:
                             cur_indices = K.alloc_local((16,), "int32")
                             with K.unroll(2) as local_row:
                                 row: K.let[K.int32] = local_row * 32 + wg1_warp_idx * 8
-                                row_base: K.let[K.int32] = (
-                                    wg1_g_indices_base + k * 64 + row
-                                )
+                                row_base: K.let[K.int32] = wg1_g_indices_base + k * 64 + row
                                 buffer_13 = K.decl_buffer(
                                     (16,), "int32", data=cur_indices.data, scope="local"
                                 )
@@ -1376,8 +1234,7 @@ def make_kernel(
                                     "",
                                 )
                             K.cuda.mbarrier_wait(
-                                K.address_of(buffer_5[k_pipe.stage]),
-                                K.bitwise_xor(k_pipe.phase, 1),
+                                K.address_of(buffer_5[k_pipe.stage]), K.bitwise_xor(k_pipe.phase, 1)
                             )
                             src_col: K.let[K.int32] = cta_idx * 256
                             with K.unroll(4) as row_group:
@@ -1407,8 +1264,7 @@ def make_kernel(
                                             )
                                         ),
                                         K.reinterpret(
-                                            K.handle().ty,
-                                            K.address_of(kv_tma_tensormap),
+                                            K.handle().ty, K.address_of(kv_tma_tensormap)
                                         ),
                                         src_col + col_atom * 64,
                                         cur_indices[row_group * 4],
@@ -1451,23 +1307,18 @@ def make_kernel(
                                 with K.If(have_topk_length):
                                     with K.Then():
                                         K.ptx.ld.global_.s32(
-                                            umma_topk_len,
-                                            topk_length.ptr_to([umma_s_q_idx]),
+                                            umma_topk_len, topk_length.ptr_to([umma_s_q_idx])
                                         )
                                 umma_num_k_blocks: K.let[K.int32] = K.max(
                                     (umma_topk_len + 64 - 1) // 64, 1
                                 )
-                                K.cuda.mbarrier_wait(
-                                    K.address_of(buffer_2[0]), jobs.epoch.phase
-                                )
+                                K.cuda.mbarrier_wait(K.address_of(buffer_2[0]), jobs.epoch.phase)
                                 with K.serial(umma_num_k_blocks + 1, unroll=False) as k:
                                     with K.If(k < umma_num_k_blocks):
                                         with K.Then():
                                             K.cuda.mbarrier_wait(
                                                 K.address_of(bar_P_empty_buf[0]),
-                                                K.bitwise_xor(
-                                                    K.bitwise_and(k_pipe.stage, 1), 1
-                                                ),
+                                                K.bitwise_xor(K.bitwise_and(k_pipe.stage, 1), 1),
                                             )
                                             K.ptx.mbarrier(
                                                 K.cuda.cvta_generic_to_shared(
@@ -1483,12 +1334,9 @@ def make_kernel(
                                                 "",
                                             )
                                             K.cuda.mbarrier_wait(
-                                                K.address_of(buffer_4[k_pipe.stage]),
-                                                k_pipe.phase,
+                                                K.address_of(buffer_4[k_pipe.stage]), k_pipe.phase
                                             )
-                                            K.ptx.tcgen05(
-                                                "fence::after_thread_sync", ""
-                                            )
+                                            K.ptx.tcgen05("fence::after_thread_sync", "")
                                             qk_accumulate = K.local_scalar("uint32")
                                             K.assign(qk_accumulate, K.uint32(0))
                                             descB_local = K.local_scalar("uint64")
@@ -1503,27 +1351,16 @@ def make_kernel(
                                                 with K.unroll(1) as ni:
                                                     with K.unroll(16) as ki:
                                                         K.ptx.tcgen05(
-                                                            K.Cast(
-                                                                "uint32", ni * 64 + 384
-                                                            ),
-                                                            K.Cast(
-                                                                "uint32", ki * 8 + 256
-                                                            ),
+                                                            K.Cast("uint32", ni * 64 + 384),
+                                                            K.Cast("uint32", ki * 8 + 256),
                                                             _add_smem_desc_offset(
                                                                 descB_local,
                                                                 (
                                                                     ki // 1024 * 16384
                                                                     + ni * 16384
-                                                                    + k_pipe.stage
-                                                                    * 16384
-                                                                    + ki
-                                                                    % 16
-                                                                    // 4
-                                                                    * 4096
-                                                                    + ki
-                                                                    % 1024
-                                                                    // 16
-                                                                    * 64
+                                                                    + k_pipe.stage * 16384
+                                                                    + ki % 16 // 4 * 4096
+                                                                    + ki % 1024 // 16 * 64
                                                                     + ki % 4 * 16
                                                                 )
                                                                 // 8,
@@ -1539,10 +1376,7 @@ def make_kernel(
                                                             K.uint32(0),
                                                             K.Or(
                                                                 ki != 0,
-                                                                K.Cast(
-                                                                    "bool",
-                                                                    qk_accumulate,
-                                                                ),
+                                                                K.Cast("bool", qk_accumulate),
                                                             ),
                                                             "mma",
                                                             "cta_group::2",
@@ -1579,11 +1413,9 @@ def make_kernel(
                                     with K.If(k > 0):
                                         with K.Then():
                                             prev_k: K.let[K.int32] = k - 1
-                                            prev_buf: K.let[K.int32] = (
-                                                k_pipe.stage + 3
-                                            ) % 4
-                                            prev_s_o_phase: K.let[K.int32] = (
-                                                K.bitwise_and(prev_buf, 1)
+                                            prev_buf: K.let[K.int32] = (k_pipe.stage + 3) % 4
+                                            prev_s_o_phase: K.let[K.int32] = K.bitwise_and(
+                                                prev_buf, 1
                                             )
                                             K.cuda.mbarrier_wait(
                                                 K.address_of(bar_S_O_full_buf[0]),
@@ -1592,23 +1424,15 @@ def make_kernel(
                                             with K.If(prev_k == 0):
                                                 with K.Then():
                                                     K.cuda.mbarrier_wait(
-                                                        K.address_of(
-                                                            bar_tOut_empty_buf[0]
-                                                        ),
-                                                        K.bitwise_xor(
-                                                            jobs.epoch.phase, 1
-                                                        ),
+                                                        K.address_of(bar_tOut_empty_buf[0]),
+                                                        K.bitwise_xor(jobs.epoch.phase, 1),
                                                     )
-                                            K.ptx.tcgen05(
-                                                "fence::after_thread_sync", ""
-                                            )
+                                            K.ptx.tcgen05("fence::after_thread_sync", "")
                                             o_accumulate = K.local_scalar("uint32")
                                             K.assign(
                                                 o_accumulate,
                                                 K.if_then_else(
-                                                    prev_k == 0,
-                                                    K.uint32(0),
-                                                    K.uint32(1),
+                                                    prev_k == 0, K.uint32(0), K.uint32(1)
                                                 ),
                                             )
                                             descB_local = K.local_scalar("uint64")
@@ -1644,13 +1468,9 @@ def make_kernel(
                                                             _add_smem_desc_offset(
                                                                 descB_local,
                                                                 (
-                                                                    (ki * 16 + ni)
-                                                                    // 64
-                                                                    * 16384
+                                                                    (ki * 16 + ni) // 64 * 16384
                                                                     + prev_buf * 16384
-                                                                    + (ki * 16 + ni)
-                                                                    % 64
-                                                                    * 64
+                                                                    + (ki * 16 + ni) % 64 * 64
                                                                 )
                                                                 // 8,
                                                             ),
@@ -1665,9 +1485,7 @@ def make_kernel(
                                                             K.uint32(0),
                                                             K.Or(
                                                                 ki != 0,
-                                                                K.Cast(
-                                                                    "bool", o_accumulate
-                                                                ),
+                                                                K.Cast("bool", o_accumulate),
                                                             ),
                                                             "mma",
                                                             "cta_group::2",
@@ -1694,9 +1512,7 @@ def make_kernel(
                                                 with K.unroll(1) as ni:
                                                     with K.unroll(4) as ki:
                                                         K.ptx.tcgen05(
-                                                            K.Cast(
-                                                                "uint32", ni * 128 + 128
-                                                            ),
+                                                            K.Cast("uint32", ni * 128 + 128),
                                                             _add_smem_desc_offset(
                                                                 descA_local_1,
                                                                 (
@@ -1709,13 +1525,9 @@ def make_kernel(
                                                             _add_smem_desc_offset(
                                                                 descB_local_1,
                                                                 (
-                                                                    (ki * 16 + ni)
-                                                                    // 64
-                                                                    * 16384
+                                                                    (ki * 16 + ni) // 64 * 16384
                                                                     + prev_buf * 16384
-                                                                    + (ki * 16 + ni)
-                                                                    % 64
-                                                                    * 64
+                                                                    + (ki * 16 + ni) % 64 * 64
                                                                     + 8192
                                                                 )
                                                                 // 8,
@@ -1731,9 +1543,7 @@ def make_kernel(
                                                             K.uint32(0),
                                                             K.Or(
                                                                 ki != 0,
-                                                                K.Cast(
-                                                                    "bool", o_accumulate
-                                                                ),
+                                                                K.Cast("bool", o_accumulate),
                                                             ),
                                                             "mma",
                                                             "cta_group::2",
@@ -1772,9 +1582,7 @@ def make_kernel(
                                             k_pipe.advance()
                                 K.ptx.tcgen05("fence::before_thread_sync", "")
                                 K.ptx.tcgen05(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(buffer_3[0])
-                                    ),
+                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_3[0])),
                                     K.Cast("uint16", 3),
                                     "commit",
                                     "cta_group::2",
@@ -1796,9 +1604,7 @@ def make_kernel(
                                     jobs = CLCJobScheduler()
                                     index_pipe = K.PipelineState(4, phase=0)
                                     with K.While(jobs.valid != 0):
-                                        valid_s_q_idx: K.let[K.int32] = (
-                                            jobs.block_idx // 2
-                                        )
+                                        valid_s_q_idx: K.let[K.int32] = jobs.block_idx // 2
                                         valid_topk_len = K.local_scalar("int32")
                                         K.assign(valid_topk_len, topk)
                                         with K.If(have_topk_length):
@@ -1813,19 +1619,12 @@ def make_kernel(
                                         valid_g_indices_base: K.let[K.int32] = (
                                             valid_s_q_idx * stride_indices_s_q
                                         )
-                                        with K.serial(
-                                            valid_num_k_blocks, unroll=False
-                                        ) as k:
+                                        with K.serial(valid_num_k_blocks, unroll=False) as k:
                                             row_base: K.let[K.int32] = (
-                                                valid_g_indices_base
-                                                + k * 64
-                                                + lane_idx * 8
+                                                valid_g_indices_base + k * 64 + lane_idx * 8
                                             )
                                             buffer_13 = K.decl_buffer(
-                                                (8,),
-                                                "int32",
-                                                data=lane_indices.data,
-                                                scope="local",
+                                                (8,), "int32", data=lane_indices.data, scope="local"
                                             )
                                             buffer_14 = buffer_13.view("uint32")
                                             K.ptx.ld(
@@ -1859,13 +1658,10 @@ def make_kernel(
                                                             K.Select(
                                                                 K.bitwise_and(
                                                                     K.bitwise_and(
-                                                                        lane_indices[0]
-                                                                        >= 0,
-                                                                        lane_indices[0]
-                                                                        < s_kv,
+                                                                        lane_indices[0] >= 0,
+                                                                        lane_indices[0] < s_kv,
                                                                     ),
-                                                                    abs_pos_start
-                                                                    + lane_idx * 8
+                                                                    abs_pos_start + lane_idx * 8
                                                                     < valid_topk_len,
                                                                 ),
                                                                 1,
@@ -1874,14 +1670,10 @@ def make_kernel(
                                                             K.Select(
                                                                 K.bitwise_and(
                                                                     K.bitwise_and(
-                                                                        lane_indices[1]
-                                                                        >= 0,
-                                                                        lane_indices[1]
-                                                                        < s_kv,
+                                                                        lane_indices[1] >= 0,
+                                                                        lane_indices[1] < s_kv,
                                                                     ),
-                                                                    abs_pos_start
-                                                                    + lane_idx * 8
-                                                                    + 1
+                                                                    abs_pos_start + lane_idx * 8 + 1
                                                                     < valid_topk_len,
                                                                 ),
                                                                 2,
@@ -1892,14 +1684,10 @@ def make_kernel(
                                                             K.Select(
                                                                 K.bitwise_and(
                                                                     K.bitwise_and(
-                                                                        lane_indices[2]
-                                                                        >= 0,
-                                                                        lane_indices[2]
-                                                                        < s_kv,
+                                                                        lane_indices[2] >= 0,
+                                                                        lane_indices[2] < s_kv,
                                                                     ),
-                                                                    abs_pos_start
-                                                                    + lane_idx * 8
-                                                                    + 2
+                                                                    abs_pos_start + lane_idx * 8 + 2
                                                                     < valid_topk_len,
                                                                 ),
                                                                 4,
@@ -1908,14 +1696,10 @@ def make_kernel(
                                                             K.Select(
                                                                 K.bitwise_and(
                                                                     K.bitwise_and(
-                                                                        lane_indices[3]
-                                                                        >= 0,
-                                                                        lane_indices[3]
-                                                                        < s_kv,
+                                                                        lane_indices[3] >= 0,
+                                                                        lane_indices[3] < s_kv,
                                                                     ),
-                                                                    abs_pos_start
-                                                                    + lane_idx * 8
-                                                                    + 3
+                                                                    abs_pos_start + lane_idx * 8 + 3
                                                                     < valid_topk_len,
                                                                 ),
                                                                 8,
@@ -1928,14 +1712,10 @@ def make_kernel(
                                                             K.Select(
                                                                 K.bitwise_and(
                                                                     K.bitwise_and(
-                                                                        lane_indices[4]
-                                                                        >= 0,
-                                                                        lane_indices[4]
-                                                                        < s_kv,
+                                                                        lane_indices[4] >= 0,
+                                                                        lane_indices[4] < s_kv,
                                                                     ),
-                                                                    abs_pos_start
-                                                                    + lane_idx * 8
-                                                                    + 4
+                                                                    abs_pos_start + lane_idx * 8 + 4
                                                                     < valid_topk_len,
                                                                 ),
                                                                 16,
@@ -1944,14 +1724,10 @@ def make_kernel(
                                                             K.Select(
                                                                 K.bitwise_and(
                                                                     K.bitwise_and(
-                                                                        lane_indices[5]
-                                                                        >= 0,
-                                                                        lane_indices[5]
-                                                                        < s_kv,
+                                                                        lane_indices[5] >= 0,
+                                                                        lane_indices[5] < s_kv,
                                                                     ),
-                                                                    abs_pos_start
-                                                                    + lane_idx * 8
-                                                                    + 5
+                                                                    abs_pos_start + lane_idx * 8 + 5
                                                                     < valid_topk_len,
                                                                 ),
                                                                 32,
@@ -1962,14 +1738,10 @@ def make_kernel(
                                                             K.Select(
                                                                 K.bitwise_and(
                                                                     K.bitwise_and(
-                                                                        lane_indices[6]
-                                                                        >= 0,
-                                                                        lane_indices[6]
-                                                                        < s_kv,
+                                                                        lane_indices[6] >= 0,
+                                                                        lane_indices[6] < s_kv,
                                                                     ),
-                                                                    abs_pos_start
-                                                                    + lane_idx * 8
-                                                                    + 6
+                                                                    abs_pos_start + lane_idx * 8 + 6
                                                                     < valid_topk_len,
                                                                 ),
                                                                 64,
@@ -1978,14 +1750,10 @@ def make_kernel(
                                                             K.Select(
                                                                 K.bitwise_and(
                                                                     K.bitwise_and(
-                                                                        lane_indices[7]
-                                                                        >= 0,
-                                                                        lane_indices[7]
-                                                                        < s_kv,
+                                                                        lane_indices[7] >= 0,
+                                                                        lane_indices[7] < s_kv,
                                                                     ),
-                                                                    abs_pos_start
-                                                                    + lane_idx * 8
-                                                                    + 7
+                                                                    abs_pos_start + lane_idx * 8 + 7
                                                                     < valid_topk_len,
                                                                 ),
                                                                 128,
@@ -2004,9 +1772,7 @@ def make_kernel(
                                                 K.bitwise_xor(index_pipe.phase, 1),
                                             )
                                             K.ptx.st.shared.b8(
-                                                is_k_valid.ptr_to(
-                                                    [index_pipe.stage, lane_idx]
-                                                ),
+                                                is_k_valid.ptr_to([index_pipe.stage, lane_idx]),
                                                 K.reinterpret("uint8", mask),
                                             )
                                             K.ptx.mbarrier(
@@ -2033,16 +1799,13 @@ def make_kernel(
                                 with K.Then():
                                     clc_token = K.alloc_local((1,), "uint32")
                                     K.assign(
-                                        clc_token[0],
-                                        K.cuda.iket.sentinel_token("h128-small-clc"),
+                                        clc_token[0], K.cuda.iket.sentinel_token("h128-small-clc")
                                     )
                                     with K.If(role == 2):
                                         with K.Then():
                                             K.assign(
                                                 clc_token[0],
-                                                K.cuda.iket.range_start(
-                                                    "h128-small-clc"
-                                                ),
+                                                K.cuda.iket.range_start("h128-small-clc"),
                                             )
                                     with K.If(K.cuda.elect_sync()):
                                         with K.Then():
@@ -2065,12 +1828,8 @@ def make_kernel(
                 K.assign(wg3_topk_len, topk)
                 with K.If(have_topk_length):
                     with K.Then():
-                        K.ptx.ld.global_.s32(
-                            wg3_topk_len, topk_length.ptr_to([wg3_s_q_idx])
-                        )
-                wg3_num_k_blocks: K.let[K.int32] = K.max(
-                    (wg3_topk_len + 64 - 1) // 64, 1
-                )
+                        K.ptx.ld.global_.s32(wg3_topk_len, topk_length.ptr_to([wg3_s_q_idx]))
+                wg3_num_k_blocks: K.let[K.int32] = K.max((wg3_topk_len + 64 - 1) // 64, 1)
                 mi = K.local_scalar("float32")
                 K.assign(mi, K.float32(-1000000000000000019884624838656.0))
                 li = K.local_scalar("float32")
@@ -2281,12 +2040,8 @@ def make_kernel(
                         "u32",
                         "",
                     )
-                    K.ptx.mbarrier(
-                        buffer_17, "arrive", "", "", "shared::cluster", "b64", ""
-                    )
-                    valid_word_offset: K.let[K.int32] = K.if_then_else(
-                        local_warp_idx >= 2, 1, 0
-                    )
+                    K.ptx.mbarrier(buffer_17, "arrive", "", "", "shared::cluster", "b64", "")
+                    valid_word_offset: K.let[K.int32] = K.if_then_else(local_warp_idx >= 2, 1, 0)
                     buffer_18 = K.decl_buffer(
                         (4, 2),
                         "uint32",
@@ -2297,19 +2052,15 @@ def make_kernel(
                     )
                     is_k_valid_u32 = K.local_scalar("uint32")
                     K.ptx.ld.shared.u32(
-                        is_k_valid_u32,
-                        buffer_18.ptr_to([index_pipe.stage, valid_word_offset]),
+                        is_k_valid_u32, buffer_18.ptr_to([index_pipe.stage, valid_word_offset])
                     )
                     with K.unroll(32) as p_i:
                         invalid_p_predicate: K.let[K.bool] = K.bitwise_and(
-                            K.shift_right(is_k_valid_u32, K.Cast("uint32", p_i)),
-                            K.uint32(1),
+                            K.shift_right(is_k_valid_u32, K.Cast("uint32", p_i)), K.uint32(1)
                         ) == K.uint32(0)
                         K.ptx.mov.b32(
                             p[p_i],
-                            K.if_then_else(
-                                invalid_p_predicate, K.uint32(4286578688), p[p_i]
-                            ),
+                            K.if_then_else(invalid_p_predicate, K.uint32(4286578688), p[p_i]),
                         )
                     sum_pair0 = K.local_scalar("uint64")
                     sum_pair1 = K.local_scalar("uint64")
@@ -2319,10 +2070,7 @@ def make_kernel(
                         K.ptx.st(
                             K.cuda.cvta_generic_to_shared(
                                 K.address_of(
-                                    p_exchange[
-                                        K.bitwise_xor(local_warp_idx, 2),
-                                        exchange_offset,
-                                    ]
+                                    p_exchange[K.bitwise_xor(local_warp_idx, 2), exchange_offset]
                                 )
                             ),
                             p_peer[p_peer_offset],
@@ -2355,9 +2103,7 @@ def make_kernel(
                             p_exchange_tmp[2],
                             p_exchange_tmp[3],
                             K.cuda.cvta_generic_to_shared(
-                                K.address_of(
-                                    p_exchange[local_warp_idx, exchange_offset]
-                                )
+                                K.address_of(p_exchange[local_warp_idx, exchange_offset])
                             ),
                             "",
                             "",
@@ -2379,24 +2125,12 @@ def make_kernel(
                             K.cuda.uint_as_float(p_exchange_tmp[0]),
                             K.cuda.uint_as_float(p_exchange_tmp[1]),
                         )
-                        K.ptx.add(
-                            sum_pair0,
-                            p_pair0,
-                            peer_pair0,
-                            "rn",
-                            "",
-                            "",
-                            "f32x2",
-                            "",
-                            "",
+                        K.ptx.add(sum_pair0, p_pair0, peer_pair0, "rn", "", "", "f32x2", "", "")
+                        K.ptx.mov.b32(
+                            p[exchange_i * 4], K.cuda.float_as_uint(K.cuda.float2_x(sum_pair0))
                         )
                         K.ptx.mov.b32(
-                            p[exchange_i * 4],
-                            K.cuda.float_as_uint(K.cuda.float2_x(sum_pair0)),
-                        )
-                        K.ptx.mov.b32(
-                            p[exchange_i * 4 + 1],
-                            K.cuda.float_as_uint(K.cuda.float2_y(sum_pair0)),
+                            p[exchange_i * 4 + 1], K.cuda.float_as_uint(K.cuda.float2_y(sum_pair0))
                         )
                         p_pair1: K.let[K.uint64] = K.cuda.make_float2(
                             K.cuda.uint_as_float(p[exchange_i * 4 + 2]),
@@ -2406,35 +2140,19 @@ def make_kernel(
                             K.cuda.uint_as_float(p_exchange_tmp[2]),
                             K.cuda.uint_as_float(p_exchange_tmp[3]),
                         )
-                        K.ptx.add(
-                            sum_pair1,
-                            p_pair1,
-                            peer_pair1,
-                            "rn",
-                            "",
-                            "",
-                            "f32x2",
-                            "",
-                            "",
+                        K.ptx.add(sum_pair1, p_pair1, peer_pair1, "rn", "", "", "f32x2", "", "")
+                        K.ptx.mov.b32(
+                            p[exchange_i * 4 + 2], K.cuda.float_as_uint(K.cuda.float2_x(sum_pair1))
                         )
                         K.ptx.mov.b32(
-                            p[exchange_i * 4 + 2],
-                            K.cuda.float_as_uint(K.cuda.float2_x(sum_pair1)),
-                        )
-                        K.ptx.mov.b32(
-                            p[exchange_i * 4 + 3],
-                            K.cuda.float_as_uint(K.cuda.float2_y(sum_pair1)),
+                            p[exchange_i * 4 + 3], K.cuda.float_as_uint(K.cuda.float2_y(sum_pair1))
                         )
                     cur_pi_max = K.local_scalar("float32")
                     K.assign(cur_pi_max, K.float32("-inf"))
                     with K.unroll(32) as p_i:
-                        K.assign(
-                            cur_pi_max, K.max(cur_pi_max, K.cuda.uint_as_float(p[p_i]))
-                        )
+                        K.assign(cur_pi_max, K.max(cur_pi_max, K.cuda.uint_as_float(p[p_i])))
                     K.assign(cur_pi_max, cur_pi_max * K.float32(sm_scale_div_log2))
-                    K.ptx.st.shared.f32(
-                        rowwise_max_buf.ptr_to([idx_in_warpgroup]), cur_pi_max
-                    )
+                    K.ptx.st.shared.f32(rowwise_max_buf.ptr_to([idx_in_warpgroup]), cur_pi_max)
                     K.ptx.bar(
                         K.Cast("uint32", 2 + K.bitwise_and(local_warp_idx, 1)),
                         K.uint32(64),
@@ -2444,16 +2162,12 @@ def make_kernel(
                     )
                     peer_pi_max = K.local_scalar("float32")
                     K.ptx.ld.shared.f32(
-                        peer_pi_max,
-                        rowwise_max_buf.ptr_to([K.bitwise_xor(idx_in_warpgroup, 64)]),
+                        peer_pi_max, rowwise_max_buf.ptr_to([K.bitwise_xor(idx_in_warpgroup, 64)])
                     )
                     K.assign(cur_pi_max, K.max(cur_pi_max, peer_pi_max))
                     K.assign(real_mi, K.max(real_mi, cur_pi_max))
                     should_scale_o: K.let[K.bool] = (
-                        K.cuda.any_sync(
-                            K.uint32(4294967295), cur_pi_max - mi > K.float32(6.0)
-                        )
-                        != 0
+                        K.cuda.any_sync(K.uint32(4294967295), cur_pi_max - mi > K.float32(6.0)) != 0
                     )
                     new_max = K.local_scalar("float32")
                     scale_for_old = K.local_scalar("float32")
@@ -2463,24 +2177,19 @@ def make_kernel(
                             K.assign(new_max, mi)
                         with K.Else():
                             K.assign(new_max, K.max(cur_pi_max, mi))
-                            K.ptx.ex2(
-                                scale_for_old, mi - new_max, "approx", "ftz", "f32", ""
-                            )
+                            K.ptx.ex2(scale_for_old, mi - new_max, "approx", "ftz", "f32", "")
                     K.assign(mi, new_max)
                     s_frag = K.alloc_local((32,), "bfloat16")
                     s_pack = s_frag.view("uint32")
                     cur_sum_pair = K.local_scalar("uint64")
-                    K.assign(
-                        cur_sum_pair, K.cuda.make_float2(K.float32(0.0), K.float32(0.0))
-                    )
+                    K.assign(cur_sum_pair, K.cuda.make_float2(K.float32(0.0), K.float32(0.0)))
                     neg_new_max_pair: K.let[K.uint64] = K.cuda.make_float2(
                         new_max * K.float32(-1.0), new_max * K.float32(-1.0)
                     )
                     fma_pair = K.local_scalar("uint64")
                     with K.unroll(16) as s_i:
                         p_pair: K.let[K.uint64] = K.cuda.make_float2(
-                            K.cuda.uint_as_float(p[s_i * 2]),
-                            K.cuda.uint_as_float(p[s_i * 2 + 1]),
+                            K.cuda.uint_as_float(p[s_i * 2]), K.cuda.uint_as_float(p[s_i * 2 + 1])
                         )
                         K.ptx.fma(
                             fma_pair,
@@ -2496,49 +2205,29 @@ def make_kernel(
                         )
                         s_x = K.local_scalar("float32")
                         s_y = K.local_scalar("float32")
-                        K.ptx.ex2(
-                            s_x, K.cuda.float2_x(fma_pair), "approx", "ftz", "f32", ""
-                        )
-                        K.ptx.ex2(
-                            s_y, K.cuda.float2_y(fma_pair), "approx", "ftz", "f32", ""
-                        )
+                        K.ptx.ex2(s_x, K.cuda.float2_x(fma_pair), "approx", "ftz", "f32", "")
+                        K.ptx.ex2(s_y, K.cuda.float2_y(fma_pair), "approx", "ftz", "f32", "")
                         s_pair: K.let[K.uint64] = K.cuda.make_float2(s_x, s_y)
-                        K.ptx.add(
-                            cur_sum_pair,
-                            cur_sum_pair,
-                            s_pair,
-                            "rn",
-                            "",
-                            "",
-                            "f32x2",
-                            "",
-                            "",
-                        )
+                        K.ptx.add(cur_sum_pair, cur_sum_pair, s_pair, "rn", "", "", "f32x2", "", "")
                         K.ptx.mov.b32(s_pack[s_i], K.cuda.float22bfloat162_rn(s_x, s_y))
-                    cur_sum: K.let[K.float32] = K.cuda.float2_x(
+                    cur_sum: K.let[K.float32] = K.cuda.float2_x(cur_sum_pair) + K.cuda.float2_y(
                         cur_sum_pair
-                    ) + K.cuda.float2_y(cur_sum_pair)
-                    li_tmp = K.local_scalar("float32")
-                    K.ptx.fma(
-                        li_tmp, li, scale_for_old, cur_sum, "rn", "", "", "f32", "", ""
                     )
+                    li_tmp = K.local_scalar("float32")
+                    K.ptx.fma(li_tmp, li, scale_for_old, cur_sum, "rn", "", "", "f32", "", "")
                     K.assign(li, li_tmp)
                     K.cuda.mbarrier_wait(
                         K.address_of(buffer_7[0]),
                         K.bitwise_xor(K.bitwise_and(index_pipe.stage, 1), 1),
                     )
                     K.ptx.fence("proxy", "async", "shared::cta", "")
-                    s_base: K.int32 = (
-                        idx_in_warpgroup // 64 * 2048 + idx_in_warpgroup % 64 * 8
-                    )
+                    s_base: K.int32 = idx_in_warpgroup // 64 * 2048 + idx_in_warpgroup % 64 * 8
                     r_words = s_frag.view("uint32")
                     for f in range(4):
                         ds: K.int32 = f % 4 * 512
                         dr: K.int32 = f % 4 * 8
                         s_ptr: K.let = K.ptr_byte_offset(
-                            K.address_of(s_smem_gemm[0, 0]),
-                            (s_base + ds) * BF16_BYTES,
-                            "bfloat16",
+                            K.address_of(s_smem_gemm[0, 0]), (s_base + ds) * BF16_BYTES, "bfloat16"
                         )
                         r_w: K.int32 = dr // 2
                         K.ptx.st(
@@ -2563,23 +2252,14 @@ def make_kernel(
                             o_rescale = K.alloc_local((32,), "float32")
                             with K.unroll(8) as chunk_idx:
                                 _tmem_load_32(
-                                    o_rescale,
-                                    K.cuda.get_tmem_addr(
-                                        K.uint32(0), 0, chunk_idx * 32
-                                    ),
+                                    o_rescale, K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32)
                                 )
                                 K.ptx.tcgen05("wait::ld", "sync", "aligned", "")
                                 for f in range(16):
                                     buffer_23 = K.local_scalar("uint64")
                                     buffer_24 = K.local_scalar("uint64")
-                                    K.ptx.mov.b64(
-                                        buffer_23,
-                                        o_rescale[f * 2],
-                                        o_rescale[f * 2 + 1],
-                                    )
-                                    K.ptx.mov.b64(
-                                        buffer_24, scale_for_old, scale_for_old
-                                    )
+                                    K.ptx.mov.b64(buffer_23, o_rescale[f * 2], o_rescale[f * 2 + 1])
+                                    K.ptx.mov.b64(buffer_24, scale_for_old, scale_for_old)
                                     K.ptx.mul(
                                         buffer_23,
                                         buffer_23,
@@ -2590,16 +2270,9 @@ def make_kernel(
                                         "f32x2",
                                         "",
                                     )
-                                    K.ptx.mov.b64(
-                                        o_rescale[f * 2],
-                                        o_rescale[f * 2 + 1],
-                                        buffer_23,
-                                    )
+                                    K.ptx.mov.b64(o_rescale[f * 2], o_rescale[f * 2 + 1], buffer_23)
                                 _tmem_store_32(
-                                    o_rescale,
-                                    K.cuda.get_tmem_addr(
-                                        K.uint32(0), 0, chunk_idx * 32
-                                    ),
+                                    o_rescale, K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32)
                                 )
                                 K.ptx.tcgen05("wait::st", "sync", "aligned", "")
                             K.ptx.tcgen05("fence::before_thread_sync", "")
@@ -2607,22 +2280,16 @@ def make_kernel(
                     buffer_20 = K.local_scalar("uint32")
                     K.ptx.mapa(
                         buffer_20,
-                        K.cuda.cvta_generic_to_shared(
-                            K.address_of(bar_S_O_full_buf[0])
-                        ),
+                        K.cuda.cvta_generic_to_shared(K.address_of(bar_S_O_full_buf[0])),
                         K.uint32(0),
                         "shared::cluster",
                         "u32",
                         "",
                     )
-                    K.ptx.mbarrier(
-                        buffer_20, "arrive", "", "", "shared::cluster", "b64", ""
-                    )
+                    K.ptx.mbarrier(buffer_20, "arrive", "", "", "shared::cluster", "b64", "")
                     K.ptx.mbarrier(
                         K.cuda.cvta_generic_to_shared(
-                            K.address_of(
-                                bar_valid_coord_scales_empty_buf[index_pipe.stage]
-                            )
+                            K.address_of(bar_valid_coord_scales_empty_buf[index_pipe.stage])
                         ),
                         K.uint32(1),
                         "arrive",
@@ -2638,8 +2305,7 @@ def make_kernel(
                         K.assign(li, K.float32(0.0))
                         K.assign(mi, K.float32("-inf"))
                 K.cuda.mbarrier_wait(
-                    K.address_of(bar_li_empty_buf[0]),
-                    K.bitwise_xor(jobs.epoch.phase, 1),
+                    K.address_of(bar_li_empty_buf[0]), K.bitwise_xor(jobs.epoch.phase, 1)
                 )
                 K.ptx.st.shared.f32(
                     rowwise_li_buf.ptr_to([K.bitwise_xor(idx_in_warpgroup, 64)]), li
@@ -2655,29 +2321,21 @@ def make_kernel(
                         K.assign(attn_sink_value, K.float32(-float("inf")))
                         with K.If(have_attn_sink):
                             with K.Then():
-                                K.ptx.ld.global_.f32(
-                                    attn_sink_value, attn_sink.ptr_to([head_idx])
-                                )
+                                K.ptx.ld.global_.f32(attn_sink_value, attn_sink.ptr_to([head_idx]))
                         attn_sink_log2: K.let[K.float32] = attn_sink_value * K.float32(
                             1.4426950408889634
                         )
                         sink_exp = K.local_scalar("float32")
-                        K.ptx.ex2(
-                            sink_exp, attn_sink_log2 - mi, "approx", "ftz", "f32", ""
-                        )
+                        K.ptx.ex2(sink_exp, attn_sink_log2 - mi, "approx", "ftz", "f32", "")
                         output_scale: K.let[K.float32] = K.cuda.fdividef(
                             K.float32(1.0), li + sink_exp
                         )
                         K.ptx.st.shared.f32(
                             rowwise_li_buf.ptr_to([idx_in_warpgroup]),
-                            K.if_then_else(
-                                li == K.float32(0.0), K.float32(0.0), output_scale
-                            ),
+                            K.if_then_else(li == K.float32(0.0), K.float32(0.0), output_scale),
                         )
                         K.ptx.mbarrier(
-                            K.cuda.cvta_generic_to_shared(
-                                K.address_of(bar_li_full_buf[0])
-                            ),
+                            K.cuda.cvta_generic_to_shared(K.address_of(bar_li_full_buf[0])),
                             K.uint32(1),
                             "arrive",
                             "",
@@ -2701,17 +2359,13 @@ def make_kernel(
                         )
                         K.assign(
                             cur_lse,
-                            K.if_then_else(
-                                cur_lse == K.float32("-inf"), K.float32("inf"), cur_lse
-                            ),
+                            K.if_then_else(cur_lse == K.float32("-inf"), K.float32("inf"), cur_lse),
                         )
                         K.ptx.st.global_.f32(
                             max_logits.ptr_to([wg3_s_q_idx, head_idx]),
                             real_mi * K.float32(0.69314718055994529),
                         )
-                        K.ptx.st.global_.f32(
-                            lse.ptr_to([wg3_s_q_idx, head_idx]), cur_lse
-                        )
+                        K.ptx.st.global_.f32(lse.ptr_to([wg3_s_q_idx, head_idx]), cur_lse)
                 jobs.advance()
             K.cuda.iket.range_end(softmax_token[0])
 
@@ -2787,9 +2441,7 @@ def run_test(**kwargs: Any) -> None:
     torch.cuda.synchronize()
     ref_out, ref_max_logits, ref_lse = _reference_sparse_prefill(case)
     torch.testing.assert_close(case["out"], ref_out, rtol=4.01 / 128, atol=5e-3)
-    torch.testing.assert_close(
-        case["max_logits"], ref_max_logits, rtol=2.01 / 65536, atol=1e-6
-    )
+    torch.testing.assert_close(case["max_logits"], ref_max_logits, rtol=2.01 / 65536, atol=1e-6)
     torch.testing.assert_close(case["lse"], ref_lse, rtol=2.01 / 65536, atol=1e-6)
     cfg.validate()
 
@@ -2809,9 +2461,7 @@ def run_gpu(
     _rounds = kwargs.pop("rounds", 1)
     _cooldown_s = kwargs.pop("cooldown_s", 1.0)
     if not torch.cuda.is_available():
-        raise SkipTest(
-            "CUDA is required for sparse FlashMLA head128 small-topk phase1 benchmark"
-        )
+        raise SkipTest("CUDA is required for sparse FlashMLA head128 small-topk phase1 benchmark")
 
     from tirx_kernels.runner import bench
 
@@ -2847,25 +2497,12 @@ def run_gpu(
 
 
 def run_bench(
-    *,
-    warmup: int | None = None,
-    repeat: int | None = None,
-    timer: str | None = None,
-    **kwargs: Any,
+    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
 ) -> dict[str, Any]:
     config = dict(kwargs)
-    protocol = {
-        name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config
-    }
+    protocol = {name: config.pop(name) for name in ("rounds", "cooldown_s") if name in config}
     prepared = prepare_bench(**config)
     return prepared.run_gpu(warmup=warmup, repeat=repeat, timer=timer, **protocol)
 
 
-__all__ = [
-    "CONFIGS",
-    "KERNEL_META",
-    "get_kernel",
-    "prepare_data",
-    "run_bench",
-    "run_test",
-]
+__all__ = ["CONFIGS", "KERNEL_META", "get_kernel", "prepare_data", "run_bench", "run_test"]

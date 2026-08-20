@@ -745,9 +745,7 @@ def _make_gdn_decode_fp32_mtp_warp(
     PREFETCH_ROWS,
 ):
     @TK.kernel(
-        warps=NUM_WARPS,
-        arch="sm_100a",
-        grid=lambda p: p["batch"] * NUM_V_HEADS * NUM_V_TILES,
+        warps=NUM_WARPS, arch="sm_100a", grid=lambda p: p["batch"] * NUM_V_HEADS * NUM_V_TILES
     )
     def gdn_decode_fp32_mtp_warp(
         state: TK.gptr[TK.f32],

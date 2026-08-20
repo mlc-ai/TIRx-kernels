@@ -705,10 +705,7 @@ def get_kernel(**kwargs: Any):
                 )
             else:
                 K.assign(state_batch, K.cast(seq_idx, "int64"))
-            K.assign(
-                is_pad,
-                K.if_then_else(state_batch != K.cast(pad_slot_id, "int64"), 0, 1),
-            )
+            K.assign(is_pad, K.if_then_else(state_batch != K.cast(pad_slot_id, "int64"), 0, 1))
             K.assign(
                 state_head_offset,
                 state_batch * state_stride_batch + K.cast(head * DIM * DSTATE, "int64"),

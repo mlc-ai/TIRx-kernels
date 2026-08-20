@@ -273,10 +273,7 @@ def _stage_vector(buf, s_ordered, row_in, i, vec, load_bytes, is32, to_ordered, 
             lo = to_ordered(K.cast(K.bitwise_and(word, K.uint32(0xFFFF)), "uint16"))
             hi = to_ordered(K.cast(K.shift_right(word, K.uint32(16)), "uint16"))
             keys.append(
-                K.bitwise_or(
-                    K.cast(lo, "uint32"),
-                    K.shift_left(K.cast(hi, "uint32"), K.uint32(16)),
-                )
+                K.bitwise_or(K.cast(lo, "uint32"), K.shift_left(K.cast(hi, "uint32"), K.uint32(16)))
             )
     if len(keys) == 4:
         st_shared_quad_u32(s_ordered, i, keys[0], keys[1], keys[2], keys[3])
@@ -467,8 +464,9 @@ def get_kernel(
 
             static_main = basic and not basic_trivial
             with (
-                nullcontext() if static_main else K.If(take_main[0] == 1)
-            ), (nullcontext() if static_main else K.Then()):
+                nullcontext() if static_main else K.If(take_main[0] == 1),
+                nullcontext() if static_main else K.Then(),
+            ):
                 # === Stage 1: stage the row as monotone keys (:605-623) ====
                 if basic:
                     aligned = length // vec * vec
@@ -551,9 +549,10 @@ def get_kernel(
                         K.assign(count_gt[0], K.uint32(0))
                         with K.If(tx + 1 < RADIX), K.Then():
                             K.assign(count_gt[0], ld_shared_u32(s_suffix, tx + 1))
-                        with K.If(
-                            K.And(count_ge >= remaining_k, count_gt[0] < remaining_k)
-                        ), K.Then():
+                        with (
+                            K.If(K.And(count_ge >= remaining_k, count_gt[0] < remaining_k)),
+                            K.Then(),
+                        ):
                             st_shared_pair_u32(
                                 s_scalars, 2, K.cast(tx, "uint32"), remaining_k - count_gt[0]
                             )
@@ -585,14 +584,10 @@ def get_kernel(
                 K.assign(my_eq[0], K.uint32(0))
                 with K.serial(tx, row_len, step=BLOCK_THREADS, unroll=2) as ic:
                     key2 = K.cast(ld_key(s_ordered, ic), "uint32")
-                    K.assign(
-                        my_gt[0],
-                        my_gt[0] + K.Select(key2 > pivot, K.uint32(1), K.uint32(0)),
-                    )
+                    K.assign(my_gt[0], my_gt[0] + K.Select(key2 > pivot, K.uint32(1), K.uint32(0)))
                     if deterministic:
                         K.assign(
-                            my_eq[0],
-                            my_eq[0] + K.Select(key2 == pivot, K.uint32(1), K.uint32(0)),
+                            my_eq[0], my_eq[0] + K.Select(key2 == pivot, K.uint32(1), K.uint32(0))
                         )
                 with K.unroll(5) as step:
                     delta = K.shift_right(K.int32(16), step)
@@ -689,8 +684,7 @@ def get_kernel(
                                 key5 = K.cast(ld_key(s_ordered, id1), "uint32")
                                 K.assign(
                                     sel[0],
-                                    sel[0]
-                                    + K.Select(key5 > pivot, K.uint32(1), K.uint32(0)),
+                                    sel[0] + K.Select(key5 > pivot, K.uint32(1), K.uint32(0)),
                                 )
                             # cub BLOCK_SCAN_RAKING_MEMOIZE exclusive sum (:268-270):
                             # place into the padded raking grid, one warp serially
@@ -717,9 +711,7 @@ def get_kernel(
                                     K.assign(scan_run[0], scan_run[0] + cache[j])
                             bar_sync()
                             pre = ld_shared_u32(s_scan, rake_off)
-                            with K.If(
-                                K.And(sel[0] > K.uint32(0), pre < gt_limit[0])
-                            ), K.Then():
+                            with K.If(K.And(sel[0] > K.uint32(0), pre < gt_limit[0])), K.Then():
                                 emit_pos = K.alloc_local([1], "uint32")
                                 emit_end = K.alloc_local([1], "uint32")
                                 done = K.alloc_local([1], "int32")
@@ -758,13 +750,11 @@ def get_kernel(
                                 key7 = K.cast(ld_key(s_ordered, id4), "uint32")
                                 K.assign(
                                     sel_gt[0],
-                                    sel_gt[0]
-                                    + K.Select(key7 > pivot, K.uint32(1), K.uint32(0)),
+                                    sel_gt[0] + K.Select(key7 > pivot, K.uint32(1), K.uint32(0)),
                                 )
                                 K.assign(
                                     sel_eq[0],
-                                    sel_eq[0]
-                                    + K.Select(key7 == pivot, K.uint32(1), K.uint32(0)),
+                                    sel_eq[0] + K.Select(key7 == pivot, K.uint32(1), K.uint32(0)),
                                 )
                             # The same raking scan over the {gt, eq} pair (:1122-1125).
                             rake_off2 = _raking_offset(tx) * 2
@@ -806,9 +796,7 @@ def get_kernel(
                             K.assign(cur_eq[0], seg_out[1])
                             with K.serial(tx, row_len, step=BLOCK_THREADS) as i8:
                                 key8 = K.cast(ld_key(s_ordered, i8), "uint32")
-                                with K.If(
-                                    K.And(key8 > pivot, cur_gt[0] < gt_limit[0])
-                                ):
+                                with K.If(K.And(key8 > pivot, cur_gt[0] < gt_limit[0])):
                                     with K.Then():
                                         _emit(
                                             out_idx,
@@ -825,9 +813,10 @@ def get_kernel(
                                         )
                                         K.assign(cur_gt[0], cur_gt[0] + K.uint32(1))
                                     with K.Else():
-                                        with K.If(
-                                            K.And(key8 == pivot, cur_eq[0] < eq_limit)
-                                        ), K.Then():
+                                        with (
+                                            K.If(K.And(key8 == pivot, cur_eq[0] < eq_limit)),
+                                            K.Then(),
+                                        ):
                                             _emit(
                                                 out_idx,
                                                 out_val,

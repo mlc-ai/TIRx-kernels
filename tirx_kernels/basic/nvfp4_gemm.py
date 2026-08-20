@@ -1251,13 +1251,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, **kwargs):
                 **config_kwargs,
             )
     else:
-        result = bench(
-            funcs,
-            warmup=warmup,
-            repeat=repeat,
-            timer=timer,
-            **config_kwargs,
-        )
+        result = bench(funcs, warmup=warmup, repeat=repeat, timer=timer, **config_kwargs)
     result["metadata"] = {**result.get("metadata", {}), **metadata}
     return result
 

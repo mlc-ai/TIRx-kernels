@@ -582,10 +582,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
             # Out-of-row tokens clamp to token 0 so the loads stay in bounds; the
             # value is discarded by the `active` predicate in phase B.
             pidx: K.int32 = K.if_then_else(t < seq_len, token_base + t, 0)
-            K.assign(
-                ves[t],
-                _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx),
-            )
+            K.assign(ves[t], _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx))
             K.assign(b_bits[t], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
             for e in range(EPT):
                 de_l: K.int32 = d[0] + e * NT

@@ -686,13 +686,7 @@ def get_kernel(**kwargs: Any):
         def mma_mxf4_block32_ss(desc_a, desc_b, tmem_c, scale_c, desc, tmem_sfa, tmem_sfb):
             i_desc_hi = K.Cast("uint32", K.shift_right(desc, K.uint64(32)))
             K.ptx["tcgen05.mma.cta_group::1.kind::mxf4.block_scale.scale_vec::2X"](
-                tmem_c,
-                desc_a,
-                desc_b,
-                i_desc_hi,
-                tmem_sfa,
-                tmem_sfb,
-                K.ptx.pred(scale_c),
+                tmem_c, desc_a, desc_b, i_desc_hi, tmem_sfa, tmem_sfb, K.ptx.pred(scale_c)
             )
 
         def utccp_required_smem_warp_transpose(buf, prefix, base_offset):

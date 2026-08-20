@@ -115,22 +115,17 @@ def _desc_add_16B_offset(desc, offset):
     chain stays uniform.
     """
     low = K.cast(K.cast(desc, "uint32") + K.cast(offset, "uint32"), "uint64")
-    return K.bitwise_or(
-        K.bitwise_and(desc, K.bitwise_not(K.uint64(0xFFFFFFFF))), low
-    )
+    return K.bitwise_or(K.bitwise_and(desc, K.bitwise_not(K.uint64(0xFFFFFFFF))), low)
 
 
 def _replace_smem_desc_addr(desc, smem_ptr):
     start_addr = K.cast(
         K.bitwise_and(
-            K.shift_right(K.cuda.cvta_generic_to_shared(smem_ptr), K.uint32(4)),
-            K.uint32(0x3FFF),
+            K.shift_right(K.cuda.cvta_generic_to_shared(smem_ptr), K.uint32(4)), K.uint32(0x3FFF)
         ),
         "uint64",
     )
-    return K.bitwise_or(
-        K.bitwise_and(desc, K.bitwise_not(K.uint64(0x3FFF))), start_addr
-    )
+    return K.bitwise_or(K.bitwise_and(desc, K.bitwise_not(K.uint64(0x3FFF))), start_addr)
 
 
 class ModelType(str, Enum):
@@ -177,13 +172,9 @@ class SparseFlashMLADecodeHead64Config:
         if self.h_kv != 1 or self.d_v != D_V:
             raise ValueError("head64 sparse decode requires h_kv=1 and d_v=512")
         if self.h_q == 128 and self.normalized_model_type is not ModelType.V32:
-            raise ValueError(
-                "h_q=128,d_qk=512 dispatches to the out-of-scope head128 kernel"
-            )
+            raise ValueError("h_q=128,d_qk=512 dispatches to the out-of-scope head128 kernel")
         if self.h_q not in (B_H, 2 * B_H):
-            raise ValueError(
-                "this port covers h_q=64 direct and V32 h_q=128 head64x2 dispatch"
-            )
+            raise ValueError("this port covers h_q=64 direct and V32 h_q=128 head64x2 dispatch")
         if self.b <= 0 or self.s_q <= 0 or self.s_kv <= 0 or self.page_block_size <= 0:
             raise ValueError("b, s_q, s_kv, and page_block_size must be positive")
         if self.topk <= 0 or self.topk % B_TOPK != 0:
@@ -193,9 +184,7 @@ class SparseFlashMLADecodeHead64Config:
         if self.extra_topk and not self.extra_s_kv:
             raise ValueError("extra_s_kv is required when extra_topk is nonzero")
         if self.extra_topk and self.extra_page_block_size <= 0:
-            raise ValueError(
-                "extra_page_block_size must be positive with an extra KV cache"
-            )
+            raise ValueError("extra_page_block_size must be positive with an extra KV cache")
         if self.have_extra_topk_length and not self.extra_topk:
             raise ValueError("extra_topk_length requires an extra KV cache")
 
@@ -429,9 +418,7 @@ def _kv_storage_spec(
     else:
         bytes_per_token = 448 + 64 * BF16_BYTES + 7 + 1
         tma_k_stride = 576
-        stride_kv_block = (
-            _ceil_div(page_block_size * bytes_per_token, tma_k_stride) * tma_k_stride
-        )
+        stride_kv_block = _ceil_div(page_block_size * bytes_per_token, tma_k_stride) * tma_k_stride
     num_tma_rows = num_blocks * (stride_kv_block // tma_k_stride)
     return bytes_per_token, tma_k_stride, stride_kv_block, num_tma_rows
 
@@ -456,9 +443,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
     kv_rope_start = (d_nope + (16 if is_v32 else 0)) // BF16_BYTES
     source_smem_size = 232192 if is_v32 else 218848
 
-    @K.kernel(
-        warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=("s_q", "num_sm_parts", 1)
-    )
+    @K.kernel(warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=("s_q", "num_sm_parts", 1))
     def sparse_flashmla_decode_head64_main(
         q: K.gptr[K.bf16],
         kv: K.gptr[K.bf16],
@@ -532,25 +517,17 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         pool = smem.pool
         u_base = pool.offset
         if is_v32:
-            k_union = smem.alloc(
-                (NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle=K.SW128B
-            ).buf
+            k_union = smem.alloc((NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle=K.SW128B).buf
             k_union_end = pool.offset
             k_full = k_union
             pool.move_base_to(u_base)
-            k_rope = smem.alloc(
-                (NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle=K.SW64B
-            ).buf
+            k_rope = smem.alloc((NUM_BUFS, B_TOPK, D_V + 64), "bfloat16", swizzle=K.SW64B).buf
             pool.move_base_to(k_union_end)
         else:
-            k_full = smem.alloc(
-                (NUM_BUFS, B_TOPK, D_V), "bfloat16", swizzle=K.SW128B
-            ).buf
+            k_full = smem.alloc((NUM_BUFS, B_TOPK, D_V), "bfloat16", swizzle=K.SW128B).buf
             k_union_end = pool.offset
             pool.move_base_to(u_base)
-            k_rope = smem.alloc(
-                (NUM_BUFS, B_TOPK, 64), "bfloat16", swizzle=K.SW128B
-            ).buf
+            k_rope = smem.alloc((NUM_BUFS, B_TOPK, 64), "bfloat16", swizzle=K.SW128B).buf
             pool.move_base_to(k_union_end)
         raw_nope = pool.alloc((NUM_BUFS, B_TOPK, d_nope // 8), "uint64", align=1024)
         kv_union_end = pool.offset
@@ -564,9 +541,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         o_smem = smem.alloc((B_H, D_V), "bfloat16", swizzle=K.SW128B).buf
         o_bf16_end = pool.offset
         pool.move_base_to(o_union_base)
-        o_accum_storage = pool.alloc(
-            ((B_H - 1) * (D_V + 8) + D_V,), "float32", align=1024
-        )
+        o_accum_storage = pool.alloc(((B_H - 1) * (D_V + 8) + D_V,), "float32", align=1024)
         qo_union_end = pool.offset
         pool.move_base_to(max(kv_union_end, qo_union_end, o_bf16_end))
         sp_union_base = pool.offset
@@ -585,27 +560,17 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         pv_a_hi_desc.init(s_smem_gemm.ptr_to([0, 0]), ldo=64, sdo=8, swizzle=0)
         q_main_cp_desc = K.alloc_local([1], "uint64")
         K.cuda.tcgen05.encode_matrix_descriptor(
-            K.address_of(q_main_cp_desc[0]),
-            K.reinterpret(K.handle().ty, K.uint64(0)),
-            1,
-            64,
-            3,
+            K.address_of(q_main_cp_desc[0]), K.reinterpret(K.handle().ty, K.uint64(0)), 1, 64, 3
         )
         if is_v32:
             q_tail_cp_desc = K.alloc_local([1], "uint64")
             K.cuda.tcgen05.encode_matrix_descriptor(
-                K.address_of(q_tail_cp_desc[0]),
-                K.reinterpret(K.handle().ty, K.uint64(0)),
-                1,
-                32,
-                2,
+                K.address_of(q_tail_cp_desc[0]), K.reinterpret(K.handle().ty, K.uint64(0)), 1, 32, 2
             )
         rowwise_buf = pool.alloc((128,), "float32", align=16)
         is_token_valid = pool.alloc((NUM_INDEX_BUFS, B_TOPK // 8), "int8", align=16)
         tma_coord = pool.alloc((NUM_INDEX_BUFS, B_TOPK), "int32", align=16)
-        scales_e8m0 = pool.alloc(
-            (NUM_INDEX_BUFS, B_TOPK * num_scales), "uint8", align=16
-        )
+        scales_e8m0 = pool.alloc((NUM_INDEX_BUFS, B_TOPK * num_scales), "uint8", align=16)
         tmem_start_addr = pool.alloc((4,), "uint32", align=16)
         bar_last_store_done = K.MBarrier(pool, 1)
         bar_q_tma = K.TMABar(pool, 1)
@@ -626,11 +591,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             # including its cache operators and L2 prefetch size; the eighth
             # int32 word is intentionally loaded even though it is reserved.
             K.ptx["ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v4.u64"](
-                dst[0],
-                dst[1],
-                dst[2],
-                dst[3],
-                tile_scheduler_metadata.ptr_to([partition_idx * 8]),
+                dst[0], dst[1], dst[2], dst[3], tile_scheduler_metadata.ptr_to([partition_idx * 8])
             )
 
         def dequant_st128(smem_addr, raw, scale_bits):
@@ -664,12 +625,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             K.ptx.mbarrier.init.shared.b64(
                                 bar_last_store_done.ptr_to([0]), K.uint32(128)
                             )
-                            K.ptx.mbarrier.init.shared.b64(
-                                bar_q_tma.ptr_to([0]), K.uint32(1)
-                            )
-                            K.ptx.mbarrier.init.shared.b64(
-                                bar_q_utccp.ptr_to([0]), K.uint32(1)
-                            )
+                            K.ptx.mbarrier.init.shared.b64(bar_q_tma.ptr_to([0]), K.uint32(1))
+                            K.ptx.mbarrier.init.shared.b64(bar_q_utccp.ptr_to([0]), K.uint32(1))
                             with K.unroll(NUM_BUFS) as stage:
                                 K.ptx.mbarrier.init.shared.b64(
                                     bar_rope_ready.ptr_to([stage]), K.uint32(1)
@@ -704,9 +661,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                         K.address_of(tmem_start_addr[0]), K.uint32(512)
                     )
                     allocated_tmem_start = K.local_scalar("uint32")
-                    K.ptx.ld.shared.u32(
-                        allocated_tmem_start, tmem_start_addr.ptr_to([0])
-                    )
+                    K.ptx.ld.shared.u32(allocated_tmem_start, tmem_start_addr.ptr_to([0]))
                     K.cuda.trap_when_assert_failed(allocated_tmem_start == K.uint32(0))
                     K.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
             K.cuda.cta_sync()
@@ -727,9 +682,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                     K.assign(
                         attn_sink_log2,
                         (
-                            K.cuda.ldg(
-                                attn_sink.ptr_to([idx_in_warpgroup % B_H]), "float32"
-                            )
+                            K.cuda.ldg(attn_sink.ptr_to([idx_in_warpgroup % B_H]), "float32")
                             * LOG_2_E
                         ),
                     )
@@ -750,18 +703,13 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             # its body so inactive partitions still reach WG0's TMEM dealloc.
             with K.If(sched_begin_req < b):
                 with K.Then():
-                    with K.serial(
-                        sched_begin_req, sched_end_req + 1, unroll=False
-                    ) as batch_idx:
+                    with K.serial(sched_begin_req, sched_end_req + 1, unroll=False) as batch_idx:
                         topk_len = K.local_scalar("int32")
                         K.assign(topk_len, topk)
                         with K.If(have_topk_length):
                             with K.Then():
                                 K.assign(
-                                    topk_len,
-                                    K.cuda.ldg(
-                                        topk_length.ptr_to([batch_idx]), "int32"
-                                    ),
+                                    topk_len, K.cuda.ldg(topk_length.ptr_to([batch_idx]), "int32")
                                 )
                         orig_topk_padded: K.let = K.max(
                             ((topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK, B_TOPK
@@ -772,29 +720,22 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             with K.Then():
                                 K.assign(
                                     extra_topk_len,
-                                    K.cuda.ldg(
-                                        extra_topk_length.ptr_to([batch_idx]), "int32"
-                                    ),
+                                    K.cuda.ldg(extra_topk_length.ptr_to([batch_idx]), "int32"),
                                 )
                         total_topk_padded: K.let = (
-                            orig_topk_padded
-                            + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
+                            orig_topk_padded + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
                         )
                         start_block: K.let = K.if_then_else(
                             batch_idx == sched_begin_req, sched_begin_block, 0
                         )
                         end_block: K.let = K.if_then_else(
-                            batch_idx == sched_end_req,
-                            sched_end_block,
-                            total_topk_padded // B_TOPK,
+                            batch_idx == sched_end_req, sched_end_block, total_topk_padded // B_TOPK
                         )
                         is_split: K.bool = K.cast(
                             K.if_then_else(
                                 batch_idx == sched_begin_req,
                                 sched_first_split,
-                                K.if_then_else(
-                                    batch_idx == sched_end_req, sched_last_split, 0
-                                ),
+                                K.if_then_else(batch_idx == sched_end_req, sched_last_split, 0),
                             ),
                             "bool",
                         )
@@ -828,9 +769,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
 
                         # kernel.cuh:160-299.  P load, dual-warp exchange, mask,
                         # online softmax, S staging, and conditional O rescale.
-                        with K.serial(
-                            start_block, end_block, unroll=False
-                        ) as block_idx:
+                        with K.serial(start_block, end_block, unroll=False) as block_idx:
                             K.ptx.bar.sync(K.uint32(BAR_WG0_SYNC), 128)
                             bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                             bar_qk_done.wait(rs_buf.stage, rs_buf.phase)
@@ -845,28 +784,20 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             p_peer = K.alloc_local((B_TOPK // 2,), "float32")
                             with K.If(warp_idx < 2):
                                 with K.Then():
-                                    K.evaluate(
-                                        _tmem_load(p, K.uint32(400), B_TOPK // 2)
-                                    )
+                                    K.evaluate(_tmem_load(p, K.uint32(400), B_TOPK // 2))
                                     K.evaluate(
                                         _tmem_load(
                                             p_peer,
-                                            K.cuda.get_tmem_addr(
-                                                K.uint32(400), 0, B_TOPK // 2
-                                            ),
+                                            K.cuda.get_tmem_addr(K.uint32(400), 0, B_TOPK // 2),
                                             B_TOPK // 2,
                                         )
                                     )
                                 with K.Else():
-                                    K.evaluate(
-                                        _tmem_load(p_peer, K.uint32(400), B_TOPK // 2)
-                                    )
+                                    K.evaluate(_tmem_load(p_peer, K.uint32(400), B_TOPK // 2))
                                     K.evaluate(
                                         _tmem_load(
                                             p,
-                                            K.cuda.get_tmem_addr(
-                                                K.uint32(400), 0, B_TOPK // 2
-                                            ),
+                                            K.cuda.get_tmem_addr(K.uint32(400), 0, B_TOPK // 2),
                                             B_TOPK // 2,
                                         )
                                     )
@@ -874,9 +805,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             K.ptx.tcgen05.fence__before_thread_sync()
 
                             with K.unroll((B_TOPK // 2) // 4) as exchange_i:
-                                exchange_offset: K.let = (
-                                    exchange_i * 32 * 4 + lane_idx * 4
-                                )
+                                exchange_offset: K.let = exchange_i * 32 * 4 + lane_idx * 4
                                 p_peer_words = p_peer.view("uint32")
                                 peer_word: K.let = exchange_i * 4
                                 K.ptx.st.shared.v4.u32(
@@ -889,15 +818,10 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     p_peer_words[peer_word + 3],
                                 )
                             K.ptx.bar.sync(
-                                K.uint32(
-                                    BAR_WG0_WARP02 + K.bitwise_and(warp_idx, K.int32(1))
-                                ),
-                                64,
+                                K.uint32(BAR_WG0_WARP02 + K.bitwise_and(warp_idx, K.int32(1))), 64
                             )
                             with K.unroll((B_TOPK // 2) // 4) as exchange_i:
-                                exchange_offset: K.let = (
-                                    exchange_i * 32 * 4 + lane_idx * 4
-                                )
+                                exchange_offset: K.let = exchange_i * 32 * 4 + lane_idx * 4
                                 peer_tmp = K.alloc_local((4,), "float32")
                                 peer_tmp_words = peer_tmp.view("uint32")
                                 K.ptx.ld.shared.v4.u32(
@@ -905,17 +829,13 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     peer_tmp_words[1],
                                     peer_tmp_words[2],
                                     peer_tmp_words[3],
-                                    p_exchange.view("uint32").ptr_to(
-                                        [warp_idx, exchange_offset]
-                                    ),
+                                    p_exchange.view("uint32").ptr_to([warp_idx, exchange_offset]),
                                 )
                                 pair0 = K.local_scalar("uint64")
                                 pair1 = K.local_scalar("uint64")
                                 K.ptx.add.f32x2(
                                     pair0,
-                                    K.cuda.make_float2(
-                                        p[exchange_i * 4], p[exchange_i * 4 + 1]
-                                    ),
+                                    K.cuda.make_float2(p[exchange_i * 4], p[exchange_i * 4 + 1]),
                                     K.cuda.make_float2(peer_tmp[0], peer_tmp[1]),
                                 )
                                 K.ptx.add.f32x2(
@@ -926,32 +846,21 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     K.cuda.make_float2(peer_tmp[2], peer_tmp[3]),
                                 )
                                 K.ptx.mov.b32(p[exchange_i * 4], K.cuda.float2_x(pair0))
-                                K.ptx.mov.b32(
-                                    p[exchange_i * 4 + 1], K.cuda.float2_y(pair0)
-                                )
-                                K.ptx.mov.b32(
-                                    p[exchange_i * 4 + 2], K.cuda.float2_x(pair1)
-                                )
-                                K.ptx.mov.b32(
-                                    p[exchange_i * 4 + 3], K.cuda.float2_y(pair1)
-                                )
+                                K.ptx.mov.b32(p[exchange_i * 4 + 1], K.cuda.float2_y(pair0))
+                                K.ptx.mov.b32(p[exchange_i * 4 + 2], K.cuda.float2_x(pair1))
+                                K.ptx.mov.b32(p[exchange_i * 4 + 3], K.cuda.float2_y(pair1))
 
                             valid_word = K.local_scalar("uint32")
                             K.ptx.ld.shared.u32(
                                 valid_word,
                                 is_token_valid.view("uint32").ptr_to(
-                                    [
-                                        rs_index.stage,
-                                        K.if_then_else(idx_in_warpgroup >= 64, 1, 0),
-                                    ]
+                                    [rs_index.stage, K.if_then_else(idx_in_warpgroup >= 64, 1, 0)]
                                 ),
                             )
                             with K.unroll(B_TOPK // 2) as p_i:
                                 with K.If(
                                     K.bitwise_and(
-                                        K.shift_right(
-                                            valid_word, K.cast(p_i, "uint32")
-                                        ),
+                                        K.shift_right(valid_word, K.cast(p_i, "uint32")),
                                         K.uint32(1),
                                     )
                                     == K.uint32(0)
@@ -964,9 +873,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             with K.unroll(B_TOPK // 2) as p_i:
                                 K.assign(cur_pi_max, K.max(cur_pi_max, p[p_i]))
                             K.assign(cur_pi_max, cur_pi_max * sm_scale_div_log2)
-                            K.ptx.st.shared.f32(
-                                rowwise_buf.ptr_to([idx_in_warpgroup]), cur_pi_max
-                            )
+                            K.ptx.st.shared.f32(rowwise_buf.ptr_to([idx_in_warpgroup]), cur_pi_max)
                             K.ptx.bar.sync(K.uint32(BAR_WG0_SYNC), 128)
                             bar_valid_free.arrive(rs_index.stage)
                             peer_pi_max = K.local_scalar("float32")
@@ -978,9 +885,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             should_scale_o = K.local_scalar("uint32")
                             K.assign(
                                 should_scale_o,
-                                K.cuda.any_sync(
-                                    K.uint32(0xFFFFFFFF), cur_pi_max - mi > 6.0
-                                ),
+                                K.cuda.any_sync(K.uint32(0xFFFFFFFF), cur_pi_max - mi > 6.0),
                             )
                             new_max = K.local_scalar("float32")
                             scale_for_old = K.local_scalar("float32")
@@ -990,9 +895,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     K.assign(new_max, mi)
                                 with K.Else():
                                     K.assign(new_max, K.max(cur_pi_max, mi))
-                                    K.ptx.ex2.approx.ftz.f32(
-                                        scale_for_old, mi - new_max
-                                    )
+                                    K.ptx.ex2.approx.ftz.f32(scale_for_old, mi - new_max)
                             K.assign(mi, new_max)
 
                             s_frag = K.alloc_local((B_TOPK // 2,), "bfloat16")
@@ -1001,35 +904,26 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             K.assign(cur_sum_pair, K.cuda.make_float2(0.0, 0.0))
                             neg_max_pair: K.let = K.cuda.make_float2(-new_max, -new_max)
                             with K.unroll((B_TOPK // 2) // 2) as s_i:
-                                p_pair: K.let = K.cuda.make_float2(
-                                    p[s_i * 2], p[s_i * 2 + 1]
-                                )
+                                p_pair: K.let = K.cuda.make_float2(p[s_i * 2], p[s_i * 2 + 1])
                                 soft_pair = K.local_scalar("uint64")
-                                K.ptx.fma.rn.f32x2(
-                                    soft_pair, p_pair, scale_pair, neg_max_pair
-                                )
+                                K.ptx.fma.rn.f32x2(soft_pair, p_pair, scale_pair, neg_max_pair)
                                 sx = K.local_scalar("float32")
                                 sy = K.local_scalar("float32")
                                 K.ptx.ex2.approx.ftz.f32(sx, K.cuda.float2_x(soft_pair))
                                 K.ptx.ex2.approx.ftz.f32(sy, K.cuda.float2_y(soft_pair))
                                 K.ptx.add.f32x2(
-                                    cur_sum_pair,
-                                    cur_sum_pair,
-                                    K.cuda.make_float2(sx, sy),
+                                    cur_sum_pair, cur_sum_pair, K.cuda.make_float2(sx, sy)
                                 )
-                                K.ptx.mov.b32(
-                                    s_pack[s_i], K.cuda.float22bfloat162_rn(sx, sy)
-                                )
-                            cur_sum: K.let = K.cuda.float2_x(
+                                K.ptx.mov.b32(s_pack[s_i], K.cuda.float22bfloat162_rn(sx, sy))
+                            cur_sum: K.let = K.cuda.float2_x(cur_sum_pair) + K.cuda.float2_y(
                                 cur_sum_pair
-                            ) + K.cuda.float2_y(cur_sum_pair)
+                            )
                             li_next = K.local_scalar("float32")
                             K.ptx.fma.rn.f32(li_next, li, scale_for_old, cur_sum)
                             K.assign(li, li_next)
 
                             s_base: K.let = (
-                                idx_in_warpgroup // 64 * 2048
-                                + idx_in_warpgroup % 64 * 8
+                                idx_in_warpgroup // 64 * 2048 + idx_in_warpgroup % 64 * 8
                             )
                             s_words = s_frag.view("uint32")
                             with K.unroll(4) as s_store_i:
@@ -1047,10 +941,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     s_words[s_word + 3],
                                 )
                             with K.If(
-                                K.And(
-                                    block_idx != start_block,
-                                    should_scale_o != K.uint32(0),
-                                )
+                                K.And(block_idx != start_block, should_scale_o != K.uint32(0))
                             ):
                                 with K.Then():
                                     scale_for_old_pair: K.let = K.cuda.make_float2(
@@ -1062,9 +953,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         K.evaluate(
                                             _tmem_load(
                                                 o_rescale,
-                                                K.cuda.get_tmem_addr(
-                                                    K.uint32(0), 0, o_chunk * 64
-                                                ),
+                                                K.cuda.get_tmem_addr(K.uint32(0), 0, o_chunk * 64),
                                                 64,
                                             )
                                         )
@@ -1080,8 +969,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 scale_for_old_pair,
                                             )
                                             K.ptx.mov.b32(
-                                                o_rescale[scale_i * 2],
-                                                K.cuda.float2_x(scaled_pair),
+                                                o_rescale[scale_i * 2], K.cuda.float2_x(scaled_pair)
                                             )
                                             K.ptx.mov.b32(
                                                 o_rescale[scale_i * 2 + 1],
@@ -1090,9 +978,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         K.evaluate(
                                             _tmem_store(
                                                 o_rescale,
-                                                K.cuda.get_tmem_addr(
-                                                    K.uint32(0), 0, o_chunk * 64
-                                                ),
+                                                K.cuda.get_tmem_addr(K.uint32(0), 0, o_chunk * 64),
                                             )
                                         )
                                         K.ptx.tcgen05.wait__st.sync.aligned()
@@ -1118,18 +1004,14 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                         K.ptx.st.shared.f32(rowwise_buf.ptr_to([idx_in_warpgroup]), li)
                         K.ptx.bar.sync(K.uint32(BAR_WG0_SYNC), 128)
                         peer_li = K.local_scalar("float32")
-                        K.ptx.ld.shared.f32(
-                            peer_li, rowwise_buf.ptr_to([idx_in_warpgroup ^ 64])
-                        )
+                        K.ptx.ld.shared.f32(peer_li, rowwise_buf.ptr_to([idx_in_warpgroup ^ 64]))
                         K.assign(li, li + peer_li)
                         with K.If(idx_in_warpgroup < B_H):
                             with K.Then():
                                 with K.If(is_no_split):
                                     with K.Then():
                                         cur_lse = K.local_scalar("float32")
-                                        K.ptx.fma.rn.f32(
-                                            cur_lse, mi, K.float32(LN_2), K.log(li)
-                                        )
+                                        K.ptx.fma.rn.f32(cur_lse, mi, K.float32(LN_2), K.log(li))
                                         K.ptx.st.global_.f32(
                                             lse.ptr_to(
                                                 [
@@ -1175,9 +1057,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 K.assign(
                                     output_scale,
                                     K.if_then_else(
-                                        li == 0.0,
-                                        0.0,
-                                        K.cuda.fdividef(1.0, li + sink_exp),
+                                        li == 0.0, 0.0, K.cuda.fdividef(1.0, li + sink_exp)
                                     ),
                                 )
                                 output_scale_pair = K.local_scalar("uint64")
@@ -1192,9 +1072,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     K.evaluate(
                                         _tmem_load(
                                             o_epi,
-                                            K.cuda.get_tmem_addr(
-                                                K.uint32(0), 0, epi_i * 64
-                                            ),
+                                            K.cuda.get_tmem_addr(K.uint32(0), 0, epi_i * 64),
                                             64,
                                         )
                                     )
@@ -1204,28 +1082,23 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         K.ptx.mul.f32x2(
                                             scaled_pair,
                                             K.cuda.make_float2(
-                                                o_epi[scale_i * 2],
-                                                o_epi[scale_i * 2 + 1],
+                                                o_epi[scale_i * 2], o_epi[scale_i * 2 + 1]
                                             ),
                                             output_scale_pair,
                                         )
                                         K.ptx.mov.b32(
-                                            o_epi[scale_i * 2],
-                                            K.cuda.float2_x(scaled_pair),
+                                            o_epi[scale_i * 2], K.cuda.float2_x(scaled_pair)
                                         )
                                         K.ptx.mov.b32(
-                                            o_epi[scale_i * 2 + 1],
-                                            K.cuda.float2_y(scaled_pair),
+                                            o_epi[scale_i * 2 + 1], K.cuda.float2_y(scaled_pair)
                                         )
                                     with K.unroll(64 // 2) as cast_i:
                                         K.evaluate(
-                                            _cast_f32x2_bf16x2(
-                                                o_epi_bf16, o_epi, cast_i * 2
-                                            )
+                                            _cast_f32x2_bf16x2(o_epi_bf16, o_epi, cast_i * 2)
                                         )
-                                    col_base = (
-                                        D_V // 2 if epi_i * 64 >= D_V // 4 else 0
-                                    ) + (epi_i * 64) % (D_V // 4)
+                                    col_base = (D_V // 2 if epi_i * 64 >= D_V // 4 else 0) + (
+                                        epi_i * 64
+                                    ) % (D_V // 4)
                                     o_epi_words = o_epi_bf16.view("uint32")
                                     with K.unroll(8) as o_store_i:
                                         o_smem_offset: K.let = (
@@ -1261,9 +1134,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     K.ptx.bar.sync(K.uint32(BAR_WG0_SYNC), 128)
                                     with K.If(warp_idx == 0):
                                         with K.Then():
-                                            with K.If(
-                                                K.cuda.elect_sync() != K.uint32(0)
-                                            ):
+                                            with K.If(K.cuda.elect_sync() != K.uint32(0)):
                                                 with K.Then():
                                                     K.evaluate(
                                                         K.ptx[_TMA_S2G_4D](
@@ -1274,12 +1145,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             K.cast(batch_idx, "int32"),
                                                             K.cuda.cvta_generic_to_shared(
                                                                 K.ptr_byte_offset(
-                                                                    o_smem.ptr_to(
-                                                                        [0, 0]
-                                                                    ),
-                                                                    col_base
-                                                                    * B_H
-                                                                    * BF16_BYTES,
+                                                                    o_smem.ptr_to([0, 0]),
+                                                                    col_base * B_H * BF16_BYTES,
                                                                     "bfloat16",
                                                                 )
                                                             ),
@@ -1288,9 +1155,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     warp1_col_base = col_base + D_V // 4
                                     with K.If(warp_idx == 1):
                                         with K.Then():
-                                            with K.If(
-                                                K.cuda.elect_sync() != K.uint32(0)
-                                            ):
+                                            with K.If(K.cuda.elect_sync() != K.uint32(0)):
                                                 with K.Then():
                                                     K.evaluate(
                                                         K.ptx[_TMA_S2G_4D](
@@ -1301,9 +1166,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             K.cast(batch_idx, "int32"),
                                                             K.cuda.cvta_generic_to_shared(
                                                                 K.ptr_byte_offset(
-                                                                    o_smem.ptr_to(
-                                                                        [0, 0]
-                                                                    ),
+                                                                    o_smem.ptr_to([0, 0]),
                                                                     warp1_col_base
                                                                     * B_H
                                                                     * BF16_BYTES,
@@ -1322,9 +1185,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 output_scale = K.local_scalar("float32")
                                 K.assign(
                                     output_scale,
-                                    K.if_then_else(
-                                        li == 0.0, 0.0, K.cuda.fdividef(1.0, li)
-                                    ),
+                                    K.if_then_else(li == 0.0, 0.0, K.cuda.fdividef(1.0, li)),
                                 )
                                 output_scale_pair = K.local_scalar("uint64")
                                 K.assign(
@@ -1336,9 +1197,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     K.evaluate(
                                         _tmem_load(
                                             split_local,
-                                            K.cuda.get_tmem_addr(
-                                                K.uint32(0), 0, epi_i * 64
-                                            ),
+                                            K.cuda.get_tmem_addr(K.uint32(0), 0, epi_i * 64),
                                             64,
                                         )
                                     )
@@ -1354,8 +1213,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             output_scale_pair,
                                         )
                                         K.ptx.mov.b32(
-                                            split_local[scale_i * 2],
-                                            K.cuda.float2_x(scaled_pair),
+                                            split_local[scale_i * 2], K.cuda.float2_x(scaled_pair)
                                         )
                                         K.ptx.mov.b32(
                                             split_local[scale_i * 2 + 1],
@@ -1363,9 +1221,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         )
                                     col_base: K.let = (
                                         (idx_in_warpgroup // 64) * 128
-                                        + K.if_then_else(
-                                            epi_i * 64 >= D_V // 4, D_V // 2, 0
-                                        )
+                                        + K.if_then_else(epi_i * 64 >= D_V // 4, D_V // 2, 0)
                                         + (epi_i * 64) % (D_V // 4)
                                     )
                                     split_words = split_local.view("uint32")
@@ -1402,13 +1258,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 + s_q_idx * stride_o_accum_s_q
                                                 + smem_row * stride_o_accum_h_q,
                                             )
-                                            K.ptx[
-                                                "cp.async.bulk.global.shared::cta.bulk_group"
-                                            ](
+                                            K.ptx["cp.async.bulk.global.shared::cta.bulk_group"](
                                                 o_accum.ptr_to([o_accum_row]),
-                                                o_accum_storage.ptr_to(
-                                                    [smem_row * (D_V + 8)]
-                                                ),
+                                                o_accum_storage.ptr_to([smem_row * (D_V + 8)]),
                                                 K.uint32(D_V * 4),
                                             )
                                         K.ptx.cp.async_.bulk.commit_group()
@@ -1416,15 +1268,11 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                         # kernel.cuh:116 uses the unaligned spelling because the
                         # elected WG1 producer lanes reach this named barrier via
                         # control flow distinct from the empty-role lanes.
-                        K.ptx.barrier.sync(
-                            K.uint32(BAR_EVERYONE_SYNC), K.uint32(NUM_THREADS)
-                        )
+                        K.ptx.barrier.sync(K.uint32(BAR_EVERYONE_SYNC), K.uint32(NUM_THREADS))
 
             with K.If(warp_idx == 0):
                 with K.Then():
-                    K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                        K.uint32(0), K.uint32(512)
-                    )
+                    K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(K.uint32(0), K.uint32(512))
 
         def producer_mma(selected_wg1_role):
             # kernel.cuh:431-746.  Mirror each CUDA run_main_loop(lambda)
@@ -1437,29 +1285,21 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                 qk_nope_desc = K.SmemDescriptor()
                 qk_rope_desc = K.SmemDescriptor()
                 if role == 4:
-                    qk_nope_desc.init(
-                        k_full.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3
-                    )
+                    qk_nope_desc.init(k_full.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
                     if is_v32:
-                        qk_rope_desc.init(
-                            k_rope.ptr_to([0, 0, D_V]), ldo=0, sdo=32, swizzle=2
-                        )
+                        qk_rope_desc.init(k_rope.ptr_to([0, 0, D_V]), ldo=0, sdo=32, swizzle=2)
 
                 # kernel.cuh:657-667.  These warp-7 invariants are deliberately
                 # materialized before the scheduler traversal.  Pointer bases are
                 # held as byte addresses so the per-token paths only add offsets.
                 if role == 7:
-                    tma_coords_step_per_token: K.let = (
-                        656 if is_v32 else 576
-                    ) // tma_k_stride
+                    tma_coords_step_per_token: K.let = (656 if is_v32 else 576) // tma_k_stride
                     k_scales_ptr_u64: K.let = K.reinterpret(
                         "uint64",
                         (
                             kv.ptr_to([d_nope // BF16_BYTES])
                             if is_v32
-                            else kv.ptr_to(
-                                [page_block_size * (tma_k_stride // BF16_BYTES)]
-                            )
+                            else kv.ptr_to([page_block_size * (tma_k_stride // BF16_BYTES)])
                         ),
                     )
                     extra_k_scales_ptr_u64 = K.local_scalar("uint64")
@@ -1474,10 +1314,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         extra_kv.ptr_to([d_nope // BF16_BYTES])
                                         if is_v32
                                         else extra_kv.ptr_to(
-                                            [
-                                                extra_page_block_size
-                                                * (tma_k_stride // BF16_BYTES)
-                                            ]
+                                            [extra_page_block_size * (tma_k_stride // BF16_BYTES)]
                                         )
                                     ),
                                 ),
@@ -1509,9 +1346,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 with K.Then():
                                     K.assign(
                                         topk_len,
-                                        K.cuda.ldg(
-                                            topk_length.ptr_to([batch_idx]), "int32"
-                                        ),
+                                        K.cuda.ldg(topk_length.ptr_to([batch_idx]), "int32"),
                                     )
                             orig_topk_padded: K.let = K.max(
                                 ((topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK, B_TOPK
@@ -1522,10 +1357,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 with K.Then():
                                     K.assign(
                                         extra_topk_len,
-                                        K.cuda.ldg(
-                                            extra_topk_length.ptr_to([batch_idx]),
-                                            "int32",
-                                        ),
+                                        K.cuda.ldg(extra_topk_length.ptr_to([batch_idx]), "int32"),
                                     )
                             total_topk_padded: K.let = (
                                 orig_topk_padded
@@ -1543,9 +1375,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 K.if_then_else(
                                     batch_idx == sched_begin_req,
                                     sched_first_split,
-                                    K.if_then_else(
-                                        batch_idx == sched_end_req, sched_last_split, 0
-                                    ),
+                                    K.if_then_else(batch_idx == sched_end_req, sched_last_split, 0),
                                 ),
                                 "bool",
                             )
@@ -1580,9 +1410,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             K.int32(0),
                                             K.cast(s_q_idx, "int32"),
                                             K.cast(batch_idx, "int32"),
-                                            K.cuda.cvta_generic_to_shared(
-                                                bar_q_tma.ptr_to([0])
-                                            ),
+                                            K.cuda.cvta_generic_to_shared(bar_q_tma.ptr_to([0])),
                                             _Q_TMA_CACHE_HINT,
                                         )
                                     )
@@ -1596,9 +1424,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             K.int32(16),
                                             K.cast(s_q_idx, "int32"),
                                             K.cast(batch_idx, "int32"),
-                                            K.cuda.cvta_generic_to_shared(
-                                                bar_q_tma.ptr_to([0])
-                                            ),
+                                            K.cuda.cvta_generic_to_shared(bar_q_tma.ptr_to([0])),
                                             _Q_TMA_CACHE_HINT,
                                         )
                                     )
@@ -1609,11 +1435,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 with K.unroll(16) as q_main_flat:
                                     q_main_src: K.let = K.ptr_byte_offset(
                                         q_main_cp_view.ptr_to([0, 0, 0, 0]),
-                                        (
-                                            q_main_flat % 4 * 1024
-                                            + q_main_flat // 4 % 4 * 2
-                                        )
-                                        * 16,
+                                        (q_main_flat % 4 * 1024 + q_main_flat // 4 % 4 * 2) * 16,
                                         "bfloat16",
                                     )
                                     K.evaluate(
@@ -1624,9 +1446,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 + q_main_flat // 4 % 4 * 8,
                                                 "uint32",
                                             ),
-                                            _replace_smem_desc_addr(
-                                                q_main_cp_desc[0], q_main_src
-                                            ),
+                                            _replace_smem_desc_addr(q_main_cp_desc[0], q_main_src),
                                         )
                                     )
                                 if is_v32:
@@ -1638,9 +1458,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         )
                                         K.evaluate(
                                             K.ptx[_TCGEN_CP_128X256](
-                                                K.cast(
-                                                    384 + q_tail_flat % 2 * 8, "uint32"
-                                                ),
+                                                K.cast(384 + q_tail_flat % 2 * 8, "uint32"),
                                                 _replace_smem_desc_addr(
                                                     q_tail_cp_desc[0], q_tail_src
                                                 ),
@@ -1653,34 +1471,24 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 # kernel.cuh:529-584.  MODEL_TYPE only selects how the
                                 # shared K latent is interpreted; both instances issue
                                 # the same dual-head P and SxV pipelines.
-                                with K.serial(
-                                    start_block, end_block, unroll=False
-                                ) as block_idx:
-                                    k_stage_elems = (
-                                        B_TOPK * (D_V + 64) if is_v32 else B_TOPK * D_V
-                                    )
+                                with K.serial(start_block, end_block, unroll=False) as block_idx:
+                                    k_stage_elems = B_TOPK * (D_V + 64) if is_v32 else B_TOPK * D_V
                                     if is_v32:
                                         bar_rope_ready.wait(rs_buf.stage, rs_buf.phase)
                                         K.ptx.tcgen05.fence__after_thread_sync()
                                         with K.unroll(2) as qk_rope_ki:
                                             qk_rope_offset: K.let = (
-                                                rs_buf.stage * k_stage_elems
-                                                + qk_rope_ki * 16
+                                                rs_buf.stage * k_stage_elems + qk_rope_ki * 16
                                             ) // 8
                                             K.evaluate(
                                                 K.ptx[_MMA_WS_F16](
                                                     K.uint32(400),
-                                                    K.cast(
-                                                        384 + qk_rope_ki * 8, "uint32"
-                                                    ),
+                                                    K.cast(384 + qk_rope_ki * 8, "uint32"),
                                                     _desc_add_16B_offset(
-                                                        qk_rope_desc.desc,
-                                                        qk_rope_offset,
+                                                        qk_rope_desc.desc, qk_rope_offset
                                                     ),
                                                     K.uint32(69207184),
-                                                    K.ptx.pred(
-                                                        K.Cast("bool", qk_rope_ki != 0)
-                                                    ),
+                                                    K.ptx.pred(K.Cast("bool", qk_rope_ki != 0)),
                                                     K.uint64(0),
                                                 )
                                             )
@@ -1713,10 +1521,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                         K.Or(
                                                             qk_nope_ki != 0,
                                                             K.cast(
-                                                                K.uint32(
-                                                                    1 if is_v32 else 0
-                                                                ),
-                                                                "bool",
+                                                                K.uint32(1 if is_v32 else 0), "bool"
                                                             ),
                                                         ),
                                                     )
@@ -1729,9 +1534,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     bar_so_ready.wait(rs_buf.stage, rs_buf.phase)
                                     K.ptx.tcgen05.fence__after_thread_sync()
                                     mma_o_accum: K.let = K.if_then_else(
-                                        block_idx == start_block,
-                                        K.uint32(0),
-                                        K.uint32(1),
+                                        block_idx == start_block, K.uint32(0), K.uint32(1)
                                     )
                                     with K.unroll(4) as pv_ki:
                                         pv_a_offset: K.let = (
@@ -1756,8 +1559,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     K.Cast(
                                                         "bool",
                                                         K.Or(
-                                                            pv_ki != 0,
-                                                            K.cast(mma_o_accum, "bool"),
+                                                            pv_ki != 0, K.cast(mma_o_accum, "bool")
                                                         ),
                                                     )
                                                 ),
@@ -1788,8 +1590,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     K.Cast(
                                                         "bool",
                                                         K.Or(
-                                                            pv_ki != 0,
-                                                            K.cast(mma_o_accum, "bool"),
+                                                            pv_ki != 0, K.cast(mma_o_accum, "bool")
                                                         ),
                                                     )
                                                 ),
@@ -1808,12 +1609,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     with K.serial(
                                         start_block, end_block, unroll=False
                                     ) as block_idx:
-                                        bar_valid_ready.wait(
-                                            rs_index.stage, rs_index.phase
-                                        )
-                                        bar_raw_free.wait(
-                                            rs_buf.stage, rs_buf.phase ^ 1
-                                        )
+                                        bar_valid_ready.wait(rs_index.stage, rs_index.phase)
+                                        bar_raw_free.wait(rs_buf.stage, rs_buf.phase ^ 1)
                                         cur_indices = K.alloc_local((4,), "int32")
                                         next_indices = K.alloc_local((4,), "int32")
                                         cur_index_words = cur_indices.view("uint32")
@@ -1822,17 +1619,13 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             cur_index_words[1],
                                             cur_index_words[2],
                                             cur_index_words[3],
-                                            tma_coord.view("uint32").ptr_to(
-                                                [rs_index.stage, 0]
-                                            ),
+                                            tma_coord.view("uint32").ptr_to([rs_index.stage, 0]),
                                         )
                                         with K.unroll(B_TOPK // 4) as row4:
                                             row: K.let = row4 * 4
                                             with K.If(row + 4 < B_TOPK):
                                                 with K.Then():
-                                                    next_index_words = (
-                                                        next_indices.view("uint32")
-                                                    )
+                                                    next_index_words = next_indices.view("uint32")
                                                     K.ptx.ld.shared.v4.u32(
                                                         next_index_words[0],
                                                         next_index_words[1],
@@ -1842,15 +1635,12 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             [rs_index.stage, row + 4]
                                                         ),
                                                     )
-                                            selected_nope_tensormap = K.local_scalar(
-                                                "uint64"
-                                            )
+                                            selected_nope_tensormap = K.local_scalar("uint64")
                                             K.assign(
                                                 selected_nope_tensormap,
                                                 (
                                                     K.reinterpret(
-                                                        "uint64",
-                                                        K.address_of(kv_nope_tensormap),
+                                                        "uint64", K.address_of(kv_nope_tensormap)
                                                     )
                                                 ),
                                             )
@@ -1860,8 +1650,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                         selected_nope_tensormap,
                                                         (
                                                             K.if_then_else(
-                                                                block_idx
-                                                                >= num_orig_blocks,
+                                                                block_idx >= num_orig_blocks,
                                                                 K.reinterpret(
                                                                     "uint64",
                                                                     K.address_of(
@@ -1870,21 +1659,16 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                                 ),
                                                                 K.reinterpret(
                                                                     "uint64",
-                                                                    K.address_of(
-                                                                        kv_nope_tensormap
-                                                                    ),
+                                                                    K.address_of(kv_nope_tensormap),
                                                                 ),
                                                             )
                                                         ),
                                                     )
                                             K.evaluate(
                                                 K.ptx[_TMA_GATHER4_2D_CACHE](
-                                                    raw_nope.ptr_to(
-                                                        [rs_buf.stage, row, 0]
-                                                    ),
+                                                    raw_nope.ptr_to([rs_buf.stage, row, 0]),
                                                     K.reinterpret(
-                                                        K.handle().ty,
-                                                        selected_nope_tensormap,
+                                                        K.handle().ty, selected_nope_tensormap
                                                     ),
                                                     K.int32(0),
                                                     cur_indices[0],
@@ -1892,28 +1676,16 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     cur_indices[2],
                                                     cur_indices[3],
                                                     K.cuda.cvta_generic_to_shared(
-                                                        bar_raw_ready.ptr_to(
-                                                            [rs_buf.stage]
-                                                        )
+                                                        bar_raw_ready.ptr_to([rs_buf.stage])
                                                     ),
                                                     _KV_TMA_CACHE_HINT,
                                                 )
                                             )
-                                            K.ptx.mov.b32(
-                                                cur_indices[0], next_indices[0]
-                                            )
-                                            K.ptx.mov.b32(
-                                                cur_indices[1], next_indices[1]
-                                            )
-                                            K.ptx.mov.b32(
-                                                cur_indices[2], next_indices[2]
-                                            )
-                                            K.ptx.mov.b32(
-                                                cur_indices[3], next_indices[3]
-                                            )
-                                        bar_raw_ready.arrive(
-                                            rs_buf.stage, tx_count=B_TOPK * d_nope
-                                        )
+                                            K.ptx.mov.b32(cur_indices[0], next_indices[0])
+                                            K.ptx.mov.b32(cur_indices[1], next_indices[1])
+                                            K.ptx.mov.b32(cur_indices[2], next_indices[2])
+                                            K.ptx.mov.b32(cur_indices[3], next_indices[3])
+                                        bar_raw_ready.arrive(rs_buf.stage, tx_count=B_TOPK * d_nope)
                                         bar_valid_free.arrive(rs_index.stage)
                                         rs_buf.advance()
                                         rs_index.advance()
@@ -1927,17 +1699,11 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         with K.serial(
                                             start_block, end_block, unroll=False
                                         ) as block_idx:
-                                            bar_valid_ready.wait(
-                                                rs_index.stage, rs_index.phase
-                                            )
+                                            bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                                             if is_v32:
-                                                bar_qk_done.wait(
-                                                    rs_buf.stage, rs_buf.phase ^ 1
-                                                )
+                                                bar_qk_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
                                             else:
-                                                bar_sv_done.wait(
-                                                    rs_buf.stage, rs_buf.phase ^ 1
-                                                )
+                                                bar_sv_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
                                             cur_indices = K.alloc_local((4,), "int32")
                                             next_indices = K.alloc_local((4,), "int32")
                                             cur_index_words = cur_indices.view("uint32")
@@ -1954,75 +1720,50 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 row: K.let = row4 * 4
                                                 with K.If(row + 4 < B_TOPK):
                                                     with K.Then():
-                                                        next_index_words = (
-                                                            next_indices.view("uint32")
+                                                        next_index_words = next_indices.view(
+                                                            "uint32"
                                                         )
                                                         K.ptx.ld.shared.v4.u32(
                                                             next_index_words[0],
                                                             next_index_words[1],
                                                             next_index_words[2],
                                                             next_index_words[3],
-                                                            tma_coord.view(
-                                                                "uint32"
-                                                            ).ptr_to(
-                                                                [
-                                                                    rs_index.stage,
-                                                                    row + 4,
-                                                                ]
+                                                            tma_coord.view("uint32").ptr_to(
+                                                                [rs_index.stage, row + 4]
                                                             ),
                                                         )
-                                                with K.unroll(
-                                                    64 // rope_tile
-                                                ) as rope_part:
+                                                with K.unroll(64 // rope_tile) as rope_part:
                                                     if is_v32:
-                                                        rope_tma_dst: K.let = (
-                                                            K.ptr_byte_offset(
-                                                                k_union.ptr_to(
-                                                                    [0, 0, 0]
-                                                                ),
-                                                                (
-                                                                    rs_buf.stage
-                                                                    * B_TOPK
-                                                                    * (D_V + 64)
-                                                                    + (
-                                                                        D_V
-                                                                        + rope_part
-                                                                        * rope_tile
-                                                                    )
-                                                                    * B_TOPK
-                                                                    + row * rope_tile
-                                                                )
-                                                                * BF16_BYTES,
-                                                                "bfloat16",
+                                                        rope_tma_dst: K.let = K.ptr_byte_offset(
+                                                            k_union.ptr_to([0, 0, 0]),
+                                                            (
+                                                                rs_buf.stage * B_TOPK * (D_V + 64)
+                                                                + (D_V + rope_part * rope_tile)
+                                                                * B_TOPK
+                                                                + row * rope_tile
                                                             )
+                                                            * BF16_BYTES,
+                                                            "bfloat16",
                                                         )
                                                     else:
-                                                        rope_tma_dst: K.let = (
-                                                            K.ptr_byte_offset(
-                                                                k_full.ptr_to(
-                                                                    [0, 0, 0]
-                                                                ),
-                                                                (
-                                                                    rs_buf.stage
-                                                                    * B_TOPK
-                                                                    * D_V
-                                                                    + d_nope * B_TOPK
-                                                                    + row * 64
-                                                                )
-                                                                * BF16_BYTES,
-                                                                "bfloat16",
+                                                        rope_tma_dst: K.let = K.ptr_byte_offset(
+                                                            k_full.ptr_to([0, 0, 0]),
+                                                            (
+                                                                rs_buf.stage * B_TOPK * D_V
+                                                                + d_nope * B_TOPK
+                                                                + row * 64
                                                             )
+                                                            * BF16_BYTES,
+                                                            "bfloat16",
                                                         )
-                                                    selected_rope_tensormap = (
-                                                        K.local_scalar("uint64")
+                                                    selected_rope_tensormap = K.local_scalar(
+                                                        "uint64"
                                                     )
                                                     K.assign(
                                                         selected_rope_tensormap,
                                                         K.reinterpret(
                                                             "uint64",
-                                                            K.address_of(
-                                                                kv_rope_tensormap
-                                                            ),
+                                                            K.address_of(kv_rope_tensormap),
                                                         ),
                                                     )
                                                     with K.If(have_extra_kv):
@@ -2030,8 +1771,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             K.assign(
                                                                 selected_rope_tensormap,
                                                                 K.if_then_else(
-                                                                    block_idx
-                                                                    >= num_orig_blocks,
+                                                                    block_idx >= num_orig_blocks,
                                                                     K.reinterpret(
                                                                         "uint64",
                                                                         K.address_of(
@@ -2053,10 +1793,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                                 K.handle().ty,
                                                                 selected_rope_tensormap,
                                                             ),
-                                                            K.cast(
-                                                                rope_part * rope_tile,
-                                                                "int32",
-                                                            ),
+                                                            K.cast(rope_part * rope_tile, "int32"),
                                                             cur_indices[0],
                                                             cur_indices[1],
                                                             cur_indices[2],
@@ -2069,21 +1806,12 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             _KV_TMA_CACHE_HINT,
                                                         )
                                                     )
-                                                K.ptx.mov.b32(
-                                                    cur_indices[0], next_indices[0]
-                                                )
-                                                K.ptx.mov.b32(
-                                                    cur_indices[1], next_indices[1]
-                                                )
-                                                K.ptx.mov.b32(
-                                                    cur_indices[2], next_indices[2]
-                                                )
-                                                K.ptx.mov.b32(
-                                                    cur_indices[3], next_indices[3]
-                                                )
+                                                K.ptx.mov.b32(cur_indices[0], next_indices[0])
+                                                K.ptx.mov.b32(cur_indices[1], next_indices[1])
+                                                K.ptx.mov.b32(cur_indices[2], next_indices[2])
+                                                K.ptx.mov.b32(cur_indices[3], next_indices[3])
                                             bar_rope_ready.arrive(
-                                                rs_buf.stage,
-                                                tx_count=B_TOPK * 64 * BF16_BYTES,
+                                                rs_buf.stage, tx_count=B_TOPK * 64 * BF16_BYTES
                                             )
                                             bar_valid_free.arrive(rs_index.stage)
                                             rs_buf.advance()
@@ -2107,37 +1835,26 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             ):
                                                 abs_pos: K.let = K.if_then_else(
                                                     is_extra,
-                                                    (cur_block - num_orig_blocks)
-                                                    * B_TOPK
+                                                    (cur_block - num_orig_blocks) * B_TOPK
                                                     + lane_idx * 2,
                                                     cur_block * B_TOPK + lane_idx * 2,
                                                 )
                                                 cur_page_size: K.let = K.if_then_else(
-                                                    is_extra,
-                                                    extra_page_block_size,
-                                                    page_block_size,
+                                                    is_extra, extra_page_block_size, page_block_size
                                                 )
-                                                cur_block_stride: K.let = (
-                                                    K.if_then_else(
-                                                        is_extra,
-                                                        stride_extra_kv_block,
-                                                        stride_kv_block,
-                                                    )
+                                                cur_block_stride: K.let = K.if_then_else(
+                                                    is_extra, stride_extra_kv_block, stride_kv_block
                                                 )
                                                 cur_row_stride: K.let = K.if_then_else(
-                                                    is_extra,
-                                                    stride_extra_kv_row,
-                                                    stride_kv_row,
+                                                    is_extra, stride_extra_kv_row, stride_kv_row
                                                 )
                                                 cur_length: K.let = K.if_then_else(
                                                     is_extra, extra_topk_len, topk_len
                                                 )
-                                                cur_k_scales_ptr_u64: K.let = (
-                                                    K.if_then_else(
-                                                        is_extra,
-                                                        extra_k_scales_ptr_u64,
-                                                        k_scales_ptr_u64,
-                                                    )
+                                                cur_k_scales_ptr_u64: K.let = K.if_then_else(
+                                                    is_extra,
+                                                    extra_k_scales_ptr_u64,
+                                                    k_scales_ptr_u64,
                                                 )
                                                 cur_tma_coords_step_per_block: K.let = (
                                                     K.if_then_else(
@@ -2147,33 +1864,22 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     )
                                                 )
 
-                                                pair_indices = K.alloc_local(
-                                                    (2,), "int32"
-                                                )
-                                                pair_index_words = pair_indices.view(
-                                                    "uint32"
-                                                )
+                                                pair_indices = K.alloc_local((2,), "int32")
+                                                pair_index_words = pair_indices.view("uint32")
                                                 with K.If(is_extra):
                                                     with K.Then():
                                                         K.ptx.ld.global_.nc.v2.u32(
                                                             pair_index_words[0],
                                                             pair_index_words[1],
-                                                            extra_indices.view(
-                                                                "uint32"
-                                                            ).ptr_to(
-                                                                [
-                                                                    extra_indices_base
-                                                                    + abs_pos
-                                                                ]
+                                                            extra_indices.view("uint32").ptr_to(
+                                                                [extra_indices_base + abs_pos]
                                                             ),
                                                         )
                                                     with K.Else():
                                                         K.ptx.ld.global_.nc.v2.u32(
                                                             pair_index_words[0],
                                                             pair_index_words[1],
-                                                            indices.view(
-                                                                "uint32"
-                                                            ).ptr_to(
+                                                            indices.view("uint32").ptr_to(
                                                                 [indices_base + abs_pos]
                                                             ),
                                                         )
@@ -2181,24 +1887,12 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     rs_index.stage, rs_index.phase ^ 1
                                                 )
                                                 coords = K.alloc_local((2,), "int32")
-                                                cache_blocks = K.alloc_local(
-                                                    (2,), "uint32"
-                                                )
-                                                indices_in_block = K.alloc_local(
-                                                    (2,), "uint32"
-                                                )
-                                                scale_words = K.alloc_local(
-                                                    (2,), "uint64"
-                                                )
-                                                pair_token_valid = K.alloc_local(
-                                                    (2,), "uint32"
-                                                )
-                                                scale_f32 = K.alloc_local(
-                                                    (2, 4), "float32"
-                                                )
-                                                scale_byte_offsets = K.alloc_local(
-                                                    (2,), "uint64"
-                                                )
+                                                cache_blocks = K.alloc_local((2,), "uint32")
+                                                indices_in_block = K.alloc_local((2,), "uint32")
+                                                scale_words = K.alloc_local((2,), "uint64")
+                                                pair_token_valid = K.alloc_local((2,), "uint32")
+                                                scale_f32 = K.alloc_local((2, 4), "float32")
+                                                scale_byte_offsets = K.alloc_local((2,), "uint64")
 
                                                 def load_token_scales(
                                                     pair_i: K.constexpr,
@@ -2219,52 +1913,29 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             byte_offsets[pair_i],
                                                             (
                                                                 K.if_then_else(
-                                                                    K.Cast(
-                                                                        "bool",
-                                                                        token_valid,
-                                                                    ),
-                                                                    K.cast(
-                                                                        cache_block,
-                                                                        "uint64",
-                                                                    )
-                                                                    * K.cast(
-                                                                        block_stride,
-                                                                        "int64",
-                                                                    )
+                                                                    K.Cast("bool", token_valid),
+                                                                    K.cast(cache_block, "uint64")
+                                                                    * K.cast(block_stride, "int64")
                                                                     + K.cast(
-                                                                        index_in_block,
-                                                                        "uint64",
+                                                                        index_in_block, "uint64"
                                                                     )
-                                                                    * K.cast(
-                                                                        row_stride,
-                                                                        "int64",
-                                                                    ),
+                                                                    * K.cast(row_stride, "int64"),
                                                                     K.uint64(0),
                                                                 )
                                                             ),
                                                         )
                                                         K.cuda.ldg(
                                                             K.reinterpret(
-                                                                PointerType(
-                                                                    PrimType("float32")
-                                                                ),
+                                                                PointerType(PrimType("float32")),
                                                                 scales_ptr_u64
                                                                 + byte_offsets[pair_i],
                                                             ),
                                                             "float32",
                                                             dst=(
-                                                                values.ptr_to(
-                                                                    [pair_i, 0]
-                                                                ),
-                                                                values.ptr_to(
-                                                                    [pair_i, 1]
-                                                                ),
-                                                                values.ptr_to(
-                                                                    [pair_i, 2]
-                                                                ),
-                                                                values.ptr_to(
-                                                                    [pair_i, 3]
-                                                                ),
+                                                                values.ptr_to([pair_i, 0]),
+                                                                values.ptr_to([pair_i, 1]),
+                                                                values.ptr_to([pair_i, 2]),
+                                                                values.ptr_to([pair_i, 3]),
                                                             ),
                                                             vec="v4",
                                                         )
@@ -2272,18 +1943,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                         K.ptx.mov.b64(
                                                             byte_offsets[pair_i],
                                                             (
-                                                                K.cast(
-                                                                    cache_block,
-                                                                    "uint64",
-                                                                )
-                                                                * K.cast(
-                                                                    block_stride,
-                                                                    "int64",
-                                                                )
-                                                                + K.cast(
-                                                                    index_in_block,
-                                                                    "uint64",
-                                                                )
+                                                                K.cast(cache_block, "uint64")
+                                                                * K.cast(block_stride, "int64")
+                                                                + K.cast(index_in_block, "uint64")
                                                                 * 8
                                                             ),
                                                         )
@@ -2291,21 +1953,14 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             words[pair_i],
                                                             (
                                                                 K.if_then_else(
-                                                                    K.Cast(
-                                                                        "bool",
-                                                                        token_valid,
-                                                                    ),
+                                                                    K.Cast("bool", token_valid),
                                                                     K.cuda.ldg(
                                                                         K.reinterpret(
                                                                             PointerType(
-                                                                                PrimType(
-                                                                                    "uint64"
-                                                                                )
+                                                                                PrimType("uint64")
                                                                             ),
                                                                             scales_ptr_u64
-                                                                            + byte_offsets[
-                                                                                pair_i
-                                                                            ],
+                                                                            + byte_offsets[pair_i],
                                                                         ),
                                                                         "uint64",
                                                                     ),
@@ -2324,18 +1979,14 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                         cache_blocks[pair_i],
                                                         (
                                                             index_u32
-                                                            // K.cast(
-                                                                cur_page_size, "uint32"
-                                                            )
+                                                            // K.cast(cur_page_size, "uint32")
                                                         ),
                                                     )
                                                     K.ptx.mov.b32(
                                                         indices_in_block[pair_i],
                                                         (
                                                             index_u32
-                                                            % K.cast(
-                                                                cur_page_size, "uint32"
-                                                            )
+                                                            % K.cast(cur_page_size, "uint32")
                                                         ),
                                                     )
                                                     token_valid: K.let = K.And(
@@ -2350,17 +2001,10 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                         valid_mask,
                                                         K.cast(
                                                             K.bitwise_or(
-                                                                K.cast(
-                                                                    valid_mask, "int32"
-                                                                ),
+                                                                K.cast(valid_mask, "int32"),
                                                                 K.shift_left(
-                                                                    K.cast(
-                                                                        token_valid,
-                                                                        "int32",
-                                                                    ),
-                                                                    K.cast(
-                                                                        pair_i, "int32"
-                                                                    ),
+                                                                    K.cast(token_valid, "int32"),
+                                                                    K.cast(pair_i, "int32"),
                                                                 ),
                                                             ),
                                                             "int8",
@@ -2370,21 +2014,12 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                         coords[pair_i],
                                                         K.if_then_else(
                                                             K.Cast(
-                                                                "bool",
-                                                                pair_token_valid[
-                                                                    pair_i
-                                                                ],
+                                                                "bool", pair_token_valid[pair_i]
                                                             ),
-                                                            K.cast(
-                                                                cache_blocks[pair_i],
-                                                                "int32",
-                                                            )
+                                                            K.cast(cache_blocks[pair_i], "int32")
                                                             * cur_tma_coords_step_per_block
                                                             + K.cast(
-                                                                indices_in_block[
-                                                                    pair_i
-                                                                ],
-                                                                "int32",
+                                                                indices_in_block[pair_i], "int32"
                                                             )
                                                             * tma_coords_step_per_token,
                                                             -1,
@@ -2419,16 +2054,11 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             scale_f32[pair_i, 3],
                                                             scale_f32[pair_i, 2],
                                                         )
-                                                        packed_scale: K.let = (
-                                                            K.bitwise_or(
-                                                                K.cast(lo, "uint32"),
-                                                                K.shift_left(
-                                                                    K.cast(
-                                                                        hi, "uint32"
-                                                                    ),
-                                                                    K.uint32(16),
-                                                                ),
-                                                            )
+                                                        packed_scale: K.let = K.bitwise_or(
+                                                            K.cast(lo, "uint32"),
+                                                            K.shift_left(
+                                                                K.cast(hi, "uint32"), K.uint32(16)
+                                                            ),
                                                         )
                                                         K.ptx.mov.b64(
                                                             scale_words[pair_i],
@@ -2436,14 +2066,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                                 K.if_then_else(
                                                                     K.Cast(
                                                                         "bool",
-                                                                        pair_token_valid[
-                                                                            pair_i
-                                                                        ],
+                                                                        pair_token_valid[pair_i],
                                                                     ),
-                                                                    K.cast(
-                                                                        packed_scale,
-                                                                        "uint64",
-                                                                    ),
+                                                                    K.cast(packed_scale, "uint64"),
                                                                     K.uint64(0),
                                                                 )
                                                             ),
@@ -2454,10 +2079,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     K.cast(
                                                         K.shift_left(
                                                             K.cast(valid_mask, "int32"),
-                                                            K.cast(
-                                                                (lane_idx % 4) * 2,
-                                                                "int32",
-                                                            ),
+                                                            K.cast((lane_idx % 4) * 2, "int32"),
                                                         ),
                                                         "int8",
                                                     ),
@@ -2469,9 +2091,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             K.cast(valid_mask, "int32"),
                                                             K.cuda.__shfl_xor_sync(
                                                                 K.uint32(0xFFFFFFFF),
-                                                                K.cast(
-                                                                    valid_mask, "int32"
-                                                                ),
+                                                                K.cast(valid_mask, "int32"),
                                                                 1,
                                                                 32,
                                                             ),
@@ -2486,9 +2106,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                             K.cast(valid_mask, "int32"),
                                                             K.cuda.__shfl_xor_sync(
                                                                 K.uint32(0xFFFFFFFF),
-                                                                K.cast(
-                                                                    valid_mask, "int32"
-                                                                ),
+                                                                K.cast(valid_mask, "int32"),
                                                                 2,
                                                                 32,
                                                             ),
@@ -2498,31 +2116,21 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 )
                                                 if is_v32:
                                                     K.ptx.st.shared.u64(
-                                                        scales_e8m0.view(
-                                                            "uint64"
-                                                        ).ptr_to(
+                                                        scales_e8m0.view("uint64").ptr_to(
                                                             [rs_index.stage, lane_idx]
                                                         ),
                                                         K.bitwise_or(
                                                             scale_words[0],
                                                             K.shift_left(
-                                                                scale_words[1],
-                                                                K.uint64(32),
+                                                                scale_words[1], K.uint64(32)
                                                             ),
                                                         ),
                                                     )
                                                 else:
-                                                    scale_word_bits = scale_words.view(
-                                                        "uint32"
-                                                    )
+                                                    scale_word_bits = scale_words.view("uint32")
                                                     K.ptx.st.shared.v4.u32(
-                                                        scales_e8m0.view(
-                                                            "uint32"
-                                                        ).ptr_to(
-                                                            [
-                                                                rs_index.stage,
-                                                                lane_idx * 4,
-                                                            ]
+                                                        scales_e8m0.view("uint32").ptr_to(
+                                                            [rs_index.stage, lane_idx * 4]
                                                         ),
                                                         scale_word_bits[0],
                                                         scale_word_bits[1],
@@ -2541,14 +2149,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     with K.Then():
                                                         K.ptx.st.shared.b8(
                                                             is_token_valid.ptr_to(
-                                                                [
-                                                                    rs_index.stage,
-                                                                    lane_idx // 4,
-                                                                ]
+                                                                [rs_index.stage, lane_idx // 4]
                                                             ),
-                                                            K.reinterpret(
-                                                                "uint8", valid_mask
-                                                            ),
+                                                            K.reinterpret("uint8", valid_mask),
                                                         )
                                                 bar_valid_ready.arrive(rs_index.stage)
                                                 rs_buf.advance()
@@ -2560,24 +2163,16 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 unroll=False,
                                             ) as block_idx:
                                                 process_index_block(block_idx, False)
-                                            with K.If(
-                                                K.And(have_extra_kv, have_extra_indices)
-                                            ):
+                                            with K.If(K.And(have_extra_kv, have_extra_indices)):
                                                 with K.Then():
                                                     with K.serial(
-                                                        K.max(
-                                                            start_block, num_orig_blocks
-                                                        ),
+                                                        K.max(start_block, num_orig_blocks),
                                                         end_block,
                                                         unroll=False,
                                                     ) as block_idx:
-                                                        process_index_block(
-                                                            block_idx, True
-                                                        )
+                                                        process_index_block(block_idx, True)
 
-                            K.ptx.barrier.sync(
-                                K.uint32(BAR_EVERYONE_SYNC), K.uint32(NUM_THREADS)
-                            )
+                            K.ptx.barrier.sync(K.uint32(BAR_EVERYONE_SYNC), K.uint32(NUM_THREADS))
                             batch_epoch.advance()
 
             with K.If(selected_wg1_role == 4):
@@ -2639,18 +2234,13 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             # The CUDA return exits only this role's run_main_loop lambda.
             with K.If(sched_begin_req < b):
                 with K.Then():
-                    with K.serial(
-                        sched_begin_req, sched_end_req + 1, unroll=False
-                    ) as batch_idx:
+                    with K.serial(sched_begin_req, sched_end_req + 1, unroll=False) as batch_idx:
                         topk_len = K.local_scalar("int32")
                         K.assign(topk_len, topk)
                         with K.If(have_topk_length):
                             with K.Then():
                                 K.assign(
-                                    topk_len,
-                                    K.cuda.ldg(
-                                        topk_length.ptr_to([batch_idx]), "int32"
-                                    ),
+                                    topk_len, K.cuda.ldg(topk_length.ptr_to([batch_idx]), "int32")
                                 )
                         orig_topk_padded: K.let = K.max(
                             ((topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK, B_TOPK
@@ -2661,37 +2251,29 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             with K.Then():
                                 K.assign(
                                     extra_topk_len,
-                                    K.cuda.ldg(
-                                        extra_topk_length.ptr_to([batch_idx]), "int32"
-                                    ),
+                                    K.cuda.ldg(extra_topk_length.ptr_to([batch_idx]), "int32"),
                                 )
                         total_topk_padded: K.let = (
-                            orig_topk_padded
-                            + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
+                            orig_topk_padded + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
                         )
                         start_block: K.let = K.if_then_else(
                             batch_idx == sched_begin_req, sched_begin_block, 0
                         )
                         end_block: K.let = K.if_then_else(
-                            batch_idx == sched_end_req,
-                            sched_end_block,
-                            total_topk_padded // B_TOPK,
+                            batch_idx == sched_end_req, sched_end_block, total_topk_padded // B_TOPK
                         )
                         is_split: K.bool = K.cast(
                             K.if_then_else(
                                 batch_idx == sched_begin_req,
                                 sched_first_split,
-                                K.if_then_else(
-                                    batch_idx == sched_end_req, sched_last_split, 0
-                                ),
+                                K.if_then_else(batch_idx == sched_end_req, sched_last_split, 0),
                             ),
                             "bool",
                         )
                         is_no_split: K.bool = K.Not(is_split)
                         n_split_idx: K.let = K.if_then_else(
                             batch_idx == sched_begin_req,
-                            K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32")
-                            + sched_begin_split,
+                            K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32") + sched_begin_split,
                             K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
                         )
                         num_orig_blocks: K.let = orig_topk_padded // B_TOPK
@@ -2701,9 +2283,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                         # SxV use, then convert each fp8x8 with the exact ue8m0
                         # scale and weak shared b128 store from the source.
                         bar_q_utccp.wait(0, batch_epoch.phase)
-                        with K.serial(
-                            start_block, end_block, unroll=False
-                        ) as block_idx:
+                        with K.serial(start_block, end_block, unroll=False) as block_idx:
                             bar_valid_ready.wait(rs_index.stage, rs_index.phase)
                             bar_raw_ready.wait(rs_buf.stage, rs_buf.phase)
                             bar_sv_done.wait(rs_buf.stage, rs_buf.phase ^ 1)
@@ -2716,31 +2296,19 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 rs_buf.stage == 0, nope0_base_u64, nope1_base_u64
                             )
                             cur_raw_nope_base_u64: K.let = K.if_then_else(
-                                rs_buf.stage == 0,
-                                raw_nope0_base_u64,
-                                raw_nope1_base_u64,
+                                rs_buf.stage == 0, raw_nope0_base_u64, raw_nope1_base_u64
                             )
-                            cur_nope_base_uint_addr: K.let = (
-                                K.cuda.cvta_generic_to_shared(
-                                    K.reinterpret(
-                                        PointerType(PrimType("bfloat16")),
-                                        cur_nope_base_u64,
-                                    )
-                                )
+                            cur_nope_base_uint_addr: K.let = K.cuda.cvta_generic_to_shared(
+                                K.reinterpret(PointerType(PrimType("bfloat16")), cur_nope_base_u64)
                             )
-                            cur_raw_nope_base_uint_addr: K.let = (
-                                K.cuda.cvta_generic_to_shared(
-                                    K.reinterpret(
-                                        PointerType(PrimType("uint64")),
-                                        cur_raw_nope_base_u64,
-                                    )
+                            cur_raw_nope_base_uint_addr: K.let = K.cuda.cvta_generic_to_shared(
+                                K.reinterpret(
+                                    PointerType(PrimType("uint64")), cur_raw_nope_base_u64
                                 )
                             )
                             with K.unroll(rows_per_group) as local_row:
                                 row_idx: K.let = local_row * (128 // 8) + group_idx
-                                scales_bf16_bits = K.alloc_local(
-                                    (num_scales,), "uint16"
-                                )
+                                scales_bf16_bits = K.alloc_local((num_scales,), "uint16")
                                 if is_v32:
                                     packed_scales = K.local_scalar("uint32")
                                     K.ptx.ld.shared.u32(
@@ -2756,9 +2324,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             K.cast(
                                                 K.shift_right(
                                                     packed_scales,
-                                                    K.cast(
-                                                        scale_pair_idx * 16, "uint32"
-                                                    ),
+                                                    K.cast(scale_pair_idx * 16, "uint32"),
                                                 ),
                                                 "uint16",
                                             ),
@@ -2770,9 +2336,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         K.ptx.mov.b16(
                                             scales_bf16_bits[scale_pair_idx * 2 + 1],
                                             K.cast(
-                                                K.shift_right(
-                                                    converted_pair, K.uint32(16)
-                                                ),
+                                                K.shift_right(converted_pair, K.uint32(16)),
                                                 "uint16",
                                             ),
                                         )
@@ -2791,9 +2355,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             K.cast(
                                                 K.shift_right(
                                                     packed_scales,
-                                                    K.cast(
-                                                        scale_pair_idx * 16, "uint64"
-                                                    ),
+                                                    K.cast(scale_pair_idx * 16, "uint64"),
                                                 ),
                                                 "uint16",
                                             ),
@@ -2805,9 +2367,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         K.ptx.mov.b16(
                                             scales_bf16_bits[scale_pair_idx * 2 + 1],
                                             K.cast(
-                                                K.shift_right(
-                                                    converted_pair, K.uint32(16)
-                                                ),
+                                                K.shift_right(converted_pair, K.uint32(16)),
                                                 "uint16",
                                             ),
                                         )
@@ -2833,9 +2393,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 ),
                                             )
                                     scale_idx: K.let = (
-                                        local_col // (cols_per_group // 4)
-                                        if is_v32
-                                        else local_col
+                                        local_col // (cols_per_group // 4) if is_v32 else local_col
                                     )
                                     dequant_st128(
                                         cur_nope_base_uint_addr
@@ -2857,9 +2415,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             rs_buf.advance()
                             rs_index.advance()
 
-                        K.ptx.barrier.sync(
-                            K.uint32(BAR_EVERYONE_SYNC), K.uint32(NUM_THREADS)
-                        )
+                        K.ptx.barrier.sync(K.uint32(BAR_EVERYONE_SYNC), K.uint32(NUM_THREADS))
                         batch_epoch.advance()
 
         roles = K.specialize(chain_dispatch=True)
@@ -2943,12 +2499,8 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
         with K.If(warp_idx[0] >= num_valid_heads[0]), K.Then():
             K.Return(K.int32(0))
 
-        start_split = local(
-            "int32", K.cuda.ldg(num_splits.ptr_to([batch_idx[0]]), "int32")
-        )
-        end_split = local(
-            "int32", K.cuda.ldg(num_splits.ptr_to([batch_idx[0] + 1]), "int32")
-        )
+        start_split = local("int32", K.cuda.ldg(num_splits.ptr_to([batch_idx[0]]), "int32"))
+        end_split = local("int32", K.cuda.ldg(num_splits.ptr_to([batch_idx[0] + 1]), "int32"))
         my_num_splits = local("int32", end_split[0] - start_split[0])
         with K.If(my_num_splits[0] == 1), K.Then():
             K.Return(K.int32(0))
@@ -2963,10 +2515,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             + h_block_base[0],
         )
         g_lse_offset = local(
-            "int32",
-            batch_idx[0] * stride_lse_b
-            + query_idx[0] * stride_lse_s_q
-            + h_block_base[0],
+            "int32", batch_idx[0] * stride_lse_b + query_idx[0] * stride_lse_s_q + h_block_base[0]
         )
         g_lse_accum = K.decl_buffer(
             (max_splits * stride_lse_accum_split + 8,),
@@ -3015,9 +2564,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             with K.If(split_idx < my_num_splits[0]), K.Then():
                 K.ptx.ld.global_.f32(
                     local_lse[lse_i],
-                    g_lse_accum.ptr_to(
-                        [split_idx * stride_lse_accum_split + warp_idx[0]]
-                    ),
+                    g_lse_accum.ptr_to([split_idx * stride_lse_accum_split + warp_idx[0]]),
                 )
         max_lse = K.alloc_local((1,), "float32")
         K.assign(max_lse[0], K.float32(-float("inf")))
@@ -3029,16 +2576,12 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
                 max_lse[0],
                 K.max(
                     max_lse[0],
-                    K.cuda.__shfl_xor_sync(
-                        K.uint32(0xFFFFFFFF), max_lse[0], xor_offset, 32
-                    ),
+                    K.cuda.__shfl_xor_sync(K.uint32(0xFFFFFFFF), max_lse[0], xor_offset, 32),
                 ),
             )
         K.assign(
             max_lse[0],
-            K.if_then_else(
-                max_lse[0] == K.float32(-float("inf")), K.float32(0.0), max_lse[0]
-            ),
+            K.if_then_else(max_lse[0] == K.float32(-float("inf")), K.float32(0.0), max_lse[0]),
         )
         sum_lse = K.alloc_local((1,), "float32")
         lse_exp = K.alloc_local((1,), "float32")
@@ -3051,9 +2594,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             K.assign(
                 sum_lse[0],
                 sum_lse[0]
-                + K.cuda.__shfl_xor_sync(
-                    K.uint32(0xFFFFFFFF), sum_lse[0], xor_offset, 32
-                ),
+                + K.cuda.__shfl_xor_sync(K.uint32(0xFFFFFFFF), sum_lse[0], xor_offset, 32),
             )
         global_lse = K.alloc_local((1,), "float32")
         K.assign(
@@ -3065,21 +2606,15 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             ),
         )
         with K.If(lane_idx[0] == 0), K.Then():
-            K.ptx.st.global_.f32(
-                g_lse.ptr_to([warp_idx[0]]), global_lse[0] / K.float32(LOG_2_E)
-            )
+            K.ptx.st.global_.f32(g_lse.ptr_to([warp_idx[0]]), global_lse[0] / K.float32(LOG_2_E))
 
         if have_attn_sink:
             sink = K.Bind(K.cuda.ldg(attn_sink.ptr_to([head_idx[0]]), "float32"))
             with K.If(global_lse[0] != K.float32(float("inf"))):
                 with K.Then():
                     sink_lse_exp = K.alloc_local((1,), "float32")
-                    K.ptx.ex2.approx.ftz.f32(
-                        sink_lse_exp[0], sink * LOG_2_E - global_lse[0]
-                    )
-                    K.assign(
-                        global_lse[0], global_lse[0] + K.log2(1.0 + sink_lse_exp[0])
-                    )
+                    K.ptx.ex2.approx.ftz.f32(sink_lse_exp[0], sink * LOG_2_E - global_lse[0])
+                    K.assign(global_lse[0], global_lse[0] + K.log2(1.0 + sink_lse_exp[0]))
                 with K.Else():
                     K.assign(
                         global_lse[0],
@@ -3092,12 +2627,8 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
         lse_scale_value = K.alloc_local((1,), "float32")
         with K.unroll(lse_fragments) as lse_i:
             split_idx = K.Bind(lse_i * 32 + lane_idx[0])
-            K.ptx.ex2.approx.ftz.f32(
-                lse_scale_value[0], local_lse[lse_i] - global_lse[0]
-            )
-            K.ptx.st.shared.f32(
-                lse_scales.ptr_to([warp_idx[0], split_idx]), lse_scale_value[0]
-            )
+            K.ptx.ex2.approx.ftz.f32(lse_scale_value[0], local_lse[lse_i] - global_lse[0])
+            K.ptx.st.shared.f32(lse_scales.ptr_to([warp_idx[0], split_idx]), lse_scale_value[0])
         K.cuda.warp_sync()
 
         # combine.cu:123-160. Keep the serial traversal and next-split prefetch.
@@ -3107,9 +2638,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
                 K.ptx.mov.b32(result[elem_i, vec_i], K.float32(0.0))
         lse_scale = K.alloc_local((1,), "float32")
         with K.serial(my_num_splits[0], unroll=False) as split_idx:
-            K.ptx.ld.shared.f32(
-                lse_scale[0], lse_scales.ptr_to([warp_idx[0], split_idx])
-            )
+            K.ptx.ld.shared.f32(lse_scale[0], lse_scales.ptr_to([warp_idx[0], split_idx]))
             with K.unroll(D_V // (32 * 4)) as elem_i:
                 with K.unroll(4) as vec_i:
                     K.ptx.fma.rn.f32(
@@ -3135,9 +2664,7 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
 
         out_offset = local(
             "int32",
-            batch_idx[0] * stride_o_b
-            + query_idx[0] * stride_o_s_q
-            + head_idx[0] * stride_o_h_q,
+            batch_idx[0] * stride_o_b + query_idx[0] * stride_o_s_q + head_idx[0] * stride_o_h_q,
         )
         o_ptr = K.decl_buffer(
             (D_V,), "bfloat16", data=out.data, scope="global", elem_offset=out_offset[0]
@@ -3169,9 +2696,7 @@ def _kernel_shape_params(
         device_index = device_obj.index
         if device_index is None:
             device_index = torch.cuda.current_device()
-        num_sms = int(
-            torch.cuda.get_device_properties(device_index).multi_processor_count
-        )
+        num_sms = int(torch.cuda.get_device_properties(device_index).multi_processor_count)
     else:
         num_sms = prepared_num_sms
     num_sm_parts = num_sms // cfg.s_q
@@ -3191,10 +2716,8 @@ def _kernel_shape_params(
             if prepared_extra_num_blocks is not None
             else _ceil_div(cfg.extra_s_kv, cfg.extra_page_block_size)
         )
-        (_, extra_tma_k_stride, stride_extra_kv_block, extra_num_tma_rows) = (
-            _kv_storage_spec(
-                cfg.normalized_model_type, extra_num_blocks, cfg.extra_page_block_size
-            )
+        (_, extra_tma_k_stride, stride_extra_kv_block, extra_num_tma_rows) = _kv_storage_spec(
+            cfg.normalized_model_type, extra_num_blocks, cfg.extra_page_block_size
         )
         if extra_tma_k_stride != tma_k_stride:
             raise AssertionError("original and extra KV caches must use one MODEL_TYPE")
@@ -3208,13 +2731,9 @@ def _kernel_shape_params(
         stride_extra_kv_block = 0
         extra_num_tma_rows = 0
 
-    max_splits = next(
-        (bucket for bucket in (32, 64, 96, 128, 160) if num_sm_parts <= bucket), None
-    )
+    max_splits = next((bucket for bucket in (32, 64, 96, 128, 160) if num_sm_parts <= bucket), None)
     if max_splits is None:
-        raise ValueError(
-            f"FlashMLA combine supports at most 160 SM partitions, got {num_sm_parts}"
-        )
+        raise ValueError(f"FlashMLA combine supports at most 160 SM partitions, got {num_sm_parts}")
 
     return {
         "num_sm_parts": num_sm_parts,
@@ -3266,9 +2785,7 @@ def _specialized_main_kernel(
 
 
 @lru_cache(maxsize=20)
-def _specialized_combine_kernel(
-    max_splits: int, have_attn_sink: bool, use_pdl: bool = False
-):
+def _specialized_combine_kernel(max_splits: int, have_attn_sink: bool, use_pdl: bool = False):
     return (
         make_combine_kernel(max_splits, have_attn_sink, use_pdl)
         .func.with_attr("global_symbol", "sparse_flashmla_decode_head64_combine")
@@ -3280,10 +2797,7 @@ def _specialized_combine_kernel(
 
 
 def _specialized_decode_kernels(
-    model_type: ModelType,
-    max_splits: int,
-    presence: MainPresenceMask,
-    use_pdl: bool = False,
+    model_type: ModelType, max_splits: int, presence: MainPresenceMask, use_pdl: bool = False
 ):
     if not use_pdl:
         return (
@@ -3304,10 +2818,7 @@ def get_kernel(**kwargs: Any):
     shape = _kernel_shape_params(cfg, device)
     return list(
         _specialized_decode_kernels(
-            cfg.normalized_model_type,
-            shape["max_splits"],
-            _main_presence_mask(cfg),
-            cfg.b == 2,
+            cfg.normalized_model_type, shape["max_splits"], _main_presence_mask(cfg), cfg.b == 2
         )
     )
 
@@ -3321,9 +2832,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         device.index if device.index is not None else torch.cuda.current_device()
     )
     if props.major != 10:
-        raise SkipTest(
-            f"SM100f is required, got compute capability {props.major}.{props.minor}"
-        )
+        raise SkipTest(f"SM100f is required, got compute capability {props.major}.{props.minor}")
 
     device_generator = torch.Generator(device=device)
     device_generator.manual_seed(cfg.seed)
@@ -3354,12 +2863,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     scope_specs = [(cfg.s_kv, cfg.topk, cfg.page_block_size, cfg.have_topk_length)]
     if cfg.extra_topk:
         scope_specs.append(
-            (
-                cfg.extra_s_kv,
-                cfg.extra_topk,
-                cfg.extra_page_block_size,
-                cfg.have_extra_topk_length,
-            )
+            (cfg.extra_s_kv, cfg.extra_topk, cfg.extra_page_block_size, cfg.have_extra_topk_length)
         )
 
     prepared_scopes = []
@@ -3371,9 +2875,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
                     max(python_rng.normalvariate(s_kv, s_kv / 2), cfg.s_q)
                 )
         if cfg.have_zero_seqlen_k:
-            zero_mask = (
-                torch.randn((cfg.b,), dtype=torch.float32, generator=cpu_generator) > 0
-            )
+            zero_mask = torch.randn((cfg.b,), dtype=torch.float32, generator=cpu_generator) > 0
             cache_seqlens_cpu[zero_mask] = 0
 
         max_seqlen_alignment = 4 * page_block_size
@@ -3407,9 +2909,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
                 (cfg.b, cfg.s_q, topk), -1, dtype=torch.int32, device=device
             )
         else:
-            permutation_ranges = cache_seqlens_cpu.to(device=device).repeat_interleave(
-                cfg.s_q
-            )
+            permutation_ranges = cache_seqlens_cpu.to(device=device).repeat_interleave(cfg.s_q)
             max_range = max(int(permutation_ranges.max().item()), topk)
             random_values = torch.rand(
                 (permutation_ranges.numel(), max_range),
@@ -3435,9 +2935,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
             torch.arange(cfg.b, dtype=torch.int32, device=device) * blocks_per_sequence
         ).view(cfg.b, 1, 1)
         block_lookup = safe_indices // page_block_size + batch_block_offsets
-        physical_blocks = block_table.view(-1).index_select(
-            0, block_lookup.view(-1).long()
-        )
+        physical_blocks = block_table.view(-1).index_select(0, block_lookup.view(-1).long())
         indices = (
             physical_blocks.view(cfg.b, cfg.s_q, topk) * page_block_size
             + safe_indices % page_block_size
@@ -3446,18 +2944,12 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
         if have_topk_length:
             topk_length = torch.randint(
-                0,
-                topk + 1,
-                (cfg.b,),
-                dtype=torch.int32,
-                device=device,
-                generator=device_generator,
+                0, topk + 1, (cfg.b,), dtype=torch.int32, device=device, generator=device_generator
             )
             topk_length_cpu = topk_length.cpu()
             masked_indices = indices.clone()
             masked_indices.masked_fill_(
-                torch.arange(topk, device=device).view(1, 1, topk)
-                >= topk_length.view(cfg.b, 1, 1),
+                torch.arange(topk, device=device).view(1, 1, topk) >= topk_length.view(cfg.b, 1, 1),
                 -1,
             )
         else:
@@ -3474,9 +2966,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         bytes_per_token, _, stride_kv_block, num_tma_rows = _kv_storage_spec(
             cfg.normalized_model_type, num_blocks, page_block_size
         )
-        kv_storage = torch.empty(
-            (num_blocks * stride_kv_block,), dtype=torch.uint8, device=device
-        )
+        kv_storage = torch.empty((num_blocks * stride_kv_block,), dtype=torch.uint8, device=device)
         source_rows = source[:, :, 0, :]
         if cfg.normalized_model_type is ModelType.V32:
             d_nope, tile_size, num_tiles = 512, 128, 4
@@ -3484,23 +2974,16 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
                 (num_blocks, page_block_size, 656), (stride_kv_block, 656, 1)
             )
             scale_view = physical_rows[:, :, 512:528].view(torch.float32)
-            physical_rows[:, :, 528:656].view(torch.bfloat16).copy_(
-                source_rows[:, :, d_nope:]
-            )
+            physical_rows[:, :, 528:656].view(torch.bfloat16).copy_(source_rows[:, :, d_nope:])
             for tile_idx in range(num_tiles):
                 values = source_rows[
                     :, :, tile_idx * tile_size : (tile_idx + 1) * tile_size
                 ].float()
                 scale = torch.pow(
-                    2.0,
-                    (values.abs().amax(dim=-1) / 448.0).clamp_min(1.0e-4).log2().ceil(),
+                    2.0, (values.abs().amax(dim=-1) / 448.0).clamp_min(1.0e-4).log2().ceil()
                 )
-                physical_rows[
-                    :, :, tile_idx * tile_size : (tile_idx + 1) * tile_size
-                ].copy_(
-                    (values / scale.unsqueeze(-1))
-                    .to(torch.float8_e4m3fn)
-                    .view(torch.uint8)
+                physical_rows[:, :, tile_idx * tile_size : (tile_idx + 1) * tile_size].copy_(
+                    (values / scale.unsqueeze(-1)).to(torch.float8_e4m3fn).view(torch.uint8)
                 )
                 scale_view[:, :, tile_idx].copy_(scale)
         else:
@@ -3513,27 +2996,18 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
                 (stride_kv_block, 8, 1),
                 storage_offset=page_block_size * 576,
             )
-            physical_rows[:, :, d_nope:576].view(torch.bfloat16).copy_(
-                source_rows[:, :, d_nope:]
-            )
+            physical_rows[:, :, d_nope:576].view(torch.bfloat16).copy_(source_rows[:, :, d_nope:])
             for tile_idx in range(num_tiles):
                 values = source_rows[
                     :, :, tile_idx * tile_size : (tile_idx + 1) * tile_size
                 ].float()
                 scale = torch.pow(
-                    2.0,
-                    (values.abs().amax(dim=-1) / 448.0).clamp_min(1.0e-4).log2().ceil(),
+                    2.0, (values.abs().amax(dim=-1) / 448.0).clamp_min(1.0e-4).log2().ceil()
                 )
-                physical_rows[
-                    :, :, tile_idx * tile_size : (tile_idx + 1) * tile_size
-                ].copy_(
-                    (values / scale.unsqueeze(-1))
-                    .to(torch.float8_e4m3fn)
-                    .view(torch.uint8)
+                physical_rows[:, :, tile_idx * tile_size : (tile_idx + 1) * tile_size].copy_(
+                    (values / scale.unsqueeze(-1)).to(torch.float8_e4m3fn).view(torch.uint8)
                 )
-                scale_rows[:, :, tile_idx].copy_(
-                    scale.to(torch.float8_e8m0fnu).view(torch.uint8)
-                )
+                scale_rows[:, :, tile_idx].copy_(scale.to(torch.float8_e8m0fnu).view(torch.uint8))
         del source
 
         kv = kv_storage.view(torch.float8_e4m3fn).as_strided(
@@ -3566,14 +3040,10 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         cfg,
         device,
         prepared_num_blocks=kv_scope["num_blocks"],
-        prepared_extra_num_blocks=(
-            extra_scope["num_blocks"] if extra_scope is not None else None
-        ),
+        prepared_extra_num_blocks=(extra_scope["num_blocks"] if extra_scope is not None else None),
     )
     q_storage = torch.empty(
-        (cfg.b + 1, cfg.s_q + 1, cfg.h_q + 1, cfg.d_qk + 128),
-        dtype=torch.bfloat16,
-        device=device,
+        (cfg.b + 1, cfg.s_q + 1, cfg.h_q + 1, cfg.d_qk + 128), dtype=torch.bfloat16, device=device
     )
     q = q_storage[: cfg.b, : cfg.s_q, : cfg.h_q, : cfg.d_qk]
     q.copy_(q_contiguous)
@@ -3657,12 +3127,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
             end_block_idx = now_block + first_block_idx[now_req_idx]
         else:
             prev_req_idx = now_req_idx - 1
-            end_block_idx = (
-                0 if seqlens_k[prev_req_idx] == 0 else last_block_idx[prev_req_idx] + 1
-            )
+            end_block_idx = 0 if seqlens_k[prev_req_idx] == 0 else last_block_idx[prev_req_idx] + 1
         is_last_req_splitted = int(
-            end_block_idx != last_block_idx[end_req_idx] + 1
-            and seqlens_k[end_req_idx] != 0
+            end_block_idx != last_block_idx[end_req_idx] + 1 and seqlens_k[end_req_idx] != 0
         )
         if begin_req_idx == end_req_idx:
             split = int(bool(is_first_req_splitted or is_last_req_splitted))
@@ -3688,9 +3155,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     num_splits = num_splits.to(device=device)
 
     out_elements = cfg.b * cfg.s_q * cfg.h_q * D_V
-    out_storage = torch.empty(
-        (out_elements + cfg.h_q * D_V,), dtype=torch.bfloat16, device=device
-    )
+    out_storage = torch.empty((out_elements + cfg.h_q * D_V,), dtype=torch.bfloat16, device=device)
     out = out_storage[:out_elements].view(cfg.b, cfg.s_q, cfg.h_q, D_V)
     lse = torch.empty((cfg.b, cfg.s_q, cfg.h_q), dtype=torch.float32, device=device)
     lse_accum = torch.empty(
@@ -3717,9 +3182,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "tile_scheduler_metadata": tile_scheduler_metadata,
         "num_splits": num_splits,
         "extra_kv": extra_scope["kv"] if extra_scope is not None else None,
-        "extra_kv_storage": extra_scope["kv_storage"]
-        if extra_scope is not None
-        else None,
+        "extra_kv_storage": extra_scope["kv_storage"] if extra_scope is not None else None,
         "extra_indices": extra_scope["indices"] if extra_scope is not None else None,
         "extra_topk_length": (
             extra_scope["topk_length"]
@@ -3743,12 +3206,8 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "stride_o_b": out.stride(0),
         "stride_o_s_q": out.stride(1),
         "stride_o_h_q": out.stride(2),
-        "stride_extra_kv_block": extra_scope["kv"].stride(0)
-        if extra_scope is not None
-        else 0,
-        "stride_extra_kv_row": extra_scope["kv"].stride(1)
-        if extra_scope is not None
-        else 0,
+        "stride_extra_kv_block": extra_scope["kv"].stride(0) if extra_scope is not None else 0,
+        "stride_extra_kv_row": extra_scope["kv"].stride(1) if extra_scope is not None else 0,
         "stride_extra_indices_b": (
             extra_scope["indices"].stride(0) if extra_scope is not None else 0
         ),
@@ -3858,20 +3317,13 @@ def _main_tensor_maps(case, start_head_idx, q_arg, kv_arg, extra_kv_arg, out_arg
             swizzle=2 if is_v32 else 3,
         )
         nope = _encode_tensor_map(
-            ptr,
-            "int64",
-            (d_nope // 8, num_rows),
-            (tma_k_stride,),
-            (d_nope // 8, 1),
-            swizzle=0,
+            ptr, "int64", (d_nope // 8, num_rows), (tma_k_stride,), (d_nope // 8, 1), swizzle=0
         )
         return rope, nope
 
     kv_rope, kv_nope = kv_maps(kv_arg, case["shape"]["num_tma_rows"])
     if cfg.extra_topk:
-        extra_rope, extra_nope = kv_maps(
-            extra_kv_arg, case["shape"]["extra_num_tma_rows"]
-        )
+        extra_rope, extra_nope = kv_maps(extra_kv_arg, case["shape"]["extra_num_tma_rows"])
     else:
         extra_rope, extra_nope = kv_rope, kv_nope
     q_ptr = int(q_arg.data_ptr())
@@ -3931,11 +3383,7 @@ def _tirx_main_args(case: dict[str, Any], start_head_idx: int) -> tuple[Any, ...
         + (cfg.s_q - 1) * case["stride_indices_s_q"]
         + cfg.topk
     )
-    lse_extent = (
-        (cfg.b - 1) * case["stride_lse_b"]
-        + (cfg.s_q - 1) * case["stride_lse_s_q"]
-        + B_H
-    )
+    lse_extent = (cfg.b - 1) * case["stride_lse_b"] + (cfg.s_q - 1) * case["stride_lse_s_q"] + B_H
     out_extent = cfg.b * case["stride_o_b"]
     lse_accum_extent = (
         (case["shape"]["split_rows"] - 1) * case["stride_lse_accum_split"]
@@ -3961,13 +3409,9 @@ def _tirx_main_args(case: dict[str, Any], start_head_idx: int) -> tuple[Any, ...
     indices_arg = _flat_storage_alias(case["indices"], extent=indices_extent)
     topk_length_arg = case["topk_length"]
     attn_sink_arg = case["attn_sink"][start_head_idx : start_head_idx + B_H]
-    lse_arg = _flat_storage_alias(
-        case["lse"], element_offset=start_head_idx, extent=lse_extent
-    )
+    lse_arg = _flat_storage_alias(case["lse"], element_offset=start_head_idx, extent=lse_extent)
     out_arg = _flat_storage_alias(
-        case["out"],
-        element_offset=start_head_idx * case["stride_o_h_q"],
-        extent=out_extent,
+        case["out"], element_offset=start_head_idx * case["stride_o_h_q"], extent=out_extent
     )
     lse_accum_arg = _flat_storage_alias(
         case["lse_accum"], element_offset=start_head_idx, extent=lse_accum_extent
@@ -3979,16 +3423,12 @@ def _tirx_main_args(case: dict[str, Any], start_head_idx: int) -> tuple[Any, ...
     )
     if case["extra_kv_storage"] is not None:
         extra_kv_arg = case["extra_kv_storage"].view(torch.bfloat16)
-        extra_indices_arg = _flat_storage_alias(
-            case["extra_indices"], extent=extra_indices_extent
-        )
+        extra_indices_arg = _flat_storage_alias(case["extra_indices"], extent=extra_indices_extent)
     else:
         extra_kv_arg = kv_arg
         extra_indices_arg = indices_arg
     extra_topk_length_arg = (
-        case["extra_topk_length"]
-        if case["extra_topk_length"] is not None
-        else topk_length_arg
+        case["extra_topk_length"] if case["extra_topk_length"] is not None else topk_length_arg
     )
     maps = _main_tensor_maps(case, start_head_idx, q_arg, kv_arg, extra_kv_arg, out_arg)
     return (
@@ -4072,23 +3512,17 @@ def _tirx_combine_args(case: dict[str, Any]) -> tuple[Any, ...]:
 
 
 @lru_cache(maxsize=128)
-def _compile_main_kernel_cached(
-    model_type: ModelType, presence: MainPresenceMask, use_pdl: bool
-):
+def _compile_main_kernel_cached(model_type: ModelType, presence: MainPresenceMask, use_pdl: bool):
     from tirx_kernels.runner import compile_kernel
 
     return compile_kernel(_specialized_main_kernel(model_type, presence, use_pdl))
 
 
 @lru_cache(maxsize=20)
-def _compile_combine_kernel_cached(
-    max_splits: int, have_attn_sink: bool, use_pdl: bool
-):
+def _compile_combine_kernel_cached(max_splits: int, have_attn_sink: bool, use_pdl: bool):
     from tirx_kernels.runner import compile_kernel
 
-    return compile_kernel(
-        _specialized_combine_kernel(max_splits, have_attn_sink, use_pdl)
-    )
+    return compile_kernel(_specialized_combine_kernel(max_splits, have_attn_sink, use_pdl))
 
 
 def _compile_decode_kernels(**kwargs: Any):
@@ -4150,9 +3584,7 @@ def run_test(**kwargs: Any) -> None:
     ours_metadata = case["tile_scheduler_metadata"]
     torch.testing.assert_close(ours_metadata[:, 0], ref_metadata[:, 0], rtol=0, atol=0)
     active = ours_metadata[:, 0] < cfg.b
-    torch.testing.assert_close(
-        ours_metadata[active, :7], ref_metadata[active, :7], rtol=0, atol=0
-    )
+    torch.testing.assert_close(ours_metadata[active, :7], ref_metadata[active, :7], rtol=0, atol=0)
     torch.testing.assert_close(case["num_splits"], ref_num_splits, rtol=0, atol=0)
 
     case["out"].fill_(float("nan"))
@@ -4160,9 +3592,7 @@ def run_test(**kwargs: Any) -> None:
     _launch_tirx(case, executables)
     torch.cuda.synchronize()
     torch.testing.assert_close(case["out"], ref_out, rtol=2.01 / 128, atol=1.0e-3)
-    torch.testing.assert_close(
-        case["lse"], ref_lse.transpose(1, 2), rtol=8.01 / 65536, atol=1.0e-6
-    )
+    torch.testing.assert_close(case["lse"], ref_lse.transpose(1, 2), rtol=8.01 / 65536, atol=1.0e-6)
     cfg.validate()
 
 
@@ -4190,9 +3620,7 @@ def run_gpu(
     def tirx_decode():
         _launch_tirx(case, executables)
 
-    from tirx_kernels.flashmla.utils._flashmla_bench import (
-        flashmla_decode_reference_builder,
-    )
+    from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_decode_reference_builder
 
     return bench(
         {"tirx": tirx_decode},
@@ -4206,11 +3634,7 @@ def run_gpu(
 
 
 def run_bench(
-    *,
-    warmup: int | None = None,
-    repeat: int | None = None,
-    timer: str | None = None,
-    **kwargs: Any,
+    *, warmup: int | None = None, repeat: int | None = None, timer: str | None = None, **kwargs: Any
 ) -> dict[str, Any]:
     rounds = kwargs.pop("rounds", 1)
     cooldown_s = kwargs.pop("cooldown_s", 1.0)
