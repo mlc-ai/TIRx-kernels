@@ -725,11 +725,11 @@ def build_kernel(spec: GemmSpec):
             K.ptx.barrier.cluster.wait.acquire.aligned()
 
         with load_role:
-            K.evaluate(K.ptx.prefetch.tensormap(K.address_of(tensor_map_a)))
-            K.evaluate(K.ptx.prefetch.tensormap(K.address_of(tensor_map_b)))
-            K.evaluate(K.ptx.prefetch.tensormap(K.address_of(tensor_map_sfa)))
-            K.evaluate(K.ptx.prefetch.tensormap(K.address_of(tensor_map_sfb)))
-            K.evaluate(K.ptx.prefetch.tensormap(K.address_of(tensor_map_cd)))
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_a))
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_b))
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_sfa))
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_sfb))
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_cd))
 
         # ---- barrier init and TMEM allocation -------------------------------
         def init_barriers():
@@ -749,7 +749,7 @@ def build_kernel(spec: GemmSpec):
                         K.ptx.mbarrier.init.shared.b64(
                             tmem_empty_barriers.ptr_to([e]), K.uint32(cta_group * num_store_threads)
                         )
-                    K.evaluate(K.ptx.fence.mbarrier_init.release.cluster())
+                    K.ptx.fence.mbarrier_init.release.cluster()
 
         with mma_role:
             init_barriers()
@@ -764,7 +764,7 @@ def build_kernel(spec: GemmSpec):
         else:
             K.ptx.bar.sync(K.uint32(0))
 
-        K.evaluate(K.ptx.griddepcontrol.wait())
+        K.ptx.griddepcontrol.wait()
 
         # ===============================================================
         # Persistent scheduler (source `scheduler/gemm.cuh`)
@@ -959,79 +959,71 @@ def build_kernel(spec: GemmSpec):
                                     K.assign(k_b, k_b_idx + ld_k * block_k)
                                     K.assign(k_a, k_a_offset + ld_k * block_k)
                                     with K.unroll(0, num_a_atoms) as i:
-                                        K.evaluate(
-                                            K.ptx[load_chain](
+                                        K.ptx[load_chain](
+                                            (
+                                                smem_a_tile[ld_pipe.stage].ptr_to(0, i * a_atom)
+                                                if major_a_is_k
+                                                else smem_a_tile[ld_pipe.stage].ptr_to(0, 0)
+                                            ),
+                                            K.address_of(tensor_map_a),
+                                            *_tma_coords(
                                                 (
-                                                    smem_a_tile[ld_pipe.stage].ptr_to(0, i * a_atom)
+                                                    (k_a + i * a_atom, m_idx)
                                                     if major_a_is_k
-                                                    else smem_a_tile[ld_pipe.stage].ptr_to(0, 0)
+                                                    else (m_idx + i * a_atom, k_a)
                                                 ),
-                                                K.address_of(tensor_map_a),
-                                                *_tma_coords(
-                                                    (
-                                                        (k_a + i * a_atom, m_idx)
-                                                        if major_a_is_k
-                                                        else (m_idx + i * a_atom, k_a)
-                                                    ),
-                                                    ld_sched.grp,
-                                                ),
-                                                full_barriers.ptr_to([ld_pipe.stage]),
-                                                K.uint64(EVICT_NORMAL),
-                                            )
+                                                ld_sched.grp,
+                                            ),
+                                            full_barriers.ptr_to([ld_pipe.stage]),
+                                            K.uint64(EVICT_NORMAL),
                                         )
                                     with K.unroll(0, num_b_atoms) as i:
-                                        K.evaluate(
-                                            K.ptx[load_chain](
+                                        K.ptx[load_chain](
+                                            (
+                                                smem_b_tile[ld_pipe.stage].ptr_to(0, i * b_atom)
+                                                if major_b_is_k
+                                                else smem_b_tile[ld_pipe.stage].ptr_to(0, 0)
+                                            ),
+                                            K.address_of(tensor_map_b),
+                                            *_tma_coords(
                                                 (
-                                                    smem_b_tile[ld_pipe.stage].ptr_to(0, i * b_atom)
+                                                    (k_b + i * b_atom, n_idx)
                                                     if major_b_is_k
-                                                    else smem_b_tile[ld_pipe.stage].ptr_to(0, 0)
+                                                    else (n_idx + i * b_atom, k_b)
                                                 ),
-                                                K.address_of(tensor_map_b),
-                                                *_tma_coords(
-                                                    (
-                                                        (k_b + i * b_atom, n_idx)
-                                                        if major_b_is_k
-                                                        else (n_idx + i * b_atom, k_b)
-                                                    ),
-                                                    ld_sched.grp,
-                                                ),
-                                                full_barriers.ptr_to([ld_pipe.stage]),
-                                                K.uint64(EVICT_NORMAL),
-                                            )
+                                                ld_sched.grp,
+                                            ),
+                                            full_barriers.ptr_to([ld_pipe.stage]),
+                                            K.uint64(EVICT_NORMAL),
                                         )
                                     arrival = K.local_scalar("int32")
                                     K.assign(arrival, arrival_bytes_ab)
                                     with K.If(ld_k % sfa_stages_per_load == 0):
                                         with K.Then():
-                                            K.evaluate(
-                                                K.ptx[sf_load_chain](
-                                                    smem_sfa.ptr_to([ld_pipe.stage, 0]),
-                                                    K.address_of(tensor_map_sfa),
-                                                    K.cast(sfa_mn, "int32"),
-                                                    K.cast(
-                                                        sfa_k_offset + ld_k // sfa_stages_per_load,
-                                                        "int32",
-                                                    ),
-                                                    full_barriers.ptr_to([ld_pipe.stage]),
-                                                    K.uint64(EVICT_NORMAL),
-                                                )
+                                            K.ptx[sf_load_chain](
+                                                smem_sfa.ptr_to([ld_pipe.stage, 0]),
+                                                K.address_of(tensor_map_sfa),
+                                                K.cast(sfa_mn, "int32"),
+                                                K.cast(
+                                                    sfa_k_offset + ld_k // sfa_stages_per_load,
+                                                    "int32",
+                                                ),
+                                                full_barriers.ptr_to([ld_pipe.stage]),
+                                                K.uint64(EVICT_NORMAL),
                                             )
                                             K.assign(arrival, arrival + block_m * 4)
                                     with K.If(ld_k % sfb_stages_per_load == 0):
                                         with K.Then():
-                                            K.evaluate(
-                                                K.ptx[sf_load_chain](
-                                                    smem_sfb.ptr_to([ld_pipe.stage, 0]),
-                                                    K.address_of(tensor_map_sfb),
-                                                    K.cast(sfb_mn, "int32"),
-                                                    K.cast(
-                                                        sfb_k_offset + ld_k // sfb_stages_per_load,
-                                                        "int32",
-                                                    ),
-                                                    full_barriers.ptr_to([ld_pipe.stage]),
-                                                    K.uint64(EVICT_NORMAL),
-                                                )
+                                            K.ptx[sf_load_chain](
+                                                smem_sfb.ptr_to([ld_pipe.stage, 0]),
+                                                K.address_of(tensor_map_sfb),
+                                                K.cast(sfb_mn, "int32"),
+                                                K.cast(
+                                                    sfb_k_offset + ld_k // sfb_stages_per_load,
+                                                    "int32",
+                                                ),
+                                                full_barriers.ptr_to([ld_pipe.stage]),
+                                                K.uint64(EVICT_NORMAL),
                                             )
                                             K.assign(arrival, arrival + block_n * 4)
                                     full_barriers.arrive(ld_pipe.stage, K.cast(arrival, "uint32"))
@@ -1216,15 +1208,13 @@ def build_kernel(spec: GemmSpec):
                                                             ),
                                                         ),
                                                     )
-                                                    K.evaluate(
-                                                        K.ptx[utccp_chain](
-                                                            K.cast(
-                                                                sfa_tmem.allocated_addr[0] + c * 4,
-                                                                "uint32",
-                                                            ),
-                                                            desc_sf,
-                                                            pred=mma_elected,
-                                                        )
+                                                    K.ptx[utccp_chain](
+                                                        K.cast(
+                                                            sfa_tmem.allocated_addr[0] + c * 4,
+                                                            "uint32",
+                                                        ),
+                                                        desc_sf,
+                                                        pred=mma_elected,
                                                     )
                                         with K.If(u % sfb_stages_per_load == 0):
                                             with K.Then():
@@ -1243,15 +1233,13 @@ def build_kernel(spec: GemmSpec):
                                                             ),
                                                         ),
                                                     )
-                                                    K.evaluate(
-                                                        K.ptx[utccp_chain](
-                                                            K.cast(
-                                                                sfb_tmem.allocated_addr[0] + c * 4,
-                                                                "uint32",
-                                                            ),
-                                                            desc_sf,
-                                                            pred=mma_elected,
-                                                        )
+                                                    K.ptx[utccp_chain](
+                                                        K.cast(
+                                                            sfb_tmem.allocated_addr[0] + c * 4,
+                                                            "uint32",
+                                                        ),
+                                                        desc_sf,
+                                                        pred=mma_elected,
                                                     )
                                         with K.unroll(0, umma_k_steps) as ki:
                                             # `issue_full_k_block` / `issue_tail_k_block`:
@@ -1321,27 +1309,25 @@ def build_kernel(spec: GemmSpec):
                                                         desc_b, b_base_lo, ki * b_k_step_units
                                                     ),
                                                 )
-                                                K.evaluate(
-                                                    K.ptx[mma_chain](
-                                                        K.cast(accum_pipe.stage * umma_n, "uint32"),
-                                                        (adv_b if swap_ab else adv_a),
-                                                        (adv_a if swap_ab else adv_b),
-                                                        rt_desc,
-                                                        K.cast(
-                                                            (
-                                                                sfb_tmem if swap_ab else sfa_tmem
-                                                            ).allocated_addr[0],
-                                                            "uint32",
-                                                        ),
-                                                        K.cast(
-                                                            (
-                                                                sfa_tmem if swap_ab else sfb_tmem
-                                                            ).allocated_addr[0],
-                                                            "uint32",
-                                                        ),
-                                                        K.Or(ki > 0, mma_k > 0),
-                                                        pred=mma_elected,
-                                                    )
+                                                K.ptx[mma_chain](
+                                                    K.cast(accum_pipe.stage * umma_n, "uint32"),
+                                                    (adv_b if swap_ab else adv_a),
+                                                    (adv_a if swap_ab else adv_b),
+                                                    rt_desc,
+                                                    K.cast(
+                                                        (
+                                                            sfb_tmem if swap_ab else sfa_tmem
+                                                        ).allocated_addr[0],
+                                                        "uint32",
+                                                    ),
+                                                    K.cast(
+                                                        (
+                                                            sfa_tmem if swap_ab else sfb_tmem
+                                                        ).allocated_addr[0],
+                                                        "uint32",
+                                                    ),
+                                                    K.Or(ki > 0, mma_k > 0),
+                                                    pred=mma_elected,
                                                 )
                                         K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
                                         # `tcgen05.commit` implies `fence::before_thread_sync`.
@@ -1431,7 +1417,7 @@ def build_kernel(spec: GemmSpec):
                             # The prior logical task may still read this stage through tcgen05's
                             # async proxy.  Complete that handoff before generic-proxy transpose
                             # stores reuse the same shared bytes.
-                            K.evaluate(K.ptx.fence.proxy.async_.shared__cta())
+                            K.ptx.fence.proxy.async_.shared__cta()
                             with K.If(tr_k % sfa_stages_per_load == 0):
                                 with K.Then():
                                     with K.unroll(0, num_sfa_chunks) as c:
@@ -1451,7 +1437,7 @@ def build_kernel(spec: GemmSpec):
                                             sf_vals[2],
                                             sf_vals[3],
                                         )
-                                    K.evaluate(K.ptx.fence.proxy.async_.shared__cta())
+                                    K.ptx.fence.proxy.async_.shared__cta()
                             with K.If(tr_k % sfb_stages_per_load == 0):
                                 with K.Then():
                                     with K.unroll(0, num_sfb_chunks) as c:
@@ -1471,7 +1457,7 @@ def build_kernel(spec: GemmSpec):
                                             sf_vals[2],
                                             sf_vals[3],
                                         )
-                                    K.evaluate(K.ptx.fence.proxy.async_.shared__cta())
+                                    K.ptx.fence.proxy.async_.shared__cta()
                             # `arrive(0u)` passes a destination CTA rank, not a count:
                             # every thread arrives on the leader CTA's barrier copy.
                             rem = K.alloc_local((1,), "uint64")
@@ -1558,10 +1544,8 @@ def build_kernel(spec: GemmSpec):
                                 with K.If(st < ep_stores), K.Then():
                                     with K.If(ep_warp == 0):
                                         with K.Then():
-                                            K.evaluate(
-                                                K.ptx.cp.async_.bulk.wait_group(
-                                                    NUM_TMA_STORE_STAGES - 1
-                                                )
+                                            K.ptx.cp.async_.bulk.wait_group(
+                                                NUM_TMA_STORE_STAGES - 1
                                             )
                                     K.ptx.bar.sync(
                                         K.uint32(EPILOGUE_NAMED_BARRIER),
@@ -1579,10 +1563,8 @@ def build_kernel(spec: GemmSpec):
                                             ep_warp // warps_per_atom
                                         ) * store_block_m * swizzle_cd + i * 8 * swizzle_cd
                                         if cd_is_fp32:
-                                            K.evaluate(
-                                                K.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
-                                                    *[values[j] for j in range(8)], taddr_s
-                                                )
+                                            K.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
+                                                *[values[j] for j in range(8)], taddr_s
                                             )
                                             K.ptx.tcgen05.wait__ld.sync.aligned()
                                             col_f = K.local_scalar("int32")
@@ -1606,23 +1588,15 @@ def build_kernel(spec: GemmSpec):
                                         else:
                                             # Two `16x256b` slices: the second takes the upper
                                             # 16 rows via bit 20 of the TMEM address.
-                                            K.evaluate(
-                                                K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
-                                                    values[0],
-                                                    values[1],
-                                                    values[2],
-                                                    values[3],
-                                                    taddr_s,
-                                                )
+                                            K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
+                                                values[0], values[1], values[2], values[3], taddr_s
                                             )
-                                            K.evaluate(
-                                                K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
-                                                    values[4],
-                                                    values[5],
-                                                    values[6],
-                                                    values[7],
-                                                    K.bitwise_or(taddr_s, K.uint32(0x00100000)),
-                                                )
+                                            K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
+                                                values[4],
+                                                values[5],
+                                                values[6],
+                                                values[7],
+                                                K.bitwise_or(taddr_s, K.uint32(0x00100000)),
                                             )
                                             K.ptx.tcgen05.wait__ld.sync.aligned()
                                             with K.unroll(0, 4) as j:
@@ -1671,7 +1645,7 @@ def build_kernel(spec: GemmSpec):
                                                 rem_s[0], K.uint32(1), pred=K.bool(True)
                                             )
 
-                                    K.evaluate(K.ptx.fence.proxy.async_.shared__cta())
+                                    K.ptx.fence.proxy.async_.shared__cta()
                                     K.ptx.bar.sync(
                                         K.uint32(EPILOGUE_NAMED_BARRIER),
                                         K.uint32(num_store_threads),
@@ -1686,35 +1660,33 @@ def build_kernel(spec: GemmSpec):
                                                 ep_elected_lane, ep_elected, K.uint32(0xFFFFFFFF)
                                             )
                                             with K.unroll(0, num_n_atoms) as i:
-                                                K.evaluate(
-                                                    K.ptx[
-                                                        (
-                                                            reduce_chain
-                                                            if with_accumulation
-                                                            else store_chain
-                                                        )
-                                                    ](
-                                                        K.address_of(tensor_map_cd),
-                                                        *_tma_coords(
-                                                            (
-                                                                base_n + i * store_block_n_atom,
-                                                                base_m + st * store_block_m,
-                                                            ),
-                                                            ep_sched.grp,
-                                                        ),
-                                                        smem_cd_u32.ptr_to(
-                                                            [
-                                                                (
-                                                                    tma_stage * cd_stage_bytes
-                                                                    + i * store_block_m * swizzle_cd
-                                                                )
-                                                                // 4
-                                                            ]
-                                                        ),
-                                                        pred=ep_elected,
+                                                K.ptx[
+                                                    (
+                                                        reduce_chain
+                                                        if with_accumulation
+                                                        else store_chain
                                                     )
+                                                ](
+                                                    K.address_of(tensor_map_cd),
+                                                    *_tma_coords(
+                                                        (
+                                                            base_n + i * store_block_n_atom,
+                                                            base_m + st * store_block_m,
+                                                        ),
+                                                        ep_sched.grp,
+                                                    ),
+                                                    smem_cd_u32.ptr_to(
+                                                        [
+                                                            (
+                                                                tma_stage * cd_stage_bytes
+                                                                + i * store_block_m * swizzle_cd
+                                                            )
+                                                            // 4
+                                                        ]
+                                                    ),
+                                                    pred=ep_elected,
                                                 )
-                                            K.evaluate(K.ptx.cp.async_.bulk.commit_group())
+                                            K.ptx.cp.async_.bulk.commit_group()
                                     K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
                                     K.assign(tma_stage, _next_tma_store_stage(tma_stage))
                         else:
@@ -1722,10 +1694,8 @@ def build_kernel(spec: GemmSpec):
                                 with K.unroll(0, num_stores) as st:
                                     with K.If(ep_warp == 0):
                                         with K.Then():
-                                            K.evaluate(
-                                                K.ptx.cp.async_.bulk.wait_group(
-                                                    NUM_TMA_STORE_STAGES - 1
-                                                )
+                                            K.ptx.cp.async_.bulk.wait_group(
+                                                NUM_TMA_STORE_STAGES - 1
                                             )
                                     K.ptx.bar.sync(
                                         K.uint32(EPILOGUE_NAMED_BARRIER),
@@ -1752,14 +1722,8 @@ def build_kernel(spec: GemmSpec):
                                             ),
                                         )
                                         if cd_is_fp32:
-                                            K.evaluate(
-                                                K.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
-                                                    values[0],
-                                                    values[1],
-                                                    values[2],
-                                                    values[3],
-                                                    taddr,
-                                                )
+                                            K.ptx["tcgen05.ld.sync.aligned.32x32b.x4.b32"](
+                                                values[0], values[1], values[2], values[3], taddr
                                             )
                                             K.ptx.tcgen05.wait__ld.sync.aligned()
                                             K.ptx.st.shared.v4.u32(
@@ -1770,10 +1734,8 @@ def build_kernel(spec: GemmSpec):
                                                 values[3],
                                             )
                                         else:
-                                            K.evaluate(
-                                                K.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
-                                                    *[values[j] for j in range(8)], taddr
-                                                )
+                                            K.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
+                                                *[values[j] for j in range(8)], taddr
                                             )
                                             K.ptx.tcgen05.wait__ld.sync.aligned()
                                             with K.unroll(0, 4) as j:
@@ -1808,7 +1770,7 @@ def build_kernel(spec: GemmSpec):
                                                 rem_e[0], K.uint32(1), pred=K.bool(True)
                                             )
 
-                                    K.evaluate(K.ptx.fence.proxy.async_.shared__cta())
+                                    K.ptx.fence.proxy.async_.shared__cta()
                                     K.ptx.bar.sync(
                                         K.uint32(EPILOGUE_NAMED_BARRIER),
                                         K.uint32(num_store_threads),
@@ -1822,27 +1784,21 @@ def build_kernel(spec: GemmSpec):
                                             K.ptx.elect_sync(
                                                 ep_elected_lane, ep_elected, K.uint32(0xFFFFFFFF)
                                             )
-                                            K.evaluate(
-                                                K.ptx[
+                                            K.ptx[
+                                                (reduce_chain if with_accumulation else store_chain)
+                                            ](
+                                                K.address_of(tensor_map_cd),
+                                                *_tma_coords(
                                                     (
-                                                        reduce_chain
-                                                        if with_accumulation
-                                                        else store_chain
-                                                    )
-                                                ](
-                                                    K.address_of(tensor_map_cd),
-                                                    *_tma_coords(
-                                                        (
-                                                            base_n + st * store_block_n,
-                                                            base_m + w * store_block_m,
-                                                        ),
-                                                        ep_sched.grp,
+                                                        base_n + st * store_block_n,
+                                                        base_m + w * store_block_m,
                                                     ),
-                                                    smem_cd.ptr_to([tma_stage, 0, 0]),
-                                                    pred=ep_elected,
-                                                )
+                                                    ep_sched.grp,
+                                                ),
+                                                smem_cd.ptr_to([tma_stage, 0, 0]),
+                                                pred=ep_elected,
                                             )
-                                            K.evaluate(K.ptx.cp.async_.bulk.commit_group())
+                                            K.ptx.cp.async_.bulk.commit_group()
                                     K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
                                     K.assign(tma_stage, _next_tma_store_stage(tma_stage))
                         _advance_pipeline(accum_pipe_e, NUM_EPILOGUE_STAGES)
