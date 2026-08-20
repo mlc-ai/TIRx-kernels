@@ -486,7 +486,7 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
             words = K.alloc_local((4,), "uint32")
             K.ptx.ld.shared.v4.b32(words[0], words[1], words[2], words[3], ptr)
             for i in range(4):
-                K.ptx.mov.b32(dst[base + i], K.reinterpret("float32", words[i]))
+                K.assign(dst[base + i], K.reinterpret("float32", words[i]))
 
         def st_shared_u32x4(ptr, words):
             K.ptx.st.shared.v4.b32(ptr, words[0], words[1], words[2], words[3])
@@ -564,12 +564,12 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
             k_words = _load_u32x2(k, qk_base[0])
             g_words = _load_u32x2(g, gate_base[0])
             for pair in range(2):
-                K.ptx.mov.b32(r_q[2 * pair], _widen_lo(q_words[pair]))
-                K.ptx.mov.b32(r_q[2 * pair + 1], _widen_hi(q_words[pair]))
-                K.ptx.mov.b32(r_k[2 * pair], _widen_lo(k_words[pair]))
-                K.ptx.mov.b32(r_k[2 * pair + 1], _widen_hi(k_words[pair]))
-                K.ptx.mov.b32(r_d[2 * pair], _widen_lo(g_words[pair]))
-                K.ptx.mov.b32(r_d[2 * pair + 1], _widen_hi(g_words[pair]))
+                K.assign(r_q[2 * pair], _widen_lo(q_words[pair]))
+                K.assign(r_q[2 * pair + 1], _widen_hi(q_words[pair]))
+                K.assign(r_k[2 * pair], _widen_lo(k_words[pair]))
+                K.assign(r_k[2 * pair + 1], _widen_hi(k_words[pair]))
+                K.assign(r_d[2 * pair], _widen_lo(g_words[pair]))
+                K.assign(r_d[2 * pair + 1], _widen_hi(g_words[pair]))
 
             # Index-ordered accumulation (:241-244); the first term has a zero addend.
             q_sq = K.alloc_local((1,), "float32")
@@ -607,11 +607,11 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
             k_pub = K.alloc_local((4,), "uint32")
             d_pub = K.alloc_local((4,), "uint32")
             for i in range(4):
-                K.ptx.mov.b32(r_q[i], _mul(r_q[i], q_norm[0]))
-                K.ptx.mov.b32(r_k[i], _mul(r_k[i], k_norm[0]))
-                K.ptx.mov.b32(r_d[i], _expf(r_d[i]))
-                K.ptx.mov.b32(k_pub[i], K.reinterpret("uint32", r_k[i]))
-                K.ptx.mov.b32(d_pub[i], K.reinterpret("uint32", r_d[i]))
+                K.assign(r_q[i], _mul(r_q[i], q_norm[0]))
+                K.assign(r_k[i], _mul(r_k[i], k_norm[0]))
+                K.assign(r_d[i], _expf(r_d[i]))
+                K.assign(k_pub[i], K.reinterpret("uint32", r_k[i]))
+                K.assign(d_pub[i], K.reinterpret("uint32", r_d[i]))
             st_shared_u32x4(s_k.ptr_to([token[0], elem_start[0]]), k_pub)
             st_shared_u32x4(s_d.ptr_to([token[0], elem_start[0]]), d_pub)
 
@@ -642,8 +642,15 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
         # =======================================================================
         init_slot = K.alloc_local((1,), "int32")
         K.assign(init_slot[0], ld_shared_i32(s_init.ptr_to([0])))
-        head_base = K.cast(init_slot[0], "int64") * K.cast(STATE_SLOT_STRIDE, "int64") + K.cast(
-            hv[0] * HEAD_DIM * HEAD_DIM, "int64"
+        # Materialised, not left as an expression: the eight unrolled row loads
+        # below share this 64-bit base, and re-expanding it per row keeps its
+        # int32 inputs live all the way to the tail, which costs register
+        # spills inside the body.
+        head_base = K.alloc_local((1,), "int64")
+        K.assign(
+            head_base[0],
+            K.cast(init_slot[0], "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
+            + K.cast(hv[0] * HEAD_DIM * HEAD_DIM, "int64"),
         )
         hist = K.alloc_local((8 * 8,), "float32")
         for row_local in range(8):
@@ -651,11 +658,12 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
             K.assign(row_l[0], owned_row_base[0] + row_local)
             pack = _load_u32x4(
                 state,
-                head_base + K.cast((tile_row_base[0] + row_l[0]) * HEAD_DIM + k_start[0], "int64"),
+                head_base[0]
+                + K.cast((tile_row_base[0] + row_l[0]) * HEAD_DIM + k_start[0], "int64"),
             )
             for pr in range(4):
-                K.ptx.mov.b32(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
-                K.ptx.mov.b32(hist[row_local * 8 + 2 * pr + 1], _widen_hi(pack[pr]))
+                K.assign(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
+                K.assign(hist[row_local * 8 + 2 * pr + 1], _widen_hi(pack[pr]))
             # The bf16 bits go to shared unmodified; the swizzle is on the byte
             # offset. lane_group < 8 lands in sState0, the rest in sState1.
             with K.If(lane_group[0] < 8):
@@ -691,7 +699,7 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
 
             ratio = K.alloc_local((4,), "float32")
             for i in range(4):
-                K.ptx.mov.b32(ratio[i], K.float32(1.0))
+                K.assign(ratio[i], K.float32(1.0))
             for source_offset in range(NUM_TOKENS):
                 source_token = K.alloc_local((1,), "int32")
                 K.assign(source_token[0], token_c[0] - source_offset)
@@ -726,7 +734,7 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
                         sd_vec = K.alloc_local((4,), "float32")
                         ld_shared_f32x4(s_d.ptr_to([source_token[0], elem_start[0]]), sd_vec, 0)
                         for i in range(4):
-                            K.ptx.mov.b32(ratio[i], _mul(ratio[i], sd_vec[i]))
+                            K.assign(ratio[i], _mul(ratio[i], sd_vec[i]))
 
         K.ptx.bar.sync(K.uint32(0), K.uint32(THREADS))
 
@@ -776,8 +784,8 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
             ha_lo = K.alloc_local((NUM_TOKENS,), "float32")
             ha_hi = K.alloc_local((NUM_TOKENS,), "float32")
             for t in range(NUM_TOKENS):
-                K.ptx.mov.b32(ha_lo[t], _shfl_idx(acc[t], quad_base[0]))
-                K.ptx.mov.b32(ha_hi[t], _shfl_idx(acc[2 + t], quad_base[0]))
+                K.assign(ha_lo[t], _shfl_idx(acc[t], quad_base[0]))
+                K.assign(ha_hi[t], _shfl_idx(acc[2 + t], quad_base[0]))
 
             with K.If(lane_quad[0] == 2), K.Then():
                 row_lo = K.alloc_local((1,), "int32")
@@ -806,8 +814,8 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
                             K.assign(lts[0], ld_shared_f32(s_l.ptr_to([t, prev])))
                             K.assign(solved_lo[0], _sub(solved_lo[0], _mul(lts[0], u_lo[prev])))
                             K.assign(solved_hi[0], _sub(solved_hi[0], _mul(lts[0], u_hi[prev])))
-                    K.ptx.mov.b32(u_lo[t], solved_lo[0])
-                    K.ptx.mov.b32(u_hi[t], solved_hi[0])
+                    K.assign(u_lo[t], solved_lo[0])
+                    K.assign(u_hi[t], solved_hi[0])
 
                 # ---- outputs, both tokens (:484-531) --------------------------
                 for t in range(NUM_TOKENS):
@@ -873,12 +881,12 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
                     # compiler contracts the FIRST product: update*sK is rounded,
                     # hist*sD is fused. This is the only stateful accumulation and
                     # it feeds both the checkpoint and token 1's history.
-                    K.ptx.mov.b32(
+                    K.assign(
                         hist[row_local * 8 + i],
                         _fma(hist[row_local * 8 + i], sd_t[i], _mul(update[0], sk_t[i])),
                     )
                 for pr in range(4):
-                    K.ptx.mov.b32(
+                    K.assign(
                         words_w[pr],
                         _pack_bf16x2(
                             hist[row_local * 8 + 2 * pr + 1], hist[row_local * 8 + 2 * pr]

@@ -421,13 +421,24 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                     tmem_n = buf * MMA_N
                     # 2-SM tcgen05 A@B^T (B is stored (N,K), so transB=False).
                     for ki in range(BLK_K // 16):
-                        desc_a_ki = desc_a.add_16B_offset(
+                        # Descriptor stepping is a plain 64-bit add, not
+                        # `add_16B_offset`: the helper's unpack/add/pack round
+                        # trip needs three extra locals per operand and, with
+                        # eight of them live in this loop, ptxas spills the MMA
+                        # warp (STACK 72 -> 168 B, +25% static SASS, measured).
+                        # The arithmetic is identical here — the low half of a
+                        # tcgen05 descriptor holds the 14-bit address and the
+                        # 14-bit leading-dim offset with bits 31:30 clear, so no
+                        # offset this kernel forms can carry out of it.
+                        desc_a_ki = desc_a.desc + K.Cast(
+                            "uint64",
                             ((stage * NUM_CONSUMER + pw) * BLK_M * BLK_K) // 8
                             + (ki // 4) * BLK_M * 8
-                            + 2 * (ki % 4)
+                            + 2 * (ki % 4),
                         )
-                        desc_b_ki = desc_b.add_16B_offset(
-                            (stage * BLK_N * BLK_K) // 8 + (ki // 4) * BLK_N * 8 + 2 * (ki % 4)
+                        desc_b_ki = desc_b.desc + K.Cast(
+                            "uint64",
+                            (stage * BLK_N * BLK_K) // 8 + (ki // 4) * BLK_N * 8 + 2 * (ki % 4),
                         )
                         # orig: pred = any(ki != 0, accum). `ki` is a trace-time
                         # int here, so the disjunction folds: every k-phase after

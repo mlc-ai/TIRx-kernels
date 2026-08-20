@@ -689,17 +689,28 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
 
                     # ---- pass 1: decay the state, accumulate the raw prediction ----
                     # gi == 0 is peeled so pvec is initialized by a mul, not fill+add.
+                    #
+                    # The four granule passes are `K.serial`, not python `range`,
+                    # so the emitted CUDA keeps a real `for` over the 4*G packed
+                    # pairs and nvcc unrolls it itself.  Unrolling them here
+                    # instead hands ptxas one 300-instruction straight line whose
+                    # 32 live carry pairs it can no longer colour in place: it
+                    # inserts ~22 register-copy MOVs per token (+181 over the
+                    # recurrence, 3576 vs 3392 instructions) and costs 4.4% on
+                    # ver_t8_hv12_b16.  Rolled, the recurrence is MOV-free.  Only
+                    # these six loops matter -- every other loop in the kernel is
+                    # trace-unrolled with no effect on the schedule.
                     egp = _ld_shared_granule(s_eg, base_t)
                     krp = _ld_shared_granule(s_kr, base_t)
-                    for pr in range(4):
+                    with K.serial(4) as pr:
                         sv = _vmul(s_pairs[pr], egp[pr])
                         K.assign(s_pairs[pr], sv)
                         K.assign(kreg[pr], krp[pr])
                         K.assign(pvec[pr], _vmul(krp[pr], sv))
-                    for gi in range(1, G):
+                    with K.serial(1, G) as gi:
                         egp = _ld_shared_granule(s_eg, base_t + gi * KS * 8)
                         krp = _ld_shared_granule(s_kr, base_t + gi * KS * 8)
-                        for pr in range(4):
+                        with K.serial(4) as pr:
                             sv = _vmul(s_pairs[gi * 4 + pr], egp[pr])
                             K.assign(s_pairs[gi * 4 + pr], sv)
                             K.assign(kreg[gi * 4 + pr], krp[pr])
@@ -722,13 +733,13 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
 
                     # ---- pass 2: rank-1 update, accumulate the raw output ----
                     qrp = _ld_shared_granule(s_qr, base_t)
-                    for pr in range(4):
+                    with K.serial(4) as pr:
                         sv = _vadd(s_pairs[pr], _vmul(kreg[pr], dpair))
                         K.assign(s_pairs[pr], sv)
                         K.assign(ovec[pr], _vmul(qrp[pr], sv))
-                    for gi in range(1, G):
+                    with K.serial(1, G) as gi:
                         qrp = _ld_shared_granule(s_qr, base_t + gi * KS * 8)
-                        for pr in range(4):
+                        with K.serial(4) as pr:
                             sv = _vadd(s_pairs[gi * 4 + pr], _vmul(kreg[gi * 4 + pr], dpair))
                             K.assign(s_pairs[gi * 4 + pr], sv)
                             K.assign(ovec[pr], _vadd(ovec[pr], _vmul(qrp[pr], sv)))
