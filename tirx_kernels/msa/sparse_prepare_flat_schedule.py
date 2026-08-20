@@ -27,6 +27,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from tirx_kernels.msa.utils._scalar_ops import (
+    atom_add_global_i32,
+    ld_global_i32,
+    shfl_idx_i32,
+    st_global_i32,
+    uceil_div_i32,
+    udiv_i32,
+)
 from tvm.script import tirx as T
 
 KERNEL_META = {
@@ -98,67 +106,22 @@ def flat_schedule_capacity(
 # ---------------------------------------------------------------------------
 # Scalar memory and cross-lane primitives.
 #
-# Global memory is reached only through `T.ptx.*` on `ptr_to`, as the low-level
-# IR contract requires, and each helper is one PTX instruction of the family the
-# source export uses.
+# Shared with the other MSA prepare kernel; see `utils/_scalar_ops.py` for the
+# instruction each one emits and why global memory is reached only through
+# `T.ptx.*` on `ptr_to`.
+#
+# Call-site map for this kernel: the scalar loads are the CSR bounds (:307-308)
+# and the `cu_seqlens_k` scans (:165); the store is one work-item field
+# (:151-156); the atomic is the slot reservation (:326-331), whose explicit
+# `sem="relaxed", scope="gpu"` are PTX's defaults and so leave no qualifier in
+# the export; the shuffle is the warp broadcast (:319-322).
 # ---------------------------------------------------------------------------
-def _ld_global_i32(buffer, index):
-    """``ld.global.b32``; the source's plain scalar load (:165, :307-308)."""
-    out = T.alloc_local((1,), "int32")
-    T.evaluate(T.ptx.ld.global_.b32(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _st_global_i32(buffer, index, value):
-    """``st.global.b32``; one work-item field (:151-156)."""
-    T.evaluate(T.ptx.st.global_.b32(buffer.ptr_to([index]), value))
-
-
-def _atom_add_global_i32(buffer, index, value):
-    """``atom.global.add.u32``; returns the value held before the addition.
-
-    The source asks for `sem="relaxed", scope="gpu"` (:326-331), which are PTX's
-    defaults for `atom.global`, so its export carries this short encoding with no
-    `.relaxed`, no `.gpu`, and no surrounding fence.
-    """
-    out = T.alloc_local((1,), "uint32")
-    T.evaluate(T.ptx.atom.global_.add.u32(out[0], buffer.ptr_to([index]), value))
-    return T.reinterpret("int32", out[0])
-
-
-def _udiv_i32(x, d):
-    """`x / d` for a non-negative `x` and positive `d`, without the sign fixup.
-
-    Every quotient in this kernel divides a count by a block size or a head
-    count, so no operand can be negative -- but they arrive from signed int32
-    globals and kernel arguments, which gives the compiler no such proof, and a
-    signed `//` then carries the full floordiv correction chain on the decode's
-    innermost loop. Routing through unsigned keeps the same quotient and drops
-    the correction; the divisors stay runtime values, so both sides still issue
-    a real integer divide.
-    """
-    return T.cast(T.cast(x, "uint32") // T.cast(d, "uint32"), "int32")
-
-
-def _uceil_div_i32(x, d):
-    """`ceil(x / d)` under the same non-negativity argument as `_udiv_i32`."""
-    numerator: T.uint32 = T.cast(x, "uint32") + T.cast(d, "uint32") - T.uint32(1)
-    return T.cast(numerator // T.cast(d, "uint32"), "int32")
-
-
-def _shfl_idx_i32(value, source_lane):
-    """``shfl.sync.idx.b32 d, a, src, 31, -1``; the warp broadcast (:319-322)."""
-    out = T.alloc_local((1,), "uint32")
-    T.evaluate(
-        T.ptx.shfl_sync.idx.b32(
-            out[0],
-            T.reinterpret("uint32", value),
-            T.uint32(source_lane),
-            T.uint32(31),
-            T.uint32(0xFFFFFFFF),
-        )
-    )
-    return T.reinterpret("int32", out[0])
+_ld_global_i32 = ld_global_i32
+_st_global_i32 = st_global_i32
+_atom_add_global_i32 = atom_add_global_i32
+_udiv_i32 = udiv_i32
+_uceil_div_i32 = uceil_div_i32
+_shfl_idx_i32 = shfl_idx_i32
 
 
 # ---------------------------------------------------------------------------

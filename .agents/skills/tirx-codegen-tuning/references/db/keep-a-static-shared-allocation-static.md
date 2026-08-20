@@ -54,6 +54,16 @@ the reference's own declaration before choosing, and verify the realized byte
 budget either way -- a `cuobjdump -res-usage` figure includes the driver's
 reserved block and will not match the declaration.
 
+Take that declaration from the reference's export, not its source text. A DSL
+frontend can allocate from the dynamic pool something whose source reads exactly
+like a static array: a fixed-size struct member, no pool or arena in sight,
+allocated through the frontend's own allocator and emitted as
+`.extern .shared .b8 __dynamic_shmem__[]` with the base broadcast across the
+warp. Reading the source there yields the opposite answer and sends a port away
+from the reference rather than toward it. Where the reference is already the pool
+form, matching it is what this entry asks for, and a static buffer is then a
+candidate for beating the reference rather than a fidelity fix.
+
 ## Verification
 
 Read the declaration in the generated CUDA, not just the total: the static form
