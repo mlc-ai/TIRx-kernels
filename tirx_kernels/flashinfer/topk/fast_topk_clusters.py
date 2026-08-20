@@ -156,18 +156,18 @@ def _ld_nc32(buf, index):
     `const __restrict__` on the source side, so the reference reads all of them
     non-coherently. Only the overflow ring is deliberately unqualified -- this
     kernel writes it, so its parameter cannot be `const`."""
-    out = K.alloc_local([1], "uint32")
-    K.evaluate(K.ptx.ld.global_.nc.b32(out[0], buf.ptr_to([index])))
-    return out[0]
+    out = K.local_scalar("uint32")
+    K.ptx.ld.global_.nc.b32(out, buf.ptr_to([index]))
+    return out
 
 
 def _ld_nc_bits(buf, index, is32):
     """The scalar mirror of `_ld_vec4`: `ld.global.nc.b32` | `ld.global.nc.b16`."""
     if is32:
         return _ld_nc32(buf, index)
-    out = K.alloc_local([1], "uint16")
-    K.evaluate(K.ptx.ld.global_.nc.b16(out[0], buf.ptr_to([index])))
-    return out[0]
+    out = K.local_scalar("uint16")
+    K.ptx.ld.global_.nc.b16(out, buf.ptr_to([index]))
+    return out
 
 
 def _ld_vec4(buf, elem_index, is32):
@@ -180,10 +180,10 @@ def _ld_vec4(buf, elem_index, is32):
     """
     if is32:
         w = K.alloc_local([4], "uint32", align=16)
-        K.evaluate(K.ptx["ld.global.nc.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index])))
+        K.ptx["ld.global.nc.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index]))
         return w
     w2 = K.alloc_local([2], "uint32", align=8)
-    K.evaluate(K.ptx["ld.global.nc.v2.b32"](w2[0], w2[1], buf.ptr_to([elem_index])))
+    K.ptx["ld.global.nc.v2.b32"](w2[0], w2[1], buf.ptr_to([elem_index]))
     return w2
 
 
@@ -202,13 +202,11 @@ def _st_idx(buf, index, value, i64: bool):
             # constant-folds into "cannot make uint from negative value". The
             # bit-complement of its magnitude produces the same pattern.
             imm = K.bitwise_not(K.uint64(-value - 1)) if value < 0 else K.uint64(value)
-            K.evaluate(K.ptx.st.global_.b64(buf.ptr_to([index]), imm))
+            K.ptx.st.global_.b64(buf.ptr_to([index]), imm)
         else:
             R.st_global_u32(buf, index, K.uint32(value & 0xFFFFFFFF))
     elif i64:
-        K.evaluate(
-            K.ptx.st.global_.b64(buf.ptr_to([index]), K.cast(K.cast(value, "int64"), "uint64"))
-        )
+        K.ptx.st.global_.b64(buf.ptr_to([index]), K.cast(K.cast(value, "int64"), "uint64"))
     else:
         R.st_global_u32(buf, index, K.reinterpret("uint32", K.cast(value, "int32")))
 
@@ -291,7 +289,7 @@ def get_kernel(
     def _threshold(hist, scal, tid, warp, lane, rank, bank, k_rem, sum_across):
         """`get_threshold_bin` (:116-154). Leaves the bin in `scal[THR]` and
         walks the caller's `k_rem` register down."""
-        K.evaluate(K.tvm_storage_sync("shared"))
+        K.tvm_storage_sync("shared")
 
         v = K.local_scalar("int32", init=K.int32(0))
         with K.If(tid < RADIX), K.Then():
@@ -306,7 +304,7 @@ def get_kernel(
                     K.assign(v, v + K.cast(peer, "int32"))
             with K.If(lane == 0), K.Then():
                 R.st_shared_u32(scal, CUM0 + warp, K.reinterpret("uint32", v))
-        K.evaluate(K.tvm_storage_sync("shared"))
+        K.tvm_storage_sync("shared")
 
         with K.If(warp == 0), K.Then():
             w = K.local_scalar("int32", init=K.int32(0))
@@ -318,13 +316,13 @@ def get_kernel(
                     K.assign(w, w + K.cast(peer, "int32"))
             # `__syncwarp` sits BETWEEN the scan and the write-back into the same
             # buffer (:48). After the store it would protect nothing.
-            K.evaluate(K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF)))
+            K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF))
             # The guard is load-bearing: cum_reduce_buf is 8 ints with
             # k_remaining_counter 32 B later, so an unguarded 32-lane store puts
             # 128 B where 32 are allocated (:49-51).
             with K.If(lane < 8), K.Then():
                 R.st_shared_u32(scal, CUM0 + lane, K.reinterpret("uint32", w))
-        K.evaluate(K.tvm_storage_sync("shared"))
+        K.tvm_storage_sync("shared")
         with K.If(warp < 7), K.Then():
             K.assign(v, v + K.cast(R.ld_shared_u32(scal, CUM0 + warp + 1), "int32"))
 
@@ -333,26 +331,24 @@ def get_kernel(
             with K.If(tid < RADIX), K.Then():
                 # This IS the DSMEM publication: peers read the PING-PONG bank.
                 R.st_shared_u32(hist, bank * RADIX + tid, K.reinterpret("uint32", v))
-            K.evaluate(K.ptx.barrier.cluster.arrive())
-            K.evaluate(K.ptx.barrier.cluster.wait())
+            K.ptx.barrier.cluster.arrive()
+            K.ptx.barrier.cluster.wait()
             with K.If(tid < RADIX), K.Then():
                 with K.unroll(nc - 1) as c:
                     peer = K.alloc_local([1], "uint32")
-                    K.evaluate(
-                        K.ptx.mapa.shared__cluster.u32(
-                            peer[0],
-                            K.cuda.cvta_generic_to_shared(hist.ptr_to([bank * RADIX + tid])),
-                            K.cast((c + rank + 1) % nc, "uint32"),
-                        )
+                    K.ptx.mapa.shared__cluster.u32(
+                        peer[0],
+                        K.cuda.cvta_generic_to_shared(hist.ptr_to([bank * RADIX + tid])),
+                        K.cast((c + rank + 1) % nc, "uint32"),
                     )
-                    got = K.alloc_local([1], "uint32")
-                    K.evaluate(K.ptx.ld.shared__cluster.b32(got[0], peer[0]))
-                    K.assign(v, v + K.cast(got[0], "int32"))
+                    got = K.local_scalar("uint32")
+                    K.ptx.ld.shared__cluster.b32(got, peer[0])
+                    K.assign(v, v + K.cast(got, "int32"))
                 R.st_shared_u32(hist, 2 * RADIX + tid, K.reinterpret("uint32", v))
         else:
             with K.If(tid < RADIX), K.Then():
                 R.st_shared_u32(hist, 2 * RADIX + tid, K.reinterpret("uint32", v))
-        K.evaluate(K.tvm_storage_sync("shared"))
+        K.tvm_storage_sync("shared")
 
         # --- pick the crossing bin (:142-152) --------------------------------
         nxt = K.local_scalar("int32", init=K.int32(0))
@@ -361,7 +357,7 @@ def get_kernel(
         with K.If(tid < RADIX), K.Then():
             with K.If(K.And(v > k_rem, nxt <= k_rem)), K.Then():
                 R.st_shared_u32(scal, THR, K.reinterpret("uint32", tid))
-        K.evaluate(K.tvm_storage_sync("shared"))
+        K.tvm_storage_sync("shared")
         bin_ = K.local_scalar("int32", init=K.cast(R.ld_shared_u32(scal, THR), "int32"))
         with K.If(bin_ < RADIX - 1), K.Then():
             K.assign(k_rem, k_rem - K.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32"))
@@ -460,19 +456,15 @@ def get_kernel(
                         # CTA per cluster rank 0 is this CTA and the mapping is
                         # the identity.
                         with K.If(K.And(k_rem > 0, exceeded == 0)), K.Then():
-                            peer = K.alloc_local([1], "uint32")
-                            K.evaluate(
-                                K.ptx.mapa.shared__cluster.u32(
-                                    peer[0],
-                                    K.cuda.cvta_generic_to_shared(scal.ptr_to([KREM])),
-                                    K.uint32(0),
-                                )
+                            peer = K.local_scalar("uint32")
+                            K.ptx.mapa.shared__cluster.u32(
+                                peer,
+                                K.cuda.cvta_generic_to_shared(scal.ptr_to([KREM])),
+                                K.uint32(0),
                             )
-                            got = K.alloc_local([1], "uint32")
-                            K.evaluate(
-                                K.ptx.atom.shared__cluster.add.u32(got[0], peer[0], K.uint32(1))
-                            )
-                            with K.If(K.cast(got[0], "int32") < k_rem):
+                            got = K.local_scalar("uint32")
+                            K.ptx.atom.shared__cluster.add.u32(got, peer, K.uint32(1))
+                            with K.If(K.cast(got, "int32") < k_rem):
                                 with K.Then():
                                     slot = R.atom_shared_add_u32(scal, FINAL, K.uint32(1))
                                     R.st_shared_u32(
@@ -510,7 +502,7 @@ def get_kernel(
         phase = t % 2
         K.assign(exceeded, K.int32(0))  # :268 -- per round, per thread
         if nc > 1:
-            K.evaluate(K.ptx.barrier.cluster.wait())
+            K.ptx.barrier.cluster.wait()
         with K.If(tid < RADIX), K.Then():
             R.st_shared_u32(hist, (phase ^ 1) * RADIX + tid, K.uint32(0))
         with K.If(tid == 0), K.Then():
@@ -520,7 +512,7 @@ def get_kernel(
         if nc > 1 and t < rounds - 1:
             # Skipped on the final round: no further threshold() means no
             # further peer read of this bank (:260-263).
-            K.evaluate(K.ptx.barrier.cluster.arrive())
+            K.ptx.barrier.cluster.arrive()
 
         raw = K.local_scalar(
             "int32", init=K.cast(R.ld_shared_u32(scal, NCACHED + (phase ^ 1)), "int32")
@@ -683,7 +675,7 @@ def get_kernel(
                     # threshold_bin is deliberately NOT initialized (:166-170): a
                     # round whose crossing test selects no lane reads the
                     # previous round's value. Reproduce, do not repair.
-                K.evaluate(K.tvm_storage_sync("shared"))
+                K.tvm_storage_sync("shared")
 
                 # ---- first histogram pass: SCALAR strided (:174-179) --------
                 with K.serial(
@@ -709,7 +701,7 @@ def get_kernel(
 
                 if nc > 1:
                     # SPLIT barrier: the matching wait heads round 1 (:218-225, :248).
-                    K.evaluate(K.ptx.barrier.cluster.arrive())
+                    K.ptx.barrier.cluster.arrive()
 
                 # Vectorized classification (:227-236): four elements per issue,
                 # then a scalar tail (:237-239). Only THIS pass is vectorized --
@@ -796,7 +788,7 @@ def get_kernel(
                     )
 
                 # ---- epilogue: claim the output range (:374-404) ------------
-                K.evaluate(K.tvm_storage_sync("shared"))
+                K.tvm_storage_sync("shared")
                 n_out = K.local_scalar("int32", init=K.int32(k))
                 out_start = K.local_scalar("int32", init=K.int32(0))
                 if nc > 1:
@@ -804,29 +796,25 @@ def get_kernel(
                     my_num = K.local_scalar(
                         "int32", init=K.cast(R.ld_shared_u32(scal, FINAL), "int32")
                     )
-                    K.evaluate(K.ptx.barrier.cluster.arrive())
-                    K.evaluate(K.ptx.barrier.cluster.wait())
+                    K.ptx.barrier.cluster.arrive()
+                    K.ptx.barrier.cluster.wait()
                     with K.If(rank > 0), K.Then():
                         with K.If(tid == 0), K.Then():
-                            peer = K.alloc_local([1], "uint32")
-                            K.evaluate(
-                                K.ptx.mapa.shared__cluster.u32(
-                                    peer[0],
-                                    K.cuda.cvta_generic_to_shared(scal.ptr_to([FINAL])),
-                                    K.uint32(0),
-                                )
+                            peer = K.local_scalar("uint32")
+                            K.ptx.mapa.shared__cluster.u32(
+                                peer,
+                                K.cuda.cvta_generic_to_shared(scal.ptr_to([FINAL])),
+                                K.uint32(0),
                             )
-                            old = K.alloc_local([1], "uint32")
-                            K.evaluate(
-                                K.ptx.atom.shared__cluster.add.u32(
-                                    old[0], peer[0], K.reinterpret("uint32", my_num)
-                                )
+                            old = K.local_scalar("uint32")
+                            K.ptx.atom.shared__cluster.add.u32(
+                                old, peer, K.reinterpret("uint32", my_num)
                             )
-                            R.st_shared_u32(scal, FINAL, old[0])  # broadcast (:392)
-                        K.evaluate(K.tvm_storage_sync("shared"))
+                            R.st_shared_u32(scal, FINAL, old)  # broadcast (:392)
+                        K.tvm_storage_sync("shared")
                         K.assign(out_start, K.cast(R.ld_shared_u32(scal, FINAL), "int32"))
-                    K.evaluate(K.ptx.barrier.cluster.arrive())
-                    K.evaluate(K.ptx.barrier.cluster.wait())
+                    K.ptx.barrier.cluster.arrive()
+                    K.ptx.barrier.cluster.wait()
                     K.assign(n_out, K.min(K.int32(k), my_num))
 
                 # ---- writeback (:438-447 / :486-492 / :530-536) -------------
