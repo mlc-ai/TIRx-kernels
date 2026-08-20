@@ -45,8 +45,10 @@ the single-CTA specialization, which is ported separately as
 """
 
 import math
+from contextlib import nullcontext
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.topk.radix_topk_single_cta import (
     BLOCK_THREADS,
     DTYPES,
@@ -106,7 +108,6 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
     warp_inclusive_sum_u32,
 )
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 
 # This specialization declares four shared scalars (:1194-1200), so the ordered
 # keys start at byte 2064 while the launcher's header is sized for five (2080).
@@ -237,6 +238,27 @@ def reachable_vecs(dtype: str) -> list[int]:
     return out
 
 
+def advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx):
+    """``AdvanceRadixGroupBarrier`` (topk.cuh:174-182), and bump ``phase``.
+
+    The group's CTAs rendezvous on a monotonically increasing arrival counter
+    with absolute phase targets: one fenced ``red.relaxed.gpu.global.add.s32``
+    arrival from thread 0 (:176), then an ``ld.global.acquire.gpu.b32`` spin to
+    ``(phase + 1) * ctas_per_group`` (:179).  Two CTA barriers close it --
+    ``wait_ge`` ends with one (:133) and the phase bump is followed by another
+    (:182) -- so every thread leaves with the new phase visible.
+    """
+    with K.If(tx == 0), K.Then():
+        red_release_gpu_add_s32(state, arrival_word, K.int32(1))
+        target = (phase + K.int32(1)) * K.int32(ctas_per_group)
+        spin = K.local_scalar("int32", init=ld_acquire_gpu_s32(state, arrival_word))
+        with K.While(spin < target):
+            K.assign(spin, ld_acquire_gpu_s32(state, arrival_word))
+    bar_sync()
+    K.assign(phase, phase + K.int32(1))
+    bar_sync()
+
+
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
@@ -302,35 +324,23 @@ def get_kernel(
     def st_key(buf, i, v):
         st_shared_u32(buf, i, v) if is32 else st_shared_u16(buf, i, v)
 
-    @T.prim_func
+    @K.kernel(warps=BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
     def radix_topk_multi_cta(
-        input_h: T.handle,
-        output_indices_h: T.handle,
-        output_values_h: T.handle,
-        aux_data_h: T.handle,
-        lengths_h: T.handle,
-        row_starts_h: T.handle,
-        page_table_row_starts_h: T.handle,
-        row_to_batch_h: T.handle,
-        row_states_h: T.handle,
-        aux_stride: T.int64,
+        inp: K.gptr[dtype, (num_rows * length,)],
+        out_idx: K.gptr[K.i32, (num_rows * k,)],
+        out_val: K.gptr[dtype, (num_rows * k,)],
+        aux: K.gptr[K.i32, (aux_elems,)],
+        lengths_g: K.gptr[K.i32, (num_rows,)],
+        row_starts_g: K.gptr[K.i32, (num_rows,)],
+        pt_starts_g: K.gptr[K.i32, (num_rows,)],
+        row_to_batch_g: K.gptr[K.i32, (num_rows,)],
+        state: K.gptr[K.u32, (WORKSPACE_WORDS,)],
+        aux_stride: K.i64,
     ):
-        T.func_attr({"global_symbol": "radix_topk_multi_cta"})
-        inp = T.match_buffer(input_h, (num_rows * length,), dtype, scope="global")
-        out_idx = T.match_buffer(output_indices_h, (num_rows * k,), "int32", scope="global")
-        out_val = T.match_buffer(output_values_h, (num_rows * k,), dtype, scope="global")
-        aux = T.match_buffer(aux_data_h, (aux_elems,), "int32", scope="global")
-        lengths_g = T.match_buffer(lengths_h, (num_rows,), "int32", scope="global")
-        row_starts_g = T.match_buffer(row_starts_h, (num_rows,), "int32", scope="global")
-        pt_starts_g = T.match_buffer(page_table_row_starts_h, (num_rows,), "int32", scope="global")
-        row_to_batch_g = T.match_buffer(row_to_batch_h, (num_rows,), "int32", scope="global")
-        state = T.match_buffer(row_states_h, (WORKSPACE_WORDS,), "uint32", scope="global")
-        T.device_entry()
+        cta = K.cta_id()
+        tx = K.thread_id()
 
-        cta = T.cta_id([grid])
-        tx = T.thread_id([BLOCK_THREADS])
-
-        pool = T.SMEMPool()
+        pool = K.smem_pool()
         s_hist = pool.alloc((RADIX,), "uint32")
         s_suffix = pool.alloc((RADIX,), "uint32")
         s_scalars = pool.alloc((NUM_SCALARS_MULTI_CTA,), "uint32")
@@ -338,327 +348,325 @@ def get_kernel(
         if deterministic:
             s_scan = pool.alloc((scan_elems,), "uint32", align=16)
         s_last = pool.alloc((1,), "uint32")
-        pool.commit()
 
         # --- group identity and per-group state (:1187-1201) --------------
-        group_id: T.int32 = T.truncdiv(cta, T.int32(ctas_per_group))
-        cta_in_group: T.int32 = cta - group_id * T.int32(ctas_per_group)
-        st_base: T.int32 = group_id * T.int32(ROW_STATE_WORDS)
-        arrival_word: T.int32 = st_base + T.int32(ARRIVAL_COUNTER_WORD)
-        output_word: T.int32 = st_base + T.int32(OUTPUT_COUNTER_WORD)
-        det_base: T.int32 = T.int32(det_scratch_base) + group_id * T.int32(DET_SCRATCH_WORDS)
-        barrier_phase: T.int32 = T.int32(0)
+        group_id = K.truncdiv(cta, K.int32(ctas_per_group))
+        cta_in_group = cta - group_id * K.int32(ctas_per_group)
+        st_base = group_id * K.int32(ROW_STATE_WORDS)
+        arrival_word = st_base + K.int32(ARRIVAL_COUNTER_WORD)
+        output_word = st_base + K.int32(OUTPUT_COUNTER_WORD)
+        det_base = K.int32(det_scratch_base) + group_id * K.int32(DET_SCRATCH_WORDS)
+        # The phase is loop-carried across every barrier this CTA takes, so it is
+        # real mutable state rather than a trace-time counter.
+        phase = K.local_scalar("int32", init=K.int32(0))
 
         # --- persistent row loop (:1218-1220) -----------------------------
-        for it in T.serial(0, total_iterations):
-            # `T.serial` rather than a `while`: the trip count is static, so a
+        with K.serial(0, total_iterations) as it:
+            # `K.serial` rather than a `while`: the trip count is static, so a
             # single-iteration grid (num_rows <= num_groups, i.e. every shape but
             # the fully-occupied ones) folds `it` to 0 and turns `global_round`
             # and the trivial branch's next-buffer index into constants.  A
             # mutable while-loop counter blocks that folding.
-            row_idx: T.int32 = group_id + it * T.int32(num_groups)
-            if row_idx < num_rows:
+            row_idx = group_id + it * K.int32(num_groups)
+            with K.If(row_idx < num_rows), K.Then():
                 # --- per-row header (:1221-1240) --------------------------
-                row_start: T.int32 = T.int32(0)
-                page_start: T.int32 = T.int32(0)
+                row_start = K.int32(0)
+                page_start = K.int32(0)
                 row_len = length
                 if not basic:
                     if row_starts:
-                        row_start = T.reinterpret("int32", ld_global_u32(row_starts_g, row_idx))
+                        row_start = K.reinterpret("int32", ld_global_u32(row_starts_g, row_idx))
                     if page_table:
                         if page_table_row_starts:
-                            page_start = T.reinterpret("int32", ld_global_u32(pt_starts_g, row_idx))
+                            page_start = K.reinterpret("int32", ld_global_u32(pt_starts_g, row_idx))
                         else:
                             page_start = row_start
-                    row_len_rt: T.int32 = T.reinterpret("int32", ld_global_u32(lengths_g, row_idx))
-                    row_len = row_len_rt
-                row_in: T.int64 = T.cast(row_idx, "int64") * T.int64(length) + T.cast(
-                    row_start, "int64"
-                )
-                row_out: T.int64 = T.cast(row_idx, "int64") * T.int64(k)
+                    row_len = K.reinterpret("int32", ld_global_u32(lengths_g, row_idx))
+                row_in = K.cast(row_idx, "int64") * K.int64(length) + K.cast(row_start, "int64")
+                row_out = K.cast(row_idx, "int64") * K.int64(k)
 
                 # --- mode trivial early-out (:1243-1307) ------------------
+                take_main = None
                 if not (basic and not basic_trivial):
-                    take_main: T.int32 = T.int32(1)
-                if basic:
-                    if basic_trivial:
-                        # Basic SPLITS the identity emit across the group (:1246-1255).
-                        take_main = T.int32(0)
-                        t_start: T.int32 = cta_in_group * T.int32(chunk)
-                        t_actual: T.int32 = T.int32(0)
-                        if t_start < row_len:
-                            t_actual = T.min(T.int32(chunk), row_len - t_start)
-                        for i0 in T.serial(tx, t_actual, step=BLOCK_THREADS):
-                            g0: T.int32 = t_start + i0
-                            if g0 < k:
-                                slot0: T.int64 = row_out + T.cast(g0, "int64")
-                                st_global_u32(out_idx, slot0, T.reinterpret("uint32", g0))
-                                bits0 = ld_global_bits(
-                                    inp,
-                                    T.cast(row_idx, "int64") * T.int64(length)
-                                    + T.cast(g0, "int64"),
-                                    is32,
-                                )
-                                if is32:
-                                    st_global_u32(out_val, slot0, bits0)
-                                else:
-                                    st_global_u16(out_val, slot0, bits0)
-                batch_idx: T.int32 = row_idx
-                offset: T.int32 = T.int32(0)
+                    take_main = K.local_scalar("int32", init=K.int32(1))
+                if basic and basic_trivial:
+                    # Basic SPLITS the identity emit across the group (:1246-1255).
+                    K.assign(take_main, K.int32(0))
+                    t_start = cta_in_group * K.int32(chunk)
+                    t_actual = K.local_scalar("int32", init=K.int32(0))
+                    with K.If(t_start < row_len), K.Then():
+                        K.assign(t_actual, K.min(K.int32(chunk), row_len - t_start))
+                    with K.serial(tx, t_actual, step=BLOCK_THREADS) as i0:
+                        g0 = t_start + i0
+                        with K.If(g0 < k), K.Then():
+                            slot0 = row_out + K.cast(g0, "int64")
+                            st_global_u32(out_idx, slot0, K.reinterpret("uint32", g0))
+                            bits0 = ld_global_bits(
+                                inp,
+                                K.cast(row_idx, "int64") * K.int64(length) + K.cast(g0, "int64"),
+                                is32,
+                            )
+                            if is32:
+                                st_global_u32(out_val, slot0, bits0)
+                            else:
+                                st_global_u16(out_val, slot0, bits0)
+                batch_idx = row_idx
+                offset = K.int32(0)
                 if page_table:
                     if row_to_batch:
-                        batch_idx = T.reinterpret("int32", ld_global_u32(row_to_batch_g, row_idx))
-                    if row_len <= k:
+                        batch_idx = K.reinterpret("int32", ld_global_u32(row_to_batch_g, row_idx))
+                    with K.If(row_len <= k), K.Then():
                         # NOT split: every CTA writes the whole [0, k) range (:1272-1276).
-                        take_main = T.int32(0)
-                        src0: T.int64 = T.cast(batch_idx, "int64") * aux_stride
-                        for i1 in T.serial(tx, k, step=BLOCK_THREADS):
-                            page_id: T.int32 = T.int32(-1)
-                            if i1 < row_len:
-                                page_id = T.reinterpret(
-                                    "int32",
-                                    ld_global_u32(aux, src0 + T.cast(page_start + i1, "int64")),
+                        K.assign(take_main, K.int32(0))
+                        src0 = K.cast(batch_idx, "int64") * aux_stride
+                        with K.serial(tx, k, step=BLOCK_THREADS) as i1:
+                            page_id = K.local_scalar("int32", init=K.int32(-1))
+                            with K.If(i1 < row_len), K.Then():
+                                K.assign(
+                                    page_id,
+                                    K.reinterpret(
+                                        "int32",
+                                        ld_global_u32(aux, src0 + K.cast(page_start + i1, "int64")),
+                                    ),
                                 )
                             st_global_u32(
                                 out_idx,
-                                row_out + T.cast(i1, "int64"),
-                                T.reinterpret("uint32", page_id),
+                                row_out + K.cast(i1, "int64"),
+                                K.reinterpret("uint32", page_id),
                             )
                 if ragged:
-                    offset = T.reinterpret("int32", ld_global_u32(aux, T.cast(row_idx, "int64")))
-                    if row_len <= k:
-                        take_main = T.int32(0)
-                        for i2 in T.serial(tx, k, step=BLOCK_THREADS):
-                            val2: T.int32 = T.int32(-1)
-                            if i2 < row_len:
-                                val2 = i2 + offset
+                    offset = K.reinterpret("int32", ld_global_u32(aux, K.cast(row_idx, "int64")))
+                    with K.If(row_len <= k), K.Then():
+                        K.assign(take_main, K.int32(0))
+                        with K.serial(tx, k, step=BLOCK_THREADS) as i2:
+                            val2 = K.local_scalar("int32", init=K.int32(-1))
+                            with K.If(i2 < row_len), K.Then():
+                                K.assign(val2, i2 + offset)
                             st_global_u32(
                                 out_idx,
-                                row_out + T.cast(i2, "int64"),
-                                T.reinterpret("uint32", val2),
+                                row_out + K.cast(i2, "int64"),
+                                K.reinterpret("uint32", val2),
                             )
                 if not (basic and not basic_trivial):
                     # Common tail of the trivial branches (:1257-1266, :1277-1286,
                     # :1295-1304): CTA 0 clears the buffer the next iteration opens
                     # on, so a skipped row cannot leave it dirty.
-                    if take_main == T.int32(0):
-                        next_first: T.int32 = T.truncmod(
-                            (it + T.int32(1)) * T.int32(rounds), T.int32(3)
-                        )
-                        if cta_in_group == 0:
-                            for bz in T.serial(tx, RADIX, step=BLOCK_THREADS):
+                    with K.If(take_main == K.int32(0)), K.Then():
+                        next_first = K.truncmod((it + K.int32(1)) * K.int32(rounds), K.int32(3))
+                        with K.If(cta_in_group == 0), K.Then():
+                            with K.serial(tx, RADIX, step=BLOCK_THREADS) as bz:
                                 st_global_u32(
-                                    state, st_base + next_first * T.int32(RADIX) + bz, T.uint32(0)
+                                    state, st_base + next_first * K.int32(RADIX) + bz, K.uint32(0)
                                 )
 
-                main_guard = True if (basic and not basic_trivial) else (take_main == 1)
-                if main_guard:
-                    chunk_start: T.int32 = cta_in_group * T.int32(chunk)
-                    actual: T.int32 = T.int32(0)
-                    if chunk_start < row_len:
-                        actual = T.min(T.int32(chunk), row_len - chunk_start)
-                    chunk_in: T.int64 = row_in + T.cast(chunk_start, "int64")
+                # Basic with k < length has no trivial branch, so the guard is
+                # compile-time true; a runtime flag wrapped the whole body in a branch.
+                static_main = basic and not basic_trivial
+                with (
+                    nullcontext() if static_main else K.If(take_main == 1),
+                    nullcontext() if static_main else K.Then(),
+                ):
+                    chunk_start = cta_in_group * K.int32(chunk)
+                    actual = K.local_scalar("int32", init=K.int32(0))
+                    with K.If(chunk_start < row_len), K.Then():
+                        K.assign(actual, K.min(K.int32(chunk), row_len - chunk_start))
+                    chunk_in = row_in + K.cast(chunk_start, "int64")
 
                     # === Stage 1: stage this CTA's chunk (:602-623) ========
-                    aligned_rt: T.int32 = T.truncdiv(actual, T.int32(vec)) * T.int32(vec)
-                    for iv in T.serial(
-                        tx * vec, aligned_rt, step=BLOCK_THREADS * vec, unroll=stage_unroll
-                    ):
+                    # A loop BOUND must be a snapshot: C re-evaluates the
+                    # condition every iteration, so left lazy this puts the
+                    # divide and multiply inside the staging loop.  Basic mode
+                    # hides it (its `actual` folds to a constant); the runtime
+                    # row lengths of page_table and ragged do not, which is
+                    # where it cost up to 7%.
+                    aligned = K.local_scalar(
+                        "int32", init=K.truncdiv(actual, K.int32(vec)) * K.int32(vec)
+                    )
+                    with K.serial(
+                        tx * vec, aligned, step=BLOCK_THREADS * vec, unroll=stage_unroll
+                    ) as iv:
                         stage_vector(
                             inp, s_ordered, chunk_in, iv, vec, load_bytes, is32, to_ordered, st_key
                         )
-                    for it_tail in T.serial(aligned_rt + tx, actual, step=BLOCK_THREADS):
+                    with K.serial(aligned + tx, actual, step=BLOCK_THREADS) as it_tail:
                         st_key(
                             s_ordered,
                             it_tail,
                             to_ordered(
-                                ld_global_bits(inp, chunk_in + T.cast(it_tail, "int64"), is32)
+                                ld_global_bits(inp, chunk_in + K.cast(it_tail, "int64"), is32)
                             ),
                         )
                     bar_sync()
 
                     # scalar caches (:670-677); no shared output counter here
-                    if tx == 0:
-                        st_shared_pair_u32(s_scalars, 0, T.uint32(0), T.uint32(k))
+                    with K.If(tx == 0), K.Then():
+                        st_shared_pair_u32(s_scalars, 0, K.uint32(0), K.uint32(k))
                     bar_sync()
 
                     # === initial group rendezvous (:679-687) ===============
-                    # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                    # One fenced arrival from thread 0 (:176), an acquire spin to the
-                    # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                    # one (:133) and the phase bump is followed by another (:182).
-                    if tx == 0:
-                        red_release_gpu_add_s32(state, arrival_word, T.int32(1))
-                    bar_target0: T.int32 = (barrier_phase + T.int32(1)) * T.int32(ctas_per_group)
-                    if tx == 0:
-                        spin0: T.int32 = ld_acquire_gpu_s32(state, arrival_word)
-                        while spin0 < bar_target0:
-                            spin0 = ld_acquire_gpu_s32(state, arrival_word)
-                    bar_sync()
-                    barrier_phase = barrier_phase + T.int32(1)
-                    bar_sync()
-                    if T.And(cta_in_group == 0, tx == 0):
-                        st_release_gpu_s32(state, output_word, T.int32(0))
+                    advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
+                    with K.If(K.And(cta_in_group == 0, tx == 0)), K.Then():
+                        st_release_gpu_s32(state, output_word, K.int32(0))
 
                     # === Stage 2: NUM_ROUNDS rounds, reduced group-wide ====
-                    for rnd in T.serial(0, rounds):
-                        global_round: T.int32 = it * T.int32(rounds) + rnd
-                        cur_buf: T.int32 = T.truncmod(global_round, T.int32(3))
-                        next_buf: T.int32 = T.truncmod(global_round + T.int32(1), T.int32(3))
-                        cur_hist: T.int32 = st_base + cur_buf * T.int32(RADIX)
-                        next_hist: T.int32 = st_base + next_buf * T.int32(RADIX)
-                        shift: T.int32 = T.int32(obits) - (rnd + 1) * 8
-                        mask: T.uint32 = T.uint32(0)
-                        if rnd != 0:
-                            mask = T.shift_left(
-                                T.uint32(0xFFFFFFFF), T.cast(T.int32(obits) - rnd * 8, "uint32")
+                    with K.serial(0, rounds) as rnd:
+                        global_round = it * K.int32(rounds) + rnd
+                        cur_hist = st_base + K.truncmod(global_round, K.int32(3)) * K.int32(RADIX)
+                        next_hist = st_base + K.truncmod(
+                            global_round + K.int32(1), K.int32(3)
+                        ) * K.int32(RADIX)
+                        shift = K.int32(obits) - (rnd + 1) * 8
+                        mask = K.local_scalar("uint32", init=K.uint32(0))
+                        with K.If(rnd != 0), K.Then():
+                            K.assign(
+                                mask,
+                                K.shift_left(
+                                    K.uint32(0xFFFFFFFF), K.cast(K.int32(obits) - rnd * 8, "uint32")
+                                ),
                             )
-                        packed: T.uint64 = ld_shared_u64(s_scalars, 0)
-                        prefix: T.uint32 = u64_lo(packed)
-                        remaining_k: T.uint32 = u64_hi(packed)
+                        # Snapshots, not expressions: both halves are consumed
+                        # inside the histogram loop, and leaving them lazy keeps
+                        # the 64-bit load itself live across the whole round.
+                        packed = ld_shared_u64(s_scalars, 0)
+                        prefix = K.local_scalar("uint32", init=u64_lo(packed))
+                        remaining_k = K.local_scalar("uint32", init=u64_hi(packed))
 
-                        for bh in T.serial(tx, RADIX, step=BLOCK_THREADS):
-                            st_shared_u32(s_hist, bh, T.uint32(0))
+                        with K.serial(tx, RADIX, step=BLOCK_THREADS) as bh:
+                            st_shared_u32(s_hist, bh, K.uint32(0))
                         bar_sync()
-                        for ih in T.serial(tx, actual, step=BLOCK_THREADS, unroll=2):
-                            key: T.uint32 = T.cast(ld_key(s_ordered, ih), "uint32")
-                            if T.bitwise_and(key, mask) == prefix:
-                                bucket: T.uint32 = T.bitwise_and(
-                                    T.shift_right(key, T.cast(shift, "uint32")), T.uint32(0xFF)
+                        with K.serial(tx, actual, step=BLOCK_THREADS, unroll=2) as ih:
+                            key = K.cast(ld_key(s_ordered, ih), "uint32")
+                            with K.If(K.bitwise_and(key, mask) == prefix), K.Then():
+                                bucket = K.bitwise_and(
+                                    K.shift_right(key, K.cast(shift, "uint32")), K.uint32(0xFF)
                                 )
-                                T.evaluate(
+                                K.evaluate(
                                     atom_shared_add_u32(
-                                        s_hist, T.cast(bucket, "int32"), T.uint32(1)
+                                        s_hist, K.cast(bucket, "int32"), K.uint32(1)
                                     )
                                 )
                         bar_sync()
 
                         # fold this CTA's histogram into the group's buffer (:727-736)
-                        for ba in T.serial(tx, RADIX, step=BLOCK_THREADS):
-                            hval: T.uint32 = ld_shared_u32(s_hist, ba)
-                            if hval > T.uint32(0):
-                                T.evaluate(atom_global_add_u32(state, cur_hist + ba, hval))
-                        if cta_in_group == 0:
-                            for bc in T.serial(tx, RADIX, step=BLOCK_THREADS):
-                                st_global_u32(state, next_hist + bc, T.uint32(0))
-                        # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                        # One fenced arrival from thread 0 (:176), an acquire spin to the
-                        # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                        # one (:133) and the phase bump is followed by another (:182).
-                        if tx == 0:
-                            red_release_gpu_add_s32(state, arrival_word, T.int32(1))
-                        bar_target1: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
-                            ctas_per_group
-                        )
-                        if tx == 0:
-                            spin1: T.int32 = ld_acquire_gpu_s32(state, arrival_word)
-                            while spin1 < bar_target1:
-                                spin1 = ld_acquire_gpu_s32(state, arrival_word)
-                        bar_sync()
-                        barrier_phase = barrier_phase + T.int32(1)
-                        bar_sync()
-                        for bs in T.serial(tx, RADIX, step=BLOCK_THREADS):
+                        with K.serial(tx, RADIX, step=BLOCK_THREADS) as ba:
+                            hval = ld_shared_u32(s_hist, ba)
+                            with K.If(hval > K.uint32(0)), K.Then():
+                                K.evaluate(atom_global_add_u32(state, cur_hist + ba, hval))
+                        with K.If(cta_in_group == 0), K.Then():
+                            with K.serial(tx, RADIX, step=BLOCK_THREADS) as bc:
+                                st_global_u32(state, next_hist + bc, K.uint32(0))
+                        advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
+                        with K.serial(tx, RADIX, step=BLOCK_THREADS) as bs:
                             st_shared_u32(s_suffix, bs, ld_global_u32(state, cur_hist + bs))
                         bar_sync()
 
                         # RadixSuffixSum (:389-406)
-                        for step in T.unroll(8):
-                            stride: T.int32 = T.shift_left(T.int32(1), step)
-                            acc: T.uint32 = T.uint32(0)
-                            if tx < RADIX:
-                                acc = ld_shared_u32(s_suffix, tx)
-                                if tx + stride < RADIX:
-                                    acc = acc + ld_shared_u32(s_suffix, tx + stride)
+                        with K.unroll(8) as step:
+                            stride = K.shift_left(K.int32(1), step)
+                            acc = K.local_scalar("uint32", init=K.uint32(0))
+                            with K.If(tx < RADIX), K.Then():
+                                K.assign(acc, ld_shared_u32(s_suffix, tx))
+                                with K.If(tx + stride < RADIX), K.Then():
+                                    K.assign(acc, acc + ld_shared_u32(s_suffix, tx + stride))
                             bar_sync()
-                            if tx < RADIX:
+                            with K.If(tx < RADIX), K.Then():
                                 st_shared_u32(s_suffix, tx, acc)
                             bar_sync()
 
                         # threshold bucket (:753-767)
-                        if tx == 0:
-                            st_shared_pair_u32(s_scalars, 2, T.uint32(0), remaining_k)
+                        with K.If(tx == 0), K.Then():
+                            st_shared_pair_u32(s_scalars, 2, K.uint32(0), remaining_k)
                         bar_sync()
-                        if tx < RADIX:
-                            count_ge: T.uint32 = ld_shared_u32(s_suffix, tx)
-                            count_gt: T.uint32 = T.uint32(0)
-                            if tx + 1 < RADIX:
-                                count_gt = ld_shared_u32(s_suffix, tx + 1)
-                            if T.And(count_ge >= remaining_k, count_gt < remaining_k):
+                        with K.If(tx < RADIX), K.Then():
+                            count_ge = ld_shared_u32(s_suffix, tx)
+                            count_gt = K.local_scalar("uint32", init=K.uint32(0))
+                            with K.If(tx + 1 < RADIX), K.Then():
+                                K.assign(count_gt, ld_shared_u32(s_suffix, tx + 1))
+                            with (
+                                K.If(K.And(count_ge >= remaining_k, count_gt < remaining_k)),
+                                K.Then(),
+                            ):
                                 st_shared_pair_u32(
-                                    s_scalars, 2, T.cast(tx, "uint32"), remaining_k - count_gt
+                                    s_scalars, 2, K.cast(tx, "uint32"), remaining_k - count_gt
                                 )
                         bar_sync()
-                        if tx == 0:
+                        with K.If(tx == 0), K.Then():
                             found = ld_shared_pair_u32(s_scalars, 2)
                             st_shared_pair_u32(
                                 s_scalars,
                                 0,
-                                T.bitwise_or(
-                                    prefix, T.shift_left(found[0], T.cast(shift, "uint32"))
+                                K.bitwise_or(
+                                    prefix, K.shift_left(found[0], K.cast(shift, "uint32"))
                                 ),
                                 found[1],
                             )
                         bar_sync()
 
-                    pivot: T.uint32 = ld_shared_u32(s_scalars, 0)
+                    pivot = ld_shared_u32(s_scalars, 0)
                     if not is32:
-                        pivot = T.bitwise_and(pivot, T.uint32(0xFFFF))
+                        # The 16-bit narrowing is consumed by every collect loop;
+                        # snapshot it rather than re-masking the raw scalar there.
+                        pivot = K.local_scalar(
+                            "uint32", init=K.bitwise_and(pivot, K.uint32(0xFFFF))
+                        )
 
                     # === Stage 3: CTA-local gt (and eq) counts (:777-830) ==
-                    if tx == 0:
+                    with K.If(tx == 0), K.Then():
                         if deterministic:
-                            st_shared_pair_u32(s_suffix, 0, T.uint32(0), T.uint32(0))
+                            st_shared_pair_u32(s_suffix, 0, K.uint32(0), K.uint32(0))
                         else:
-                            st_shared_u32(s_suffix, 0, T.uint32(0))
+                            st_shared_u32(s_suffix, 0, K.uint32(0))
                     bar_sync()
-                    my_gt: T.uint32 = T.uint32(0)
-                    my_eq: T.uint32 = T.uint32(0)
-                    for ic in T.serial(tx, actual, step=BLOCK_THREADS, unroll=2):
-                        key2: T.uint32 = T.cast(ld_key(s_ordered, ic), "uint32")
-                        my_gt = my_gt + T.Select(key2 > pivot, T.uint32(1), T.uint32(0))
+                    my_gt = K.local_scalar("uint32", init=K.uint32(0))
+                    my_eq = K.local_scalar("uint32", init=K.uint32(0))
+                    with K.serial(tx, actual, step=BLOCK_THREADS, unroll=2) as ic:
+                        key2 = K.cast(ld_key(s_ordered, ic), "uint32")
+                        K.assign(my_gt, my_gt + K.Select(key2 > pivot, K.uint32(1), K.uint32(0)))
                         if deterministic:
-                            my_eq = my_eq + T.Select(key2 == pivot, T.uint32(1), T.uint32(0))
-                    for step in T.unroll(5):
-                        delta: T.int32 = T.shift_right(T.int32(16), step)
-                        my_gt = my_gt + shfl_down_u32(my_gt, delta)
+                            K.assign(
+                                my_eq, my_eq + K.Select(key2 == pivot, K.uint32(1), K.uint32(0))
+                            )
+                    with K.unroll(5) as step:
+                        delta = K.shift_right(K.int32(16), step)
+                        K.assign(my_gt, my_gt + shfl_down_u32(my_gt, delta))
                         if deterministic:
-                            my_eq = my_eq + shfl_down_u32(my_eq, delta)
-                    lane: T.int32 = T.bitwise_and(tx, T.int32(31))
-                    if T.And(lane == 0, my_gt > T.uint32(0)):
-                        T.evaluate(atom_shared_add_u32(s_suffix, 0, my_gt))
+                            K.assign(my_eq, my_eq + shfl_down_u32(my_eq, delta))
+                    lane = K.bitwise_and(tx, K.int32(31))
+                    with K.If(K.And(lane == 0, my_gt > K.uint32(0))), K.Then():
+                        K.evaluate(atom_shared_add_u32(s_suffix, 0, my_gt))
                     if deterministic:
-                        if T.And(lane == 0, my_eq > T.uint32(0)):
-                            T.evaluate(atom_shared_add_u32(s_suffix, 1, my_eq))
+                        with K.If(K.And(lane == 0, my_eq > K.uint32(0))), K.Then():
+                            K.evaluate(atom_shared_add_u32(s_suffix, 1, my_eq))
                     bar_sync()
-                    gt_count: T.uint32 = ld_shared_u32(s_suffix, 0)
+                    gt_count = ld_shared_u32(s_suffix, 0)
 
                     # === Stage 3b: epilogue-scope aux (:1344-1345, :1373) ==
-                    src_base: T.int64 = T.int64(0)
+                    src_base = K.int64(0)
                     if page_table:
                         if row_to_batch:
-                            batch_idx = T.reinterpret(
+                            batch_idx = K.reinterpret(
                                 "int32", ld_global_u32(row_to_batch_g, row_idx)
                             )
-                        src_base = T.cast(batch_idx, "int64") * aux_stride
+                        src_base = K.cast(batch_idx, "int64") * aux_stride
                     if ragged:
-                        offset = T.reinterpret(
-                            "int32", ld_global_u32(aux, T.cast(row_idx, "int64"))
+                        offset = K.reinterpret(
+                            "int32", ld_global_u32(aux, K.cast(row_idx, "int64"))
                         )
 
                     if not deterministic:
                         # === Stage 4a: non-deterministic collect (:906-963) =
-                        if tx == 0:
-                            st_shared_u32(s_hist, 0, T.uint32(0))
-                            if gt_count > T.uint32(0):
+                        with K.If(tx == 0), K.Then():
+                            st_shared_u32(s_hist, 0, K.uint32(0))
+                            with K.If(gt_count > K.uint32(0)), K.Then():
                                 st_shared_u32(
                                     s_hist, 1, atom_global_add_u32(state, output_word, gt_count)
                                 )
                         bar_sync()
-                        for i in T.serial(tx, actual, step=BLOCK_THREADS, unroll=2):
-                            key3: T.uint32 = T.cast(ld_key(s_ordered, i), "uint32")
-                            if key3 > pivot:
-                                local_pos: T.uint32 = atom_shared_add_u32(s_hist, 0, T.uint32(1))
-                                pos: T.int32 = T.cast(ld_shared_u32(s_hist, 1) + local_pos, "int32")
+                        with K.serial(tx, actual, step=BLOCK_THREADS, unroll=2) as i:
+                            key3 = K.cast(ld_key(s_ordered, i), "uint32")
+                            with K.If(key3 > pivot), K.Then():
+                                local_pos = atom_shared_add_u32(s_hist, 0, K.uint32(1))
+                                pos = K.cast(ld_shared_u32(s_hist, 1) + local_pos, "int32")
                                 emit_selected(
                                     out_idx,
                                     out_val,
@@ -672,29 +680,14 @@ def get_kernel(
                                     is32,
                                     dtype,
                                 )
-                        # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                        # One fenced arrival from thread 0 (:176), an acquire spin to the
-                        # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                        # one (:133) and the phase bump is followed by another (:182).
-                        if tx == 0:
-                            red_release_gpu_add_s32(state, arrival_word, T.int32(1))
-                        bar_target2: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
-                            ctas_per_group
-                        )
-                        if tx == 0:
-                            spin2: T.int32 = ld_acquire_gpu_s32(state, arrival_word)
-                            while spin2 < bar_target2:
-                                spin2 = ld_acquire_gpu_s32(state, arrival_word)
-                        bar_sync()
-                        barrier_phase = barrier_phase + T.int32(1)
-                        bar_sync()
-                        for i in T.serial(tx, actual, step=BLOCK_THREADS, unroll=2):
-                            key4: T.uint32 = T.cast(ld_key(s_ordered, i), "uint32")
-                            if key4 == pivot:
-                                pos2: T.int32 = T.cast(
-                                    atom_global_add_u32(state, output_word, T.uint32(1)), "int32"
+                        advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
+                        with K.serial(tx, actual, step=BLOCK_THREADS, unroll=2) as i:
+                            key4 = K.cast(ld_key(s_ordered, i), "uint32")
+                            with K.If(key4 == pivot), K.Then():
+                                pos2 = K.cast(
+                                    atom_global_add_u32(state, output_word, K.uint32(1)), "int32"
                                 )
-                                if pos2 < k:
+                                with K.If(pos2 < k), K.Then():
                                     emit_selected(
                                         out_idx,
                                         out_val,
@@ -710,230 +703,232 @@ def get_kernel(
                                     )
                     else:
                         # === Stage 4b: deterministic collect (:1048-1138) ==
-                        eq_count: T.uint32 = ld_shared_u32(s_suffix, 1)
-                        if tx == 0:
-                            st_shared_u32(s_hist, 1, T.uint32(0))
-                            st_shared_u32(s_hist, 4, T.uint32(0))
+                        eq_count = ld_shared_u32(s_suffix, 1)
+                        with K.If(tx == 0), K.Then():
+                            st_shared_u32(s_hist, 1, K.uint32(0))
+                            st_shared_u32(s_hist, 4, K.uint32(0))
                             st_global_u32(state, det_base + cta_in_group, gt_count)
-                            st_global_u32(state, det_base + T.int32(RADIX) + cta_in_group, eq_count)
-                        # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                        # One fenced arrival from thread 0 (:176), an acquire spin to the
-                        # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                        # one (:133) and the phase bump is followed by another (:182).
-                        if tx == 0:
-                            red_release_gpu_add_s32(state, arrival_word, T.int32(1))
-                        bar_target3: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
-                            ctas_per_group
-                        )
-                        if tx == 0:
-                            spin3: T.int32 = ld_acquire_gpu_s32(state, arrival_word)
-                            while spin3 < bar_target3:
-                                spin3 = ld_acquire_gpu_s32(state, arrival_word)
-                        bar_sync()
-                        barrier_phase = barrier_phase + T.int32(1)
-                        bar_sync()
-                        if tx == 0:
-                            gt_prefix: T.uint32 = T.uint32(0)
-                            row_total_gt: T.uint32 = T.uint32(0)
-                            eq_prefix: T.uint32 = T.uint32(0)
-                            for c in T.serial(0, ctas_per_group):
-                                c_gt: T.uint32 = ld_global_u32(state, det_base + c)
-                                c_eq: T.uint32 = ld_global_u32(state, det_base + T.int32(RADIX) + c)
-                                if c < cta_in_group:
-                                    gt_prefix = gt_prefix + c_gt
-                                    eq_prefix = eq_prefix + c_eq
-                                row_total_gt = row_total_gt + c_gt
-                            eq_needed: T.uint32 = T.uint32(0)
-                            if T.uint32(k) > row_total_gt:
-                                eq_needed = T.uint32(k) - row_total_gt
+                            st_global_u32(state, det_base + K.int32(RADIX) + cta_in_group, eq_count)
+                        advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
+                        with K.If(tx == 0), K.Then():
+                            gt_prefix = K.local_scalar("uint32", init=K.uint32(0))
+                            row_total_gt = K.local_scalar("uint32", init=K.uint32(0))
+                            eq_prefix = K.local_scalar("uint32", init=K.uint32(0))
+                            with K.serial(0, ctas_per_group) as c:
+                                c_gt = ld_global_u32(state, det_base + c)
+                                c_eq = ld_global_u32(state, det_base + K.int32(RADIX) + c)
+                                with K.If(c < cta_in_group), K.Then():
+                                    K.assign(gt_prefix, gt_prefix + c_gt)
+                                    K.assign(eq_prefix, eq_prefix + c_eq)
+                                K.assign(row_total_gt, row_total_gt + c_gt)
+                            eq_needed = K.local_scalar("uint32", init=K.uint32(0))
+                            with K.If(K.uint32(k) > row_total_gt), K.Then():
+                                K.assign(eq_needed, K.uint32(k) - row_total_gt)
                             st_shared_quad_u32(
                                 s_hist, 0, gt_prefix, eq_prefix, row_total_gt, eq_needed
                             )
-                            st_shared_u32(s_hist, 4, T.uint32(0))
-                            if eq_needed > eq_prefix:
-                                st_shared_u32(s_hist, 4, T.min(eq_count, eq_needed - eq_prefix))
+                            st_shared_u32(s_hist, 4, K.uint32(0))
+                            with K.If(eq_needed > eq_prefix), K.Then():
+                                st_shared_u32(s_hist, 4, K.min(eq_count, eq_needed - eq_prefix))
                         bar_sync()
+                        # Snapshot the two fields the collect needs so the
+                        # four-register quad dies here; read lazily it would stay
+                        # live across the whole raking scan and cost spills.
                         plan_v = ld_shared_quad_u32(s_hist, 0)
-                        gt_base: T.uint32 = plan_v[0]
-                        eq_base: T.uint32 = plan_v[2] + plan_v[1]
-                        eq_limit: T.uint32 = ld_shared_u32(s_hist, 4)
-                        gt_limit: T.uint32 = T.uint32(0)
-                        if T.uint32(k) > gt_base:
-                            gt_limit = T.uint32(k) - gt_base
+                        gt_base = K.local_scalar("uint32", init=plan_v[0])
+                        eq_base = K.local_scalar("uint32", init=plan_v[2] + plan_v[1])
+                        eq_limit = ld_shared_u32(s_hist, 4)
+                        gt_limit = K.local_scalar("uint32", init=K.uint32(0))
+                        with K.If(K.uint32(k) > gt_base), K.Then():
+                            K.assign(gt_limit, K.uint32(k) - gt_base)
 
-                        if eq_limit == T.uint32(0):
-                            sel: T.uint32 = T.uint32(0)
-                            for id1 in T.serial(tx, actual, step=BLOCK_THREADS):
-                                key5: T.uint32 = T.cast(ld_key(s_ordered, id1), "uint32")
-                                sel = sel + T.Select(key5 > pivot, T.uint32(1), T.uint32(0))
-                            rake_off: T.int32 = _raking_offset(tx)
-                            st_shared_u32(s_scan, rake_off, sel)
-                            bar_sync()
-                            if tx < RAKING_THREADS:
-                                rake_base: T.int32 = tx * RAKING_STRIDE
-                                cache = T.alloc_local((RAKING_SEGMENT,), "uint32")
-                                total: T.uint32 = T.uint32(0)
-                                for j in T.unroll(RAKING_SEGMENT):
-                                    cache[j] = ld_shared_u32(s_scan, rake_base + j)
-                                    total = total + cache[j]
-                                run: T.uint32 = warp_inclusive_sum_u32(total, tx) - total
-                                for j in T.unroll(RAKING_SEGMENT):
-                                    st_shared_u32(s_scan, rake_base + j, run)
-                                    run = run + cache[j]
-                            bar_sync()
-                            pre: T.uint32 = ld_shared_u32(s_scan, rake_off)
-                            if T.And(sel > T.uint32(0), pre < gt_limit):
-                                emit_pos: T.uint32 = pre
-                                emit_end: T.uint32 = pre + sel
-                                if emit_end > gt_limit:
-                                    emit_end = gt_limit
-                                done: T.int32 = 0
-                                for id3 in T.serial(tx, actual, step=BLOCK_THREADS):
-                                    if done == 0:
-                                        key6: T.uint32 = T.cast(ld_key(s_ordered, id3), "uint32")
-                                        if key6 > pivot:
+                        with K.If(eq_limit == K.uint32(0)):
+                            with K.Then():
+                                sel = K.local_scalar("uint32", init=K.uint32(0))
+                                with K.serial(tx, actual, step=BLOCK_THREADS) as id1:
+                                    key5 = K.cast(ld_key(s_ordered, id1), "uint32")
+                                    K.assign(
+                                        sel, sel + K.Select(key5 > pivot, K.uint32(1), K.uint32(0))
+                                    )
+                                rake_off = _raking_offset(tx)
+                                st_shared_u32(s_scan, rake_off, sel)
+                                bar_sync()
+                                with K.If(tx < RAKING_THREADS), K.Then():
+                                    rake_base = tx * RAKING_STRIDE
+                                    cache = K.alloc_local([RAKING_SEGMENT], "uint32")
+                                    total = K.local_scalar("uint32", init=K.uint32(0))
+                                    with K.unroll(RAKING_SEGMENT) as j:
+                                        K.assign(cache[j], ld_shared_u32(s_scan, rake_base + j))
+                                        K.assign(total, total + cache[j])
+                                    run = K.local_scalar(
+                                        "uint32", init=warp_inclusive_sum_u32(total, tx) - total
+                                    )
+                                    with K.unroll(RAKING_SEGMENT) as j:
+                                        st_shared_u32(s_scan, rake_base + j, run)
+                                        K.assign(run, run + cache[j])
+                                bar_sync()
+                                pre = ld_shared_u32(s_scan, rake_off)
+                                with K.If(K.And(sel > K.uint32(0), pre < gt_limit)), K.Then():
+                                    emit_pos = K.local_scalar("uint32", init=pre)
+                                    emit_end = K.local_scalar("uint32", init=pre + sel)
+                                    with K.If(emit_end > gt_limit), K.Then():
+                                        K.assign(emit_end, gt_limit)
+                                    done = K.local_scalar("int32", init=K.int32(0))
+                                    with K.serial(tx, actual, step=BLOCK_THREADS) as id3:
+                                        with K.If(done == 0), K.Then():
+                                            key6 = K.cast(ld_key(s_ordered, id3), "uint32")
+                                            with K.If(key6 > pivot), K.Then():
+                                                emit_selected(
+                                                    out_idx,
+                                                    out_val,
+                                                    row_out,
+                                                    chunk_start + id3,
+                                                    key6,
+                                                    K.cast(gt_base + emit_pos, "int32"),
+                                                    offset,
+                                                    basic,
+                                                    ragged,
+                                                    is32,
+                                                    dtype,
+                                                )
+                                                K.assign(emit_pos, emit_pos + K.uint32(1))
+                                                with K.If(emit_pos == emit_end), K.Then():
+                                                    K.assign(done, 1)
+                                bar_sync()
+                            with K.Else():
+                                sel_gt = K.local_scalar("uint32", init=K.uint32(0))
+                                sel_eq = K.local_scalar("uint32", init=K.uint32(0))
+                                with K.serial(tx, actual, step=BLOCK_THREADS) as id4:
+                                    key7 = K.cast(ld_key(s_ordered, id4), "uint32")
+                                    K.assign(
+                                        sel_gt,
+                                        sel_gt + K.Select(key7 > pivot, K.uint32(1), K.uint32(0)),
+                                    )
+                                    K.assign(
+                                        sel_eq,
+                                        sel_eq + K.Select(key7 == pivot, K.uint32(1), K.uint32(0)),
+                                    )
+                                # The same raking scan over the {gt, eq} pair (:1122-1125).
+                                rake_off2 = _raking_offset(tx) * 2
+                                st_shared_pair_u32(s_scan, rake_off2, sel_gt, sel_eq)
+                                bar_sync()
+                                with K.If(tx < RAKING_THREADS), K.Then():
+                                    rake_base2 = tx * RAKING_STRIDE * 2
+                                    cache_gt = K.alloc_local([RAKING_SEGMENT], "uint32")
+                                    cache_eq = K.alloc_local([RAKING_SEGMENT], "uint32")
+                                    total_gt = K.local_scalar("uint32", init=K.uint32(0))
+                                    total_eq = K.local_scalar("uint32", init=K.uint32(0))
+                                    with K.unroll(RAKING_SEGMENT) as j:
+                                        seg = ld_shared_pair_u32(s_scan, rake_base2 + j * 2)
+                                        K.assign(cache_gt[j], seg[0])
+                                        K.assign(cache_eq[j], seg[1])
+                                        K.assign(total_gt, total_gt + cache_gt[j])
+                                        K.assign(total_eq, total_eq + cache_eq[j])
+                                    run_gt = K.local_scalar(
+                                        "uint32",
+                                        init=warp_inclusive_sum_u32(total_gt, tx) - total_gt,
+                                    )
+                                    run_eq = K.local_scalar(
+                                        "uint32",
+                                        init=warp_inclusive_sum_u32(total_eq, tx) - total_eq,
+                                    )
+                                    with K.unroll(RAKING_SEGMENT) as j:
+                                        st_shared_pair_u32(
+                                            s_scan, rake_base2 + j * 2, run_gt, run_eq
+                                        )
+                                        K.assign(run_gt, run_gt + cache_gt[j])
+                                        K.assign(run_eq, run_eq + cache_eq[j])
+                                bar_sync()
+                                seg_out = ld_shared_pair_u32(s_scan, rake_off2)
+                                cur_gt = K.local_scalar("uint32", init=seg_out[0])
+                                cur_eq = K.local_scalar("uint32", init=seg_out[1])
+                                with K.serial(tx, actual, step=BLOCK_THREADS) as i8:
+                                    key8 = K.cast(ld_key(s_ordered, i8), "uint32")
+                                    # `>` and `==` are mutually exclusive, so the
+                                    # source's if / else-if pair (:1130-1136) is two
+                                    # conjunctions rather than four nested branches.
+                                    with K.If(K.And(key8 > pivot, cur_gt < gt_limit)):
+                                        with K.Then():
                                             emit_selected(
                                                 out_idx,
                                                 out_val,
                                                 row_out,
-                                                chunk_start + id3,
-                                                key6,
-                                                T.cast(gt_base + emit_pos, "int32"),
+                                                chunk_start + i8,
+                                                key8,
+                                                K.cast(gt_base + cur_gt, "int32"),
                                                 offset,
                                                 basic,
                                                 ragged,
                                                 is32,
                                                 dtype,
                                             )
-                                            emit_pos = emit_pos + T.uint32(1)
-                                            if emit_pos == emit_end:
-                                                done = 1
-                            bar_sync()
-                        else:
-                            sel_gt: T.uint32 = T.uint32(0)
-                            sel_eq: T.uint32 = T.uint32(0)
-                            for id4 in T.serial(tx, actual, step=BLOCK_THREADS):
-                                key7: T.uint32 = T.cast(ld_key(s_ordered, id4), "uint32")
-                                sel_gt = sel_gt + T.Select(key7 > pivot, T.uint32(1), T.uint32(0))
-                                sel_eq = sel_eq + T.Select(key7 == pivot, T.uint32(1), T.uint32(0))
-                            rake_off2: T.int32 = _raking_offset(tx) * 2
-                            st_shared_pair_u32(s_scan, rake_off2, sel_gt, sel_eq)
-                            bar_sync()
-                            if tx < RAKING_THREADS:
-                                rake_base2: T.int32 = tx * RAKING_STRIDE * 2
-                                cache_gt = T.alloc_local((RAKING_SEGMENT,), "uint32")
-                                cache_eq = T.alloc_local((RAKING_SEGMENT,), "uint32")
-                                total_gt: T.uint32 = T.uint32(0)
-                                total_eq: T.uint32 = T.uint32(0)
-                                for j in T.unroll(RAKING_SEGMENT):
-                                    seg = ld_shared_pair_u32(s_scan, rake_base2 + j * 2)
-                                    cache_gt[j] = seg[0]
-                                    cache_eq[j] = seg[1]
-                                    total_gt = total_gt + cache_gt[j]
-                                    total_eq = total_eq + cache_eq[j]
-                                run_gt: T.uint32 = warp_inclusive_sum_u32(total_gt, tx) - total_gt
-                                run_eq: T.uint32 = warp_inclusive_sum_u32(total_eq, tx) - total_eq
-                                for j in T.unroll(RAKING_SEGMENT):
-                                    st_shared_pair_u32(s_scan, rake_base2 + j * 2, run_gt, run_eq)
-                                    run_gt = run_gt + cache_gt[j]
-                                    run_eq = run_eq + cache_eq[j]
-                            bar_sync()
-                            seg_out = ld_shared_pair_u32(s_scan, rake_off2)
-                            seg_gt: T.uint32 = seg_out[0]
-                            seg_eq: T.uint32 = seg_out[1]
-                            cur_gt: T.uint32 = seg_gt
-                            cur_eq: T.uint32 = seg_eq
-                            for i8 in T.serial(tx, actual, step=BLOCK_THREADS):
-                                key8: T.uint32 = T.cast(ld_key(s_ordered, i8), "uint32")
-                                if T.And(key8 > pivot, cur_gt < gt_limit):
-                                    emit_selected(
-                                        out_idx,
-                                        out_val,
-                                        row_out,
-                                        chunk_start + i8,
-                                        key8,
-                                        T.cast(gt_base + cur_gt, "int32"),
-                                        offset,
-                                        basic,
-                                        ragged,
-                                        is32,
-                                        dtype,
-                                    )
-                                    cur_gt = cur_gt + T.uint32(1)
-                                elif T.And(key8 == pivot, cur_eq < eq_limit):
-                                    emit_selected(
-                                        out_idx,
-                                        out_val,
-                                        row_out,
-                                        chunk_start + i8,
-                                        key8,
-                                        T.cast(eq_base + cur_eq, "int32"),
-                                        offset,
-                                        basic,
-                                        ragged,
-                                        is32,
-                                        dtype,
-                                    )
-                                    cur_eq = cur_eq + T.uint32(1)
-                            bar_sync()
+                                            K.assign(cur_gt, cur_gt + K.uint32(1))
+                                        with K.Else():
+                                            with (
+                                                K.If(K.And(key8 == pivot, cur_eq < eq_limit)),
+                                                K.Then(),
+                                            ):
+                                                emit_selected(
+                                                    out_idx,
+                                                    out_val,
+                                                    row_out,
+                                                    chunk_start + i8,
+                                                    key8,
+                                                    K.cast(eq_base + cur_eq, "int32"),
+                                                    offset,
+                                                    basic,
+                                                    ragged,
+                                                    is32,
+                                                    dtype,
+                                                )
+                                                K.assign(cur_eq, cur_eq + K.uint32(1))
+                                bar_sync()
 
                     # === Stage 5: PageTable gather, split (:1359-1371) =====
                     if page_table:
-                        # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                        # One fenced arrival from thread 0 (:176), an acquire spin to the
-                        # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                        # one (:133) and the phase bump is followed by another (:182).
-                        if tx == 0:
-                            red_release_gpu_add_s32(state, arrival_word, T.int32(1))
-                        bar_target4: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
-                            ctas_per_group
+                        advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
+                        elems = K.truncdiv(
+                            K.int32(k) + K.int32(ctas_per_group) - 1, K.int32(ctas_per_group)
                         )
-                        if tx == 0:
-                            spin4: T.int32 = ld_acquire_gpu_s32(state, arrival_word)
-                            while spin4 < bar_target4:
-                                spin4 = ld_acquire_gpu_s32(state, arrival_word)
-                        bar_sync()
-                        barrier_phase = barrier_phase + T.int32(1)
-                        bar_sync()
-                        elems: T.int32 = T.truncdiv(
-                            T.int32(k) + T.int32(ctas_per_group) - 1, T.int32(ctas_per_group)
-                        )
-                        my_start: T.int32 = cta_in_group * elems
-                        my_end: T.int32 = T.min(my_start + elems, T.int32(k))
-                        for ig in T.serial(my_start + tx, my_end, step=BLOCK_THREADS):
-                            out_slot: T.int64 = row_out + T.cast(ig, "int64")
-                            gidx: T.int32 = T.reinterpret("int32", ld_global_u32(out_idx, out_slot))
-                            gathered: T.uint32 = ld_global_u32(
-                                aux, src_base + T.cast(page_start + gidx, "int64")
+                        my_start = cta_in_group * elems
+                        # Loop bound again: snapshot so the `min` does not run
+                        # once per gathered element.
+                        my_end = K.local_scalar("int32", init=K.min(my_start + elems, K.int32(k)))
+                        with K.serial(my_start + tx, my_end, step=BLOCK_THREADS) as ig:
+                            out_slot = row_out + K.cast(ig, "int64")
+                            gidx = K.reinterpret("int32", ld_global_u32(out_idx, out_slot))
+                            st_global_u32(
+                                out_idx,
+                                out_slot,
+                                ld_global_u32(aux, src_base + K.cast(page_start + gidx, "int64")),
                             )
-                            st_global_u32(out_idx, out_slot, gathered)
 
         # === exit: the last CTA of the group resets the state (:203-238) ===
         bar_sync()
-        if tx == 0:
-            old: T.int32 = atom_add_release_gpu_s32(state, arrival_word, T.int32(1))
+        with K.If(tx == 0), K.Then():
+            old = atom_add_release_gpu_s32(state, arrival_word, K.int32(1))
             st_shared_u32(
                 s_last,
                 0,
-                T.Select(
-                    old + T.int32(1) == (barrier_phase + T.int32(1)) * ctas_per_group,
-                    T.uint32(1),
-                    T.uint32(0),
+                K.Select(
+                    old + K.int32(1) == (phase + K.int32(1)) * ctas_per_group,
+                    K.uint32(1),
+                    K.uint32(0),
                 ),
             )
         bar_sync()
-        if ld_shared_u32(s_last, 0) != T.uint32(0):
-            for bufi in T.serial(0, 3):
-                for br in T.serial(tx, RADIX, step=BLOCK_THREADS):
-                    st_global_u32(state, st_base + bufi * T.int32(RADIX) + br, T.uint32(0))
+        with K.If(ld_shared_u32(s_last, 0) != K.uint32(0)), K.Then():
+            with K.serial(0, 3) as bufi:
+                with K.serial(tx, RADIX, step=BLOCK_THREADS) as br:
+                    st_global_u32(state, st_base + bufi * K.int32(RADIX) + br, K.uint32(0))
             if deterministic:
-                for dw in T.serial(tx, DET_SCRATCH_WORDS, step=BLOCK_THREADS):
-                    st_global_u32(state, det_base + dw, T.uint32(0))
+                with K.serial(tx, DET_SCRATCH_WORDS, step=BLOCK_THREADS) as dw:
+                    st_global_u32(state, det_base + dw, K.uint32(0))
             bar_sync()
-            if tx == 0:
-                st_release_gpu_s32(state, arrival_word, T.int32(0))
+            with K.If(tx == 0), K.Then():
+                st_release_gpu_s32(state, arrival_word, K.int32(0))
 
-    return radix_topk_multi_cta.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return radix_topk_multi_cta.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 
 
 # ---------------------------------------------------------------------------
