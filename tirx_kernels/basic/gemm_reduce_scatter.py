@@ -469,68 +469,62 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
     RS_N_CLUSTERS = config.rs_n_clusters
 
     def host_prelude(params):
-        A_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
-        B_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
-        D_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
-        Kern.evaluate(
-            Kern.call_packed(
-                "runtime.cuTensorMapEncodeTiled",
-                A_tensor_map,
-                a_type,
-                2,
-                params["A"].data,
-                K_LOCAL,
-                M,
-                K_LOCAL * F16_BYTES,
-                BLK_K,
-                BLK_M,
-                1,
-                1,
-                0,
-                SWIZZLE,
-                0,
-                0,
-            )
+        A_tensor_map = Kern.stack_alloca("tensormap", 1)
+        B_tensor_map = Kern.stack_alloca("tensormap", 1)
+        D_tensor_map = Kern.stack_alloca("tensormap", 1)
+        Kern.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            A_tensor_map,
+            a_type,
+            2,
+            params["A"].data,
+            K_LOCAL,
+            M,
+            K_LOCAL * F16_BYTES,
+            BLK_K,
+            BLK_M,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            0,
+            0,
         )
-        Kern.evaluate(
-            Kern.call_packed(
-                "runtime.cuTensorMapEncodeTiled",
-                B_tensor_map,
-                b_type,
-                2,
-                params["B"].data,
-                K_LOCAL,
-                N,
-                K_LOCAL * F16_BYTES,
-                BLK_K,
-                BLK_N,
-                1,
-                1,
-                0,
-                SWIZZLE,
-                0,
-                0,
-            )
+        Kern.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            B_tensor_map,
+            b_type,
+            2,
+            params["B"].data,
+            K_LOCAL,
+            N,
+            K_LOCAL * F16_BYTES,
+            BLK_K,
+            BLK_N,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            0,
+            0,
         )
-        Kern.evaluate(
-            Kern.call_packed(
-                "runtime.cuTensorMapEncodeTiled",
-                D_tensor_map,
-                d_type,
-                2,
-                params["gemm_out"].data,
-                N,
-                M,
-                N * F16_BYTES,
-                EPI_TILE,
-                BLK_M,
-                1,
-                1,
-                0,
-                SWIZZLE,
-                0,
-                0,
-            )
+        Kern.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            D_tensor_map,
+            d_type,
+            2,
+            params["gemm_out"].data,
+            N,
+            M,
+            N * F16_BYTES,
+            EPI_TILE,
+            BLK_M,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            0,
+            0,
         )
         return A_tensor_map, B_tensor_map, D_tensor_map
 
@@ -568,7 +562,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         exit_barrier = exit_barrier.view(2)
 
         cbx_expr, _ = I.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
-        cbx = Kern.Bind(cbx_expr)
+        cbx = cbx_expr
         bx = Kern.cta_id()
         warp_id_in_cta = Kern.warp_id()
         wg_id = warp_id_in_cta // WARP_NUMBER
@@ -704,12 +698,12 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
 
         with Kern.While(tile_scheduler.valid()):
             with Kern.If(tile_scheduler.fetched_task_type[0] == TaskType.RS.value), Kern.Then():
-                m_idx = Kern.Bind(tile_scheduler.fetched_task_idx0[0])
-                n_idx = Kern.Bind(tile_scheduler.fetched_task_idx1[0])
+                m_idx = tile_scheduler.fetched_task_idx0[0]
+                n_idx = tile_scheduler.fetched_task_idx1[0]
                 Kern.assign(offset[0], tid)
                 with Kern.While(offset[0] < TILE_M // 2 * TILE_N // 8):
-                    m_start = Kern.Bind(offset[0] // (TILE_N // 8))
-                    n_start = Kern.Bind(offset[0] % (TILE_N // 8) * 8)
+                    m_start = offset[0] // (TILE_N // 8)
+                    n_start = offset[0] % (TILE_N // 8) * 8
                     if WORLD_SIZE == 1:
                         Kern.ptx.ld.global_.v4.b32(
                             copy_words[0],
@@ -758,8 +752,8 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                     Kern.assign(offset[0], offset[0] + NUM_THREADS)
 
             with Kern.If(tile_scheduler.fetched_task_type[0] == TaskType.GEMM.value), Kern.Then():
-                m_idx = Kern.Bind(tile_scheduler.fetched_task_idx0[0])
-                n_idx = Kern.Bind(tile_scheduler.fetched_task_idx1[0])
+                m_idx = tile_scheduler.fetched_task_idx0[0]
+                n_idx = tile_scheduler.fetched_task_idx1[0]
 
                 def emit_producer_roles():
                     def tma_body():
@@ -767,7 +761,11 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
 
                             def tma_load(_is_remain, ks):
                                 smem_pipe.empty.wait(ks, smem_cycle.phase)
-                                stage_k = Kern.Bind(stage[0] * BLK_K)
+                                # Materialized, not plain: `stage` is a mutable
+                                # cursor the pipeline rewrites per iteration, and
+                                # this value feeds three TMA coordinates. A plain
+                                # name would re-load stage[0] at each of them.
+                                stage_k = Kern.local_scalar("int32", init=stage[0] * BLK_K)
                                 Kern.ptx[_TMA_G2S_CG2](
                                     A_smem.ptr_to([ks, 0, 0, 0]),
                                     Kern.address_of(A_tensor_map),
@@ -898,7 +896,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                     tmem_cycle.advance()
                     Kern.ptx.tcgen05.fence__after_thread_sync()
                     for i in range(MMA_N // TMEM_LD_SIZE):
-                        col_st = Kern.Bind(consumer_wg * MMA_N + i * TMEM_LD_SIZE)
+                        col_st = consumer_wg * MMA_N + i * TMEM_LD_SIZE
                         Kern.ptx[_TMEM_LD_64](
                             *[reg[j] for j in range(TMEM_LD_SIZE)], Kern.cast(col_st, "uint32")
                         )
@@ -930,9 +928,9 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
                             Kern.ptx.cp.async_.bulk.wait_group(0)
                         Kern.cuda.warpgroup_sync(consumer_wg)
                     tmem_pipe.empty.arrive(consumer_wg, remote=0)
-                    comm_m_idx = Kern.Bind(m_idx * 2 + consumer_wg)
-                    comm_m_idx_local = Kern.Bind(comm_m_idx % (LOCAL_M // TILE_M))
-                    signal_rank = Kern.Bind(comm_m_idx // (LOCAL_M // TILE_M))
+                    comm_m_idx = m_idx * 2 + consumer_wg
+                    comm_m_idx_local = comm_m_idx % (LOCAL_M // TILE_M)
+                    signal_rank = comm_m_idx // (LOCAL_M // TILE_M)
                     sem.semaphore_notify(signal_rank, tid, comm_m_idx_local, n_idx, rs_queue)
 
             fetch_next()
