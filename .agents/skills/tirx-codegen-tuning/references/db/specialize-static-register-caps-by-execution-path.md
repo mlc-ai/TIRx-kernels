@@ -1,6 +1,6 @@
 # Specialize static register caps by execution path
 
-**Symptoms:** `register_budget_mismatch`, `schedule_regression`, `dispatch_specific_deficit`, `low_occupancy`
+**Symptoms:** `register_budget_mismatch`, `schedule_regression`, `dispatch_specific_deficit`, `low_occupancy`, `small_grid`
 
 ## Symptom
 
@@ -54,6 +54,15 @@ changing the mathematical kernel: the dependency-protocol path moved from
 1.001x in the final complete matrix. A static cap is a contract with the
 current allocator and scheduler, not a stable source-level constant.
 
+An underfilled launch isolated the scheduling effect from occupancy. With only
+16 CTAs on 148 SMs, lowering realized allocation from 96 to 80 registers could
+not reduce actual CTA occupancy; it kept the complete opcode vectors identical
+and introduced no spill, yet moved the ratio from 0.983 to 0.972. Raising the
+allocation to 104 registers reduced dynamic instructions and long-scoreboard
+stall from about 2.69 to 2.34 cycles per issued instruction, also without spill,
+but still measured only 0.975. Matching the reference allocation or improving a
+stall counter did not select the useful cap.
+
 ## Boundary
 
 `tirx.max_registers` and `tirx.launch_bounds_*` are alternative static codegen
@@ -63,6 +72,11 @@ that is too low can introduce spills or recomputation; a cap that is too high
 can reduce occupancy or produce a worse schedule. Re-sweep after any change to
 fragment lifetime, instruction ordering, launch protocol, compiler, or codegen
 pipeline.
+
+A grid too small to fill the machine does not make a cap change free. Even when
+the launch geometry proves occupancy cannot fall, retain a cap only when its
+scheduled SASS and affected/guard timings improve; realized register parity and
+stall counters alone are diagnostic evidence.
 
 Do not copy the reference's realized register count into the cap. One
 source-like cap of 74 moved a wide-fragment path to 4.7-4.9 microseconds, and a
