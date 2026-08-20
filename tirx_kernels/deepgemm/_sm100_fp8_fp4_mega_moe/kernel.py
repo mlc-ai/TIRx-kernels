@@ -204,10 +204,8 @@ _evict_normal_policy = K.uint64(1152921504606846976)
 
 def sm100_tma_2sm_load_2d_addr(dst, mbar, tensormap_addr, coord0, coord1):
     mbar_addr = K.cuda.sm100_2sm_leader_smem_addr(mbar)
-    K.evaluate(
-        K.ptx[_sm100_2sm_load_chain](
-            dst, tensormap_addr, coord0, coord1, mbar_addr, _evict_normal_policy
-        )
+    K.ptx[_sm100_2sm_load_chain](
+        dst, tensormap_addr, coord0, coord1, mbar_addr, _evict_normal_policy
     )
 
 
@@ -305,23 +303,17 @@ def st_async_cluster_task_info(dst_ptr, bar_ptr, dst_cta_idx, task_info_regs):
     mapped_dst = K.alloc_local((1,), "uint32")
     mapped_dst_hi = K.alloc_local((1,), "uint32")
     cta = K.cast(dst_cta_idx, "uint32")
-    K.evaluate(
-        K.ptx.mapa.shared__cluster.u32(mapped_bar[0], K.cuda.cvta_generic_to_shared(bar_ptr), cta)
+    K.ptx.mapa.shared__cluster.u32(mapped_bar[0], K.cuda.cvta_generic_to_shared(bar_ptr), cta)
+    K.ptx.mapa.shared__cluster.u32(mapped_dst[0], K.cuda.cvta_generic_to_shared(dst_ptr), cta)
+    K.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
+        mapped_dst[0],
+        task_info_regs[0],
+        task_info_regs[1],
+        task_info_regs[2],
+        task_info_regs[3],
+        mapped_bar[0],
     )
-    K.evaluate(
-        K.ptx.mapa.shared__cluster.u32(mapped_dst[0], K.cuda.cvta_generic_to_shared(dst_ptr), cta)
-    )
-    K.evaluate(
-        K.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
-            mapped_dst[0],
-            task_info_regs[0],
-            task_info_regs[1],
-            task_info_regs[2],
-            task_info_regs[3],
-            mapped_bar[0],
-        )
-    )
-    K.evaluate(K.ptx.add.u32(mapped_dst_hi[0], mapped_dst[0], K.uint32(16)))
+    K.ptx.add.u32(mapped_dst_hi[0], mapped_dst[0], K.uint32(16))
     return K.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
         mapped_dst_hi[0],
         task_info_regs[4],
@@ -1037,26 +1029,26 @@ def get_kernel(
 
         def prefetch_all_tensormaps(prefetch_warp_idx):
             with K.If(prefetch_warp_idx == 0), K.Then():
-                K.evaluate(prefetch_tensormap(tensor_map_l1_acts))
-                K.evaluate(prefetch_tensormap(tensor_map_l1_acts_sf))
-                K.evaluate(prefetch_tensormap(tensor_map_l1_weights))
-                K.evaluate(prefetch_tensormap(tensor_map_l1_weights_sf))
-                K.evaluate(prefetch_tensormap(tensor_map_l1_output))
-                K.evaluate(prefetch_tensormap(tensor_map_l2_acts))
-                K.evaluate(prefetch_tensormap(tensor_map_l2_acts_sf))
-                K.evaluate(prefetch_tensormap(tensor_map_l2_weights))
-                K.evaluate(prefetch_tensormap(tensor_map_l2_weights_sf))
+                prefetch_tensormap(tensor_map_l1_acts)
+                prefetch_tensormap(tensor_map_l1_acts_sf)
+                prefetch_tensormap(tensor_map_l1_weights)
+                prefetch_tensormap(tensor_map_l1_weights_sf)
+                prefetch_tensormap(tensor_map_l1_output)
+                prefetch_tensormap(tensor_map_l2_acts)
+                prefetch_tensormap(tensor_map_l2_acts_sf)
+                prefetch_tensormap(tensor_map_l2_weights)
+                prefetch_tensormap(tensor_map_l2_weights_sf)
                 # Unconditional in the source for every specialization: at S == 0
                 # these alias the routed descriptors above (impls .cuh:106-114).
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l1_acts))
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l1_acts_sf))
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l1_weights))
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l1_weights_sf))
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l1_output))
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l2_acts))
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l2_acts_sf))
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l2_weights))
-                K.evaluate(prefetch_tensormap(tensor_map_shared_l2_weights_sf))
+                prefetch_tensormap(tensor_map_shared_l1_acts)
+                prefetch_tensormap(tensor_map_shared_l1_acts_sf)
+                prefetch_tensormap(tensor_map_shared_l1_weights)
+                prefetch_tensormap(tensor_map_shared_l1_weights_sf)
+                prefetch_tensormap(tensor_map_shared_l1_output)
+                prefetch_tensormap(tensor_map_shared_l2_acts)
+                prefetch_tensormap(tensor_map_shared_l2_acts_sf)
+                prefetch_tensormap(tensor_map_shared_l2_weights)
+                prefetch_tensormap(tensor_map_shared_l2_weights_sf)
 
         input_topk_idx = K.decl_buffer(
             (workspace_layout.num_max_tokens_per_rank, num_topk),
@@ -2011,13 +2003,11 @@ def get_kernel(
                 K.ptx.mbarrier.arrive.expect_tx.release.cluster.b64(
                     _rem_ti[0], K.uint32(task_info_bytes), pred=K.bool(True)
                 )
-                K.evaluate(
-                    st_async_cluster_task_info(
-                        smem_task_infos.ptr_to([sched_state.stage, 0]),
-                        task_info_full_barriers.ptr_to([sched_state.stage]),
-                        lane_idx,
-                        task_info_regs,
-                    )
+                st_async_cluster_task_info(
+                    smem_task_infos.ptr_to([sched_state.stage, 0]),
+                    task_info_full_barriers.ptr_to([sched_state.stage]),
+                    lane_idx,
+                    task_info_regs,
                 )
             K.cuda.warp_sync()
             sched_advance_pipeline()
@@ -2148,9 +2138,7 @@ def get_kernel(
             atomic_add_rel_u32(
                 atom_prev_unused, workspace_l2_full_count.ptr_to([ring_block_idx]), K.uint32(1)
             )
-            K.evaluate(
-                red_add_gpu_u32(workspace_l1_empty_count.ptr_to([ring_block_idx]), K.uint32(1))
-            )
+            red_add_gpu_u32(workspace_l1_empty_count.ptr_to([ring_block_idx]), K.uint32(1))
 
         def epilogue_wait_l2_empty():
             K.assign(
@@ -2188,21 +2176,19 @@ def get_kernel(
         ):
             # `task_info.is_shared() ? &tensor_map_shared_l1_output
             #                        : &tensor_map_l1_output` (impls .cuh:1162)
-            K.evaluate(
-                tma_store_2d_addr(
-                    src_ptr,
-                    K.if_then_else(
-                        has_shared,
-                        K.Select(
-                            block_phase_value > K.int32(2),
-                            K.address_of(tensor_map_shared),
-                            K.address_of(tensor_map),
-                        ),
+            tma_store_2d_addr(
+                src_ptr,
+                K.if_then_else(
+                    has_shared,
+                    K.Select(
+                        block_phase_value > K.int32(2),
+                        K.address_of(tensor_map_shared),
                         K.address_of(tensor_map),
                     ),
-                    coord0,
-                    coord1,
-                )
+                    K.address_of(tensor_map),
+                ),
+                coord0,
+                coord1,
             )
 
         def full_barrier_arrive_and_expect_tx(full_barrier_ptr, transaction_bytes):
@@ -2338,9 +2324,7 @@ def get_kernel(
                                 ),
                             )
                     with K.If(K.cuda.elect_sync()), K.Then():
-                        K.evaluate(
-                            st_shared_bulk(smem_expert_count.ptr_to([0]), K.uint32(num_experts * 4))
-                        )
+                        st_shared_bulk(smem_expert_count.ptr_to([0]), K.uint32(num_experts * 4))
                 with K.Else():
                     with K.If(flat_warp_idx == 1):
                         with K.Then():
@@ -2350,7 +2334,7 @@ def get_kernel(
                                     dispatch_barriers.ptr_to([dispatch_expert_idx]), K.uint32(1)
                                 )
                                 K.assign(dispatch_expert_idx, dispatch_expert_idx + 32)
-                            K.evaluate(fence_barrier_init())
+                            fence_barrier_init()
                         with K.Else():
                             with K.If(flat_warp_idx == 2):
                                 with K.Then():
@@ -2402,7 +2386,7 @@ def get_kernel(
                                                 K.uint32(num_schedule_consumer_threads),
                                             )
                                             K.assign(dispatch_expert_idx, (dispatch_expert_idx + 1))
-                                    K.evaluate(fence_barrier_init())
+                                    fence_barrier_init()
                                 with K.Else():
                                     with (
                                         K.If(flat_warp_idx == kernel_config.num_dispatch_warps - 1),
@@ -2609,11 +2593,9 @@ def get_kernel(
                 K.uint32(dispatch_sync_barrier_idx), K.uint32(kernel_config.num_dispatch_threads)
             )
             dispatch_nvlink_barrier_before_pull(role_thread_idx)
-            K.evaluate(
-                sync_unaligned(
-                    dispatch_with_epilogue_sync_barrier_idx,
-                    kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
-                )
+            sync_unaligned(
+                dispatch_with_epilogue_sync_barrier_idx,
+                kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
             )
             pull_state.init(0)
             K.assign(current_expert_idx, K.int32(-1))
@@ -2850,8 +2832,8 @@ def get_kernel(
                                 smem_send_buffers.ptr_to([role_warp_idx, 0]),
                                 kernel_config.num_bytes_per_pull,
                             )
-                            K.evaluate(tma_store_arrive())
-                            K.evaluate(tma_store_wait(0))
+                            tma_store_arrive()
+                            tma_store_wait(0)
                 K.cuda.warp_sync()
                 K.assign(token_idx_in_block, token_idx_in_expert % kernel_config.block_m)
                 K.assign(
@@ -2917,8 +2899,8 @@ def get_kernel(
                         smem_send_buffers.ptr_to([role_warp_idx, 0]),
                         kernel_config.num_bytes_per_pull,
                     )
-                    K.evaluate(tma_store_arrive())
-                    K.evaluate(tma_store_wait(0))
+                    tma_store_arrive()
+                    tma_store_wait(0)
                     atomic_add_rel_u32(
                         atom_prev_unused,
                         workspace_l1_full_count.ptr_to([pull_ring_block_idx]),
@@ -2936,11 +2918,9 @@ def get_kernel(
                         + kernel_config.num_sms * kernel_config.num_dispatch_warps
                     ),
                 )
-            K.evaluate(
-                sync_unaligned(
-                    dispatch_with_epilogue_sync_barrier_idx,
-                    kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
-                )
+            sync_unaligned(
+                dispatch_with_epilogue_sync_barrier_idx,
+                kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
             )
             # Dispatch and load-A read reusable global workspace after the
             # preceding grid rendezvous. The epilogue grid rendezvous cannot
@@ -3023,13 +3003,9 @@ def get_kernel(
                             ),
                             K.Then(),
                         ):
-                            K.evaluate(
-                                K.ptx.red.gpu.global_.add.s32(
-                                    cumulative_local_expert_recv_stats.ptr_to(
-                                        [pull_local_expert_idx]
-                                    ),
-                                    pull_num_tokens,
-                                )
+                            K.ptx.red.gpu.global_.add.s32(
+                                cumulative_local_expert_recv_stats.ptr_to([pull_local_expert_idx]),
+                                pull_num_tokens,
                             )
                         K.assign(dispatch_dst_rank_idx, role_thread_idx)
                         with K.While(dispatch_dst_rank_idx < K.int32(num_processes)):
@@ -3573,11 +3549,9 @@ def get_kernel(
             epilogue_warp_idx_u32 = K.cast(epilogue_warp_idx, "uint32")
             K.assign(epilogue_wg_idx, K.cast(epilogue_warp_idx_u32 // K.uint32(4), "int32"))
             warp_idx_in_wg = K.cast(epilogue_warp_idx_u32 % K.uint32(4), "int32")
-            K.evaluate(
-                sync_unaligned(
-                    dispatch_with_epilogue_sync_barrier_idx,
-                    kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
-                )
+            sync_unaligned(
+                dispatch_with_epilogue_sync_barrier_idx,
+                kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
             )
             sched_state.init(0)
             accum_state.init(0)
@@ -3796,7 +3770,7 @@ def get_kernel(
                                     )
                                 K.cuda.warp_sync()
                             tma_stage_idx = s % num_tma_store_stages
-                            K.evaluate(tma_store_wait(1))
+                            tma_store_wait(1)
                             K.ptx.bar.sync(
                                 K.uint32(epilogue_wg_sync_barrier_start_idx + epilogue_wg_idx), 128
                             )
@@ -3927,7 +3901,7 @@ def get_kernel(
                                 K.uint32(epilogue_wg_sync_barrier_start_idx + epilogue_wg_idx), 128
                             )
                             with K.If((warp_idx_in_wg == 0) & K.cuda.elect_sync() != 0), K.Then():
-                                K.evaluate(tma_store_fence())
+                                tma_store_fence()
                                 sm90_tma_store_2d_copy_select(
                                     smem_cd_l1.ptr_to([tma_stage_idx, epilogue_wg_idx, 0, 0]),
                                     tensor_map_l1_output,
@@ -3940,9 +3914,9 @@ def get_kernel(
                                     + epilogue_wg_idx * wg_block_m
                                     + s * kernel_config.store_block_m,
                                 )
-                                K.evaluate(tma_store_arrive())
+                                tma_store_arrive()
                             K.cuda.warp_sync()
-                        K.evaluate(tma_store_wait(0))
+                        tma_store_wait(0)
                         K.ptx.bar.sync(
                             K.uint32(epilogue_full_sync_barrier_idx),
                             K.uint32(kernel_config.num_epilogue_threads),
@@ -3971,11 +3945,9 @@ def get_kernel(
                                     K.If((epilogue_warp_idx == 0) & K.cuda.elect_sync() != 0),
                                     K.Then(),
                                 ):
-                                    K.evaluate(
-                                        red_add_gpu_u32(
-                                            workspace_l2_empty_count.ptr_to([ring_block_idx]),
-                                            K.uint32(1),
-                                        )
+                                    red_add_gpu_u32(
+                                        workspace_l2_empty_count.ptr_to([ring_block_idx]),
+                                        K.uint32(1),
                                     )
                                 K.cuda.warp_sync()
                         else:
@@ -3983,11 +3955,8 @@ def get_kernel(
                                 K.If((epilogue_warp_idx == 0) & K.cuda.elect_sync() != 0),
                                 K.Then(),
                             ):
-                                K.evaluate(
-                                    red_add_gpu_u32(
-                                        workspace_l2_empty_count.ptr_to([ring_block_idx]),
-                                        K.uint32(1),
-                                    )
+                                red_add_gpu_u32(
+                                    workspace_l2_empty_count.ptr_to([ring_block_idx]), K.uint32(1)
                                 )
                             K.cuda.warp_sync()
                         K.assign(n_idx, n_block_idx * kernel_config.block_n)
@@ -4186,11 +4155,9 @@ def get_kernel(
                 K.ptx[
                     f"tcgen05.dealloc.cta_group::{kernel_config.num_ctas_per_cluster}.sync.aligned.b32"
                 ](K.uint32(0), K.uint32(num_tmem_cols))
-            K.evaluate(
-                sync_unaligned(
-                    dispatch_with_epilogue_sync_barrier_idx,
-                    kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
-                )
+            sync_unaligned(
+                dispatch_with_epilogue_sync_barrier_idx,
+                kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
             )
             # The preceding grid barrier publishes every epilogue's generic
             # stores into the symmetric combine-token buffer.  Combine reads
@@ -4300,7 +4267,7 @@ def get_kernel(
                         # async proxy. Publish every lane's completed generic
                         # loads before the elected lane can issue that overwrite.
                         with K.If(combine_slot_mask != K.uint32(0)), K.Then():
-                            K.evaluate(tma_store_fence())
+                            tma_store_fence()
                             K.cuda.warp_sync()
                         combine_state.advance()
                         K.assign(combine_do_reduce, combine_next_do_reduce)
@@ -4314,7 +4281,7 @@ def get_kernel(
                                 ),
                             )
                         with K.If(j == 0), K.Then():
-                            K.evaluate(tma_store_wait(0))
+                            tma_store_wait(0)
                             K.cuda.warp_sync()
                         combine_store_ptr = combine_chunks.ptr_to(
                             [2, epilogue_warp_idx, j * 32 + lane_idx, 0]
@@ -4328,11 +4295,11 @@ def get_kernel(
                         )
                     K.cuda.warp_sync()
                     with K.If(K.cuda.elect_sync()), K.Then():
-                        K.evaluate(tma_store_fence())
+                        tma_store_fence()
                         dst_ptr = y.ptr_to([combine_token_idx * hidden + chunk_offset_elems])
                         combine_store_ptr = combine_chunks.ptr_to([2, epilogue_warp_idx, 0, 0])
                         tma_store_1d(dst_ptr, combine_store_ptr, num_chunk_bytes)
-                        K.evaluate(tma_store_arrive())
+                        tma_store_arrive()
                 K.cuda.warp_sync()
                 K.assign(
                     combine_token_idx,
