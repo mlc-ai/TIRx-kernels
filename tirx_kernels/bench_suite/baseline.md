@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '0d695aa0', 'tirx-kernels': 'db0958ea-dirty', 'tirx-bench-ci': None}`
-- Workloads: 397 ok, 0 failed
+- Git:       `{'tir': '3df3e86a', 'tirx-kernels': 'aedd23c2-dirty', 'tirx-bench-ci': None}`
+- Workloads: 403 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -239,6 +239,17 @@ Grouped workloads show one row per config and one timing column per implementati
 | `b2_s4096_h16_causal` | tir | 388.0339 | flashattn_sm100 | 390.3185 | 1.006 | — |
 | `b4_s8192_h16_causal` | tir | 2473.1056 | flashattn_sm100 | 2496.3857 | 1.009 | — |
 | `b4_s8192_h16_noncausal` | tir | 5549.1120 | flashattn_sm100 | 5662.1554 | 1.020 | — |
+
+## flashinfer_fused_add_rmsnorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `fused_bf16_m32_h4096_xc_rc_pdl0` | tirx | 3.6033 | flashinfer_cutedsl | 3.6118 | 1.002 | — |
+| `fused_bf16_m32_h4096_xc_rc_pdl1` | tirx | 3.7216 | flashinfer_cutedsl | 3.7030 | 0.995 | — |
+| `fused_bf16_m64_h8192_xc_rc_pdl0` | tirx | 3.7880 | flashinfer_cutedsl | 3.7899 | 1.000 | — |
+| `gemma_bf16_m32_h4096_xc_rc_pdl0` | tirx | 3.5710 | flashinfer_cutedsl | 3.5449 | 0.993 | — |
+| `gemma_bf16_m32_h4096_xc_rc_pdl1` | tirx | 3.7241 | flashinfer_cutedsl | 3.7073 | 0.995 | — |
+| `gemma_bf16_m64_h8192_xc_rc_pdl0` | tirx | 3.8722 | flashinfer_cutedsl | 3.8765 | 1.001 | — |
 
 ## flashinfer_qk_rmsnorm
 

@@ -54,6 +54,14 @@ changing the mathematical kernel: the dependency-protocol path moved from
 1.001x in the final complete matrix. A static cap is a contract with the
 current allocator and scheduler, not a stable source-level constant.
 
+The requested cap and the realized allocation need not move together or by one
+register. In one neighboring sweep, declared caps 128 and 127 both realized 127
+registers, 126 realized 126, and 125 jumped to 123; every candidate was
+spill-free, yet their scheduled binaries and affected timings differed. The
+125 cap was the only member of that sweep to clear the complete required-shape
+matrix. Treat each distinct final binary as an independent schedule candidate,
+including adjacent caps that land on the same realized allocation.
+
 An underfilled launch isolated the scheduling effect from occupancy. With only
 16 CTAs on 148 SMs, lowering realized allocation from 96 to 80 registers could
 not reduce actual CTA occupancy; it kept the complete opcode vectors identical
@@ -84,9 +92,20 @@ cap matching the reference's 56-register dependency path improved the target
 only slightly without clearing the gate. The two instruction streams can need
 different budgets to realize comparable schedules.
 
+Do not infer a family-wide cap from one operation mode. A cap that initially
+helped one dependency-protocol specialization failed a sibling mode in a later
+complete matrix; applying the cap to both modes produced another distinct
+schedule rather than a guaranteed transfer. Select the scope from compile-time
+live-range and protocol identity, then guard every affected sibling.
+
 ## Verification
 
 Confirm that CUDA and PTX contain the requested `__maxnreg__` and `.maxnreg`,
 then read the realized register allocation, stack size, local-memory traffic,
 and scheduled SASS rather than trusting the declaration. Run correctness plus
 the affected performance shapes and guard shapes on every retained cap.
+
+Hash or normalize the final cubin before labeling neighboring caps duplicate.
+Zero spill, equal realized registers, or equal static instruction totals are not
+enough: ptxas can reorder the same-count stream, and that schedule difference
+is exactly what the cap sweep is testing.
