@@ -173,8 +173,7 @@ def build_preprocess(B, S, H, D):
                     K.ptx.fma.rn.ftz.f32(dst[0], lhs_value[element], rhs_value[element], dst[0])
 
         # Overlap the independent LSE load with the O/dO dot products.
-        lse_for_log2 = K.local_scalar("float32")
-        K.assign(lse_for_log2, K.float32(0))
+        lse_for_log2 = K.local_scalar("float32", init=K.float32(0))
         with K.If(tx < PRE_ROWS_PER_BLOCK), K.Then():
             K.ptx.ld.global_.f32(
                 lse_for_log2, LSE_g.ptr_to([(bz * H + by) * S + bx * PRE_ROWS_PER_BLOCK + tx])
@@ -1278,8 +1277,7 @@ def build_kernel(
 
                 m_st_cta = m_st_val + id_in_pair * DQ_M_PER_CTA
                 # Materialize elect_sync while all 32 lanes are converged.
-                dq_reduce_elected = K.local_scalar("uint32")
-                K.assign(dq_reduce_elected, K.cuda.elect_sync())
+                dq_reduce_elected = K.local_scalar("uint32", init=K.cuda.elect_sync())
 
                 for stage in range(DQ_REDUCE_ITERS):
                     smem_slot = stage % DQ_STAGES

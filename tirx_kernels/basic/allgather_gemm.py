@@ -183,7 +183,7 @@ def _mapa_u64_tx(ptr, rank):
     The scratch and the call both go through the full TIRx namespace.
     """
     mapped = Kern.local_scalar("uint64")
-    Kern.evaluate(Kern.ptx.mapa.u64(mapped, ptr, Kern.uint32(rank)))
+    Kern.ptx.mapa.u64(mapped, ptr, Kern.uint32(rank))
     return mapped
 
 

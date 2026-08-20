@@ -692,8 +692,7 @@ def make_kernel(
 
                 # -------- warp 0: MMA issuer — orig:L896-1059 --------------------
                 with r_mma:
-                    acc = K.local_scalar("int32")
-                    K.assign(acc, 0)
+                    acc = K.local_scalar("int32", init=0)
 
                     def gemm_qk(q_stage, kv_stage, qd, kd):
                         """S[q_stage] = Q[q_stage] @ K[kv_stage]^T — orig:L900-920.
