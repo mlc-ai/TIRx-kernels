@@ -157,10 +157,8 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         d_map = K.stack_alloca("tensormap", 1)
 
         def encode(descriptor, rank, data, *shape):
-            K.evaluate(
-                K.call_packed(
-                    "runtime.cuTensorMapEncodeTiled", descriptor, AB_DTYPE, rank, data, *shape
-                )
+            K.call_packed(
+                "runtime.cuTensorMapEncodeTiled", descriptor, AB_DTYPE, rank, data, *shape
             )
 
         # A and B encode identically apart from their map, data pointer, row count

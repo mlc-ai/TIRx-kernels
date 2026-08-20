@@ -699,7 +699,7 @@ def get_kernel(**kwargs: Any):
                 head * DIM * DSTATE, "int64"
             )
 
-            K.evaluate(state.data)
+            K.keep_alive(state.data)
 
             if ROLE == "producer":
                 with K.If(K.cuda.elect_sync()), K.Then():

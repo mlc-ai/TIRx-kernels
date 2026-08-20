@@ -510,9 +510,7 @@ def get_kernel(
                             bucket = K.bitwise_and(
                                 K.shift_right(key, K.cast(shift, "uint32")), K.uint32(0xFF)
                             )
-                            K.evaluate(
-                                atom_shared_add_u32(s_hist, K.cast(bucket, "int32"), K.uint32(1))
-                            )
+                            atom_shared_add_u32(s_hist, K.cast(bucket, "int32"), K.uint32(1))
                     bar_sync()
 
                     with K.serial(tx, RADIX, step=BLOCK_THREADS) as bs:
@@ -583,10 +581,10 @@ def get_kernel(
                         K.assign(my_eq, my_eq + shfl_down_u32(my_eq, delta))
                 lane = K.bitwise_and(tx, K.int32(31))
                 with K.If(K.And(lane == 0, my_gt > K.uint32(0))), K.Then():
-                    K.evaluate(atom_shared_add_u32(s_suffix, 0, my_gt))
+                    atom_shared_add_u32(s_suffix, 0, my_gt)
                 if deterministic:
                     with K.If(K.And(lane == 0, my_eq > K.uint32(0))), K.Then():
-                        K.evaluate(atom_shared_add_u32(s_suffix, 1, my_eq))
+                        atom_shared_add_u32(s_suffix, 1, my_eq)
                 bar_sync()
                 gt_count = ld_shared_u32(s_suffix, 0)
 
