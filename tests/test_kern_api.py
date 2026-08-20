@@ -31,8 +31,10 @@ def test_local_scalar_init_matches_declare_then_assign():
 
 
 def test_stack_alloca_matches_bound_tvm_stack_alloca():
+    from tvm.tirx.script.builder import ir as _I
+
     def bind_form(out):
-        handle = K.Bind(K.tvm_stack_alloca("tensormap", 1))
+        handle = _I.Bind(K.tvm_stack_alloca("tensormap", 1))
         K.evaluate(handle)
         K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
@@ -42,3 +44,11 @@ def test_stack_alloca_matches_bound_tvm_stack_alloca():
         K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
     assert _tir(bind_form) == _tir(sanctioned_form)
+
+
+def test_retired_binding_forms_are_rejected_with_guidance():
+    import pytest
+
+    for name in ("Bind", "let", "Let"):
+        with pytest.raises(AttributeError, match="two spellings"):
+            getattr(K, name)

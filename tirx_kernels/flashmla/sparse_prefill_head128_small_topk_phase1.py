@@ -40,24 +40,14 @@ LAUNCH_TAGS = (
 )
 
 
-def _add_smem_desc_offset(desc, offset):
+def _add_smem_desc_offset(dst, desc, offset):
     # Descriptor offsets wrap in the low 32 bits without carrying into the
     # encoded layout fields in the high half.
     desc_lo = K.alloc_local((1,), "uint32")
     desc_hi = K.alloc_local((1,), "uint32")
-    result = K.alloc_local((1,), "uint64")
     K.evaluate(K.ptx.mov.b64(desc_lo[0], desc_hi[0], desc))
     K.evaluate(K.ptx.add.u32(desc_lo[0], desc_lo[0], K.cast(offset, "uint32")))
-    K.evaluate(K.ptx.mov.b64(result[0], desc_lo[0], desc_hi[0]))
-    return result[0]
-
-
-def _tmem_load_32(dst, col):
-    K.evaluate(K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](*[dst[i] for i in range(32)], col))
-
-
-def _tmem_store_32(src, col):
-    K.evaluate(K.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](col, *[src[i] for i in range(32)]))
+    K.evaluate(K.ptx.mov.b64(dst, desc_lo[0], desc_hi[0]))
 
 
 @dataclass(frozen=True)
@@ -266,7 +256,7 @@ def make_kernel(
         out = params["out"]
 
         def encode(data, rank, *shape):
-            descriptor = K.Bind(K.tvm_stack_alloca("tensormap", 1))
+            descriptor = K.stack_alloca("tensormap", 1)
             K.evaluate(
                 K.call_packed(
                     "runtime.cuTensorMapEncodeTiled", descriptor, "bfloat16", rank, data, *shape
@@ -289,9 +279,9 @@ def make_kernel(
             3,
             0,
         )
-        out_tma = encode(
-            K.handle_add_byte_offset(out.data, 0),
-            4,
+        # Both output descriptors encode the same tiling; the kernel keeps two so the
+        # steady-state and drain stores address separate tensormaps.
+        out_shape = (
             64,
             B_H,
             D_V // 64,
@@ -312,29 +302,8 @@ def make_kernel(
             3,
             0,
         )
-        out_tma_1 = encode(
-            K.handle_add_byte_offset(out.data, 0),
-            4,
-            64,
-            B_H,
-            D_V // 64,
-            s_q,
-            D_V * BF16_BYTES,
-            64 * BF16_BYTES,
-            B_H * D_V * BF16_BYTES,
-            64,
-            B_H // 2,
-            D_V // 64,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            3,
-            3,
-            0,
-        )
+        out_tma = encode(K.handle_add_byte_offset(out.data, 0), 4, *out_shape)
+        out_tma_1 = encode(K.handle_add_byte_offset(out.data, 0), 4, *out_shape)
         q_tma = encode(
             K.handle_add_byte_offset(q.data, 0),
             5,
@@ -386,7 +355,7 @@ def make_kernel(
         warp_idx = K.warp_id()
         lane_idx = K.lane_id()
         idx_in_warpgroup = K.thread_id_in_wg([128])
-        cta_idx = K.Bind(block_idx % 2)
+        cta_idx = block_idx % 2
 
         def prefetch(tensor_map):
             with K.If(warp_idx == 0), K.Then():
@@ -432,24 +401,6 @@ def make_kernel(
         clc_empty = K.MBarrier(pool, 1)
         tq_consumed = K.MBarrier(pool, 1)
 
-        buffer = q_full.buf
-        buffer_1 = tq_ready.buf
-        buffer_2 = q_consumed.buf
-        buffer_3 = q_released.buf
-        bar_tOut_empty_buf = t_out_empty.buf
-        buffer_4 = k_ready.buf
-        buffer_5 = k_empty.buf
-        bar_P_empty_buf = p_empty.buf
-        buffer_6 = umma_ready.buf
-        buffer_7 = softmax_ready.buf
-        bar_S_O_full_buf = so_full.buf
-        bar_li_full_buf = li_full.buf
-        bar_li_empty_buf = li_empty.buf
-        bar_valid_coord_scales_full_buf = valid_full.buf
-        bar_valid_coord_scales_empty_buf = valid_empty.buf
-        buffer_8 = clc_response_ready.buf
-        bar_clc_empty_buf = clc_empty.buf
-        bar_tQ_consumed_buf = tq_consumed.buf
         clc_response = pool.alloc((4,), "uint32", align=16)
         tmem_start_addr = pool.alloc((1,), "uint32", align=4)
         assert pool.offset == 222500
@@ -480,24 +431,23 @@ def make_kernel(
                 K.assign(self.block_idx, block_idx)
 
             def issue_cancel(self):
-                with K.If(cta_idx == 0):
-                    with K.Then():
-                        K.cuda.mbarrier_wait(
-                            K.address_of(bar_clc_empty_buf[0]), K.bitwise_xor(self.epoch.phase, 1)
-                        )
-                        K.ptx.clusterlaunchcontrol(
-                            K.cuda.cvta_generic_to_shared(K.address_of(clc_response[0])),
-                            K.cuda.cvta_generic_to_shared(K.address_of(buffer_8[0])),
-                            "try_cancel",
-                            "async",
-                            "shared::cta",
-                            "mbarrier::complete_tx::bytes",
-                            "multicast::cluster::all",
-                            "b128",
-                            "",
-                        )
+                with K.If(cta_idx == 0), K.Then():
+                    K.cuda.mbarrier_wait(
+                        K.address_of(clc_empty.buf[0]), K.bitwise_xor(self.epoch.phase, 1)
+                    )
+                    K.ptx.clusterlaunchcontrol(
+                        K.cuda.cvta_generic_to_shared(K.address_of(clc_response[0])),
+                        K.cuda.cvta_generic_to_shared(K.address_of(clc_response_ready.buf[0])),
+                        "try_cancel",
+                        "async",
+                        "shared::cta",
+                        "mbarrier::complete_tx::bytes",
+                        "multicast::cluster::all",
+                        "b128",
+                        "",
+                    )
                 K.ptx.mbarrier(
-                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_8[0])),
+                    K.cuda.cvta_generic_to_shared(K.address_of(clc_response_ready.buf[0])),
                     K.uint32(16),
                     "arrive",
                     "expect_tx",
@@ -509,13 +459,13 @@ def make_kernel(
                 )
 
             def advance(self):
-                K.cuda.mbarrier_wait(K.address_of(buffer_8[0]), self.epoch.phase)
+                K.cuda.mbarrier_wait(K.address_of(clc_response_ready.buf[0]), self.epoch.phase)
                 next_job = K.local_scalar("uint32")
                 query_cancel_first_ctaid_x(next_job, K.address_of(clc_response[0]))
                 remote_empty = K.local_scalar("uint64")
                 K.ptx.mapa(
                     remote_empty,
-                    K.address_of(bar_clc_empty_buf[0]),
+                    K.address_of(clc_empty.buf[0]),
                     K.uint32(0),
                     "shared::cluster",
                     "u64",
@@ -544,143 +494,34 @@ def make_kernel(
                 with K.Then():
                     with K.If(K.cuda.elect_sync()):
                         with K.Then():
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer[i])),
-                                    K.uint32(1),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_1[i])),
-                                    K.uint32(1),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_2[i])),
-                                    K.uint32(1),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_3[i])),
-                                    K.uint32(1),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(bar_tOut_empty_buf[i])
-                                    ),
-                                    K.uint32(256),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(bar_P_empty_buf[i])),
-                                    K.uint32(256),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_6[i])),
-                                    K.uint32(1),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_7[i])),
-                                    K.uint32(1),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(bar_S_O_full_buf[i])
-                                    ),
-                                    K.uint32(256),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(bar_li_full_buf[i])),
-                                    K.uint32(64),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(bar_li_empty_buf[i])
-                                    ),
-                                    K.uint32(128),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_8[i])),
-                                    K.uint32(1),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(bar_clc_empty_buf[i])
-                                    ),
-                                    K.uint32(539),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
-                            # One elected arrival from each WG0 warp in both CTAs.
-                            with K.unroll(1) as i:
-                                K.ptx.mbarrier(
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(bar_tQ_consumed_buf[i])
-                                    ),
-                                    K.uint32(8),
-                                    "init",
-                                    "shared",
-                                    "b64",
-                                    "",
-                                )
+                            for init_bar, arrive_count in (
+                                (q_full, 1),
+                                (tq_ready, 1),
+                                (q_consumed, 1),
+                                (q_released, 1),
+                                (t_out_empty, 256),
+                                (p_empty, 256),
+                                (umma_ready, 1),
+                                (softmax_ready, 1),
+                                (so_full, 256),
+                                (li_full, 64),
+                                (li_empty, 128),
+                                (clc_response_ready, 1),
+                                (clc_empty, 539),
+                                # One elected arrival from each WG0 warp in both CTAs.
+                                (tq_consumed, 8),
+                            ):
+                                with K.unroll(1) as i:
+                                    K.ptx.mbarrier(
+                                        K.cuda.cvta_generic_to_shared(
+                                            K.address_of(init_bar.buf[i])
+                                        ),
+                                        K.uint32(arrive_count),
+                                        "init",
+                                        "shared",
+                                        "b64",
+                                        "",
+                                    )
                             K.ptx.fence("mbarrier_init", "release", "cluster", "")
                 with K.Else():
                     with K.If(warp_idx == 2):
@@ -703,61 +544,51 @@ def make_kernel(
                                 "relinquish_alloc_permit", "cta_group::2", "sync", "aligned", ""
                             )
                         with K.Else():
-                            with K.If(warp_idx == 3):
-                                with K.Then():
-                                    with K.If(K.cuda.elect_sync()):
-                                        with K.Then():
-                                            with K.unroll(4) as init_stage:
-                                                K.ptx.mbarrier(
-                                                    K.cuda.cvta_generic_to_shared(
-                                                        K.address_of(buffer_4[init_stage])
-                                                    ),
-                                                    K.uint32(1),
-                                                    "init",
-                                                    "shared",
-                                                    "b64",
-                                                    "",
-                                                )
-                                                K.ptx.mbarrier(
-                                                    K.cuda.cvta_generic_to_shared(
-                                                        K.address_of(buffer_5[init_stage])
-                                                    ),
-                                                    K.uint32(1),
-                                                    "init",
-                                                    "shared",
-                                                    "b64",
-                                                    "",
-                                                )
-                                            with K.unroll(4) as init_stage:
-                                                K.ptx.mbarrier(
-                                                    K.cuda.cvta_generic_to_shared(
-                                                        K.address_of(
-                                                            bar_valid_coord_scales_full_buf[
-                                                                init_stage
-                                                            ]
-                                                        )
-                                                    ),
-                                                    K.uint32(8),
-                                                    "init",
-                                                    "shared",
-                                                    "b64",
-                                                    "",
-                                                )
-                                                K.ptx.mbarrier(
-                                                    K.cuda.cvta_generic_to_shared(
-                                                        K.address_of(
-                                                            bar_valid_coord_scales_empty_buf[
-                                                                init_stage
-                                                            ]
-                                                        )
-                                                    ),
-                                                    K.uint32(128),
-                                                    "init",
-                                                    "shared",
-                                                    "b64",
-                                                    "",
-                                                )
-                                            K.ptx.fence("mbarrier_init", "release", "cluster", "")
+                            with K.If(warp_idx == 3), K.Then():
+                                with K.If(K.cuda.elect_sync()), K.Then():
+                                    with K.unroll(4) as init_stage:
+                                        K.ptx.mbarrier(
+                                            K.cuda.cvta_generic_to_shared(
+                                                K.address_of(k_ready.buf[init_stage])
+                                            ),
+                                            K.uint32(1),
+                                            "init",
+                                            "shared",
+                                            "b64",
+                                            "",
+                                        )
+                                        K.ptx.mbarrier(
+                                            K.cuda.cvta_generic_to_shared(
+                                                K.address_of(k_empty.buf[init_stage])
+                                            ),
+                                            K.uint32(1),
+                                            "init",
+                                            "shared",
+                                            "b64",
+                                            "",
+                                        )
+                                    with K.unroll(4) as init_stage:
+                                        K.ptx.mbarrier(
+                                            K.cuda.cvta_generic_to_shared(
+                                                K.address_of(valid_full.buf[init_stage])
+                                            ),
+                                            K.uint32(8),
+                                            "init",
+                                            "shared",
+                                            "b64",
+                                            "",
+                                        )
+                                        K.ptx.mbarrier(
+                                            K.cuda.cvta_generic_to_shared(
+                                                K.address_of(valid_empty.buf[init_stage])
+                                            ),
+                                            K.uint32(128),
+                                            "init",
+                                            "shared",
+                                            "b64",
+                                            "",
+                                        )
+                                    K.ptx.fence("mbarrier_init", "release", "cluster", "")
             K.cuda.cluster_sync()
 
         initialize_protocol()
@@ -770,11 +601,11 @@ def make_kernel(
             signal_q_consumed: K.constexpr,
             launch_dependents: K.constexpr,
         ):
-            K.cuda.mbarrier_wait(K.address_of(bar_li_full_buf[0]), output_epoch)
+            K.cuda.mbarrier_wait(K.address_of(li_full.buf[0]), output_epoch)
             output_scale = K.local_scalar("float32")
             K.ptx.ld.shared.f32(output_scale, rowwise_li_buf.ptr_to([idx_in_warpgroup % 64]))
             K.ptx.mbarrier(
-                K.cuda.cvta_generic_to_shared(K.address_of(bar_li_empty_buf[0])),
+                K.cuda.cvta_generic_to_shared(K.address_of(li_empty.buf[0])),
                 K.uint32(1),
                 "arrive",
                 "",
@@ -783,11 +614,10 @@ def make_kernel(
                 "b64",
                 "",
             )
-            K.cuda.mbarrier_wait(K.address_of(buffer_3[0]), output_epoch)
+            K.cuda.mbarrier_wait(K.address_of(q_released.buf[0]), output_epoch)
             if launch_dependents:
-                with K.If(K.cuda.elect_sync()):
-                    with K.Then():
-                        K.ptx.griddepcontrol("launch_dependents", "")
+                with K.If(K.cuda.elect_sync()), K.Then():
+                    K.ptx.griddepcontrol("launch_dependents", "")
 
             output_storage = K.alloc_local((64,))
             bf16_storage = K.alloc_local((32,), "uint32")
@@ -795,70 +625,7 @@ def make_kernel(
             with K.unroll(4) as epi_k:
                 local_storage = output_storage
                 K.ptx.tcgen05(
-                    local_storage[0],
-                    local_storage[1],
-                    local_storage[2],
-                    local_storage[3],
-                    local_storage[4],
-                    local_storage[5],
-                    local_storage[6],
-                    local_storage[7],
-                    local_storage[8],
-                    local_storage[9],
-                    local_storage[10],
-                    local_storage[11],
-                    local_storage[12],
-                    local_storage[13],
-                    local_storage[14],
-                    local_storage[15],
-                    local_storage[16],
-                    local_storage[17],
-                    local_storage[18],
-                    local_storage[19],
-                    local_storage[20],
-                    local_storage[21],
-                    local_storage[22],
-                    local_storage[23],
-                    local_storage[24],
-                    local_storage[25],
-                    local_storage[26],
-                    local_storage[27],
-                    local_storage[28],
-                    local_storage[29],
-                    local_storage[30],
-                    local_storage[31],
-                    local_storage[32],
-                    local_storage[33],
-                    local_storage[34],
-                    local_storage[35],
-                    local_storage[36],
-                    local_storage[37],
-                    local_storage[38],
-                    local_storage[39],
-                    local_storage[40],
-                    local_storage[41],
-                    local_storage[42],
-                    local_storage[43],
-                    local_storage[44],
-                    local_storage[45],
-                    local_storage[46],
-                    local_storage[47],
-                    local_storage[48],
-                    local_storage[49],
-                    local_storage[50],
-                    local_storage[51],
-                    local_storage[52],
-                    local_storage[53],
-                    local_storage[54],
-                    local_storage[55],
-                    local_storage[56],
-                    local_storage[57],
-                    local_storage[58],
-                    local_storage[59],
-                    local_storage[60],
-                    local_storage[61],
-                    local_storage[62],
-                    local_storage[63],
+                    *[local_storage[i] for i in range(64)],
                     K.cuda.get_tmem_addr(K.uint32(0), 0, epi_k * 64),
                     "ld",
                     "sync",
@@ -870,39 +637,34 @@ def make_kernel(
                     "",
                 )
                 K.ptx.tcgen05("wait::ld", "sync", "aligned", "")
-                with K.If(epi_k == 0):
-                    with K.Then():
-                        K.cuda.mbarrier_wait(K.address_of(buffer_2[0]), q_epoch)
-                        K.ptx.fence("proxy", "async", "shared::cta", "")
-                        if signal_q_consumed:
-                            with K.If(K.cuda.elect_sync()):
-                                with K.Then():
-                                    q_consumed = K.local_scalar("uint32")
-                                    K.ptx.mapa(
-                                        q_consumed,
-                                        K.cuda.cvta_generic_to_shared(
-                                            K.address_of(bar_tQ_consumed_buf[0])
-                                        ),
-                                        K.uint32(0),
-                                        "shared::cluster",
-                                        "u32",
-                                        "",
-                                    )
-                                    K.ptx.mbarrier(
-                                        q_consumed, "arrive", "", "", "shared::cluster", "b64", ""
-                                    )
-                with K.If(epi_k == 3):
-                    with K.Then():
-                        output_empty = K.local_scalar("uint32")
-                        K.ptx.mapa(
-                            output_empty,
-                            K.cuda.cvta_generic_to_shared(K.address_of(bar_tOut_empty_buf[0])),
-                            K.uint32(0),
-                            "shared::cluster",
-                            "u32",
-                            "",
-                        )
-                        K.ptx.mbarrier(output_empty, "arrive", "", "", "shared::cluster", "b64", "")
+                with K.If(epi_k == 0), K.Then():
+                    K.cuda.mbarrier_wait(K.address_of(q_consumed.buf[0]), q_epoch)
+                    K.ptx.fence("proxy", "async", "shared::cta", "")
+                    if signal_q_consumed:
+                        with K.If(K.cuda.elect_sync()), K.Then():
+                            tq_consumed_remote = K.local_scalar("uint32")
+                            K.ptx.mapa(
+                                tq_consumed_remote,
+                                K.cuda.cvta_generic_to_shared(K.address_of(tq_consumed.buf[0])),
+                                K.uint32(0),
+                                "shared::cluster",
+                                "u32",
+                                "",
+                            )
+                            K.ptx.mbarrier(
+                                tq_consumed_remote, "arrive", "", "", "shared::cluster", "b64", ""
+                            )
+                with K.If(epi_k == 3), K.Then():
+                    output_empty = K.local_scalar("uint32")
+                    K.ptx.mapa(
+                        output_empty,
+                        K.cuda.cvta_generic_to_shared(K.address_of(t_out_empty.buf[0])),
+                        K.uint32(0),
+                        "shared::cluster",
+                        "u32",
+                        "",
+                    )
+                    K.ptx.mbarrier(output_empty, "arrive", "", "", "shared::cluster", "b64", "")
 
                 scaled = output_storage
                 unscaled = output_storage
@@ -942,7 +704,7 @@ def make_kernel(
                             ),
                         )
                     )
-                    s_ptr: K.let = K.ptr_byte_offset(
+                    s_ptr = K.ptr_byte_offset(
                         K.address_of(q_smem_win[0, 0]), s_off * BF16_BYTES, "bfloat16"
                     )
                     r_w: K.int32 = f * 4
@@ -965,163 +727,136 @@ def make_kernel(
 
             K.ptx.fence("proxy", "async", "shared::cta", "")
             K.ptx.bar(K.uint32(0), K.uint32(128), "", "sync", "")
-            with K.If(warp_idx == 0):
-                with K.Then():
-                    with K.If(K.cuda.elect_sync()):
-                        with K.Then():
-                            K.ptx.cp(
-                                K.reinterpret(K.handle().ty, K.address_of(tensor_map)),
-                                0,
-                                block_idx % 2 * 64,
-                                0,
-                                s_q_idx,
-                                K.cuda.cvta_generic_to_shared(q_smem.ptr_to([0, 0])),
-                                "async",
-                                "bulk",
-                                "tensor",
-                                "4d",
-                                "global",
-                                "shared::cta",
-                                "tile",
-                                "bulk_group",
-                                "",
-                                "",
-                            )
-                    K.ptx.cp("async", "bulk", "commit_group", "")
+            with K.If(warp_idx == 0), K.Then():
+                with K.If(K.cuda.elect_sync()), K.Then():
+                    K.ptx.cp(
+                        K.reinterpret(K.handle().ty, K.address_of(tensor_map)),
+                        0,
+                        cta_idx * 64,
+                        0,
+                        s_q_idx,
+                        K.cuda.cvta_generic_to_shared(q_smem.ptr_to([0, 0])),
+                        "async",
+                        "bulk",
+                        "tensor",
+                        "4d",
+                        "global",
+                        "shared::cta",
+                        "tile",
+                        "bulk_group",
+                        "",
+                        "",
+                    )
+                K.ptx.cp("async", "bulk", "commit_group", "")
 
         def q_load_output():
             q_o_token = iket_range("h128-small-q-load-output")
             jobs = CLCJobScheduler()
-            last_valid = K.local_scalar("int32")
-            K.assign(last_valid, 0)
-            last_s_q_idx = K.local_scalar("int32")
-            K.assign(last_s_q_idx, 0)
+            last_valid = K.local_scalar("int32", init=0)
+            last_s_q_idx = K.local_scalar("int32", init=0)
             with K.While(jobs.valid != 0):
-                wg0_s_q_idx: K.let[K.int32] = jobs.block_idx // 2
-                previous_epoch: K.let[K.int32] = K.bitwise_xor(jobs.epoch.phase, 1)
-                with K.If(warp_idx == 0):
-                    with K.Then():
-                        with K.If(K.cuda.elect_sync()):
-                            with K.Then():
-                                K.ptx.cp(0, "async", "bulk", "wait_group", "", "")
-                                buffer_17 = K.local_scalar("uint64")
-                                K.ptx.mapa(
-                                    buffer_17, K.address_of(buffer[0]), K.uint32(0), "", "u64", ""
+                wg0_s_q_idx = jobs.block_idx // 2
+                previous_epoch = K.bitwise_xor(jobs.epoch.phase, 1)
+                with K.If(warp_idx == 0), K.Then():
+                    with K.If(K.cuda.elect_sync()), K.Then():
+                        K.ptx.cp(0, "async", "bulk", "wait_group", "", "")
+                        buffer_17 = K.local_scalar("uint64")
+                        K.ptx.mapa(
+                            buffer_17, K.address_of(q_full.buf[0]), K.uint32(0), "", "u64", ""
+                        )
+                        K.ptx.cp(
+                            K.cuda.cvta_generic_to_shared(q_smem.ptr_to([0, 0])),
+                            K.reinterpret(K.handle().ty, K.address_of(q_tma_tensormap)),
+                            0,
+                            cta_idx * 64,
+                            0,
+                            0,
+                            jobs.block_idx // 2,
+                            K.cuda.cvta_generic_to_shared(K.reinterpret(K.handle().ty, buffer_17)),
+                            K.uint64(1364590687093260288),
+                            "async",
+                            "bulk",
+                            "tensor",
+                            "5d",
+                            "shared::cluster",
+                            "global",
+                            "",
+                            "mbarrier::complete_tx::bytes",
+                            "",
+                            "cta_group::2",
+                            "L2::cache_hint",
+                            "",
+                        )
+                        with K.If(cta_idx == 0), K.Then():
+                            # Do not republish tQ-full until both CTAs consumed its prior phase.
+                            with K.If(last_valid != 0), K.Then():
+                                K.cuda.mbarrier_wait(
+                                    K.address_of(tq_consumed.buf[0]), previous_epoch
                                 )
-                                K.ptx.cp(
-                                    K.cuda.cvta_generic_to_shared(q_smem.ptr_to([0, 0])),
-                                    K.reinterpret(K.handle().ty, K.address_of(q_tma_tensormap)),
-                                    0,
-                                    block_idx % 2 * 64,
-                                    0,
-                                    0,
-                                    jobs.block_idx // 2,
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.reinterpret(K.handle().ty, buffer_17)
-                                    ),
-                                    K.uint64(1364590687093260288),
-                                    "async",
-                                    "bulk",
-                                    "tensor",
-                                    "5d",
-                                    "shared::cluster",
-                                    "global",
-                                    "",
-                                    "mbarrier::complete_tx::bytes",
-                                    "",
-                                    "cta_group::2",
-                                    "L2::cache_hint",
-                                    "",
-                                )
-                                with K.If(cta_idx == 0):
-                                    with K.Then():
-                                        # Do not republish tQ-full until both CTAs consumed its prior phase.
-                                        with K.If(last_valid != 0):
-                                            with K.Then():
-                                                K.cuda.mbarrier_wait(
-                                                    K.address_of(bar_tQ_consumed_buf[0]),
-                                                    previous_epoch,
-                                                )
-                                        K.ptx.mbarrier(
-                                            K.cuda.cvta_generic_to_shared(K.address_of(buffer[0])),
-                                            K.uint32(131072),
-                                            "arrive",
-                                            "expect_tx",
-                                            "",
-                                            "",
-                                            "shared",
-                                            "b64",
-                                            "",
-                                        )
-                                        K.cuda.mbarrier_wait(
-                                            K.address_of(buffer[0]), jobs.epoch.phase
-                                        )
-                                        K.cuda.mbarrier_wait(
-                                            K.address_of(buffer_1[0]), previous_epoch
-                                        )
-                                        K.ptx.tcgen05("fence::after_thread_sync", "")
-                                        cp_desc = K.local_scalar("uint64")
-                                        K.cuda.tcgen05.encode_matrix_descriptor(
-                                            cp_desc.buffer.data,
-                                            K.reinterpret(K.handle().ty, K.uint64(0)),
-                                            1,
-                                            64,
-                                            3,
-                                        )
-                                        with K.unroll(16) as flat:
-                                            K.ptx.tcgen05(
-                                                K.Cast(
-                                                    "uint32",
-                                                    256 + (flat % 4 * 32 + flat // 4 % 4 * 8),
-                                                ),
-                                                K.bitwise_or(
-                                                    K.bitwise_and(
-                                                        cp_desc, K.bitwise_not(K.uint64(16383))
+                            K.ptx.mbarrier(
+                                K.cuda.cvta_generic_to_shared(K.address_of(q_full.buf[0])),
+                                K.uint32(131072),
+                                "arrive",
+                                "expect_tx",
+                                "",
+                                "",
+                                "shared",
+                                "b64",
+                                "",
+                            )
+                            K.cuda.mbarrier_wait(K.address_of(q_full.buf[0]), jobs.epoch.phase)
+                            K.cuda.mbarrier_wait(K.address_of(tq_ready.buf[0]), previous_epoch)
+                            K.ptx.tcgen05("fence::after_thread_sync", "")
+                            cp_desc = K.local_scalar("uint64")
+                            K.cuda.tcgen05.encode_matrix_descriptor(
+                                cp_desc.buffer.data,
+                                K.reinterpret(K.handle().ty, K.uint64(0)),
+                                1,
+                                64,
+                                3,
+                            )
+                            with K.unroll(16) as flat:
+                                K.ptx.tcgen05(
+                                    K.Cast("uint32", 256 + (flat % 4 * 32 + flat // 4 % 4 * 8)),
+                                    K.bitwise_or(
+                                        K.bitwise_and(cp_desc, K.bitwise_not(K.uint64(16383))),
+                                        K.Cast(
+                                            "uint64",
+                                            K.bitwise_and(
+                                                K.shift_right(
+                                                    K.cuda.cvta_generic_to_shared(
+                                                        K.ptr_byte_offset(
+                                                            q_smem.ptr_to([0, 0]),
+                                                            (flat % 4 * 1024 + flat // 4 % 4 * 2)
+                                                            * 16,
+                                                            K.type_annotation("bfloat16"),
+                                                        )
                                                     ),
-                                                    K.Cast(
-                                                        "uint64",
-                                                        K.bitwise_and(
-                                                            K.shift_right(
-                                                                K.cuda.cvta_generic_to_shared(
-                                                                    K.ptr_byte_offset(
-                                                                        q_smem.ptr_to([0, 0]),
-                                                                        (
-                                                                            flat % 4 * 1024
-                                                                            + flat // 4 % 4 * 2
-                                                                        )
-                                                                        * 16,
-                                                                        K.type_annotation(
-                                                                            "bfloat16"
-                                                                        ),
-                                                                    )
-                                                                ),
-                                                                K.uint32(4),
-                                                            ),
-                                                            K.uint32(16383),
-                                                        ),
-                                                    ),
+                                                    K.uint32(4),
                                                 ),
-                                                "cp",
-                                                "cta_group::2",
-                                                "128x256b",
-                                                "",
-                                                "",
-                                                "",
-                                                "",
-                                            )
-                                        K.ptx.tcgen05(
-                                            K.cuda.cvta_generic_to_shared(
-                                                K.address_of(buffer_2[0])
+                                                K.uint32(16383),
                                             ),
-                                            K.Cast("uint16", 3),
-                                            "commit",
-                                            "cta_group::2",
-                                            "mbarrier::arrive::one",
-                                            "shared::cluster",
-                                            "multicast::cluster",
-                                            "b64",
-                                            "",
-                                        )
+                                        ),
+                                    ),
+                                    "cp",
+                                    "cta_group::2",
+                                    "128x256b",
+                                    "",
+                                    "",
+                                    "",
+                                    "",
+                                )
+                            K.ptx.tcgen05(
+                                K.cuda.cvta_generic_to_shared(K.address_of(q_consumed.buf[0])),
+                                K.Cast("uint16", 3),
+                                "commit",
+                                "cta_group::2",
+                                "mbarrier::arrive::one",
+                                "shared::cluster",
+                                "multicast::cluster",
+                                "b64",
+                                "",
+                            )
                 with K.If(last_valid != 0):
                     with K.Then():
                         store_output(
@@ -1133,759 +868,517 @@ def make_kernel(
                             launch_dependents=False,
                         )
                     with K.Else():
-                        K.cuda.mbarrier_wait(K.address_of(buffer_2[0]), jobs.epoch.phase)
-                        with K.If(K.cuda.elect_sync()):
-                            with K.Then():
-                                buffer_13 = K.local_scalar("uint32")
-                                K.ptx.mapa(
-                                    buffer_13,
-                                    K.cuda.cvta_generic_to_shared(
-                                        K.address_of(bar_tQ_consumed_buf[0])
-                                    ),
-                                    K.uint32(0),
-                                    "shared::cluster",
-                                    "u32",
-                                    "",
-                                )
-                                K.ptx.mbarrier(
-                                    buffer_13, "arrive", "", "", "shared::cluster", "b64", ""
-                                )
+                        K.cuda.mbarrier_wait(K.address_of(q_consumed.buf[0]), jobs.epoch.phase)
+                        with K.If(K.cuda.elect_sync()), K.Then():
+                            buffer_13 = K.local_scalar("uint32")
+                            K.ptx.mapa(
+                                buffer_13,
+                                K.cuda.cvta_generic_to_shared(K.address_of(tq_consumed.buf[0])),
+                                K.uint32(0),
+                                "shared::cluster",
+                                "u32",
+                                "",
+                            )
+                            K.ptx.mbarrier(
+                                buffer_13, "arrive", "", "", "shared::cluster", "b64", ""
+                            )
                 K.assign(last_valid, 1)
                 K.assign(last_s_q_idx, wg0_s_q_idx)
                 jobs.advance()
-            with K.If(last_valid != 0):
-                with K.Then():
-                    last_epoch: K.let[K.int32] = K.bitwise_xor(jobs.epoch.phase, 1)
-                    with K.If(warp_idx == 0):
-                        with K.Then():
-                            with K.If(K.cuda.elect_sync()):
-                                with K.Then():
-                                    K.ptx.cp(0, "async", "bulk", "wait_group", "", "")
-                    K.ptx.bar(K.uint32(0), K.uint32(128), "", "sync", "")
-                    store_output(
-                        last_epoch,
-                        last_epoch,
-                        out_tensormap,
-                        last_s_q_idx,
-                        signal_q_consumed=False,
-                        launch_dependents=True,
-                    )
-            with K.If(warp_idx == 0):
-                with K.Then():
-                    K.ptx.tcgen05(
-                        K.uint32(0),
-                        K.uint32(512),
-                        "dealloc",
-                        "cta_group::2",
-                        "sync",
-                        "aligned",
-                        "b32",
-                        "",
-                    )
+            with K.If(last_valid != 0), K.Then():
+                last_epoch = K.bitwise_xor(jobs.epoch.phase, 1)
+                with K.If(warp_idx == 0), K.Then():
+                    with K.If(K.cuda.elect_sync()), K.Then():
+                        K.ptx.cp(0, "async", "bulk", "wait_group", "", "")
+                K.ptx.bar(K.uint32(0), K.uint32(128), "", "sync", "")
+                store_output(
+                    last_epoch,
+                    last_epoch,
+                    out_tensormap,
+                    last_s_q_idx,
+                    signal_q_consumed=False,
+                    launch_dependents=True,
+                )
+            with K.If(warp_idx == 0), K.Then():
+                K.ptx.tcgen05(
+                    K.uint32(0),
+                    K.uint32(512),
+                    "dealloc",
+                    "cta_group::2",
+                    "sync",
+                    "aligned",
+                    "b32",
+                    "",
+                )
             K.cuda.iket.range_end(q_o_token[0])
 
         def kv_gather():
             kv_gather_token = iket_range("h128-small-kv-load")
-            wg1_warp_idx: K.let[K.int32] = thread_idx // 32 - 4
-            with K.If(K.cuda.elect_sync()):
-                with K.Then():
-                    jobs = CLCJobScheduler()
-                    k_pipe = K.PipelineState(4, phase=0)
-                    with K.While(jobs.valid != 0):
-                        wg1_s_q_idx: K.let[K.int32] = jobs.block_idx // 2
-                        wg1_topk_len = K.local_scalar("int32")
-                        K.assign(wg1_topk_len, topk)
-                        with K.If(have_topk_length):
-                            with K.Then():
-                                K.ptx.ld.global_.s32(
-                                    wg1_topk_len, topk_length.ptr_to([wg1_s_q_idx])
-                                )
-                        wg1_num_k_blocks: K.let[K.int32] = K.max((wg1_topk_len + 64 - 1) // 64, 1)
-                        wg1_g_indices_base: K.let[K.int32] = wg1_s_q_idx * stride_indices_s_q
-                        with K.serial(wg1_num_k_blocks, unroll=False) as k:
-                            cur_indices = K.alloc_local((16,), "int32")
-                            with K.unroll(2) as local_row:
-                                row: K.let[K.int32] = local_row * 32 + wg1_warp_idx * 8
-                                row_base: K.let[K.int32] = wg1_g_indices_base + k * 64 + row
-                                buffer_13 = K.decl_buffer(
-                                    (16,), "int32", data=cur_indices.data, scope="local"
-                                )
-                                buffer_14 = buffer_13.view("uint32")
-                                K.ptx.ld(
-                                    buffer_14[local_row * 8],
-                                    buffer_14[local_row * 8 + 1],
-                                    buffer_14[local_row * 8 + 2],
-                                    buffer_14[local_row * 8 + 3],
-                                    buffer_14[local_row * 8 + 4],
-                                    buffer_14[local_row * 8 + 5],
-                                    buffer_14[local_row * 8 + 6],
-                                    buffer_14[local_row * 8 + 7],
-                                    K.address_of(indices[row_base]),
-                                    "",
-                                    "",
-                                    "global",
-                                    "",
-                                    "nc",
-                                    "L1::no_allocate",
-                                    "L2::evict_first",
-                                    "L2::256B",
-                                    "v8",
-                                    "u32",
-                                    "",
-                                )
-                            K.cuda.mbarrier_wait(
-                                K.address_of(buffer_5[k_pipe.stage]), K.bitwise_xor(k_pipe.phase, 1)
+            wg1_warp_idx = thread_idx // 32 - 4
+            with K.If(K.cuda.elect_sync()), K.Then():
+                jobs = CLCJobScheduler()
+                k_pipe = K.PipelineState(4, phase=0)
+                with K.While(jobs.valid != 0):
+                    wg1_s_q_idx = jobs.block_idx // 2
+                    wg1_topk_len = K.local_scalar("int32", init=topk)
+                    with K.If(have_topk_length), K.Then():
+                        K.ptx.ld.global_.s32(wg1_topk_len, topk_length.ptr_to([wg1_s_q_idx]))
+                    wg1_num_k_blocks = K.max((wg1_topk_len + 64 - 1) // 64, 1)
+                    wg1_g_indices_base = wg1_s_q_idx * stride_indices_s_q
+                    with K.serial(wg1_num_k_blocks, unroll=False) as k:
+                        cur_indices = K.alloc_local((16,), "int32")
+                        with K.unroll(2) as local_row:
+                            row = local_row * 32 + wg1_warp_idx * 8
+                            row_base = wg1_g_indices_base + k * 64 + row
+                            buffer_13 = K.decl_buffer(
+                                (16,), "int32", data=cur_indices.data, scope="local"
                             )
-                            src_col: K.let[K.int32] = cta_idx * 256
-                            with K.unroll(4) as row_group:
-                                with K.unroll(4) as col_atom:
-                                    buffer_16 = K.local_scalar("uint64")
-                                    K.ptx.mapa(
-                                        buffer_16,
-                                        K.address_of(buffer_4[k_pipe.stage]),
-                                        K.uint32(0),
-                                        "",
-                                        "u64",
-                                        "",
-                                    )
-                                    kv_dst_offset: K.let[K.int32] = (
-                                        k_pipe.stage * 16384
-                                        + wg1_warp_idx * 512
-                                        + row_group // 2 * 2048
-                                        + row_group % 2 * 256
-                                        + col_atom * 4096
-                                    ) * BF16_BYTES
-                                    K.ptx.cp(
-                                        K.cuda.cvta_generic_to_shared(
-                                            K.ptr_byte_offset(
-                                                K.address_of(k_smem[0, 0]),
-                                                kv_dst_offset,
-                                                K.type_annotation("bfloat16"),
-                                            )
-                                        ),
-                                        K.reinterpret(
-                                            K.handle().ty, K.address_of(kv_tma_tensormap)
-                                        ),
-                                        src_col + col_atom * 64,
-                                        cur_indices[row_group * 4],
-                                        cur_indices[row_group * 4 + 1],
-                                        cur_indices[row_group * 4 + 2],
-                                        cur_indices[row_group * 4 + 3],
-                                        K.cuda.cvta_generic_to_shared(
-                                            K.reinterpret(K.handle().ty, buffer_16)
-                                        ),
-                                        K.uint64(1508705875169116160),
-                                        "async",
-                                        "bulk",
-                                        "tensor",
-                                        "2d",
-                                        "shared::cluster",
-                                        "global",
-                                        "tile::gather4",
-                                        "mbarrier::complete_tx::bytes",
-                                        "",
-                                        "cta_group::2",
-                                        "L2::cache_hint",
-                                        "",
-                                    )
-                            k_pipe.advance()
-                        jobs.advance()
+                            buffer_14 = buffer_13.view("uint32")
+                            K.ptx.ld(
+                                *[buffer_14[local_row * 8 + i] for i in range(8)],
+                                K.address_of(indices[row_base]),
+                                "",
+                                "",
+                                "global",
+                                "",
+                                "nc",
+                                "L1::no_allocate",
+                                "L2::evict_first",
+                                "L2::256B",
+                                "v8",
+                                "u32",
+                                "",
+                            )
+                        K.cuda.mbarrier_wait(
+                            K.address_of(k_empty.buf[k_pipe.stage]), K.bitwise_xor(k_pipe.phase, 1)
+                        )
+                        src_col = cta_idx * 256
+                        with K.unroll(4) as row_group:
+                            with K.unroll(4) as col_atom:
+                                buffer_16 = K.local_scalar("uint64")
+                                K.ptx.mapa(
+                                    buffer_16,
+                                    K.address_of(k_ready.buf[k_pipe.stage]),
+                                    K.uint32(0),
+                                    "",
+                                    "u64",
+                                    "",
+                                )
+                                kv_dst_offset = (
+                                    k_pipe.stage * 16384
+                                    + wg1_warp_idx * 512
+                                    + row_group // 2 * 2048
+                                    + row_group % 2 * 256
+                                    + col_atom * 4096
+                                ) * BF16_BYTES
+                                K.ptx.cp(
+                                    K.cuda.cvta_generic_to_shared(
+                                        K.ptr_byte_offset(
+                                            K.address_of(k_smem[0, 0]),
+                                            kv_dst_offset,
+                                            K.type_annotation("bfloat16"),
+                                        )
+                                    ),
+                                    K.reinterpret(K.handle().ty, K.address_of(kv_tma_tensormap)),
+                                    src_col + col_atom * 64,
+                                    cur_indices[row_group * 4],
+                                    cur_indices[row_group * 4 + 1],
+                                    cur_indices[row_group * 4 + 2],
+                                    cur_indices[row_group * 4 + 3],
+                                    K.cuda.cvta_generic_to_shared(
+                                        K.reinterpret(K.handle().ty, buffer_16)
+                                    ),
+                                    K.uint64(1508705875169116160),
+                                    "async",
+                                    "bulk",
+                                    "tensor",
+                                    "2d",
+                                    "shared::cluster",
+                                    "global",
+                                    "tile::gather4",
+                                    "mbarrier::complete_tx::bytes",
+                                    "",
+                                    "cta_group::2",
+                                    "L2::cache_hint",
+                                    "",
+                                )
+                        k_pipe.advance()
+                    jobs.advance()
             K.cuda.iket.range_end(kv_gather_token[0])
 
         def producer_role(role: K.constexpr):
             with K.If(role == 0):
                 with K.Then():
                     mma_token = iket_range("h128-small-qk-pv-issue")
-                    with K.If(K.cuda.elect_sync()):
-                        with K.Then():
-                            jobs = CLCJobScheduler()
-                            k_pipe = K.PipelineState(4, phase=0)
-                            with K.While(jobs.valid != 0):
-                                umma_s_q_idx: K.let[K.int32] = jobs.block_idx // 2
-                                umma_topk_len = K.local_scalar("int32")
-                                K.assign(umma_topk_len, topk)
-                                with K.If(have_topk_length):
-                                    with K.Then():
-                                        K.ptx.ld.global_.s32(
-                                            umma_topk_len, topk_length.ptr_to([umma_s_q_idx])
+                    with K.If(K.cuda.elect_sync()), K.Then():
+                        jobs = CLCJobScheduler()
+                        k_pipe = K.PipelineState(4, phase=0)
+                        with K.While(jobs.valid != 0):
+                            umma_s_q_idx = jobs.block_idx // 2
+                            umma_topk_len = K.local_scalar("int32", init=topk)
+                            with K.If(have_topk_length), K.Then():
+                                K.ptx.ld.global_.s32(
+                                    umma_topk_len, topk_length.ptr_to([umma_s_q_idx])
+                                )
+                            umma_num_k_blocks = K.max((umma_topk_len + 64 - 1) // 64, 1)
+                            K.cuda.mbarrier_wait(K.address_of(q_consumed.buf[0]), jobs.epoch.phase)
+                            with K.serial(umma_num_k_blocks + 1, unroll=False) as k:
+                                with K.If(k < umma_num_k_blocks), K.Then():
+                                    K.cuda.mbarrier_wait(
+                                        K.address_of(p_empty.buf[0]),
+                                        K.bitwise_xor(K.bitwise_and(k_pipe.stage, 1), 1),
+                                    )
+                                    K.ptx.mbarrier(
+                                        K.cuda.cvta_generic_to_shared(
+                                            K.address_of(k_ready.buf[k_pipe.stage])
+                                        ),
+                                        K.uint32(65536),
+                                        "arrive",
+                                        "expect_tx",
+                                        "",
+                                        "",
+                                        "shared",
+                                        "b64",
+                                        "",
+                                    )
+                                    K.cuda.mbarrier_wait(
+                                        K.address_of(k_ready.buf[k_pipe.stage]), k_pipe.phase
+                                    )
+                                    K.ptx.tcgen05("fence::after_thread_sync", "")
+                                    qk_accumulate = K.local_scalar("uint32", init=K.uint32(0))
+                                    descB_local = K.local_scalar("uint64")
+                                    K.cuda.tcgen05.encode_matrix_descriptor(
+                                        K.address_of(descB_local),
+                                        K.address_of(k_smem_gemm[0, 0, 0]),
+                                        512,
+                                        64,
+                                        3,
+                                    )
+                                    with K.unroll(1) as mi:
+                                        with K.unroll(1) as ni:
+                                            with K.unroll(16) as ki:
+                                                descB_off = K.local_scalar("uint64")
+                                                _add_smem_desc_offset(
+                                                    descB_off,
+                                                    descB_local,
+                                                    (
+                                                        ki // 1024 * 16384
+                                                        + ni * 16384
+                                                        + k_pipe.stage * 16384
+                                                        + ki % 16 // 4 * 4096
+                                                        + ki % 1024 // 16 * 64
+                                                        + ki % 4 * 16
+                                                    )
+                                                    // 8,
+                                                )
+                                                K.ptx.tcgen05(
+                                                    K.Cast("uint32", ni * 64 + 384),
+                                                    K.Cast("uint32", ki * 8 + 256),
+                                                    descB_off,
+                                                    K.uint32(136316048),
+                                                    K.uint32(0),
+                                                    K.uint32(0),
+                                                    K.uint32(0),
+                                                    K.uint32(0),
+                                                    K.uint32(0),
+                                                    K.uint32(0),
+                                                    K.uint32(0),
+                                                    K.uint32(0),
+                                                    K.Or(ki != 0, K.Cast("bool", qk_accumulate)),
+                                                    "mma",
+                                                    "cta_group::2",
+                                                    "kind::f16",
+                                                    "p12",
+                                                )
+                                    K.assign(qk_accumulate, K.uint32(1))
+                                    K.ptx.tcgen05(
+                                        K.cuda.cvta_generic_to_shared(
+                                            K.address_of(umma_ready.buf[0])
+                                        ),
+                                        K.Cast("uint16", 3),
+                                        "commit",
+                                        "cta_group::2",
+                                        "mbarrier::arrive::one",
+                                        "shared::cluster",
+                                        "multicast::cluster",
+                                        "b64",
+                                        "",
+                                    )
+                                    with K.If(k == umma_num_k_blocks - 1), K.Then():
+                                        K.ptx.tcgen05(
+                                            K.cuda.cvta_generic_to_shared(
+                                                K.address_of(tq_ready.buf[0])
+                                            ),
+                                            "commit",
+                                            "cta_group::2",
+                                            "mbarrier::arrive::one",
+                                            "shared::cluster",
+                                            "b64",
+                                            "",
                                         )
-                                umma_num_k_blocks: K.let[K.int32] = K.max(
-                                    (umma_topk_len + 64 - 1) // 64, 1
-                                )
-                                K.cuda.mbarrier_wait(K.address_of(buffer_2[0]), jobs.epoch.phase)
-                                with K.serial(umma_num_k_blocks + 1, unroll=False) as k:
-                                    with K.If(k < umma_num_k_blocks):
-                                        with K.Then():
-                                            K.cuda.mbarrier_wait(
-                                                K.address_of(bar_P_empty_buf[0]),
-                                                K.bitwise_xor(K.bitwise_and(k_pipe.stage, 1), 1),
-                                            )
-                                            K.ptx.mbarrier(
-                                                K.cuda.cvta_generic_to_shared(
-                                                    K.address_of(buffer_4[k_pipe.stage])
-                                                ),
-                                                K.uint32(65536),
-                                                "arrive",
-                                                "expect_tx",
-                                                "",
-                                                "",
-                                                "shared",
-                                                "b64",
-                                                "",
-                                            )
-                                            K.cuda.mbarrier_wait(
-                                                K.address_of(buffer_4[k_pipe.stage]), k_pipe.phase
-                                            )
-                                            K.ptx.tcgen05("fence::after_thread_sync", "")
-                                            qk_accumulate = K.local_scalar("uint32")
-                                            K.assign(qk_accumulate, K.uint32(0))
-                                            descB_local = K.local_scalar("uint64")
-                                            K.cuda.tcgen05.encode_matrix_descriptor(
-                                                K.address_of(descB_local),
-                                                K.address_of(k_smem_gemm[0, 0, 0]),
-                                                512,
-                                                64,
-                                                3,
-                                            )
-                                            with K.unroll(1) as mi:
-                                                with K.unroll(1) as ni:
-                                                    with K.unroll(16) as ki:
-                                                        K.ptx.tcgen05(
-                                                            K.Cast("uint32", ni * 64 + 384),
-                                                            K.Cast("uint32", ki * 8 + 256),
-                                                            _add_smem_desc_offset(
-                                                                descB_local,
-                                                                (
-                                                                    ki // 1024 * 16384
-                                                                    + ni * 16384
-                                                                    + k_pipe.stage * 16384
-                                                                    + ki % 16 // 4 * 4096
-                                                                    + ki % 1024 // 16 * 64
-                                                                    + ki % 4 * 16
-                                                                )
-                                                                // 8,
-                                                            ),
-                                                            K.uint32(136316048),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.Or(
-                                                                ki != 0,
-                                                                K.Cast("bool", qk_accumulate),
-                                                            ),
-                                                            "mma",
-                                                            "cta_group::2",
-                                                            "kind::f16",
-                                                            "p12",
-                                                        )
-                                            K.assign(qk_accumulate, K.uint32(1))
-                                            K.ptx.tcgen05(
-                                                K.cuda.cvta_generic_to_shared(
-                                                    K.address_of(buffer_6[0])
-                                                ),
-                                                K.Cast("uint16", 3),
-                                                "commit",
-                                                "cta_group::2",
-                                                "mbarrier::arrive::one",
-                                                "shared::cluster",
-                                                "multicast::cluster",
-                                                "b64",
-                                                "",
-                                            )
-                                            with K.If(k == umma_num_k_blocks - 1):
-                                                with K.Then():
+                                with K.If(k > 0), K.Then():
+                                    prev_k = k - 1
+                                    prev_buf = (k_pipe.stage + 3) % 4
+                                    prev_s_o_phase = K.bitwise_and(prev_buf, 1)
+                                    K.cuda.mbarrier_wait(
+                                        K.address_of(so_full.buf[0]),
+                                        K.bitwise_xor(prev_s_o_phase, 0),
+                                    )
+                                    with K.If(prev_k == 0), K.Then():
+                                        K.cuda.mbarrier_wait(
+                                            K.address_of(t_out_empty.buf[0]),
+                                            K.bitwise_xor(jobs.epoch.phase, 1),
+                                        )
+                                    K.ptx.tcgen05("fence::after_thread_sync", "")
+                                    o_accumulate = K.local_scalar(
+                                        "uint32",
+                                        init=K.if_then_else(prev_k == 0, K.uint32(0), K.uint32(1)),
+                                    )
+                                    # The two PV MMA issues differ only in the N-half they accumulate
+                                    # into and the matching 8KB descB offset.
+                                    for n_half, b_half in ((0, 0), (128, 8192)):
+                                        descB_local = K.local_scalar("uint64")
+                                        K.cuda.tcgen05.encode_matrix_descriptor(
+                                            K.address_of(descB_local),
+                                            K.address_of(k_smem_gemm[0, 0, 0]),
+                                            512,
+                                            64,
+                                            3,
+                                        )
+                                        descA_local = K.local_scalar("uint64")
+                                        K.cuda.tcgen05.encode_matrix_descriptor(
+                                            K.address_of(descA_local),
+                                            K.address_of(s_smem_gemm[0, 0]),
+                                            64,
+                                            8,
+                                            0,
+                                        )
+                                        with K.unroll(1) as mi:
+                                            with K.unroll(1) as ni:
+                                                with K.unroll(4) as ki:
+                                                    # `if` guards keep the first half free of `+ 0` terms.
+                                                    n_acc = ni * 128
+                                                    if n_half:
+                                                        n_acc = n_acc + n_half
+                                                    b_off = (
+                                                        (ki * 16 + ni) // 64 * 16384
+                                                        + prev_buf * 16384
+                                                        + (ki * 16 + ni) % 64 * 64
+                                                    )
+                                                    if b_half:
+                                                        b_off = b_off + b_half
+                                                    descA_off = K.local_scalar("uint64")
+                                                    _add_smem_desc_offset(
+                                                        descA_off,
+                                                        descA_local,
+                                                        (ki % 4 * 1024 + mi * 512 + ki // 4 * 8)
+                                                        // 8,
+                                                    )
+                                                    descB_off = K.local_scalar("uint64")
+                                                    _add_smem_desc_offset(
+                                                        descB_off, descB_local, b_off // 8
+                                                    )
                                                     K.ptx.tcgen05(
-                                                        K.cuda.cvta_generic_to_shared(
-                                                            K.address_of(buffer_1[0])
-                                                        ),
-                                                        "commit",
+                                                        K.Cast("uint32", n_acc),
+                                                        descA_off,
+                                                        descB_off,
+                                                        K.uint32(138478736),
+                                                        K.uint32(0),
+                                                        K.uint32(0),
+                                                        K.uint32(0),
+                                                        K.uint32(0),
+                                                        K.uint32(0),
+                                                        K.uint32(0),
+                                                        K.uint32(0),
+                                                        K.uint32(0),
+                                                        K.Or(ki != 0, K.Cast("bool", o_accumulate)),
+                                                        "mma",
                                                         "cta_group::2",
-                                                        "mbarrier::arrive::one",
-                                                        "shared::cluster",
-                                                        "b64",
-                                                        "",
+                                                        "kind::f16",
+                                                        "p12",
                                                     )
-                                    with K.If(k > 0):
-                                        with K.Then():
-                                            prev_k: K.let[K.int32] = k - 1
-                                            prev_buf: K.let[K.int32] = (k_pipe.stage + 3) % 4
-                                            prev_s_o_phase: K.let[K.int32] = K.bitwise_and(
-                                                prev_buf, 1
-                                            )
-                                            K.cuda.mbarrier_wait(
-                                                K.address_of(bar_S_O_full_buf[0]),
-                                                K.bitwise_xor(prev_s_o_phase, 0),
-                                            )
-                                            with K.If(prev_k == 0):
-                                                with K.Then():
-                                                    K.cuda.mbarrier_wait(
-                                                        K.address_of(bar_tOut_empty_buf[0]),
-                                                        K.bitwise_xor(jobs.epoch.phase, 1),
-                                                    )
-                                            K.ptx.tcgen05("fence::after_thread_sync", "")
-                                            o_accumulate = K.local_scalar("uint32")
-                                            K.assign(
-                                                o_accumulate,
-                                                K.if_then_else(
-                                                    prev_k == 0, K.uint32(0), K.uint32(1)
-                                                ),
-                                            )
-                                            descB_local = K.local_scalar("uint64")
-                                            K.cuda.tcgen05.encode_matrix_descriptor(
-                                                K.address_of(descB_local),
-                                                K.address_of(k_smem_gemm[0, 0, 0]),
-                                                512,
-                                                64,
-                                                3,
-                                            )
-                                            descA_local = K.local_scalar("uint64")
-                                            K.cuda.tcgen05.encode_matrix_descriptor(
-                                                K.address_of(descA_local),
-                                                K.address_of(s_smem_gemm[0, 0]),
-                                                64,
-                                                8,
-                                                0,
-                                            )
-                                            with K.unroll(1) as mi:
-                                                with K.unroll(1) as ni:
-                                                    with K.unroll(4) as ki:
-                                                        K.ptx.tcgen05(
-                                                            K.Cast("uint32", ni * 128),
-                                                            _add_smem_desc_offset(
-                                                                descA_local,
-                                                                (
-                                                                    ki % 4 * 1024
-                                                                    + mi * 512
-                                                                    + ki // 4 * 8
-                                                                )
-                                                                // 8,
-                                                            ),
-                                                            _add_smem_desc_offset(
-                                                                descB_local,
-                                                                (
-                                                                    (ki * 16 + ni) // 64 * 16384
-                                                                    + prev_buf * 16384
-                                                                    + (ki * 16 + ni) % 64 * 64
-                                                                )
-                                                                // 8,
-                                                            ),
-                                                            K.uint32(138478736),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.Or(
-                                                                ki != 0,
-                                                                K.Cast("bool", o_accumulate),
-                                                            ),
-                                                            "mma",
-                                                            "cta_group::2",
-                                                            "kind::f16",
-                                                            "p12",
-                                                        )
-                                            descB_local_1 = K.local_scalar("uint64")
-                                            K.cuda.tcgen05.encode_matrix_descriptor(
-                                                K.address_of(descB_local_1),
-                                                K.address_of(k_smem_gemm[0, 0, 0]),
-                                                512,
-                                                64,
-                                                3,
-                                            )
-                                            descA_local_1 = K.local_scalar("uint64")
-                                            K.cuda.tcgen05.encode_matrix_descriptor(
-                                                K.address_of(descA_local_1),
-                                                K.address_of(s_smem_gemm[0, 0]),
-                                                64,
-                                                8,
-                                                0,
-                                            )
-                                            with K.unroll(1) as mi:
-                                                with K.unroll(1) as ni:
-                                                    with K.unroll(4) as ki:
-                                                        K.ptx.tcgen05(
-                                                            K.Cast("uint32", ni * 128 + 128),
-                                                            _add_smem_desc_offset(
-                                                                descA_local_1,
-                                                                (
-                                                                    ki % 4 * 1024
-                                                                    + mi * 512
-                                                                    + ki // 4 * 8
-                                                                )
-                                                                // 8,
-                                                            ),
-                                                            _add_smem_desc_offset(
-                                                                descB_local_1,
-                                                                (
-                                                                    (ki * 16 + ni) // 64 * 16384
-                                                                    + prev_buf * 16384
-                                                                    + (ki * 16 + ni) % 64 * 64
-                                                                    + 8192
-                                                                )
-                                                                // 8,
-                                                            ),
-                                                            K.uint32(138478736),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.uint32(0),
-                                                            K.Or(
-                                                                ki != 0,
-                                                                K.Cast("bool", o_accumulate),
-                                                            ),
-                                                            "mma",
-                                                            "cta_group::2",
-                                                            "kind::f16",
-                                                            "p12",
-                                                        )
-                                            K.assign(o_accumulate, K.uint32(1))
-                                            K.ptx.tcgen05(
-                                                K.cuda.cvta_generic_to_shared(
-                                                    K.address_of(buffer_7[0])
-                                                ),
-                                                K.Cast("uint16", 3),
-                                                "commit",
-                                                "cta_group::2",
-                                                "mbarrier::arrive::one",
-                                                "shared::cluster",
-                                                "multicast::cluster",
-                                                "b64",
-                                                "",
-                                            )
-                                            K.ptx.tcgen05(
-                                                K.cuda.cvta_generic_to_shared(
-                                                    K.address_of(buffer_5[prev_buf])
-                                                ),
-                                                K.Cast("uint16", 3),
-                                                "commit",
-                                                "cta_group::2",
-                                                "mbarrier::arrive::one",
-                                                "shared::cluster",
-                                                "multicast::cluster",
-                                                "b64",
-                                                "",
-                                            )
-                                    with K.If(k != umma_num_k_blocks):
-                                        with K.Then():
-                                            k_pipe.advance()
-                                K.ptx.tcgen05("fence::before_thread_sync", "")
-                                K.ptx.tcgen05(
-                                    K.cuda.cvta_generic_to_shared(K.address_of(buffer_3[0])),
-                                    K.Cast("uint16", 3),
-                                    "commit",
-                                    "cta_group::2",
-                                    "mbarrier::arrive::one",
-                                    "shared::cluster",
-                                    "multicast::cluster",
-                                    "b64",
-                                    "",
-                                )
-                                jobs.advance()
+                                    K.assign(o_accumulate, K.uint32(1))
+                                    K.ptx.tcgen05(
+                                        K.cuda.cvta_generic_to_shared(
+                                            K.address_of(softmax_ready.buf[0])
+                                        ),
+                                        K.Cast("uint16", 3),
+                                        "commit",
+                                        "cta_group::2",
+                                        "mbarrier::arrive::one",
+                                        "shared::cluster",
+                                        "multicast::cluster",
+                                        "b64",
+                                        "",
+                                    )
+                                    K.ptx.tcgen05(
+                                        K.cuda.cvta_generic_to_shared(
+                                            K.address_of(k_empty.buf[prev_buf])
+                                        ),
+                                        K.Cast("uint16", 3),
+                                        "commit",
+                                        "cta_group::2",
+                                        "mbarrier::arrive::one",
+                                        "shared::cluster",
+                                        "multicast::cluster",
+                                        "b64",
+                                        "",
+                                    )
+                                with K.If(k != umma_num_k_blocks), K.Then():
+                                    k_pipe.advance()
+                            K.ptx.tcgen05("fence::before_thread_sync", "")
+                            K.ptx.tcgen05(
+                                K.cuda.cvta_generic_to_shared(K.address_of(q_released.buf[0])),
+                                K.Cast("uint16", 3),
+                                "commit",
+                                "cta_group::2",
+                                "mbarrier::arrive::one",
+                                "shared::cluster",
+                                "multicast::cluster",
+                                "b64",
+                                "",
+                            )
+                            jobs.advance()
                     K.cuda.iket.range_end(mma_token[0])
                 with K.Else():
                     with K.If(role == 1):
                         with K.Then():
                             valid_mask_token = iket_range("h128-small-valid-mask")
-                            with K.If(lane_idx < 8):
-                                with K.Then():
-                                    lane_indices = K.alloc_local((8,), "int32")
-                                    jobs = CLCJobScheduler()
-                                    index_pipe = K.PipelineState(4, phase=0)
-                                    with K.While(jobs.valid != 0):
-                                        valid_s_q_idx: K.let[K.int32] = jobs.block_idx // 2
-                                        valid_topk_len = K.local_scalar("int32")
-                                        K.assign(valid_topk_len, topk)
-                                        with K.If(have_topk_length):
-                                            with K.Then():
-                                                K.ptx.ld.global_.s32(
-                                                    valid_topk_len,
-                                                    topk_length.ptr_to([valid_s_q_idx]),
-                                                )
-                                        valid_num_k_blocks: K.let[K.int32] = K.max(
-                                            (valid_topk_len + 64 - 1) // 64, 1
+                            with K.If(lane_idx < 8), K.Then():
+                                lane_indices = K.alloc_local((8,), "int32")
+                                jobs = CLCJobScheduler()
+                                index_pipe = K.PipelineState(4, phase=0)
+                                with K.While(jobs.valid != 0):
+                                    valid_s_q_idx = jobs.block_idx // 2
+                                    valid_topk_len = K.local_scalar("int32", init=topk)
+                                    with K.If(have_topk_length), K.Then():
+                                        K.ptx.ld.global_.s32(
+                                            valid_topk_len, topk_length.ptr_to([valid_s_q_idx])
                                         )
-                                        valid_g_indices_base: K.let[K.int32] = (
-                                            valid_s_q_idx * stride_indices_s_q
+                                    valid_num_k_blocks = K.max((valid_topk_len + 64 - 1) // 64, 1)
+                                    valid_g_indices_base = valid_s_q_idx * stride_indices_s_q
+                                    with K.serial(valid_num_k_blocks, unroll=False) as k:
+                                        row_base = valid_g_indices_base + k * 64 + lane_idx * 8
+                                        buffer_13 = K.decl_buffer(
+                                            (8,), "int32", data=lane_indices.data, scope="local"
                                         )
-                                        with K.serial(valid_num_k_blocks, unroll=False) as k:
-                                            row_base: K.let[K.int32] = (
-                                                valid_g_indices_base + k * 64 + lane_idx * 8
-                                            )
-                                            buffer_13 = K.decl_buffer(
-                                                (8,), "int32", data=lane_indices.data, scope="local"
-                                            )
-                                            buffer_14 = buffer_13.view("uint32")
-                                            K.ptx.ld(
-                                                buffer_14[0],
-                                                buffer_14[1],
-                                                buffer_14[2],
-                                                buffer_14[3],
-                                                buffer_14[4],
-                                                buffer_14[5],
-                                                buffer_14[6],
-                                                buffer_14[7],
-                                                K.address_of(indices[row_base]),
-                                                "",
-                                                "",
-                                                "global",
-                                                "",
-                                                "nc",
-                                                "L1::no_allocate",
-                                                "L2::evict_normal",
-                                                "L2::256B",
-                                                "v8",
-                                                "u32",
-                                                "",
-                                            )
-                                            abs_pos_start: K.let[K.int32] = k * 64
-                                            mask: K.let[K.int8] = K.Cast(
-                                                "int8",
-                                                K.bitwise_or(
-                                                    K.bitwise_or(
-                                                        K.bitwise_or(
-                                                            K.Select(
-                                                                K.bitwise_and(
-                                                                    K.bitwise_and(
-                                                                        lane_indices[0] >= 0,
-                                                                        lane_indices[0] < s_kv,
-                                                                    ),
-                                                                    abs_pos_start + lane_idx * 8
-                                                                    < valid_topk_len,
-                                                                ),
-                                                                1,
-                                                                0,
-                                                            ),
-                                                            K.Select(
-                                                                K.bitwise_and(
-                                                                    K.bitwise_and(
-                                                                        lane_indices[1] >= 0,
-                                                                        lane_indices[1] < s_kv,
-                                                                    ),
-                                                                    abs_pos_start + lane_idx * 8 + 1
-                                                                    < valid_topk_len,
-                                                                ),
-                                                                2,
-                                                                0,
-                                                            ),
-                                                        ),
-                                                        K.bitwise_or(
-                                                            K.Select(
-                                                                K.bitwise_and(
-                                                                    K.bitwise_and(
-                                                                        lane_indices[2] >= 0,
-                                                                        lane_indices[2] < s_kv,
-                                                                    ),
-                                                                    abs_pos_start + lane_idx * 8 + 2
-                                                                    < valid_topk_len,
-                                                                ),
-                                                                4,
-                                                                0,
-                                                            ),
-                                                            K.Select(
-                                                                K.bitwise_and(
-                                                                    K.bitwise_and(
-                                                                        lane_indices[3] >= 0,
-                                                                        lane_indices[3] < s_kv,
-                                                                    ),
-                                                                    abs_pos_start + lane_idx * 8 + 3
-                                                                    < valid_topk_len,
-                                                                ),
-                                                                8,
-                                                                0,
-                                                            ),
-                                                        ),
+                                        buffer_14 = buffer_13.view("uint32")
+                                        K.ptx.ld(
+                                            *[buffer_14[i] for i in range(8)],
+                                            K.address_of(indices[row_base]),
+                                            "",
+                                            "",
+                                            "global",
+                                            "",
+                                            "nc",
+                                            "L1::no_allocate",
+                                            "L2::evict_normal",
+                                            "L2::256B",
+                                            "v8",
+                                            "u32",
+                                            "",
+                                        )
+                                        abs_pos_start = k * 64
+
+                                        def valid_bit(j, bit):
+                                            # j == 0 keeps the bare base so the emitted expression matches the
+                                            # other seven lanes' `base + j` form without a folded `+ 0`.
+                                            pos = abs_pos_start + lane_idx * 8
+                                            if j:
+                                                pos = pos + j
+                                            return K.Select(
+                                                K.bitwise_and(
+                                                    K.bitwise_and(
+                                                        lane_indices[j] >= 0, lane_indices[j] < s_kv
                                                     ),
-                                                    K.bitwise_or(
-                                                        K.bitwise_or(
-                                                            K.Select(
-                                                                K.bitwise_and(
-                                                                    K.bitwise_and(
-                                                                        lane_indices[4] >= 0,
-                                                                        lane_indices[4] < s_kv,
-                                                                    ),
-                                                                    abs_pos_start + lane_idx * 8 + 4
-                                                                    < valid_topk_len,
-                                                                ),
-                                                                16,
-                                                                0,
-                                                            ),
-                                                            K.Select(
-                                                                K.bitwise_and(
-                                                                    K.bitwise_and(
-                                                                        lane_indices[5] >= 0,
-                                                                        lane_indices[5] < s_kv,
-                                                                    ),
-                                                                    abs_pos_start + lane_idx * 8 + 5
-                                                                    < valid_topk_len,
-                                                                ),
-                                                                32,
-                                                                0,
-                                                            ),
-                                                        ),
-                                                        K.bitwise_or(
-                                                            K.Select(
-                                                                K.bitwise_and(
-                                                                    K.bitwise_and(
-                                                                        lane_indices[6] >= 0,
-                                                                        lane_indices[6] < s_kv,
-                                                                    ),
-                                                                    abs_pos_start + lane_idx * 8 + 6
-                                                                    < valid_topk_len,
-                                                                ),
-                                                                64,
-                                                                0,
-                                                            ),
-                                                            K.Select(
-                                                                K.bitwise_and(
-                                                                    K.bitwise_and(
-                                                                        lane_indices[7] >= 0,
-                                                                        lane_indices[7] < s_kv,
-                                                                    ),
-                                                                    abs_pos_start + lane_idx * 8 + 7
-                                                                    < valid_topk_len,
-                                                                ),
-                                                                128,
-                                                                0,
-                                                            ),
-                                                        ),
-                                                    ),
+                                                    pos < valid_topk_len,
                                                 ),
+                                                bit,
+                                                0,
                                             )
-                                            K.cuda.mbarrier_wait(
-                                                K.address_of(
-                                                    bar_valid_coord_scales_empty_buf[
-                                                        index_pipe.stage
-                                                    ]
-                                                ),
-                                                K.bitwise_xor(index_pipe.phase, 1),
-                                            )
-                                            K.ptx.st.shared.b8(
-                                                is_k_valid.ptr_to([index_pipe.stage, lane_idx]),
-                                                K.reinterpret("uint8", mask),
-                                            )
-                                            K.ptx.mbarrier(
-                                                K.cuda.cvta_generic_to_shared(
-                                                    K.address_of(
-                                                        bar_valid_coord_scales_full_buf[
-                                                            index_pipe.stage
-                                                        ]
-                                                    )
-                                                ),
-                                                K.uint32(1),
-                                                "arrive",
-                                                "",
-                                                "",
-                                                "shared",
-                                                "b64",
-                                                "",
-                                            )
-                                            index_pipe.advance()
-                                        jobs.advance()
+
+                                        # Balanced pairwise reduction: reproduces the hand-written or-tree shape.
+                                        terms = [valid_bit(j, 1 << j) for j in range(8)]
+                                        while len(terms) > 1:
+                                            terms = [
+                                                K.bitwise_or(terms[j], terms[j + 1])
+                                                for j in range(0, len(terms), 2)
+                                            ]
+                                        mask = K.Cast("int8", terms[0])
+                                        K.cuda.mbarrier_wait(
+                                            K.address_of(valid_empty.buf[index_pipe.stage]),
+                                            K.bitwise_xor(index_pipe.phase, 1),
+                                        )
+                                        K.ptx.st.shared.b8(
+                                            is_k_valid.ptr_to([index_pipe.stage, lane_idx]),
+                                            K.reinterpret("uint8", mask),
+                                        )
+                                        K.ptx.mbarrier(
+                                            K.cuda.cvta_generic_to_shared(
+                                                K.address_of(valid_full.buf[index_pipe.stage])
+                                            ),
+                                            K.uint32(1),
+                                            "arrive",
+                                            "",
+                                            "",
+                                            "shared",
+                                            "b64",
+                                            "",
+                                        )
+                                        index_pipe.advance()
+                                    jobs.advance()
                             K.cuda.iket.range_end(valid_mask_token[0])
                         with K.Else():
-                            with K.If(role >= 2):
-                                with K.Then():
-                                    clc_token = K.alloc_local((1,), "uint32")
+                            with K.If(role >= 2), K.Then():
+                                clc_token = K.alloc_local((1,), "uint32")
+                                K.assign(clc_token[0], K.cuda.iket.sentinel_token("h128-small-clc"))
+                                with K.If(role == 2), K.Then():
                                     K.assign(
-                                        clc_token[0], K.cuda.iket.sentinel_token("h128-small-clc")
+                                        clc_token[0], K.cuda.iket.range_start("h128-small-clc")
                                     )
-                                    with K.If(role == 2):
-                                        with K.Then():
-                                            K.assign(
-                                                clc_token[0],
-                                                K.cuda.iket.range_start("h128-small-clc"),
-                                            )
-                                    with K.If(K.cuda.elect_sync()):
-                                        with K.Then():
-                                            with K.If(role == 2):
-                                                with K.Then():
-                                                    jobs = CLCJobScheduler()
-                                                    with K.While(jobs.valid != 0):
-                                                        jobs.issue_cancel()
-                                                        jobs.advance()
-                                    K.cuda.iket.range_end(clc_token[0])
+                                with K.If(K.cuda.elect_sync()), K.Then():
+                                    with K.If(role == 2), K.Then():
+                                        jobs = CLCJobScheduler()
+                                        with K.While(jobs.valid != 0):
+                                            jobs.issue_cancel()
+                                            jobs.advance()
+                                K.cuda.iket.range_end(clc_token[0])
 
         def softmax():
             softmax_token = iket_range("h128-small-softmax")
-            local_warp_idx: K.let[K.int32] = warp_idx - 12
+            local_warp_idx = warp_idx - 12
             jobs = CLCJobScheduler()
             index_pipe = K.PipelineState(4, phase=0)
             with K.While(jobs.valid != 0):
-                wg3_s_q_idx: K.let[K.int32] = jobs.block_idx // 2
-                wg3_topk_len = K.local_scalar("int32")
-                K.assign(wg3_topk_len, topk)
-                with K.If(have_topk_length):
-                    with K.Then():
-                        K.ptx.ld.global_.s32(wg3_topk_len, topk_length.ptr_to([wg3_s_q_idx]))
-                wg3_num_k_blocks: K.let[K.int32] = K.max((wg3_topk_len + 64 - 1) // 64, 1)
-                mi = K.local_scalar("float32")
-                K.assign(mi, K.float32(-1000000000000000019884624838656.0))
-                li = K.local_scalar("float32")
-                K.assign(li, K.float32(0.0))
-                real_mi = K.local_scalar("float32")
-                K.assign(real_mi, K.float32("-inf"))
-                scale_pair: K.let[K.uint64] = K.cuda.make_float2(
-                    K.float32(sm_scale_div_log2), K.float32(sm_scale_div_log2)
+                wg3_s_q_idx = jobs.block_idx // 2
+                wg3_topk_len = K.local_scalar("int32", init=topk)
+                with K.If(have_topk_length), K.Then():
+                    K.ptx.ld.global_.s32(wg3_topk_len, topk_length.ptr_to([wg3_s_q_idx]))
+                wg3_num_k_blocks = K.max((wg3_topk_len + 64 - 1) // 64, 1)
+                mi = K.local_scalar("float32", init=K.float32(-1000000000000000019884624838656.0))
+                li = K.local_scalar("float32", init=K.float32(0.0))
+                real_mi = K.local_scalar("float32", init=K.float32("-inf"))
+                scale_pair = K.local_scalar(
+                    "uint64",
+                    init=K.cuda.make_float2(
+                        K.float32(sm_scale_div_log2), K.float32(sm_scale_div_log2)
+                    ),
                 )
                 with K.serial(wg3_num_k_blocks, unroll=False) as k:
                     K.cuda.mbarrier_wait(
-                        K.address_of(bar_valid_coord_scales_full_buf[index_pipe.stage]),
-                        index_pipe.phase,
+                        K.address_of(valid_full.buf[index_pipe.stage]), index_pipe.phase
                     )
                     p = K.alloc_local((32,), "uint32")
                     p_peer = K.alloc_local((32,), "uint32")
                     K.cuda.mbarrier_wait(
-                        K.address_of(buffer_6[0]), K.bitwise_and(index_pipe.stage, 1)
+                        K.address_of(umma_ready.buf[0]), K.bitwise_and(index_pipe.stage, 1)
                     )
                     K.ptx.tcgen05("fence::after_thread_sync", "")
                     with K.If(local_warp_idx < 2):
                         with K.Then():
                             local_storage = p
                             K.ptx.tcgen05(
-                                local_storage[0],
-                                local_storage[1],
-                                local_storage[2],
-                                local_storage[3],
-                                local_storage[4],
-                                local_storage[5],
-                                local_storage[6],
-                                local_storage[7],
-                                local_storage[8],
-                                local_storage[9],
-                                local_storage[10],
-                                local_storage[11],
-                                local_storage[12],
-                                local_storage[13],
-                                local_storage[14],
-                                local_storage[15],
-                                local_storage[16],
-                                local_storage[17],
-                                local_storage[18],
-                                local_storage[19],
-                                local_storage[20],
-                                local_storage[21],
-                                local_storage[22],
-                                local_storage[23],
-                                local_storage[24],
-                                local_storage[25],
-                                local_storage[26],
-                                local_storage[27],
-                                local_storage[28],
-                                local_storage[29],
-                                local_storage[30],
-                                local_storage[31],
+                                *[local_storage[i] for i in range(32)],
                                 K.uint32(384),
                                 "ld",
                                 "sync",
@@ -1898,38 +1391,7 @@ def make_kernel(
                             )
                             local_storage_1 = p_peer
                             K.ptx.tcgen05(
-                                local_storage_1[0],
-                                local_storage_1[1],
-                                local_storage_1[2],
-                                local_storage_1[3],
-                                local_storage_1[4],
-                                local_storage_1[5],
-                                local_storage_1[6],
-                                local_storage_1[7],
-                                local_storage_1[8],
-                                local_storage_1[9],
-                                local_storage_1[10],
-                                local_storage_1[11],
-                                local_storage_1[12],
-                                local_storage_1[13],
-                                local_storage_1[14],
-                                local_storage_1[15],
-                                local_storage_1[16],
-                                local_storage_1[17],
-                                local_storage_1[18],
-                                local_storage_1[19],
-                                local_storage_1[20],
-                                local_storage_1[21],
-                                local_storage_1[22],
-                                local_storage_1[23],
-                                local_storage_1[24],
-                                local_storage_1[25],
-                                local_storage_1[26],
-                                local_storage_1[27],
-                                local_storage_1[28],
-                                local_storage_1[29],
-                                local_storage_1[30],
-                                local_storage_1[31],
+                                *[local_storage_1[i] for i in range(32)],
                                 K.cuda.get_tmem_addr(K.uint32(384), 0, 32),
                                 "ld",
                                 "sync",
@@ -1943,38 +1405,7 @@ def make_kernel(
                         with K.Else():
                             local_storage = p_peer
                             K.ptx.tcgen05(
-                                local_storage[0],
-                                local_storage[1],
-                                local_storage[2],
-                                local_storage[3],
-                                local_storage[4],
-                                local_storage[5],
-                                local_storage[6],
-                                local_storage[7],
-                                local_storage[8],
-                                local_storage[9],
-                                local_storage[10],
-                                local_storage[11],
-                                local_storage[12],
-                                local_storage[13],
-                                local_storage[14],
-                                local_storage[15],
-                                local_storage[16],
-                                local_storage[17],
-                                local_storage[18],
-                                local_storage[19],
-                                local_storage[20],
-                                local_storage[21],
-                                local_storage[22],
-                                local_storage[23],
-                                local_storage[24],
-                                local_storage[25],
-                                local_storage[26],
-                                local_storage[27],
-                                local_storage[28],
-                                local_storage[29],
-                                local_storage[30],
-                                local_storage[31],
+                                *[local_storage[i] for i in range(32)],
                                 K.uint32(384),
                                 "ld",
                                 "sync",
@@ -1987,38 +1418,7 @@ def make_kernel(
                             )
                             local_storage_1 = p
                             K.ptx.tcgen05(
-                                local_storage_1[0],
-                                local_storage_1[1],
-                                local_storage_1[2],
-                                local_storage_1[3],
-                                local_storage_1[4],
-                                local_storage_1[5],
-                                local_storage_1[6],
-                                local_storage_1[7],
-                                local_storage_1[8],
-                                local_storage_1[9],
-                                local_storage_1[10],
-                                local_storage_1[11],
-                                local_storage_1[12],
-                                local_storage_1[13],
-                                local_storage_1[14],
-                                local_storage_1[15],
-                                local_storage_1[16],
-                                local_storage_1[17],
-                                local_storage_1[18],
-                                local_storage_1[19],
-                                local_storage_1[20],
-                                local_storage_1[21],
-                                local_storage_1[22],
-                                local_storage_1[23],
-                                local_storage_1[24],
-                                local_storage_1[25],
-                                local_storage_1[26],
-                                local_storage_1[27],
-                                local_storage_1[28],
-                                local_storage_1[29],
-                                local_storage_1[30],
-                                local_storage_1[31],
+                                *[local_storage_1[i] for i in range(32)],
                                 K.cuda.get_tmem_addr(K.uint32(384), 0, 32),
                                 "ld",
                                 "sync",
@@ -2034,14 +1434,14 @@ def make_kernel(
                     buffer_17 = K.local_scalar("uint32")
                     K.ptx.mapa(
                         buffer_17,
-                        K.cuda.cvta_generic_to_shared(K.address_of(bar_P_empty_buf[0])),
+                        K.cuda.cvta_generic_to_shared(K.address_of(p_empty.buf[0])),
                         K.uint32(0),
                         "shared::cluster",
                         "u32",
                         "",
                     )
                     K.ptx.mbarrier(buffer_17, "arrive", "", "", "shared::cluster", "b64", "")
-                    valid_word_offset: K.let[K.int32] = K.if_then_else(local_warp_idx >= 2, 1, 0)
+                    valid_word_offset = K.if_then_else(local_warp_idx >= 2, 1, 0)
                     buffer_18 = K.decl_buffer(
                         (4, 2),
                         "uint32",
@@ -2055,7 +1455,7 @@ def make_kernel(
                         is_k_valid_u32, buffer_18.ptr_to([index_pipe.stage, valid_word_offset])
                     )
                     with K.unroll(32) as p_i:
-                        invalid_p_predicate: K.let[K.bool] = K.bitwise_and(
+                        invalid_p_predicate = K.bitwise_and(
                             K.shift_right(is_k_valid_u32, K.Cast("uint32", p_i)), K.uint32(1)
                         ) == K.uint32(0)
                         K.ptx.mov.b32(
@@ -2066,7 +1466,7 @@ def make_kernel(
                     sum_pair1 = K.local_scalar("uint64")
                     with K.unroll(8) as exchange_i:
                         exchange_offset: K.int32 = exchange_i * 32 * 4 + lane_idx * 4
-                        p_peer_offset: K.let[K.int32] = exchange_i * 4
+                        p_peer_offset = exchange_i * 4
                         K.ptx.st(
                             K.cuda.cvta_generic_to_shared(
                                 K.address_of(
@@ -2117,11 +1517,11 @@ def make_kernel(
                             "u32",
                             "",
                         )
-                        p_pair0: K.let[K.uint64] = K.cuda.make_float2(
+                        p_pair0 = K.cuda.make_float2(
                             K.cuda.uint_as_float(p[exchange_i * 4]),
                             K.cuda.uint_as_float(p[exchange_i * 4 + 1]),
                         )
-                        peer_pair0: K.let[K.uint64] = K.cuda.make_float2(
+                        peer_pair0 = K.cuda.make_float2(
                             K.cuda.uint_as_float(p_exchange_tmp[0]),
                             K.cuda.uint_as_float(p_exchange_tmp[1]),
                         )
@@ -2132,11 +1532,11 @@ def make_kernel(
                         K.ptx.mov.b32(
                             p[exchange_i * 4 + 1], K.cuda.float_as_uint(K.cuda.float2_y(sum_pair0))
                         )
-                        p_pair1: K.let[K.uint64] = K.cuda.make_float2(
+                        p_pair1 = K.cuda.make_float2(
                             K.cuda.uint_as_float(p[exchange_i * 4 + 2]),
                             K.cuda.uint_as_float(p[exchange_i * 4 + 3]),
                         )
-                        peer_pair1: K.let[K.uint64] = K.cuda.make_float2(
+                        peer_pair1 = K.cuda.make_float2(
                             K.cuda.uint_as_float(p_exchange_tmp[2]),
                             K.cuda.uint_as_float(p_exchange_tmp[3]),
                         )
@@ -2147,8 +1547,7 @@ def make_kernel(
                         K.ptx.mov.b32(
                             p[exchange_i * 4 + 3], K.cuda.float_as_uint(K.cuda.float2_y(sum_pair1))
                         )
-                    cur_pi_max = K.local_scalar("float32")
-                    K.assign(cur_pi_max, K.float32("-inf"))
+                    cur_pi_max = K.local_scalar("float32", init=K.float32("-inf"))
                     with K.unroll(32) as p_i:
                         K.assign(cur_pi_max, K.max(cur_pi_max, K.cuda.uint_as_float(p[p_i])))
                     K.assign(cur_pi_max, cur_pi_max * K.float32(sm_scale_div_log2))
@@ -2166,8 +1565,10 @@ def make_kernel(
                     )
                     K.assign(cur_pi_max, K.max(cur_pi_max, peer_pi_max))
                     K.assign(real_mi, K.max(real_mi, cur_pi_max))
-                    should_scale_o: K.let[K.bool] = (
-                        K.cuda.any_sync(K.uint32(4294967295), cur_pi_max - mi > K.float32(6.0)) != 0
+                    should_scale_o = K.local_scalar(
+                        "bool",
+                        init=K.cuda.any_sync(K.uint32(4294967295), cur_pi_max - mi > K.float32(6.0))
+                        != 0,
                     )
                     new_max = K.local_scalar("float32")
                     scale_for_old = K.local_scalar("float32")
@@ -2181,14 +1582,18 @@ def make_kernel(
                     K.assign(mi, new_max)
                     s_frag = K.alloc_local((32,), "bfloat16")
                     s_pack = s_frag.view("uint32")
-                    cur_sum_pair = K.local_scalar("uint64")
-                    K.assign(cur_sum_pair, K.cuda.make_float2(K.float32(0.0), K.float32(0.0)))
-                    neg_new_max_pair: K.let[K.uint64] = K.cuda.make_float2(
-                        new_max * K.float32(-1.0), new_max * K.float32(-1.0)
+                    cur_sum_pair = K.local_scalar(
+                        "uint64", init=K.cuda.make_float2(K.float32(0.0), K.float32(0.0))
+                    )
+                    neg_new_max_pair = K.local_scalar(
+                        "uint64",
+                        init=K.cuda.make_float2(
+                            new_max * K.float32(-1.0), new_max * K.float32(-1.0)
+                        ),
                     )
                     fma_pair = K.local_scalar("uint64")
                     with K.unroll(16) as s_i:
-                        p_pair: K.let[K.uint64] = K.cuda.make_float2(
+                        p_pair = K.cuda.make_float2(
                             K.cuda.uint_as_float(p[s_i * 2]), K.cuda.uint_as_float(p[s_i * 2 + 1])
                         )
                         K.ptx.fma(
@@ -2207,17 +1612,15 @@ def make_kernel(
                         s_y = K.local_scalar("float32")
                         K.ptx.ex2(s_x, K.cuda.float2_x(fma_pair), "approx", "ftz", "f32", "")
                         K.ptx.ex2(s_y, K.cuda.float2_y(fma_pair), "approx", "ftz", "f32", "")
-                        s_pair: K.let[K.uint64] = K.cuda.make_float2(s_x, s_y)
+                        s_pair = K.cuda.make_float2(s_x, s_y)
                         K.ptx.add(cur_sum_pair, cur_sum_pair, s_pair, "rn", "", "", "f32x2", "", "")
                         K.ptx.mov.b32(s_pack[s_i], K.cuda.float22bfloat162_rn(s_x, s_y))
-                    cur_sum: K.let[K.float32] = K.cuda.float2_x(cur_sum_pair) + K.cuda.float2_y(
-                        cur_sum_pair
-                    )
+                    cur_sum = K.cuda.float2_x(cur_sum_pair) + K.cuda.float2_y(cur_sum_pair)
                     li_tmp = K.local_scalar("float32")
                     K.ptx.fma(li_tmp, li, scale_for_old, cur_sum, "rn", "", "", "f32", "", "")
                     K.assign(li, li_tmp)
                     K.cuda.mbarrier_wait(
-                        K.address_of(buffer_7[0]),
+                        K.address_of(softmax_ready.buf[0]),
                         K.bitwise_xor(K.bitwise_and(index_pipe.stage, 1), 1),
                     )
                     K.ptx.fence("proxy", "async", "shared::cta", "")
@@ -2226,7 +1629,7 @@ def make_kernel(
                     for f in range(4):
                         ds: K.int32 = f % 4 * 512
                         dr: K.int32 = f % 4 * 8
-                        s_ptr: K.let = K.ptr_byte_offset(
+                        s_ptr = K.ptr_byte_offset(
                             K.address_of(s_smem_gemm[0, 0]), (s_base + ds) * BF16_BYTES, "bfloat16"
                         )
                         r_w: K.int32 = dr // 2
@@ -2246,41 +1649,39 @@ def make_kernel(
                             "u32",
                             "",
                         )
-                    with K.If(K.bitwise_and(k > 0, should_scale_o)):
-                        with K.Then():
-                            K.ptx.tcgen05("fence::after_thread_sync", "")
-                            o_rescale = K.alloc_local((32,), "float32")
-                            with K.unroll(8) as chunk_idx:
-                                _tmem_load_32(
-                                    o_rescale, K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32)
+                    with K.If(K.bitwise_and(k > 0, should_scale_o)), K.Then():
+                        K.ptx.tcgen05("fence::after_thread_sync", "")
+                        o_rescale = K.alloc_local((32,), "float32")
+                        with K.unroll(8) as chunk_idx:
+                            K.evaluate(
+                                K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                                    *[o_rescale[i] for i in range(32)],
+                                    K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32),
                                 )
-                                K.ptx.tcgen05("wait::ld", "sync", "aligned", "")
-                                for f in range(16):
-                                    buffer_23 = K.local_scalar("uint64")
-                                    buffer_24 = K.local_scalar("uint64")
-                                    K.ptx.mov.b64(buffer_23, o_rescale[f * 2], o_rescale[f * 2 + 1])
-                                    K.ptx.mov.b64(buffer_24, scale_for_old, scale_for_old)
-                                    K.ptx.mul(
-                                        buffer_23,
-                                        buffer_23,
-                                        buffer_24,
-                                        "rz",
-                                        "ftz",
-                                        "",
-                                        "f32x2",
-                                        "",
-                                    )
-                                    K.ptx.mov.b64(o_rescale[f * 2], o_rescale[f * 2 + 1], buffer_23)
-                                _tmem_store_32(
-                                    o_rescale, K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32)
+                            )
+                            K.ptx.tcgen05("wait::ld", "sync", "aligned", "")
+                            for f in range(16):
+                                buffer_23 = K.local_scalar("uint64")
+                                buffer_24 = K.local_scalar("uint64")
+                                K.ptx.mov.b64(buffer_23, o_rescale[f * 2], o_rescale[f * 2 + 1])
+                                K.ptx.mov.b64(buffer_24, scale_for_old, scale_for_old)
+                                K.ptx.mul(
+                                    buffer_23, buffer_23, buffer_24, "rz", "ftz", "", "f32x2", ""
                                 )
-                                K.ptx.tcgen05("wait::st", "sync", "aligned", "")
-                            K.ptx.tcgen05("fence::before_thread_sync", "")
+                                K.ptx.mov.b64(o_rescale[f * 2], o_rescale[f * 2 + 1], buffer_23)
+                            K.evaluate(
+                                K.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
+                                    K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32),
+                                    *[o_rescale[i] for i in range(32)],
+                                )
+                            )
+                            K.ptx.tcgen05("wait::st", "sync", "aligned", "")
+                        K.ptx.tcgen05("fence::before_thread_sync", "")
                     K.ptx.fence("proxy", "async", "shared::cta", "")
                     buffer_20 = K.local_scalar("uint32")
                     K.ptx.mapa(
                         buffer_20,
-                        K.cuda.cvta_generic_to_shared(K.address_of(bar_S_O_full_buf[0])),
+                        K.cuda.cvta_generic_to_shared(K.address_of(so_full.buf[0])),
                         K.uint32(0),
                         "shared::cluster",
                         "u32",
@@ -2289,7 +1690,7 @@ def make_kernel(
                     K.ptx.mbarrier(buffer_20, "arrive", "", "", "shared::cluster", "b64", "")
                     K.ptx.mbarrier(
                         K.cuda.cvta_generic_to_shared(
-                            K.address_of(bar_valid_coord_scales_empty_buf[index_pipe.stage])
+                            K.address_of(valid_empty.buf[index_pipe.stage])
                         ),
                         K.uint32(1),
                         "arrive",
@@ -2300,12 +1701,11 @@ def make_kernel(
                         "",
                     )
                     index_pipe.advance()
-                with K.If(real_mi == K.float32("-inf")):
-                    with K.Then():
-                        K.assign(li, K.float32(0.0))
-                        K.assign(mi, K.float32("-inf"))
+                with K.If(real_mi == K.float32("-inf")), K.Then():
+                    K.assign(li, K.float32(0.0))
+                    K.assign(mi, K.float32("-inf"))
                 K.cuda.mbarrier_wait(
-                    K.address_of(bar_li_empty_buf[0]), K.bitwise_xor(jobs.epoch.phase, 1)
+                    K.address_of(li_empty.buf[0]), K.bitwise_xor(jobs.epoch.phase, 1)
                 )
                 K.ptx.st.shared.f32(
                     rowwise_li_buf.ptr_to([K.bitwise_xor(idx_in_warpgroup, 64)]), li
@@ -2314,58 +1714,53 @@ def make_kernel(
                 peer_li = K.local_scalar("float32")
                 K.ptx.ld.shared.f32(peer_li, rowwise_li_buf.ptr_to([idx_in_warpgroup]))
                 K.assign(li, li + peer_li)
-                with K.If(idx_in_warpgroup < 64):
-                    with K.Then():
-                        head_idx: K.let[K.int32] = cta_idx * 64 + idx_in_warpgroup
-                        attn_sink_value = K.local_scalar("float32")
-                        K.assign(attn_sink_value, K.float32(-float("inf")))
-                        with K.If(have_attn_sink):
-                            with K.Then():
-                                K.ptx.ld.global_.f32(attn_sink_value, attn_sink.ptr_to([head_idx]))
-                        attn_sink_log2: K.let[K.float32] = attn_sink_value * K.float32(
-                            1.4426950408889634
-                        )
-                        sink_exp = K.local_scalar("float32")
-                        K.ptx.ex2(sink_exp, attn_sink_log2 - mi, "approx", "ftz", "f32", "")
-                        output_scale: K.let[K.float32] = K.cuda.fdividef(
-                            K.float32(1.0), li + sink_exp
-                        )
-                        K.ptx.st.shared.f32(
-                            rowwise_li_buf.ptr_to([idx_in_warpgroup]),
-                            K.if_then_else(li == K.float32(0.0), K.float32(0.0), output_scale),
-                        )
-                        K.ptx.mbarrier(
-                            K.cuda.cvta_generic_to_shared(K.address_of(bar_li_full_buf[0])),
-                            K.uint32(1),
-                            "arrive",
-                            "",
-                            "",
-                            "shared",
-                            "b64",
-                            "",
-                        )
-                        cur_lse = K.local_scalar("float32")
-                        K.ptx.fma(
-                            cur_lse,
-                            mi,
-                            K.float32(0.69314718055994529),
-                            K.log(li),
-                            "rn",
-                            "",
-                            "",
-                            "f32",
-                            "",
-                            "",
-                        )
-                        K.assign(
-                            cur_lse,
-                            K.if_then_else(cur_lse == K.float32("-inf"), K.float32("inf"), cur_lse),
-                        )
-                        K.ptx.st.global_.f32(
-                            max_logits.ptr_to([wg3_s_q_idx, head_idx]),
-                            real_mi * K.float32(0.69314718055994529),
-                        )
-                        K.ptx.st.global_.f32(lse.ptr_to([wg3_s_q_idx, head_idx]), cur_lse)
+                with K.If(idx_in_warpgroup < 64), K.Then():
+                    head_idx = cta_idx * 64 + idx_in_warpgroup
+                    attn_sink_value = K.local_scalar("float32", init=K.float32(-float("inf")))
+                    with K.If(have_attn_sink), K.Then():
+                        K.ptx.ld.global_.f32(attn_sink_value, attn_sink.ptr_to([head_idx]))
+                    attn_sink_log2 = attn_sink_value * K.float32(1.4426950408889634)
+                    sink_exp = K.local_scalar("float32")
+                    K.ptx.ex2(sink_exp, attn_sink_log2 - mi, "approx", "ftz", "f32", "")
+                    output_scale = K.local_scalar(
+                        "float32", init=K.cuda.fdividef(K.float32(1.0), li + sink_exp)
+                    )
+                    K.ptx.st.shared.f32(
+                        rowwise_li_buf.ptr_to([idx_in_warpgroup]),
+                        K.if_then_else(li == K.float32(0.0), K.float32(0.0), output_scale),
+                    )
+                    K.ptx.mbarrier(
+                        K.cuda.cvta_generic_to_shared(K.address_of(li_full.buf[0])),
+                        K.uint32(1),
+                        "arrive",
+                        "",
+                        "",
+                        "shared",
+                        "b64",
+                        "",
+                    )
+                    cur_lse = K.local_scalar("float32")
+                    K.ptx.fma(
+                        cur_lse,
+                        mi,
+                        K.float32(0.69314718055994529),
+                        K.log(li),
+                        "rn",
+                        "",
+                        "",
+                        "f32",
+                        "",
+                        "",
+                    )
+                    K.assign(
+                        cur_lse,
+                        K.if_then_else(cur_lse == K.float32("-inf"), K.float32("inf"), cur_lse),
+                    )
+                    K.ptx.st.global_.f32(
+                        max_logits.ptr_to([wg3_s_q_idx, head_idx]),
+                        real_mi * K.float32(0.69314718055994529),
+                    )
+                    K.ptx.st.global_.f32(lse.ptr_to([wg3_s_q_idx, head_idx]), cur_lse)
                 jobs.advance()
             K.cuda.iket.range_end(softmax_token[0])
 
