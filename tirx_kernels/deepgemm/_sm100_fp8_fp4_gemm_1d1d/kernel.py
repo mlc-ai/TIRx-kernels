@@ -1238,20 +1238,18 @@ def build_kernel(spec: GemmSpec):
                                             # steps of a partial final K block are valid.
                                             with (
                                                 K.If(
-                                                    
-                                                        K.Or(
-                                                            mma_k < mma_kblocks - 1,
-                                                            ki * UMMA_K
-                                                            < (
-                                                                mma_sched.psum
-                                                                if is_k_grouped
-                                                                else eff_k
-                                                            )
-                                                            - mma_k * block_k,
+                                                    K.Or(
+                                                        mma_k < mma_kblocks - 1,
+                                                        ki * UMMA_K
+                                                        < (
+                                                            mma_sched.psum
+                                                            if is_k_grouped
+                                                            else eff_k
                                                         )
-                                                        if may_have_tail_k
-                                                        else ki < umma_k_steps
-                                                    
+                                                        - mma_k * block_k,
+                                                    )
+                                                    if may_have_tail_k
+                                                    else ki < umma_k_steps
                                                 ),
                                                 K.Then(),
                                             ):
