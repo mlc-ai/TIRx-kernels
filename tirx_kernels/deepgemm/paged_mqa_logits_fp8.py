@@ -1519,10 +1519,15 @@ def _load_sglang_cutedsl_reference() -> tuple[Any, Any]:
         package = types.ModuleType(name)
         package.__package__ = name
         package.__path__ = [str(path)]
+        # A spec-less module in sys.modules makes every later find_spec("sglang")
+        # raise ValueError, failing the availability probe of subsequent configs.
+        package.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
+        package.__spec__.submodule_search_locations = [str(path)]
         sys.modules[name] = package
 
     utils = types.ModuleType("sglang.srt.utils")
     utils.is_sm100_supported = lambda: torch.cuda.get_device_capability()[0] == 10
+    utils.__spec__ = importlib.machinery.ModuleSpec(utils.__name__, loader=None)
     sys.modules[utils.__name__] = utils
 
     module = importlib.import_module("sglang.kernels.ops.attention.dsa.cutedsl_paged_mqa_logits")

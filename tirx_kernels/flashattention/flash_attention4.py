@@ -200,17 +200,77 @@ def make_kernel(
         Q_STAGE16 = stage16(q_smem)
         KV_STAGE16 = stage16(kv_smem)
 
+        # How a descriptor is carried from its encode to the tcgen05.mma
+        # operands, by regime. SPLIT_DESC keeps the two halves in plain C
+        # scalars; the alternative is K's native uint64 descriptor plus
+        # KDesc.__add__, which spells both the split and every step as inline
+        # asm (mov.b64-unpack / add.u32 / mov.b64-pack).
+        #
+        # An asm result is an optimisation barrier, so under the native form
+        # ptxas never sees one value flowing into the operands and reschedules
+        # the descriptor chain across the whole kernel; the asm add also pins
+        # the association to `lo + (stage*STAGE16 + koff)`, costing a ULEA per
+        # k-phase because the `lo + stage*STAGE16` base can no longer be
+        # hoisted out of the eight-phase walk (ULEA in the issuer region:
+        # 15 -> 60). On the long non-causal GQA=1 stream that is worth -3.8%
+        # (771.3 -> 742.3us on s8192_h32kv32, paired same-process; the
+        # pre-rewrite kernel, which reached the halves through a C union,
+        # measures 744.8us there). The GQA-packed causal path measures the
+        # other way: with STEADY_DESC keeping eight descriptors live at once,
+        # every plain-C spelling tried (split halves; split halves with an asm
+        # pack; masking the halves out of the packed value at each use) lands
+        # at 112.8-112.9us on s4096_h32kv4_causal against 110.8us for the
+        # native form, so that regime keeps the native form. Elsewhere the
+        # split is a win or a wash: s4096_h32kv32 218.0 -> 211.2,
+        # s4096_h32kv32_causal 125.6 -> 122.9, s1024_h32kv32_causal
+        # 26.38 -> 26.06, s8192_h32kv32_causal 424.4 -> 422.9,
+        # s2048_h32kv8 60.12 -> 60.02, s1024_h32kv4 23.65 -> 23.85.
+        SPLIT_DESC = not STEADY_DESC
+
         def lo_uniform(desc):
-            """Broadcast the descriptor's low half — orig SmemDescriptor.make_lo_uniform."""
+            """Broadcast the descriptor's low half — orig SmemDescriptor.make_lo_uniform.
+
+            Returns whatever :func:`desc_at` wants in this regime: the split
+            ``(lo, hi)`` halves, or the ``KDesc`` itself.
+            """
             desc_lo = K.alloc_local((1,), "uint32")
             desc_hi = K.alloc_local((1,), "uint32")
-            K.ptx.mov.b64(desc_lo[0], desc_hi[0], desc.value)
-            K.ptx.mov.b64(desc.value, K.uniform(desc_lo[0]), desc_hi[0])
+            if not SPLIT_DESC:
+                K.ptx.mov.b64(desc_lo[0], desc_hi[0], desc.value)
+                K.ptx.mov.b64(desc.value, K.uniform(desc_lo[0]), desc_hi[0])
+                return desc
+            K.assign(desc_lo[0], K.uniform(K.Cast("uint32", desc.value)))
+            K.assign(desc_hi[0], K.Cast("uint32", K.shift_right(desc.value, K.uint64(32))))
+            return desc_lo, desc_hi
+
+        def desc_at(desc, off16):
+            """The descriptor for a 16-byte-unit offset from ``desc``'s base.
+
+            Only the low half moves -- every offset here is a small
+            non-negative displacement inside one tile ring, so nothing carries
+            into the encoded layout fields -- and the high half is
+            loop-invariant, so a step is one 32-bit add plus the pack into the
+            operand register pair.
+            """
+            if not SPLIT_DESC:
+                return desc + off16
+            lo, hi = desc
+            packed = K.alloc_local((1,), "uint64")
+            low = (
+                lo[0] if isinstance(off16, int) and off16 == 0 else lo[0] + K.Cast("uint32", off16)
+            )
+            K.assign(
+                packed[0],
+                K.bitwise_or(
+                    K.shift_left(K.Cast("uint64", hi[0]), K.uint64(32)), K.Cast("uint64", low)
+                ),
+            )
+            return packed[0]
 
         def encode(view, major="k"):
             """One hoisted, lo-uniform tcgen05 matrix descriptor for a stage-0 view.
 
-            Returns ``(desc, off16)``. K derives ldo/sdo/swizzle from the tile it
+            Returns ``(halves, off16)``. K derives ldo/sdo/swizzle from the tile it
             allocated and checks them against that layout; the frozen kernel
             hand-writes ldo=1024 sdo=64 swizzle=3 (orig:L635) and K derives
             exactly those three numbers. ``off16(kp)`` is the trace-time 16-byte
@@ -225,8 +285,7 @@ def make_kernel(
             the original emits.
             """
             desc, off16 = view.encode(major=major, mma_k=MMA_K)
-            lo_uniform(desc)
-            return desc, off16
+            return lo_uniform(desc), off16
 
         # orig:L634-658. k_desc and v_desc are numerically identical (K and V
         # alias); they are separate registers on purpose, and the five *_steady
@@ -648,8 +707,8 @@ def make_kernel(
                             with K.If(elected()), K.Then():
                                 K.ptx[MMA_F16](
                                     K.Cast("uint32", q_stage * MMA_N),
-                                    qd + (q_stage * Q_STAGE16 + koff(ki)),
-                                    kd + (kv_stage * KV_STAGE16 + koff(ki)),
+                                    desc_at(qd, q_stage * Q_STAGE16 + koff(ki)),
+                                    desc_at(kd, kv_stage * KV_STAGE16 + koff(ki)),
                                     K.uint32(ID_QK),
                                     K.uint32(0),
                                     K.uint32(0),
@@ -669,7 +728,7 @@ def make_kernel(
                                 K.ptx[MMA_F16](
                                     K.Cast("uint32", (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N),
                                     K.Cast("uint32", i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2)),
-                                    vd + (kv_stage * KV_STAGE16 + mnoff(ki)),
+                                    desc_at(vd, kv_stage * KV_STAGE16 + mnoff(ki)),
                                     K.uint32(ID_PV),
                                     K.uint32(0),
                                     K.uint32(0),
@@ -691,7 +750,9 @@ def make_kernel(
                                         "uint32",
                                         i_q * MMA_N + MMA_N // 2 + K_SPLIT // 2 + ki * (MMA_K // 2),
                                     ),
-                                    vd + (kv_stage * KV_STAGE16 + mnoff(K_SPLIT // MMA_K + ki)),
+                                    desc_at(
+                                        vd, kv_stage * KV_STAGE16 + mnoff(K_SPLIT // MMA_K + ki)
+                                    ),
                                     K.uint32(ID_PV),
                                     K.uint32(0),
                                     K.uint32(0),

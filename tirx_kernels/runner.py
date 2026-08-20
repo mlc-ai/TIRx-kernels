@@ -13,6 +13,7 @@ kernel modules to use.
 
 from __future__ import annotations
 
+import importlib
 import os
 import shlex
 import sys
@@ -21,7 +22,6 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from importlib import util as importlib_util
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol, runtime_checkable
@@ -113,8 +113,35 @@ def prepared_gpu_benchmark(
     return ExplicitPreparedBenchmark(run_gpu, state, required_num_gpus, close)
 
 
+# Modules the A/B before tree shares byte-for-byte with the current checkout
+# (see bench_suite.ab._SHARED_HARNESS_PATHS). Their already-imported instances
+# are reused while the current benchmark module loads, so process-global side
+# effects (tvm registrations, compile hooks) never run twice.
+AB_SHARED_MODULE_PREFIXES = (
+    "tirx_kernels.bench",
+    "tirx_kernels.bench_suite",
+    "tirx_kernels.runner",
+    "tirx_kernels.low_level_ir",
+    "tirx_kernels.kern",
+    "tirx_kernels.basic.utils._runtime",
+)
+
+
+def _is_ab_shared_module(name: str) -> bool:
+    return any(
+        name == prefix or name.startswith(prefix + ".") for prefix in AB_SHARED_MODULE_PREFIXES
+    )
+
+
 def ab_current_benchmark_module(module: ModuleType) -> ModuleType:
-    """Load the current benchmark contract while an A/B child imports old kernel code."""
+    """Load the current benchmark contract while an A/B child imports old kernel code.
+
+    The current module is imported under its canonical name inside a temporary
+    ``sys.modules`` context whose ``tirx_kernels`` package resolves from the
+    current checkout, so any kernel-to-kernel imports it performs load current
+    code instead of the before tree's. The before child's module state is
+    restored afterwards.
+    """
     configured_root = os.environ.get(AB_CURRENT_BENCHMARK_ROOT_ENV)
     if configured_root is None:
         return module
@@ -127,27 +154,34 @@ def ab_current_benchmark_module(module: ModuleType) -> ModuleType:
     if cached is not None:
         return cached
 
-    relative = Path(*module.__name__.split("."))
-    source_path = current_root / relative.with_suffix(".py")
-    if not source_path.is_file():
-        source_path = current_root / relative / "__init__.py"
-    if not source_path.is_file():
-        raise FileNotFoundError(
-            f"current A/B benchmark module {module.__name__!r} is missing under {current_root}"
-        )
+    package_root = current_root / "tirx_kernels"
+    if not package_root.is_dir():
+        raise FileNotFoundError(f"current A/B checkout has no tirx_kernels package: {current_root}")
 
-    alias = f"_tirx_ab_current_{module.__name__.replace('.', '_')}"
-    spec = importlib_util.spec_from_file_location(alias, source_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load current A/B benchmark module from {source_path}")
-    current_module = importlib_util.module_from_spec(spec)
-    current_module.__package__ = module.__package__
-    sys.modules[alias] = current_module
+    saved = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name == "tirx_kernels" or name.startswith("tirx_kernels.")
+    }
+    for name in saved:
+        del sys.modules[name]
+    # A bare namespace package avoids re-running tirx_kernels/__init__ side
+    # effects; submodules resolve through __path__ into the current checkout.
+    package = ModuleType("tirx_kernels")
+    package.__path__ = [str(package_root)]
+    package.__package__ = "tirx_kernels"
+    sys.modules["tirx_kernels"] = package
+    for name, mod in saved.items():
+        if _is_ab_shared_module(name):
+            sys.modules[name] = mod
     try:
-        spec.loader.exec_module(current_module)
-    except BaseException:
-        sys.modules.pop(alias, None)
-        raise
+        current_module = importlib.import_module(module.__name__)
+    finally:
+        for name in [
+            n for n in sys.modules if n == "tirx_kernels" or n.startswith("tirx_kernels.")
+        ]:
+            del sys.modules[name]
+        sys.modules.update(saved)
     _AB_CURRENT_MODULES[key] = current_module
     return current_module
 

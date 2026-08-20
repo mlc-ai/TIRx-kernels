@@ -103,6 +103,23 @@ def _cast_f32x2_bf16x2(dst, src, offset):
     return K.ptx.cvt.rn.bf16x2.f32(dst_words[offset // 2], src[offset + 1], src[offset])
 
 
+def _desc_add_16B_offset(desc, offset):
+    """Add a 16-byte-unit offset to the low half of an SMEM descriptor.
+
+    Same wrap-in-the-low-32-bits arithmetic as ``K.SmemDescriptor``'s own
+    stepper, but spelled as an expression instead of a ``mov.b64`` unpack /
+    ``add.u32`` / ``mov.b64`` repack.  The inline-asm round trip is opaque to
+    ptxas' uniform-datapath promotion, so every one of this kernel's 26
+    per-block MMA operands paid a vector IADD3 plus an R2UR to reach the
+    uniform register the MMA reads; as plain arithmetic the whole descriptor
+    chain stays uniform.
+    """
+    low = K.cast(K.cast(desc, "uint32") + K.cast(offset, "uint32"), "uint64")
+    return K.bitwise_or(
+        K.bitwise_and(desc, K.bitwise_not(K.uint64(0xFFFFFFFF))), low
+    )
+
+
 def _replace_smem_desc_addr(desc, smem_ptr):
     start_addr = K.cast(
         K.bitwise_and(
@@ -782,11 +799,18 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             "bool",
                         )
                         is_no_split: K.bool = K.Not(is_split)
-                        n_split_idx: K.let = K.if_then_else(
-                            batch_idx == sched_begin_req,
-                            K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32")
-                            + sched_begin_split,
-                            K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
+                        # Both LSE and O epilogues address their split row with
+                        # this index; keep the num_splits fetch off the store's
+                        # dependence chain by loading it once here.
+                        n_split_idx = K.local_scalar("int32")
+                        K.assign(
+                            n_split_idx,
+                            K.if_then_else(
+                                batch_idx == sched_begin_req,
+                                K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32")
+                                + sched_begin_split,
+                                K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
+                            ),
                         )
                         num_orig_blocks: K.let = orig_topk_padded // B_TOPK
                         is_last_batch: K.bool = batch_idx == sched_end_req
@@ -951,15 +975,16 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             )
                             K.assign(cur_pi_max, K.max(cur_pi_max, peer_pi_max))
                             K.assign(real_mi, K.max(real_mi, cur_pi_max))
-                            should_scale_o: K.let = (
+                            should_scale_o = K.local_scalar("uint32")
+                            K.assign(
+                                should_scale_o,
                                 K.cuda.any_sync(
                                     K.uint32(0xFFFFFFFF), cur_pi_max - mi > 6.0
-                                )
-                                != 0
+                                ),
                             )
                             new_max = K.local_scalar("float32")
                             scale_for_old = K.local_scalar("float32")
-                            with K.If(K.Not(should_scale_o)):
+                            with K.If(should_scale_o == K.uint32(0)):
                                 with K.Then():
                                     K.assign(scale_for_old, 1.0)
                                     K.assign(new_max, mi)
@@ -1021,7 +1046,12 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     s_words[s_word + 2],
                                     s_words[s_word + 3],
                                 )
-                            with K.If(K.And(block_idx != start_block, should_scale_o)):
+                            with K.If(
+                                K.And(
+                                    block_idx != start_block,
+                                    should_scale_o != K.uint32(0),
+                                )
+                            ):
                                 with K.Then():
                                     scale_for_old_pair: K.let = K.cuda.make_float2(
                                         scale_for_old, scale_for_old
@@ -1141,11 +1171,19 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             with K.Then():
                                 sink_exp = K.local_scalar("float32")
                                 K.ptx.ex2.approx.ftz.f32(sink_exp, attn_sink_log2 - mi)
-                                output_scale: K.let = K.if_then_else(
-                                    li == 0.0, 0.0, K.cuda.fdividef(1.0, li + sink_exp)
+                                output_scale = K.local_scalar("float32")
+                                K.assign(
+                                    output_scale,
+                                    K.if_then_else(
+                                        li == 0.0,
+                                        0.0,
+                                        K.cuda.fdividef(1.0, li + sink_exp),
+                                    ),
                                 )
-                                output_scale_pair: K.let = K.cuda.make_float2(
-                                    output_scale, output_scale
+                                output_scale_pair = K.local_scalar("uint64")
+                                K.assign(
+                                    output_scale_pair,
+                                    K.cuda.make_float2(output_scale, output_scale),
                                 )
                                 o_epi = K.alloc_local((64,), "float32")
                                 o_epi_bf16 = K.alloc_local((64,), "bfloat16")
@@ -1281,11 +1319,17 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 emit_no_split_epilogue(3)
                                 K.ptx.cp.async_.bulk.commit_group()
                             with K.Else():
-                                output_scale: K.let = K.if_then_else(
-                                    li == 0.0, 0.0, K.cuda.fdividef(1.0, li)
+                                output_scale = K.local_scalar("float32")
+                                K.assign(
+                                    output_scale,
+                                    K.if_then_else(
+                                        li == 0.0, 0.0, K.cuda.fdividef(1.0, li)
+                                    ),
                                 )
-                                output_scale_pair: K.let = K.cuda.make_float2(
-                                    output_scale, output_scale
+                                output_scale_pair = K.local_scalar("uint64")
+                                K.assign(
+                                    output_scale_pair,
+                                    K.cuda.make_float2(output_scale, output_scale),
                                 )
                                 split_local = K.alloc_local((64,), "float32")
                                 with K.unroll((D_V // 2) // 64) as epi_i:
@@ -1344,19 +1388,24 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 K.ptx.bar.sync(K.uint32(BAR_WG0_SYNC), 128)
                                 with K.If(K.cuda.elect_sync() != K.uint32(0)):
                                     with K.Then():
+                                        # One int32 row index per store: handing
+                                        # ptr_to the open sum lets the index
+                                        # widening distribute over it, so each of
+                                        # the 16 stores sign-extends three
+                                        # products and adds them in 64 bits.
+                                        o_accum_row = K.local_scalar("int32")
                                         with K.unroll(B_H // 4) as local_row:
                                             smem_row: K.let = local_row * 4 + warp_idx
+                                            K.assign(
+                                                o_accum_row,
+                                                n_split_idx * stride_o_accum_split
+                                                + s_q_idx * stride_o_accum_s_q
+                                                + smem_row * stride_o_accum_h_q,
+                                            )
                                             K.ptx[
                                                 "cp.async.bulk.global.shared::cta.bulk_group"
                                             ](
-                                                o_accum.ptr_to(
-                                                    [
-                                                        n_split_idx
-                                                        * stride_o_accum_split
-                                                        + s_q_idx * stride_o_accum_s_q
-                                                        + smem_row * stride_o_accum_h_q
-                                                    ]
-                                                ),
+                                                o_accum.ptr_to([o_accum_row]),
                                                 o_accum_storage.ptr_to(
                                                     [smem_row * (D_V + 8)]
                                                 ),
@@ -1624,8 +1673,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     K.cast(
                                                         384 + qk_rope_ki * 8, "uint32"
                                                     ),
-                                                    qk_rope_desc.add_16B_offset(
-                                                        qk_rope_offset
+                                                    _desc_add_16B_offset(
+                                                        qk_rope_desc.desc,
+                                                        qk_rope_offset,
                                                     ),
                                                     K.uint32(69207184),
                                                     K.ptx.pred(
@@ -1653,8 +1703,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                             K.ptx[_MMA_WS_F16](
                                                 K.uint32(400),
                                                 K.cast(256 + qk_nope_ki * 8, "uint32"),
-                                                qk_nope_desc.add_16B_offset(
-                                                    qk_nope_offset
+                                                _desc_add_16B_offset(
+                                                    qk_nope_desc.desc, qk_nope_offset
                                                 ),
                                                 K.uint32(69207184),
                                                 K.ptx.pred(
@@ -1695,11 +1745,11 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         K.evaluate(
                                             K.ptx[_MMA_WS_F16](
                                                 K.uint32(0),
-                                                pv_a_lo_desc.add_16B_offset(
-                                                    pv_a_offset
+                                                _desc_add_16B_offset(
+                                                    pv_a_lo_desc.desc, pv_a_offset
                                                 ),
-                                                pv_b_lo_desc.add_16B_offset(
-                                                    pv_b_lo_offset
+                                                _desc_add_16B_offset(
+                                                    pv_b_lo_desc.desc, pv_b_lo_offset
                                                 ),
                                                 K.uint32(71369872),
                                                 K.ptx.pred(
@@ -1727,11 +1777,11 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         K.evaluate(
                                             K.ptx[_MMA_WS_F16](
                                                 K.uint32(128),
-                                                pv_a_hi_desc.add_16B_offset(
-                                                    pv_a_offset
+                                                _desc_add_16B_offset(
+                                                    pv_a_hi_desc.desc, pv_a_offset
                                                 ),
-                                                pv_b_hi_desc.add_16B_offset(
-                                                    pv_b_hi_offset
+                                                _desc_add_16B_offset(
+                                                    pv_b_hi_desc.desc, pv_b_hi_offset
                                                 ),
                                                 K.uint32(71369872),
                                                 K.ptx.pred(
