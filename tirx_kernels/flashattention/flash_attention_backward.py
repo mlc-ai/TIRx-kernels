@@ -173,11 +173,11 @@ def build_preprocess(B, S, H, D):
                     K.ptx.fma.rn.ftz.f32(dst[0], lhs_value[element], rhs_value[element], dst[0])
 
         # Overlap the independent LSE load with the O/dO dot products.
-        lse_for_log2 = K.alloc_local([1], "float32")
-        K.assign(lse_for_log2[0], K.float32(0))
+        lse_for_log2 = K.local_scalar("float32")
+        K.assign(lse_for_log2, K.float32(0))
         with K.If(tx < PRE_ROWS_PER_BLOCK), K.Then():
             K.ptx.ld.global_.f32(
-                lse_for_log2[0], LSE_g.ptr_to([(bz * H + by) * S + bx * PRE_ROWS_PER_BLOCK + tx])
+                lse_for_log2, LSE_g.ptr_to([(bz * H + by) * S + bx * PRE_ROWS_PER_BLOCK + tx])
             )
 
         acc = K.alloc_local([1], "float32")
@@ -215,9 +215,9 @@ def build_preprocess(B, S, H, D):
             K.ptx.st.global_.f32(
                 LSE_log2_g.ptr_to([lse_s]),
                 K.if_then_else(
-                    lse_for_log2[0] == K.float32(-float("inf")),
+                    lse_for_log2 == K.float32(-float("inf")),
                     K.float32(0),
-                    lse_for_log2[0] * K.float32(LOG2_E),
+                    lse_for_log2 * K.float32(LOG2_E),
                 ),
             )
 
@@ -798,9 +798,9 @@ def build_kernel(
                 s_tmem_consumed_ph = K.PipelineState(1, phase=0)
                 dq_tmem_free_ph = K.PipelineState(1, phase=1)
 
-                accum_var = K.alloc_local([1], "int32")
-                accum_dv = K.alloc_local([1], "int32")
-                accum_dk = K.alloc_local([1], "int32")
+                accum_var = K.local_scalar("int32")
+                accum_dv = K.local_scalar("int32")
+                accum_dk = K.local_scalar("int32")
 
                 def phase_a():
                     """S = K @ Q_row^T, M=256 (128/CTA)."""
@@ -808,11 +808,11 @@ def build_kernel(
                     q_ph.advance()
 
                 def phase_a_issue():
-                    K.assign(accum_var[0], 0)
+                    K.assign(accum_var, 0)
                     with K.If(elected()), K.Then():
                         mma_chain2(
                             TMEM_OFF_A, a=d_k_row, b=q_row_operand(),
-                            idesc=ID_SS, accumulate=accum_var[0],
+                            idesc=ID_SS, accumulate=accum_var,
                         )
                     with K.If(elected()), K.Then():
                         mma2wg0_s.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
@@ -822,11 +822,11 @@ def build_kernel(
                     """dP = V @ dO_row^K."""
                     tma_a.wait(0, a_ph.phase)
                     a_ph.advance()
-                    K.assign(accum_var[0], 0)
+                    K.assign(accum_var, 0)
                     with K.If(elected()), K.Then():
                         mma_chain2(
                             TMEM_OFF_DP, a=d_v_row, b=d_do_row,
-                            idesc=ID_SS, accumulate=accum_var[0],
+                            idesc=ID_SS, accumulate=accum_var,
                         )
                     with K.If(elected()), K.Then():
                         mma2wg0_dp.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
@@ -838,9 +838,9 @@ def build_kernel(
                     with K.If(elected()), K.Then():
                         mma_chain2(
                             TMEM_OFF_B, a=TMEM_OFF_A * 2, b=d_do_col,
-                            idesc=ID_TS, accumulate=accum_dv[0],
+                            idesc=ID_TS, accumulate=accum_dv,
                         )
-                    K.assign(accum_dv[0], 1)
+                    K.assign(accum_dv, 1)
                     with K.If(elected()), K.Then():
                         tcgen05_commit(buf_a_consumed.ptr_to([0]))
 
@@ -859,7 +859,7 @@ def build_kernel(
                     with K.If(elected()), K.Then():
                         mma_chain2(
                             TMEM_OFF_C, a=TMEM_OFF_DP, b=d_q_col,
-                            idesc=ID_TS, accumulate=accum_dk[0],
+                            idesc=ID_TS, accumulate=accum_dk,
                         )
                     with K.If(elected()), K.Then():
                         tcgen05_commit(qcol_consumed.ptr_to([0]))
@@ -868,14 +868,14 @@ def build_kernel(
                             # its final update, while the final dQ path is live.
                             tcgen05_commit(dk_done.ptr_to([0]))
                     if not is_last:
-                        K.assign(accum_dk[0], 1)
+                        K.assign(accum_dk, 1)
 
                 def phase_e_issue():
-                    K.assign(accum_var[0], 0)
+                    K.assign(accum_var, 0)
                     with K.If(elected()), K.Then():
                         mma_chain2(
                             TMEM_OFF_DQ, a=d_ds_exch, b=d_k_col,
-                            idesc=ID_DQ, accumulate=accum_var[0],
+                            idesc=ID_DQ, accumulate=accum_var,
                         )
                     with K.If(elected()), K.Then():
                         mma2wg0_dq.arrive(0, cta_group=CTA_GROUP, cta_mask=pair_mask)
@@ -883,8 +883,8 @@ def build_kernel(
 
                 tma_kv.wait(0, kv_ph.phase)
                 kv_ph.advance()
-                K.assign(accum_dv[0], 0)
-                K.assign(accum_dk[0], 0)
+                K.assign(accum_dv, 0)
+                K.assign(accum_dk, 0)
 
                 # ---- special first M-tile (i=0): A, B, C only ----
                 phase_a()
@@ -941,10 +941,10 @@ def build_kernel(
             K.ptx.barrier.sync(K.uint32(5), 416)
             tmem_dealloc_mbar.arrive(0, remote=1 - id_in_pair, pred=True)
             tmem_dealloc_mbar.wait(0, 0)
-            tmem_dealloc_addr = K.alloc_local([1], "uint32")
-            K.ptx.ld.shared.u32(tmem_dealloc_addr[0], tmem_addr.ptr_to([0]))
+            tmem_dealloc_addr = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_addr.ptr_to([0]))
             K.ptx["tcgen05.dealloc.cta_group::2.sync.aligned.b32"](
-                tmem_dealloc_addr[0], K.uint32(512)
+                tmem_dealloc_addr, K.uint32(512)
             )
 
         # ---- relay warp ---------------------------------------------------
@@ -986,14 +986,14 @@ def build_kernel(
 
             def fma_scale_sub_f32x2(scores, scale, lse):
                 """``scores * scale - lse``, all three packed f32x2."""
-                neg_lse = K.alloc_local([1], "uint64")
-                result = K.alloc_local([1], "uint64")
+                neg_lse = K.local_scalar("uint64")
+                result = K.local_scalar("uint64")
                 sign_mask = K.bitwise_or(
                     K.shift_left(K.uint64(0x80000000), K.uint64(32)), K.uint64(0x80000000)
                 )
-                K.ptx.xor.b64(neg_lse[0], lse, sign_mask)
-                K.ptx.fma.rn.f32x2(result[0], scores, scale, neg_lse[0])
-                return result[0]
+                K.ptx.xor.b64(neg_lse, lse, sign_mask)
+                K.ptx.fma.rn.f32x2(result, scores, scale, neg_lse)
+                return result
 
             with K.serial(
                 num_m_tiles_this_n, annotations={"disable_unroll": True}
@@ -1180,26 +1180,26 @@ def build_kernel(
                     ds_copy_bytes = CTA_N * B_N * DTYPE_SIZE
                     # mapa writes its result, so the peer-window addresses are
                     # computed into registers first.
-                    remote_mbar = K.alloc_local([1], "uint32")
+                    remote_mbar = K.local_scalar("uint32")
                     K.ptx.mapa.shared__cluster.u32(
-                        remote_mbar[0],
+                        remote_mbar,
                         K.cuda.cvta_generic_to_shared(ds_exch_mbar.ptr_to([0])),
                         K.uint32(peer_cta),
                     )
-                    remote_dst = K.alloc_local([1], "uint32")
+                    remote_dst = K.local_scalar("uint32")
                     K.ptx.mapa.shared__cluster.u32(
-                        remote_dst[0],
+                        remote_dst,
                         K.cuda.cvta_generic_to_shared(dS_exch.ptr_to(id_in_pair * CTA_N, 0)),
                         K.uint32(peer_cta),
                     )
                     K.ptx.mbarrier.arrive.expect_tx.shared__cluster.b64(
-                        remote_mbar[0], K.uint32(ds_copy_bytes), pred=True
+                        remote_mbar, K.uint32(ds_copy_bytes), pred=True
                     )
                     K.ptx[BULK_S2C](
-                        remote_dst[0],
+                        remote_dst,
                         dS_send.ptr_to(0, 0),
                         K.uint32(ds_copy_bytes),
-                        remote_mbar[0],
+                        remote_mbar,
                     )
 
             # ---- two-stage dKV epilogue ----
@@ -1278,8 +1278,8 @@ def build_kernel(
 
                 m_st_cta = m_st_val + id_in_pair * DQ_M_PER_CTA
                 # Materialize elect_sync while all 32 lanes are converged.
-                dq_reduce_elected = K.alloc_local([1], "uint32")
-                K.assign(dq_reduce_elected[0], K.cuda.elect_sync())
+                dq_reduce_elected = K.local_scalar("uint32")
+                K.assign(dq_reduce_elected, K.cuda.elect_sync())
 
                 for stage in range(DQ_REDUCE_ITERS):
                     smem_slot = stage % DQ_STAGES
@@ -1293,7 +1293,7 @@ def build_kernel(
                     K.cuda.warpgroup_sync(4)
 
                     with K.If(warp_id == 0), K.Then():
-                        with K.If(dq_reduce_elected[0] != K.uint32(0)), K.Then():
+                        with K.If(dq_reduce_elected != K.uint32(0)), K.Then():
                             K.ptx[TMA_S2G_REDUCE.format(dim=4, redop="add")](
                                 K.address_of(dq_map),
                                 0,

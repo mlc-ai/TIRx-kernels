@@ -132,9 +132,9 @@ class GemmRSConfig:
 def _mapa_u64_tx(ptr, rank):
     """`mapa.u64` into a declared register, returned as an ordinary value."""
 
-    mapped = Kern.alloc_local([1], "uint64")
-    Kern.evaluate(Kern.ptx.mapa.u64(mapped[0], ptr, Kern.uint32(rank)))
-    return mapped[0]
+    mapped = Kern.local_scalar("uint64")
+    Kern.evaluate(Kern.ptx.mapa.u64(mapped, ptr, Kern.uint32(rank)))
+    return mapped
 
 
 def derive_config(

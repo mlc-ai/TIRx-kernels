@@ -400,23 +400,23 @@ def make_kernel(
 
         def fma_f32x2(values, idx, multiplier, addend_value):
             """A packed f32x2 operand is one 64-bit value."""
-            packed = K.alloc_local([1], "uint64")
-            rhs = K.alloc_local([1], "uint64")
-            addend = K.alloc_local([1], "uint64")
-            K.ptx.mov.b64(packed[0], values[idx], values[idx + 1])
-            K.ptx.mov.b64(rhs[0], multiplier, multiplier)
-            K.ptx.mov.b64(addend[0], addend_value, addend_value)
-            K.ptx.fma.rz.ftz.f32x2(packed[0], packed[0], rhs[0], addend[0])
-            K.ptx.mov.b64(values[idx], values[idx + 1], packed[0])
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
+            addend = K.local_scalar("uint64")
+            K.ptx.mov.b64(packed, values[idx], values[idx + 1])
+            K.ptx.mov.b64(rhs, multiplier, multiplier)
+            K.ptx.mov.b64(addend, addend_value, addend_value)
+            K.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
+            K.ptx.mov.b64(values[idx], values[idx + 1], packed)
 
         def mul_f32x2(values, idx, multiplier):
             """orig:L215-223."""
-            packed = K.alloc_local([1], "uint64")
-            rhs = K.alloc_local([1], "uint64")
-            K.ptx.mov.b64(packed[0], values[idx], values[idx + 1])
-            K.ptx.mov.b64(rhs[0], multiplier, multiplier)
-            K.ptx.mul.rz.ftz.f32x2(packed[0], packed[0], rhs[0])
-            K.ptx.mov.b64(values[idx], values[idx + 1], packed[0])
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
+            K.ptx.mov.b64(packed, values[idx], values[idx + 1])
+            K.ptx.mov.b64(rhs, multiplier, multiplier)
+            K.ptx.mul.rz.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(values[idx], values[idx + 1], packed)
 
         def reduce_max_128(out, values, accum=False):
             """SM100 three-input max tree — orig:L226-244. The outer walk stays a
@@ -442,8 +442,8 @@ def make_kernel(
         def reduce_sum_128(out, values, accum=False):
             """Packed add tree, accumulator insertion order preserved — orig:L247-276."""
             local_sum = K.alloc_local([8], "float32")
-            packed = K.alloc_local([1], "uint64")
-            rhs = K.alloc_local([1], "uint64")
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
             for i in range(8):
                 if accum and i == 0:
                     K.ptx.mov.b32(local_sum[i], values[i] + out[0])
@@ -451,38 +451,38 @@ def make_kernel(
                     K.ptx.mov.b32(local_sum[i], values[i])
             with K.serial(15) as outer:
                 for i in range(4):
-                    K.ptx.mov.b64(packed[0], local_sum[2 * i], local_sum[2 * i + 1])
+                    K.ptx.mov.b64(packed, local_sum[2 * i], local_sum[2 * i + 1])
                     K.ptx.mov.b64(
-                        rhs[0], values[8 * (outer + 1) + 2 * i], values[8 * (outer + 1) + 2 * i + 1]
+                        rhs, values[8 * (outer + 1) + 2 * i], values[8 * (outer + 1) + 2 * i + 1]
                     )
-                    K.ptx.add.rn.ftz.f32x2(packed[0], packed[0], rhs[0])
-                    K.ptx.mov.b64(local_sum[2 * i], local_sum[2 * i + 1], packed[0])
+                    K.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
+                    K.ptx.mov.b64(local_sum[2 * i], local_sum[2 * i + 1], packed)
             for lo, hi in ((0, 2), (4, 6), (0, 4)):
-                K.ptx.mov.b64(packed[0], local_sum[lo], local_sum[lo + 1])
-                K.ptx.mov.b64(rhs[0], local_sum[hi], local_sum[hi + 1])
-                K.ptx.add.rn.ftz.f32x2(packed[0], packed[0], rhs[0])
-                K.ptx.mov.b64(local_sum[lo], local_sum[lo + 1], packed[0])
+                K.ptx.mov.b64(packed, local_sum[lo], local_sum[lo + 1])
+                K.ptx.mov.b64(rhs, local_sum[hi], local_sum[hi + 1])
+                K.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
+                K.ptx.mov.b64(local_sum[lo], local_sum[lo + 1], packed)
             K.assign(out[0], local_sum[0] + local_sum[1])
 
         def shl_u32_clamp(val, shift):
             """Left shift with PTX clamping (shift>=32 -> 0) — orig:L114-121."""
-            result = K.alloc_local([1], "uint32")
-            K.ptx.shl.b32(result[0], val, shift)
-            return result[0]
+            result = K.local_scalar("uint32")
+            K.ptx.shl.b32(result, val, shift)
+            return result
 
         def combine_int_frac_ex2(x_rounded, frac_ex2):
             """orig:L124-135."""
-            x_rounded_i = K.alloc_local([1], "int32")
-            frac_ex_i = K.alloc_local([1], "int32")
-            x_rounded_e = K.alloc_local([1], "int32")
-            out_i = K.alloc_local([1], "int32")
-            out = K.alloc_local([1], "float32")
-            K.ptx.mov.b32(x_rounded_i[0], x_rounded)
-            K.ptx.mov.b32(frac_ex_i[0], frac_ex2)
-            K.ptx.shl.b32(x_rounded_e[0], x_rounded_i[0], K.uint32(23))
-            K.ptx.add.s32(out_i[0], x_rounded_e[0], frac_ex_i[0])
-            K.ptx.mov.b32(out[0], out_i[0])
-            return out[0]
+            x_rounded_i = K.local_scalar("int32")
+            frac_ex_i = K.local_scalar("int32")
+            x_rounded_e = K.local_scalar("int32")
+            out_i = K.local_scalar("int32")
+            out = K.local_scalar("float32")
+            K.ptx.mov.b32(x_rounded_i, x_rounded)
+            K.ptx.mov.b32(frac_ex_i, frac_ex2)
+            K.ptx.shl.b32(x_rounded_e, x_rounded_i, K.uint32(23))
+            K.ptx.add.s32(out_i, x_rounded_e, frac_ex_i)
+            K.ptx.mov.b32(out, out_i)
+            return out
 
         POLY_EX2_DEG3 = (1.0, 0.6951461434364319, 0.22756439447402954, 0.07711908966302872)
         FP32_ROUND_INT = float(2**23 + 2**22)
@@ -492,33 +492,33 @@ def make_kernel(
             xy_clamped = K.alloc_local([2], "float32")
             K.ptx.mov.b32(xy_clamped[0], K.max(x, -127.0))
             K.ptx.mov.b32(xy_clamped[1], K.max(y, -127.0))
-            packed = K.alloc_local([1], "uint64")
-            rhs = K.alloc_local([1], "uint64")
-            addend = K.alloc_local([1], "uint64")
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
+            addend = K.local_scalar("uint64")
             xy_rounded = K.alloc_local([2], "float32")
-            K.ptx.mov.b64(packed[0], xy_clamped[0], xy_clamped[1])
-            K.ptx.mov.b64(rhs[0], K.float32(FP32_ROUND_INT), K.float32(FP32_ROUND_INT))
-            K.ptx.add.rm.ftz.f32x2(packed[0], packed[0], rhs[0])
-            K.ptx.mov.b64(xy_rounded[0], xy_rounded[1], packed[0])
+            K.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1])
+            K.ptx.mov.b64(rhs, K.float32(FP32_ROUND_INT), K.float32(FP32_ROUND_INT))
+            K.ptx.add.rm.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(xy_rounded[0], xy_rounded[1], packed)
             xy_rounded_back = K.alloc_local([2], "float32")
-            K.ptx.mov.b64(packed[0], xy_rounded[0], xy_rounded[1])
-            K.ptx.mov.b64(rhs[0], K.float32(FP32_ROUND_INT), K.float32(FP32_ROUND_INT))
-            K.ptx.sub.rn.ftz.f32x2(packed[0], packed[0], rhs[0])
-            K.ptx.mov.b64(xy_rounded_back[0], xy_rounded_back[1], packed[0])
+            K.ptx.mov.b64(packed, xy_rounded[0], xy_rounded[1])
+            K.ptx.mov.b64(rhs, K.float32(FP32_ROUND_INT), K.float32(FP32_ROUND_INT))
+            K.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(xy_rounded_back[0], xy_rounded_back[1], packed)
             xy_frac = K.alloc_local([2], "float32")
-            K.ptx.mov.b64(packed[0], xy_clamped[0], xy_clamped[1])
-            K.ptx.mov.b64(rhs[0], xy_rounded_back[0], xy_rounded_back[1])
-            K.ptx.sub.rn.ftz.f32x2(packed[0], packed[0], rhs[0])
-            K.ptx.mov.b64(xy_frac[0], xy_frac[1], packed[0])
+            K.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1])
+            K.ptx.mov.b64(rhs, xy_rounded_back[0], xy_rounded_back[1])
+            K.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(xy_frac[0], xy_frac[1], packed)
             xy_frac_ex2 = K.alloc_local([2], "float32")
             K.ptx.mov.b32(xy_frac_ex2[0], K.float32(POLY_EX2_DEG3[3]))
             K.ptx.mov.b32(xy_frac_ex2[1], K.float32(POLY_EX2_DEG3[3]))
             for coeff in (POLY_EX2_DEG3[2], POLY_EX2_DEG3[1], POLY_EX2_DEG3[0]):
-                K.ptx.mov.b64(rhs[0], xy_frac[0], xy_frac[1])
-                K.ptx.mov.b64(packed[0], xy_frac_ex2[0], xy_frac_ex2[1])
-                K.ptx.mov.b64(addend[0], K.float32(coeff), K.float32(coeff))
-                K.ptx.fma.rz.ftz.f32x2(packed[0], packed[0], rhs[0], addend[0])
-                K.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed[0])
+                K.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
+                K.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
+                K.ptx.mov.b64(addend, K.float32(coeff), K.float32(coeff))
+                K.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
+                K.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
             K.ptx.mov.b32(out[idx], combine_int_frac_ex2(xy_rounded[0], xy_frac_ex2[0]))
             K.ptx.mov.b32(out[idx + 1], combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1]))
 
@@ -565,9 +565,9 @@ def make_kernel(
             K.ptx[TMEM_ALLOC](K.address_of(tmem_addr[0]), K.uint32(N_COLS_TMEM))
             K.cuda.warp_sync()
         with K.If(tvm.tirx.all(wg_id == 3, warp_id == 0)), K.Then():
-            allocated = K.alloc_local([1], "uint32")
-            K.ptx.ld.shared.u32(allocated[0], tmem_addr.ptr_to([0]))
-            K.cuda.trap_when_assert_failed(allocated[0] == K.uint32(0))
+            allocated = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(allocated, tmem_addr.ptr_to([0]))
+            K.cuda.trap_when_assert_failed(allocated == K.uint32(0))
         with K.If(wg_id == 2), K.Then():
             for i_q in range(2):
                 p_o_rescale.arrive(i_q)
@@ -640,18 +640,17 @@ def make_kernel(
                         K.cuda.iket.range_end(tma_kv_token[0])
                         kv_pipe.advance()
 
-                    load_trip_count = K.alloc_local([1], "int32")
+                    load_trip_count = K.local_scalar("int32")
                     K.assign(
-                        load_trip_count[0],
-                        n_block_max_of(m_block_idx) if is_causal else num_kv_blocks,
+                        load_trip_count, n_block_max_of(m_block_idx) if is_causal else num_kv_blocks
                     )
                     load_q(0, Q_tensor_map)
-                    load_kv(load_trip_count[0] - 1, K_tensor_map, "issue-tma-k")
+                    load_kv(load_trip_count - 1, K_tensor_map, "issue-tma-k")
                     load_q(1, Q_tensor_map_1)
                     q_epoch.advance()
-                    load_kv(load_trip_count[0] - 1, V_tensor_map, "issue-tma-v")
-                    with K.serial(load_trip_count[0] - 1, unroll=False) as _i:
-                        i_kv = load_trip_count[0] - 2 - _i
+                    load_kv(load_trip_count - 1, V_tensor_map, "issue-tma-v")
+                    with K.serial(load_trip_count - 1, unroll=False) as _i:
+                        i_kv = load_trip_count - 2 - _i
                         load_kv(i_kv, K_tensor_map_1, "issue-tma-k")
                         load_kv(i_kv, V_tensor_map_1, "issue-tma-v")
 
@@ -693,8 +692,8 @@ def make_kernel(
 
                 # -------- warp 0: MMA issuer — orig:L896-1059 --------------------
                 with r_mma:
-                    acc = K.alloc_local([1], "int32")
-                    K.assign(acc[0], 0)
+                    acc = K.local_scalar("int32")
+                    K.assign(acc, 0)
 
                     def gemm_qk(q_stage, kv_stage, qd, kd):
                         """S[q_stage] = Q[q_stage] @ K[kv_stage]^T — orig:L900-920.
@@ -777,12 +776,11 @@ def make_kernel(
                                 kv_load.empty.arrive(kv_pipe.stage)
                     kv_pipe.advance()
 
-                    mma_trip_count = K.alloc_local([1], "int32")
+                    mma_trip_count = K.local_scalar("int32")
                     K.assign(
-                        mma_trip_count[0],
-                        n_block_max_of(m_block_idx) if is_causal else num_kv_blocks,
+                        mma_trip_count, n_block_max_of(m_block_idx) if is_causal else num_kv_blocks
                     )
-                    with K.serial(mma_trip_count[0] - 1, unroll=False) as i_kv:
+                    with K.serial(mma_trip_count - 1, unroll=False) as i_kv:
                         # stage_v / phase_v are snapshots: kv_pipe.stage is a
                         # mutable Var and advance() rewrites it, so holding the
                         # expression across the advance would name the wrong
@@ -800,7 +798,7 @@ def make_kernel(
                             if i_q == 0:
                                 kv_load.full.wait(stage_v, phase_v)
                             p_o_rescale.wait(i_q, tmem_epoch.phase)
-                            gemm_pv(i_q, stage_v, acc[0], v_desc, v_desc_steady_hi)
+                            gemm_pv(i_q, stage_v, acc, v_desc, v_desc_steady_hi)
                             if i_q == 1:
                                 with K.If(elected()), K.Then():
                                     kv_load.empty.arrive(stage_v)
@@ -809,13 +807,13 @@ def make_kernel(
                             gemm_qk(i_q, kv_pipe.stage, q_desc_steady, k_desc_steady)
                             # Early Q release — orig:L1018-1030.
                             if EARLY_Q_RELEASE:
-                                with K.If(i_kv == mma_trip_count[0] - 2), K.Then():
+                                with K.If(i_kv == mma_trip_count - 2), K.Then():
                                     with K.If(elected()), K.Then():
                                         q_load.empty.arrive(i_q)
                             if i_q == 1:
                                 with K.If(elected()), K.Then():
                                     kv_load.empty.arrive(kv_pipe.stage)
-                        K.assign(acc[0], 1)
+                        K.assign(acc, 1)
                         kv_pipe.advance()
                         tmem_epoch.advance()
                     # tail PV — orig:L1037-1053
@@ -823,7 +821,7 @@ def make_kernel(
                         if i_q == 0:
                             kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
                         p_o_rescale.wait(i_q, tmem_epoch.phase)
-                        gemm_pv(i_q, kv_pipe.stage, acc[0], v_desc_tail_lo, v_desc_tail_hi)
+                        gemm_pv(i_q, kv_pipe.stage, acc, v_desc_tail_lo, v_desc_tail_hi)
                         if i_q == 1:
                             with K.If(elected()), K.Then():
                                 kv_load.empty.arrive(kv_pipe.stage)
@@ -844,7 +842,7 @@ def make_kernel(
             # softmax warpgroups 0 and 1 — orig:L1060-1395
             # =================================================================
             with r_softmax:
-                row_max = K.alloc_local([1], "float32")
+                row_max = K.local_scalar("float32")
                 row_sum = K.alloc_local([1], "float32")
                 with K.If(warp_id == 0), K.Then():
                     K.cuda.iket.mark("softmax-baseline")
@@ -859,17 +857,15 @@ def make_kernel(
                     CHUNK_SIZE = 32
                     for s in range(ceildiv(ncol, CHUNK_SIZE)):
                         k_keep = K.max(col_limit - s * CHUNK_SIZE, 0)
-                        mask_inv = K.alloc_local([1], "uint32")
+                        mask_inv = K.local_scalar("uint32")
                         K.assign(
-                            mask_inv[0],
-                            shl_u32_clamp(K.uint32(0xFFFFFFFF), K.Cast("uint32", k_keep)),
+                            mask_inv, shl_u32_clamp(K.uint32(0xFFFFFFFF), K.Cast("uint32", k_keep))
                         )
                         for i in range(CHUNK_SIZE):
                             if i < ncol - s * CHUNK_SIZE:
                                 c = s * CHUNK_SIZE + i
                                 in_bound = K.bitwise_and(
-                                    K.bitwise_not(mask_inv[0]),
-                                    K.shift_left(K.uint32(1), K.uint32(i)),
+                                    K.bitwise_not(mask_inv), K.shift_left(K.uint32(1), K.uint32(i))
                                 )
                                 K.ptx.mov.b32(
                                     s_chunk[c],
@@ -912,46 +908,46 @@ def make_kernel(
                         )
                     if apply_mask:
                         apply_causal_mask(s_chunk, m_block_idx, i_kv)
-                    row_max_old = K.alloc_local([1], "float32")
+                    row_max_old = K.local_scalar("float32")
                     if is_first:
                         reduce_max_128(tile_max, s_chunk)
                     else:
                         # row_max is initialized by the first step; its load
                         # stays inside the non-first specialization.
-                        K.assign(row_max_old[0], row_max[0])
-                        K.assign(tile_max[0], row_max_old[0])
+                        K.assign(row_max_old, row_max)
+                        K.assign(tile_max[0], row_max_old)
                         reduce_max_128(tile_max, s_chunk, accum=True)
-                    row_max_new = K.alloc_local([1], "float32")
-                    acc_scale = K.alloc_local([1], "float32")
-                    acc_scale_ = K.alloc_local([1], "float32")
-                    row_max_safe = K.alloc_local([1], "float32")
-                    K.assign(row_max_new[0], tile_max[0])
+                    row_max_new = K.local_scalar("float32")
+                    acc_scale = K.local_scalar("float32")
+                    acc_scale_ = K.local_scalar("float32")
+                    row_max_safe = K.local_scalar("float32")
+                    K.assign(row_max_new, tile_max[0])
                     K.assign(
-                        row_max_safe[0],
+                        row_max_safe,
                         K.if_then_else(
                             tile_max[0] == K.float32(NEG_INF), K.float32(0.0), tile_max[0]
                         ),
                     )
                     if is_first:
-                        K.assign(acc_scale[0], K.float32(1.0))
+                        K.assign(acc_scale, K.float32(1.0))
                     else:
-                        K.assign(acc_scale_[0], (row_max_old[0] - row_max_safe[0]) * scale_log2)
-                        with K.If(acc_scale_[0] >= -rescale_threshold):
+                        K.assign(acc_scale_, (row_max_old - row_max_safe) * scale_log2)
+                        with K.If(acc_scale_ >= -rescale_threshold):
                             with K.Then():
-                                K.assign(row_max_new[0], row_max_old[0])
-                                K.assign(row_max_safe[0], row_max_old[0])
-                                K.assign(acc_scale[0], K.float32(1.0))
+                                K.assign(row_max_new, row_max_old)
+                                K.assign(row_max_safe, row_max_old)
+                                K.assign(acc_scale, K.float32(1.0))
                             with K.Else():
-                                K.ptx.ex2.approx.ftz.f32(acc_scale[0], acc_scale_[0])
-                    K.assign(row_max[0], row_max_new[0])
-                    row_max_scaled = row_max_safe[0] * scale_log2
+                                K.ptx.ex2.approx.ftz.f32(acc_scale, acc_scale_)
+                    K.assign(row_max, row_max_new)
+                    row_max_scaled = row_max_safe * scale_log2
                     with K.If(warp_id == 0), K.Then():
                         K.cuda.iket.mark("softmax-phase-1")
                     K.cuda.iket.range_end(softmax_max_token[0])
                     if not is_first:
                         with K.If(tid_in_wg < BLK_M), K.Then():
                             sScale_idx = ACC_SCALE_BASE + tid_in_wg + wg_id * BLK_M
-                            K.ptx.st.shared.f32(sScale.ptr_to([sScale_idx]), acc_scale[0])
+                            K.ptx.st.shared.f32(sScale.ptr_to([sScale_idx]), acc_scale)
                     # Stats-ready handshake to the correction wg over a HW named
                     # barrier — orig:L1192-1203.
                     if STATS_BAR_PAIRWISE:
@@ -1013,7 +1009,7 @@ def make_kernel(
                     if is_first:
                         reduce_sum_128(row_sum, s_chunk)
                     else:
-                        K.assign(row_sum[0], row_sum[0] * acc_scale[0])
+                        K.assign(row_sum[0], row_sum[0] * acc_scale)
                         reduce_sum_128(row_sum, s_chunk, accum=True)
                     with K.If(warp_id == 0), K.Then():
                         K.cuda.iket.mark("softmax-phase-5")
@@ -1056,9 +1052,9 @@ def make_kernel(
                     acc_O_row_is_zero_or_nan = tvm.tirx.any(
                         row_sum[0] == K.float32(0.0), row_sum[0] != row_sum[0]
                     )
-                    norm_scale_sm = K.alloc_local([1], "float32")
+                    norm_scale_sm = K.local_scalar("float32")
                     K.ptx.rcp.approx.ftz.f32(
-                        norm_scale_sm[0],
+                        norm_scale_sm,
                         K.Select(acc_O_row_is_zero_or_nan, K.float32(1.0), row_sum[0]),
                     )
                     o_row_f32_sm = K.alloc_local([EPI_LD_SM], "float32")
@@ -1074,7 +1070,7 @@ def make_kernel(
                                     EPI_LD_SM,
                                 )
                                 for i in range(EPI_LD_SM // 2):
-                                    mul_f32x2(o_row_f32_sm, 2 * i, norm_scale_sm[0])
+                                    mul_f32x2(o_row_f32_sm, 2 * i, norm_scale_sm)
                                 for i in range(EPI_LD_SM // 2):
                                     cast_f32x2_f16x2(o_row_f16_sm, o_row_f32_sm, 2 * i)
                                 for i in range(EPI_LD_SM // 8):
@@ -1120,22 +1116,20 @@ def make_kernel(
                     for i_q in range(2):
                         stats_sync(i_q)
                         correction_token = iket_range("correction", leader_only=True)
-                        acc_scale = K.alloc_local([1], "float32")
-                        should_rescale = K.alloc_local([1], "int32")
+                        acc_scale = K.local_scalar("float32")
+                        should_rescale = K.local_scalar("int32")
                         with K.If(tid_in_wg < BLK_M):
                             with K.Then():
                                 K.ptx.ld.shared.f32(
-                                    acc_scale[0],
+                                    acc_scale,
                                     sScale.ptr_to([ACC_SCALE_BASE + tid_in_wg + i_q * BLK_M]),
                                 )
-                                K.assign(
-                                    should_rescale[0], K.Select(acc_scale[0] < K.float32(1.0), 1, 0)
-                                )
+                                K.assign(should_rescale, K.Select(acc_scale < K.float32(1.0), 1, 0))
                             with K.Else():
-                                K.assign(should_rescale[0], 0)
+                                K.assign(should_rescale, 0)
                         # Materialize the collective before divergence.
                         any_needs_rescale = K.local_scalar(
-                            "uint32", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), should_rescale[0])
+                            "uint32", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), should_rescale)
                         )
                         with K.If(any_needs_rescale != 0), K.Then():
                             with K.If(tid_in_wg < BLK_M), K.Then():
@@ -1147,7 +1141,7 @@ def make_kernel(
                                         addr = tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start)
                                         tmem_load(o_row, 0, addr, RESCALE_TILE)
                                         for i in range(RESCALE_TILE // 2):
-                                            mul_f32x2(o_row, 2 * i, acc_scale[0])
+                                            mul_f32x2(o_row, 2 * i, acc_scale)
                                         tmem_store(o_row, 0, addr)
                                 K.ptx.tcgen05.wait__st.sync.aligned()
                         p_o_rescale.arrive(i_q)
@@ -1158,20 +1152,20 @@ def make_kernel(
                 if not EPI_ON_SOFTMAX:
                     for i_q in range(2):
                         stats_sync(i_q)
-                        row_sum_c = K.alloc_local([1], "float32")
+                        row_sum_c = K.local_scalar("float32")
                         K.ptx.ld.shared.f32(
-                            row_sum_c[0], sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + i_q * BLK_M])
+                            row_sum_c, sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + i_q * BLK_M])
                         )
                         softmax_corr.empty.arrive(i_q)
                         o_ready.wait(i_q, tmem_epoch.phase)
                         corr_epi.empty.wait(i_q, tmem_epoch.phase)
                         epi_ld_tmem_token = iket_range("epi-ld-tmem", leader_only=True)
                         zero_or_nan = tvm.tirx.any(
-                            row_sum_c[0] == K.float32(0.0), row_sum_c[0] != row_sum_c[0]
+                            row_sum_c == K.float32(0.0), row_sum_c != row_sum_c
                         )
-                        norm_scale = K.alloc_local([1], "float32")
+                        norm_scale = K.local_scalar("float32")
                         K.ptx.rcp.approx.ftz.f32(
-                            norm_scale[0], K.Select(zero_or_nan, K.float32(1.0), row_sum_c[0])
+                            norm_scale, K.Select(zero_or_nan, K.float32(1.0), row_sum_c)
                         )
                         o_row_f32 = K.alloc_local([TMEM_EPI_LD_SIZE], "float32")
                         o_row_f16 = K.alloc_local([TMEM_EPI_LD_SIZE // 2], "uint32")
@@ -1185,7 +1179,7 @@ def make_kernel(
                                     TMEM_EPI_LD_SIZE,
                                 )
                                 for i in range(TMEM_EPI_LD_SIZE // 2):
-                                    mul_f32x2(o_row_f32, 2 * i, norm_scale[0])
+                                    mul_f32x2(o_row_f32, 2 * i, norm_scale)
                                 for i in range(TMEM_EPI_LD_SIZE // 2):
                                     cast_f32x2_f16x2(o_row_f16, o_row_f32, 2 * i)
                                 for i in range(TMEM_EPI_LD_SIZE // 8):
@@ -1208,10 +1202,10 @@ def make_kernel(
         # Match the current canonical CTA rendezvous before TMEM teardown.
         K.cuda.cta_sync()
         with K.If(tvm.tirx.all(wg_id == 0, warp_id == 0)), K.Then():
-            dealloc = K.alloc_local([1], "uint32")
-            K.ptx.ld.shared.u32(dealloc[0], tmem_addr.ptr_to([0]))
+            dealloc = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(dealloc, tmem_addr.ptr_to([0]))
             K.ptx[TMEM_RELINQUISH]()
-            K.ptx[TMEM_DEALLOC](dealloc[0], K.uint32(N_COLS_TMEM))
+            K.ptx[TMEM_DEALLOC](dealloc, K.uint32(N_COLS_TMEM))
 
     return flash_attention4
 

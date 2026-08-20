@@ -489,9 +489,9 @@ def make_kernel(
         pool = smem.pool
         u_base = pool.offset
         q_full = smem.alloc((B_H // 2, d_qk), "bfloat16", swizzle=K.SW128B).buf
-        q_cp_desc = K.alloc_local([1], "uint64")
+        q_cp_desc = K.local_scalar("uint64")
         K.cuda.tcgen05.encode_matrix_descriptor(
-            K.address_of(q_cp_desc[0]), K.reinterpret(K.handle().ty, K.uint64(0)), 0, 64, 3
+            K.address_of(q_cp_desc), K.reinterpret(K.handle().ty, K.uint64(0)), 0, 64, 3
         )
         pool.move_base_to(u_base + (B_H // 2) * d_sq * BF16_BYTES)
         v_smem = smem.alloc((D_V // 2, B_TOPK), "bfloat16", swizzle=K.SW128B).buf
@@ -520,10 +520,10 @@ def make_kernel(
         rowwise_max_buf = pool.alloc((128,), "float32")
         rowwise_li_buf = pool.alloc((128,), "float32")
         g_indices_base = s_q_idx * stride_indices_s_q
-        mma_p_accumulate = K.alloc_local([1], "uint32")
-        mma_o_accumulate = K.alloc_local([1], "uint32")
-        K.assign(mma_p_accumulate[0], K.uint32(0))
-        K.assign(mma_o_accumulate[0], K.uint32(0))
+        mma_p_accumulate = K.local_scalar("uint32")
+        mma_o_accumulate = K.local_scalar("uint32")
+        K.assign(mma_p_accumulate, K.uint32(0))
+        K.assign(mma_o_accumulate, K.uint32(0))
 
         def initialize_and_load_q():
             # CUDA phase1.cuh:87-146.  Warp 0 owns barrier init, Q TMA launch,
@@ -649,7 +649,7 @@ def make_kernel(
                                 _recompute_smem_desc(pv_a_ptr, 0x00004008, 0x00400000),
                                 _recompute_smem_desc(pv_b_ptr, 0x40004040, 0x04000000),
                                 K.uint32(0x08410490),
-                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
+                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate, "bool")),
                             )
                         elif mma_smem_desc == "encode":
                             pv_a_encode = K.SmemDescriptor()
@@ -675,7 +675,7 @@ def make_kernel(
                                 pv_a_encode.desc,
                                 pv_b_encode.desc,
                                 K.uint32(0x08410490),
-                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
+                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate, "bool")),
                             )
                         elif mma_smem_desc == "local_hoist":
                             _mma_f16(
@@ -683,7 +683,7 @@ def make_kernel(
                                 pv_a_local.add_16B_offset(pv_a_offset // 8),
                                 pv_b_local.add_16B_offset(pv_b_offset // 8),
                                 K.uint32(0x08410490),
-                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
+                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate, "bool")),
                             )
                         else:
                             _mma_f16(
@@ -691,7 +691,7 @@ def make_kernel(
                                 _add_smem_desc_offset(hoisted_a, pv_a_offset // 8),
                                 _add_smem_desc_offset(hoisted_b, pv_b_offset // 8),
                                 K.uint32(0x08410490),
-                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
+                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate, "bool")),
                             )
 
         def softmax_and_epilogue():
@@ -1036,12 +1036,12 @@ def make_kernel(
                                             _KV_TMA_CACHE_HINT,
                                         )
                             with K.Else():
-                                _rem1 = K.alloc_local([1], "uint64")
+                                _rem1 = K.local_scalar("uint64")
                                 K.ptx.mapa.shared__cluster.u64(
-                                    _rem1[0], bar.ptr_to([k_stage]), K.uint32(0)
+                                    _rem1, bar.ptr_to([k_stage]), K.uint32(0)
                                 )
                                 K.ptx.mbarrier.complete_tx.relaxed.cluster.b64(
-                                    _rem1[0],
+                                    _rem1,
                                     K.uint32(WG1_ROWS_PER_WARP * 4 * tx_dim * BF16_BYTES),
                                     pred=K.uint32(1),
                                 )
@@ -1161,7 +1161,7 @@ def make_kernel(
                                     q_tmem_col + q_copy_flat % 6 * 32 + q_copy_flat // 6 % 8 * 4,
                                     "uint32",
                                 ),
-                                _replace_smem_desc_addr(q_cp_desc[0], q_copy_src),
+                                _replace_smem_desc_addr(q_cp_desc, q_copy_src),
                             )
                         K.ptx[_TCGEN_COMMIT](
                             K.cuda.cvta_generic_to_shared(bar_prologue_utccp.ptr_to([0])),
@@ -1183,7 +1183,7 @@ def make_kernel(
                                     bar_p_free.wait(prior_p_stage, prior_p_phase)
                                 K.ptx.tcgen05.fence__after_thread_sync()
 
-                                K.assign(mma_p_accumulate[0], K.uint32(0))
+                                K.assign(mma_p_accumulate, K.uint32(0))
                                 with K.If(d_sq > 0), K.Then():
                                     if mma_smem_desc == "local_hoist":
                                         qk_part0_a_local = K.SmemDescriptor()
@@ -1230,7 +1230,7 @@ def make_kernel(
                                                         K.uint32(0x08200490),
                                                         K.Or(
                                                             mma_ki != 0,
-                                                            K.cast(mma_p_accumulate[0], "bool"),
+                                                            K.cast(mma_p_accumulate, "bool"),
                                                         ),
                                                     )
                                                 elif mma_smem_desc == "encode":
@@ -1263,7 +1263,7 @@ def make_kernel(
                                                         K.uint32(0x08200490),
                                                         K.Or(
                                                             mma_ki != 0,
-                                                            K.cast(mma_p_accumulate[0], "bool"),
+                                                            K.cast(mma_p_accumulate, "bool"),
                                                         ),
                                                     )
                                                 elif mma_smem_desc == "local_hoist":
@@ -1278,7 +1278,7 @@ def make_kernel(
                                                         K.uint32(0x08200490),
                                                         K.Or(
                                                             mma_ki != 0,
-                                                            K.cast(mma_p_accumulate[0], "bool"),
+                                                            K.cast(mma_p_accumulate, "bool"),
                                                         ),
                                                     )
                                                 else:
@@ -1293,10 +1293,10 @@ def make_kernel(
                                                         K.uint32(0x08200490),
                                                         K.Or(
                                                             mma_ki != 0,
-                                                            K.cast(mma_p_accumulate[0], "bool"),
+                                                            K.cast(mma_p_accumulate, "bool"),
                                                         ),
                                                     )
-                                    K.assign(mma_p_accumulate[0], K.uint32(1))
+                                    K.assign(mma_p_accumulate, K.uint32(1))
                                 bar_qk_part_done.arrive(qk_stage, cta_group=2, cta_mask=3)
 
                                 bar_k_part1_ready.arrive(
@@ -1335,7 +1335,7 @@ def make_kernel(
                                                     K.uint32(0x08200490),
                                                     K.Or(
                                                         mma_ki != 0,
-                                                        K.cast(mma_p_accumulate[0], "bool"),
+                                                        K.cast(mma_p_accumulate, "bool"),
                                                     ),
                                                 )
                                             elif mma_smem_desc == "encode":
@@ -1357,7 +1357,7 @@ def make_kernel(
                                                     K.uint32(0x08200490),
                                                     K.Or(
                                                         mma_ki != 0,
-                                                        K.cast(mma_p_accumulate[0], "bool"),
+                                                        K.cast(mma_p_accumulate, "bool"),
                                                     ),
                                                 )
                                             elif mma_smem_desc == "local_hoist":
@@ -1370,7 +1370,7 @@ def make_kernel(
                                                     K.uint32(0x08200490),
                                                     K.Or(
                                                         mma_ki != 0,
-                                                        K.cast(mma_p_accumulate[0], "bool"),
+                                                        K.cast(mma_p_accumulate, "bool"),
                                                     ),
                                                 )
                                             else:
@@ -1383,10 +1383,10 @@ def make_kernel(
                                                     K.uint32(0x08200490),
                                                     K.Or(
                                                         mma_ki != 0,
-                                                        K.cast(mma_p_accumulate[0], "bool"),
+                                                        K.cast(mma_p_accumulate, "bool"),
                                                     ),
                                                 )
-                                K.assign(mma_p_accumulate[0], K.uint32(1))
+                                K.assign(mma_p_accumulate, K.uint32(1))
                                 bar_qk_done.arrive(qk_stage, cta_group=2, cta_mask=3)
 
                             with K.If(k > 0), K.Then():
@@ -1400,7 +1400,7 @@ def make_kernel(
                                 bar_v_part0_ready.wait(pv_stage, pv_phase)
                                 K.ptx.tcgen05.fence__after_thread_sync()
                                 K.assign(
-                                    mma_o_accumulate[0],
+                                    mma_o_accumulate,
                                     K.if_then_else(k == 1, K.uint32(0), K.uint32(1)),
                                 )
                                 if mma_smem_desc == "hoist":
@@ -1417,7 +1417,7 @@ def make_kernel(
                                 else:
                                     issue_pv_mma(0, 0, 0, K.uint64(0), K.uint64(0))
                                     issue_pv_mma(128, 0, 16384, K.uint64(0), K.uint64(0))
-                                K.assign(mma_o_accumulate[0], K.uint32(1))
+                                K.assign(mma_o_accumulate, K.uint32(1))
                                 bar_sv_part_done.arrive(pv_stage, cta_group=2, cta_mask=3)
 
                                 bar_v_part1_ready.arrive(
@@ -1443,7 +1443,7 @@ def make_kernel(
                                 else:
                                     issue_pv_mma(0, 4096, 4096, K.uint64(0), K.uint64(0))
                                     issue_pv_mma(128, 4096, 20480, K.uint64(0), K.uint64(0))
-                                K.assign(mma_o_accumulate[0], K.uint32(1))
+                                K.assign(mma_o_accumulate, K.uint32(1))
                                 bar_sv_done.arrive(pv_stage, cta_group=2, cta_mask=3)
                     K.cuda.iket.range_end(mma_token[0])
 

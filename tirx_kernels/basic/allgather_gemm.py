@@ -182,9 +182,9 @@ def _mapa_u64_tx(ptr, rank):
     a one-element local buffer gives both a writable lvalue and an Expr.
     The scratch and the call both go through the full TIRx namespace.
     """
-    mapped = Kern.alloc_local([1], "uint64")
-    Kern.evaluate(Kern.ptx.mapa.u64(mapped[0], ptr, Kern.uint32(rank)))
-    return mapped[0]
+    mapped = Kern.local_scalar("uint64")
+    Kern.evaluate(Kern.ptx.mapa.u64(mapped, ptr, Kern.uint32(rank)))
+    return mapped
 
 
 def derive_config(
@@ -240,9 +240,9 @@ def derive_config(
 
 def _arrive_remote_u64(barrier_ptr, remote_cta):
     """Preserve the source's mapa.u64 + implicit-count remote arrive sequence."""
-    mapped = Kern.alloc_local([1], "uint64")
-    Kern.ptx.mapa.shared__cluster.u64(mapped[0], barrier_ptr, Kern.uint32(remote_cta))
-    Kern.ptx.mbarrier.arrive.b64(mapped[0], Kern.uint32(1), pred=Kern.bool(True))
+    mapped = Kern.local_scalar("uint64")
+    Kern.ptx.mapa.shared__cluster.u64(mapped, barrier_ptr, Kern.uint32(remote_cta))
+    Kern.ptx.mbarrier.arrive.b64(mapped, Kern.uint32(1), pred=Kern.bool(True))
 
 
 def int_var(name: str, scope="local", dtype="int32", align=4):

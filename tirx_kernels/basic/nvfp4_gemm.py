@@ -314,19 +314,19 @@ _DEFAULTS = {
 
 def _mapa_u64(ptr, rank):
     """The original's defining ``mapa.u64`` spelling."""
-    mapped = K.alloc_local([1], "uint64")
-    K.ptx.mapa.u64(mapped[0], ptr, K.uint32(rank))
-    return mapped[0]
+    mapped = K.local_scalar("uint64")
+    K.ptx.mapa.u64(mapped, ptr, K.uint32(rank))
+    return mapped
 
 
 def _mul_f32x2_inplace(values, index, multiplier):
     """The original inline helper, preserving both explicit registers."""
-    packed = K.alloc_local([1], "uint64")
-    rhs = K.alloc_local([1], "uint64")
-    K.ptx.mov.b64(packed[0], values[index], values[index + 1])
-    K.ptx.mov.b64(rhs[0], multiplier, multiplier)
-    K.ptx.mul.rz.ftz.f32x2(packed[0], packed[0], rhs[0])
-    K.ptx.mov.b64(values[index], values[index + 1], packed[0])
+    packed = K.local_scalar("uint64")
+    rhs = K.local_scalar("uint64")
+    K.ptx.mov.b64(packed, values[index], values[index + 1])
+    K.ptx.mov.b64(rhs, multiplier, multiplier)
+    K.ptx.mul.rz.ftz.f32x2(packed, packed, rhs)
+    K.ptx.mov.b64(values[index], values[index + 1], packed)
 
 
 def make_kernel(M, N, KDIM):
@@ -489,19 +489,19 @@ def make_kernel(M, N, KDIM):
         with K.If(tid_in_cta < 32), K.Then():
             K.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
 
-        pair_mask = K.alloc_local([1], "int32")
-        K.assign(pair_mask[0], K.int32(0))
-        K.assign(pair_mask[0], pair_mask[0] | (K.int32(1) << pair_leader_rank))
-        K.assign(pair_mask[0], pair_mask[0] | (K.int32(1) << (pair_leader_rank + 1)))
+        pair_mask = K.local_scalar("int32")
+        K.assign(pair_mask, K.int32(0))
+        K.assign(pair_mask, pair_mask | (K.int32(1) << pair_leader_rank))
+        K.assign(pair_mask, pair_mask | (K.int32(1) << (pair_leader_rank + 1)))
         tma_cur = PipelineState(PIPE_DEPTH, 1)
         mma_smem = PipelineState(PIPE_DEPTH, 0)
         mma_tmem = PipelineState(TMEM_PIPE_DEPTH, 1)
-        accum = K.alloc_local([1], "int32")
-        K.assign(accum[0], 0)
+        accum = K.local_scalar("int32")
+        K.assign(accum, 0)
         epi_cur = PipelineState(TMEM_PIPE_DEPTH, 0)
         epi_wb_state = PipelineState(WB_PIPE_DEPTH, 1)
-        alpha_local = K.alloc_local([1], "float32")
-        K.ptx.ld.global_.nc.f32(alpha_local[0], alpha.ptr_to([0]))
+        alpha_local = K.local_scalar("float32")
+        K.ptx.ld.global_.nc.f32(alpha_local, alpha.ptr_to([0]))
 
         # These five role blocks are intentionally adjacent: K folds their
         # guards into the original if/elif dispatch chain.
@@ -512,12 +512,12 @@ def make_kernel(M, N, KDIM):
                 k = k_tile * CTA_K // 2
                 smem_pipe.empty.wait(tma_cur.stage, tma_cur.phase)
                 with K.If(id_in_pair == 0), K.Then():
-                    rem = K.alloc_local([1], "uint64")
+                    rem = K.local_scalar("uint64")
                     K.ptx.mapa.shared__cluster.u64(
-                        rem[0], tile_full_bar.ptr_to([stage]), K.uint32(pair_leader_rank)
+                        rem, tile_full_bar.ptr_to([stage]), K.uint32(pair_leader_rank)
                     )
                     K.ptx.mbarrier.arrive.expect_tx.b64(
-                        rem[0], K.uint32(A_BYTES + B_BYTES), pred=K.bool(True)
+                        rem, K.uint32(A_BYTES + B_BYTES), pred=K.bool(True)
                     )
                 single_cta_mask = K.int32(1) << id_in_pair
                 mapped_tile_bar = _mapa_u64(tile_full_bar.ptr_to([stage]), 0)
@@ -556,12 +556,12 @@ def make_kernel(M, N, KDIM):
                 sf_n = (d_n // 128) * 128
                 smem_pipe.empty.wait(tma_cur.stage, tma_cur.phase)
                 with K.If(id_in_pair == 0), K.Then():
-                    rem = K.alloc_local([1], "uint64")
+                    rem = K.local_scalar("uint64")
                     K.ptx.mapa.shared__cluster.u64(
-                        rem[0], scale_full_bar.ptr_to([stage]), K.uint32(pair_leader_rank)
+                        rem, scale_full_bar.ptr_to([stage]), K.uint32(pair_leader_rank)
                     )
                     K.ptx.mbarrier.arrive.expect_tx.b64(
-                        rem[0], K.uint32(SFA_BYTES + SFB_BYTES), pred=K.bool(True)
+                        rem, K.uint32(SFA_BYTES + SFB_BYTES), pred=K.bool(True)
                     )
                 single_cta_mask = K.int32(1) << id_in_pair
                 mapped_sfa_bar = _mapa_u64(scale_full_bar.ptr_to([stage]), 0)
@@ -585,7 +585,7 @@ def make_kernel(M, N, KDIM):
                             K.Cast("int32", sf_k // 4),
                             K.Cast("int32", sf_n // 128),
                             K.cuda.cvta_generic_to_shared(K.reinterpret("handle", mapped_sfb_bar)),
-                            K.Cast("uint16", pair_mask[0]),
+                            K.Cast("uint16", pair_mask),
                             K.uint64(_EVICT_NORMAL_L2_POLICY),
                         )
                 else:
@@ -596,7 +596,7 @@ def make_kernel(M, N, KDIM):
                         K.Cast("int32", sf_k // 4),
                         K.Cast("int32", sf_n // 128 + cb_m),
                         K.cuda.cvta_generic_to_shared(K.reinterpret("handle", mapped_sfb_bar)),
-                        K.Cast("uint16", pair_mask[0]),
+                        K.Cast("uint16", pair_mask),
                         K.uint64(_EVICT_NORMAL_L2_POLICY),
                     )
 
@@ -616,9 +616,9 @@ def make_kernel(M, N, KDIM):
                     tile_full_bar.wait(mma_smem.stage, mma_smem.phase)
                     for flat in range(CTA_M // 32):
                         sfa_row = flat % 4 * 32
-                        sfa_shared_addr = K.alloc_local([1], "uint32")
+                        sfa_shared_addr = K.local_scalar("uint32")
                         K.assign(
-                            sfa_shared_addr[0],
+                            sfa_shared_addr,
                             K.cuda.cvta_generic_to_shared(
                                 K.ptr_byte_offset(
                                     SFA_smem.ptr_to([0, 0, 0]),
@@ -627,29 +627,28 @@ def make_kernel(M, N, KDIM):
                                 )
                             ),
                         )
-                        sfa_cp_desc = K.alloc_local([1], "uint64")
+                        sfa_cp_desc = K.local_scalar("uint64")
                         K.assign(
-                            sfa_cp_desc[0],
+                            sfa_cp_desc,
                             K.bitwise_or(
                                 K.bitwise_and(sf_desc.desc, K.bitwise_not(K.uint64(0x3FFF))),
                                 K.Cast(
                                     "uint64",
                                     K.bitwise_and(
-                                        K.shift_right(sfa_shared_addr[0], K.uint32(4)),
+                                        K.shift_right(sfa_shared_addr, K.uint32(4)),
                                         K.uint32(0x3FFF),
                                     ),
                                 ),
                             ),
                         )
                         K.ptx[_TCGEN05_CP_2SM](
-                            K.Cast("uint32", SFA_tmem.allocated_addr[0] + flat % 4 * 4),
-                            sfa_cp_desc[0],
+                            K.Cast("uint32", SFA_tmem.allocated_addr[0] + flat % 4 * 4), sfa_cp_desc
                         )
                     for flat in range(SFB_N // 32):
                         sfb_row = flat % 4 * 32 + flat // 4 * 128
-                        sfb_shared_addr = K.alloc_local([1], "uint32")
+                        sfb_shared_addr = K.local_scalar("uint32")
                         K.assign(
-                            sfb_shared_addr[0],
+                            sfb_shared_addr,
                             K.cuda.cvta_generic_to_shared(
                                 K.ptr_byte_offset(
                                     SFB_smem.ptr_to([0, 0, 0]),
@@ -658,15 +657,15 @@ def make_kernel(M, N, KDIM):
                                 )
                             ),
                         )
-                        sfb_cp_desc = K.alloc_local([1], "uint64")
+                        sfb_cp_desc = K.local_scalar("uint64")
                         K.assign(
-                            sfb_cp_desc[0],
+                            sfb_cp_desc,
                             K.bitwise_or(
                                 K.bitwise_and(sf_desc.desc, K.bitwise_not(K.uint64(0x3FFF))),
                                 K.Cast(
                                     "uint64",
                                     K.bitwise_and(
-                                        K.shift_right(sfb_shared_addr[0], K.uint32(4)),
+                                        K.shift_right(sfb_shared_addr, K.uint32(4)),
                                         K.uint32(0x3FFF),
                                     ),
                                 ),
@@ -679,11 +678,11 @@ def make_kernel(M, N, KDIM):
                                 + flat % 4 * SFB_n_chunks * 4
                                 + flat // 4 * 4,
                             ),
-                            sfb_cp_desc[0],
+                            sfb_cp_desc,
                         )
-                    desc_i = K.alloc_local([1], "uint32")
+                    desc_i = K.local_scalar("uint32")
                     K.cuda.tcgen05.encode_instr_descriptor_block_scaled(
-                        K.address_of(desc_i[0]),
+                        K.address_of(desc_i),
                         d_dtype="float32",
                         a_dtype="float4_e2m1fn",
                         b_dtype="float4_e2m1fn",
@@ -710,7 +709,7 @@ def make_kernel(M, N, KDIM):
                             K.Cast("uint32", tmem.allocated_addr[0]),
                             desc_a_ki,
                             desc_b_ki,
-                            desc_i[0],
+                            desc_i,
                             K.cuda.get_tmem_addr(
                                 SFA_tmem.allocated_addr[0],
                                 sf_linear % 512 // 16,
@@ -722,22 +721,20 @@ def make_kernel(M, N, KDIM):
                                 sf_linear % 16 // sf_mma_k * sf_mma_k * SFB_n_chunks
                                 + sf_linear // 512,
                             ),
-                            K.bool(True) if ki else K.Cast("bool", accum[0]),
+                            K.bool(True) if ki else K.Cast("bool", accum),
                         )
-                    K.assign(accum[0], 1)
-                    smem_pipe.empty.arrive(
-                        mma_smem.stage, cta_group=CTA_GROUP, cta_mask=pair_mask[0]
-                    )
+                    K.assign(accum, 1)
+                    smem_pipe.empty.arrive(mma_smem.stage, cta_group=CTA_GROUP, cta_mask=pair_mask)
 
                 with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
                     with K.While(tile_scheduler.valid()):
                         tmem_pipe.empty.wait(mma_tmem.stage, mma_tmem.phase)
-                        K.assign(accum[0], 0)
+                        K.assign(accum, 0)
                         with K.serial(K_TILES):
                             execute_mma()
                             mma_smem.advance()
                         tmem_pipe.full.arrive(
-                            mma_tmem.stage, cta_group=CTA_GROUP, cta_mask=pair_mask[0]
+                            mma_tmem.stage, cta_group=CTA_GROUP, cta_mask=pair_mask
                         )
                         mma_tmem.advance()
                         tile_scheduler.next_tile()
@@ -802,7 +799,7 @@ def make_kernel(M, N, KDIM):
                                     epi_cur.stage, remote=pair_leader_rank, pred=True, count=1
                                 )
                         for pair in range(EPI_TILE // 2):
-                            _mul_f32x2_inplace(reg_f32, pair * 2, alpha_local[0])
+                            _mul_f32x2_inplace(reg_f32, pair * 2, alpha_local)
                         for pair in range(EPI_TILE // 2):
                             K.ptx.cvt.rn.bf16x2.f32(
                                 reg_bf16_words[pair], reg_f32[pair * 2 + 1], reg_f32[pair * 2]
@@ -825,7 +822,7 @@ def make_kernel(M, N, KDIM):
                         K.ptx.mul.rz.ftz.f32x2(
                             reg_all_pairs[pair],
                             K.cuda.make_float2(reg_all_f32[pair * 2], reg_all_f32[pair * 2 + 1]),
-                            K.cuda.make_float2(alpha_local[0], alpha_local[0]),
+                            K.cuda.make_float2(alpha_local, alpha_local),
                         )
                     for pair in range(MMA_N // 2):
                         K.ptx.cvt.rn.bf16x2.f32(
@@ -851,16 +848,16 @@ def make_kernel(M, N, KDIM):
 
         with K.If(warp_id == _W_EPILOGUE), K.Then():
             with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
-                rem = K.alloc_local([1], "uint64")
+                rem = K.local_scalar("uint64")
                 K.ptx.mapa.shared__cluster.u64(
-                    rem[0], tmem_finished.ptr_to([0]), K.uint32(pair_leader_rank + 1 - id_in_pair)
+                    rem, tmem_finished.ptr_to([0]), K.uint32(pair_leader_rank + 1 - id_in_pair)
                 )
-                K.ptx.mbarrier.arrive.b64(rem[0], K.uint32(1), pred=K.bool(True))
+                K.ptx.mbarrier.arrive.b64(rem, K.uint32(1), pred=K.bool(True))
             K.cuda.mbarrier_wait_acquire_cluster(tmem_finished.ptr_to([0]), 0)
-            tmem_dealloc_addr = K.alloc_local([1], "uint32")
-            K.ptx.ld.shared.u32(tmem_dealloc_addr[0], tmem_addr.ptr_to([0]))
+            tmem_dealloc_addr = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_addr.ptr_to([0]))
             K.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
-                tmem_dealloc_addr[0], K.uint32(512)
+                tmem_dealloc_addr, K.uint32(512)
             )
 
     return nvfp4_gemm_kern
