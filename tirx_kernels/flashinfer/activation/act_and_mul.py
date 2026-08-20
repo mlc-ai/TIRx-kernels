@@ -60,16 +60,16 @@ _GELU_TANH_C1 = 0.7978845608028654
 
 def _tanh_approx(x):
     # tanh.approx.f32 (matches flashinfer math.cuh math::tanh(float))
-    out = K.alloc_local([1], "float32")
-    K.ptx.tanh.approx.f32(out[0], x)
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.tanh.approx.f32(out, x)
+    return out
 
 
 def _fmaf_rn(a, b, c):
     # __fmaf_rn under the production -use_fast_math build (fma.rn.ftz.f32)
-    out = K.alloc_local([1], "float32")
-    K.ptx.fma.rn.ftz.f32(out[0], a, b, c)
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.fma.rn.ftz.f32(out, a, b, c)
+    return out
 
 
 def _unpack_lo(word, dtype):
@@ -104,12 +104,11 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
         x_vec = K.alloc_local([8], "float32")
         y_vec = K.alloc_local([8], "float32")
         out_vec = K.alloc_local([8], "float32")
-        e_tmp = K.alloc_local([1], "float32")
+        e_tmp = K.local_scalar("float32")
 
         # Main vector loop (source: #pragma unroll 1 grid-stride loop).
-        idx = K.alloc_local([1], "uint32")
-        K.assign(idx[0], tid)
-        with K.While(idx[0] < n_vec):
+        idx = K.local_scalar("uint32", init=tid)
+        with K.While(idx < n_vec):
             K.ptx.ld.global_.nc.v4.b32(
                 x_bits[0],
                 x_bits[1],
@@ -117,7 +116,7 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                 x_bits[3],
                 K.address_of(
                     input_global[
-                        0, K.cast(token, "int64") * (2 * d) + K.cast(idx[0], "int64") * VEC_SIZE
+                        0, K.cast(token, "int64") * (2 * d) + K.cast(idx, "int64") * VEC_SIZE
                     ]
                 ),
             )
@@ -128,7 +127,7 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                 y_bits[3],
                 K.address_of(
                     input_global[
-                        0, K.cast(token, "int64") * (2 * d) + K.cast(idx[0], "int64") * VEC_SIZE + d
+                        0, K.cast(token, "int64") * (2 * d) + K.cast(idx, "int64") * VEC_SIZE + d
                     ]
                 ),
             )
@@ -140,8 +139,8 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                 K.ptx.mov.b32(y_vec[2 * p + 1], _unpack_hi(y_bits[p], dtype))
             for i in range(8):
                 if act == "silu":
-                    K.ptx.ex2.approx.ftz.f32(e_tmp[0], x_vec[i] * K.float32(-_LOG2E))
-                    K.ptx.mov.b32(out_vec[i], (x_vec[i] / (K.float32(1.0) + e_tmp[0])) * y_vec[i])
+                    K.ptx.ex2.approx.ftz.f32(e_tmp, x_vec[i] * K.float32(-_LOG2E))
+                    K.ptx.mov.b32(out_vec[i], (x_vec[i] / (K.float32(1.0) + e_tmp)) * y_vec[i])
                 elif act == "gelu":
                     K.ptx.mov.b32(
                         out_vec[i],
@@ -167,49 +166,45 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     K.ptx.cvt.rn.bf16x2.f32(o_bits[p], out_vec[2 * p + 1], out_vec[2 * p])
             K.ptx.st.global_.v4.b32(
                 K.address_of(
-                    out_global[0, K.cast(token, "int64") * d + K.cast(idx[0], "int64") * VEC_SIZE]
+                    out_global[0, K.cast(token, "int64") * d + K.cast(idx, "int64") * VEC_SIZE]
                 ),
                 o_bits[0],
                 o_bits[1],
                 o_bits[2],
                 o_bits[3],
             )
-            K.assign(idx[0], idx[0] + block_size)
+            K.assign(idx, idx + block_size)
 
         # Scalar remainder loop (source: #pragma unroll 1; dead when REM == 0).
         if rem > 0:
-            ridx = K.alloc_local([1], "uint32")
-            K.assign(ridx[0], tid)
-            with K.While(ridx[0] < rem):
-                xr16 = K.alloc_local([1], "uint16")
-                yr16 = K.alloc_local([1], "uint16")
-                ob16 = K.alloc_local([1], "uint16")
-                er = K.alloc_local([1], "float32")
+            ridx = K.local_scalar("uint32", init=tid)
+            with K.While(ridx < rem):
+                xr16 = K.local_scalar("uint16")
+                yr16 = K.local_scalar("uint16")
+                ob16 = K.local_scalar("uint16")
+                er = K.local_scalar("float32")
                 K.ptx.ld.global_.nc.b16(
-                    xr16[0],
+                    xr16,
                     K.address_of(
                         input_global[
-                            0, K.cast(token, "int64") * (2 * d) + K.cast(ridx[0], "int64") + rem_off
+                            0, K.cast(token, "int64") * (2 * d) + K.cast(ridx, "int64") + rem_off
                         ]
                     ),
                 )
                 K.ptx.ld.global_.nc.b16(
-                    yr16[0],
+                    yr16,
                     K.address_of(
                         input_global[
                             0,
-                            K.cast(token, "int64") * (2 * d)
-                            + K.cast(ridx[0], "int64")
-                            + rem_off
-                            + d,
+                            K.cast(token, "int64") * (2 * d) + K.cast(ridx, "int64") + rem_off + d,
                         ]
                     ),
                 )
-                xr = K.cast(K.reinterpret(dtype, xr16[0]), "float32")
-                yr = K.cast(K.reinterpret(dtype, yr16[0]), "float32")
+                xr = K.cast(K.reinterpret(dtype, xr16), "float32")
+                yr = K.cast(K.reinterpret(dtype, yr16), "float32")
                 if act == "silu":
-                    K.ptx.ex2.approx.ftz.f32(er[0], xr * K.float32(-_LOG2E))
-                    out_r = (xr / (K.float32(1.0) + er[0])) * yr
+                    K.ptx.ex2.approx.ftz.f32(er, xr * K.float32(-_LOG2E))
+                    out_r = (xr / (K.float32(1.0) + er)) * yr
                 elif act == "gelu":
                     out_r = (
                         (xr * K.float32(0.5)) * (K.float32(1.0) + K.erf(xr * K.float32(_SQRT1_2)))
@@ -224,18 +219,16 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
                     c = a * K.float32(0.5)
                     out_r = (xr * c) * yr
                 if dtype == "float16":
-                    K.ptx.cvt.rn.f16.f32(ob16[0], out_r)
+                    K.ptx.cvt.rn.f16.f32(ob16, out_r)
                 else:
-                    K.ptx.cvt.rn.bf16.f32(ob16[0], out_r)
+                    K.ptx.cvt.rn.bf16.f32(ob16, out_r)
                 K.ptx.st.global_.b16(
                     K.address_of(
-                        out_global[
-                            0, K.cast(token, "int64") * d + K.cast(ridx[0], "int64") + rem_off
-                        ]
+                        out_global[0, K.cast(token, "int64") * d + K.cast(ridx, "int64") + rem_off]
                     ),
-                    ob16[0],
+                    ob16,
                 )
-                K.assign(ridx[0], ridx[0] + block_size)
+                K.assign(ridx, ridx + block_size)
 
         K.ptx.griddepcontrol.launch_dependents()
 
