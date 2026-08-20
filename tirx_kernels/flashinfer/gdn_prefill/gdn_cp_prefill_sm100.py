@@ -272,9 +272,9 @@ def _load_global_as_f32(values, value_index, source, source_index, SOURCE_DTYPE)
     if SOURCE_DTYPE == "float32":
         K.ptx.ld.global_.f32(values[value_index], source.ptr_to([source_index]))
     else:
-        bits = K.alloc_local((1,), "uint16")
-        K.ptx.ld.global_.b16(bits[0], source.ptr_to([source_index]))
-        K.ptx.mov.b32(values[value_index], K.cast(K.reinterpret(SOURCE_DTYPE, bits[0]), "float32"))
+        bits = K.local_scalar("uint16")
+        K.ptx.ld.global_.b16(bits, source.ptr_to([source_index]))
+        K.ptx.mov.b32(values[value_index], K.cast(K.reinterpret(SOURCE_DTYPE, bits), "float32"))
 
 
 def _store_global_from_f32(output, output_index, value, OUTPUT_DTYPE):
@@ -299,32 +299,32 @@ def _load_sequence_bounds(cu_seqlens, seq_idx, bounds, CU_DTYPE):
 
 
 def _lg2_approx_ftz(value):
-    result = K.alloc_local((1,), "float32")
-    K.ptx.lg2.approx.ftz.f32(result[0], value)
-    return result[0]
+    result = K.local_scalar("float32")
+    K.ptx.lg2.approx.ftz.f32(result, value)
+    return result
 
 
 def _ex2_approx_ftz(value):
-    result = K.alloc_local((1,), "float32")
-    K.ptx.ex2.approx.ftz.f32(result[0], value)
-    return result[0]
+    result = K.local_scalar("float32")
+    K.ptx.ex2.approx.ftz.f32(result, value)
+    return result
 
 
 def _prefill_predicated_gamma(s_addr, t_addr, pred):
-    s_log = K.alloc_local((1,), "float32")
-    t_log = K.alloc_local((1,), "float32")
-    gamma = K.alloc_local((1,), "float32")
+    s_log = K.local_scalar("float32")
+    t_log = K.local_scalar("float32")
+    gamma = K.local_scalar("float32")
     predicate = K.cast(pred, "uint32")
     # Both coordinates always name the allocated shared tile; the predicate
     # only masks the triangular/tail result.  Load and exponentiate directly,
     # then select zero, which preserves the source semantics without a
     # destination-predicated instruction.
-    K.ptx.ld.shared.f32(s_log[0], s_addr)
-    K.ptx.ld.shared.f32(t_log[0], t_addr)
-    K.ptx.sub.f32(gamma[0], s_log[0], t_log[0])
-    K.ptx.ex2.approx.ftz.f32(gamma[0], gamma[0])
-    K.ptx.selp.f32(gamma[0], gamma[0], K.float32(0), K.ptx.pred(predicate))
-    return gamma[0]
+    K.ptx.ld.shared.f32(s_log, s_addr)
+    K.ptx.ld.shared.f32(t_log, t_addr)
+    K.ptx.sub.f32(gamma, s_log, t_log)
+    K.ptx.ex2.approx.ftz.f32(gamma, gamma)
+    K.ptx.selp.f32(gamma, gamma, K.float32(0), K.ptx.pred(predicate))
+    return gamma
 
 
 def _t_matrix_ptr(storage, row, col):
@@ -336,19 +336,17 @@ def _t_k_matrix_ptr(storage, row, col):
 
 
 def _t_pack_f16x2(a, b):
-    packed = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.cvt.rn.f16x2.f32(packed[0], b, a))
-    return packed[0]
+    packed = K.local_scalar("uint32")
+    K.ptx.cvt.rn.f16x2.f32(packed, b, a)
+    return packed
 
 
 def _t_sub_zero_pack_f16x2(a, b, dst, dst_index):
-    negated = K.alloc_local((1,), "uint64")
+    negated = K.local_scalar("uint64")
     K.ptx.sub.rn.f32x2(
-        negated[0], K.cuda.make_float2(K.float32(0.0), K.float32(0.0)), K.cuda.make_float2(a, b)
+        negated, K.cuda.make_float2(K.float32(0.0), K.float32(0.0)), K.cuda.make_float2(a, b)
     )
-    K.ptx.mov.b32(
-        dst[dst_index], _t_pack_f16x2(K.cuda.float2_x(negated[0]), K.cuda.float2_y(negated[0]))
-    )
+    K.ptx.mov.b32(dst[dst_index], _t_pack_f16x2(K.cuda.float2_x(negated), K.cuda.float2_y(negated)))
 
 
 _T_MMA_ZERO_C = [K.float32(0.0)] * 4
@@ -397,46 +395,35 @@ def _t_mma_m16n8k8_f16_zero(acc, a, b):
 
 
 def _t_ldmatrix_x4(storage, base_row, base_col, lane, transpose, dst):
-    lane_matrix = K.local_scalar("int32")
-    K.assign(lane_matrix, lane >> 3)
-    row = K.local_scalar("int32")
-    K.assign(row, base_row + (lane & 7) + (lane_matrix & 1) * 8)
-    col = K.local_scalar("int32")
-    K.assign(col, base_col + (lane_matrix >> 1) * 8)
+    lane_matrix = K.local_scalar("int32", init=lane >> 3)
+    row = K.local_scalar("int32", init=base_row + (lane & 7) + (lane_matrix & 1) * 8)
+    col = K.local_scalar("int32", init=base_col + (lane_matrix >> 1) * 8)
     K.ptx[f"ldmatrix.sync.aligned.m8n8.x4{'.trans' if transpose else ''}.shared.b16"](
         *[dst[i] for i in range(4)], _t_matrix_ptr(storage, row, col)
     )
 
 
 def _t_ldmatrix_x4_k_a(smem_raw, base_row, base_col, lane, dst):
-    lane_matrix = K.local_scalar("int32")
-    K.assign(lane_matrix, lane >> 3)
-    row = K.local_scalar("int32")
-    K.assign(row, base_row + (lane & 7) + (lane_matrix & 1) * 8)
-    col = K.local_scalar("int32")
-    K.assign(col, base_col + (lane_matrix >> 1) * 8)
+    lane_matrix = K.local_scalar("int32", init=lane >> 3)
+    row = K.local_scalar("int32", init=base_row + (lane & 7) + (lane_matrix & 1) * 8)
+    col = K.local_scalar("int32", init=base_col + (lane_matrix >> 1) * 8)
     K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
         dst[0], dst[1], dst[2], dst[3], _t_k_matrix_ptr(smem_raw, row, col)
     )
 
 
 def _t_ldmatrix_x4_k_b(smem_raw, base_row, base_col, lane, dst):
-    row = K.local_scalar("int32")
-    K.assign(row, base_row + (lane & 7) + ((lane >> 4) & 1) * 8)
-    col = K.local_scalar("int32")
-    K.assign(col, base_col + ((lane >> 3) & 1) * 8)
+    row = K.local_scalar("int32", init=base_row + (lane & 7) + ((lane >> 4) & 1) * 8)
+    col = K.local_scalar("int32", init=base_col + ((lane >> 3) & 1) * 8)
     K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
         dst[0], dst[1], dst[2], dst[3], _t_k_matrix_ptr(smem_raw, row, col)
     )
 
 
 def _t_stmatrix_x4(storage, base_row, base_col, lane, src):
-    lane_matrix = K.local_scalar("int32")
-    K.assign(lane_matrix, lane >> 3)
-    row = K.local_scalar("int32")
-    K.assign(row, base_row + (lane & 7) + (lane_matrix & 1) * 8)
-    col = K.local_scalar("int32")
-    K.assign(col, base_col + (lane_matrix >> 1) * 8)
+    lane_matrix = K.local_scalar("int32", init=lane >> 3)
+    row = K.local_scalar("int32", init=base_row + (lane & 7) + (lane_matrix & 1) * 8)
+    col = K.local_scalar("int32", init=base_col + (lane_matrix >> 1) * 8)
     K.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
         _t_matrix_ptr(storage, row, col), *[src[i] for i in range(4)]
     )
@@ -445,30 +432,24 @@ def _t_stmatrix_x4(storage, base_row, base_col, lane, src):
 def _t_store_t_fragment(
     inverse_frag, beta_storage, t, t_base, valid_len, local_warp, lane, n_group, IO_DTYPE
 ):
-    row_base = K.local_scalar("int32")
-    K.assign(row_base, local_warp * 16 + (lane >> 2))
-    col_base = K.local_scalar("int32")
-    K.assign(col_base, n_group * 16 + (lane & 3) * 2)
+    row_base = K.local_scalar("int32", init=local_warp * 16 + (lane >> 2))
+    col_base = K.local_scalar("int32", init=n_group * 16 + (lane & 3) * 2)
     with K.unroll(4) as pair:
-        row = K.local_scalar("int32")
-        K.assign(row, row_base + (pair & 1) * 8)
-        col = K.local_scalar("int32")
-        K.assign(col, col_base + (pair >> 1) * 8)
-        word = K.local_scalar("uint32")
-        K.assign(word, inverse_frag[pair])
-        inverse_lo = K.local_scalar("float32")
-        K.assign(
-            inverse_lo,
-            K.cast(K.reinterpret("float16", K.cast(word & K.uint32(0xFFFF), "uint16")), "float32"),
+        row = K.local_scalar("int32", init=row_base + (pair & 1) * 8)
+        col = K.local_scalar("int32", init=col_base + (pair >> 1) * 8)
+        word = K.local_scalar("uint32", init=inverse_frag[pair])
+        inverse_lo = K.local_scalar(
+            "float32",
+            init=K.cast(
+                K.reinterpret("float16", K.cast(word & K.uint32(0xFFFF), "uint16")), "float32"
+            ),
         )
-        inverse_hi = K.local_scalar("float32")
-        K.assign(
-            inverse_hi, K.cast(K.reinterpret("float16", K.cast(word >> 16, "uint16")), "float32")
+        inverse_hi = K.local_scalar(
+            "float32",
+            init=K.cast(K.reinterpret("float16", K.cast(word >> 16, "uint16")), "float32"),
         )
-        output_lo = K.local_scalar("float32")
-        K.assign(output_lo, 0.0)
-        output_hi = K.local_scalar("float32")
-        K.assign(output_hi, 0.0)
+        output_lo = K.local_scalar("float32", init=0.0)
+        output_hi = K.local_scalar("float32", init=0.0)
         beta_value = K.local_scalar("float32")
         with K.If(K.And(row < valid_len, col < valid_len)):
             with K.Then():
@@ -492,12 +473,12 @@ def _t_inverse_8_to_16(storage, block16, lane):
     a = K.alloc_local((2,), "uint32")
     b = K.alloc_local((1,), "uint32")
     acc = K.alloc_local((4,), "float32")
-    word = K.alloc_local((1,), "uint32")
+    word = K.local_scalar("uint32")
     K.ptx.ldmatrix.sync.aligned.m8n8.x1.shared.b16(
-        word[0], _t_matrix_ptr(storage, block16 + 8 + (lane & 7), block16 + 8)
+        word, _t_matrix_ptr(storage, block16 + 8 + (lane & 7), block16 + 8)
     )
-    K.ptx.mov.b32(a[0], word[0])
-    K.ptx.mov.b32(a[1], word[0])
+    K.ptx.mov.b32(a[0], word)
+    K.ptx.mov.b32(a[1], word)
     K.ptx.ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16(
         b[0], _t_matrix_ptr(storage, block16 + 8 + (lane & 7), block16)
     )
@@ -508,9 +489,9 @@ def _t_inverse_8_to_16(storage, block16, lane):
         b[0], _t_matrix_ptr(storage, block16 + (lane & 7), block16)
     )
     _t_mma_m16n8k8_f16_zero(acc, a, b)
-    K.assign(word[0], _t_pack_f16x2(acc[0], acc[1]))
+    K.assign(word, _t_pack_f16x2(acc[0], acc[1]))
     K.ptx.stmatrix.sync.aligned.m8n8.x1.shared.b16(
-        _t_matrix_ptr(storage, block16 + 8 + (lane & 7), block16), word[0]
+        _t_matrix_ptr(storage, block16 + 8 + (lane & 7), block16), word
     )
 
 
@@ -537,14 +518,10 @@ def _t_inverse_32_to_64(storage, local_warp, lane):
     # CollectiveInverse splits the final 32-wide K reduction between warp
     # pairs.  Each partial result is rounded to FP16 before the x=1 warp adds
     # the x=0 contribution in FP16.
-    x = K.local_scalar("int32")
-    K.assign(x, local_warp >> 1)
-    y = K.local_scalar("int32")
-    K.assign(y, local_warp & 1)
-    row_base = K.local_scalar("int32")
-    K.assign(row_base, 32 + y * 16)
-    split = K.local_scalar("int32")
-    K.assign(split, x * 16)
+    x = K.local_scalar("int32", init=local_warp >> 1)
+    y = K.local_scalar("int32", init=local_warp & 1)
+    row_base = K.local_scalar("int32", init=32 + y * 16)
+    split = K.local_scalar("int32", init=x * 16)
     d0 = K.alloc_local((4,), "uint32")
     d1 = K.alloc_local((4,), "uint32")
     c0 = K.alloc_local((4,), "uint32")
@@ -628,12 +605,12 @@ def _t_inverse_32_to_64(storage, local_warp, lane):
 
 
 def _mn_opt_pack_iox2(a, b, IO_DTYPE):
-    packed = K.alloc_local((1,), "uint32")
+    packed = K.local_scalar("uint32")
     if IO_DTYPE == "float16":
-        K.evaluate(K.ptx.cvt.rn.f16x2.f32(packed[0], b, a))
+        K.ptx.cvt.rn.f16x2.f32(packed, b, a)
     else:
-        K.evaluate(K.ptx.cvt.rn.bf16x2.f32(packed[0], b, a))
-    return packed[0]
+        K.ptx.cvt.rn.bf16x2.f32(packed, b, a)
+    return packed
 
 
 def _mn_opt_unpack_io_lo(word, IO_DTYPE):
@@ -706,10 +683,10 @@ def _mn_opt_tmem_st_128x64_io(tmem_base, column, thread, values):
 def _mn_opt_load_128x64_fragment(tile, stage, thread, values):
     for half_idx in range(2):
         for band in range(4):
-            row = K.local_scalar("int32")
-            K.assign(row, (thread & 7) | ((thread & 16) >> 1) | (thread & 64) | (band << 4))
-            col = K.local_scalar("int32")
-            K.assign(col, (thread & 40) | (half_idx << 4))
+            row = K.local_scalar(
+                "int32", init=(thread & 7) | ((thread & 16) >> 1) | (thread & 64) | (band << 4)
+            )
+            col = K.local_scalar("int32", init=(thread & 40) | (half_idx << 4))
             offset = half_idx * 16 + band * 4
             K.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
                 *[values[offset + i] for i in range(4)], tile[stage].ptr_to(row, col)
@@ -719,10 +696,10 @@ def _mn_opt_load_128x64_fragment(tile, stage, thread, values):
 def _mn_opt_store_128x64_fragment(tile, stage, thread, values):
     for half_idx in range(2):
         for band in range(4):
-            row = K.local_scalar("int32")
-            K.assign(row, (thread & 7) | ((thread & 16) >> 1) | (thread & 64) | (band << 4))
-            col = K.local_scalar("int32")
-            K.assign(col, (thread & 40) | (half_idx << 4))
+            row = K.local_scalar(
+                "int32", init=(thread & 7) | ((thread & 16) >> 1) | (thread & 64) | (band << 4)
+            )
+            col = K.local_scalar("int32", init=(thread & 40) | (half_idx << 4))
             offset = half_idx * 16 + band * 4
             K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
                 tile[stage].ptr_to(row, col), *[values[offset + i] for i in range(4)]
@@ -733,8 +710,7 @@ def _mn_opt_initialize_matrix(tmem_base, column, thread, identity):
     values = K.alloc_local((32,), "float32")
     for sub in range(4):
         with K.unroll(32) as i:
-            col = K.local_scalar("int32")
-            K.assign(col, sub * 32 + i)
+            col = K.local_scalar("int32", init=sub * 32 + i)
             K.ptx.mov.b32(
                 values[i],
                 K.if_then_else(K.And(identity, thread == col), K.float32(1.0), K.float32(0.0)),
@@ -794,8 +770,7 @@ def _mn_opt_materialize_x(tmem_base, x_tile, stage, thread, IO_DTYPE):
 
 def _mn_opt_store_matrix_global(tmem_base, column, output, base, thread):
     values = K.alloc_local((32,), "uint32")
-    thread_base = K.local_scalar("int64")
-    K.assign(thread_base, base + K.cast(thread, "int64") * D_HEAD)
+    thread_base = K.local_scalar("int64", init=base + K.cast(thread, "int64") * D_HEAD)
     for sub in range(4):
         _mn_opt_tmem_ld_matrix_sub(tmem_base, column, thread, sub, values, 0)
         for vector in range(8):
@@ -895,8 +870,7 @@ def _fixup_load_n_to_tmem(tmem_base, n_tile, thread, ROWS):
     words = K.alloc_local((128,), "uint32")
     if ROWS == 128:
         for sub in range(4):
-            row = K.local_scalar("int32")
-            K.assign(row, thread)
+            row = K.local_scalar("int32", init=thread)
             for vector in range(8):
                 K.ptx.ld.shared.v4.b32(
                     words[sub * 32 + vector * 4],
@@ -907,10 +881,8 @@ def _fixup_load_n_to_tmem(tmem_base, n_tile, thread, ROWS):
                 )
     else:
         for sub in range(4):
-            row = K.local_scalar("int32")
-            K.assign(row, (thread >> 5) * 16 + (thread & 15))
-            col = K.local_scalar("int32")
-            K.assign(col, thread & 16)
+            row = K.local_scalar("int32", init=(thread >> 5) * 16 + (thread & 15))
+            col = K.local_scalar("int32", init=thread & 16)
             for vector in range(4):
                 K.ptx.ld.shared.v4.b32(
                     words[sub * 16 + vector * 4],
@@ -936,10 +908,8 @@ def _fixup_load_initial_to_tmem(tmem_base, initial_state, base, thread, ROWS, ST
                     STATE_DTYPE,
                 )
     else:
-        local_row = K.local_scalar("int32")
-        K.assign(local_row, (thread >> 5) * 16 + (thread & 15))
-        col_base = K.local_scalar("int32")
-        K.assign(col_base, thread & 16)
+        local_row = K.local_scalar("int32", init=(thread >> 5) * 16 + (thread & 15))
+        col_base = K.local_scalar("int32", init=thread & 16)
         for sub in range(4):
             with K.unroll(16) as i:
                 _load_global_as_f32(
@@ -955,8 +925,9 @@ def _fixup_load_initial_to_tmem(tmem_base, initial_state, base, thread, ROWS, ST
 def _fixup_store_f32(words, output, base, thread, ROWS):
     if ROWS == 128:
         for sub in range(4):
-            thread_base = K.local_scalar("int64")
-            K.assign(thread_base, base + K.cast(thread, "int64") * D_HEAD + sub * 32)
+            thread_base = K.local_scalar(
+                "int64", init=base + K.cast(thread, "int64") * D_HEAD + sub * 32
+            )
             for vector in range(8):
                 K.ptx.st.global_.v4.b32(
                     output.ptr_to([thread_base + vector * 4]),
@@ -966,14 +937,11 @@ def _fixup_store_f32(words, output, base, thread, ROWS):
                     words[sub * 32 + vector * 4 + 3],
                 )
     else:
-        local_row = K.local_scalar("int32")
-        K.assign(local_row, (thread >> 5) * 16 + (thread & 15))
-        col_base = K.local_scalar("int32")
-        K.assign(col_base, thread & 16)
+        local_row = K.local_scalar("int32", init=(thread >> 5) * 16 + (thread & 15))
+        col_base = K.local_scalar("int32", init=thread & 16)
         for sub in range(4):
-            thread_base = K.local_scalar("int64")
-            K.assign(
-                thread_base, (base + K.cast(local_row, "int64") * D_HEAD + col_base + sub * 32)
+            thread_base = K.local_scalar(
+                "int64", init=base + K.cast(local_row, "int64") * D_HEAD + col_base + sub * 32
             )
             for vector in range(4):
                 K.ptx.st.global_.v4.b32(
@@ -1001,8 +969,9 @@ def _fixup_store_state(values, output, base, thread, ROWS, STATE_DTYPE):
                             STATE_DTYPE,
                         ),
                     )
-                thread_base = K.local_scalar("int64")
-                K.assign(thread_base, base + K.cast(thread, "int64") * D_HEAD + sub * 32)
+                thread_base = K.local_scalar(
+                    "int64", init=base + K.cast(thread, "int64") * D_HEAD + sub * 32
+                )
                 for vector in range(4):
                     K.ptx["st.global.L1::no_allocate.v4.b32"](
                         output.ptr_to([thread_base + vector * 8]),
@@ -1012,10 +981,8 @@ def _fixup_store_state(values, output, base, thread, ROWS, STATE_DTYPE):
                         packed[sub * 16 + vector * 4 + 3],
                     )
         else:
-            local_row = K.local_scalar("int32")
-            K.assign(local_row, (thread >> 5) * 16 + (thread & 15))
-            col_base = K.local_scalar("int32")
-            K.assign(col_base, thread & 16)
+            local_row = K.local_scalar("int32", init=(thread >> 5) * 16 + (thread & 15))
+            col_base = K.local_scalar("int32", init=thread & 16)
             for sub in range(4):
                 with K.unroll(8) as pair:
                     K.ptx.mov.b32(
@@ -1026,9 +993,8 @@ def _fixup_store_state(values, output, base, thread, ROWS, STATE_DTYPE):
                             STATE_DTYPE,
                         ),
                     )
-                thread_base = K.local_scalar("int64")
-                K.assign(
-                    thread_base, base + K.cast(local_row, "int64") * D_HEAD + col_base + sub * 32
+                thread_base = K.local_scalar(
+                    "int64", init=base + K.cast(local_row, "int64") * D_HEAD + col_base + sub * 32
                 )
                 for vector in range(2):
                     K.ptx["st.global.L1::no_allocate.v4.b32"](
@@ -1065,20 +1031,19 @@ def _fixup_smem_desc_m(smem_addr, M_OFF):
 
 
 def _fixup_mma(tmem_base, m_desc, m_stage, ROWS, done_full, ready_empty, m_empty):
-    instr_desc = K.local_scalar("uint32")
-    K.assign(instr_desc, K.uint32(K.if_then_else(ROWS == 128, 0x08110910, 0x04110910)))
+    instr_desc = K.local_scalar(
+        "uint32", init=K.uint32(K.if_then_else(ROWS == 128, 0x08110910, 0x04110910))
+    )
     for kphase in range(16):
         for n_half in range(2):
-            K.evaluate(
-                K.ptx[_FIXUP_MMA_TF32](
-                    K.cast(tmem_base + n_half * 64, "uint32"),
-                    K.cast(tmem_base + _FIXUP_TMEM_OPERAND_COL + kphase * 8, "uint32"),
-                    m_desc + K.uint64(m_stage * 4096 + kphase * 64 + n_half * 2048),
-                    instr_desc,
-                    *_FIXUP_ZERO_MASKS,
-                    True,
-                    pred=K.cuda.elect_sync(),
-                )
+            K.ptx[_FIXUP_MMA_TF32](
+                K.cast(tmem_base + n_half * 64, "uint32"),
+                K.cast(tmem_base + _FIXUP_TMEM_OPERAND_COL + kphase * 8, "uint32"),
+                m_desc + K.uint64(m_stage * 4096 + kphase * 64 + n_half * 2048),
+                instr_desc,
+                *_FIXUP_ZERO_MASKS,
+                True,
+                pred=K.cuda.elect_sync(),
             )
     _mn_opt_mma_commit(done_full)
     _mn_opt_mma_commit(ready_empty)
@@ -1089,16 +1054,14 @@ def _mn_opt_mma_ss_128x64_k64(tmem_d, a_desc_base, b_desc_base, full_barrier, IO
     descriptor = K.local_scalar("uint32")
     K.assign(descriptor, _mn_opt_mma_descriptor(0x08108010, IO_DTYPE))
     for kphase in range(4):
-        K.evaluate(
-            K.ptx[_MN_OPT_MMA_CHAIN](
-                K.cast(tmem_d, "uint32"),
-                a_desc_base + K.uint64(kphase * 128),
-                b_desc_base + K.uint64(kphase * 2),
-                descriptor,
-                *_MN_OPT_ZERO_MASKS,
-                K.ptx.pred(K.if_then_else(kphase == 0, 0, 1)),
-                pred=K.cuda.elect_sync(),
-            )
+        K.ptx[_MN_OPT_MMA_CHAIN](
+            K.cast(tmem_d, "uint32"),
+            a_desc_base + K.uint64(kphase * 128),
+            b_desc_base + K.uint64(kphase * 2),
+            descriptor,
+            *_MN_OPT_ZERO_MASKS,
+            K.ptx.pred(K.if_then_else(kphase == 0, 0, 1)),
+            pred=K.cuda.elect_sync(),
         )
     _mn_opt_mma_commit(full_barrier)
 
@@ -1107,18 +1070,15 @@ def _mn_opt_mma_ts_128x64_k128(tmem_d, tmem_a, b_desc_base, full_barrier, IO_DTY
     descriptor = K.local_scalar("uint32")
     K.assign(descriptor, _mn_opt_mma_descriptor(0x08100010, IO_DTYPE))
     for kphase in range(8):
-        phase_off = K.local_scalar("uint64")
-        K.assign(phase_off, K.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
-        K.evaluate(
-            K.ptx[_MN_OPT_MMA_CHAIN](
-                K.cast(tmem_d, "uint32"),
-                K.cast(tmem_a + kphase * 8, "uint32"),
-                b_desc_base + phase_off,
-                descriptor,
-                *_MN_OPT_ZERO_MASKS,
-                K.ptx.pred(K.if_then_else(kphase == 0, 0, 1)),
-                pred=K.cuda.elect_sync(),
-            )
+        phase_off = K.local_scalar("uint64", init=K.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
+        K.ptx[_MN_OPT_MMA_CHAIN](
+            K.cast(tmem_d, "uint32"),
+            K.cast(tmem_a + kphase * 8, "uint32"),
+            b_desc_base + phase_off,
+            descriptor,
+            *_MN_OPT_ZERO_MASKS,
+            K.ptx.pred(K.if_then_else(kphase == 0, 0, 1)),
+            pred=K.cuda.elect_sync(),
         )
     _mn_opt_mma_commit(full_barrier)
 
@@ -1127,16 +1087,14 @@ def _mn_opt_mma_ss_128x128_k64(tmem_d, a_desc_base, b_desc_base, full_barrier, I
     descriptor = K.local_scalar("uint32")
     K.assign(descriptor, _mn_opt_mma_descriptor(0x08218010, IO_DTYPE))
     for kphase in range(4):
-        K.evaluate(
-            K.ptx[_MN_OPT_MMA_CHAIN](
-                K.cast(tmem_d, "uint32"),
-                a_desc_base + K.uint64(kphase * 128),
-                b_desc_base + K.uint64(kphase * 128),
-                descriptor,
-                *_MN_OPT_ZERO_MASKS,
-                True,
-                pred=K.cuda.elect_sync(),
-            )
+        K.ptx[_MN_OPT_MMA_CHAIN](
+            K.cast(tmem_d, "uint32"),
+            a_desc_base + K.uint64(kphase * 128),
+            b_desc_base + K.uint64(kphase * 128),
+            descriptor,
+            *_MN_OPT_ZERO_MASKS,
+            True,
+            pred=K.cuda.elect_sync(),
         )
     _mn_opt_mma_commit(full_barrier)
 
@@ -1145,16 +1103,14 @@ def _mn_opt_mma_ts_128x128_k64(tmem_d, tmem_a, b_desc_base, full_barrier, IO_DTY
     descriptor = K.local_scalar("uint32")
     K.assign(descriptor, _mn_opt_mma_descriptor(0x08210010, IO_DTYPE))
     for kphase in range(4):
-        K.evaluate(
-            K.ptx[_MN_OPT_MMA_CHAIN](
-                K.cast(tmem_d, "uint32"),
-                K.cast(tmem_a + kphase * 8, "uint32"),
-                b_desc_base + K.uint64(kphase * 128),
-                descriptor,
-                *_MN_OPT_ZERO_MASKS,
-                True,
-                pred=K.cuda.elect_sync(),
-            )
+        K.ptx[_MN_OPT_MMA_CHAIN](
+            K.cast(tmem_d, "uint32"),
+            K.cast(tmem_a + kphase * 8, "uint32"),
+            b_desc_base + K.uint64(kphase * 128),
+            descriptor,
+            *_MN_OPT_ZERO_MASKS,
+            True,
+            pred=K.cuda.elect_sync(),
         )
     _mn_opt_mma_commit(full_barrier)
 
@@ -1177,12 +1133,10 @@ def _mn_opt_process_y(
     y_words = K.alloc_local((32,), "uint32")
     _mn_opt_tmem_ld_128x64(tmem_base, MN_OPT_TMEM_XY_COL, thread, y_values)
     _mn_opt_load_128x64_fragment(v_tile, v_stage, thread, v_words)
-    factor_col_base = K.local_scalar("int32")
-    K.assign(factor_col_base, K.bitwise_and(thread << 1, K.int32(6)))
+    factor_col_base = K.local_scalar("int32", init=K.bitwise_and(thread << 1, K.int32(6)))
     neg_factors = K.alloc_local((16,), "float32")
     with K.unroll(8) as factor_group:
-        factor_col = K.local_scalar("int32")
-        K.assign(factor_col, factor_col_base + factor_group * 8)
+        factor_col = K.local_scalar("int32", init=factor_col_base + factor_group * 8)
         K.ptx.ld.shared.v2.f32(
             neg_factors[factor_group * 2],
             neg_factors[factor_group * 2 + 1],
@@ -1191,8 +1145,9 @@ def _mn_opt_process_y(
     with K.unroll(2) as row_half:
         with K.unroll(8) as factor_group:
             with K.unroll(2) as factor_repeat:
-                pair = K.local_scalar("int32")
-                K.assign(pair, row_half * 16 + factor_group * 2 + factor_repeat)
+                pair = K.local_scalar(
+                    "int32", init=row_half * 16 + factor_group * 2 + factor_repeat
+                )
                 v0 = K.local_scalar("float32")
                 K.assign(v0, _mn_opt_unpack_io_lo(v_words[pair], IO_DTYPE))
                 v1 = K.local_scalar("float32")
@@ -1221,10 +1176,10 @@ def _mn_opt_process_y(
 
 
 def _prefill_opt_cg0_tmem_ld(tmem_base, stage, thread, values):
-    row_bits = K.local_scalar("int32")
-    K.assign(row_bits, K.bitwise_and(thread << 16, K.int32(0x600000)))
-    addr = K.local_scalar("int32")
-    K.assign(addr, tmem_base + PREFILL_OPT_TMEM_CG0_ACC_COL + stage * 64 + row_bits)
+    row_bits = K.local_scalar("int32", init=K.bitwise_and(thread << 16, K.int32(0x600000)))
+    addr = K.local_scalar(
+        "int32", init=tmem_base + PREFILL_OPT_TMEM_CG0_ACC_COL + stage * 64 + row_bits
+    )
     K.ptx["tcgen05.ld.sync.aligned.16x256b.x8.b32"](
         *[values[i] for i in range(32)], K.cast(addr, "uint32")
     )
@@ -1242,23 +1197,19 @@ def _prefill_tmem_st_128x64_f32(tmem_base, column, thread, values):
 
 
 def _prefill_opt_load_t_fragment(tile, stage, thread, values, IO_DTYPE):
-    lane_byte = K.local_scalar("int32")
-    K.assign(
-        lane_byte,
-        (
+    lane_byte = K.local_scalar(
+        "int32",
+        init=K.bitwise_or(
             K.bitwise_or(
-                K.bitwise_or(
-                    K.bitwise_and(thread << 6, K.int32(960)), K.bitwise_and(thread >> 1, K.int32(8))
-                ),
-                K.bitwise_and(thread << 5, K.int32(3072)),
-            )
-            << 1
-        ),
+                K.bitwise_and(thread << 6, K.int32(960)), K.bitwise_and(thread >> 1, K.int32(8))
+            ),
+            K.bitwise_and(thread << 5, K.int32(3072)),
+        )
+        << 1,
     )
     packed = K.alloc_local((16,), "uint32")
     for band in range(4):
-        linear = K.local_scalar("int32")
-        K.assign(linear, lane_byte // 2 + band * 16)
+        linear = K.local_scalar("int32", init=lane_byte // 2 + band * 16)
         K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
             *[packed[band * 4 + i] for i in range(4)],
             tile[stage].ptr_to(linear // T_BLOCK, linear % T_BLOCK),
@@ -1270,20 +1221,17 @@ def _prefill_opt_load_t_fragment(tile, stage, thread, values, IO_DTYPE):
 
 def _prefill_opt_store_ainv_fragment(tile, stage, thread, values, IO_DTYPE):
     # Ainv carries the transposed STMatrix fragment produced by the T transform.
-    a = K.local_scalar("int32")
-    K.assign(a, K.bitwise_and(thread << 6, K.int32(448)))
-    c = K.local_scalar("int32")
-    K.assign(
-        c,
-        K.bitwise_or(
+    a = K.local_scalar("int32", init=K.bitwise_and(thread << 6, K.int32(448)))
+    c = K.local_scalar(
+        "int32",
+        init=K.bitwise_or(
             K.bitwise_or(a, K.bitwise_and(thread >> 1, K.int32(48))),
             K.bitwise_and(thread, K.int32(8)),
         ),
     )
-    lane_byte = K.local_scalar("int32")
-    K.assign(
-        lane_byte,
-        K.bitwise_or(K.bitwise_and(thread << 6, K.int32(1024)), K.bitwise_xor(a >> 3, c) << 1),
+    lane_byte = K.local_scalar(
+        "int32",
+        init=K.bitwise_or(K.bitwise_and(thread << 6, K.int32(1024)), K.bitwise_xor(a >> 3, c) << 1),
     )
     packed = K.alloc_local((16,), "uint32")
     with K.unroll(16) as pair:
@@ -1300,25 +1248,22 @@ def _prefill_opt_store_ainv_fragment(tile, stage, thread, values, IO_DTYPE):
 
 def _prefill_opt_store_qk_fragment(tile, stage, thread, values, IO_DTYPE):
     # QK carries the non-transposed TMEM accumulator fragment; it is not Ainv's layout.
-    a = K.local_scalar("int32")
-    K.assign(a, K.bitwise_and(thread << 6, K.int32(448)))
-    x = K.local_scalar("int32")
-    K.assign(x, K.bitwise_or(a, K.bitwise_and(thread >> 1, K.int32(8))))
-    g = K.local_scalar("int32")
-    K.assign(g, K.bitwise_xor(K.bitwise_and(x >> 3, K.int32(56)), x))
-    hi = K.local_scalar("int32")
-    K.assign(
-        hi,
-        K.bitwise_or(
+    a = K.local_scalar("int32", init=K.bitwise_and(thread << 6, K.int32(448)))
+    x = K.local_scalar("int32", init=K.bitwise_or(a, K.bitwise_and(thread >> 1, K.int32(8))))
+    g = K.local_scalar("int32", init=K.bitwise_xor(K.bitwise_and(x >> 3, K.int32(56)), x))
+    hi = K.local_scalar(
+        "int32",
+        init=K.bitwise_or(
             K.bitwise_and(thread << 6, K.int32(512)), K.bitwise_and(thread << 5, K.int32(3072))
         ),
     )
-    lane_byte = K.local_scalar("int32")
-    K.assign(lane_byte, K.bitwise_or(hi, g) << 1)
-    delta1 = K.local_scalar("int32")
-    K.assign(delta1, K.if_then_else(K.bitwise_and(x, K.int32(128)) == 0, K.int32(16), K.int32(-16)))
-    delta2 = K.local_scalar("int32")
-    K.assign(delta2, K.if_then_else(K.bitwise_and(x, K.int32(256)) == 0, K.int32(32), K.int32(-32)))
+    lane_byte = K.local_scalar("int32", init=K.bitwise_or(hi, g) << 1)
+    delta1 = K.local_scalar(
+        "int32", init=K.if_then_else(K.bitwise_and(x, K.int32(128)) == 0, K.int32(16), K.int32(-16))
+    )
+    delta2 = K.local_scalar(
+        "int32", init=K.if_then_else(K.bitwise_and(x, K.int32(256)) == 0, K.int32(32), K.int32(-32))
+    )
     packed = K.alloc_local((16,), "uint32")
     with K.unroll(16) as pair:
         K.ptx.mov.b32(
@@ -1354,30 +1299,23 @@ def _prefill_opt_transform_t(
 ):
     values = K.alloc_local((32,), "float32")
     _prefill_opt_load_t_fragment(t_tile, t_stage, thread, values, IO_DTYPE)
-    row_base = K.local_scalar("int32")
-    K.assign(
-        row_base,
-        K.bitwise_or(
+    row_base = K.local_scalar(
+        "int32",
+        init=K.bitwise_or(
             K.bitwise_and(thread >> 2, K.int32(7)), K.bitwise_and(thread >> 1, K.int32(48))
         ),
     )
-    col_base = K.local_scalar("int32")
-    K.assign(col_base, K.bitwise_and(thread << 1, K.int32(6)))
+    col_base = K.local_scalar("int32", init=K.bitwise_and(thread << 1, K.int32(6)))
     with K.unroll(32) as i:
-        t_coord = K.local_scalar("int32")
-        K.assign(t_coord, row_base + K.bitwise_and(i >> 1, K.int32(1)) * 8)
-        s_coord = K.local_scalar("int32")
-        K.assign(
-            s_coord,
-            (
-                col_base
-                + K.bitwise_and(i, K.int32(1))
-                + K.bitwise_and(i >> 2, K.int32(1)) * 8
-                + (i >> 3) * 16
-            ),
+        t_coord = K.local_scalar("int32", init=row_base + K.bitwise_and(i >> 1, K.int32(1)) * 8)
+        s_coord = K.local_scalar(
+            "int32",
+            init=col_base
+            + K.bitwise_and(i, K.int32(1))
+            + K.bitwise_and(i >> 2, K.int32(1)) * 8
+            + (i >> 3) * 16,
         )
-        valid = K.local_scalar("bool")
-        K.assign(valid, s_coord >= t_coord)
+        valid = K.local_scalar("bool", init=s_coord >= t_coord)
         with K.If(is_final_block):
             with K.Then():
                 K.assign(valid, K.And(K.And(valid, s_coord < valid_tokens), t_coord < valid_tokens))
@@ -1403,12 +1341,12 @@ def _prefill_opt_store_o_fragment(tile, stage, thread, values):
 
 
 def _prefill_opt_sub_iox2(lhs, rhs, IO_DTYPE):
-    result = K.alloc_local((1,), "uint32")
+    result = K.local_scalar("uint32")
     if IO_DTYPE == "float16":
-        K.evaluate(K.ptx.sub.f16x2(result[0], lhs, rhs))
+        K.ptx.sub.f16x2(result, lhs, rhs)
     else:
-        K.evaluate(K.ptx["sub.bf16x2"](result[0], lhs, rhs))
-    return result[0]
+        K.ptx["sub.bf16x2"](result, lhs, rhs)
+    return result
 
 
 _PREFILL_OPT_MMA_CHAIN = "tcgen05.mma.cta_group::1.kind::f16"
@@ -1429,18 +1367,15 @@ def _prefill_opt_mma_ss_64x64_k128(tmem_d, a_desc_base, b_desc_base, full_barrie
     descriptor = K.local_scalar("uint32")
     K.assign(descriptor, _prefill_opt_mma_descriptor(0x04100010, IO_DTYPE))
     for kphase in range(8):
-        phase_off = K.local_scalar("uint64")
-        K.assign(phase_off, K.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
-        K.evaluate(
-            K.ptx[_PREFILL_OPT_MMA_CHAIN](
-                K.cast(tmem_d, "uint32"),
-                a_desc_base + phase_off,
-                b_desc_base + phase_off,
-                descriptor,
-                *_PREFILL_OPT_ZERO_MASKS,
-                K.ptx.pred(K.if_then_else(kphase == 0, 0, 1)),
-                pred=K.cuda.elect_sync(),
-            )
+        phase_off = K.local_scalar("uint64", init=K.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
+        K.ptx[_PREFILL_OPT_MMA_CHAIN](
+            K.cast(tmem_d, "uint32"),
+            a_desc_base + phase_off,
+            b_desc_base + phase_off,
+            descriptor,
+            *_PREFILL_OPT_ZERO_MASKS,
+            K.ptx.pred(K.if_then_else(kphase == 0, 0, 1)),
+            pred=K.cuda.elect_sync(),
         )
     _prefill_opt_mma_commit(full_barrier)
 
@@ -1449,18 +1384,15 @@ def _prefill_opt_mma_ts_128x64_k128(tmem_d, tmem_a, b_desc_base, full_barrier, I
     descriptor = K.local_scalar("uint32")
     K.assign(descriptor, _prefill_opt_mma_descriptor(0x08100010, IO_DTYPE))
     for kphase in range(8):
-        phase_off = K.local_scalar("uint64")
-        K.assign(phase_off, K.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
-        K.evaluate(
-            K.ptx[_PREFILL_OPT_MMA_CHAIN](
-                K.cast(tmem_d, "uint32"),
-                K.cast(tmem_a + kphase * 8, "uint32"),
-                b_desc_base + phase_off,
-                descriptor,
-                *_PREFILL_OPT_ZERO_MASKS,
-                K.ptx.pred(K.if_then_else(kphase == 0, 0, 1)),
-                pred=K.cuda.elect_sync(),
-            )
+        phase_off = K.local_scalar("uint64", init=K.uint64((kphase % 4) * 2 + (kphase // 4) * 512))
+        K.ptx[_PREFILL_OPT_MMA_CHAIN](
+            K.cast(tmem_d, "uint32"),
+            K.cast(tmem_a + kphase * 8, "uint32"),
+            b_desc_base + phase_off,
+            descriptor,
+            *_PREFILL_OPT_ZERO_MASKS,
+            K.ptx.pred(K.if_then_else(kphase == 0, 0, 1)),
+            pred=K.cuda.elect_sync(),
         )
     _prefill_opt_mma_commit(full_barrier)
 
@@ -1469,16 +1401,14 @@ def _prefill_opt_mma_ts_128x64_k64(tmem_d, tmem_a, b_desc_base, accumulate, IO_D
     descriptor = K.local_scalar("uint32")
     K.assign(descriptor, _prefill_opt_mma_descriptor(0x08100010, IO_DTYPE))
     for kphase in range(4):
-        K.evaluate(
-            K.ptx[_PREFILL_OPT_MMA_CHAIN](
-                K.cast(tmem_d, "uint32"),
-                K.cast(tmem_a + kphase * 8, "uint32"),
-                b_desc_base + K.uint64(kphase * 2),
-                descriptor,
-                *_PREFILL_OPT_ZERO_MASKS,
-                K.ptx.pred(K.if_then_else(kphase == 0, accumulate, 1)),
-                pred=K.cuda.elect_sync(),
-            )
+        K.ptx[_PREFILL_OPT_MMA_CHAIN](
+            K.cast(tmem_d, "uint32"),
+            K.cast(tmem_a + kphase * 8, "uint32"),
+            b_desc_base + K.uint64(kphase * 2),
+            descriptor,
+            *_PREFILL_OPT_ZERO_MASKS,
+            K.ptx.pred(K.if_then_else(kphase == 0, accumulate, 1)),
+            pred=K.cuda.elect_sync(),
         )
 
 
@@ -1486,16 +1416,14 @@ def _prefill_opt_mma_ts_128x128_k64(tmem_d, tmem_a, b_desc_base, full_barrier, I
     descriptor = K.local_scalar("uint32")
     K.assign(descriptor, _prefill_opt_mma_descriptor(0x08210010, IO_DTYPE))
     for kphase in range(4):
-        K.evaluate(
-            K.ptx[_PREFILL_OPT_MMA_CHAIN](
-                K.cast(tmem_d, "uint32"),
-                K.cast(tmem_a + kphase * 8, "uint32"),
-                b_desc_base + K.uint64(kphase * 128),
-                descriptor,
-                *_PREFILL_OPT_ZERO_MASKS,
-                True,
-                pred=K.cuda.elect_sync(),
-            )
+        K.ptx[_PREFILL_OPT_MMA_CHAIN](
+            K.cast(tmem_d, "uint32"),
+            K.cast(tmem_a + kphase * 8, "uint32"),
+            b_desc_base + K.uint64(kphase * 128),
+            descriptor,
+            *_PREFILL_OPT_ZERO_MASKS,
+            True,
+            pred=K.cuda.elect_sync(),
         )
     _prefill_opt_mma_commit(full_barrier)
 
@@ -1642,13 +1570,12 @@ def _make_t_precompute(spec):
                         col_kk = (
                             n_group * 16 + (element >> 2) * 8 + (lane & 3) * 2 + (within_mma & 1)
                         )
-                        value_kk = K.alloc_local((1,), "float32")
-                        K.assign(value_kk[0], 0.0)
+                        value_kk = K.local_scalar("float32", init=0.0)
                         with K.If(row_kk > col_kk), K.Then():
                             beta_value = K.alloc_local((1,), "float32")
                             K.ptx.ld.shared.f32(beta_value[0], s_beta.ptr_to([row_kk]))
-                            K.assign(value_kk[0], kk_acc[n_group * 8 + element] * beta_value[0])
-                        K.ptx.mov.b32(kk_acc[n_group * 8 + element], value_kk[0])
+                            K.assign(value_kk, kk_acc[n_group * 8 + element] * beta_value[0])
+                        K.ptx.mov.b32(kk_acc[n_group * 8 + element], value_kk)
                     with K.unroll(4) as pair:
                         K.ptx.mov.b32(
                             packed_kk[pair],
@@ -1702,13 +1629,13 @@ def _make_t_precompute(spec):
                                 with K.Else():
                                     K.ptx.mov.b32(inverse_row[col8], raw_value)
                     with K.unroll(7) as src_row:
-                        row_scale = K.alloc_local((1,), "float32")
-                        K.ptx.neg.f32(row_scale[0], inverse_row[src_row])
+                        row_scale = K.local_scalar("float32")
+                        K.ptx.neg.f32(row_scale, inverse_row[src_row])
                         with K.unroll(7) as inverse_col:
                             with K.If(inverse_col < src_row), K.Then():
-                                pivot = K.alloc_local((1,), "float32")
+                                pivot = K.local_scalar("float32")
                                 K.assign(
-                                    pivot[0],
+                                    pivot,
                                     K.cuda._shfl_sync(
                                         K.uint32(0xFFFFFFFF), inverse_row[inverse_col], src_row, 8
                                     ),
@@ -1716,10 +1643,10 @@ def _make_t_precompute(spec):
                                 with K.If(row8 > src_row), K.Then():
                                     K.ptx.mov.b32(
                                         inverse_row[inverse_col],
-                                        (inverse_row[inverse_col] + row_scale[0] * pivot[0]),
+                                        (inverse_row[inverse_col] + row_scale * pivot),
                                     )
                         with K.If(row8 > src_row), K.Then():
-                            K.ptx.mov.b32(inverse_row[src_row], row_scale[0])
+                            K.ptx.mov.b32(inverse_row[src_row], row_scale)
                     with K.unroll(4) as pair8:
                         K.ptx.mov.b32(
                             inverse_words[pair8],
@@ -1813,14 +1740,12 @@ def _make_fixup_simt(spec):
             num_chunks = (seq_len + cp_chunk_len - 1) // cp_chunk_len
             chunk_start = _device_chunk_bound(seq_idx, seq_start, cp_chunk_len)
             gap_start = chunk_start + num_chunks
-            gap_end = K.alloc_local((1,), "int32")
-            K.assign(gap_end[0], total_cp_chunks)
+            gap_end = K.local_scalar("int32", init=total_cp_chunks)
             with K.If(seq_idx + 1 < num_sequences), K.Then():
-                K.assign(gap_end[0], _device_chunk_bound(seq_idx + 1, seq_end, cp_chunk_len))
-            state_slot = K.alloc_local((1,), "int32")
-            K.assign(state_slot[0], seq_idx)
+                K.assign(gap_end, _device_chunk_bound(seq_idx + 1, seq_end, cp_chunk_len))
+            state_slot = K.local_scalar("int32", init=seq_idx)
             if use_state_indices:
-                K.ptx.ld.global_.nc.b32(state_slot[0], state_indices.ptr_to([seq_idx]))
+                K.ptx.ld.global_.nc.b32(state_slot, state_indices.ptr_to([seq_idx]))
 
             with K.If(num_chunks > 0), K.Then():
                 start = 0
@@ -1828,9 +1753,7 @@ def _make_fixup_simt(spec):
                     initial_values = K.alloc_local((rows_per_cta,), "float32")
                     with K.unroll(rows_per_cta) as local_row:
                         initial_index = (
-                            (state_slot[0] * state_heads + state_head) * D_HEAD
-                            + row_start
-                            + local_row
+                            (state_slot * state_heads + state_head) * D_HEAD + row_start + local_row
                         ) * D_HEAD + col
                         _load_global_as_f32(
                             initial_values, local_row, initial_state, initial_index, state_dtype
@@ -1852,10 +1775,10 @@ def _make_fixup_simt(spec):
                         first_index = (
                             (first_slot * state_heads + state_head) * D_HEAD + row_start + local_row
                         ) * D_HEAD + col
-                        first_value = K.alloc_local((1,), "float32")
-                        K.ptx.ld.global_.nc.f32(first_value[0], local_state.ptr_to([first_index]))
-                        K.ptx.st.shared.f32(shared_state.ptr_to([local_row, col]), first_value[0])
-                        K.ptx.st.global_.f32(fixed_state.ptr_to([first_index]), first_value[0])
+                        first_value = K.local_scalar("float32")
+                        K.ptx.ld.global_.nc.f32(first_value, local_state.ptr_to([first_index]))
+                        K.ptx.st.shared.f32(shared_state.ptr_to([local_row, col]), first_value)
+                        K.ptx.st.global_.f32(fixed_state.ptr_to([first_index]), first_value)
                 K.cuda.cta_sync()
 
                 accum = K.alloc_local((rows_per_cta,), "float32")
@@ -1952,17 +1875,13 @@ def _make_fixup_simt(spec):
                 if store_final_state:
                     with K.unroll(rows_per_cta) as local_row:
                         final_index = (
-                            (state_slot[0] * state_heads + state_head) * D_HEAD
-                            + row_start
-                            + local_row
+                            (state_slot * state_heads + state_head) * D_HEAD + row_start + local_row
                         ) * D_HEAD + col
-                        final_value = K.alloc_local((1,), "float32")
-                        K.ptx.ld.shared.f32(final_value[0], shared_state.ptr_to([local_row, col]))
-                        _store_global_from_f32(
-                            final_state, final_index, final_value[0], state_dtype
-                        )
+                        final_value = K.local_scalar("float32")
+                        K.ptx.ld.shared.f32(final_value, shared_state.ptr_to([local_row, col]))
+                        _store_global_from_f32(final_state, final_index, final_value, state_dtype)
 
-            with K.serial(gap_start, gap_end[0]) as gap_slot:
+            with K.serial(gap_start, gap_end) as gap_slot:
                 with K.unroll(rows_per_cta) as local_row:
                     gap_index = (
                         (gap_slot * state_heads + state_head) * D_HEAD + row_start + local_row
@@ -2029,10 +1948,9 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
         num_chunks = (seq_end - seq_start + cp_chunk_len - 1) // cp_chunk_len
         chunk_start = _device_chunk_bound(seq_idx, seq_start, cp_chunk_len)
         start = 0 if needs_initial_state else 1
-        state_slot = K.alloc_local((1,), "int32")
-        K.assign(state_slot[0], seq_idx)
+        state_slot = K.local_scalar("int32", init=seq_idx)
         if use_state_indices:
-            K.ptx.ld.global_.nc.b32(state_slot[0], state_indices.ptr_to([seq_idx]))
+            K.ptx.ld.global_.nc.b32(state_slot, state_indices.ptr_to([seq_idx]))
 
         with K.If(num_chunks == 0):
             with K.Then():
@@ -2047,17 +1965,14 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
                     K.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                         K.address_of(tmem_holding[0]), K.uint32(_FIXUP_TMEM_COLUMNS)
                     )
-                tmem_base_invalid = K.alloc_local((1,), "int32")
-                K.assign(tmem_base_invalid[0], 0)
+                tmem_base_invalid = K.local_scalar("int32", init=0)
                 with K.If(warp <= 4), K.Then():
                     K.ptx.bar.sync(K.uint32(_FIXUP_TMEM_ALLOC_BARRIER), K.uint32(160))
-                    K.ptx.ld.volatile.shared.s32(
-                        tmem_base_invalid[0], K.address_of(tmem_holding[0])
-                    )
+                    K.ptx.ld.volatile.shared.s32(tmem_base_invalid, K.address_of(tmem_holding[0]))
                 with K.If(warp == 0), K.Then():
                     K.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                     K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                        K.Cast("uint32", tmem_base_invalid[0]), K.uint32(_FIXUP_TMEM_COLUMNS)
+                        K.Cast("uint32", tmem_base_invalid), K.uint32(_FIXUP_TMEM_COLUMNS)
                     )
             with K.Else():
                 with compute:
@@ -2075,7 +1990,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
                     ready_state = K.PipelineState(1, phase=1)
                     done_state = K.PipelineState(1, phase=0)
                     state_base = (
-                        K.Cast("int64", state_slot[0] * state_heads + state_head) * D_HEAD * D_HEAD
+                        K.Cast("int64", state_slot * state_heads + state_head) * D_HEAD * D_HEAD
                         + row_start * D_HEAD
                     )
                     workspace_base = (
@@ -2333,17 +2248,14 @@ def _make_mn_precompute(spec):
                     K.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                         K.address_of(tmem_holding[0]), K.uint32(TMEM_COLUMNS)
                     )
-                tmem_base_invalid = K.alloc_local((1,), "int32")
-                K.assign(tmem_base_invalid[0], 0)
+                tmem_base_invalid = K.local_scalar("int32", init=0)
                 with K.If((warp <= 8) | (warp == 11)), K.Then():
                     K.ptx.bar.sync(K.uint32(MN_OPT_TMEM_ALLOC_BARRIER), K.uint32(320))
-                    K.ptx.ld.volatile.shared.s32(
-                        tmem_base_invalid[0], K.address_of(tmem_holding[0])
-                    )
+                    K.ptx.ld.volatile.shared.s32(tmem_base_invalid, K.address_of(tmem_holding[0]))
                 with K.If(warp == 4), K.Then():
                     K.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
                     K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                        K.Cast("uint32", tmem_base_invalid[0]), K.uint32(TMEM_COLUMNS)
+                        K.Cast("uint32", tmem_base_invalid), K.uint32(TMEM_COLUMNS)
                     )
             with K.Else():
                 with cg0:
@@ -2748,15 +2660,13 @@ def _make_mn_precompute(spec):
                             logs[1],
                             logs[1] + K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), logs[0], 31, 32),
                         )
-                        end_log = K.alloc_local((1,), "float32")
-                        K.assign(
-                            end_log[0], K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), logs[1], 31, 32)
-                        )
+                        end_log = K.local_scalar("float32")
+                        K.assign(end_log, K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), logs[1], 31, 32))
                         cumprod0 = _ex2_approx_ftz(logs[0])
                         cumprod1 = _ex2_approx_ftz(logs[1])
                         neg = K.alloc_local((2,), "float32")
-                        K.ptx.neg.f32(neg[0], _ex2_approx_ftz(end_log[0] - logs[0]))
-                        K.ptx.neg.f32(neg[1], _ex2_approx_ftz(end_log[0] - logs[1]))
+                        K.ptx.neg.f32(neg[0], _ex2_approx_ftz(end_log - logs[0]))
+                        K.ptx.neg.f32(neg[1], _ex2_approx_ftz(end_log - logs[1]))
                         with K.If(token0 >= valid_len), K.Then():
                             K.ptx.mov.b32(neg[0], K.float32(0.0))
                         with K.If(token1 >= valid_len), K.Then():
@@ -2904,18 +2814,17 @@ def _make_prefill(spec):
         seq_end = sequence_bounds[1]
         seq_len = seq_end - seq_start
         num_cp_chunks = (seq_len + cp_chunk_len - 1) // cp_chunk_len
-        chunk_len = K.alloc_local((1,), "int32")
-        K.assign(chunk_len[0], 0)
+        chunk_len = K.local_scalar("int32", init=0)
         with K.If(chunk_in_seq < num_cp_chunks), K.Then():
-            K.assign(chunk_len[0], K.min(cp_chunk_len, seq_len - chunk_in_seq * cp_chunk_len))
+            K.assign(chunk_len, K.min(cp_chunk_len, seq_len - chunk_in_seq * cp_chunk_len))
         chunk_start = seq_start + chunk_in_seq * cp_chunk_len
-        chunk_end = chunk_start + chunk_len[0]
+        chunk_end = chunk_start + chunk_len
         cp_slot = _device_chunk_bound(seq_idx, seq_start, cp_chunk_len) + chunk_in_seq
         t_block_start = _device_chunk_bound(seq_idx, seq_start, T_BLOCK) + chunk_in_seq * (
             cp_chunk_len // T_BLOCK
         )
-        num_valid_chunks = (chunk_len[0] + T_BLOCK - 1) // T_BLOCK
-        padded_chunks = ((chunk_len[0] + 2 * T_BLOCK - 1) // (2 * T_BLOCK)) * 2
+        num_valid_chunks = (chunk_len + T_BLOCK - 1) // T_BLOCK
+        padded_chunks = ((chunk_len + 2 * T_BLOCK - 1) // (2 * T_BLOCK)) * 2
         subhead = state_head % head_ratio
         base_head = state_head // head_ratio
         k_head = state_head * k_heads // state_heads
@@ -2949,7 +2858,7 @@ def _make_prefill(spec):
                     st_gate.stage,
                     thread,
                     chunk >= num_valid_chunks - 1,
-                    chunk_len[0] - chunk * T_BLOCK,
+                    chunk_len - chunk * T_BLOCK,
                     io_dtype,
                 )
                 K.ptx.fence.proxy.async_.shared__cta()
@@ -2974,21 +2883,20 @@ def _make_prefill(spec):
                         + K.bitwise_and(frag >> 2, K.int32(1)) * 8
                         + (frag >> 3) * 16
                     )
-                    valid = K.alloc_local((1,), "bool")
-                    K.assign(valid[0], score_s >= score_t)
+                    valid = K.local_scalar("bool", init=score_s >= score_t)
                     with K.If(chunk >= num_valid_chunks - 1), K.Then():
                         K.assign(
-                            valid[0],
+                            valid,
                             (
-                                valid[0]
-                                & (score_s < chunk_len[0] - chunk * T_BLOCK)
-                                & (score_t < chunk_len[0] - chunk * T_BLOCK)
+                                valid
+                                & (score_s < chunk_len - chunk * T_BLOCK)
+                                & (score_t < chunk_len - chunk * T_BLOCK)
                             ),
                         )
                     gamma = _prefill_predicated_gamma(
                         K.cuda.cvta_generic_to_shared(s_cumsumlog.ptr_to([st_gate.stage, score_s])),
                         K.cuda.cvta_generic_to_shared(s_cumsumlog.ptr_to([st_gate.stage, score_t])),
-                        valid[0],
+                        valid,
                     )
                     K.ptx.mov.b32(qk_values[frag], qk_values[frag] * gamma * scale)
                 _prefill_opt_store_qk_fragment(s_qk, st_qk.stage, thread, qk_values, io_dtype)
@@ -3028,7 +2936,7 @@ def _make_prefill(spec):
             st_nv = K.PipelineState(1, phase=1)
             st_decay = K.PipelineState(1, phase=1)
             st_o = K.PipelineState(2, phase=1)
-            with K.If(chunk_len[0] > 0), K.Then():
+            with K.If(chunk_len > 0), K.Then():
                 p_kv.empty.wait(st_kv_p.stage, st_kv_p.phase)
                 cg1_thread = K.tid_in_role()
                 state_words = K.alloc_local((32,), "uint32")
@@ -3086,9 +2994,9 @@ def _make_prefill(spec):
                         st_kv_p.advance()
                         st_kv_p.advance()
                     p_gate.full.wait(st_gate.stage, st_gate.phase)
-                    cumprod_total = K.alloc_local((1,), "float32")
+                    cumprod_total = K.local_scalar("float32")
                     K.ptx.ld.shared.f32(
-                        cumprod_total[0], s_cumprod.ptr_to([st_gate.stage, T_BLOCK - 1])
+                        cumprod_total, s_cumprod.ptr_to([st_gate.stage, T_BLOCK - 1])
                     )
 
                     p_kv.full.wait(st_kv_c.stage, st_kv_c.phase)
@@ -3122,14 +3030,14 @@ def _make_prefill(spec):
                     K.ptx.tcgen05.wait__st.sync.aligned()
                     p_state_input.full.arrive(st_state_input.stage)
                     with K.unroll(64) as pair:
-                        state_mul = K.alloc_local((1,), "uint64")
+                        state_mul = K.local_scalar("uint64")
                         K.ptx.mul.rn.f32x2(
-                            state_mul[0],
+                            state_mul,
                             K.cuda.make_float2(state_values[pair * 2], state_values[pair * 2 + 1]),
-                            K.cuda.make_float2(cumprod_total[0], cumprod_total[0]),
+                            K.cuda.make_float2(cumprod_total, cumprod_total),
                         )
-                        K.ptx.mov.b32(state_values[pair * 2], K.cuda.float2_x(state_mul[0]))
-                        K.ptx.mov.b32(state_values[pair * 2 + 1], K.cuda.float2_y(state_mul[0]))
+                        K.ptx.mov.b32(state_values[pair * 2], K.cuda.float2_x(state_mul))
+                        K.ptx.mov.b32(state_values[pair * 2 + 1], K.cuda.float2_y(state_mul))
                     for state_sub in range(4):
                         _mn_opt_tmem_st_matrix_sub(
                             tmem_base[0],
@@ -3145,10 +3053,8 @@ def _make_prefill(spec):
                     cumprod_factor = K.alloc_local((16,), "float32")
                     decay_factor = K.alloc_local((16,), "float32")
                     factor_col_base = K.bitwise_and(cg1_thread << 1, K.int32(6))
-                    last_log = K.alloc_local((1,), "float32")
-                    K.ptx.ld.shared.f32(
-                        last_log[0], s_cumsumlog.ptr_to([st_gate.stage, T_BLOCK - 1])
-                    )
+                    last_log = K.local_scalar("float32")
+                    K.ptx.ld.shared.f32(last_log, s_cumsumlog.ptr_to([st_gate.stage, T_BLOCK - 1]))
                     with K.unroll(8) as factor_group:
                         factor_col = factor_col_base + factor_group * 8
                         K.ptx.ld.shared.v2.f32(
@@ -3162,17 +3068,17 @@ def _make_prefill(spec):
                             log_pair[1],
                             s_cumsumlog.ptr_to([st_gate.stage, factor_col]),
                         )
-                        diff = K.alloc_local((1,), "uint64")
+                        diff = K.local_scalar("uint64")
                         K.ptx.sub.rn.f32x2(
-                            diff[0],
-                            K.cuda.make_float2(last_log[0], last_log[0]),
+                            diff,
+                            K.cuda.make_float2(last_log, last_log),
                             K.cuda.make_float2(log_pair[0], log_pair[1]),
                         )
                         K.ptx.ex2.approx.ftz.f32(
-                            decay_factor[factor_group * 2], K.cuda.float2_x(diff[0])
+                            decay_factor[factor_group * 2], K.cuda.float2_x(diff)
                         )
                         K.ptx.ex2.approx.ftz.f32(
-                            decay_factor[factor_group * 2 + 1], K.cuda.float2_y(diff[0])
+                            decay_factor[factor_group * 2 + 1], K.cuda.float2_y(diff)
                         )
                     p_gate.empty.arrive(st_gate.stage)
 
@@ -3662,10 +3568,9 @@ def _make_prefill(spec):
                 st_v.advance()
 
                 p_t.empty.wait(st_t.stage, st_t.phase)
-                t_chunk = K.alloc_local((1,), "int32")
-                K.assign(t_chunk[0], chunk)
+                t_chunk = K.local_scalar("int32", init=chunk)
                 with K.If(chunk >= num_valid_chunks), K.Then():
-                    K.assign(t_chunk[0], num_valid_chunks - 1)
+                    K.assign(t_chunk, num_valid_chunks - 1)
                 with K.If(K.cuda.elect_sync()), K.Then():
                     p_t.full.arrive(st_t.stage, tx_count=8192)
                     K.ptx[_PREFILL_OPT_TMA_G2S[5]](
@@ -3675,7 +3580,7 @@ def _make_prefill(spec):
                         K.int32(0),
                         subhead,
                         base_head,
-                        t_block_start + t_chunk[0],
+                        t_block_start + t_chunk,
                         p_t.full.ptr_to([st_t.stage]),
                         K.uint64(0),
                     )
@@ -3795,7 +3700,7 @@ def _make_prefill(spec):
             K.ptx.fence.proxy.tensormap__generic.release.gpu()
             with K.If(K.cuda.elect_sync()), K.Then():
                 K.ptx.fence.proxy.tensormap__generic.acquire.gpu(descriptor_o)
-            with K.If(chunk_len[0] > 0), K.Then():
+            with K.If(chunk_len > 0), K.Then():
                 with K.unroll(2) as prefetch:
                     load_gate(chunk_start + prefetch * T_BLOCK, prefetch >= num_valid_chunks - 1)
                 with K.If(padded_chunks > 2), K.Then():
