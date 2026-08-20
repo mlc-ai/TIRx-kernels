@@ -35,16 +35,99 @@ def msa_root() -> Path:
     raise ImportError(f"no MSA checkout found (set MSA_PATH); tried: {tried}")
 
 
+def cutedsl_paths() -> list[str]:
+    """Import roots for the CuTe-DSL build MSA's sources need, or an empty list.
+
+    MSA's CuTe-DSL sources are written against ``cutlass.cute``. CuTe-DSL 4.6
+    renamed that package to ``iket``, so 4.6 releases cannot run them at all,
+    and the 4.6.0 development build that still carries ``cutlass.cute`` fails
+    NVVM serialization on the forward kernel's gather4 Q specializations
+    (``qhead_per_kv`` 1, 2 and 4) -- the reference simply will not compile for
+    a third of this kernel's dispatch domain. 4.5.3 compiles all of them, and
+    ``quack-kernels`` has to match it: 0.5.1 and newer import
+    ``cutlass._mlir_helpers``, which 4.5 does not have.
+
+    Install the pair with::
+
+        python -m pip install --no-deps --target .reference-deps/msa-cutedsl \\
+          nvidia-cutlass-dsl==4.5.3 nvidia-cutlass-dsl-libs-base==4.5.3 \\
+          nvidia-cutlass-dsl-libs-cu13==4.5.3 quack-kernels==0.5.0
+
+    ``MSA_CUTEDSL_PATH`` overrides the location. When neither the override nor
+    the default prefix exists, the ambient install is used unchanged.
+    """
+    override = os.environ.get("MSA_CUTEDSL_PATH")
+    prefix = Path(override) if override else _REPO_ROOT / ".reference-deps" / "msa-cutedsl"
+    packages = prefix / "nvidia_cutlass_dsl" / "python_packages"
+    if not packages.is_dir():
+        return []
+    return [str(prefix), str(packages)]
+
+
+def _drop_interrupted_imports() -> None:
+    """Forget modules whose import was cut off partway through.
+
+    The bench suite stops a worker mid-flight when it sees another process on
+    the GPU, then retries the measurement inside that same worker. If the stop
+    lands inside one of the reference's heavy imports -- ``quack.__init__``
+    pulls in CuTe-DSL, and CuTe-DSL pulls in ``sympy`` -- the package stays in
+    ``sys.modules`` with its body only partly executed. The retry then reads a
+    missing attribute off it (``quack`` with no ``copy_utils``, ``sympy`` with
+    no ``core``) instead of importing it again, and the workload is reported as
+    a baseline error even though nothing is wrong with either implementation.
+
+    A module still marked ``_initializing`` here is stale by construction: this
+    runs from the reference builder, not from inside anyone's import.
+
+    That flag does not catch every case -- a package can be left incomplete with
+    the flag already cleared -- so the packages that have actually been seen to
+    break are probed for an attribute their own ``__init__`` defines, and their
+    whole subtree is dropped when the probe fails. Re-importing costs seconds,
+    but only on a retry, and it happens outside the timed region.
+    """
+    for name, module in list(sys.modules.items()):
+        if name.startswith(("tirx_kernels", "tvm")):
+            continue
+        spec = getattr(module, "__spec__", None)
+        if spec is not None and getattr(spec, "_initializing", False):
+            del sys.modules[name]
+
+    for package, attribute in (("sympy", "core"), ("quack", "rounding")):
+        module = sys.modules.get(package)
+        if module is not None and not hasattr(module, attribute):
+            for name in [n for n in sys.modules if n == package or n.startswith(package + ".")]:
+                del sys.modules[name]
+
+
+def ensure_msa_importable() -> None:
+    """Put MSA's two import roots -- and its pinned CuTe-DSL -- on ``sys.path``."""
+    _drop_interrupted_imports()
+    if "cutlass" in sys.modules:
+        pinned = cutedsl_paths()
+        search_path = getattr(sys.modules["cutlass"], "__path__", None)
+        loaded = str(next(iter(search_path))) if search_path else None
+        if pinned and loaded and not loaded.startswith(pinned[0]):
+            raise RuntimeError(
+                "cutlass was imported before the MSA reference pinned its CuTe-DSL "
+                f"build; loaded from {loaded}, expected under {pinned[0]}"
+            )
+    for entry in reversed(cutedsl_paths()):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+
+    root = msa_root()
+    for entry in (str(root / "python" / "fmha_sm100" / "cute"), str(root / "python")):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+
+
 def prepare_scheduler_module():
     """Import ``src.sm100.prepare_scheduler`` from the MSA checkout, once."""
     global _MSA_MODULE
     if _MSA_MODULE is not None:
         return _MSA_MODULE
 
-    root = msa_root()
-    for entry in (str(root / "python" / "fmha_sm100" / "cute"), str(root / "python")):
-        if entry not in sys.path:
-            sys.path.insert(0, entry)
+    ensure_msa_importable()
 
     import src.sm100.prepare_scheduler as prepare_scheduler
 
@@ -73,6 +156,138 @@ def compiled_fwd_split_atomic(case: dict):
         case["max_seqlen_q"],
         case["topk"],
     )
+
+
+_FWD_CACHE: dict = {}
+
+
+def compiled_sparse_atten_fwd(case: dict):
+    """Compile (or fetch) ``SparseAttentionForwardSm100`` and return the launchable.
+
+    This mirrors the compile step of ``_call_sparse_forward_sm100_csr_varlen``
+    (interface.py:1714-1780) instead of calling that host entry, so the timed
+    closure covers the kernel launch alone: the host entry would also validate
+    shapes, copy ``O_partial`` through ``reshape(-1, head_dim).contiguous()``,
+    build a gather4 tensor map, and -- when handed no prebuilt schedule -- run
+    the two preparation kernels first.
+
+    Every tensor is wrapped **before** ``cute.compile``. Wrapping one afterwards
+    binds this process to a host ``cuTensorMapEncodeTiled`` path that unrelated
+    kernels then fail on, long after the call that caused it.
+    """
+    ensure_msa_importable()
+
+    import cutlass
+    import cutlass.cute as cute
+    import torch
+    from cutlass import Float32, Int32
+    from src.common.cute_dsl_utils import to_cute_tensor
+    from src.common.tma_utils import create_q_gather4_tma_desc
+    from src.sm100.fwd.atten_fwd import SparseAttentionForwardSm100
+
+    qhead_per_kv = case["qhead_per_kv"]
+    q_flat = case["q_flat"]
+    o_partial_flat = case["o_partial_flat"]
+    lse_temperature = case.get("lse_temperature_partial")
+    gather4_desc = (
+        create_q_gather4_tma_desc(q_flat, box_x=128 if q_flat.dtype == torch.float8_e4m3fn else 64)
+        if qhead_per_kv in (1, 2, 4)
+        else None
+    )
+
+    key = (
+        "sparse_forward_sm100_csr_varlen",
+        case["head_dim"],
+        case["blk_kv"],
+        qhead_per_kv,
+        q_flat.dtype,
+        case["k"].dtype,
+        case["v"].dtype,
+        case["qk_dtype"],
+        case["pv_dtype"],
+        o_partial_flat.dtype,
+        bool(case["causal"]),
+        False,  # paged_kv
+        True,  # use_prepare_scheduler
+        None,  # page_size
+        False,  # seqused_k
+        lse_temperature is not None,
+    )
+    if key not in _FWD_CACHE:
+        cutlass_dtype = {
+            torch.bfloat16: cutlass.BFloat16,
+            torch.float16: cutlass.Float16,
+            torch.float8_e4m3fn: cutlass.Float8E4M3FN,
+        }
+        kernel = SparseAttentionForwardSm100(
+            head_dim=case["head_dim"],
+            qheadperkv=qhead_per_kv,
+            n_block_size=case["blk_kv"],
+            paged_kv=False,
+            page_size=None,
+            has_seqused_k=False,
+            causal=bool(case["causal"]),
+            use_prepare_scheduler=True,
+            qk_dtype=cutlass_dtype[case["qk_dtype"]],
+            pv_dtype=cutlass_dtype[case["pv_dtype"]],
+        )
+        _FWD_CACHE[key] = cute.compile(
+            kernel,
+            to_cute_tensor(case["k"]),
+            to_cute_tensor(case["v"]),
+            to_cute_tensor(case["k2q_q_indices"]),
+            to_cute_tensor(case["k2q_qsplit_indices"]),
+            to_cute_tensor(case["k2q_row_ptr"]),
+            to_cute_tensor(case["scheduler_metadata"]),
+            to_cute_tensor(case["work_count"]),
+            to_cute_tensor(o_partial_flat),
+            to_cute_tensor(case["lse_partial"]),
+            None if lse_temperature is None else to_cute_tensor(lse_temperature),
+            to_cute_tensor(q_flat),
+            None if gather4_desc is None else to_cute_tensor(gather4_desc),
+            None,  # page_table
+            None,  # seqused_k
+            to_cute_tensor(case["cu_seqlens_q"]),
+            to_cute_tensor(case["cu_seqlens_k"]),
+            Float32(case["softmax_scale"]),
+            Float32(case["lse_temperature_inv_scale"]),
+            Int32(case["num_kv_blocks"]),
+            Int32(case["head_kv"]),
+            Int32(case["max_seqlen_q"]),
+            Int32(case["work_capacity"]),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+
+    compiled = _FWD_CACHE[key]
+
+    def launch() -> None:
+        compiled(
+            case["k"],
+            case["v"],
+            case["k2q_q_indices"],
+            case["k2q_qsplit_indices"],
+            case["k2q_row_ptr"],
+            case["scheduler_metadata"],
+            case["work_count"],
+            o_partial_flat,
+            case["lse_partial"],
+            lse_temperature,
+            q_flat,
+            gather4_desc,
+            None,
+            None,
+            case["cu_seqlens_q"],
+            case["cu_seqlens_k"],
+            case["softmax_scale"],
+            case["lse_temperature_inv_scale"],
+            case["num_kv_blocks"],
+            case["head_kv"],
+            case["max_seqlen_q"],
+            case["work_capacity"],
+        )
+
+    return launch
 
 
 def compiled_flat_schedule(case: dict):

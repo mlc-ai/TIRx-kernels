@@ -1,0 +1,13 @@
+kernel: msa_sparse_atten_fwd_sm100
+selection_rationale: The two Q-load programs are separate device code, so a default set that exercised only one would leave half the kernel unmeasured; the defaults pair MSA's ring-attention shape (TMA Q, BF16) with a varlen gather4 shape and the FP8 family at ring scale, which also brings in the BF16 partial store and the temperature LSE.
+configs:
+  - {config: ring48k_bf16_qh16_t16, default: true, selection_role: large}
+  - {config: ulysses384k_bf16_qh2_t4, default: false}
+  - {config: long96k_bf16_qh2_t16, default: false}
+  - {config: varlen_b3_s8192_qh4_t16, default: true, selection_role: medium}
+  - {config: varlen_b3_s4096_qh8_t8, default: false}
+  - {config: qh1_s8192_bf16_t16, default: false}
+  - {config: ring48k_fp8_qh16_t16, default: true, selection_role: small}
+  - {config: fp8kv_s16384_qh4_t16, default: false}
+  - {config: fp8_pvbf16_s8192_qh8_t8, default: false}
+  - {config: edge_b1_s1024_bf16_t4, default: false}
