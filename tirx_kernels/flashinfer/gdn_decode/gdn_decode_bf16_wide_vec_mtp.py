@@ -46,7 +46,7 @@ def _local_scalar(dtype: str, value):
 
 def _shared_load_f32x2(buffer, index, values):
     words = TK.alloc_local((2,), "uint32", align=8)
-    TK.evaluate(TK.ptx.ld.shared.v2.b32(words[0], words[1], buffer.ptr_to([index])))
+    TK.ptx.ld.shared.v2.b32(words[0], words[1], buffer.ptr_to([index]))
     TK.ptx.mov.b32(values[0], TK.reinterpret("float32", words[0]))
     TK.ptx.mov.b32(values[1], TK.reinterpret("float32", words[1]))
 
@@ -54,21 +54,17 @@ def _shared_load_f32x2(buffer, index, values):
 def _load_state_bf16x32(buffer, index, values):
     words = TK.alloc_local((ILP_ROWS * 4,), "uint32", align=16)
     with TK.unroll(ILP_ROWS) as row:
-        word_offset = TK.local_scalar("int32")
-        TK.assign(word_offset, row * 4)
-        TK.evaluate(
-            TK.ptx["ld.global.L1::evict_first.v4.b32"](
-                words[word_offset],
-                words[word_offset + 1],
-                words[word_offset + 2],
-                words[word_offset + 3],
-                buffer.ptr_to([index + row * K]),
-            )
+        word_offset = TK.local_scalar("int32", init=row * 4)
+        TK.ptx["ld.global.L1::evict_first.v4.b32"](
+            words[word_offset],
+            words[word_offset + 1],
+            words[word_offset + 2],
+            words[word_offset + 3],
+            buffer.ptr_to([index + row * K]),
         )
     with TK.unroll(4) as pair:
         with TK.unroll(ILP_ROWS) as row:
-            word = TK.local_scalar("uint32")
-            TK.assign(word, words[row * 4 + pair])
+            word = TK.local_scalar("uint32", init=words[row * 4 + pair])
             TK.ptx.mov.b32(
                 values[row * ELEMS_PER_LANE + pair * 2],
                 TK.cuda.uint_as_float(TK.shift_left(word, TK.uint32(16))),
@@ -91,30 +87,25 @@ def _store_state_f32x32(buffer, index, values):
                 ),
             )
     with TK.unroll(ILP_ROWS) as row:
-        word_offset = TK.local_scalar("int32")
-        TK.assign(word_offset, row * 4)
-        TK.evaluate(
-            TK.ptx.st.global_.v4.b32(
-                buffer.ptr_to([index + row * K]),
-                words[word_offset],
-                words[word_offset + 1],
-                words[word_offset + 2],
-                words[word_offset + 3],
-            )
+        word_offset = TK.local_scalar("int32", init=row * 4)
+        TK.ptx.st.global_.v4.b32(
+            buffer.ptr_to([index + row * K]),
+            words[word_offset],
+            words[word_offset + 1],
+            words[word_offset + 2],
+            words[word_offset + 3],
         )
 
 
 def _packed_fma(lhs0, lhs1, rhs0, rhs1, acc0, acc1):
-    out = TK.alloc_local((1,), "uint64")
-    TK.evaluate(
-        TK.ptx.fma.rn.f32x2(
-            out[0],
-            TK.cuda.make_float2(lhs0, lhs1),
-            TK.cuda.make_float2(rhs0, rhs1),
-            TK.cuda.make_float2(acc0, acc1),
-        )
+    out = TK.local_scalar("uint64")
+    TK.ptx.fma.rn.f32x2(
+        out,
+        TK.cuda.make_float2(lhs0, lhs1),
+        TK.cuda.make_float2(rhs0, rhs1),
+        TK.cuda.make_float2(acc0, acc1),
     )
-    return out[0]
+    return out
 
 
 _SEQ_LENS = (2, 4, 8)
@@ -356,20 +347,20 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
         hv = _local_scalar("int32", cta_head[0] % NUM_V_HEADS)
         n = _local_scalar("int32", cta_head[0] // NUM_V_HEADS)
         h = _local_scalar("int32", hv[0] // (NUM_V_HEADS // NUM_HEADS))
-        read_slot_raw = TK.alloc_local((1,), "int32")
-        TK.evaluate(TK.ptx.ld.global_.s32(read_slot_raw[0], read_indices.ptr_to([n[0]])))
-        A_value = TK.alloc_local((1,), "float32")
-        TK.evaluate(TK.ptx.ld.global_.b32(A_value[0], A_log.ptr_to([hv[0]])))
-        dt_value = TK.alloc_local((1,), "float32")
-        TK.evaluate(TK.ptx.ld.global_.b32(dt_value[0], dt_bias.ptr_to([hv[0]])))
+        read_slot_raw = TK.local_scalar("int32")
+        TK.ptx.ld.global_.s32(read_slot_raw, read_indices.ptr_to([n[0]]))
+        A_value = TK.local_scalar("float32")
+        TK.ptx.ld.global_.b32(A_value, A_log.ptr_to([hv[0]]))
+        dt_value = TK.local_scalar("float32")
+        TK.ptx.ld.global_.b32(dt_value, dt_bias.ptr_to([hv[0]]))
         _max = TK.local_scalar("int32")
-        TK.evaluate(TK.ptx["max.s32"](_max, read_slot_raw[0], TK.int32(0)))
+        TK.ptx["max.s32"](_max, read_slot_raw, TK.int32(0))
         read_slot = _local_scalar("int32", _max)
         write_slot = _local_scalar("int32", read_slot[0])
         if not SAME_POOL:
             _ldg32 = TK.local_scalar("int32")
-            TK.evaluate(TK.ptx.ld.global_.s32(_ldg32, write_indices.ptr_to([n[0]])))
-            TK.evaluate(TK.ptx["max.s32"](write_slot[0], _ldg32, TK.int32(0)))
+            TK.ptx.ld.global_.s32(_ldg32, write_indices.ptr_to([n[0]]))
+            TK.ptx["max.s32"](write_slot[0], _ldg32, TK.int32(0))
         read_state_base = _local_scalar(
             "int64",
             TK.cast(read_slot[0], "int64") * state_slot_stride + TK.cast(hv[0] * V * K, "int64"),
@@ -383,7 +374,7 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
             )
         accepted = _local_scalar("int32", TK.int32(SEQ_LEN - 1))
         if PER_REQUEST_ACCEPTED_STEPS:
-            TK.evaluate(TK.ptx.ld.global_.s32(accepted[0], accepted_steps.ptr_to([n[0]])))
+            TK.ptx.ld.global_.s32(accepted[0], accepted_steps.ptr_to([n[0]]))
         phase_a_bound = _local_scalar("int32", TK.int32(RECOVERY_STEPS))
         phase_b_begin = _local_scalar("int32", TK.int32(RECOVERY_STEPS))
         phase_b_bound = _local_scalar("int32", TK.int32(SEQ_LEN - RECOVERY_STEPS))
@@ -407,14 +398,12 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                     "int64",
                     read_state_base[0] + TK.cast((pre_v_base[0] + row) * K + k_start[0], "int64"),
                 )
-                TK.evaluate(
-                    TK.ptx["ld.global.L1::evict_first.v4.b32"](
-                        prefetch_words[word_offset[0]],
-                        prefetch_words[word_offset[0] + 1],
-                        prefetch_words[word_offset[0] + 2],
-                        prefetch_words[word_offset[0] + 3],
-                        state.ptr_to([prefetch_offset[0]]),
-                    )
+                TK.ptx["ld.global.L1::evict_first.v4.b32"](
+                    prefetch_words[word_offset[0]],
+                    prefetch_words[word_offset[0] + 1],
+                    prefetch_words[word_offset[0] + 2],
+                    prefetch_words[word_offset[0] + 3],
+                    state.ptr_to([prefetch_offset[0]]),
                 )
         for pass_index in range((SEQ_LEN + NUM_WARPS - 1) // NUM_WARPS):
             t_pre = _local_scalar("int32", pass_index * NUM_WARPS + warp)
@@ -432,115 +421,97 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                         + TK.cast((t_pre[0] * NUM_HEADS + h[0]) * K + k_pre[0], "int64"),
                     )
                     for i in range(ELEMS_PER_LANE):
-                        TK.evaluate(TK.ptx.ld.global_.b16(q_bits[i], q.ptr_to([q_base[0] + i])))
-                        TK.evaluate(TK.ptx.cvt.f32.bf16(r_q[i], TK.cast(q_bits[i], "uint16")))
+                        TK.ptx.ld.global_.b16(q_bits[i], q.ptr_to([q_base[0] + i]))
+                        TK.ptx.cvt.f32.bf16(r_q[i], TK.cast(q_bits[i], "uint16"))
                 k_base = _local_scalar(
                     "int64",
                     TK.cast(n[0], "int64") * k_batch_stride
                     + TK.cast((t_pre[0] * NUM_HEADS + h[0]) * K + k_pre[0], "int64"),
                 )
                 for i in range(ELEMS_PER_LANE):
-                    TK.evaluate(TK.ptx.ld.global_.b16(k_bits[i], k.ptr_to([k_base[0] + i])))
-                    TK.evaluate(TK.ptx.cvt.f32.bf16(r_k[i], TK.cast(k_bits[i], "uint16")))
+                    TK.ptx.ld.global_.b16(k_bits[i], k.ptr_to([k_base[0] + i]))
+                    TK.ptx.cvt.f32.bf16(r_k[i], TK.cast(k_bits[i], "uint16"))
                 if USE_QK_L2NORM:
                     sum_k = _local_scalar("float32", TK.float32(0.0))
                     for i in range(ELEMS_PER_LANE):
-                        TK.evaluate(
-                            TK.ptx.fma.rn.f32.bf16(
-                                sum_k[0],
-                                TK.cast(k_bits[i], "uint16"),
-                                TK.cast(k_bits[i], "uint16"),
-                                sum_k[0],
-                            )
+                        TK.ptx.fma.rn.f32.bf16(
+                            sum_k[0],
+                            TK.cast(k_bits[i], "uint16"),
+                            TK.cast(k_bits[i], "uint16"),
+                            sum_k[0],
                         )
                     for delta_index in range(4):
                         delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
-                        TK.evaluate(
-                            TK.ptx["add.f32"](
-                                sum_k[0],
-                                sum_k[0],
-                                TK.cuda.__shfl_xor_sync(
-                                    TK.uint32(4294967295), sum_k[0], delta[0], 32
-                                ),
-                            )
+                        TK.ptx["add.f32"](
+                            sum_k[0],
+                            sum_k[0],
+                            TK.cuda.__shfl_xor_sync(TK.uint32(4294967295), sum_k[0], delta[0], 32),
                         )
                     _add = TK.local_scalar("float32")
-                    TK.evaluate(TK.ptx["add.f32"](_add, sum_k[0], TK.float32(1e-06)))
+                    TK.ptx["add.f32"](_add, sum_k[0], TK.float32(1e-06))
                     _rsqrt = TK.local_scalar("float32")
-                    TK.evaluate(TK.ptx["rsqrt.approx.ftz.f32"](_rsqrt, _add))
+                    TK.ptx["rsqrt.approx.ftz.f32"](_rsqrt, _add)
                     k_factor = _local_scalar("float32", _rsqrt)
                     for i in range(ELEMS_PER_LANE):
-                        TK.evaluate(TK.ptx["mul.f32"](r_k[i], r_k[i], k_factor[0]))
+                        TK.ptx["mul.f32"](r_k[i], r_k[i], k_factor[0])
                     if not DISABLE_OUTPUT and (pass_index + 1) * NUM_WARPS > RECOVERY_STEPS:
                         sum_q = _local_scalar("float32", TK.float32(0.0))
                         for i in range(ELEMS_PER_LANE):
-                            TK.evaluate(
-                                TK.ptx.fma.rn.f32.bf16(
-                                    sum_q[0],
-                                    TK.cast(q_bits[i], "uint16"),
-                                    TK.cast(q_bits[i], "uint16"),
-                                    sum_q[0],
-                                )
+                            TK.ptx.fma.rn.f32.bf16(
+                                sum_q[0],
+                                TK.cast(q_bits[i], "uint16"),
+                                TK.cast(q_bits[i], "uint16"),
+                                sum_q[0],
                             )
                         for delta_index in range(4):
                             delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
-                            TK.evaluate(
-                                TK.ptx["add.f32"](
-                                    sum_q[0],
-                                    sum_q[0],
-                                    TK.cuda.__shfl_xor_sync(
-                                        TK.uint32(4294967295), sum_q[0], delta[0], 32
-                                    ),
-                                )
+                            TK.ptx["add.f32"](
+                                sum_q[0],
+                                sum_q[0],
+                                TK.cuda.__shfl_xor_sync(
+                                    TK.uint32(4294967295), sum_q[0], delta[0], 32
+                                ),
                             )
                         _add2 = TK.local_scalar("float32")
-                        TK.evaluate(TK.ptx["add.f32"](_add2, sum_q[0], TK.float32(1e-06)))
+                        TK.ptx["add.f32"](_add2, sum_q[0], TK.float32(1e-06))
                         _rsqrt2 = TK.local_scalar("float32")
-                        TK.evaluate(TK.ptx["rsqrt.approx.ftz.f32"](_rsqrt2, _add2))
+                        TK.ptx["rsqrt.approx.ftz.f32"](_rsqrt2, _add2)
                         _mul = TK.local_scalar("float32")
-                        TK.evaluate(TK.ptx["mul.f32"](_mul, _rsqrt2, TK.float32(SCALE)))
+                        TK.ptx["mul.f32"](_mul, _rsqrt2, TK.float32(SCALE))
                         q_factor = _local_scalar("float32", _mul)
                         for i in range(ELEMS_PER_LANE):
-                            TK.evaluate(TK.ptx["mul.f32"](r_q[i], r_q[i], q_factor[0]))
+                            TK.ptx["mul.f32"](r_q[i], r_q[i], q_factor[0])
                 elif not DISABLE_OUTPUT and (pass_index + 1) * NUM_WARPS > RECOVERY_STEPS:
                     for i in range(ELEMS_PER_LANE):
-                        TK.evaluate(TK.ptx["mul.f32"](r_q[i], r_q[i], TK.float32(SCALE)))
+                        TK.ptx["mul.f32"](r_q[i], r_q[i], TK.float32(SCALE))
                 shared_base = _local_scalar("int32", t_pre[0] * (K + 8) + k_pre[0])
                 if not DISABLE_OUTPUT and (pass_index + 1) * NUM_WARPS > RECOVERY_STEPS:
                     for i in range(ELEMS_PER_LANE):
-                        TK.evaluate(
-                            TK.ptx.st.shared.b32(
-                                s_q.ptr_to([shared_base[0] + i]), TK.reinterpret("uint32", r_q[i])
-                            )
+                        TK.ptx.st.shared.b32(
+                            s_q.ptr_to([shared_base[0] + i]), TK.reinterpret("uint32", r_q[i])
                         )
                 for i in range(ELEMS_PER_LANE):
-                    TK.evaluate(
-                        TK.ptx.st.shared.b32(
-                            s_k.ptr_to([shared_base[0] + i]), TK.reinterpret("uint32", r_k[i])
-                        )
+                    TK.ptx.st.shared.b32(
+                        s_k.ptr_to([shared_base[0] + i]), TK.reinterpret("uint32", r_k[i])
                     )
-                a_bits = TK.alloc_local((1,), "uint16")
-                TK.evaluate(
-                    TK.ptx.ld.global_.b16(
-                        a_bits[0], a.ptr_to([(n[0] * SEQ_LEN + t_pre[0]) * NUM_V_HEADS + hv[0]])
-                    )
+                a_bits = TK.local_scalar("uint16")
+                TK.ptx.ld.global_.b16(
+                    a_bits, a.ptr_to([(n[0] * SEQ_LEN + t_pre[0]) * NUM_V_HEADS + hv[0]])
                 )
                 _addbf = TK.local_scalar("float32")
-                TK.evaluate(
-                    TK.ptx.add.rn.f32.bf16(_addbf, TK.cast(a_bits[0], "uint16"), dt_value[0])
-                )
+                TK.ptx.add.rn.f32.bf16(_addbf, TK.cast(a_bits, "uint16"), dt_value)
                 x_value = _local_scalar("float32", _addbf)
                 _mul2 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["mul.f32"](_mul2, x_value[0], TK.float32(LOG2_E)))
+                TK.ptx["mul.f32"](_mul2, x_value[0], TK.float32(LOG2_E))
                 _exp2 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["ex2.approx.ftz.f32"](_exp2, _mul2))
+                TK.ptx["ex2.approx.ftz.f32"](_exp2, _mul2)
                 softplus_exp = _local_scalar("float32", _exp2)
                 _add3 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["add.f32"](_add3, TK.float32(1.0), softplus_exp[0]))
+                TK.ptx["add.f32"](_add3, TK.float32(1.0), softplus_exp[0])
                 _log2 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["lg2.approx.ftz.f32"](_log2, _add3))
+                TK.ptx["lg2.approx.ftz.f32"](_log2, _add3)
                 _mul3 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["mul.f32"](_mul3, _log2, TK.float32(LN_2)))
+                TK.ptx["mul.f32"](_mul3, _log2, TK.float32(LN_2))
                 softplus_value = _local_scalar("float32", _mul3)
                 use_softplus = _local_scalar(
                     "float32",
@@ -549,52 +520,47 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                     ),
                 )
                 _sub = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["sub.f32"](_sub, TK.float32(1.0), use_softplus[0]))
+                TK.ptx["sub.f32"](_sub, TK.float32(1.0), use_softplus[0])
                 _mul4 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["mul.f32"](_mul4, x_value[0], _sub))
+                TK.ptx["mul.f32"](_mul4, x_value[0], _sub)
                 _fma = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["fma.rn.f32"](_fma, softplus_value[0], use_softplus[0], _mul4))
+                TK.ptx["fma.rn.f32"](_fma, softplus_value[0], use_softplus[0], _mul4)
                 softplus_x = _local_scalar("float32", _fma)
                 _mul5 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["mul.f32"](_mul5, A_value[0], TK.float32(LOG2_E)))
+                TK.ptx["mul.f32"](_mul5, A_value, TK.float32(LOG2_E))
                 _exp2_2 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["ex2.approx.ftz.f32"](_exp2_2, _mul5))
+                TK.ptx["ex2.approx.ftz.f32"](_exp2_2, _mul5)
                 exp_A = _local_scalar("float32", _exp2_2)
                 _sub2 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["sub.f32"](_sub2, TK.float32(0.0), exp_A[0]))
+                TK.ptx["sub.f32"](_sub2, TK.float32(0.0), exp_A[0])
                 _mul6 = TK.local_scalar("float32")
-                TK.evaluate(TK.ptx["mul.f32"](_mul6, _sub2, softplus_x[0]))
+                TK.ptx["mul.f32"](_mul6, _sub2, softplus_x[0])
                 gate_exponent = _local_scalar("float32", _mul6)
                 with TK.If(lane_in_warp == 0), TK.Then():
-                    b_bits = TK.alloc_local((1,), "uint16")
-                    TK.evaluate(
-                        TK.ptx.ld.global_.b16(
-                            b_bits[0],
-                            b_gate.ptr_to([(n[0] * SEQ_LEN + t_pre[0]) * NUM_V_HEADS + hv[0]]),
-                        )
+                    b_bits = TK.local_scalar("uint16")
+                    TK.ptx.ld.global_.b16(
+                        b_bits, b_gate.ptr_to([(n[0] * SEQ_LEN + t_pre[0]) * NUM_V_HEADS + hv[0]])
                     )
-                    b_value = TK.alloc_local((1,), "float32")
-                    TK.evaluate(TK.ptx.cvt.f32.bf16(b_value[0], TK.cast(b_bits[0], "uint16")))
+                    b_value = TK.local_scalar("float32")
+                    TK.ptx.cvt.f32.bf16(b_value, TK.cast(b_bits, "uint16"))
                     _mul7 = TK.local_scalar("float32")
-                    TK.evaluate(TK.ptx["mul.f32"](_mul7, b_value[0], TK.float32(-LOG2_E)))
+                    TK.ptx["mul.f32"](_mul7, b_value, TK.float32(-LOG2_E))
                     _exp2_3 = TK.local_scalar("float32")
-                    TK.evaluate(TK.ptx["ex2.approx.ftz.f32"](_exp2_3, _mul7))
+                    TK.ptx["ex2.approx.ftz.f32"](_exp2_3, _mul7)
                     _add4 = TK.local_scalar("float32")
-                    TK.evaluate(TK.ptx["add.f32"](_add4, TK.float32(1.0), _exp2_3))
+                    TK.ptx["add.f32"](_add4, TK.float32(1.0), _exp2_3)
                     _rcp = TK.local_scalar("float32")
-                    TK.evaluate(TK.ptx["rcp.rn.f32"](_rcp, _add4))
+                    TK.ptx["rcp.rn.f32"](_rcp, _add4)
                     beta = _local_scalar("float32", _rcp)
                     _mul8 = TK.local_scalar("float32")
-                    TK.evaluate(TK.ptx["mul.f32"](_mul8, gate_exponent[0], TK.float32(LOG2_E)))
+                    TK.ptx["mul.f32"](_mul8, gate_exponent[0], TK.float32(LOG2_E))
                     _exp2_4 = TK.local_scalar("float32")
-                    TK.evaluate(TK.ptx["ex2.approx.ftz.f32"](_exp2_4, _mul8))
+                    TK.ptx["ex2.approx.ftz.f32"](_exp2_4, _mul8)
                     g_value = _local_scalar("float32", _exp2_4)
-                    TK.evaluate(
-                        TK.ptx.st.shared.v2.b32(
-                            s_gb.ptr_to([t_pre[0] * 2]),
-                            TK.reinterpret("uint32", g_value[0]),
-                            TK.reinterpret("uint32", beta[0]),
-                        )
+                    TK.ptx.st.shared.v2.b32(
+                        s_gb.ptr_to([t_pre[0] * 2]),
+                        TK.reinterpret("uint32", g_value[0]),
+                        TK.reinterpret("uint32", beta[0]),
                     )
             TK.cuda.cta_sync()
         for iter_index in range(ITERS_PER_GROUP):
@@ -631,17 +597,11 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                     TK.ptx.mov.b32(sums[row], TK.float32(0.0))
                 for pair in range(ELEMS_PER_LANE // 2):
                     _lds32 = TK.local_scalar("uint32")
-                    TK.evaluate(
-                        TK.ptx.ld.shared.b32(
-                            _lds32, s_k.ptr_to([t * (K + 8) + k_start[0] + pair * 2])
-                        )
-                    )
+                    TK.ptx.ld.shared.b32(_lds32, s_k.ptr_to([t * (K + 8) + k_start[0] + pair * 2]))
                     TK.ptx.mov.b32(r_k_main[pair * 2], TK.reinterpret("float32", _lds32))
                     _lds32_2 = TK.local_scalar("uint32")
-                    TK.evaluate(
-                        TK.ptx.ld.shared.b32(
-                            _lds32_2, s_k.ptr_to([t * (K + 8) + k_start[0] + pair * 2 + 1])
-                        )
+                    TK.ptx.ld.shared.b32(
+                        _lds32_2, s_k.ptr_to([t * (K + 8) + k_start[0] + pair * 2 + 1])
                     )
                     TK.ptx.mov.b32(r_k_main[pair * 2 + 1], TK.reinterpret("float32", _lds32_2))
                     for row in range(ILP_ROWS):
@@ -663,33 +623,25 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                             r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
                             TK.cuda.float2_y(pair_value[0]),
                         )
-                        TK.evaluate(
-                            TK.ptx["fma.rn.f32"](
-                                sums[row],
-                                r_h[row * ELEMS_PER_LANE + pair * 2],
-                                r_k_main[pair * 2],
-                                sums[row],
-                            )
+                        TK.ptx["fma.rn.f32"](
+                            sums[row],
+                            r_h[row * ELEMS_PER_LANE + pair * 2],
+                            r_k_main[pair * 2],
+                            sums[row],
                         )
-                        TK.evaluate(
-                            TK.ptx["fma.rn.f32"](
-                                sums[row],
-                                r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
-                                r_k_main[pair * 2 + 1],
-                                sums[row],
-                            )
+                        TK.ptx["fma.rn.f32"](
+                            sums[row],
+                            r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
+                            r_k_main[pair * 2 + 1],
+                            sums[row],
                         )
                 for delta_index in range(4):
                     delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
                     for row in range(ILP_ROWS):
-                        TK.evaluate(
-                            TK.ptx["add.f32"](
-                                sums[row],
-                                sums[row],
-                                TK.cuda.__shfl_xor_sync(
-                                    TK.uint32(4294967295), sums[row], delta[0], 32
-                                ),
-                            )
+                        TK.ptx["add.f32"](
+                            sums[row],
+                            sums[row],
+                            TK.cuda.__shfl_xor_sync(TK.uint32(4294967295), sums[row], delta[0], 32),
                         )
                 v_base_input = _local_scalar(
                     "int64",
@@ -698,12 +650,10 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                 )
                 for row in range(ILP_ROWS):
                     v_bits = TK.alloc_local((1,), "uint16")
-                    TK.evaluate(TK.ptx.ld.global_.b16(v_bits[0], v.ptr_to([v_base_input[0] + row])))
+                    TK.ptx.ld.global_.b16(v_bits[0], v.ptr_to([v_base_input[0] + row]))
                     _subbf = TK.local_scalar("float32")
-                    TK.evaluate(
-                        TK.ptx.sub.rn.f32.bf16(_subbf, TK.cast(v_bits[0], "uint16"), sums[row])
-                    )
-                    TK.evaluate(TK.ptx["mul.f32"](values[row], _subbf, beta[0]))
+                    TK.ptx.sub.rn.f32.bf16(_subbf, TK.cast(v_bits[0], "uint16"), sums[row])
+                    TK.ptx["mul.f32"](values[row], _subbf, beta[0])
                 for pair in range(ELEMS_PER_LANE // 2):
                     for row in range(ILP_ROWS):
                         pair_value = _local_scalar(
@@ -752,17 +702,13 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                     TK.ptx.mov.b32(sums[row], TK.float32(0.0))
                 for pair in range(ELEMS_PER_LANE // 2):
                     _lds32_3 = TK.local_scalar("uint32")
-                    TK.evaluate(
-                        TK.ptx.ld.shared.b32(
-                            _lds32_3, s_k.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2])
-                        )
+                    TK.ptx.ld.shared.b32(
+                        _lds32_3, s_k.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2])
                     )
                     TK.ptx.mov.b32(r_k_main[pair * 2], TK.reinterpret("float32", _lds32_3))
                     _lds32_4 = TK.local_scalar("uint32")
-                    TK.evaluate(
-                        TK.ptx.ld.shared.b32(
-                            _lds32_4, s_k.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2 + 1])
-                        )
+                    TK.ptx.ld.shared.b32(
+                        _lds32_4, s_k.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2 + 1])
                     )
                     TK.ptx.mov.b32(r_k_main[pair * 2 + 1], TK.reinterpret("float32", _lds32_4))
                     for row in range(ILP_ROWS):
@@ -784,33 +730,25 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                             r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
                             TK.cuda.float2_y(pair_value[0]),
                         )
-                        TK.evaluate(
-                            TK.ptx["fma.rn.f32"](
-                                sums[row],
-                                r_h[row * ELEMS_PER_LANE + pair * 2],
-                                r_k_main[pair * 2],
-                                sums[row],
-                            )
+                        TK.ptx["fma.rn.f32"](
+                            sums[row],
+                            r_h[row * ELEMS_PER_LANE + pair * 2],
+                            r_k_main[pair * 2],
+                            sums[row],
                         )
-                        TK.evaluate(
-                            TK.ptx["fma.rn.f32"](
-                                sums[row],
-                                r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
-                                r_k_main[pair * 2 + 1],
-                                sums[row],
-                            )
+                        TK.ptx["fma.rn.f32"](
+                            sums[row],
+                            r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
+                            r_k_main[pair * 2 + 1],
+                            sums[row],
                         )
                 for delta_index in range(4):
                     delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
                     for row in range(ILP_ROWS):
-                        TK.evaluate(
-                            TK.ptx["add.f32"](
-                                sums[row],
-                                sums[row],
-                                TK.cuda.__shfl_xor_sync(
-                                    TK.uint32(4294967295), sums[row], delta[0], 32
-                                ),
-                            )
+                        TK.ptx["add.f32"](
+                            sums[row],
+                            sums[row],
+                            TK.cuda.__shfl_xor_sync(TK.uint32(4294967295), sums[row], delta[0], 32),
                         )
                 v_base_input = _local_scalar(
                     "int64",
@@ -819,27 +757,21 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                 )
                 for row in range(ILP_ROWS):
                     v_bits = TK.alloc_local((1,), "uint16")
-                    TK.evaluate(TK.ptx.ld.global_.b16(v_bits[0], v.ptr_to([v_base_input[0] + row])))
+                    TK.ptx.ld.global_.b16(v_bits[0], v.ptr_to([v_base_input[0] + row]))
                     _subbf2 = TK.local_scalar("float32")
-                    TK.evaluate(
-                        TK.ptx.sub.rn.f32.bf16(_subbf2, TK.cast(v_bits[0], "uint16"), sums[row])
-                    )
-                    TK.evaluate(TK.ptx["mul.f32"](values[row], _subbf2, beta[0]))
+                    TK.ptx.sub.rn.f32.bf16(_subbf2, TK.cast(v_bits[0], "uint16"), sums[row])
+                    TK.ptx["mul.f32"](values[row], _subbf2, beta[0])
                     TK.ptx.mov.b32(output_sums[row], TK.float32(0.0))
                 for pair in range(ELEMS_PER_LANE // 2):
                     if not DISABLE_OUTPUT:
                         _lds32_5 = TK.local_scalar("uint32")
-                        TK.evaluate(
-                            TK.ptx.ld.shared.b32(
-                                _lds32_5, s_q.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2])
-                            )
+                        TK.ptx.ld.shared.b32(
+                            _lds32_5, s_q.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2])
                         )
                         TK.ptx.mov.b32(r_q_main[pair * 2], TK.reinterpret("float32", _lds32_5))
                         _lds32_6 = TK.local_scalar("uint32")
-                        TK.evaluate(
-                            TK.ptx.ld.shared.b32(
-                                _lds32_6, s_q.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2 + 1])
-                            )
+                        TK.ptx.ld.shared.b32(
+                            _lds32_6, s_q.ptr_to([t[0] * (K + 8) + k_start[0] + pair * 2 + 1])
                         )
                         TK.ptx.mov.b32(r_q_main[pair * 2 + 1], TK.reinterpret("float32", _lds32_6))
                     for row in range(ILP_ROWS):
@@ -862,34 +794,28 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                             TK.cuda.float2_y(pair_value[0]),
                         )
                         if not DISABLE_OUTPUT:
-                            TK.evaluate(
-                                TK.ptx["fma.rn.f32"](
-                                    output_sums[row],
-                                    r_h[row * ELEMS_PER_LANE + pair * 2],
-                                    r_q_main[pair * 2],
-                                    output_sums[row],
-                                )
+                            TK.ptx["fma.rn.f32"](
+                                output_sums[row],
+                                r_h[row * ELEMS_PER_LANE + pair * 2],
+                                r_q_main[pair * 2],
+                                output_sums[row],
                             )
-                            TK.evaluate(
-                                TK.ptx["fma.rn.f32"](
-                                    output_sums[row],
-                                    r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
-                                    r_q_main[pair * 2 + 1],
-                                    output_sums[row],
-                                )
+                            TK.ptx["fma.rn.f32"](
+                                output_sums[row],
+                                r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
+                                r_q_main[pair * 2 + 1],
+                                output_sums[row],
                             )
                 if not DISABLE_OUTPUT:
                     for delta_index in range(4):
                         delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
                         for row in range(ILP_ROWS):
-                            TK.evaluate(
-                                TK.ptx["add.f32"](
-                                    output_sums[row],
-                                    output_sums[row],
-                                    TK.cuda.__shfl_xor_sync(
-                                        TK.uint32(4294967295), output_sums[row], delta[0], 32
-                                    ),
-                                )
+                            TK.ptx["add.f32"](
+                                output_sums[row],
+                                output_sums[row],
+                                TK.cuda.__shfl_xor_sync(
+                                    TK.uint32(4294967295), output_sums[row], delta[0], 32
+                                ),
                             )
                     output_base = _local_scalar(
                         "int64",
@@ -899,39 +825,35 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                     )
                     output_bits = TK.alloc_local((ILP_ROWS,), "uint16")
                     for row in range(ILP_ROWS):
-                        TK.evaluate(TK.ptx.cvt.rn.bf16.f32(output_bits[row], output_sums[row]))
+                        TK.ptx.cvt.rn.bf16.f32(output_bits[row], output_sums[row])
                     for row in range(ILP_ROWS):
-                        TK.evaluate(
-                            TK.ptx.st.global_.b16(
-                                output.ptr_to([output_base[0] + row]),
-                                output_bits[row],
-                                pred=TK.EQ(lane[0], TK.int32(0)),
-                            )
+                        TK.ptx.st.global_.b16(
+                            output.ptr_to([output_base[0] + row]),
+                            output_bits[row],
+                            pred=TK.EQ(lane[0], TK.int32(0)),
                         )
                 if CACHE_INTERMEDIATE_STATES or PER_TOKEN_POOL_SCATTER:
-                    state_write_base = TK.alloc_local((1,), "int64")
+                    state_write_base = TK.local_scalar("int64")
                     if PER_TOKEN_POOL_SCATTER:
-                        scatter_slot = TK.alloc_local((1,), "int32")
-                        TK.evaluate(
-                            TK.ptx.ld.global_.s32(
-                                scatter_slot[0], ssm_state_indices.ptr_to([n[0] * SEQ_LEN + t[0]])
-                            )
+                        scatter_slot = TK.local_scalar("int32")
+                        TK.ptx.ld.global_.s32(
+                            scatter_slot, ssm_state_indices.ptr_to([n[0] * SEQ_LEN + t[0]])
                         )
                         if PER_TOKEN_POOL_SCATTER_FLAT:
                             TK.assign(
-                                state_write_base[0],
-                                (TK.cast(scatter_slot[0], "int64") * NUM_V_HEADS + hv[0]) * V * K
+                                state_write_base,
+                                (TK.cast(scatter_slot, "int64") * NUM_V_HEADS + hv[0]) * V * K
                                 + TK.cast(v_base[0] * K + k_start[0], "int64"),
                             )
                         else:
                             TK.assign(
-                                state_write_base[0],
-                                TK.cast(scatter_slot[0], "int64") * state_slot_stride
+                                state_write_base,
+                                TK.cast(scatter_slot, "int64") * state_slot_stride
                                 + TK.cast(hv[0] * V * K + v_base[0] * K + k_start[0], "int64"),
                             )
                     else:
                         TK.assign(
-                            state_write_base[0],
+                            state_write_base,
                             TK.cast(
                                 (((n[0] * SEQ_LEN + t[0]) * NUM_V_HEADS + hv[0]) * V + v_base[0])
                                 * K
@@ -940,9 +862,9 @@ def _make_gdn_decode_bf16_wide_vec_mtp(
                             ),
                         )
                     if PER_TOKEN_POOL_SCATTER and (not PER_TOKEN_POOL_SCATTER_FLAT):
-                        _store_state_f32x32(state, state_write_base[0], r_h)
+                        _store_state_f32x32(state, state_write_base, r_h)
                     else:
-                        _store_state_f32x32(intermediate, state_write_base[0], r_h)
+                        _store_state_f32x32(intermediate, state_write_base, r_h)
             if (
                 not DISABLE_STATE_UPDATE
                 and (not CACHE_INTERMEDIATE_STATES)
