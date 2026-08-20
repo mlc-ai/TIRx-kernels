@@ -435,14 +435,14 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         pv_a_lo_desc.init(s_smem_gemm.ptr_to([0, 0]), ldo=64, sdo=8, swizzle=0)
         pv_a_hi_desc = K.SmemDescriptor()
         pv_a_hi_desc.init(s_smem_gemm.ptr_to([0, 0]), ldo=64, sdo=8, swizzle=0)
-        q_main_cp_desc = K.alloc_local([1], "uint64")
+        q_main_cp_desc = K.local_scalar("uint64")
         K.cuda.tcgen05.encode_matrix_descriptor(
-            K.address_of(q_main_cp_desc[0]), K.reinterpret(K.handle().ty, K.uint64(0)), 1, 64, 3
+            K.address_of(q_main_cp_desc), K.reinterpret(K.handle().ty, K.uint64(0)), 1, 64, 3
         )
         if is_v32:
-            q_tail_cp_desc = K.alloc_local([1], "uint64")
+            q_tail_cp_desc = K.local_scalar("uint64")
             K.cuda.tcgen05.encode_matrix_descriptor(
-                K.address_of(q_tail_cp_desc[0]), K.reinterpret(K.handle().ty, K.uint64(0)), 1, 32, 2
+                K.address_of(q_tail_cp_desc), K.reinterpret(K.handle().ty, K.uint64(0)), 1, 32, 2
             )
         rowwise_buf = pool.alloc((128,), "float32", align=16)
         is_token_valid = pool.alloc((NUM_INDEX_BUFS, B_TOPK // 8), "int8", align=16)
@@ -1146,7 +1146,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         256 + q_main_flat % 4 * 32 + q_main_flat // 4 % 4 * 8,
                                         "uint32",
                                     ),
-                                    _replace_smem_desc_addr(q_main_cp_desc[0], q_main_src),
+                                    _replace_smem_desc_addr(q_main_cp_desc, q_main_src),
                                 )
                             if is_v32:
                                 with K.unroll(2) as q_tail_flat:
@@ -1155,7 +1155,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     )
                                     K.ptx[_TCGEN_CP_128X256](
                                         K.cast(384 + q_tail_flat % 2 * 8, "uint32"),
-                                        _replace_smem_desc_addr(q_tail_cp_desc[0], q_tail_src),
+                                        _replace_smem_desc_addr(q_tail_cp_desc, q_tail_src),
                                     )
                             bar_q_utccp.arrive(0)
                             bar_q_utccp.wait(0, batch_epoch.phase)

@@ -490,9 +490,9 @@ def make_kernel(
             qk_nope_desc = K.SmemDescriptor()
             qk_nope_desc.init(k_nope.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
         if have_rope:
-            q_rope_cp_desc = K.alloc_local([1], "uint64")
+            q_rope_cp_desc = K.local_scalar("uint64")
             K.cuda.tcgen05.encode_matrix_descriptor(
-                K.address_of(q_rope_cp_desc[0]), K.reinterpret(K.handle().ty, K.uint64(0)), 1, 32, 2
+                K.address_of(q_rope_cp_desc), K.reinterpret(K.handle().ty, K.uint64(0)), 1, 32, 2
             )
         if not local_mma_desc:
             pv_a_lo_desc = K.SmemDescriptor()
@@ -561,12 +561,12 @@ def make_kernel(
             A packed f32x2 operand is ONE 64-bit value, not a two-element float
             window (GDN port notes §3.2).
             """
-            packed = K.alloc_local([1], "uint64")
-            rhs = K.alloc_local([1], "uint64")
-            K.ptx.mov.b64(packed[0], values[idx], values[idx + 1])
-            K.ptx.mov.b64(rhs[0], multiplier, multiplier)
-            K.ptx.mul.rz.ftz.f32x2(packed[0], packed[0], rhs[0])
-            K.ptx.mov.b64(values[idx], values[idx + 1], packed[0])
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
+            K.ptx.mov.b64(packed, values[idx], values[idx + 1])
+            K.ptx.mov.b64(rhs, multiplier, multiplier)
+            K.ptx.mul.rz.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(values[idx], values[idx + 1], packed)
 
         def commit(bar, stage):
             """The matrix engine's arrive on a one-way barrier."""
@@ -651,9 +651,9 @@ def make_kernel(
             K.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
                 K.address_of(tmem_start_addr[0]), K.uint32(512)
             )
-            allocated_tmem_start = K.alloc_local([1], "uint32")
-            K.ptx.ld.shared.u32(allocated_tmem_start[0], tmem_start_addr.ptr_to([0]))
-            K.cuda.trap_when_assert_failed(allocated_tmem_start[0] == K.uint32(0))
+            allocated_tmem_start = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(allocated_tmem_start, tmem_start_addr.ptr_to([0]))
+            K.cuda.trap_when_assert_failed(allocated_tmem_start == K.uint32(0))
             K.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
             K.cuda.iket.range_end(prologue_token[0])
 
@@ -712,14 +712,13 @@ def make_kernel(
                 valid_word_offset = K.local_scalar(
                     "int32", init=K.if_then_else(warp_idx >= 2, (B_TOPK // 2) // 32, 0)
                 )
-                is_k_valid_u32 = K.alloc_local([1], "uint32")
+                is_k_valid_u32 = K.local_scalar("uint32")
                 K.ptx.ld.shared.u32(
-                    is_k_valid_u32[0],
-                    is_k_valid.view("uint32").ptr_to([cur_buf, valid_word_offset]),
+                    is_k_valid_u32, is_k_valid.view("uint32").ptr_to([cur_buf, valid_word_offset])
                 )
                 for p_i in range(B_TOPK // 2):
                     invalid_p_predicate = K.bitwise_and(
-                        K.shift_right(is_k_valid_u32[0], K.uint32(p_i)), K.uint32(1)
+                        K.shift_right(is_k_valid_u32, K.uint32(p_i)), K.uint32(1)
                     ) == K.uint32(0)
                     K.ptx.mov.b32(
                         p[p_i],
@@ -751,8 +750,8 @@ def make_kernel(
                         p_peer_u32[p_peer_offset + 3],
                     )
                 wg0_pair_sync()
-                p_add_pair0 = K.alloc_local([1], "uint64")
-                p_add_pair1 = K.alloc_local([1], "uint64")
+                p_add_pair0 = K.local_scalar("uint64")
+                p_add_pair1 = K.local_scalar("uint64")
                 for exchange_i in range((B_TOPK // 2) // 4):
                     # orig:743, unannotated again -- see the note above.
                     exchange_offset = K.local_scalar(
@@ -769,14 +768,14 @@ def make_kernel(
                     )
                     p_pair0 = K.cuda.make_float2(p[exchange_i * 4], p[exchange_i * 4 + 1])
                     peer_pair0 = K.cuda.make_float2(p_exchange_tmp[0], p_exchange_tmp[1])
-                    K.ptx.add.rn.f32x2(p_add_pair0[0], p_pair0, peer_pair0)
-                    K.ptx.mov.b32(p[exchange_i * 4], K.cuda.float2_x(p_add_pair0[0]))
-                    K.ptx.mov.b32(p[exchange_i * 4 + 1], K.cuda.float2_y(p_add_pair0[0]))
+                    K.ptx.add.rn.f32x2(p_add_pair0, p_pair0, peer_pair0)
+                    K.ptx.mov.b32(p[exchange_i * 4], K.cuda.float2_x(p_add_pair0))
+                    K.ptx.mov.b32(p[exchange_i * 4 + 1], K.cuda.float2_y(p_add_pair0))
                     p_pair1 = K.cuda.make_float2(p[exchange_i * 4 + 2], p[exchange_i * 4 + 3])
                     peer_pair1 = K.cuda.make_float2(p_exchange_tmp[2], p_exchange_tmp[3])
-                    K.ptx.add.rn.f32x2(p_add_pair1[0], p_pair1, peer_pair1)
-                    K.ptx.mov.b32(p[exchange_i * 4 + 2], K.cuda.float2_x(p_add_pair1[0]))
-                    K.ptx.mov.b32(p[exchange_i * 4 + 3], K.cuda.float2_y(p_add_pair1[0]))
+                    K.ptx.add.rn.f32x2(p_add_pair1, p_pair1, peer_pair1)
+                    K.ptx.mov.b32(p[exchange_i * 4 + 2], K.cuda.float2_x(p_add_pair1))
+                    K.ptx.mov.b32(p[exchange_i * 4 + 3], K.cuda.float2_y(p_add_pair1))
 
                 bar_k_valid_free.arrive(cur_buf)
 
@@ -786,11 +785,11 @@ def make_kernel(
                 K.assign(cur_pi_max, cur_pi_max * sm_scale_div_log2)
                 K.ptx.st.shared.f32(rowwise_max_buf.ptr_to([idx_in_warpgroup]), cur_pi_max)
                 K.ptx.bar.sync(K.uint32(BAR_WG0_SYNC), 128)
-                peer_pi_max = K.alloc_local([1], "float32")
+                peer_pi_max = K.local_scalar("float32")
                 K.ptx.ld.shared.f32(
-                    peer_pi_max[0], rowwise_max_buf.ptr_to([K.bitwise_xor(idx_in_warpgroup, 64)])
+                    peer_pi_max, rowwise_max_buf.ptr_to([K.bitwise_xor(idx_in_warpgroup, 64)])
                 )
-                K.assign(cur_pi_max, K.max(cur_pi_max, peer_pi_max[0]))
+                K.assign(cur_pi_max, K.max(cur_pi_max, peer_pi_max))
                 K.assign(real_mi, K.max(real_mi, cur_pi_max))
                 # G3: the warp collective lands in a local *before* the guard
                 # that reads it, which is where the original's typed
@@ -798,16 +797,16 @@ def make_kernel(
                 should_scale_o = K.local_scalar(
                     "bool", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), cur_pi_max - mi > 6.0) != 0
                 )
-                new_max = K.alloc_local([1], "float32")
-                scale_for_old = K.alloc_local([1], "float32")
+                new_max = K.local_scalar("float32")
+                scale_for_old = K.local_scalar("float32")
                 with K.If(K.Not(should_scale_o)):
                     with K.Then():
-                        K.assign(scale_for_old[0], K.float32(1.0))
-                        K.assign(new_max[0], mi)
+                        K.assign(scale_for_old, K.float32(1.0))
+                        K.assign(new_max, mi)
                     with K.Else():
-                        K.assign(new_max[0], K.max(cur_pi_max, mi))
-                        K.ptx.ex2.approx.ftz.f32(scale_for_old[0], mi - new_max[0])
-                K.assign(mi, new_max[0])
+                        K.assign(new_max, K.max(cur_pi_max, mi))
+                        K.ptx.ex2.approx.ftz.f32(scale_for_old, mi - new_max)
+                K.assign(mi, new_max)
 
                 # Each warpgroup thread owns B_TOPK/2 consecutive bf16 values.
                 s_frag = K.alloc_local((B_TOPK // 2,), "bfloat16")
@@ -815,23 +814,23 @@ def make_kernel(
                 cur_sum_pair = K.local_scalar(
                     "uint64", init=K.cuda.make_float2(K.float32(0.0), K.float32(0.0))
                 )
-                neg_new_max_pair = K.cuda.make_float2(-new_max[0], -new_max[0])
+                neg_new_max_pair = K.cuda.make_float2(-new_max, -new_max)
                 scale_pair = K.cuda.make_float2(sm_scale_div_log2, sm_scale_div_log2)
-                fma_pair = K.alloc_local([1], "uint64")
+                fma_pair = K.local_scalar("uint64")
                 for s_i in range((B_TOPK // 2) // 2):
                     p_pair = K.cuda.make_float2(p[s_i * 2], p[s_i * 2 + 1])
-                    K.ptx.fma.rn.f32x2(fma_pair[0], p_pair, scale_pair, neg_new_max_pair)
-                    s_x = K.alloc_local([1], "float32")
-                    s_y = K.alloc_local([1], "float32")
-                    K.ptx.ex2.approx.ftz.f32(s_x[0], K.cuda.float2_x(fma_pair[0]))
-                    K.ptx.ex2.approx.ftz.f32(s_y[0], K.cuda.float2_y(fma_pair[0]))
-                    s_pair = K.cuda.make_float2(s_x[0], s_y[0])
+                    K.ptx.fma.rn.f32x2(fma_pair, p_pair, scale_pair, neg_new_max_pair)
+                    s_x = K.local_scalar("float32")
+                    s_y = K.local_scalar("float32")
+                    K.ptx.ex2.approx.ftz.f32(s_x, K.cuda.float2_x(fma_pair))
+                    K.ptx.ex2.approx.ftz.f32(s_y, K.cuda.float2_y(fma_pair))
+                    s_pair = K.cuda.make_float2(s_x, s_y)
                     K.ptx.add.rn.f32x2(cur_sum_pair, cur_sum_pair, s_pair)
-                    K.ptx.mov.b32(s_pack[s_i], K.cuda.float22bfloat162_rn(s_x[0], s_y[0]))
+                    K.ptx.mov.b32(s_pack[s_i], K.cuda.float22bfloat162_rn(s_x, s_y))
                 cur_sum = K.cuda.float2_x(cur_sum_pair) + K.cuda.float2_y(cur_sum_pair)
-                li_tmp = K.alloc_local([1], "float32")
-                K.ptx.fma.rn.f32(li_tmp[0], li, scale_for_old[0], cur_sum)
-                K.assign(li, li_tmp[0])
+                li_tmp = K.local_scalar("float32")
+                K.ptx.fma.rn.f32(li_tmp, li, scale_for_old, cur_sum)
+                K.assign(li, li_tmp)
 
                 with K.If(k > 0), K.Then():
                     prev_buf = K.local_scalar("int32", init=ring_mod3(k - 1))
@@ -875,7 +874,7 @@ def make_kernel(
                         )
                         K.ptx.tcgen05.wait__ld.sync.aligned()
                         for scale_i in range(32 // 2):
-                            mul_f32x2(o_rescale, scale_i * 2, scale_for_old[0])
+                            mul_f32x2(o_rescale, scale_i * 2, scale_for_old)
                         tmem_store(
                             o_rescale, K.cuda.get_tmem_addr(K.uint32(o_tmem_col), 0, chunk_idx * 32)
                         )
@@ -895,20 +894,20 @@ def make_kernel(
 
             K.ptx.st.shared.f32(rowwise_li_buf.ptr_to([idx_in_warpgroup]), li)
             K.ptx.bar.sync(K.uint32(BAR_WG0_SYNC), 128)
-            peer_li = K.alloc_local([1], "float32")
+            peer_li = K.local_scalar("float32")
             K.ptx.ld.shared.f32(
-                peer_li[0], rowwise_li_buf.ptr_to([K.bitwise_xor(idx_in_warpgroup, 64)])
+                peer_li, rowwise_li_buf.ptr_to([K.bitwise_xor(idx_in_warpgroup, 64)])
             )
-            K.assign(li, li + peer_li[0])
+            K.assign(li, li + peer_li)
 
             with K.If(idx_in_warpgroup < B_H), K.Then():
-                cur_lse = K.alloc_local([1], "float32")
+                cur_lse = K.local_scalar("float32")
                 cur_lse_log = K.log(li)
-                K.ptx.fma.rn.f32(cur_lse[0], mi, K.float32(LN_2), cur_lse_log)
+                K.ptx.fma.rn.f32(cur_lse, mi, K.float32(LN_2), cur_lse_log)
                 K.assign(
-                    cur_lse[0],
+                    cur_lse,
                     K.if_then_else(
-                        cur_lse[0] == K.float32(-float("inf")), K.float32(float("inf")), cur_lse[0]
+                        cur_lse == K.float32(-float("inf")), K.float32(float("inf")), cur_lse
                     ),
                 )
                 logits_offset = s_q_idx * h_q + idx_in_warpgroup
@@ -917,7 +916,7 @@ def make_kernel(
                     real_mi * K.float32(LN_2),
                 )
                 K.ptx.st.global_.f32(
-                    lse.ptr_to([logits_offset // h_q, logits_offset % h_q]), cur_lse[0]
+                    lse.ptr_to([logits_offset // h_q, logits_offset % h_q]), cur_lse
                 )
 
             last_k = K.local_scalar("int32", init=K.int32(num_k_blocks_buf - 1))
@@ -936,10 +935,10 @@ def make_kernel(
                 )
             else:
                 attn_sink_log2 = K.float32(-float("inf"))
-            sink_exp = K.alloc_local([1], "float32")
-            K.ptx.ex2.approx.ftz.f32(sink_exp[0], attn_sink_log2 - mi)
+            sink_exp = K.local_scalar("float32")
+            K.ptx.ex2.approx.ftz.f32(sink_exp, attn_sink_log2 - mi)
             output_scale = K.local_scalar(
-                "float32", init=K.cuda.fdividef(K.float32(1.0), li + sink_exp[0])
+                "float32", init=K.cuda.fdividef(K.float32(1.0), li + sink_exp)
             )
 
             o_epi = K.alloc_local((64,), "float32")
@@ -1162,16 +1161,16 @@ def make_kernel(
                         )
                         K.ptx[TCGEN_CP_128X256](
                             K.cast(q_rope_tmem_col + q_rope_flat % 2 * 8, "uint32"),
-                            replace_smem_desc_addr(q_rope_cp_desc[0], q_rope_src),
+                            replace_smem_desc_addr(q_rope_cp_desc, q_rope_src),
                         )
                     commit(bar_prologue_utccp_rope, 0)
 
                 bar_prologue_q_nope.arrive(0, tx_count=B_H * D_V * BF16_BYTES)
                 bar_prologue_q_nope.wait(0, 0)
                 K.ptx.tcgen05.fence__after_thread_sync()
-                q_nope_cp_desc = K.alloc_local([1], "uint64")
+                q_nope_cp_desc = K.local_scalar("uint64")
                 K.cuda.tcgen05.encode_matrix_descriptor(
-                    K.address_of(q_nope_cp_desc[0]),
+                    K.address_of(q_nope_cp_desc),
                     K.reinterpret(K.handle().ty, K.uint64(0)),
                     1,
                     64,
@@ -1188,7 +1187,7 @@ def make_kernel(
                             q_nope_tmem_col + (q_nope_flat % 4 * 32 + q_nope_flat // 4 % 4 * 8),
                             "uint32",
                         ),
-                        replace_smem_desc_addr(q_nope_cp_desc[0], q_nope_src),
+                        replace_smem_desc_addr(q_nope_cp_desc, q_nope_src),
                     )
                 commit(bar_prologue_utccp_nope, 0)
 

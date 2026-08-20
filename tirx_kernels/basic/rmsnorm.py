@@ -105,11 +105,11 @@ def make_kernel(hidden_size: int):
         xf = K.alloc_local([vec], "float32")  # input_vec_f32
         wf = K.alloc_local([vec], "float32")  # weight_vec_f32
         xv = K.alloc_local([vec], "float32")  # x_vec
-        pk = K.alloc_local([1], "uint64")  # packed_mul
+        pk = K.local_scalar("uint64")  # packed_mul
         ss = K.alloc_local([1], "float32")  # sum_sq
-        rms = K.alloc_local([1], "float32")  # rms_norm
-        row = K.alloc_local([1], "int32")  # idx
-        goff = K.alloc_local([1], "int32")  # global element offset (see gidx)
+        rms = K.local_scalar("float32")  # rms_norm
+        row = K.local_scalar("int32")  # idx
+        goff = K.local_scalar("int32")  # global element offset (see gidx)
 
         def cta_sync(bar_id):
             K.ptx.bar.sync(K.uint32(bar_id), K.uint32(nthreads))
@@ -128,8 +128,8 @@ def make_kernel(hidden_size: int):
             that reproduces the original's arithmetic exactly. The int32 range
             this implies is the original's too (largest config: 4113*8192).
             """
-            K.assign(goff[0], offset)
-            return K.Cast("int64", goff[0])
+            K.assign(goff, offset)
+            return K.Cast("int64", goff)
 
         def warp_sum(acc):
             """Butterfly sum of ``acc[0]`` over the 32 lanes — orig:L725-729.
@@ -152,12 +152,12 @@ def make_kernel(hidden_size: int):
             product lands in ``pk`` and is unpacked with float2_x/float2_y —
             exactly the original's register shape (orig:L785-799).
             """
-            K.ptx[MUL_F32X2](pk[0], a, b)
-            K.ptx.mov.b32(dst[2 * i], K.cuda.float2_x(pk[0]))
-            K.ptx.mov.b32(dst[2 * i + 1], K.cuda.float2_y(pk[0]))
+            K.ptx[MUL_F32X2](pk, a, b)
+            K.ptx.mov.b32(dst[2 * i], K.cuda.float2_x(pk))
+            K.ptx.mov.b32(dst[2 * i + 1], K.cuda.float2_y(pk))
 
-        K.assign(row[0], bx)
-        with K.While(row[0] < batch_size):
+        K.assign(row, bx)
+        with K.While(row < batch_size):
             # ---- pass 1: read x, accumulate sum(x^2), stage x in f32 smem ---
             K.assign(ss[0], K.float32(0.0))
             with K.serial(n_tiles) as ki:
@@ -166,7 +166,7 @@ def make_kernel(hidden_size: int):
                 st = (ki * nthreads + tid) * vec
                 with K.If(st < hidden_size), K.Then():
                     K.ptx[LD_G_V4](
-                        iw[0], iw[1], iw[2], iw[3], inp.ptr_to([gidx(row[0] * hidden_size + st)])
+                        iw[0], iw[1], iw[2], iw[3], inp.ptr_to([gidx(row * hidden_size + st)])
                     )
                     for pair in range(vec // 2):
                         K.idioms.cast_f16x2_to_f32x2(xf, pair, iw[pair])
@@ -193,7 +193,7 @@ def make_kernel(hidden_size: int):
                         K.ptx[ST_S_F32](sum_sq_smem.ptr_to([0]), ss[0])
             cta_sync(0)
             K.ptx[LD_S_F32](ss[0], sum_sq_smem.ptr_to([0]))
-            K.assign(rms[0], K.rsqrt(ss[0] / K.float32(hidden_size) + K.float32(eps)))
+            K.assign(rms, K.rsqrt(ss[0] / K.float32(hidden_size) + K.float32(eps)))
 
             # ---- pass 2: rescale by rms, apply the weight, write out --------
             with K.serial(n_tiles) as ki:
@@ -215,7 +215,7 @@ def make_kernel(hidden_size: int):
                         xf,
                         pair,
                         K.cuda.make_float2(xv[2 * pair], xv[2 * pair + 1]),
-                        K.cuda.make_float2(rms[0], rms[0]),
+                        K.cuda.make_float2(rms, rms),
                     )
                 for pair in range(vec // 2):
                     scale_pair(
@@ -228,10 +228,10 @@ def make_kernel(hidden_size: int):
                     for pair in range(vec // 2):
                         K.ptx[CVT_F16X2](ow[pair], xf[2 * pair + 1], xf[2 * pair])
                     K.ptx[ST_G_V4](
-                        out.ptr_to([gidx(row[0] * hidden_size + st)]), ow[0], ow[1], ow[2], ow[3]
+                        out.ptr_to([gidx(row * hidden_size + st)]), ow[0], ow[1], ow[2], ow[3]
                     )
             cta_sync(1)
-            K.assign(row[0], row[0] + SM_COUNT)
+            K.assign(row, row + SM_COUNT)
 
     return rmsnorm
 
