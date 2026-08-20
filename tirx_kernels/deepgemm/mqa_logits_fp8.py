@@ -542,8 +542,7 @@ def get_kernel(**kwargs: Any):
             # loop-level rule means this placement is preserved exactly.
             with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
                 q_state = K.RingState(num_q_stages)
-                q_idx = K.local_scalar("uint32")
-                K.assign(q_idx, sm_idx_u32)
+                q_idx = K.local_scalar("uint32", init=sm_idx_u32)
                 with K.While(q_idx < num_q_blocks):
                     q_pipe.empty.wait(q_state.stage, q_state.phase ^ K.uint32(1))
                     K.ptx[TMA_G2S_2D](

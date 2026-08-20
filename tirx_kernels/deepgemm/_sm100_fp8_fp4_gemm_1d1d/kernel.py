@@ -132,8 +132,7 @@ def _umod(x, d):
 
 
 def _wait_barrier(barrier, phase):
-    complete = K.local_scalar("uint32")
-    K.assign(complete, K.uint32(0))
+    complete = K.local_scalar("uint32", init=K.uint32(0))
     with K.While(complete == K.uint32(0)):
         K.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
             complete, barrier, K.cast(phase, "uint32"), K.uint32(TRY_WAIT_TICKS)
@@ -232,8 +231,7 @@ class _PersistentScheduler:
 
     def next(self):
         K.assign(self.nb, self.it * self.num_sms + self.sm_idx)
-        done = K.local_scalar("int32")
-        K.assign(done, 0)
+        done = K.local_scalar("int32", init=0)
         if self.is_m_grouped_masked:
             with K.While(done == 0):
                 with K.If(self.grp == self.num_groups):
@@ -814,8 +812,7 @@ def build_kernel(spec: GemmSpec):
                         num_blocks,
                         track_sfk=True,
                     )
-                    ld_kblocks = K.local_scalar("int32")
-                    K.assign(ld_kblocks, 0)
+                    ld_kblocks = K.local_scalar("int32", init=0)
                     with K.While(ld_sched.valid == 1):
                         ld_sched.next()
                         with K.If(ld_sched.valid == 1):
@@ -864,8 +861,7 @@ def build_kernel(spec: GemmSpec):
                                 k_a_offset = K.local_scalar("int32")
                                 K.assign(k_b_idx, 0)
                                 K.assign(k_a_offset, 0)
-                                sfa_k_offset = K.local_scalar("int32")
-                                K.assign(sfa_k_offset, 0)
+                                sfa_k_offset = K.local_scalar("int32", init=0)
                                 if is_m_grouped_contiguous:
                                     # Non-psum contiguous: the expert is a per-row id.
                                     expert = K.local_scalar("int32")
@@ -918,8 +914,7 @@ def build_kernel(spec: GemmSpec):
                                 # TMA (source `:237-240`).
                                 if use_effective_m:
                                     # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
-                                    ld_eff_m = K.local_scalar("int32")
-                                    K.assign(ld_eff_m, block_m)
+                                    ld_eff_m = K.local_scalar("int32", init=block_m)
                                     with K.If(ld_m_local == ld_sched.nmb - 1), K.Then():
                                         K.assign(
                                             ld_eff_m,
@@ -947,8 +942,7 @@ def build_kernel(spec: GemmSpec):
                                         )
                                     else:
                                         K.assign(n_idx, n_idx + cta_in_cluster * load_block_n)
-                                ld_k = K.local_scalar("int32")
-                                K.assign(ld_k, 0)
+                                ld_k = K.local_scalar("int32", init=0)
                                 with K.While(ld_k < ld_kblocks):
                                     _wait_barrier(
                                         empty_barriers.ptr_to([ld_pipe.stage]),
@@ -996,8 +990,7 @@ def build_kernel(spec: GemmSpec):
                                             full_barriers.ptr_to([ld_pipe.stage]),
                                             K.uint64(EVICT_NORMAL),
                                         )
-                                    arrival = K.local_scalar("int32")
-                                    K.assign(arrival, arrival_bytes_ab)
+                                    arrival = K.local_scalar("int32", init=arrival_bytes_ab)
                                     with K.If(ld_k % sfa_stages_per_load == 0):
                                         with K.Then():
                                             K.ptx[sf_load_chain](
@@ -1111,10 +1104,9 @@ def build_kernel(spec: GemmSpec):
                             if use_effective_m:
                                 # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
                                 mma_eff_m = K.local_scalar("int32")
-                                mma_m_local = K.local_scalar("int32")
-                                K.assign(
-                                    mma_m_local,
-                                    _swizzled(
+                                mma_m_local = K.local_scalar(
+                                    "int32",
+                                    init=_swizzled(
                                         mma_sched.nb - mma_sched.cum * num_n_blocks,
                                         mma_sched.nmb,
                                         num_n_blocks,
@@ -1153,16 +1145,15 @@ def build_kernel(spec: GemmSpec):
                             )
                             K.ptx.tcgen05.fence__after_thread_sync()
 
-                            mma_k = K.local_scalar("int32")
-                            K.assign(mma_k, 0)
+                            mma_k = K.local_scalar("int32", init=0)
                             # `#pragma unroll 4` (source `:339`).  Four bodies per back-edge with
                             # `mma_k == 4 * j + u` makes `mma_k % kNumSF?StagesPerLoad` the constant
                             # `u`, which is what removes the scale-factor id arithmetic and the UTCCP
                             # branch from three of every four K blocks.
-                            mma_k_rounded = K.local_scalar("int32")
-                            K.assign(
-                                mma_k_rounded,
-                                ((mma_kblocks + (MMA_K_UNROLL - 1)) // MMA_K_UNROLL) * MMA_K_UNROLL,
+                            mma_k_rounded = K.local_scalar(
+                                "int32",
+                                init=((mma_kblocks + (MMA_K_UNROLL - 1)) // MMA_K_UNROLL)
+                                * MMA_K_UNROLL,
                             )
                             with K.While(mma_k < mma_k_rounded):
                                 with K.unroll(0, MMA_K_UNROLL) as u:
@@ -1286,10 +1277,9 @@ def build_kernel(spec: GemmSpec):
                                                         )
                                                     ),
                                                 )
-                                                rt_desc = K.local_scalar("uint32")
-                                                K.assign(
-                                                    rt_desc,
-                                                    _with_sf_id(
+                                                rt_desc = K.local_scalar(
+                                                    "uint32",
+                                                    init=_with_sf_id(
                                                         desc_i,
                                                         (sfb_id if swap_ab else sfa_id),
                                                         (sfa_id if swap_ab else sfb_id),
@@ -1399,8 +1389,7 @@ def build_kernel(spec: GemmSpec):
                 num_blocks,
                 track_sfk=False,
             )
-            tr_kblocks = K.local_scalar("int32")
-            K.assign(tr_kblocks, 0)
+            tr_kblocks = K.local_scalar("int32", init=0)
             sf_vals = K.alloc_local((4,), "uint32")
             with K.While(tr_sched.valid == 1):
                 tr_sched.next()
@@ -1410,8 +1399,7 @@ def build_kernel(spec: GemmSpec):
                             tr_kblocks,
                             (_uceil(tr_sched.psum, block_k) if is_k_grouped else num_k_blocks),
                         )
-                        tr_k = K.local_scalar("int32")
-                        K.assign(tr_k, 0)
+                        tr_k = K.local_scalar("int32", init=0)
                         with K.While(tr_k < tr_kblocks):
                             _wait_barrier(full_barriers.ptr_to([tr_pipe.stage]), tr_pipe.phase)
                             # The prior logical task may still read this stage through tcgen05's
@@ -1475,8 +1463,7 @@ def build_kernel(spec: GemmSpec):
 
         def epilogue_role_body(ep_warp):
             accum_pipe_e = K.PipelineState(NUM_EPILOGUE_STAGES, phase=0)
-            tma_stage = K.local_scalar("int32")
-            K.assign(tma_stage, 0)
+            tma_stage = K.local_scalar("int32", init=0)
             ep_sched = _PersistentScheduler(
                 spec,
                 grouped_layout,
@@ -1513,15 +1500,13 @@ def build_kernel(spec: GemmSpec):
                         K.assign(base_n, ep_n_local * block_n)
                         if is_m_grouped_masked or is_k_grouped:
                             K.assign(base_m, ep_sched.grp * eff_m + base_m)
-                        tmem_base = K.local_scalar("int32")
-                        K.assign(tmem_base, accum_pipe_e.stage * umma_n)
+                        tmem_base = K.local_scalar("int32", init=accum_pipe_e.stage * umma_n)
 
                         # `num_stores = effective_m / STORE_BLOCK_M` (sketch `:1276`).
                         ep_stores = K.local_scalar("int32")
                         if use_effective_m:
                             # `get_aligned_effective_m_in_block` for this block (sketch `:559`).
-                            ep_eff_m = K.local_scalar("int32")
-                            K.assign(ep_eff_m, block_m)
+                            ep_eff_m = K.local_scalar("int32", init=block_m)
                             with K.If(ep_m_local == ep_sched.nmb - 1), K.Then():
                                 K.assign(
                                     ep_eff_m,
@@ -1552,10 +1537,9 @@ def build_kernel(spec: GemmSpec):
                                         K.uint32(num_store_threads),
                                     )
                                     with K.unroll(0, num_atom_rows) as i:
-                                        taddr_s = K.local_scalar("uint32")
-                                        K.assign(
-                                            taddr_s,
-                                            K.cast(
+                                        taddr_s = K.local_scalar(
+                                            "uint32",
+                                            init=K.cast(
                                                 tmem_base + st * store_block_m + i * 8, "uint32"
                                             ),
                                         )
@@ -1567,8 +1551,7 @@ def build_kernel(spec: GemmSpec):
                                                 *[values[j] for j in range(8)], taddr_s
                                             )
                                             K.ptx.tcgen05.wait__ld.sync.aligned()
-                                            col_f = K.local_scalar("int32")
-                                            K.assign(col_f, lane_idx // 4)
+                                            col_f = K.local_scalar("int32", init=lane_idx // 4)
                                             with K.unroll(0, 8) as row:
                                                 K.ptx.st.shared.u32(
                                                     smem_cd_u32.ptr_to(
@@ -1708,12 +1691,12 @@ def build_kernel(spec: GemmSpec):
                                         col = K.bitwise_xor(col, row % (swizzle_cd // 16))
                                         # `smem_ptr` in the source: one address per bank
                                         # group, four registers stored at it.
-                                        cd_word = K.local_scalar("int32")
-                                        K.assign(cd_word, _cd_word(tma_stage, ep_warp, row, col, 0))
-                                        taddr = K.local_scalar("uint32")
-                                        K.assign(
-                                            taddr,
-                                            K.cast(
+                                        cd_word = K.local_scalar(
+                                            "int32", init=_cd_word(tma_stage, ep_warp, row, col, 0)
+                                        )
+                                        taddr = K.local_scalar(
+                                            "uint32",
+                                            init=K.cast(
                                                 tmem_base
                                                 + w * block_n
                                                 + st * store_block_n

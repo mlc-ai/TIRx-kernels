@@ -699,8 +699,7 @@ def get_kernel(**kwargs: Any):
         def load_num_kv(q_atom_idx_arg, runtime_batch_size_arg):
             context_len = K.local_scalar("uint32")
             if config.varlen:
-                context_idx = K.local_scalar("uint32")
-                K.assign(context_idx, q_atom_idx_arg)
+                context_idx = K.local_scalar("uint32", init=q_atom_idx_arg)
                 with K.If(q_atom_idx_arg + K.uint32(1) < runtime_batch_size_arg), K.Then():
                     index_pair = K.alloc_local([2], "int32")
                     K.ptx.ld.global_.s32(
@@ -853,8 +852,7 @@ def get_kernel(**kwargs: Any):
             K.min(start_q_atom_idx, batch_size * K.uint32(num_next_n_atoms) - K.uint32(1)),
             batch_size,
         )
-        start_num_kv = K.local_scalar("uint32")
-        K.assign(start_num_kv, num_kv_result)
+        start_num_kv = K.local_scalar("uint32", init=num_kv_result)
 
         # Warm the block table into L2 as early as possible. Race-safe: a stale
         # prefetched line is invalidated by any later producer write.
@@ -864,14 +862,11 @@ def get_kernel(**kwargs: Any):
                 # `K.uint32` and the generated CUDA shows `line_idx_ptr[0]`.
                 # Left as an expression it is re-substituted at every use, which
                 # re-reads laneid each time (17 sreg reads vs the original's 5).
-                line_idx = K.local_scalar("uint32")
-                K.assign(
-                    line_idx,
-                    (
-                        (warp_idx_u32 - K.uint32(tma_warp_0)) * K.uint32(32)
-                        + lane_idx_u32
-                        + K.uint32(pf_i * 64)
-                    ),
+                line_idx = K.local_scalar(
+                    "uint32",
+                    init=(warp_idx_u32 - K.uint32(tma_warp_0)) * K.uint32(32)
+                    + lane_idx_u32
+                    + K.uint32(pf_i * 64),
                 )
                 with K.If(line_idx < K.uint32(num_prefetch_lines)), K.Then():
                     K.ptx.prefetch.global_.L2(
@@ -973,25 +968,20 @@ def get_kernel(**kwargs: Any):
             warp collective in a loop: G3 forbids moving it."""
             with K.If(kv_ptr[0] == K.uint32(32)), K.Then():
                 K.assign(kv_ptr[0], K.uint32(0))
-                block_table_offset = K.local_scalar("uint64")
-                K.assign(
-                    block_table_offset,
-                    K.Cast("uint64", atom_to_block_table_row_expr(state["q_atom"][0]))
+                block_table_offset = K.local_scalar(
+                    "uint64",
+                    init=K.Cast("uint64", atom_to_block_table_row_expr(state["q_atom"][0]))
                     * K.Cast("uint64", block_table_stride),
                 )
-                prefetch_tile_idx = K.local_scalar("uint32")
-                K.assign(
-                    prefetch_tile_idx,
-                    (
-                        state["kv_idx"][0]
-                        + K.uint32(lane_offset_tiles)
-                        + lane_idx_u32 * K.uint32(num_tiles_per_split)
-                    ),
+                prefetch_tile_idx = K.local_scalar(
+                    "uint32",
+                    init=state["kv_idx"][0]
+                    + K.uint32(lane_offset_tiles)
+                    + lane_idx_u32 * K.uint32(num_tiles_per_split),
                 )
-                block_table_index = K.local_scalar("uint64")
-                K.assign(
-                    block_table_index,
-                    block_table_offset
+                block_table_index = K.local_scalar(
+                    "uint64",
+                    init=block_table_offset
                     + K.Cast("uint64", prefetch_tile_idx * K.uint32(num_pages_per_tile)),
                 )
                 for block_i in range(num_pages_per_tile):
@@ -1069,10 +1059,8 @@ def get_kernel(**kwargs: Any):
             K.assign(kv_ptr[0], K.uint32(32))
             with K.While(state["fetched"][0] != K.uint32(0)):
                 load_atom_advance(state["next_q"][0], batch_size)
-                next_advance = K.local_scalar("uint32")
-                K.assign(next_advance, atom_advance_result)
-                prefetch_q = K.local_scalar("uint32")
-                K.assign(prefetch_q, K.uint32(0))
+                next_advance = K.local_scalar("uint32", init=atom_advance_result)
+                prefetch_q = K.local_scalar("uint32", init=K.uint32(0))
                 with (
                     K.If(
                         K.And(
@@ -1165,8 +1153,7 @@ def get_kernel(**kwargs: Any):
             q_state = K.RingState(num_q_stages)
             kv_state = K.RingState(num_kv_stages)
             umma_state = K.RingState(num_umma_stages)
-            q_stage = K.local_scalar("uint32")
-            K.assign(q_stage, K.uint32(0))
+            q_stage = K.local_scalar("uint32", init=K.uint32(0))
             pump(state)
             with K.While(state["fetched"][0] != K.uint32(0)):
                 with K.If(state["q_atom"][0] != state["next_q"][0]), K.Then():
@@ -1228,22 +1215,19 @@ def get_kernel(**kwargs: Any):
             tmem_start_base = K.Cast("uint32", tmem.allocated_addr[0]) + math_wg_u32 * K.uint32(
                 umma_n * num_umma_stages
             )
-            math_thread_idx = K.local_scalar("uint32")
-            K.assign(
-                math_thread_idx,
-                (K.Cast("uint32", K.warp_id_in_role()) % K.uint32(4)) * K.uint32(32) + lane_idx_u32,
+            math_thread_idx = K.local_scalar(
+                "uint32",
+                init=(K.Cast("uint32", K.warp_id_in_role()) % K.uint32(4)) * K.uint32(32)
+                + lane_idx_u32,
             )
             cached_weights = K.alloc_local([next_n_atom, num_heads], "float32")
-            is_paired_atom = K.local_scalar("uint32")
-            K.assign(is_paired_atom, K.uint32(0))
+            is_paired_atom = K.local_scalar("uint32", init=K.uint32(0))
             state = scheduler_state()
             q_state = K.RingState(num_q_stages)
             kv_state = K.RingState(num_kv_stages)
             umma_state = K.RingState(num_umma_stages)
-            q_stage = K.local_scalar("uint32")
-            K.assign(q_stage, K.uint32(0))
-            has_q_stage = K.local_scalar("uint32")
-            K.assign(has_q_stage, K.uint32(0))
+            q_stage = K.local_scalar("uint32", init=K.uint32(0))
+            has_q_stage = K.local_scalar("uint32", init=K.uint32(0))
             pump(state)
 
             def reduce_and_store(num_iters_c, kv_offset, scale_kv, umma_stage_idx_arg):
@@ -1334,10 +1318,9 @@ def get_kernel(**kwargs: Any):
                         )
                 K.assign(state["q_atom"][0], state["next_q"][0])
                 K.assign(state["kv_idx"][0], state["next_kv"][0])
-                kv_offset = K.local_scalar("uint64")
-                K.assign(
-                    kv_offset,
-                    K.Cast("uint64", atom_to_token_idx_expr(state["q_atom"][0]))
+                kv_offset = K.local_scalar(
+                    "uint64",
+                    init=K.Cast("uint64", atom_to_token_idx_expr(state["q_atom"][0]))
                     * K.Cast("uint64", logits_stride)
                     + K.Cast("uint64", (state["kv_idx"][0] + math_wg_u32) * K.uint32(umma_m)),
                 )
