@@ -1,6 +1,6 @@
 # Expose predication and uniform control
 
-**Symptoms:** `branch_reconvergence`, `warp_divergence`, `excess_control_instructions`, `branch_in_hot_loop`, `serialized_stores`
+**Symptoms:** `branch_reconvergence`, `excess_control_instructions`, `branch_in_hot_loop`, `excess_guard_math`, `serialized_stores`
 
 ## Symptom
 
@@ -26,6 +26,23 @@ no spill.
 
 - For a loop-invariant uniform condition, hoist it and duplicate the hot loop
   only when that exposes a dense path without changing recurrence state.
+- When compile-time launch and tiling facts prove complete rows and vectors,
+  expose a separate guard-free specialization instead of carrying the generic
+  row, column, and zero-byte-copy predicates into every unrolled issue. Keep the
+  guarded path for partial rows and columns.
+
+  ```python
+  # before: the complete-vector specialization still materializes both guards.
+  source_bytes = T.if_then_else(row_valid and col_valid, COPY_BYTES, 0)
+  _copy_async(src, dst, source_bytes)
+
+  # after: launch and tiling proofs make the complete path literal.
+  if ROWS_PER_CTA == 1 and FULL_COLUMNS:
+      _copy_async(src, dst, T.uint32(COPY_BYTES))
+  else:
+      source_bytes = T.if_then_else(row_valid and col_valid, COPY_BYTES, 0)
+      _copy_async(src, dst, source_bytes)
+  ```
 - When the condition is runtime at kernel entry but constant throughout the CTA,
   an inline TIRx helper with a `T.constexpr` mode can force the two branch
   bodies to specialize independently: dispatch once on the runtime condition,
@@ -91,6 +108,13 @@ no spill.
   tensor pipe from 67.3% to 74.2% of cycles against the reference's 73.5%. On
   the gate the mainloop half is what moved the family, from 0.939-0.983x to
   0.995-1.035x.
+- In a rows-one, full-vector specialization, making the launch proof explicit
+  removed eight asynchronous-copy row/source-byte guards, eight weight-column
+  guards, and eight output-row guards. Static SASS fell from 693 to 669
+  instructions, `BRA` from 9 to 1, and `ISETP` from 17 to 1 while the eight
+  copies, eight loads, and eight stores were unchanged. Two affected ratios
+  moved from 0.9794 to 0.9895 and from 0.9869 to 0.9955; a neighboring multi-row
+  shape stayed flat at 0.9836 to 0.9834.
 
 The reference's source text does not reveal whether it wants this. nvcc
 routinely duplicates a loop around a store predicate the reference wrote per
@@ -103,6 +127,13 @@ duplicated, and matching that multiple is the target.
 
 Do not predicate substantial computation or duplicate a body that causes
 instruction-cache pressure, spills, or lower occupancy.
+
+A complete-row proof must follow from the specialization's launch identity, not
+only from a favorite runtime sample. Preserve the generic guards for tail rows,
+partial vectors, strided layouts, and any ABI whose runtime extent can differ
+from the compile-time tile. Removing guard instructions is mechanism evidence,
+not a timing result: a separate divisible-row proof removed control and address
+instructions but still failed its affected performance shape.
 
 Not every predicate is worth rewriting. Rebuilding an integer-materialized
 condition as a boolean conjunction, aimed at an excess of logic ops and
