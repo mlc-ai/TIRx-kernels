@@ -165,69 +165,66 @@ def get_kernel(
         out_row = K.cast(row_idx, "int64") * (k // 2)
 
         # Pass 1: row amax (kernel:819-834).
-        local_amax = K.alloc_local([1], "float32")
-        sf_col = K.alloc_local([1], "int32")
-        K.assign(local_amax[0], K.float32(0.0))
-        K.assign(sf_col[0], tx)
-        with K.While(sf_col[0] < nsb):
-            elem_off = in_row + sf_col[0] * NVFP4_SF_VEC_SIZE
+        local_amax = K.local_scalar("float32")
+        sf_col = K.local_scalar("int32")
+        K.assign(local_amax, K.float32(0.0))
+        K.assign(sf_col, tx)
+        with K.While(sf_col < nsb):
+            elem_off = in_row + sf_col * NVFP4_SF_VEC_SIZE
             v0 = ld_global_v4_u32(K.address_of(in_global[elem_off]))
             v1 = ld_global_v4_u32(K.address_of(in_global[elem_off + 8]))
             words = [v0[i] for i in range(4)] + [v1[i] for i in range(4)]
             block_max = pair_max_to_f32(absmax_8(words, dtype), dtype)
-            K.assign(local_amax[0], fmax_f32(local_amax[0], block_max))
-            K.assign(sf_col[0], sf_col[0] + _PER_TOKEN_THREADS)
+            K.assign(local_amax, fmax_f32(local_amax, block_max))
+            K.assign(sf_col, sf_col + _PER_TOKEN_THREADS)
 
         # Warp + block max reduction (kernel:836-837; fp4_common:1356-1391).
-        warp_amax = warp_reduce_max(local_amax[0])
+        warp_amax = warp_reduce_max(local_amax)
         lane = K.truncmod(tx, K.int32(32))
         warp = K.truncdiv(tx, K.int32(32))
         with K.If(lane == 0), K.Then():
             K.ptx.st.shared.f32(red_buf.ptr_to([warp]), warp_amax)
         K.ptx.bar.sync(K.uint32(0), K.uint32(_PER_TOKEN_THREADS))
-        block_val = K.alloc_local([1], "float32")
-        K.assign(block_val[0], K.float32(0.0))
+        block_val = K.local_scalar("float32", init=K.float32(0.0))
         with K.If(lane < _PER_TOKEN_WARPS), K.Then():
-            K.ptx.ld.shared.f32(block_val[0], red_buf.ptr_to([lane]))
-        row_amax = warp_reduce_max(block_val[0])
+            K.ptx.ld.shared.f32(block_val, red_buf.ptr_to([lane]))
+        row_amax = warp_reduce_max(block_val)
 
         gs_inv = ld_global_f32(gsi, 0)
         # _row_scales, fast-math path (kernel:729-738).
-        encode_scale = K.alloc_local([1], "float32")
-        token_scale = K.alloc_local([1], "float32")
-        K.assign(encode_scale[0], K.float32(0.0))
-        K.assign(token_scale[0], K.float32(0.0))
+        encode_scale = K.local_scalar("float32")
+        token_scale = K.local_scalar("float32")
+        K.assign(encode_scale, K.float32(0.0))
+        K.assign(token_scale, K.float32(0.0))
         with K.If(row_amax == K.float32(0.0)):
             with K.Then():
-                K.assign(encode_scale[0], K.float32(FLOAT32_MAX))
-                K.assign(token_scale[0], K.float32(0.0))
+                K.assign(encode_scale, K.float32(FLOAT32_MAX))
+                K.assign(token_scale, K.float32(0.0))
             with K.Else():
-                K.assign(token_scale[0], mul_f32(row_amax, gs_inv))
-                K.assign(encode_scale[0], rcp_approx_ftz(token_scale[0]))
+                K.assign(token_scale, mul_f32(row_amax, gs_inv))
+                K.assign(encode_scale, rcp_approx_ftz(token_scale))
 
         with K.If(tx == 0), K.Then():
-            K.ptx.st.global_.f32(pts_out.ptr_to([row_idx]), token_scale[0])
+            K.ptx.st.global_.f32(pts_out.ptr_to([row_idx]), token_scale)
         K.ptx.bar.sync(K.uint32(0), K.uint32(_PER_TOKEN_THREADS))
 
         # Pass 2: quantize with the row encode scale (kernel:846-875).
-        sf_col2 = K.alloc_local([1], "int32")
-        K.assign(sf_col2[0], tx)
-        with K.While(sf_col2[0] < nsb):
+        sf_col2 = K.local_scalar("int32", init=tx)
+        with K.While(sf_col2 < nsb):
             scale_fp8, packed64 = _process_block_pt(
-                in_global, in_row + sf_col2[0] * NVFP4_SF_VEC_SIZE, encode_scale[0], dtype=dtype
+                in_global, in_row + sf_col2 * NVFP4_SF_VEC_SIZE, encode_scale, dtype=dtype
             )
             # Source order: SF byte store, then output store (:869/:873).
-            st_global_u8(K.address_of(sf_out[sf_offset(row_idx, sf_col2[0])]), scale_fp8)
-            st_global_u64(K.address_of(out_global[out_row + sf_col2[0] * 8]), packed64)
-            K.assign(sf_col2[0], sf_col2[0] + _PER_TOKEN_THREADS)
+            st_global_u8(K.address_of(sf_out[sf_offset(row_idx, sf_col2)]), scale_fp8)
+            st_global_u64(K.address_of(out_global[out_row + sf_col2 * 8]), packed64)
+            K.assign(sf_col2, sf_col2 + _PER_TOKEN_THREADS)
 
         # Padding SF columns for swizzled layouts (kernel:877-882).
         if sf_layout != "linear":
-            sf_pad = K.alloc_local([1], "int32")
-            K.assign(sf_pad[0], nsb + tx)
-            with K.While(sf_pad[0] < pad_cols):
-                st_global_u8(K.address_of(sf_out[sf_offset(row_idx, sf_pad[0])]), K.uint8(0))
-                K.assign(sf_pad[0], sf_pad[0] + _PER_TOKEN_THREADS)
+            sf_pad = K.local_scalar("int32", init=nsb + tx)
+            with K.While(sf_pad < pad_cols):
+                st_global_u8(K.address_of(sf_out[sf_offset(row_idx, sf_pad)]), K.uint8(0))
+                K.assign(sf_pad, sf_pad + _PER_TOKEN_THREADS)
 
         if enable_pdl:
             K.ptx.griddepcontrol.launch_dependents()

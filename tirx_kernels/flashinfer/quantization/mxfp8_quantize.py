@@ -200,9 +200,8 @@ def _quantize_block(in_global, out_global, row_idx, sf_col, thread_in_unit, *, d
 
 
 def _materialize(value):
-    local = K.alloc_local((1,), str(value.ty.dtype))
-    K.assign(local[0], value)
-    return local[0]
+    local = K.local_scalar(str(value.ty.dtype), init=value)
+    return local
 
 
 def get_kernel(
@@ -245,11 +244,10 @@ def get_kernel(
             thread_in_sf = K.truncmod(lane_idx, K.int32(tps))
 
             # Grid-stride loop over flat SF blocks (mxfp8_quantize.py:248-326).
-            sf_idx = K.alloc_local([1], "int32")
-            K.assign(sf_idx[0], bx * sfbpt + warp_idx * sfbpw + sf_idx_in_warp)
-            with K.While(sf_idx[0] < total_sf):
-                row_idx = K.truncdiv(sf_idx[0], K.int32(nsb))
-                col_idx = K.truncmod(sf_idx[0], K.int32(nsb))
+            sf_idx = K.local_scalar("int32", init=bx * sfbpt + warp_idx * sfbpw + sf_idx_in_warp)
+            with K.While(sf_idx < total_sf):
+                row_idx = K.truncdiv(sf_idx, K.int32(nsb))
+                col_idx = K.truncmod(sf_idx, K.int32(nsb))
                 scale_ue8m0_u32 = _quantize_block(
                     in_global,
                     out_global,
@@ -261,8 +259,8 @@ def get_kernel(
                     k=k,
                 )
                 with K.If(thread_in_sf == 0), K.Then():
-                    st_global_u8(K.address_of(sf_out[sf_idx[0]]), K.cast(scale_ue8m0_u32, "uint8"))
-                K.assign(sf_idx[0], sf_idx[0] + grid_x * sfbpt)
+                    st_global_u8(K.address_of(sf_out[sf_idx]), K.cast(scale_ue8m0_u32, "uint8"))
+                K.assign(sf_idx, sf_idx + grid_x * sfbpt)
 
             if enable_pdl:
                 K.ptx.griddepcontrol.launch_dependents()
@@ -295,31 +293,27 @@ def get_kernel(
             col_unit_idx = K.truncdiv(tx, K.int32(tps))
             thread_in_unit = K.truncmod(tx, K.int32(tps))
 
-            row_idx = K.alloc_local([1], "int32")
-            K.assign(row_idx[0], bx)
-            with K.While(row_idx[0] < padded_rows):
-                with K.If(row_idx[0] >= m_rows):
+            row_idx = K.local_scalar("int32", init=bx)
+            with K.While(row_idx < padded_rows):
+                with K.If(row_idx >= m_rows):
                     with K.Then():
                         # Padding row: zero out scale factors only (:481-489).
-                        sc_pad = K.alloc_local([1], "int32")
-                        K.assign(sc_pad[0], col_unit_idx)
-                        with K.While(sc_pad[0] < pad_cols):
+                        sc_pad = K.local_scalar("int32", init=col_unit_idx)
+                        with K.While(sc_pad < pad_cols):
                             with K.If(thread_in_unit == 0), K.Then():
                                 st_global_u8(
-                                    K.address_of(sf_out[sf_offset(row_idx[0], sc_pad[0])]),
-                                    K.uint8(0),
+                                    K.address_of(sf_out[sf_offset(row_idx, sc_pad)]), K.uint8(0)
                                 )
-                            K.assign(sc_pad[0], sc_pad[0] + col_units_per_block)
+                            K.assign(sc_pad, sc_pad + col_units_per_block)
                     with K.Else():
                         # Data row: quantize each SF block in the column loop.
-                        sc = K.alloc_local([1], "int32")
-                        K.assign(sc[0], col_unit_idx)
-                        with K.While(sc[0] < nsb):
+                        sc = K.local_scalar("int32", init=col_unit_idx)
+                        with K.While(sc < nsb):
                             scale_ue8m0_u32 = _quantize_block(
                                 in_global,
                                 out_global,
-                                row_idx[0],
-                                sc[0],
+                                row_idx,
+                                sc,
                                 thread_in_unit,
                                 dtype=dtype,
                                 use_2t=use_2t,
@@ -327,21 +321,19 @@ def get_kernel(
                             )
                             with K.If(thread_in_unit == 0), K.Then():
                                 st_global_u8(
-                                    K.address_of(sf_out[sf_offset(row_idx[0], sc[0])]),
+                                    K.address_of(sf_out[sf_offset(row_idx, sc)]),
                                     K.cast(scale_ue8m0_u32, "uint8"),
                                 )
-                            K.assign(sc[0], sc[0] + col_units_per_block)
+                            K.assign(sc, sc + col_units_per_block)
                         # Padding SF columns of a data row (:580-587).
-                        sc_tail = K.alloc_local([1], "int32")
-                        K.assign(sc_tail[0], nsb + col_unit_idx)
-                        with K.While(sc_tail[0] < pad_cols):
+                        sc_tail = K.local_scalar("int32", init=nsb + col_unit_idx)
+                        with K.While(sc_tail < pad_cols):
                             with K.If(thread_in_unit == 0), K.Then():
                                 st_global_u8(
-                                    K.address_of(sf_out[sf_offset(row_idx[0], sc_tail[0])]),
-                                    K.uint8(0),
+                                    K.address_of(sf_out[sf_offset(row_idx, sc_tail)]), K.uint8(0)
                                 )
-                            K.assign(sc_tail[0], sc_tail[0] + col_units_per_block)
-                K.assign(row_idx[0], row_idx[0] + grid_x)
+                            K.assign(sc_tail, sc_tail + col_units_per_block)
+                K.assign(row_idx, row_idx + grid_x)
         else:
             # Small K: multi-row processing (mxfp8_quantize.py:590-727).
             row_in_block = _materialize(K.truncdiv(tx, K.int32(threads_per_row)))
@@ -349,31 +341,30 @@ def get_kernel(
             sf_col_idx = _materialize(K.truncdiv(local_tidx, K.int32(tps)))
             thread_in_unit = _materialize(K.truncmod(local_tidx, K.int32(tps)))
 
-            row_batch_idx = K.alloc_local([1], "int32")
-            row_idx2 = K.alloc_local([1], "int32")
-            K.assign(row_batch_idx[0], bx)
-            K.assign(row_idx2[0], row_batch_idx[0] * rows_per_block + row_in_block)
-            with K.While(row_batch_idx[0] * rows_per_block < padded_rows):
-                with K.If(row_idx2[0] < padded_rows), K.Then():
-                    with K.If(row_idx2[0] >= m_rows):
+            row_batch_idx = K.local_scalar("int32")
+            row_idx2 = K.local_scalar("int32")
+            K.assign(row_batch_idx, bx)
+            K.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
+            with K.While(row_batch_idx * rows_per_block < padded_rows):
+                with K.If(row_idx2 < padded_rows), K.Then():
+                    with K.If(row_idx2 >= m_rows):
                         with K.Then():
                             # Padding row: zero ALL padded SF columns; the stride is
                             # num_sf_blocks_per_row (:609-620).
                             with K.If(thread_in_unit == 0), K.Then():
-                                pad_col = K.alloc_local([1], "int32")
-                                K.assign(pad_col[0], sf_col_idx)
-                                with K.While(pad_col[0] < pad_cols):
+                                pad_col = K.local_scalar("int32", init=sf_col_idx)
+                                with K.While(pad_col < pad_cols):
                                     st_global_u8(
-                                        K.address_of(sf_out[sf_offset(row_idx2[0], pad_col[0])]),
+                                        K.address_of(sf_out[sf_offset(row_idx2, pad_col)]),
                                         K.uint8(0),
                                     )
-                                    K.assign(pad_col[0], pad_col[0] + nsb)
+                                    K.assign(pad_col, pad_col + nsb)
                         with K.Else():
                             with K.If(sf_col_idx < nsb), K.Then():
                                 scale_ue8m0_u32 = _quantize_block(
                                     in_global,
                                     out_global,
-                                    row_idx2[0],
+                                    row_idx2,
                                     sf_col_idx,
                                     thread_in_unit,
                                     dtype=dtype,
@@ -382,24 +373,21 @@ def get_kernel(
                                 )
                                 with K.If(thread_in_unit == 0), K.Then():
                                     st_global_u8(
-                                        K.address_of(sf_out[sf_offset(row_idx2[0], sf_col_idx)]),
+                                        K.address_of(sf_out[sf_offset(row_idx2, sf_col_idx)]),
                                         K.cast(scale_ue8m0_u32, "uint8"),
                                     )
                             # Padding SF columns of a data row (:711-723).
                             if pad_cols != nsb:
                                 with K.If(thread_in_unit == 0), K.Then():
-                                    pad_col2 = K.alloc_local([1], "int32")
-                                    K.assign(pad_col2[0], nsb + sf_col_idx)
-                                    with K.While(pad_col2[0] < pad_cols):
+                                    pad_col2 = K.local_scalar("int32", init=nsb + sf_col_idx)
+                                    with K.While(pad_col2 < pad_cols):
                                         st_global_u8(
-                                            K.address_of(
-                                                sf_out[sf_offset(row_idx2[0], pad_col2[0])]
-                                            ),
+                                            K.address_of(sf_out[sf_offset(row_idx2, pad_col2)]),
                                             K.uint8(0),
                                         )
-                                        K.assign(pad_col2[0], pad_col2[0] + nsb)
-                K.assign(row_batch_idx[0], row_batch_idx[0] + grid_x)
-                K.assign(row_idx2[0], row_batch_idx[0] * rows_per_block + row_in_block)
+                                        K.assign(pad_col2, pad_col2 + nsb)
+                K.assign(row_batch_idx, row_batch_idx + grid_x)
+                K.assign(row_idx2, row_batch_idx * rows_per_block + row_in_block)
 
         if enable_pdl:
             K.ptx.griddepcontrol.launch_dependents()
