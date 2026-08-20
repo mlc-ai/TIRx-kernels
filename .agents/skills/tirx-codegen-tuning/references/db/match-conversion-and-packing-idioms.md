@@ -115,12 +115,19 @@ scalar-narrowed eight-element path still repacked its results for a
 correctness matrix and retained a final 1.003-1.010x three-shape benchmark
 matrix.
 
-In a second measured packed-4-bit family, one eight-value group became exactly
-four `cvt.rn.satfinite.e2m1x2.f32` plus one `mov.b32` instead of separate byte
-returns and a shift/or chain. Its scale byte also flowed from a uint32 word to
-one `st.global.b8` without a narrowing instruction. Exact packed-output and
-scale-byte comparison passed 1,025 configurations, and all six measured shapes
-retained 1.018-1.046x reference/port ratios.
+A packed instruction can keep the reference's PTX mnemonic and arithmetic count
+and still lose at the register-pair boundary. Against an identical baseline
+launch, one port kept every global and shared transaction count and had no
+spill, yet executed 339,902,492 instructions instead of 309,821,468 (+9.71%)
+and took 398.3 instead of 370.3 microseconds (+7.56%). The opcode delta was
+`MOV +19,038,208`, `IMAD +14,155,776`, and `LEA -7,733,248`; source correlation
+assigned about 23.59 million of the `MOV`/`IMAD.MOV` instructions to
+`fma.rn.f32x2`'s independent 64-bit output constraint, while the explicit
+`mov.b64` helper contributed only about 0.79 million. Check dynamic opcodes and
+constraint tying before blaming static expansion or the explicit packing calls.
+Where the state update is naturally in place, the missing primitive is a native
+tied read-write operand; a kernel-local asm wrapper is not an
+instruction-selection fix.
 
 ## Boundary
 

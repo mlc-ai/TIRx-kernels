@@ -39,6 +39,17 @@ deficit that disappears once the SM array fills is occupancy -- and then the
 measurement, because a benchmark can carry a per-side bias that no amount of
 codegen work will move.
 
+A selective-state-update port gives the stronger counterexample. Forcing four
+two-trip state loops to a single trip per unrolled body cut PTX instructions
+from 1,548 to 1,007, packed FMA copies from 128 to 64, and main-function SASS
+from 1,608 to 1,080 -- below the reference's 1,224. The same-GPU production row
+nevertheless moved from about 378.5 to 381.1 us, farther from the 351.9 us
+reference. A large static code reduction therefore falsified the
+instruction-cache explanation for that 7.6% deficit. Treat loop-body size as a
+mechanism only after timing moves with it; otherwise inspect the realized
+schedule and latency of the executed path instead of continuing to minimize dead
+or duplicated code.
+
 ## Boundary
 
 This is a stopping rule for the fixed region of a small kernel, not licence to

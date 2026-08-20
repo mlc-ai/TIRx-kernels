@@ -62,6 +62,13 @@ TIRx expressions are trees. Reusing a `PrimExpr` can emit its complete subtree
 at every use; ptxas does not reliably recover the intended common subexpression,
 and no backend merges across opaque inline asm.
 
+In one measured KDA port, restoring two fixed-loop unrolls reduced
+stage-4/stage-8 SASS from 688/792 to 672/776 instructions; materializing the
+reused entry, address, and output scalars then restored the reference's 608/704
+instructions and 33/46 registers, with one fewer stage-8 special-register read.
+The combined change moved all eight benchmark ratios from 0.894-0.996x to
+0.995-1.008x.
+
 In one recurrent state update, the scalar-forwarding rewrite changed no PTX line
 count but reduced the realized register allocation from 60 to 48 and static SASS
 from 1080 to 1000 instructions; `IMAD.MOV.U32` fell from 84 to 31 and `MOV` from
@@ -72,6 +79,18 @@ from 1080 to 1000 instructions; `IMAD.MOV.U32` fell from 84 to 31 and `MOV` from
 The reverse direction has a limit. Hoisting address invariants the backend
 already merges changes almost nothing: one such hoist moved static SASS by five
 instructions and left the shift count untouched.
+
+`K.Bind` has its own lowering boundary. A let-bound quotient, index, or offset
+that feeds a buffer view or pointer expression can still be substituted into
+every address use. In one eight-warp PDL combine, that repeated dynamic division
+and address arithmetic produced 296 SASS instructions and 42 registers, and two
+clean short-row campaigns measured 1.01773 and 1.01334 after/before.
+Materializing only the persistent indices, split bounds, and base offsets in
+one-element local slots restored the 280-instruction, 47-register SASS
+byte-for-byte across all three default specializations, and all 15 correctness
+configurations passed. Keep `K.Bind` for ordinary reused expressions, but
+inspect generated CUDA when a value crosses buffer/view lowering and use a local
+slot where the let is expanded instead of forwarded.
 
 A smaller generated program is not sufficient evidence to keep this rewrite.
 In one dependency-protocol specialization, forwarding a row predicate removed
