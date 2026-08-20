@@ -849,9 +849,4 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
             _I.buffer_store(vals, vals[i] + carry[0], [i])
 
 
-__all__ = [
-    "cast_f16x2_to_f32x2",
-    "decode_instr_descriptor",
-    "mma_chain",
-    "warp_scan_add",
-]
+__all__ = ["cast_f16x2_to_f32x2", "decode_instr_descriptor", "mma_chain", "warp_scan_add"]

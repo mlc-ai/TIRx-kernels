@@ -60,7 +60,15 @@ from tvm.tirx.script.builder import ir as _I
 from . import idioms
 from .entry import Kernel, TensorMap, cta_id, gptr, kernel, lane_id, thread_id, warp_id
 from .ring import RingState
-from .smem import KDesc, KStep, KTile, KTileView, SmemDescriptor, smem_desc_add_16B_offset, smem_pool
+from .smem import (
+    KDesc,
+    KStep,
+    KTile,
+    KTileView,
+    SmemDescriptor,
+    smem_desc_add_16B_offset,
+    smem_pool,
+)
 from .specialize import specialize, tid_in_role, warp_id_in_role
 
 # ---------------------------------------------------------------------------

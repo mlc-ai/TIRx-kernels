@@ -86,8 +86,7 @@ def load_acq_u32(dst, address):
 
 def grid_sync_done_u32(new_value, old_value):
     return K.cast(
-        K.bitwise_and(K.bitwise_xor(new_value, old_value), K.uint32(0x80000000))
-        != K.uint32(0),
+        K.bitwise_and(K.bitwise_xor(new_value, old_value), K.uint32(0x80000000)) != K.uint32(0),
         "uint32",
     )
 
@@ -119,9 +118,7 @@ def prefetch_tensormap(tensor_map):
 
 
 def lds128(src_ptr, dst, base=0):
-    return K.ptx.ld.shared.v4.u32(
-        dst[base], dst[base + 1], dst[base + 2], dst[base + 3], src_ptr
-    )
+    return K.ptx.ld.shared.v4.u32(dst[base], dst[base + 1], dst[base + 2], dst[base + 3], src_ptr)
 
 
 def mbarrier_arrive_and_set_tx(barrier_ptr, num_bytes):
@@ -135,20 +132,15 @@ def mbarrier_wait_phase(barrier_ptr, phase):
 def replace_smem_desc_addr(desc, smem_ptr):
     start_addr = K.cast(
         K.bitwise_and(
-            K.shift_right(K.cuda.cvta_generic_to_shared(smem_ptr), K.uint32(4)),
-            K.uint32(0x3FFF),
+            K.shift_right(K.cuda.cvta_generic_to_shared(smem_ptr), K.uint32(4)), K.uint32(0x3FFF)
         ),
         "uint64",
     )
-    return K.bitwise_or(
-        K.bitwise_and(desc, K.bitwise_not(K.uint64(0x3FFF))), start_addr
-    )
+    return K.bitwise_or(K.bitwise_and(desc, K.bitwise_not(K.uint64(0x3FFF))), start_addr)
 
 
 #: Bulk global -> shared copy, completion signalled on an mbarrier.
-_bulk_g2s_chain = (
-    "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
-)
+_bulk_g2s_chain = "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
 
 #: Bulk shared -> global copy, retired through the bulk commit group.
 _bulk_s2g_chain = "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint"
@@ -252,9 +244,7 @@ def peer_atomic_add_u64(dst, peer_base, byte_offset, value):
 
 
 def peer_red_add_rel_sys_s32(peer_base, byte_offset, value):
-    return K.ptx.red.release.sys.global_.add.s32(
-        peer_ptr(peer_base, byte_offset), value
-    )
+    return K.ptx.red.release.sys.global_.add.s32(peer_ptr(peer_base, byte_offset), value)
 
 
 def peer_load_u32(dst, peer_base, byte_offset):
@@ -300,9 +290,7 @@ def bf16x2_lo(packed):
 
 
 def bf16x2_hi(packed):
-    return K.cast(
-        K.bitwise_and(K.shift_right(packed, K.uint32(16)), K.uint32(0xFFFF)), "uint16"
-    )
+    return K.cast(K.bitwise_and(K.shift_right(packed, K.uint32(16)), K.uint32(0xFFFF)), "uint16")
 
 
 def cast_into_bf16_and_pack(v0, v1):
@@ -311,12 +299,8 @@ def cast_into_bf16_and_pack(v0, v1):
 
 def make_runtime_instr_desc_with_sf_id(desc, sfa_id, sfb_id):
     runtime_desc = K.bitwise_and(desc, K.uint32(0x9FFFFFCF))
-    runtime_desc = K.bitwise_or(
-        runtime_desc, K.shift_left(K.cast(sfa_id, "uint32"), K.uint32(29))
-    )
-    runtime_desc = K.bitwise_or(
-        runtime_desc, K.shift_left(K.cast(sfb_id, "uint32"), K.uint32(4))
-    )
+    runtime_desc = K.bitwise_or(runtime_desc, K.shift_left(K.cast(sfa_id, "uint32"), K.uint32(29)))
+    runtime_desc = K.bitwise_or(runtime_desc, K.shift_left(K.cast(sfb_id, "uint32"), K.uint32(4)))
     return runtime_desc
 
 
@@ -326,14 +310,10 @@ def st_async_cluster_task_info(dst_ptr, bar_ptr, dst_cta_idx, task_info_regs):
     mapped_dst_hi = K.alloc_local((1,), "uint32")
     cta = K.cast(dst_cta_idx, "uint32")
     K.evaluate(
-        K.ptx.mapa.shared__cluster.u32(
-            mapped_bar[0], K.cuda.cvta_generic_to_shared(bar_ptr), cta
-        )
+        K.ptx.mapa.shared__cluster.u32(mapped_bar[0], K.cuda.cvta_generic_to_shared(bar_ptr), cta)
     )
     K.evaluate(
-        K.ptx.mapa.shared__cluster.u32(
-            mapped_dst[0], K.cuda.cvta_generic_to_shared(dst_ptr), cta
-        )
+        K.ptx.mapa.shared__cluster.u32(mapped_dst[0], K.cuda.cvta_generic_to_shared(dst_ptr), cta)
     )
     K.evaluate(
         K.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
@@ -492,14 +472,7 @@ def get_kernel(
         )
 
     def get_e4m3_sf_and_sf_inv(
-        sf,
-        sf_inv,
-        scaled_pair,
-        scaled_values,
-        scaled_bits,
-        scale_exponents,
-        amax_x,
-        amax_y,
+        sf, sf_inv, scaled_pair, scaled_values, scaled_bits, scale_exponents, amax_x, amax_y
     ):
         K.assign(
             scaled_pair[0],
@@ -518,8 +491,7 @@ def get_kernel(
                     K.cast(K.shift_right(scaled_bits[dim], K.uint32(23)), "int32")
                     - K.int32(127)
                     + K.Select(
-                        K.bitwise_and(scaled_bits[dim], K.uint32((1 << 23) - 1))
-                        != K.uint32(0),
+                        K.bitwise_and(scaled_bits[dim], K.uint32((1 << 23) - 1)) != K.uint32(0),
                         K.int32(1),
                         K.int32(0),
                     )
@@ -529,8 +501,7 @@ def get_kernel(
                 sf[dim],
                 uint32_bits_to_float(
                     K.shift_left(
-                        K.cast(scale_exponents[dim] + K.int32(127), "uint32"),
-                        K.uint32(23),
+                        K.cast(scale_exponents[dim] + K.int32(127), "uint32"), K.uint32(23)
                     )
                 ),
             )
@@ -538,8 +509,7 @@ def get_kernel(
                 sf_inv[dim],
                 uint32_bits_to_float(
                     K.shift_left(
-                        K.cast(K.int32(127) - scale_exponents[dim], "uint32"),
-                        K.uint32(23),
+                        K.cast(K.int32(127) - scale_exponents[dim], "uint32"), K.uint32(23)
                     )
                 ),
             )
@@ -619,27 +589,21 @@ def get_kernel(
                     ),
                 ),
                 K.Select(
-                    block_phase_value == 1,
-                    K.address_of(tensor_map_l1),
-                    K.address_of(tensor_map_l2),
+                    block_phase_value == 1, K.address_of(tensor_map_l1), K.address_of(tensor_map_l2)
                 ),
             ),
             coord0,
             coord1,
         )
 
-    def activation_pair_store(
-        out, atom_idx, pair_idx, gate0, gate1, up0, up1, weight0, weight1
-    ):
+    def activation_pair_store(out, atom_idx, pair_idx, gate0, gate1, up0, up1, weight0, weight1):
         bf16_gate = cast_into_bf16_and_pack(gate0, gate1)
         bf16_up = cast_into_bf16_and_pack(up0, up1)
 
         with K.If(use_activation_clamp):
             with K.Then():
                 activation_clamp_value = K.float32(kernel_activation_clamp)
-                clamp_pos = cast_into_bf16_and_pack(
-                    activation_clamp_value, activation_clamp_value
-                )
+                clamp_pos = cast_into_bf16_and_pack(activation_clamp_value, activation_clamp_value)
                 clamp_neg = cast_into_bf16_and_pack(
                     -activation_clamp_value, -activation_clamp_value
                 )
@@ -651,9 +615,7 @@ def get_kernel(
         gate_x = K.cuda.float2_x(gate)
         gate_y = K.cuda.float2_y(gate)
         neg_gate_exp = K.cuda.make_float2(K.exp(-gate_x), K.exp(-gate_y))
-        denom = K.cuda.fadd2_rn(
-            K.cuda.make_float2(K.float32(1.0), K.float32(1.0)), neg_gate_exp
-        )
+        denom = K.cuda.fadd2_rn(K.cuda.make_float2(K.float32(1.0), K.float32(1.0)), neg_gate_exp)
         with K.If(kernel_fast_math):
             with K.Then():
                 rcp_x = K.local_scalar("float32")
@@ -675,17 +637,14 @@ def get_kernel(
     def advance_umma_desc_lo(desc, base_lo, mn_offset, k_offset):
         return K.bitwise_or(
             K.bitwise_and(desc, K.shift_left(K.uint64(0xFFFFFFFF), K.uint64(32))),
-            K.cast(
-                base_lo + K.cast((mn_offset + k_offset) // f128_bytes, "uint32"),
-                "uint64",
-            ),
+            K.cast(base_lo + K.cast((mn_offset + k_offset) // f128_bytes, "uint32"), "uint64"),
         )
 
     def l2_cd_swizzled_elem_offset(half_idx, row_idx, bank_group_idx, swizzle_row):
         """Physical uint16 offset within one epilogue WG's L2 CD plane."""
-        return (half_idx * kernel_config.store_block_m + row_idx) * (
-            swizzle_cd_mode // 2
-        ) + (bank_group_idx ^ swizzle_row) * (num_bank_group_bytes // 2)
+        return (half_idx * kernel_config.store_block_m + row_idx) * (swizzle_cd_mode // 2) + (
+            bank_group_idx ^ swizzle_row
+        ) * (num_bank_group_bytes // 2)
 
     def scheduler_get_num_tokens(
         expert_idx, lane_idx, stored_num_tokens_per_expert, selected_num_tokens
@@ -718,8 +677,7 @@ def get_kernel(
         K.assign(pool_block_offset_sum[0], K.int32(0))
         for expert_lane_idx in range(num_experts_per_lane):
             expert_num_blocks_u32 = (
-                stored_num_tokens_per_expert[expert_lane_idx]
-                + K.uint32(kernel_config.block_m - 1)
+                stored_num_tokens_per_expert[expert_lane_idx] + K.uint32(kernel_config.block_m - 1)
             ) // K.uint32(kernel_config.block_m)
             K.assign(
                 pool_block_offset_sum[0],
@@ -747,9 +705,7 @@ def get_kernel(
         rank_offset = symm_rank_offsets[0]
         for rank in range(1, num_processes):
             rank_offset = K.Select(
-                mapped_rank_idx_u32 == K.uint32(rank),
-                symm_rank_offsets[rank],
-                rank_offset,
+                mapped_rank_idx_u32 == K.uint32(rank), symm_rank_offsets[rank], rank_offset
             )
         return rank_offset
 
@@ -783,8 +739,7 @@ def get_kernel(
     if num_pull_chunks * kernel_config.num_bytes_per_pull != hidden:
         raise ValueError("MegaMoE pull chunk size must divide hidden")
     smem_send_buffer_size = _align_up(
-        kernel_config.num_bytes_per_pull * kernel_config.num_dispatch_warps,
-        shared_alignment,
+        kernel_config.num_bytes_per_pull * kernel_config.num_dispatch_warps, shared_alignment
     )
     smem_dispatch_size = smem_expert_count_size + smem_send_buffer_size
     smem_cd_l1_size = (
@@ -805,18 +760,12 @@ def get_kernel(
     sf_smem_outer_dim = kernel_config.block_k // 128
     smem_sfa_size_per_stage = sf_block_m * (kernel_config.block_k // 32)
     smem_sfb_size_per_stage = kernel_config.block_n * (kernel_config.block_k // 32)
-    full_a_expect_tx_leader_bytes: int = smem_a_size_per_stage * 2 + (
-        smem_sfa_size_per_stage * 2
-    )
-    full_b_expect_tx_leader_bytes: int = smem_b_size_per_stage + (
-        smem_sfb_size_per_stage * 2
-    )
+    full_a_expect_tx_leader_bytes: int = smem_a_size_per_stage * 2 + (smem_sfa_size_per_stage * 2)
+    full_b_expect_tx_leader_bytes: int = smem_b_size_per_stage + (smem_sfb_size_per_stage * 2)
     full_shared_b_expect_tx_leader_bytes: int = (smem_b_size_per_stage * 2) + (
         smem_sfb_size_per_stage * 2
     )
-    smem_amax_reduction_size = (
-        kernel_config.store_block_m * kernel_config.num_epilogue_warps * 4
-    )
+    smem_amax_reduction_size = kernel_config.store_block_m * kernel_config.num_epilogue_warps * 4
     smem_tmem_ptr_size = 4
     smem_per_stage = (
         smem_a_size_per_stage
@@ -862,15 +811,11 @@ def get_kernel(
     dispatch_with_epilogue_sync_barrier_idx = 1
     epilogue_full_sync_barrier_idx = 2
     epilogue_wg_sync_barrier_start_idx = 3
-    dispatch_with_load_a_sync_barrier_idx = (
-        epilogue_wg_sync_barrier_start_idx + num_epilogue_wgs
-    )
+    dispatch_with_load_a_sync_barrier_idx = epilogue_wg_sync_barrier_start_idx + num_epilogue_wgs
     before_dispatch_pull_barrier_tag = 1
     before_combine_reduce_barrier_tag = 2
     after_workspace_clean_barrier_tag = 3
-    nvlink_barrier_timeout_seconds = int(
-        os.environ.get("TIRX_MEGAMOE_NVL_TIMEOUT_SECONDS", "300")
-    )
+    nvlink_barrier_timeout_seconds = int(os.environ.get("TIRX_MEGAMOE_NVL_TIMEOUT_SECONDS", "300"))
     if nvlink_barrier_timeout_seconds <= 0:
         raise ValueError("TIRX_MEGAMOE_NVL_TIMEOUT_SECONDS must be positive")
     num_nvlink_barrier_timeout_cycles = nvlink_barrier_timeout_seconds * 2000000000
@@ -905,17 +850,12 @@ def get_kernel(
     num_uint4_per_lane = num_chunk_uint4 // 32
     if hidden % num_chunks != 0:
         raise ValueError("Hidden must be divisible by number of chunks")
-    if (
-        num_chunk_slots * kernel_config.num_epilogue_warps * num_chunk_bytes
-        > smem_barrier_offset
-    ):
+    if num_chunk_slots * kernel_config.num_epilogue_warps * num_chunk_bytes > smem_barrier_offset:
         raise ValueError("Hidden is too large")
     if num_chunk_bytes % 16 != 0:
         raise ValueError("Combine chunk must be TMA-aligned (16 bytes)")
     if num_chunk_uint4 % 32 != 0:
-        raise ValueError(
-            "Combine chunk must be a multiple of 32 16-byte elements (one per lane)"
-        )
+        raise ValueError("Combine chunk must be a multiple of 32 16-byte elements (one per lane)")
     if num_topk > 32:
         raise ValueError("Top-k must fit in a single warp")
 
@@ -1131,16 +1071,14 @@ def get_kernel(
             symm_buffer.ptr_to([symm_buffer_layout.input_topk_idx_offset]),
         )
         l1_acts_sf_data: K.let = K.reinterpret(
-            PointerType(PrimType("int32")),
-            symm_buffer.ptr_to([symm_buffer_layout.l1_sf_offset]),
+            PointerType(PrimType("int32")), symm_buffer.ptr_to([symm_buffer_layout.l1_sf_offset])
         )
         workspace_expert_send_count_data: K.let = K.reinterpret(
             PointerType(PrimType("uint64")),
             symm_buffer.ptr_to([workspace_layout.expert_send_count_offset]),
         )
         workspace_grid_sync_count_data: K.let = K.reinterpret(
-            PointerType(PrimType("uint32")),
-            symm_buffer.ptr_to([workspace_layout.barrier_offset]),
+            PointerType(PrimType("uint32")), symm_buffer.ptr_to([workspace_layout.barrier_offset])
         )
         workspace_nvl_barrier_counter_data: K.let = K.reinterpret(
             PointerType(PrimType("uint32")),
@@ -1207,8 +1145,7 @@ def get_kernel(
             symm_buffer.ptr_to([symm_buffer_layout.l1_topk_weights_offset]),
         )
         l2_acts_sf_data: K.let = K.reinterpret(
-            PointerType(PrimType("int32")),
-            symm_buffer.ptr_to([symm_buffer_layout.l2_sf_offset]),
+            PointerType(PrimType("int32")), symm_buffer.ptr_to([symm_buffer_layout.l2_sf_offset])
         )
         combine_tokens_data: K.let = K.reinterpret(
             PointerType(PrimType("uint16")),
@@ -1243,25 +1180,13 @@ def get_kernel(
             elem_offset=0,
         )
         workspace_grid_sync_count = K.decl_buffer(
-            (4,),
-            "uint32",
-            data=workspace_grid_sync_count_data,
-            scope="global",
-            elem_offset=0,
+            (4,), "uint32", data=workspace_grid_sync_count_data, scope="global", elem_offset=0
         )
         workspace_nvl_barrier_counter = K.decl_buffer(
-            (1,),
-            "uint32",
-            data=workspace_nvl_barrier_counter_data,
-            scope="global",
-            elem_offset=0,
+            (1,), "uint32", data=workspace_nvl_barrier_counter_data, scope="global", elem_offset=0
         )
         workspace_nvl_barrier_signal = K.decl_buffer(
-            (2,),
-            "int32",
-            data=workspace_nvl_barrier_signal_data,
-            scope="global",
-            elem_offset=0,
+            (2,), "int32", data=workspace_nvl_barrier_signal_data, scope="global", elem_offset=0
         )
         workspace_expert_recv_count = K.decl_buffer(
             (num_processes, num_experts_per_rank),
@@ -1278,11 +1203,7 @@ def get_kernel(
             elem_offset=0,
         )
         workspace_src_token_topk_idx = K.decl_buffer(
-            (
-                num_experts_per_rank,
-                num_processes,
-                workspace_layout.num_max_recv_tokens_per_expert,
-            ),
+            (num_experts_per_rank, num_processes, workspace_layout.num_max_recv_tokens_per_expert),
             "uint32",
             data=workspace_src_token_topk_idx_data,
             scope="global",
@@ -1324,32 +1245,16 @@ def get_kernel(
             elem_offset=0,
         )
         workspace_l1_task_count = K.decl_buffer(
-            (1,),
-            "uint32",
-            data=workspace_l1_task_count_data,
-            scope="global",
-            elem_offset=0,
+            (1,), "uint32", data=workspace_l1_task_count_data, scope="global", elem_offset=0
         )
         workspace_l2_task_count = K.decl_buffer(
-            (1,),
-            "uint32",
-            data=workspace_l2_task_count_data,
-            scope="global",
-            elem_offset=0,
+            (1,), "uint32", data=workspace_l2_task_count_data, scope="global", elem_offset=0
         )
         workspace_shared_l1_task_count = K.decl_buffer(
-            (1,),
-            "uint32",
-            data=workspace_shared_l1_task_count_data,
-            scope="global",
-            elem_offset=0,
+            (1,), "uint32", data=workspace_shared_l1_task_count_data, scope="global", elem_offset=0
         )
         workspace_shared_l2_task_count = K.decl_buffer(
-            (1,),
-            "uint32",
-            data=workspace_shared_l2_task_count_data,
-            scope="global",
-            elem_offset=0,
+            (1,), "uint32", data=workspace_shared_l2_task_count_data, scope="global", elem_offset=0
         )
         workspace_shared_l2_full_count = K.decl_buffer(
             (workspace_layout.num_shared_l2_pool_blocks,),
@@ -1359,11 +1264,7 @@ def get_kernel(
             elem_offset=0,
         )
         l1_topk_weights = K.decl_buffer(
-            (num_ring_tokens,),
-            "float32",
-            data=l1_topk_weights_data,
-            scope="global",
-            elem_offset=0,
+            (num_ring_tokens,), "float32", data=l1_topk_weights_data, scope="global", elem_offset=0
         )
         l2_acts = K.decl_buffer(
             (num_ring_tokens, intermediate_hidden),
@@ -1410,9 +1311,7 @@ def get_kernel(
             swizzle=K.SW128B,
         )
         smem_b = smem_b_tile.buf
-        smem_sfa_i32 = smem.alloc(
-            (num_stages, sf_block_m, sf_smem_outer_dim), K.i32, align=16
-        )
+        smem_sfa_i32 = smem.alloc((num_stages, sf_block_m, sf_smem_outer_dim), K.i32, align=16)
         smem_sfa_data = K.reinterpret(
             PointerType(PrimType("uint32")), smem_sfa_i32.ptr_to([0, 0, 0])
         )
@@ -1439,9 +1338,7 @@ def get_kernel(
             align=16,
         )
         smem_amax_reduction = smem.alloc(
-            (kernel_config.num_epilogue_warps * kernel_config.store_block_m,),
-            K.f32,
-            align=16,
+            (kernel_config.num_epilogue_warps * kernel_config.store_block_m,), K.f32, align=16
         )
         smem_task_infos = smem.alloc((num_schedule_stages, 8), K.u32, align=16)
         dispatch_barriers = K.TMABar(smem, kernel_config.num_dispatch_warps)
@@ -1477,12 +1374,7 @@ def get_kernel(
 
         # Aliases must retain the pool allocation offset; sharing only `data` rebases to SMEM 0.
         smem_cd_l1 = K.decl_buffer(
-            (
-                num_tma_store_stages,
-                num_epilogue_wgs,
-                kernel_config.store_block_m,
-                l1_out_block_n,
-            ),
+            (num_tma_store_stages, num_epilogue_wgs, kernel_config.store_block_m, l1_out_block_n),
             "int8",
             data=smem_cd_raw.data,
             scope="shared.dyn",
@@ -1507,10 +1399,7 @@ def get_kernel(
             align=16,
         )
         tmem = K.decl_buffer(
-            (128, num_tmem_cols),
-            "float32",
-            scope="tmem",
-            allocated_addr=tmem_ptr_in_smem[0],
+            (128, num_tmem_cols), "float32", scope="tmem", allocated_addr=tmem_ptr_in_smem[0]
         )
         sfa_tmem = K.decl_buffer(
             (128, sf_block_m // 32),
@@ -1527,24 +1416,16 @@ def get_kernel(
 
         roles = K.specialize(chain_dispatch=True)
         dispatch_role = roles.role(
-            "dispatch",
-            warps=range(kernel_config.num_dispatch_warps),
-            regs=num_dispatch_registers,
+            "dispatch", warps=range(kernel_config.num_dispatch_warps), regs=num_dispatch_registers
         )
         load_a_role = roles.role(
-            "load_a",
-            warps=[kernel_config.load_a_warp_idx],
-            regs=num_non_epilogue_registers,
+            "load_a", warps=[kernel_config.load_a_warp_idx], regs=num_non_epilogue_registers
         )
         load_b_role = roles.role(
-            "load_b",
-            warps=[kernel_config.load_b_warp_idx],
-            regs=num_non_epilogue_registers,
+            "load_b", warps=[kernel_config.load_b_warp_idx], regs=num_non_epilogue_registers
         )
         mma_role = roles.role(
-            "mma",
-            warps=[kernel_config.mma_issue_warp_idx],
-            regs=num_non_epilogue_registers,
+            "mma", warps=[kernel_config.mma_issue_warp_idx], regs=num_non_epilogue_registers
         )
         reserved_role = roles.role(
             "reserved",
@@ -1553,16 +1434,12 @@ def get_kernel(
         )
         epilogue_role = roles.role(
             "epilogue",
-            warps=range(
-                kernel_config.epilogue_warp_start_idx, kernel_config.num_total_warps
-            ),
+            warps=range(kernel_config.epilogue_warp_start_idx, kernel_config.num_total_warps),
             regs=num_epilogue_registers,
         )
 
         sym_buffer_base = K.Bind(ptr_to_u64(symm_buffer.ptr_to([0])))
-        cta_idx_in_cluster = K.Bind(
-            K.cta_id_in_cluster([kernel_config.num_ctas_per_cluster])
-        )
+        cta_idx_in_cluster = K.Bind(K.cta_id_in_cluster([kernel_config.num_ctas_per_cluster]))
         sm_idx = K.cta_id()
         wg_id = K.Bind(K.warp_id() // 4)
         warp_id = K.Bind(K.warp_id() % 4)
@@ -1673,17 +1550,13 @@ def get_kernel(
                 self.pool_m_idx = K.local_scalar("int32")
                 self.valid_m = K.local_scalar("int32")
                 self.sfa_m_idx = K.local_scalar("int32")
-                self.stored_num_tokens_per_expert = K.alloc_local(
-                    (num_experts_per_lane,), "uint32"
-                )
+                self.stored_num_tokens_per_expert = K.alloc_local((num_experts_per_lane,), "uint32")
                 self.selected_num_tokens = K.alloc_local((1,), "int32")
                 self.pool_block_offset_sum = K.alloc_local((1,), "int32")
                 self.task_info_regs = K.alloc_local((8,), "uint32")
                 self.sched_inclusive_vals = K.alloc_local((1,), "uint32")
                 self.stored_rank_counts = K.alloc_local((num_ranks_per_lane,), "uint32")
-                self.remaining_rank_counts = K.alloc_local(
-                    (num_ranks_per_lane,), "uint32"
-                )
+                self.remaining_rank_counts = K.alloc_local((num_ranks_per_lane,), "uint32")
                 self.combine_stored_topk_slot_idx = K.local_scalar("int32")
                 self.combine_total_mask = K.local_scalar("uint32")
                 self.combine_slot_mask = K.local_scalar("uint32")
@@ -1717,9 +1590,7 @@ def get_kernel(
             def workspace_grid_sync(
                 self, counter_idx, sync_num_threads, sync_barrier_idx, sync_thread_idx
             ):
-                K.ptx.barrier.sync(
-                    K.uint32(sync_barrier_idx), K.uint32(sync_num_threads)
-                )
+                K.ptx.barrier.sync(K.uint32(sync_barrier_idx), K.uint32(sync_num_threads))
                 with K.If(sync_thread_idx == 0):
                     with K.Then():
                         with K.If(sm_idx == 0):
@@ -1740,18 +1611,14 @@ def get_kernel(
                             workspace_grid_sync_count.ptr_to([counter_idx]),
                         )
                         with K.While(
-                            grid_sync_done_u32(
-                                self.grid_sync_new_value, self.grid_sync_old_value
-                            )
+                            grid_sync_done_u32(self.grid_sync_new_value, self.grid_sync_old_value)
                             == K.uint32(0)
                         ):
                             load_acq_u32(
                                 self.grid_sync_new_value,
                                 workspace_grid_sync_count.ptr_to([counter_idx]),
                             )
-                K.ptx.barrier.sync(
-                    K.uint32(sync_barrier_idx), K.uint32(sync_num_threads)
-                )
+                K.ptx.barrier.sync(K.uint32(sync_barrier_idx), K.uint32(sync_num_threads))
 
             def nvlink_barrier(
                 self,
@@ -1766,19 +1633,13 @@ def get_kernel(
                 with K.If(num_processes == 1):
                     with K.Then():
                         self.workspace_grid_sync(
-                            counter_idx,
-                            sync_num_threads,
-                            sync_barrier_idx,
-                            sync_thread_idx,
+                            counter_idx, sync_num_threads, sync_barrier_idx, sync_thread_idx
                         )
                     with K.Else():
                         with K.If(sync_prologue != 0):
                             with K.Then():
                                 self.workspace_grid_sync(
-                                    counter_idx,
-                                    sync_num_threads,
-                                    sync_barrier_idx,
-                                    sync_thread_idx,
+                                    counter_idx, sync_num_threads, sync_barrier_idx, sync_thread_idx
                                 )
                         with K.If(sm_idx == 0):
                             with K.Then():
@@ -1789,10 +1650,7 @@ def get_kernel(
                                 K.assign(
                                     self.barrier_status,
                                     K.cast(
-                                        K.bitwise_and(
-                                            self.nvl_counter_value, K.uint32(3)
-                                        ),
-                                        "int32",
+                                        K.bitwise_and(self.nvl_counter_value, K.uint32(3)), "int32"
                                     ),
                                 )
                                 K.assign(
@@ -1808,9 +1666,7 @@ def get_kernel(
                                         K.assign(self.barrier_target, K.int32(1))
                                         with K.If(self.barrier_signal_sign != 0):
                                             with K.Then():
-                                                K.assign(
-                                                    self.barrier_target, K.int32(-1)
-                                                )
+                                                K.assign(self.barrier_target, K.int32(-1))
                                         K.assign(
                                             self.symm_rank_base,
                                             sym_buffer_base
@@ -1823,50 +1679,33 @@ def get_kernel(
                                         )
                                         peer_red_add_rel_sys_s32(
                                             self.symm_rank_base,
-                                            K.uint64(
-                                                workspace_layout.barrier_offset + 20
-                                            )
-                                            + K.cast(
-                                                self.barrier_signal_phase * 4, "uint64"
-                                            ),
+                                            K.uint64(workspace_layout.barrier_offset + 20)
+                                            + K.cast(self.barrier_signal_phase * 4, "uint64"),
                                             self.barrier_target,
                                         )
                                 K.ptx.bar.sync(
-                                    K.uint32(sync_barrier_idx),
-                                    K.uint32(sync_num_threads),
+                                    K.uint32(sync_barrier_idx), K.uint32(sync_num_threads)
                                 )
                                 with K.If(sync_thread_idx == 0):
                                     with K.Then():
                                         red_add_gpu_u32(
-                                            workspace_nvl_barrier_counter.ptr_to([0]),
-                                            K.uint32(1),
+                                            workspace_nvl_barrier_counter.ptr_to([0]), K.uint32(1)
                                         )
-                                        K.assign(
-                                            self.barrier_target, K.int32(num_processes)
-                                        )
+                                        K.assign(self.barrier_target, K.int32(num_processes))
                                         with K.If(self.barrier_signal_sign != 0):
                                             with K.Then():
-                                                K.assign(
-                                                    self.barrier_target, K.int32(0)
-                                                )
+                                                K.assign(self.barrier_target, K.int32(0))
                                         load_acq_sys_s32(
                                             self.barrier_status,
                                             workspace_nvl_barrier_signal.ptr_to(
                                                 [self.barrier_signal_phase]
                                             ),
                                         )
-                                        K.assign(
-                                            self.nvl_barrier_start_clock, cuda_clock64()
-                                        )
-                                        with K.While(
-                                            self.barrier_status != self.barrier_target
-                                        ):
+                                        K.assign(self.nvl_barrier_start_clock, cuda_clock64())
+                                        with K.While(self.barrier_status != self.barrier_target):
                                             with K.If(
-                                                cuda_clock64()
-                                                - self.nvl_barrier_start_clock
-                                                >= K.uint64(
-                                                    num_nvlink_barrier_timeout_cycles
-                                                )
+                                                cuda_clock64() - self.nvl_barrier_start_clock
+                                                >= K.uint64(num_nvlink_barrier_timeout_cycles)
                                             ):
                                                 with K.Then():
                                                     with K.If(
@@ -1876,9 +1715,7 @@ def get_kernel(
                                                             load_acq_sys_s32(
                                                                 self.barrier_status_printf,
                                                                 workspace_nvl_barrier_signal.ptr_to(
-                                                                    [
-                                                                        self.barrier_signal_phase
-                                                                    ]
+                                                                    [self.barrier_signal_phase]
                                                                 ),
                                                             )
                                                             load_global_u32(
@@ -1894,8 +1731,7 @@ def get_kernel(
                                                                 "phase=%d, sign=%d, tag=%d\n",
                                                                 rank_idx,
                                                                 K.cast(
-                                                                    self.nvl_counter_value,
-                                                                    "int32",
+                                                                    self.nvl_counter_value, "int32"
                                                                 ),
                                                                 self.barrier_status_printf,
                                                                 self.barrier_target,
@@ -1903,9 +1739,7 @@ def get_kernel(
                                                                 self.barrier_signal_sign,
                                                                 barrier_tag,
                                                             )
-                                                    K.cuda.trap_when_assert_failed(
-                                                        False
-                                                    )
+                                                    K.cuda.trap_when_assert_failed(False)
                                             load_acq_sys_s32(
                                                 self.barrier_status,
                                                 workspace_nvl_barrier_signal.ptr_to(
@@ -1915,10 +1749,7 @@ def get_kernel(
                         with K.If(sync_epilogue != 0):
                             with K.Then():
                                 self.workspace_grid_sync(
-                                    counter_idx,
-                                    sync_num_threads,
-                                    sync_barrier_idx,
-                                    sync_thread_idx,
+                                    counter_idx, sync_num_threads, sync_barrier_idx, sync_thread_idx
                                 )
 
             def dispatch_nvlink_barrier_before_pull(self, thread_idx_in_scope):
@@ -1932,9 +1763,7 @@ def get_kernel(
                     1,
                 )
 
-            def dispatch_nvlink_barrier_after_workspace_clean(
-                self, thread_idx_in_scope
-            ):
+            def dispatch_nvlink_barrier_after_workspace_clean(self, thread_idx_in_scope):
                 self.nvlink_barrier(
                     dispatch_grid_sync_index,
                     after_workspace_clean_barrier_tag,
@@ -1945,9 +1774,7 @@ def get_kernel(
                     0,
                 )
 
-            def epilogue_nvlink_barrier_before_combine_reduce(
-                self, thread_idx_in_scope
-            ):
+            def epilogue_nvlink_barrier_before_combine_reduce(self, thread_idx_in_scope):
                 self.nvlink_barrier(
                     epilogue_grid_sync_index,
                     before_combine_reduce_barrier_tag,
@@ -1966,10 +1793,7 @@ def get_kernel(
                         with K.Then():
                             with K.While(
                                 (
-                                    K.cast(
-                                        K.shift_right(self.scheduler_cached_status, 32),
-                                        "int32",
-                                    )
+                                    K.cast(K.shift_right(self.scheduler_cached_status, 32), "int32")
                                     != kernel_config.num_sms * num_processes
                                 )
                             ):
@@ -1982,9 +1806,7 @@ def get_kernel(
                     K.ptx.mov.b32(
                         self.stored_num_tokens_per_expert[expert_lane_idx],
                         K.cast(
-                            K.bitwise_and(
-                                self.scheduler_cached_status, K.uint64(0xFFFFFFFF)
-                            ),
+                            K.bitwise_and(self.scheduler_cached_status, K.uint64(0xFFFFFFFF)),
                             "uint32",
                         ),
                     )
@@ -1998,12 +1820,8 @@ def get_kernel(
                     self.pool_block_offset_sum,
                 )
                 K.assign(self.sched_num_total_m_blocks, self.pool_block_offset_sum[0])
-                sched_num_total_m_blocks_u32 = K.cast(
-                    self.sched_num_total_m_blocks, "uint32"
-                )
-                sched_num_total_l1_tasks = sched_num_total_m_blocks_u32 * K.uint32(
-                    num_l1_clusters
-                )
+                sched_num_total_m_blocks_u32 = K.cast(self.sched_num_total_m_blocks, "uint32")
+                sched_num_total_l1_tasks = sched_num_total_m_blocks_u32 * K.uint32(num_l1_clusters)
                 sched_num_total_l1_waves = (
                     sched_num_total_l1_tasks + K.uint32(num_sched_clusters - 1)
                 ) // K.uint32(num_sched_clusters)
@@ -2028,19 +1846,10 @@ def get_kernel(
                 # `get_next_task`: wait for the published TaskInfo, copy it into
                 # registers (2x LDS.128 of the alignas(16) 32-byte struct), advance.
                 self.barrier_wait(
-                    task_info_full_barriers.ptr_to([self.sched_state.stage]),
-                    self.sched_state.phase,
+                    task_info_full_barriers.ptr_to([self.sched_state.stage]), self.sched_state.phase
                 )
-                lds128(
-                    smem_task_infos.ptr_to([self.sched_state.stage, 0]),
-                    self.task_info_regs,
-                    0,
-                )
-                lds128(
-                    smem_task_infos.ptr_to([self.sched_state.stage, 4]),
-                    self.task_info_regs,
-                    4,
-                )
+                lds128(smem_task_infos.ptr_to([self.sched_state.stage, 0]), self.task_info_regs, 0)
+                lds128(smem_task_infos.ptr_to([self.sched_state.stage, 4]), self.task_info_regs, 4)
                 self.sched_advance_pipeline()
 
             def consumer_bind_task_args(self):
@@ -2059,9 +1868,7 @@ def get_kernel(
                 _rem1 = K.alloc_local([1], "uint64")
                 K.ptx.mapa.shared__cluster.u64(
                     _rem1[0],
-                    task_info_empty_barriers.ptr_to(
-                        [self.sched_state.stage ^ K.int32(1)]
-                    ),
+                    task_info_empty_barriers.ptr_to([self.sched_state.stage ^ K.int32(1)]),
                     K.uint32(0),
                 )
                 K.ptx.mbarrier.arrive.b64(_rem1[0], K.uint32(1), pred=K.bool(True))
@@ -2075,12 +1882,10 @@ def get_kernel(
                 K.ptx.mov.b32(self.task_info_regs[1], K.uint32(0))
                 K.ptx.mov.b32(self.task_info_regs[2], K.uint32(0))
                 K.ptx.mov.b32(
-                    self.task_info_regs[3],
-                    self.sched_task_idx % K.uint32(task_num_clusters),
+                    self.task_info_regs[3], self.sched_task_idx % K.uint32(task_num_clusters)
                 )
                 K.ptx.mov.b32(
-                    self.task_info_regs[4],
-                    self.sched_task_idx // K.uint32(task_num_clusters),
+                    self.task_info_regs[4], self.sched_task_idx // K.uint32(task_num_clusters)
                 )
                 K.ptx.mov.b32(self.task_info_regs[5], K.uint32(0))
                 K.ptx.mov.b32(self.task_info_regs[6], K.uint32(task_shape_n))
@@ -2096,9 +1901,7 @@ def get_kernel(
                         // K.uint32(kernel_config.block_m),
                     )
                     # `math::warp_inclusive_sum`
-                    K.assign(
-                        self.sched_inclusive_vals[0], self.sched_expert_num_m_blocks
-                    )
+                    K.assign(self.sched_inclusive_vals[0], self.sched_expert_num_m_blocks)
                     with K.unroll(0, 5) as shuffle_offset:
                         K.assign(
                             self.sched_inclusive_sum,
@@ -2114,10 +1917,7 @@ def get_kernel(
                             with K.Then():
                                 K.assign(
                                     self.sched_inclusive_vals[0],
-                                    (
-                                        self.sched_inclusive_vals[0]
-                                        + self.sched_inclusive_sum
-                                    ),
+                                    (self.sched_inclusive_vals[0] + self.sched_inclusive_sum),
                                 )
                     K.assign(
                         self.sched_lane_pool_block_offset,
@@ -2135,28 +1935,19 @@ def get_kernel(
                                 K.cast(expert_lane_idx * 32 + lane_idx, "uint32")
                                 < K.uint32(num_experts_per_rank)
                             )
+                            & (self.task_info_regs[4] >= self.sched_lane_pool_block_offset)
                             & (
                                 self.task_info_regs[4]
-                                >= self.sched_lane_pool_block_offset
-                            )
-                            & (
-                                self.task_info_regs[4]
-                                < self.sched_lane_pool_block_offset
-                                + self.sched_expert_num_m_blocks
+                                < self.sched_lane_pool_block_offset + self.sched_expert_num_m_blocks
                             ),
                         ),
                     )
                     with K.If(self.sched_owner_mask != K.uint32(0)):
                         with K.Then():
-                            sched_owner_lane_idx = ffs_u32(
-                                self.sched_owner_mask
-                            ) - K.int32(1)
+                            sched_owner_lane_idx = ffs_u32(self.sched_owner_mask) - K.int32(1)
                             K.assign(
                                 self.sched_owner_m_block_idx,
-                                (
-                                    self.task_info_regs[4]
-                                    - self.sched_lane_pool_block_offset
-                                ),
+                                (self.task_info_regs[4] - self.sched_lane_pool_block_offset),
                             )
                             K.assign(
                                 self.sched_owner_valid_m,
@@ -2201,11 +1992,7 @@ def get_kernel(
                         self.sched_block_offset,
                         self.sched_block_offset
                         + K.tvm_warp_shuffle(
-                            K.uint32(0xFFFFFFFF),
-                            self.sched_inclusive_vals[0],
-                            K.int32(31),
-                            32,
-                            32,
+                            K.uint32(0xFFFFFFFF), self.sched_inclusive_vals[0], K.int32(31), 32, 32
                         ),
                     )
 
@@ -2222,10 +2009,7 @@ def get_kernel(
                         )
                     ):
                         with K.Then():
-                            K.assign(
-                                self.sched_num_l1_waves,
-                                self.sched_num_l1_waves - K.uint32(1),
-                            )
+                            K.assign(self.sched_num_l1_waves, self.sched_num_l1_waves - K.uint32(1))
                             K.assign(self.sched_task_idx, K.uint32(0))
                             with K.If(K.cuda.elect_sync()):
                                 with K.Then():
@@ -2237,11 +2021,7 @@ def get_kernel(
                             K.assign(
                                 self.sched_task_idx,
                                 K.tvm_warp_shuffle(
-                                    K.uint32(0xFFFFFFFF),
-                                    self.sched_task_idx,
-                                    K.int32(0),
-                                    32,
-                                    32,
+                                    K.uint32(0xFFFFFFFF), self.sched_task_idx, K.int32(0), 32, 32
                                 ),
                             )
                             with K.If(
@@ -2250,16 +2030,10 @@ def get_kernel(
                                 * K.uint32(num_l1_clusters)
                             ):
                                 with K.Then():
-                                    K.assign(
-                                        self.sched_num_l1_waves,
-                                        K.uint32(sched_l1_waves_done),
-                                    )
+                                    K.assign(self.sched_num_l1_waves, K.uint32(sched_l1_waves_done))
                                 with K.Else():
                                     self.producer_create_task(
-                                        1,
-                                        num_l1_clusters,
-                                        intermediate_hidden * 2,
-                                        hidden,
+                                        1, num_l1_clusters, intermediate_hidden * 2, hidden
                                     )
                                     K.assign(self.sched_task_valid, K.int32(1))
                         with K.Else():
@@ -2274,11 +2048,7 @@ def get_kernel(
                             K.assign(
                                 self.sched_task_idx,
                                 K.tvm_warp_shuffle(
-                                    K.uint32(0xFFFFFFFF),
-                                    self.sched_task_idx,
-                                    K.int32(0),
-                                    32,
-                                    32,
+                                    K.uint32(0xFFFFFFFF), self.sched_task_idx, K.int32(0), 32, 32
                                 ),
                             )
                             with K.If(
@@ -2288,9 +2058,7 @@ def get_kernel(
                             ):
                                 with K.Then():
                                     K.Break()
-                            with K.If(
-                                self.sched_num_l1_waves != K.uint32(sched_l1_waves_done)
-                            ):
+                            with K.If(self.sched_num_l1_waves != K.uint32(sched_l1_waves_done)):
                                 with K.Then():
                                     K.assign(self.sched_num_l1_waves, K.uint32(1))
                             self.producer_create_task(
@@ -2299,14 +2067,11 @@ def get_kernel(
                             # Wait until all required L1 tasks are fetched
                             K.assign(
                                 self.sched_required_l1_tasks,
-                                (self.task_info_regs[4] + K.uint32(1))
-                                * K.uint32(num_l1_clusters),
+                                (self.task_info_regs[4] + K.uint32(1)) * K.uint32(num_l1_clusters),
                             )
                             sched_l1_count = K.local_scalar("uint32")
                             K.assign(sched_l1_count, K.uint32(0))
-                            load_volatile_u32(
-                                sched_l1_count, workspace_l1_task_count.ptr_to([0])
-                            )
+                            load_volatile_u32(sched_l1_count, workspace_l1_task_count.ptr_to([0]))
                             with K.While(sched_l1_count < self.sched_required_l1_tasks):
                                 load_volatile_u32(
                                     sched_l1_count, workspace_l1_task_count.ptr_to([0])
@@ -2330,9 +2095,7 @@ def get_kernel(
                         K.evaluate(
                             st_async_cluster_task_info(
                                 smem_task_infos.ptr_to([self.sched_state.stage, 0]),
-                                task_info_full_barriers.ptr_to(
-                                    [self.sched_state.stage]
-                                ),
+                                task_info_full_barriers.ptr_to([self.sched_state.stage]),
                                 lane_idx,
                                 self.task_info_regs,
                             )
@@ -2341,12 +2104,7 @@ def get_kernel(
                 self.sched_advance_pipeline()
 
             def producer_shared_mainloop(
-                self,
-                task_phase,
-                task_count_ptr,
-                task_num_clusters,
-                task_shape_n,
-                task_shape_k,
+                self, task_phase, task_count_ptr, task_num_clusters, task_shape_n, task_shape_k
             ):
                 # `shared_mainloop` (scheduler/mega_moe.cuh:364-381). Dynamic
                 # scheduling over `ceil_div(num_tokens, BLOCK_M) * kNumNClusters`
@@ -2355,10 +2113,7 @@ def get_kernel(
                 K.assign(
                     self.sched_shared_num_tasks,
                     (
-                        (
-                            K.cast(num_tokens, "uint32")
-                            + K.uint32(kernel_config.block_m - 1)
-                        )
+                        (K.cast(num_tokens, "uint32") + K.uint32(kernel_config.block_m - 1))
                         // K.uint32(kernel_config.block_m)
                     )
                     * K.uint32(task_num_clusters),
@@ -2372,17 +2127,11 @@ def get_kernel(
                     K.assign(self.sched_task_idx, K.uint32(0))
                     with K.If(K.cuda.elect_sync()):
                         with K.Then():
-                            atomic_add_u32(
-                                self.sched_task_idx, task_count_ptr, K.uint32(1)
-                            )
+                            atomic_add_u32(self.sched_task_idx, task_count_ptr, K.uint32(1))
                     K.assign(
                         self.sched_task_idx,
                         K.tvm_warp_shuffle(
-                            K.uint32(0xFFFFFFFF),
-                            self.sched_task_idx,
-                            K.int32(0),
-                            32,
-                            32,
+                            K.uint32(0xFFFFFFFF), self.sched_task_idx, K.int32(0), 32, 32
                         ),
                     )
                     with K.If(self.sched_task_idx >= self.sched_shared_num_tasks):
@@ -2404,36 +2153,23 @@ def get_kernel(
                             )
                             K.ptx.mov.b32(self.task_info_regs[0], K.uint32(task_phase))
                             K.ptx.mov.b32(self.task_info_regs[1], K.uint32(0))
-                            K.ptx.mov.b32(
-                                self.task_info_regs[2], self.sched_shared_m_block_idx
-                            )
+                            K.ptx.mov.b32(self.task_info_regs[2], self.sched_shared_m_block_idx)
                             K.ptx.mov.b32(
                                 self.task_info_regs[3],
                                 self.sched_task_idx % K.uint32(task_num_clusters),
                             )
-                            K.ptx.mov.b32(
-                                self.task_info_regs[4], self.sched_shared_m_block_idx
-                            )
-                            K.ptx.mov.b32(
-                                self.task_info_regs[5], self.sched_shared_valid_m
-                            )
-                            K.ptx.mov.b32(
-                                self.task_info_regs[6], K.uint32(task_shape_n)
-                            )
-                            K.ptx.mov.b32(
-                                self.task_info_regs[7], K.uint32(task_shape_k)
-                            )
+                            K.ptx.mov.b32(self.task_info_regs[4], self.sched_shared_m_block_idx)
+                            K.ptx.mov.b32(self.task_info_regs[5], self.sched_shared_valid_m)
+                            K.ptx.mov.b32(self.task_info_regs[6], K.uint32(task_shape_n))
+                            K.ptx.mov.b32(self.task_info_regs[7], K.uint32(task_shape_k))
                             self.producer_publish_task()
 
             def update_get_valid_m_true(self):
                 valid_m_u32 = K.cast(self.valid_m, "uint32")
-                get_valid_m_true_u32 = (
-                    (valid_m_u32 + K.uint32(15)) // K.uint32(16) * K.uint32(16)
-                )
+                get_valid_m_true_u32 = (valid_m_u32 + K.uint32(15)) // K.uint32(16) * K.uint32(16)
                 K.assign(self.get_valid_m_true, K.cast(get_valid_m_true_u32, "int32"))
                 K.assign(
-                    self.get_valid_m_true_half,
-                    K.cast(get_valid_m_true_u32 // K.uint32(2), "int32"),
+                    self.get_valid_m_true_half, K.cast(get_valid_m_true_u32 // K.uint32(2), "int32")
                 )
                 K.assign(
                     self.get_valid_m_true_eighth,
@@ -2448,9 +2184,7 @@ def get_kernel(
 
             def tmem_empty_barrier_arrive_cta0(self, tmem_empty_barrier_ptr):
                 _rem2 = K.alloc_local([1], "uint64")
-                K.ptx.mapa.shared__cluster.u64(
-                    _rem2[0], tmem_empty_barrier_ptr, K.uint32(0)
-                )
+                K.ptx.mapa.shared__cluster.u64(_rem2[0], tmem_empty_barrier_ptr, K.uint32(0))
                 K.ptx.mbarrier.arrive.b64(_rem2[0], K.uint32(1), pred=K.bool(True))
 
             def umma_arrive_multicast_2x1sm(self, barrier_ptr):
@@ -2515,28 +2249,19 @@ def get_kernel(
                 )
                 K.evaluate(
                     red_add_gpu_u32(
-                        workspace_l1_empty_count.ptr_to([self.ring_block_idx]),
-                        K.uint32(1),
+                        workspace_l1_empty_count.ptr_to([self.ring_block_idx]), K.uint32(1)
                     )
                 )
 
             def epilogue_wait_l2_empty(self):
                 K.assign(
                     self.expected_ring_count,
-                    (
-                        hidden
-                        // kernel_config.block_n
-                        * (self.pool_block_idx // num_ring_blocks)
-                    ),
+                    (hidden // kernel_config.block_n * (self.pool_block_idx // num_ring_blocks)),
                 )
                 load_acq_u32(
-                    self.current_ring_count,
-                    workspace_l2_empty_count.ptr_to([self.ring_block_idx]),
+                    self.current_ring_count, workspace_l2_empty_count.ptr_to([self.ring_block_idx])
                 )
-                with K.While(
-                    self.current_ring_count
-                    != K.cast(self.expected_ring_count, "uint32")
-                ):
+                with K.While(self.current_ring_count != K.cast(self.expected_ring_count, "uint32")):
                     load_acq_u32(
                         self.current_ring_count,
                         workspace_l2_empty_count.ptr_to([self.ring_block_idx]),
@@ -2545,20 +2270,14 @@ def get_kernel(
             def load_a_wait_l1_full(self):
                 K.assign(
                     self.expected_ring_count,
-                    kernel_config.block_m
-                    * (self.pool_block_idx // num_ring_blocks + 1),
+                    kernel_config.block_m * (self.pool_block_idx // num_ring_blocks + 1),
                 )
                 load_acq_u32(
-                    self.current_ring_count,
-                    workspace_l1_full_count.ptr_to([self.block_idx]),
+                    self.current_ring_count, workspace_l1_full_count.ptr_to([self.block_idx])
                 )
-                with K.While(
-                    self.current_ring_count
-                    != K.cast(self.expected_ring_count, "uint32")
-                ):
+                with K.While(self.current_ring_count != K.cast(self.expected_ring_count, "uint32")):
                     load_acq_u32(
-                        self.current_ring_count,
-                        workspace_l1_full_count.ptr_to([self.block_idx]),
+                        self.current_ring_count, workspace_l1_full_count.ptr_to([self.block_idx])
                     )
 
             def load_a_wait_l2_full(self):
@@ -2572,26 +2291,15 @@ def get_kernel(
                     ),
                 )
                 load_acq_u32(
-                    self.current_ring_count,
-                    workspace_l2_full_count.ptr_to([self.block_idx]),
+                    self.current_ring_count, workspace_l2_full_count.ptr_to([self.block_idx])
                 )
-                with K.While(
-                    self.current_ring_count
-                    != K.cast(self.expected_ring_count, "uint32")
-                ):
+                with K.While(self.current_ring_count != K.cast(self.expected_ring_count, "uint32")):
                     load_acq_u32(
-                        self.current_ring_count,
-                        workspace_l2_full_count.ptr_to([self.block_idx]),
+                        self.current_ring_count, workspace_l2_full_count.ptr_to([self.block_idx])
                     )
 
             def sm90_tma_store_2d_copy_select(
-                self,
-                src_ptr,
-                tensor_map,
-                tensor_map_shared,
-                block_phase_value,
-                coord0,
-                coord1,
+                self, src_ptr, tensor_map, tensor_map_shared, block_phase_value, coord0, coord1
             ):
                 # `task_info.is_shared() ? &tensor_map_shared_l1_output
                 #                        : &tensor_map_l1_output` (impls .cuh:1162)
@@ -2612,9 +2320,7 @@ def get_kernel(
                     )
                 )
 
-            def full_barrier_arrive_and_expect_tx(
-                self, full_barrier_ptr, transaction_bytes
-            ):
+            def full_barrier_arrive_and_expect_tx(self, full_barrier_ptr, transaction_bytes):
                 K.ptx.mbarrier.arrive.expect_tx.shared.b64(
                     full_barrier_ptr, K.uint32(transaction_bytes)
                 )
@@ -2692,14 +2398,12 @@ def get_kernel(
                 )
 
             def utccp_copy(self, tmem_addr, sf_desc):
-                K.ptx[
-                    f"tcgen05.cp.cta_group::{kernel_config.num_ctas_per_cluster}.32x128b.warpx4"
-                ](K.cast(tmem_addr, "uint32"), sf_desc)
+                K.ptx[f"tcgen05.cp.cta_group::{kernel_config.num_ctas_per_cluster}.32x128b.warpx4"](
+                    K.cast(tmem_addr, "uint32"), sf_desc
+                )
 
             def sm100_u8x4_stsm_t_copy(self, fp8x4_word, smem_ptr):
-                K.ptx.stmatrix.sync.aligned.m16n8.x1.trans.shared.b8(
-                    smem_ptr, fp8x4_word
-                )
+                K.ptx.stmatrix.sync.aligned.m16n8.x1.trans.shared.b8(smem_ptr, fp8x4_word)
 
             def sm90_u32x4_stsm_t_copy(self, packed_values_buf, smem_ptr):
                 K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
@@ -2750,9 +2454,7 @@ def get_kernel(
                 K.ptx.barrier.cluster.arrive.relaxed.aligned()
                 K.ptx.barrier.cluster.wait.acquire.aligned()
                 full_barrier_init_count: K.int32 = 2 * 2
-                tmem_empty_barrier_init_count: K.int32 = (
-                    2 * kernel_config.num_epilogue_threads
-                )
+                tmem_empty_barrier_init_count: K.int32 = 2 * kernel_config.num_epilogue_threads
                 with K.If(flat_warp_idx == 0):
                     with K.Then():
                         with K.If(num_processes > 1):
@@ -2773,8 +2475,7 @@ def get_kernel(
                             with K.Then():
                                 K.evaluate(
                                     st_shared_bulk(
-                                        smem_expert_count.ptr_to([0]),
-                                        K.uint32(num_experts * 4),
+                                        smem_expert_count.ptr_to([0]), K.uint32(num_experts * 4)
                                     )
                                 )
                     with K.Else():
@@ -2782,18 +2483,14 @@ def get_kernel(
                             with K.Then():
                                 K.assign(self.dispatch_expert_idx, lane_idx)
                                 with K.While(
-                                    self.dispatch_expert_idx
-                                    < kernel_config.num_dispatch_warps
+                                    self.dispatch_expert_idx < kernel_config.num_dispatch_warps
                                 ):
                                     K.ptx.mbarrier.init.shared.b64(
-                                        dispatch_barriers.ptr_to(
-                                            [self.dispatch_expert_idx]
-                                        ),
+                                        dispatch_barriers.ptr_to([self.dispatch_expert_idx]),
                                         K.uint32(1),
                                     )
                                     K.assign(
-                                        self.dispatch_expert_idx,
-                                        self.dispatch_expert_idx + 32,
+                                        self.dispatch_expert_idx, self.dispatch_expert_idx + 32
                                     )
                                 K.evaluate(fence_barrier_init())
                             with K.Else():
@@ -2801,20 +2498,13 @@ def get_kernel(
                                     with K.Then():
                                         with K.If(K.cuda.elect_sync()):
                                             with K.Then():
-                                                K.assign(
-                                                    self.dispatch_expert_idx, K.int32(0)
-                                                )
-                                                with K.While(
-                                                    self.dispatch_expert_idx
-                                                    < num_stages
-                                                ):
+                                                K.assign(self.dispatch_expert_idx, K.int32(0))
+                                                with K.While(self.dispatch_expert_idx < num_stages):
                                                     K.ptx.mbarrier.init.shared.b64(
                                                         full_barriers.ptr_to(
                                                             [self.dispatch_expert_idx]
                                                         ),
-                                                        K.uint32(
-                                                            full_barrier_init_count
-                                                        ),
+                                                        K.uint32(full_barrier_init_count),
                                                     )
                                                     K.ptx.mbarrier.init.shared.b64(
                                                         empty_barriers.ptr_to(
@@ -2826,12 +2516,9 @@ def get_kernel(
                                                         self.dispatch_expert_idx,
                                                         (self.dispatch_expert_idx + 1),
                                                     )
-                                                K.assign(
-                                                    self.dispatch_expert_idx, K.int32(0)
-                                                )
+                                                K.assign(self.dispatch_expert_idx, K.int32(0))
                                                 with K.While(
-                                                    self.dispatch_expert_idx
-                                                    < num_epilogue_stages
+                                                    self.dispatch_expert_idx < num_epilogue_stages
                                                 ):
                                                     K.ptx.mbarrier.init.shared.b64(
                                                         tmem_full_barriers.ptr_to(
@@ -2843,21 +2530,16 @@ def get_kernel(
                                                         tmem_empty_barriers.ptr_to(
                                                             [self.dispatch_expert_idx]
                                                         ),
-                                                        K.uint32(
-                                                            tmem_empty_barrier_init_count
-                                                        ),
+                                                        K.uint32(tmem_empty_barrier_init_count),
                                                     )
                                                     K.assign(
                                                         self.dispatch_expert_idx,
                                                         (self.dispatch_expert_idx + 1),
                                                     )
-                                                K.assign(
-                                                    self.dispatch_expert_idx, K.int32(0)
-                                                )
+                                                K.assign(self.dispatch_expert_idx, K.int32(0))
                                                 with K.While(
                                                     self.dispatch_expert_idx
-                                                    < kernel_config.num_epilogue_warps
-                                                    * 2
+                                                    < kernel_config.num_epilogue_warps * 2
                                                 ):
                                                     K.ptx.mbarrier.init.shared.b64(
                                                         combine_barriers.ptr_to(
@@ -2869,12 +2551,9 @@ def get_kernel(
                                                         self.dispatch_expert_idx,
                                                         (self.dispatch_expert_idx + 1),
                                                     )
-                                                K.assign(
-                                                    self.dispatch_expert_idx, K.int32(0)
-                                                )
+                                                K.assign(self.dispatch_expert_idx, K.int32(0))
                                                 with K.While(
-                                                    self.dispatch_expert_idx
-                                                    < num_schedule_stages
+                                                    self.dispatch_expert_idx < num_schedule_stages
                                                 ):
                                                     K.ptx.mbarrier.init.shared.b64(
                                                         task_info_full_barriers.ptr_to(
@@ -2886,9 +2565,7 @@ def get_kernel(
                                                         task_info_empty_barriers.ptr_to(
                                                             [self.dispatch_expert_idx]
                                                         ),
-                                                        K.uint32(
-                                                            num_schedule_consumer_threads
-                                                        ),
+                                                        K.uint32(num_schedule_consumer_threads),
                                                     )
                                                     K.assign(
                                                         self.dispatch_expert_idx,
@@ -2897,8 +2574,7 @@ def get_kernel(
                                         K.evaluate(fence_barrier_init())
                                     with K.Else():
                                         with K.If(
-                                            flat_warp_idx
-                                            == kernel_config.num_dispatch_warps - 1
+                                            flat_warp_idx == kernel_config.num_dispatch_warps - 1
                                         ):
                                             with K.Then():
                                                 K.ptx[
@@ -2920,8 +2596,7 @@ def get_kernel(
                     * kernel_config.num_tokens_per_warp,
                 )
                 with K.While(
-                    K.cast(self.dispatch_token_iter, "uint32")
-                    < K.cast(num_tokens, "uint32")
+                    K.cast(self.dispatch_token_iter, "uint32") < K.cast(num_tokens, "uint32")
                 ):
                     with K.If(lane_idx < kernel_config.num_activate_lanes):
                         with K.Then():
@@ -2929,14 +2604,9 @@ def get_kernel(
                             token_idx = self.dispatch_token_iter + K.cast(
                                 lane_idx_u32 // K.uint32(num_topk), "int32"
                             )
-                            with K.If(
-                                K.cast(token_idx, "uint32")
-                                < K.cast(num_tokens, "uint32")
-                            ):
+                            with K.If(K.cast(token_idx, "uint32") < K.cast(num_tokens, "uint32")):
                                 with K.Then():
-                                    topk_idx = K.cast(
-                                        lane_idx_u32 % K.uint32(num_topk), "int32"
-                                    )
+                                    topk_idx = K.cast(lane_idx_u32 % K.uint32(num_topk), "int32")
                                     load_global_s64(
                                         self.ordinary_global_s64,
                                         input_topk_idx.ptr_to([token_idx, topk_idx]),
@@ -2971,16 +2641,13 @@ def get_kernel(
                     K.uint32(kernel_config.num_dispatch_threads),
                 )
                 K.assign(self.dispatch_expert_idx, role_thread_idx)
-                with K.While(
-                    K.cast(self.dispatch_expert_idx, "uint32") < K.uint32(num_experts)
-                ):
+                with K.While(K.cast(self.dispatch_expert_idx, "uint32") < K.uint32(num_experts)):
                     load_shared_u32(
                         self.smem_expert_count_value,
                         smem_expert_count.ptr_to([self.dispatch_expert_idx]),
                     )
                     send_value = K.bitwise_or(
-                        K.uint64(1 << 32),
-                        K.cast(self.smem_expert_count_value, "uint64"),
+                        K.uint64(1 << 32), K.cast(self.smem_expert_count_value, "uint64")
                     )
                     prev_send_count = K.local_scalar("uint64")
                     K.ptx.atom.global_.add.u64(
@@ -3006,8 +2673,7 @@ def get_kernel(
                     * kernel_config.num_tokens_per_warp,
                 )
                 with K.While(
-                    K.cast(self.dispatch_token_iter, "uint32")
-                    < K.cast(num_tokens, "uint32")
+                    K.cast(self.dispatch_token_iter, "uint32") < K.cast(num_tokens, "uint32")
                 ):
                     with K.If(lane_idx < kernel_config.num_activate_lanes):
                         with K.Then():
@@ -3015,14 +2681,9 @@ def get_kernel(
                             token_idx = self.dispatch_token_iter + K.cast(
                                 lane_idx_u32 // K.uint32(num_topk), "int32"
                             )
-                            with K.If(
-                                K.cast(token_idx, "uint32")
-                                < K.cast(num_tokens, "uint32")
-                            ):
+                            with K.If(K.cast(token_idx, "uint32") < K.cast(num_tokens, "uint32")):
                                 with K.Then():
-                                    topk_idx = K.cast(
-                                        lane_idx_u32 % K.uint32(num_topk), "int32"
-                                    )
+                                    topk_idx = K.cast(lane_idx_u32 % K.uint32(num_topk), "int32")
                                     K.assign(
                                         self.dispatch_token_topk_idx,
                                         token_idx * num_topk + topk_idx,
@@ -3068,9 +2729,7 @@ def get_kernel(
                                             K.assign(
                                                 self.symm_rank_base,
                                                 sym_buffer_base
-                                                + K.cast(
-                                                    symm_rank_offsets[0], "uint64"
-                                                ),
+                                                + K.cast(symm_rank_offsets[0], "uint64"),
                                             )
                                             load_symm_rank_base(
                                                 self.symm_rank_base,
@@ -3091,10 +2750,7 @@ def get_kernel(
                                                     )
                                                     * 4
                                                 ),
-                                                K.cast(
-                                                    self.dispatch_token_topk_idx,
-                                                    "uint32",
-                                                ),
+                                                K.cast(self.dispatch_token_topk_idx, "uint32"),
                                             )
                     K.cuda.warp_sync()
                     K.assign(
@@ -3116,38 +2772,30 @@ def get_kernel(
                     with K.Then():
                         K.assign(self.dispatch_expert_idx, role_thread_idx)
                         with K.While(
-                            K.cast(self.dispatch_expert_idx, "uint32")
-                            < K.uint32(num_experts)
+                            K.cast(self.dispatch_expert_idx, "uint32") < K.uint32(num_experts)
                         ):
-                            dispatch_expert_idx_u32 = K.cast(
-                                self.dispatch_expert_idx, "uint32"
-                            )
+                            dispatch_expert_idx_u32 = K.cast(self.dispatch_expert_idx, "uint32")
                             K.assign(
                                 self.dispatch_dst_rank_idx,
                                 K.cast(
-                                    dispatch_expert_idx_u32
-                                    // K.uint32(num_experts_per_rank),
+                                    dispatch_expert_idx_u32 // K.uint32(num_experts_per_rank),
                                     "int32",
                                 ),
                             )
                             K.assign(
                                 self.dispatch_dst_local_expert_idx,
                                 K.cast(
-                                    dispatch_expert_idx_u32
-                                    % K.uint32(num_experts_per_rank),
+                                    dispatch_expert_idx_u32 % K.uint32(num_experts_per_rank),
                                     "int32",
                                 ),
                             )
                             load_global_u64(
                                 self.scheduler_cached_status,
-                                workspace_expert_send_count.ptr_to(
-                                    [self.dispatch_expert_idx]
-                                ),
+                                workspace_expert_send_count.ptr_to([self.dispatch_expert_idx]),
                             )
                             K.assign(
                                 self.symm_rank_base,
-                                sym_buffer_base
-                                + K.cast(symm_rank_offsets[0], "uint64"),
+                                sym_buffer_base + K.cast(symm_rank_offsets[0], "uint64"),
                             )
                             load_symm_rank_base(
                                 self.symm_rank_base,
@@ -3164,17 +2812,14 @@ def get_kernel(
                                     )
                                     * 8
                                 ),
-                                K.bitwise_and(
-                                    self.scheduler_cached_status, K.uint64(0xFFFFFFFF)
-                                ),
+                                K.bitwise_and(self.scheduler_cached_status, K.uint64(0xFFFFFFFF)),
                             )
                             peer_recv_count_sum_prev = K.local_scalar(
                                 "uint64"
                             )  # atom returns the old value; unused here
                             K.assign(
                                 self.symm_rank_base,
-                                sym_buffer_base
-                                + K.cast(symm_rank_offsets[0], "uint64"),
+                                sym_buffer_base + K.cast(symm_rank_offsets[0], "uint64"),
                             )
                             load_symm_rank_base(
                                 self.symm_rank_base,
@@ -3192,10 +2837,7 @@ def get_kernel(
                             )
                             K.assign(
                                 self.dispatch_expert_idx,
-                                (
-                                    self.dispatch_expert_idx
-                                    + kernel_config.num_dispatch_threads
-                                ),
+                                (self.dispatch_expert_idx + kernel_config.num_dispatch_threads),
                             )
                 K.ptx.bar.sync(
                     K.uint32(dispatch_sync_barrier_idx),
@@ -3205,8 +2847,7 @@ def get_kernel(
                 K.evaluate(
                     sync_unaligned(
                         dispatch_with_epilogue_sync_barrier_idx,
-                        kernel_config.num_dispatch_threads
-                        + kernel_config.num_epilogue_threads,
+                        kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                     )
                 )
                 self.pull_state.init(0)
@@ -3227,10 +2868,7 @@ def get_kernel(
                         K.cast(self.dispatch_token_iter, "uint32")
                         >= K.cast(self.expert_end_idx, "uint32")
                     ):
-                        K.assign(
-                            self.current_expert_idx,
-                            self.current_expert_idx + K.int32(1),
-                        )
+                        K.assign(self.current_expert_idx, self.current_expert_idx + K.int32(1))
                         with K.If(
                             K.cast(self.current_expert_idx, "uint32")
                             >= K.uint32(num_experts_per_rank)
@@ -3245,8 +2883,7 @@ def get_kernel(
                         ) // K.uint32(kernel_config.block_m)
                         K.assign(
                             self.pull_pool_block_offset,
-                            self.pull_pool_block_offset
-                            + K.cast(expert_num_blocks_u32, "int32"),
+                            self.pull_pool_block_offset + K.cast(expert_num_blocks_u32, "int32"),
                         )
                         K.assign(self.expert_start_idx, self.expert_end_idx)
                         scheduler_get_num_tokens(
@@ -3256,12 +2893,10 @@ def get_kernel(
                             self.selected_num_tokens,
                         )
                         K.assign(
-                            self.expert_end_idx,
-                            self.expert_end_idx + self.selected_num_tokens[0],
+                            self.expert_end_idx, self.expert_end_idx + self.selected_num_tokens[0]
                         )
                     with K.If(
-                        K.cast(self.current_expert_idx, "uint32")
-                        >= K.uint32(num_experts_per_rank)
+                        K.cast(self.current_expert_idx, "uint32") >= K.uint32(num_experts_per_rank)
                     ):
                         with K.Then():
                             K.Break()
@@ -3269,13 +2904,8 @@ def get_kernel(
                         with K.Then():
                             K.assign(self.old_expert_idx, self.current_expert_idx)
                             with K.unroll(0, num_ranks_per_lane) as rank_lane_idx:
-                                K.assign(
-                                    self.dispatch_dst_rank_idx,
-                                    rank_lane_idx * 32 + lane_idx,
-                                )
-                                K.ptx.mov.b32(
-                                    self.stored_rank_counts[rank_lane_idx], K.uint32(0)
-                                )
+                                K.assign(self.dispatch_dst_rank_idx, rank_lane_idx * 32 + lane_idx)
+                                K.ptx.mov.b32(self.stored_rank_counts[rank_lane_idx], K.uint32(0))
                                 with K.If(
                                     K.cast(self.dispatch_dst_rank_idx, "uint32")
                                     < K.uint32(num_processes)
@@ -3295,8 +2925,7 @@ def get_kernel(
                                             K.cast(self.ordinary_global_u64, "uint32"),
                                         )
                     K.assign(
-                        self.token_idx_in_expert,
-                        self.dispatch_token_iter - self.expert_start_idx,
+                        self.token_idx_in_expert, self.dispatch_token_iter - self.expert_start_idx
                     )
                     K.assign(self.dispatch_dst_slot_idx, self.token_idx_in_expert)
                     K.assign(self.round_offset, K.int32(0))
@@ -3309,9 +2938,7 @@ def get_kernel(
                         K.assign(self.min_in_lane, K.uint32(0xFFFFFFFF))
                         K.assign(self.num_actives_in_lane, K.int32(0))
                         with K.unroll(0, num_ranks_per_lane) as rank_lane_idx:
-                            with K.If(
-                                self.remaining_rank_counts[rank_lane_idx] > K.uint32(0)
-                            ):
+                            with K.If(self.remaining_rank_counts[rank_lane_idx] > K.uint32(0)):
                                 with K.Then():
                                     K.assign(
                                         self.num_actives_in_lane,
@@ -3328,8 +2955,7 @@ def get_kernel(
                             self.num_active_ranks,
                             K.cast(
                                 reduce_add_sync_u32(
-                                    K.uint32(0xFFFFFFFF),
-                                    K.cast(self.num_actives_in_lane, "uint32"),
+                                    K.uint32(0xFFFFFFFF), K.cast(self.num_actives_in_lane, "uint32")
                                 ),
                                 "int32",
                             ),
@@ -3337,15 +2963,12 @@ def get_kernel(
                         K.assign(
                             self.min_active_count,
                             K.cast(
-                                K.cuda.reduce_min_sync_u32(
-                                    K.uint32(0xFFFFFFFF), self.min_in_lane
-                                ),
+                                K.cuda.reduce_min_sync_u32(K.uint32(0xFFFFFFFF), self.min_in_lane),
                                 "int32",
                             ),
                         )
                         K.assign(
-                            self.round_token_count,
-                            self.min_active_count * self.num_active_ranks,
+                            self.round_token_count, self.min_active_count * self.num_active_ranks
                         )
                         with K.If(
                             K.cast(self.dispatch_dst_slot_idx, "uint32")
@@ -3355,15 +2978,11 @@ def get_kernel(
                                 dispatch_dst_slot_idx_u32 = K.cast(
                                     self.dispatch_dst_slot_idx, "uint32"
                                 )
-                                num_active_ranks_u32 = K.cast(
-                                    self.num_active_ranks, "uint32"
-                                )
+                                num_active_ranks_u32 = K.cast(self.num_active_ranks, "uint32")
                                 K.assign(
                                     self.slot_idx_in_round,
                                     K.cast(
-                                        dispatch_dst_slot_idx_u32
-                                        % num_active_ranks_u32,
-                                        "int32",
+                                        dispatch_dst_slot_idx_u32 % num_active_ranks_u32, "int32"
                                     ),
                                 )
                                 num_seen_ranks = K.int32(0)
@@ -3373,15 +2992,12 @@ def get_kernel(
                                         self.rank_count_mask,
                                         ballot_sync(
                                             K.uint32(0xFFFFFFFF),
-                                            self.remaining_rank_counts[rank_lane_idx]
-                                            > K.uint32(0),
+                                            self.remaining_rank_counts[rank_lane_idx] > K.uint32(0),
                                         ),
                                     )
                                     K.assign(
                                         self.active_lane_count,
-                                        K.cast(
-                                            K.popcount(self.rank_count_mask), "int32"
-                                        ),
+                                        K.cast(K.popcount(self.rank_count_mask), "int32"),
                                     )
                                     with K.If(
                                         K.And(
@@ -3389,8 +3005,7 @@ def get_kernel(
                                             >= K.cast(num_seen_ranks, "uint32"),
                                             K.cast(self.slot_idx_in_round, "uint32")
                                             < K.cast(
-                                                num_seen_ranks + self.active_lane_count,
-                                                "uint32",
+                                                num_seen_ranks + self.active_lane_count, "uint32"
                                             ),
                                         )
                                     ):
@@ -3411,16 +3026,12 @@ def get_kernel(
                                                     + K.cast(rank_slot_bit, "int32")
                                                 ),
                                             )
-                                    num_seen_ranks = (
-                                        num_seen_ranks + self.active_lane_count
-                                    )
+                                    num_seen_ranks = num_seen_ranks + self.active_lane_count
                                 K.assign(
                                     self.token_idx_in_rank,
                                     self.round_offset
                                     + K.cast(
-                                        dispatch_dst_slot_idx_u32
-                                        // num_active_ranks_u32,
-                                        "int32",
+                                        dispatch_dst_slot_idx_u32 // num_active_ranks_u32, "int32"
                                     ),
                                 )
                                 K.Break()
@@ -3428,9 +3039,7 @@ def get_kernel(
                             self.dispatch_dst_slot_idx,
                             (self.dispatch_dst_slot_idx - self.round_token_count),
                         )
-                        K.assign(
-                            self.round_offset, self.round_offset + self.min_active_count
-                        )
+                        K.assign(self.round_offset, self.round_offset + self.min_active_count)
                         with K.unroll(0, num_ranks_per_lane) as rank_lane_idx:
                             K.ptx.mov.b32(
                                 self.remaining_rank_counts[rank_lane_idx],
@@ -3451,23 +3060,16 @@ def get_kernel(
                         ),
                     )
                     K.assign(
-                        self.pull_src_token_topk_idx,
-                        K.cast(self.ordinary_global_u32, "int32"),
+                        self.pull_src_token_topk_idx, K.cast(self.ordinary_global_u32, "int32")
                     )
-                    pull_src_token_topk_idx_u32 = K.cast(
-                        self.pull_src_token_topk_idx, "uint32"
-                    )
+                    pull_src_token_topk_idx_u32 = K.cast(self.pull_src_token_topk_idx, "uint32")
                     K.assign(
                         self.pull_src_token_idx,
-                        K.cast(
-                            pull_src_token_topk_idx_u32 // K.uint32(num_topk), "int32"
-                        ),
+                        K.cast(pull_src_token_topk_idx_u32 // K.uint32(num_topk), "int32"),
                     )
                     K.assign(
                         self.pull_src_topk_idx,
-                        K.cast(
-                            pull_src_token_topk_idx_u32 % K.uint32(num_topk), "int32"
-                        ),
+                        K.cast(pull_src_token_topk_idx_u32 % K.uint32(num_topk), "int32"),
                     )
                     K.assign(
                         self.pull_pool_token_idx,
@@ -3477,17 +3079,10 @@ def get_kernel(
                         ),
                     )
                     K.assign(
-                        self.pull_pool_block_idx,
-                        self.pull_pool_token_idx // kernel_config.block_m,
+                        self.pull_pool_block_idx, self.pull_pool_token_idx // kernel_config.block_m
                     )
-                    K.assign(
-                        self.pull_ring_block_idx,
-                        self.pull_pool_block_idx % num_ring_blocks,
-                    )
-                    K.assign(
-                        self.pull_ring_token_idx,
-                        self.pull_pool_token_idx % num_ring_tokens,
-                    )
+                    K.assign(self.pull_ring_block_idx, self.pull_pool_block_idx % num_ring_blocks)
+                    K.assign(self.pull_ring_token_idx, self.pull_pool_token_idx % num_ring_tokens)
                     K.assign(
                         self.l1_empty_count_target,
                         (self.pull_pool_block_idx // num_ring_blocks * num_l1_block_ns),
@@ -3496,9 +3091,7 @@ def get_kernel(
                         with K.Then():
                             load_acq_u32(
                                 self.current_ring_count,
-                                workspace_l1_empty_count.ptr_to(
-                                    [self.pull_ring_block_idx]
-                                ),
+                                workspace_l1_empty_count.ptr_to([self.pull_ring_block_idx]),
                             )
                             with K.While(
                                 self.current_ring_count
@@ -3506,17 +3099,14 @@ def get_kernel(
                             ):
                                 load_acq_u32(
                                     self.current_ring_count,
-                                    workspace_l1_empty_count.ptr_to(
-                                        [self.pull_ring_block_idx]
-                                    ),
+                                    workspace_l1_empty_count.ptr_to([self.pull_ring_block_idx]),
                                 )
                     with K.If(K.cuda.elect_sync()):
                         with K.Then():
                             with K.unroll(0, num_pull_chunks) as pull_chunk_idx:
                                 K.assign(
                                     self.symm_rank_base,
-                                    sym_buffer_base
-                                    + K.cast(symm_rank_offsets[0], "uint64"),
+                                    sym_buffer_base + K.cast(symm_rank_offsets[0], "uint64"),
                                 )
                                 load_symm_rank_base(
                                     self.symm_rank_base,
@@ -3529,8 +3119,7 @@ def get_kernel(
                                     K.uint64(
                                         symm_buffer_layout.input_token_offset
                                         + self.pull_src_token_idx * hidden
-                                        + pull_chunk_idx
-                                        * kernel_config.num_bytes_per_pull
+                                        + pull_chunk_idx * kernel_config.num_bytes_per_pull
                                     ),
                                     dispatch_barriers.ptr_to([role_warp_idx]),
                                     kernel_config.num_bytes_per_pull,
@@ -3554,17 +3143,14 @@ def get_kernel(
                                                     * kernel_config.num_bytes_per_pull,
                                                 ]
                                             ),
-                                            smem_send_buffers.ptr_to(
-                                                [role_warp_idx, 0]
-                                            ),
+                                            smem_send_buffers.ptr_to([role_warp_idx, 0]),
                                             kernel_config.num_bytes_per_pull,
                                         )
                                         K.evaluate(tma_store_arrive())
                                         K.evaluate(tma_store_wait(0))
                     K.cuda.warp_sync()
                     K.assign(
-                        self.token_idx_in_block,
-                        self.token_idx_in_expert % kernel_config.block_m,
+                        self.token_idx_in_block, self.token_idx_in_expert % kernel_config.block_m
                     )
                     K.assign(
                         self.sf_row_idx,
@@ -3598,22 +3184,17 @@ def get_kernel(
                             ),
                         )
                         store_global_u32(
-                            l1_acts_sf.ptr_to(
-                                [self.dispatch_dst_rank_idx, self.sf_row_idx]
-                            ),
+                            l1_acts_sf.ptr_to([self.dispatch_dst_rank_idx, self.sf_row_idx]),
                             pulled_sf,
                         )
-                        K.assign(
-                            self.dispatch_dst_rank_idx, self.dispatch_dst_rank_idx + 32
-                        )
+                        K.assign(self.dispatch_dst_rank_idx, self.dispatch_dst_rank_idx + 32)
                     K.cuda.warp_sync()
                     with K.If(K.cuda.elect_sync()):
                         with K.Then():
                             pulled_weight = K.local_scalar("float32")
                             K.assign(
                                 self.symm_rank_base,
-                                sym_buffer_base
-                                + K.cast(symm_rank_offsets[0], "uint64"),
+                                sym_buffer_base + K.cast(symm_rank_offsets[0], "uint64"),
                             )
                             load_symm_rank_base(
                                 self.symm_rank_base,
@@ -3629,8 +3210,7 @@ def get_kernel(
                                 ),
                             )
                             K.ptx.st.global_.f32(
-                                l1_topk_weights.ptr_to([self.pull_ring_token_idx]),
-                                pulled_weight,
+                                l1_topk_weights.ptr_to([self.pull_ring_token_idx]), pulled_weight
                             )
                             self.store_token_src_metadata(
                                 self.pull_pool_token_idx,
@@ -3639,16 +3219,14 @@ def get_kernel(
                                 self.pull_src_topk_idx,
                             )
                             mbarrier_wait_phase(
-                                dispatch_barriers.ptr_to([role_warp_idx]),
-                                self.pull_state.phase,
+                                dispatch_barriers.ptr_to([role_warp_idx]), self.pull_state.phase
                             )
                             self.pull_state.advance()
                             tma_store_1d(
                                 K.address_of(
                                     l1_acts[
                                         self.pull_ring_token_idx,
-                                        (num_pull_chunks - 1)
-                                        * kernel_config.num_bytes_per_pull,
+                                        (num_pull_chunks - 1) * kernel_config.num_bytes_per_pull,
                                     ]
                                 ),
                                 smem_send_buffers.ptr_to([role_warp_idx, 0]),
@@ -3658,12 +3236,9 @@ def get_kernel(
                             K.evaluate(tma_store_wait(0))
                             atomic_add_rel_u32(
                                 self.atom_prev_unused,
-                                workspace_l1_full_count.ptr_to(
-                                    [self.pull_ring_block_idx]
-                                ),
+                                workspace_l1_full_count.ptr_to([self.pull_ring_block_idx]),
                                 K.Select(
-                                    self.dispatch_token_iter
-                                    == self.expert_end_idx - K.int32(1),
+                                    self.dispatch_token_iter == self.expert_end_idx - K.int32(1),
                                     K.uint32(kernel_config.block_m)
                                     - K.cast(self.token_idx_in_block, "uint32"),
                                     K.uint32(1),
@@ -3680,8 +3255,7 @@ def get_kernel(
                 K.evaluate(
                     sync_unaligned(
                         dispatch_with_epilogue_sync_barrier_idx,
-                        kernel_config.num_dispatch_threads
-                        + kernel_config.num_epilogue_threads,
+                        kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                     )
                 )
                 # Dispatch and load-A read reusable global workspace after the
@@ -3699,52 +3273,35 @@ def get_kernel(
                         K.assign(self.dispatch_expert_idx, role_thread_idx)
                         with K.While(self.dispatch_expert_idx < num_experts):
                             store_global_u64(
-                                workspace_expert_send_count.ptr_to(
-                                    [self.dispatch_expert_idx]
-                                ),
+                                workspace_expert_send_count.ptr_to([self.dispatch_expert_idx]),
                                 K.uint64(0),
                             )
                             K.assign(
                                 self.dispatch_expert_idx,
-                                (
-                                    self.dispatch_expert_idx
-                                    + kernel_config.num_dispatch_threads
-                                ),
+                                (self.dispatch_expert_idx + kernel_config.num_dispatch_threads),
                             )
                         with K.If((role_warp_idx == 0) & K.cuda.elect_sync() != 0):
                             with K.Then():
+                                store_global_u32(workspace_l1_task_count.ptr_to([0]), K.uint32(0))
+                                store_global_u32(workspace_l2_task_count.ptr_to([0]), K.uint32(0))
                                 store_global_u32(
-                                    workspace_l1_task_count.ptr_to([0]), K.uint32(0)
+                                    workspace_shared_l1_task_count.ptr_to([0]), K.uint32(0)
                                 )
                                 store_global_u32(
-                                    workspace_l2_task_count.ptr_to([0]), K.uint32(0)
-                                )
-                                store_global_u32(
-                                    workspace_shared_l1_task_count.ptr_to([0]),
-                                    K.uint32(0),
-                                )
-                                store_global_u32(
-                                    workspace_shared_l2_task_count.ptr_to([0]),
-                                    K.uint32(0),
+                                    workspace_shared_l2_task_count.ptr_to([0]), K.uint32(0)
                                 )
                         K.cuda.warp_sync()
                         K.assign(self.dispatch_expert_idx, role_thread_idx)
                         with K.While(
-                            self.dispatch_expert_idx
-                            < workspace_layout.num_shared_l2_pool_blocks
+                            self.dispatch_expert_idx < workspace_layout.num_shared_l2_pool_blocks
                         ):
                             store_global_u32(
-                                workspace_shared_l2_full_count.ptr_to(
-                                    [self.dispatch_expert_idx]
-                                ),
+                                workspace_shared_l2_full_count.ptr_to([self.dispatch_expert_idx]),
                                 K.uint32(0),
                             )
                             K.assign(
                                 self.dispatch_expert_idx,
-                                (
-                                    self.dispatch_expert_idx
-                                    + kernel_config.num_dispatch_threads
-                                ),
+                                (self.dispatch_expert_idx + kernel_config.num_dispatch_threads),
                             )
                         K.cuda.warp_sync()
                     with K.Else():
@@ -3761,10 +3318,7 @@ def get_kernel(
                             K.assign(
                                 self.scheduler_num_m_blocks,
                                 K.cast(
-                                    (
-                                        pull_num_tokens_u32
-                                        + K.uint32(kernel_config.block_m - 1)
-                                    )
+                                    (pull_num_tokens_u32 + K.uint32(kernel_config.block_m - 1))
                                     // K.uint32(kernel_config.block_m),
                                     "int32",
                                 ),
@@ -3775,10 +3329,7 @@ def get_kernel(
                                 self.stored_num_tokens_per_expert,
                                 self.pool_block_offset_sum,
                             )
-                            K.assign(
-                                self.pull_pool_block_offset,
-                                self.pool_block_offset_sum[0],
-                            )
+                            K.assign(self.pull_pool_block_offset, self.pool_block_offset_sum[0])
                             K.ptx.bar.sync(
                                 K.uint32(dispatch_sync_barrier_idx),
                                 K.uint32(kernel_config.num_dispatch_threads),
@@ -3793,8 +3344,7 @@ def get_kernel(
                                     )
                             with K.If(
                                 K.And(
-                                    K.And(kernel_collect_stats, role_warp_idx == 1),
-                                    lane_idx == 0,
+                                    K.And(kernel_collect_stats, role_warp_idx == 1), lane_idx == 0
                                 )
                             ):
                                 with K.Then():
@@ -3807,15 +3357,10 @@ def get_kernel(
                                         )
                                     )
                             K.assign(self.dispatch_dst_rank_idx, role_thread_idx)
-                            with K.While(
-                                self.dispatch_dst_rank_idx < K.int32(num_processes)
-                            ):
+                            with K.While(self.dispatch_dst_rank_idx < K.int32(num_processes)):
                                 store_global_u64(
                                     workspace_expert_recv_count.ptr_to(
-                                        [
-                                            self.dispatch_dst_rank_idx,
-                                            self.pull_local_expert_idx,
-                                        ]
+                                        [self.dispatch_dst_rank_idx, self.pull_local_expert_idx]
                                     ),
                                     K.uint64(0),
                                 )
@@ -3827,39 +3372,26 @@ def get_kernel(
                                     ),
                                 )
                             K.assign(self.dispatch_dst_slot_idx, role_thread_idx)
-                            with K.While(
-                                self.dispatch_dst_slot_idx < self.scheduler_num_m_blocks
-                            ):
+                            with K.While(self.dispatch_dst_slot_idx < self.scheduler_num_m_blocks):
                                 K.assign(
                                     self.pull_ring_block_idx,
-                                    (
-                                        self.pull_pool_block_offset
-                                        + self.dispatch_dst_slot_idx
-                                    )
+                                    (self.pull_pool_block_offset + self.dispatch_dst_slot_idx)
                                     % num_ring_blocks,
                                 )
                                 store_global_u32(
-                                    workspace_l1_full_count.ptr_to(
-                                        [self.pull_ring_block_idx]
-                                    ),
+                                    workspace_l1_full_count.ptr_to([self.pull_ring_block_idx]),
                                     K.uint32(0),
                                 )
                                 store_global_u32(
-                                    workspace_l1_empty_count.ptr_to(
-                                        [self.pull_ring_block_idx]
-                                    ),
+                                    workspace_l1_empty_count.ptr_to([self.pull_ring_block_idx]),
                                     K.uint32(0),
                                 )
                                 store_global_u32(
-                                    workspace_l2_full_count.ptr_to(
-                                        [self.pull_ring_block_idx]
-                                    ),
+                                    workspace_l2_full_count.ptr_to([self.pull_ring_block_idx]),
                                     K.uint32(0),
                                 )
                                 store_global_u32(
-                                    workspace_l2_empty_count.ptr_to(
-                                        [self.pull_ring_block_idx]
-                                    ),
+                                    workspace_l2_empty_count.ptr_to([self.pull_ring_block_idx]),
                                     K.uint32(0),
                                 )
                                 K.assign(
@@ -3871,8 +3403,7 @@ def get_kernel(
                                 )
                             K.assign(
                                 self.pull_local_expert_idx,
-                                self.pull_local_expert_idx
-                                + (kernel_config.num_sms - 1),
+                                self.pull_local_expert_idx + (kernel_config.num_sms - 1),
                             )
                 self.dispatch_nvlink_barrier_after_workspace_clean(role_thread_idx)
 
@@ -3917,8 +3448,7 @@ def get_kernel(
                                         self.load_a_wait_l2_full()
                                     with K.Else():
                                         with K.If(
-                                            self.block_phase
-                                            == K.int32(block_phase_shared_l2)
+                                            self.block_phase == K.int32(block_phase_shared_l2)
                                         ):
                                             with K.Then():
                                                 # SharedLinear2 waits for its full-size (non-ring) block,
@@ -3940,10 +3470,7 @@ def get_kernel(
                                                 )
                                                 with K.While(
                                                     self.current_ring_count
-                                                    != K.cast(
-                                                        self.expected_ring_count,
-                                                        "uint32",
-                                                    )
+                                                    != K.cast(self.expected_ring_count, "uint32")
                                                 ):
                                                     load_acq_u32(
                                                         self.current_ring_count,
@@ -3974,14 +3501,10 @@ def get_kernel(
                         with K.If(cta_idx_in_cluster != 0):
                             with K.Then():
                                 self.update_get_valid_m_true()
-                                K.assign(
-                                    self.m_idx, self.m_idx + self.get_valid_m_true_half
-                                )
+                                K.assign(self.m_idx, self.m_idx + self.get_valid_m_true_half)
                         with K.If(K.cuda.elect_sync()):
                             with K.Then():
-                                full_barrier_ptr = full_barriers.ptr_to(
-                                    [self.pipeline_state.stage]
-                                )
+                                full_barrier_ptr = full_barriers.ptr_to([self.pipeline_state.stage])
                                 with K.unroll(
                                     0, kernel_config.block_k // umma_block_k
                                 ) as tma_k_atom_idx:
@@ -4003,9 +3526,7 @@ def get_kernel(
                                         tensor_map_shared_l2_acts,
                                     )
                                 self.tma_copy_2d_multicast_select(
-                                    smem_sfa_i32.ptr_to(
-                                        [self.pipeline_state.stage, 0, 0]
-                                    ),
+                                    smem_sfa_i32.ptr_to([self.pipeline_state.stage, 0, 0]),
                                     full_barrier_ptr,
                                     tensor_map_l1_acts_sf,
                                     tensor_map_l2_acts_sf,
@@ -4018,8 +3539,7 @@ def get_kernel(
                                 with K.If(cta_idx_in_cluster == 0):
                                     with K.Then():
                                         self.full_barrier_arrive_and_expect_tx(
-                                            full_barrier_ptr,
-                                            full_a_expect_tx_leader_bytes,
+                                            full_barrier_ptr, full_a_expect_tx_leader_bytes
                                         )
                                     with K.Else():
                                         self.full_barrier_arrive_cta0(full_barrier_ptr)
@@ -4101,9 +3621,7 @@ def get_kernel(
                             )
                         with K.If(K.cuda.elect_sync()):
                             with K.Then():
-                                full_barrier_ptr = full_barriers.ptr_to(
-                                    [self.pipeline_state.stage]
-                                )
+                                full_barrier_ptr = full_barriers.ptr_to([self.pipeline_state.stage])
                                 with K.unroll(
                                     0, kernel_config.block_k // umma_block_k
                                 ) as tma_k_atom_idx:
@@ -4125,9 +3643,7 @@ def get_kernel(
                                         tensor_map_shared_l2_weights,
                                     )
                                 self.tma_copy_2d_multicast_select(
-                                    smem_sfb_i32.ptr_to(
-                                        [self.pipeline_state.stage, 0, 0]
-                                    ),
+                                    smem_sfb_i32.ptr_to([self.pipeline_state.stage, 0, 0]),
                                     full_barrier_ptr,
                                     tensor_map_l1_weights_sf,
                                     tensor_map_l2_weights_sf,
@@ -4148,18 +3664,13 @@ def get_kernel(
                                                 full_barrier_ptr,
                                                 K.Select(
                                                     self.block_phase > K.int32(2),
-                                                    K.uint32(
-                                                        full_shared_b_expect_tx_leader_bytes
-                                                    ),
-                                                    K.uint32(
-                                                        full_b_expect_tx_leader_bytes
-                                                    ),
+                                                    K.uint32(full_shared_b_expect_tx_leader_bytes),
+                                                    K.uint32(full_b_expect_tx_leader_bytes),
                                                 ),
                                             )
                                         else:
                                             self.full_barrier_arrive_and_expect_tx(
-                                                full_barrier_ptr,
-                                                full_b_expect_tx_leader_bytes,
+                                                full_barrier_ptr, full_b_expect_tx_leader_bytes
                                             )
                                     with K.Else():
                                         self.full_barrier_arrive_cta0(full_barrier_ptr)
@@ -4180,13 +3691,9 @@ def get_kernel(
                             self.a_desc_lo,
                             K.Select(
                                 lane_idx < K.int32(num_stages),
-                                K.cast(
-                                    K.bitwise_and(self.desc_a, K.uint64(0xFFFFFFFF)),
-                                    "uint32",
-                                )
+                                K.cast(K.bitwise_and(self.desc_a, K.uint64(0xFFFFFFFF)), "uint32")
                                 + K.cast(
-                                    lane_idx * (smem_a_size_per_stage // f128_bytes),
-                                    "uint32",
+                                    lane_idx * (smem_a_size_per_stage // f128_bytes), "uint32"
                                 ),
                                 K.uint32(0),
                             ),
@@ -4195,13 +3702,9 @@ def get_kernel(
                             self.b_desc_lo,
                             K.Select(
                                 lane_idx < K.int32(num_stages),
-                                K.cast(
-                                    K.bitwise_and(self.desc_b, K.uint64(0xFFFFFFFF)),
-                                    "uint32",
-                                )
+                                K.cast(K.bitwise_and(self.desc_b, K.uint64(0xFFFFFFFF)), "uint32")
                                 + K.cast(
-                                    lane_idx * (smem_b_size_per_stage // f128_bytes),
-                                    "uint32",
+                                    lane_idx * (smem_b_size_per_stage // f128_bytes), "uint32"
                                 ),
                                 K.uint32(0),
                             ),
@@ -4243,9 +3746,7 @@ def get_kernel(
                                             K.uint32(0xFF81FFFF),
                                         ),
                                         K.shift_left(
-                                            K.cast(
-                                                self.get_valid_m_true_eighth, "uint32"
-                                            ),
+                                            K.cast(self.get_valid_m_true_eighth, "uint32"),
                                             K.uint32(17),
                                         ),
                                     ),
@@ -4254,13 +3755,9 @@ def get_kernel(
                                 K.assign(
                                     self.desc_i,
                                     K.bitwise_or(
-                                        K.bitwise_and(
-                                            self.desc_i, K.uint32(0xFF81FFFF)
-                                        ),
+                                        K.bitwise_and(self.desc_i, K.uint32(0xFF81FFFF)),
                                         K.shift_left(
-                                            K.cast(
-                                                self.get_valid_m_true_eighth, "uint32"
-                                            ),
+                                            K.cast(self.get_valid_m_true_eighth, "uint32"),
                                             K.uint32(17),
                                         ),
                                     ),
@@ -4302,9 +3799,7 @@ def get_kernel(
                                         with K.unroll(
                                             0, kernel_config.block_k // umma_block_k
                                         ) as umma_k_block_idx:
-                                            with K.unroll(
-                                                0, num_sfa_utccp_chunks
-                                            ) as sfa_chunk_idx:
+                                            with K.unroll(0, num_sfa_utccp_chunks) as sfa_chunk_idx:
                                                 K.assign(
                                                     self.desc_sf,
                                                     replace_smem_desc_addr(
@@ -4312,21 +3807,17 @@ def get_kernel(
                                                         smem_sfa.ptr_to(
                                                             [
                                                                 self.pipeline_state.stage,
-                                                                umma_k_block_idx
-                                                                * sf_block_m
+                                                                umma_k_block_idx * sf_block_m
                                                                 + sfa_chunk_idx * 128,
                                                             ]
                                                         ),
                                                     ),
                                                 )
                                                 self.utccp_copy(
-                                                    sfa_tmem.allocated_addr[0]
-                                                    + sfa_chunk_idx * 4,
+                                                    sfa_tmem.allocated_addr[0] + sfa_chunk_idx * 4,
                                                     self.desc_sf,
                                                 )
-                                            with K.unroll(
-                                                0, num_sfb_utccp_chunks
-                                            ) as sfb_chunk_idx:
+                                            with K.unroll(0, num_sfb_utccp_chunks) as sfb_chunk_idx:
                                                 K.assign(
                                                     self.desc_sf,
                                                     replace_smem_desc_addr(
@@ -4342,13 +3833,10 @@ def get_kernel(
                                                     ),
                                                 )
                                                 self.utccp_copy(
-                                                    sfb_tmem.allocated_addr[0]
-                                                    + sfb_chunk_idx * 4,
+                                                    sfb_tmem.allocated_addr[0] + sfb_chunk_idx * 4,
                                                     self.desc_sf,
                                                 )
-                                            with K.unroll(
-                                                0, umma_block_k // umma_k
-                                            ) as k_idx:
+                                            with K.unroll(0, umma_block_k // umma_k) as k_idx:
                                                 K.assign(
                                                     self.runtime_desc_i,
                                                     (
@@ -4391,27 +3879,15 @@ def get_kernel(
                                                 K.ptx[
                                                     f"tcgen05.mma.cta_group::{kernel_config.num_ctas_per_cluster}.kind::mxf8f6f4.block_scale.scale_vec::1X"
                                                 ](
-                                                    K.cast(
-                                                        self.accum_stage_idx * umma_n,
-                                                        "uint32",
-                                                    ),
+                                                    K.cast(self.accum_stage_idx * umma_n, "uint32"),
                                                     self.desc_b,
                                                     self.desc_a,
                                                     self.runtime_desc_i,
-                                                    K.cast(
-                                                        sfb_tmem.allocated_addr[0],
-                                                        "uint32",
-                                                    ),
-                                                    K.cast(
-                                                        sfa_tmem.allocated_addr[0],
-                                                        "uint32",
-                                                    ),
+                                                    K.cast(sfb_tmem.allocated_addr[0], "uint32"),
+                                                    K.cast(sfa_tmem.allocated_addr[0], "uint32"),
                                                     K.Or(
                                                         k_block_idx > K.int32(0),
-                                                        K.Or(
-                                                            umma_k_block_idx > 0,
-                                                            k_idx > 0,
-                                                        ),
+                                                        K.Or(umma_k_block_idx > 0, k_idx > 0),
                                                     ),
                                                 )
                                             # The next UMMA sub-block overwrites these fixed
@@ -4420,10 +3896,7 @@ def get_kernel(
                                             # without draining the outer K-block pipeline.
                                             with K.If(
                                                 umma_k_block_idx + 1
-                                                < (
-                                                    kernel_config.block_k
-                                                    // umma_block_k
-                                                )
+                                                < (kernel_config.block_k // umma_block_k)
                                             ):
                                                 with K.Then():
                                                     K.ptx.tcgen05.fence__before_thread_sync()
@@ -4462,9 +3935,7 @@ def get_kernel(
                         K.assign(self.sched_task_valid, K.int32(1))
                         with K.While(self.sched_task_valid != K.int32(0)):
                             self.barrier_wait(
-                                task_info_empty_barriers.ptr_to(
-                                    [self.sched_state.stage]
-                                ),
+                                task_info_empty_barriers.ptr_to([self.sched_state.stage]),
                                 self.sched_state.phase ^ K.int32(1),
                             )
                             self.producer_get_next_task()
@@ -4486,16 +3957,12 @@ def get_kernel(
                             self.sched_state.phase ^ K.int32(1),
                         )
                         with K.unroll(0, 8) as task_reg_idx:
-                            K.ptx.mov.b32(
-                                self.task_info_regs[task_reg_idx], K.uint32(0)
-                            )
+                            K.ptx.mov.b32(self.task_info_regs[task_reg_idx], K.uint32(0))
                         self.producer_publish_task()
 
             def epilogue(self, role_warp_idx, role_thread_idx):
                 self.init_gemm_context()
-                activation_values = K.alloc_local(
-                    (num_atoms_per_store, 2, 2), "float32"
-                )
+                activation_values = K.alloc_local((num_atoms_per_store, 2, 2), "float32")
                 amax_values = K.alloc_local((num_atoms_per_store, 2), "float32")
                 thread_local_amax = K.alloc_local((2,), "float32")
                 values = K.alloc_local((8,), "uint32")
@@ -4512,23 +3979,19 @@ def get_kernel(
                 scaled_lower = K.alloc_local((1,), "uint64")
                 epilogue_bf16_packed = K.alloc_local((4,), "uint32")
                 tmem_addr = K.alloc_local((1,), "uint32")
-                reduced = K.alloc_local(
-                    (num_uint4_per_lane * num_elems_per_uint4, 2), "float32"
-                )
+                reduced = K.alloc_local((num_uint4_per_lane * num_elems_per_uint4, 2), "float32")
                 load_shared_u32(self.tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
                 K.cuda.trap_when_assert_failed(self.tmem_allocated == K.uint32(0))
                 epilogue_warp_idx = role_warp_idx
                 epilogue_warp_idx_u32 = K.cast(epilogue_warp_idx, "uint32")
                 K.assign(
-                    self.epilogue_wg_idx,
-                    K.cast(epilogue_warp_idx_u32 // K.uint32(4), "int32"),
+                    self.epilogue_wg_idx, K.cast(epilogue_warp_idx_u32 // K.uint32(4), "int32")
                 )
                 warp_idx_in_wg = K.cast(epilogue_warp_idx_u32 % K.uint32(4), "int32")
                 K.evaluate(
                     sync_unaligned(
                         dispatch_with_epilogue_sync_barrier_idx,
-                        kernel_config.num_dispatch_threads
-                        + kernel_config.num_epilogue_threads,
+                        kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                     )
                 )
                 self.sched_state.init(0)
@@ -4543,8 +4006,7 @@ def get_kernel(
                     K.assign(self.accum_phase, self.accum_state.phase)
                     self.accum_state.advance()
                     self.barrier_wait(
-                        tmem_full_barriers.ptr_to([self.accum_stage_idx]),
-                        self.accum_phase,
+                        tmem_full_barriers.ptr_to([self.accum_stage_idx]), self.accum_phase
                     )
                     K.ptx.tcgen05.fence__after_thread_sync()
                     # Now we can release the task
@@ -4554,9 +4016,7 @@ def get_kernel(
                     # the valid-row early exit as warp-uniform instead of divergent.
                     K.assign(
                         self.valid_m,
-                        K.tvm_warp_shuffle(
-                            K.uint32(0xFFFFFFFF), self.valid_m, K.int32(0), 32, 32
-                        ),
+                        K.tvm_warp_shuffle(K.uint32(0xFFFFFFFF), self.valid_m, K.int32(0), 32, 32),
                     )
                     K.assign(self.ring_block_idx, self.pool_block_idx % num_ring_blocks)
                     if has_shared:
@@ -4573,21 +4033,15 @@ def get_kernel(
                     # `ring_m_idx` addresses the reusable ring buffers; the L1 store
                     # destination row uses `block_idx`, which for shared tasks is the
                     # absolute (non-ring) pool block (impls .cuh:981-982).
-                    K.assign(
-                        self.ring_m_idx, self.ring_block_idx * kernel_config.block_m
-                    )
-                    K.assign(
-                        self.pool_m_idx, self.pool_block_idx * kernel_config.block_m
-                    )
+                    K.assign(self.ring_m_idx, self.ring_block_idx * kernel_config.block_m)
+                    K.assign(self.pool_m_idx, self.pool_block_idx * kernel_config.block_m)
                     K.assign(
                         self.n_block_idx,
                         self.n_cluster_idx * 2
                         + K.Select(cta_idx_in_cluster == 0, K.int32(0), K.int32(1)),
                     )
                     valid_rows_in_wg = K.max(
-                        K.min(
-                            self.valid_m - self.epilogue_wg_idx * wg_block_m, wg_block_m
-                        ),
+                        K.min(self.valid_m - self.epilogue_wg_idx * wg_block_m, wg_block_m),
                         K.int32(0),
                     )
                     with K.If(
@@ -4619,18 +4073,12 @@ def get_kernel(
                             stored_cached_weight = K.local_scalar("float32")
                             K.assign(stored_cached_weight, K.float32(1.0))
                             with K.serial(
-                                0,
-                                wg_block_m // kernel_config.store_block_m,
-                                unroll=True,
+                                0, wg_block_m // kernel_config.store_block_m, unroll=True
                             ) as s:
-                                with K.If(
-                                    s * kernel_config.store_block_m >= valid_rows_in_wg
-                                ):
+                                with K.If(s * kernel_config.store_block_m >= valid_rows_in_wg):
                                     with K.Then():
                                         self.tmem_empty_barrier_arrive_cta0(
-                                            tmem_empty_barriers.ptr_to(
-                                                [self.accum_stage_idx]
-                                            )
+                                            tmem_empty_barriers.ptr_to([self.accum_stage_idx])
                                         )
                                         K.Break()
                                 with K.unroll(0, num_atoms_per_store) as i:
@@ -4641,9 +4089,7 @@ def get_kernel(
                                         K.And(
                                             (j * atom_m) % 32 == 0,
                                             K.if_then_else(
-                                                has_shared,
-                                                self.block_phase <= K.int32(2),
-                                                True,
+                                                has_shared, self.block_phase <= K.int32(2), True
                                             ),
                                         )
                                     ):
@@ -4654,38 +4100,33 @@ def get_kernel(
                                             # runtime guard for non-32-aligned wg_block_m.)
                                             with K.If(wg_block_m % 32 == 0):
                                                 with K.Then():
-                                                    l1_topk_weight_ptr = (
-                                                        l1_topk_weights.ptr_to(
-                                                            [
-                                                                self.ring_m_idx
-                                                                + self.epilogue_wg_idx
-                                                                * wg_block_m
-                                                                + j * atom_m
-                                                                + lane_idx
-                                                            ]
-                                                        )
+                                                    l1_topk_weight_ptr = l1_topk_weights.ptr_to(
+                                                        [
+                                                            self.ring_m_idx
+                                                            + self.epilogue_wg_idx * wg_block_m
+                                                            + j * atom_m
+                                                            + lane_idx
+                                                        ]
                                                     )
                                                     load_f32(
-                                                        stored_cached_weight,
-                                                        l1_topk_weight_ptr,
+                                                        stored_cached_weight, l1_topk_weight_ptr
                                                     )
                                                 with K.Else():
                                                     with K.If(
-                                                        K.cast(
-                                                            j * atom_m + lane_idx,
-                                                            "uint32",
-                                                        )
+                                                        K.cast(j * atom_m + lane_idx, "uint32")
                                                         < K.uint32(wg_block_m)
                                                     ):
                                                         with K.Then():
-                                                            l1_topk_weight_ptr = l1_topk_weights.ptr_to(
-                                                                [
-                                                                    self.ring_m_idx
-                                                                    + self.epilogue_wg_idx
-                                                                    * wg_block_m
-                                                                    + j * atom_m
-                                                                    + lane_idx
-                                                                ]
+                                                            l1_topk_weight_ptr = (
+                                                                l1_topk_weights.ptr_to(
+                                                                    [
+                                                                        self.ring_m_idx
+                                                                        + self.epilogue_wg_idx
+                                                                        * wg_block_m
+                                                                        + j * atom_m
+                                                                        + lane_idx
+                                                                    ]
+                                                                )
                                                             )
                                                             load_f32(
                                                                 stored_cached_weight,
@@ -4732,19 +4173,13 @@ def get_kernel(
                                         values[5],
                                         values[6],
                                         values[7],
-                                        K.uint32(
-                                            K.bitwise_or(
-                                                tmem_addr[0], K.uint32(0x00100000)
-                                            )
-                                        ),
+                                        K.uint32(K.bitwise_or(tmem_addr[0], K.uint32(0x00100000))),
                                     )
                                     self.fence_view_async_tmem_load()
                                     with K.If(j == wg_block_m // atom_m - 1):
                                         with K.Then():
                                             self.tmem_empty_barrier_arrive_cta0(
-                                                tmem_empty_barriers.ptr_to(
-                                                    [self.accum_stage_idx]
-                                                )
+                                                tmem_empty_barriers.ptr_to([self.accum_stage_idx])
                                             )
                                     with K.unroll(0, 2) as k:
                                         activation_pair_store(
@@ -4775,12 +4210,8 @@ def get_kernel(
                                                 K.fabs(activation_values[i, k, 1]),
                                             ),
                                         )
-                                    K.ptx.mov.b32(
-                                        amax_values[i, 0], thread_local_amax[0]
-                                    )
-                                    K.ptx.mov.b32(
-                                        amax_values[i, 1], thread_local_amax[1]
-                                    )
+                                    K.ptx.mov.b32(amax_values[i, 0], thread_local_amax[0])
+                                    K.ptx.mov.b32(amax_values[i, 1], thread_local_amax[1])
                                     warp_reduce_max_4(amax_values, i, 0)
                                     warp_reduce_max_4(amax_values, i, 1)
                                     with K.If(lane_idx < 4):
@@ -4792,9 +4223,7 @@ def get_kernel(
                                                 + lane_idx
                                             ) * 2
                                             K.ptx.st.shared.v2.f32(
-                                                smem_amax_reduction.ptr_to(
-                                                    [amax_reduction_idx]
-                                                ),
+                                                smem_amax_reduction.ptr_to([amax_reduction_idx]),
                                                 amax_values[i, 0],
                                                 amax_values[i, 1],
                                             )
@@ -4803,33 +4232,27 @@ def get_kernel(
                                 K.evaluate(tma_store_wait(1))
                                 K.ptx.bar.sync(
                                     K.uint32(
-                                        epilogue_wg_sync_barrier_start_idx
-                                        + self.epilogue_wg_idx
+                                        epilogue_wg_sync_barrier_start_idx + self.epilogue_wg_idx
                                     ),
                                     128,
                                 )
                                 with K.unroll(0, num_atoms_per_store) as i:
                                     j = s * num_atoms_per_store + i
                                     amax_reduction_idx = (
-                                        (epilogue_warp_idx ^ 1)
-                                        * (kernel_config.store_block_m // 2)
+                                        (epilogue_warp_idx ^ 1) * (kernel_config.store_block_m // 2)
                                         + i * (atom_m // 2)
                                         + (lane_idx % 4)
                                     ) * 2
                                     K.ptx.ld.shared.v2.f32(
                                         wp_amax[0],
                                         wp_amax[1],
-                                        smem_amax_reduction.ptr_to(
-                                            [amax_reduction_idx]
-                                        ),
+                                        smem_amax_reduction.ptr_to([amax_reduction_idx]),
                                     )
                                     K.ptx.mov.b32(
-                                        amax_values[i, 0],
-                                        K.max(amax_values[i, 0], wp_amax[0]),
+                                        amax_values[i, 0], K.max(amax_values[i, 0], wp_amax[0])
                                     )
                                     K.ptx.mov.b32(
-                                        amax_values[i, 1],
-                                        K.max(amax_values[i, 1], wp_amax[1]),
+                                        amax_values[i, 1], K.max(amax_values[i, 1], wp_amax[1])
                                     )
                                     get_e4m3_sf_and_sf_inv(
                                         sf,
@@ -4862,12 +4285,8 @@ def get_kernel(
                                             (col ^ (row // 2)) * num_bank_group_bytes,
                                         ]
                                     )
-                                    self.sm100_u8x4_stsm_t_copy(
-                                        epilogue_fp8_packed[0], smem_ptr
-                                    )
-                                    with K.If(
-                                        K.And(warp_idx_in_wg % 2 == 0, lane_idx < 4)
-                                    ):
+                                    self.sm100_u8x4_stsm_t_copy(epilogue_fp8_packed[0], smem_ptr)
+                                    with K.If(K.And(warp_idx_in_wg % 2 == 0, lane_idx < 4)):
                                         with K.Then():
                                             # Factored form of upstream 891d57b: token_base_idx is < BLOCK_M so
                                             # `m_block_idx * BLOCK_M` factors out as `m_block_idx * SF_BLOCK_M`
@@ -4886,13 +4305,9 @@ def get_kernel(
                                                 K.cast(self.block_idx, "uint64")
                                                 * K.uint64(sf_block_m)
                                                 + K.cast(
-                                                    transform_sf_token_idx(
-                                                        token_base_idx
-                                                    ),
-                                                    "uint64",
+                                                    transform_sf_token_idx(token_base_idx), "uint64"
                                                 )
-                                                + K.cast(lane_idx, "uint64")
-                                                * K.uint64(8)
+                                                + K.cast(lane_idx, "uint64") * K.uint64(8)
                                             )
                                             # Shared tasks write the full-size shared L2 SF
                                             # plane, which has its own MN stride and base
@@ -4902,23 +4317,16 @@ def get_kernel(
                                             if has_shared:
                                                 mn_stride = K.Select(
                                                     self.block_phase > K.int32(2),
+                                                    K.uint64(num_max_shared_sf_tokens * 4),
                                                     K.uint64(
-                                                        num_max_shared_sf_tokens * 4
-                                                    ),
-                                                    K.uint64(
-                                                        workspace_layout.num_sf_ring_tokens
-                                                        * 4
+                                                        workspace_layout.num_sf_ring_tokens * 4
                                                     ),
                                                 )
                                             else:
                                                 mn_stride = K.uint64(
-                                                    workspace_layout.num_sf_ring_tokens
-                                                    * 4
+                                                    workspace_layout.num_sf_ring_tokens * 4
                                                 )
-                                            k_idx = (
-                                                self.n_block_idx * 2
-                                                + warp_idx_in_wg // 2
-                                            )
+                                            k_idx = self.n_block_idx * 2 + warp_idx_in_wg // 2
                                             k_uint_idx = k_idx // 4
                                             byte_idx = k_idx % 4
                                             sf_addr = (
@@ -4931,9 +4339,7 @@ def get_kernel(
                                                 # which sits *before* the routed ring in the
                                                 # symm buffer. Keeps the destination a single
                                                 # address select feeding one pair of stores.
-                                                sf_addr = K.cast(
-                                                    sf_addr, "int64"
-                                                ) + K.Select(
+                                                sf_addr = K.cast(sf_addr, "int64") + K.Select(
                                                     self.block_phase > K.int32(2),
                                                     K.int64(
                                                         symm_buffer_layout.shared_l2_sf_offset
@@ -4946,10 +4352,7 @@ def get_kernel(
                                             store_global_u8(
                                                 l2_sf_buffer.ptr_to([sf_addr]),
                                                 K.cast(
-                                                    K.shift_right(
-                                                        sf_bits, K.uint32(23)
-                                                    ),
-                                                    "uint8",
+                                                    K.shift_right(sf_bits, K.uint32(23)), "uint8"
                                                 ),
                                             )
                                             store_global_u8(
@@ -4957,40 +4360,27 @@ def get_kernel(
                                                     [
                                                         sf_addr
                                                         + K.if_then_else(
-                                                            has_shared,
-                                                            K.int64(16),
-                                                            K.uint64(16),
+                                                            has_shared, K.int64(16), K.uint64(16)
                                                         )
                                                     ]
                                                 ),
                                                 K.cast(
-                                                    K.shift_right(
-                                                        sf_bits_hi, K.uint32(23)
-                                                    ),
-                                                    "uint8",
+                                                    K.shift_right(sf_bits_hi, K.uint32(23)), "uint8"
                                                 ),
                                             )
                                 K.cuda.warp_sync()
                                 K.ptx.bar.sync(
                                     K.uint32(
-                                        epilogue_wg_sync_barrier_start_idx
-                                        + self.epilogue_wg_idx
+                                        epilogue_wg_sync_barrier_start_idx + self.epilogue_wg_idx
                                     ),
                                     128,
                                 )
-                                with K.If(
-                                    (warp_idx_in_wg == 0) & K.cuda.elect_sync() != 0
-                                ):
+                                with K.If((warp_idx_in_wg == 0) & K.cuda.elect_sync() != 0):
                                     with K.Then():
                                         K.evaluate(tma_store_fence())
                                         self.sm90_tma_store_2d_copy_select(
                                             smem_cd_l1.ptr_to(
-                                                [
-                                                    tma_stage_idx,
-                                                    self.epilogue_wg_idx,
-                                                    0,
-                                                    0,
-                                                ]
+                                                [tma_stage_idx, self.epilogue_wg_idx, 0, 0]
                                             ),
                                             tensor_map_l1_output,
                                             tensor_map_shared_l1_output,
@@ -5011,9 +4401,7 @@ def get_kernel(
                                 K.uint32(epilogue_full_sync_barrier_idx),
                                 K.uint32(kernel_config.num_epilogue_threads),
                             )
-                            with K.If(
-                                (epilogue_warp_idx == 0) & K.cuda.elect_sync() != 0
-                            ):
+                            with K.If((epilogue_warp_idx == 0) & K.cuda.elect_sync() != 0):
                                 with K.Then():
                                     # Shared L1 only signals its own full-size consumer; it has
                                     # no L1 ring slot to release (impls .cuh:1179-1189).
@@ -5038,9 +4426,7 @@ def get_kernel(
                                 with K.If(self.block_phase <= K.int32(2)):
                                     with K.Then():
                                         with K.If(
-                                            (epilogue_warp_idx == 0)
-                                            & K.cuda.elect_sync()
-                                            != 0
+                                            (epilogue_warp_idx == 0) & K.cuda.elect_sync() != 0
                                         ):
                                             with K.Then():
                                                 K.evaluate(
@@ -5053,9 +4439,7 @@ def get_kernel(
                                                 )
                                         K.cuda.warp_sync()
                             else:
-                                with K.If(
-                                    (epilogue_warp_idx == 0) & K.cuda.elect_sync() != 0
-                                ):
+                                with K.If((epilogue_warp_idx == 0) & K.cuda.elect_sync() != 0):
                                     with K.Then():
                                         K.evaluate(
                                             red_add_gpu_u32(
@@ -5066,22 +4450,14 @@ def get_kernel(
                                             )
                                         )
                                 K.cuda.warp_sync()
-                            K.assign(
-                                self.n_idx, self.n_block_idx * kernel_config.block_n
-                            )
+                            K.assign(self.n_idx, self.n_block_idx * kernel_config.block_n)
                             with K.serial(
-                                0,
-                                wg_block_m // kernel_config.store_block_m,
-                                unroll=True,
+                                0, wg_block_m // kernel_config.store_block_m, unroll=True
                             ) as s:
-                                with K.If(
-                                    s * kernel_config.store_block_m >= valid_rows_in_wg
-                                ):
+                                with K.If(s * kernel_config.store_block_m >= valid_rows_in_wg):
                                     with K.Then():
                                         self.tmem_empty_barrier_arrive_cta0(
-                                            tmem_empty_barriers.ptr_to(
-                                                [self.accum_stage_idx]
-                                            )
+                                            tmem_empty_barriers.ptr_to([self.accum_stage_idx])
                                         )
                                         K.Break()
                                 with K.unroll(0, num_atoms_per_store) as i:
@@ -5107,11 +4483,7 @@ def get_kernel(
                                         values[5],
                                         values[6],
                                         values[7],
-                                        K.uint32(
-                                            K.bitwise_or(
-                                                tmem_addr[0], K.uint32(0x00100000)
-                                            )
-                                        ),
+                                        K.uint32(K.bitwise_or(tmem_addr[0], K.uint32(0x00100000))),
                                     )
                                     self.fence_view_async_tmem_load()
                                     with K.If(K.And(i == 0, s > 0)):
@@ -5125,19 +4497,13 @@ def get_kernel(
                                             )
                                     with K.If(
                                         K.And(
-                                            s
-                                            == wg_block_m // kernel_config.store_block_m
-                                            - 1,
-                                            i
-                                            == kernel_config.store_block_m // atom_m
-                                            - 1,
+                                            s == wg_block_m // kernel_config.store_block_m - 1,
+                                            i == kernel_config.store_block_m // atom_m - 1,
                                         )
                                     ):
                                         with K.Then():
                                             self.tmem_empty_barrier_arrive_cta0(
-                                                tmem_empty_barriers.ptr_to(
-                                                    [self.accum_stage_idx]
-                                                )
+                                                tmem_empty_barriers.ptr_to([self.accum_stage_idx])
                                             )
                                     K.ptx.mov.b32(
                                         epilogue_bf16_packed[0],
@@ -5169,35 +4535,23 @@ def get_kernel(
                                     )
                                     row = lane_idx % 8
                                     col = (epilogue_warp_idx % 2) * 4 + lane_idx // 8
-                                    l2_cd_elem_offset: K.int32 = (
-                                        l2_cd_swizzled_elem_offset(
-                                            warp_idx_in_wg // 2,
-                                            i * atom_m + row,
-                                            col,
-                                            row,
-                                        )
+                                    l2_cd_elem_offset: K.int32 = l2_cd_swizzled_elem_offset(
+                                        warp_idx_in_wg // 2, i * atom_m + row, col, row
                                     )
                                     smem_ptr = smem_cd_l2.ptr_to(
                                         [self.epilogue_wg_idx, l2_cd_elem_offset]
                                     )
-                                    self.sm90_u32x4_stsm_t_copy(
-                                        epilogue_bf16_packed, smem_ptr
-                                    )
+                                    self.sm90_u32x4_stsm_t_copy(epilogue_bf16_packed, smem_ptr)
                                 K.ptx.bar.sync(
                                     K.uint32(
-                                        epilogue_wg_sync_barrier_start_idx
-                                        + self.epilogue_wg_idx
+                                        epilogue_wg_sync_barrier_start_idx + self.epilogue_wg_idx
                                     ),
                                     128,
                                 )
-                                row_in_atom = (
-                                    warp_idx_in_wg * 2 + lane_idx // 16
-                                ) % atom_m
+                                row_in_atom = (warp_idx_in_wg * 2 + lane_idx // 16) % atom_m
                                 bank_group_idx = lane_idx % 8
                                 with K.unroll(0, num_rows_per_warp) as j:
-                                    row_in_store = (
-                                        j * 8 + warp_idx_in_wg * 2 + lane_idx // 16
-                                    )
+                                    row_in_store = j * 8 + warp_idx_in_wg * 2 + lane_idx // 16
                                     m_idx_in_block = (
                                         self.epilogue_wg_idx * wg_block_m
                                         + s * kernel_config.store_block_m
@@ -5208,18 +4562,13 @@ def get_kernel(
                                         < K.cast(self.valid_m, "uint32")
                                     ):
                                         with K.Then():
-                                            src_metadata_idx = (
-                                                self.pool_m_idx + m_idx_in_block
-                                            )
+                                            src_metadata_idx = self.pool_m_idx + m_idx_in_block
                                             # Shared output is rank-local: it goes straight to
                                             # this rank's slot `kNumTopk` at the local token
                                             # index, with no dispatch metadata lookup and no
                                             # NVLink hop (impls .cuh:1275-1284).
                                             with K.If(
-                                                K.And(
-                                                    has_shared,
-                                                    self.block_phase > K.int32(2),
-                                                )
+                                                K.And(has_shared, self.block_phase > K.int32(2))
                                             ):
                                                 with K.Then():
                                                     K.assign(
@@ -5228,13 +4577,10 @@ def get_kernel(
                                                     )
                                                     K.assign(
                                                         self.dst_token_idx_u32,
-                                                        K.cast(
-                                                            src_metadata_idx, "uint32"
-                                                        ),
+                                                        K.cast(src_metadata_idx, "uint32"),
                                                     )
                                                     K.assign(
-                                                        self.dst_topk_idx_u32,
-                                                        K.uint32(num_topk),
+                                                        self.dst_topk_idx_u32, K.uint32(num_topk)
                                                     )
                                                 with K.Else():
                                                     load_global_u32(
@@ -5255,21 +4601,17 @@ def get_kernel(
                                                             [src_metadata_idx, 2]
                                                         ),
                                                     )
-                                            dst_rank_idx = K.cast(
-                                                self.dst_rank_idx_u32, "int32"
-                                            )
+                                            dst_rank_idx = K.cast(self.dst_rank_idx_u32, "int32")
                                             dst_token_base_offset = K.cast(
                                                 self.dst_topk_idx_u32, "uint64"
                                             ) * K.uint64(
                                                 workspace_layout.num_max_tokens_per_rank
                                                 * hidden
                                                 * 2
-                                            ) + K.cast(
-                                                self.dst_token_idx_u32, "uint64"
-                                            ) * K.uint64(hidden * 2)
-                                            dst_col_byte_offset = K.cast(
-                                                self.n_idx * 2, "uint64"
+                                            ) + K.cast(self.dst_token_idx_u32, "uint64") * K.uint64(
+                                                hidden * 2
                                             )
+                                            dst_col_byte_offset = K.cast(self.n_idx * 2, "uint64")
                                             lane_byte_offset = K.cast(
                                                 (lane_idx % 16) * 16, "uint64"
                                             )
@@ -5278,27 +4620,20 @@ def get_kernel(
                                                 + dst_col_byte_offset
                                                 + lane_byte_offset
                                             )
-                                            l2_cd_elem_offset: K.int32 = (
-                                                l2_cd_swizzled_elem_offset(
-                                                    (lane_idx % 16) // 8,
-                                                    row_in_store,
-                                                    bank_group_idx,
-                                                    row_in_atom,
-                                                )
+                                            l2_cd_elem_offset: K.int32 = l2_cd_swizzled_elem_offset(
+                                                (lane_idx % 16) // 8,
+                                                row_in_store,
+                                                bank_group_idx,
+                                                row_in_atom,
                                             )
                                             smem_ptr = smem_cd_l2.ptr_to(
-                                                [
-                                                    self.epilogue_wg_idx,
-                                                    l2_cd_elem_offset,
-                                                ]
+                                                [self.epilogue_wg_idx, l2_cd_elem_offset]
                                             )
                                             lds128(smem_ptr, epilogue_bf16_packed)
                                             K.assign(
                                                 self.symm_rank_base,
                                                 sym_buffer_base
-                                                + K.cast(
-                                                    symm_rank_offsets[0], "uint64"
-                                                ),
+                                                + K.cast(symm_rank_offsets[0], "uint64"),
                                             )
                                             load_symm_rank_base(
                                                 self.symm_rank_base,
@@ -5325,9 +4660,7 @@ def get_kernel(
                                 K.uint32(kernel_config.num_epilogue_threads),
                             )
                 K.assign(self.epilogue_thread_idx, role_thread_idx)
-                self.epilogue_nvlink_barrier_before_combine_reduce(
-                    self.epilogue_thread_idx
-                )
+                self.epilogue_nvlink_barrier_before_combine_reduce(self.epilogue_thread_idx)
                 # The grid barrier above includes every epilogue thread in both CTAs,
                 # so no peer can still be accessing TMEM when warp 0 deallocates it.
                 with K.If(epilogue_warp_idx == 0):
@@ -5338,8 +4671,7 @@ def get_kernel(
                 K.evaluate(
                     sync_unaligned(
                         dispatch_with_epilogue_sync_barrier_idx,
-                        kernel_config.num_dispatch_threads
-                        + kernel_config.num_epilogue_threads,
+                        kernel_config.num_dispatch_threads + kernel_config.num_epilogue_threads,
                     )
                 )
                 # The preceding grid barrier publishes every epilogue's generic
@@ -5352,17 +4684,14 @@ def get_kernel(
                 )
                 self.combine_state.init(0)
                 with K.While(
-                    K.cast(self.combine_token_idx, "uint32")
-                    < K.cast(num_tokens, "uint32")
+                    K.cast(self.combine_token_idx, "uint32") < K.cast(num_tokens, "uint32")
                 ):
                     K.assign(self.combine_stored_topk_slot_idx, K.int32(-1))
                     with K.If(lane_idx < num_topk):
                         with K.Then():
                             load_global_s64(
                                 self.ordinary_global_s64,
-                                input_topk_idx.ptr_to(
-                                    [self.combine_token_idx, lane_idx]
-                                ),
+                                input_topk_idx.ptr_to([self.combine_token_idx, lane_idx]),
                             )
                             K.assign(
                                 self.combine_stored_topk_slot_idx,
@@ -5374,24 +4703,18 @@ def get_kernel(
                         # routing metadata (impls .cuh:1370).
                         with K.If(lane_idx == num_topk):
                             with K.Then():
-                                K.assign(
-                                    self.combine_stored_topk_slot_idx,
-                                    K.int32(num_topk),
-                                )
+                                K.assign(self.combine_stored_topk_slot_idx, K.int32(num_topk))
                     K.assign(
                         self.combine_total_mask,
                         ballot_sync(
-                            K.uint32(0xFFFFFFFF),
-                            self.combine_stored_topk_slot_idx >= K.int32(0),
+                            K.uint32(0xFFFFFFFF), self.combine_stored_topk_slot_idx >= K.int32(0)
                         ),
                     )
                     with K.unroll(0, num_chunks) as chunk:
                         K.assign(self.combine_slot_mask, self.combine_total_mask)
                         chunk_byte_offset = chunk * num_chunk_bytes
                         chunk_offset_elems = chunk_byte_offset // 2
-                        with K.unroll(
-                            0, num_uint4_per_lane * num_elems_per_uint4
-                        ) as reduced_idx:
+                        with K.unroll(0, num_uint4_per_lane * num_elems_per_uint4) as reduced_idx:
                             K.ptx.mov.b32(reduced[reduced_idx, 0], K.float32(0.0))
                             K.ptx.mov.b32(reduced[reduced_idx, 1], K.float32(0.0))
                         K.assign(self.combine_do_reduce, K.int32(0))
@@ -5406,8 +4729,7 @@ def get_kernel(
                                     K.bitwise_xor(
                                         self.combine_slot_mask,
                                         K.shift_left(
-                                            K.uint32(1),
-                                            K.cast(self.combine_slot_idx, "uint32"),
+                                            K.uint32(1), K.cast(self.combine_slot_idx, "uint32")
                                         ),
                                     ),
                                 )
@@ -5421,18 +4743,10 @@ def get_kernel(
                                             ]
                                         )
                                         load_barrier_ptr = combine_barriers.ptr_to(
-                                            [
-                                                epilogue_warp_idx * 2
-                                                + self.combine_state.stage
-                                            ]
+                                            [epilogue_warp_idx * 2 + self.combine_state.stage]
                                         )
                                         load_buffer_ptr = combine_chunks.ptr_to(
-                                            [
-                                                self.combine_state.stage,
-                                                epilogue_warp_idx,
-                                                0,
-                                                0,
-                                            ]
+                                            [self.combine_state.stage, epilogue_warp_idx, 0, 0]
                                         )
                                         tma_load_1d(
                                             load_buffer_ptr,
@@ -5458,8 +4772,7 @@ def get_kernel(
                                         K.bitwise_xor(
                                             self.combine_slot_mask,
                                             K.shift_left(
-                                                K.uint32(1),
-                                                K.cast(self.combine_slot_idx, "uint32"),
+                                                K.uint32(1), K.cast(self.combine_slot_idx, "uint32")
                                             ),
                                         ),
                                     )
@@ -5475,16 +4788,12 @@ def get_kernel(
                                             load_barrier_ptr = combine_barriers.ptr_to(
                                                 [
                                                     epilogue_warp_idx * 2
-                                                    + (
-                                                        self.combine_state.stage
-                                                        ^ K.int32(1)
-                                                    )
+                                                    + (self.combine_state.stage ^ K.int32(1))
                                                 ]
                                             )
                                             prefetch_buffer_ptr = combine_chunks.ptr_to(
                                                 [
-                                                    self.combine_state.stage
-                                                    ^ K.int32(1),
+                                                    self.combine_state.stage ^ K.int32(1),
                                                     epilogue_warp_idx,
                                                     0,
                                                     0,
@@ -5537,9 +4846,7 @@ def get_kernel(
                                     K.evaluate(tma_store_fence())
                                     K.cuda.warp_sync()
                             self.combine_state.advance()
-                            K.assign(
-                                self.combine_do_reduce, self.combine_next_do_reduce
-                            )
+                            K.assign(self.combine_do_reduce, self.combine_next_do_reduce)
                         with K.unroll(0, num_uint4_per_lane) as j:
                             with K.unroll(0, num_elems_per_uint4) as elem_idx:
                                 K.ptx.mov.b32(
@@ -5568,17 +4875,12 @@ def get_kernel(
                             with K.Then():
                                 K.evaluate(tma_store_fence())
                                 dst_ptr = y.ptr_to(
-                                    [
-                                        self.combine_token_idx * hidden
-                                        + chunk_offset_elems
-                                    ]
+                                    [self.combine_token_idx * hidden + chunk_offset_elems]
                                 )
                                 combine_store_ptr = combine_chunks.ptr_to(
                                     [2, epilogue_warp_idx, 0, 0]
                                 )
-                                tma_store_1d(
-                                    dst_ptr, combine_store_ptr, num_chunk_bytes
-                                )
+                                tma_store_1d(dst_ptr, combine_store_ptr, num_chunk_bytes)
                                 K.evaluate(tma_store_arrive())
                     K.cuda.warp_sync()
                     K.assign(
@@ -5602,6 +4904,4 @@ def get_kernel(
         with epilogue_role:
             state.epilogue(K.warp_id_in_role(), K.tid_in_role())
 
-    return mega_moe.func.with_attr(
-        "tirx.kernel_launch_params", get_tirx_launch_param_tags()
-    )
+    return mega_moe.func.with_attr("tirx.kernel_launch_params", get_tirx_launch_param_tags())

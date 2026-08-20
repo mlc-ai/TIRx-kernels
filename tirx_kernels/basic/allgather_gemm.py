@@ -600,11 +600,7 @@ def _make_device_kernel():
         # ag + gemm
         sem = Semaphore(cnt=1, buffer=semaphore)
         gemm_queue = GEMMMPMCQueue(
-            CAPACITY,
-            gemm_task_types,
-            gemm_task_idxs,
-            gemm_head,
-            GEMM_M_CLUSTERS * GEMM_N_CLUSTERS,
+            CAPACITY, gemm_task_types, gemm_task_idxs, gemm_head, GEMM_M_CLUSTERS * GEMM_N_CLUSTERS
         )
         packed_ptr: Kern.let[Kern.Var(name="packed_ptr", ty=PointerType(PrimType("uint64")))] = (
             Kern.reinterpret(

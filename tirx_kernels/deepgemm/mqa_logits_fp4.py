@@ -1003,10 +1003,7 @@ def get_kernel(**kwargs: Any):
                             if q_inner_i == block_q - 1:
                                 tmem_pipe.empty.arrive(tmem_state.stage)
                             result_f32 = _weighted_relu_reduce(
-                                accum,
-                                cached_weights,
-                                q_inner_i,
-                                num_heads,
+                                accum, cached_weights, q_inner_i, num_heads
                             )
                             result = K.alloc_local([1], logits_tir_dtype)
                             K.assign(result[0], K.Cast(logits_tir_dtype, result_f32))
