@@ -104,7 +104,7 @@ def _load_scaled_tmem_chunk(dst, tmem_col, scale_pair):
     The scale is applied as f32x2 against a packed pair, so the 64 accumulator
     words move through 32 mul.f32x2 rather than 64 scalar multiplies.
     """
-    K.evaluate(_tmem_load(dst, tmem_col, 64))
+    _tmem_load(dst, tmem_col, 64)
     K.ptx.tcgen05.wait__ld.sync.aligned()
     scaled_pair = K.local_scalar("uint64")
     with K.unroll(64 // 2) as scale_i:
@@ -643,22 +643,18 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                         p_peer = K.alloc_local((B_TOPK // 2,), "float32")
                         with K.If(warp_idx < 2):
                             with K.Then():
-                                K.evaluate(_tmem_load(p, K.uint32(400), B_TOPK // 2))
-                                K.evaluate(
-                                    _tmem_load(
-                                        p_peer,
-                                        K.cuda.get_tmem_addr(K.uint32(400), 0, B_TOPK // 2),
-                                        B_TOPK // 2,
-                                    )
+                                _tmem_load(p, K.uint32(400), B_TOPK // 2)
+                                _tmem_load(
+                                    p_peer,
+                                    K.cuda.get_tmem_addr(K.uint32(400), 0, B_TOPK // 2),
+                                    B_TOPK // 2,
                                 )
                             with K.Else():
-                                K.evaluate(_tmem_load(p_peer, K.uint32(400), B_TOPK // 2))
-                                K.evaluate(
-                                    _tmem_load(
-                                        p,
-                                        K.cuda.get_tmem_addr(K.uint32(400), 0, B_TOPK // 2),
-                                        B_TOPK // 2,
-                                    )
+                                _tmem_load(p_peer, K.uint32(400), B_TOPK // 2)
+                                _tmem_load(
+                                    p,
+                                    K.cuda.get_tmem_addr(K.uint32(400), 0, B_TOPK // 2),
+                                    B_TOPK // 2,
                                 )
                         K.ptx.tcgen05.wait__ld.sync.aligned()
                         K.ptx.tcgen05.fence__before_thread_sync()
@@ -801,11 +797,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     K.cuda.get_tmem_addr(K.uint32(0), 0, o_chunk * 64),
                                     scale_for_old_pair,
                                 )
-                                K.evaluate(
-                                    _tmem_store(
-                                        o_rescale,
-                                        K.cuda.get_tmem_addr(K.uint32(0), 0, o_chunk * 64),
-                                    )
+                                _tmem_store(
+                                    o_rescale, K.cuda.get_tmem_addr(K.uint32(0), 0, o_chunk * 64)
                                 )
                                 K.ptx.tcgen05.wait__st.sync.aligned()
                             K.ptx.tcgen05.fence__before_thread_sync()
@@ -895,12 +888,10 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 )
                                 o_epi_words = o_epi_bf16.view("uint32")
                                 with K.unroll(64 // 2) as cast_i:
-                                    K.evaluate(
-                                        K.ptx.cvt.rn.bf16x2.f32(
-                                            o_epi_words[cast_i],
-                                            o_epi[cast_i * 2 + 1],
-                                            o_epi[cast_i * 2],
-                                        )
+                                    K.ptx.cvt.rn.bf16x2.f32(
+                                        o_epi_words[cast_i],
+                                        o_epi[cast_i * 2 + 1],
+                                        o_epi[cast_i * 2],
                                     )
                                 col_base = (D_V // 2 if epi_i * 64 >= D_V // 4 else 0) + (
                                     epi_i * 64
@@ -939,40 +930,36 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                 K.ptx.bar.sync(K.uint32(BAR_WG0_SYNC), 128)
                                 with K.If(warp_idx == 0), K.Then():
                                     with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
-                                        K.evaluate(
-                                            K.ptx[_TMA_S2G_4D](
-                                                K.address_of(out_tensormap),
-                                                K.int32(col_base),
-                                                K.int32(0),
-                                                K.cast(s_q_idx, "int32"),
-                                                K.cast(batch_idx, "int32"),
-                                                K.cuda.cvta_generic_to_shared(
-                                                    K.ptr_byte_offset(
-                                                        o_smem.ptr_to([0, 0]),
-                                                        col_base * B_H * BF16_BYTES,
-                                                        "bfloat16",
-                                                    )
-                                                ),
-                                            )
+                                        K.ptx[_TMA_S2G_4D](
+                                            K.address_of(out_tensormap),
+                                            K.int32(col_base),
+                                            K.int32(0),
+                                            K.cast(s_q_idx, "int32"),
+                                            K.cast(batch_idx, "int32"),
+                                            K.cuda.cvta_generic_to_shared(
+                                                K.ptr_byte_offset(
+                                                    o_smem.ptr_to([0, 0]),
+                                                    col_base * B_H * BF16_BYTES,
+                                                    "bfloat16",
+                                                )
+                                            ),
                                         )
                                 warp1_col_base = col_base + D_V // 4
                                 with K.If(warp_idx == 1), K.Then():
                                     with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
-                                        K.evaluate(
-                                            K.ptx[_TMA_S2G_4D](
-                                                K.address_of(out_tensormap),
-                                                K.int32(warp1_col_base),
-                                                K.int32(0),
-                                                K.cast(s_q_idx, "int32"),
-                                                K.cast(batch_idx, "int32"),
-                                                K.cuda.cvta_generic_to_shared(
-                                                    K.ptr_byte_offset(
-                                                        o_smem.ptr_to([0, 0]),
-                                                        warp1_col_base * B_H * BF16_BYTES,
-                                                        "bfloat16",
-                                                    )
-                                                ),
-                                            )
+                                        K.ptx[_TMA_S2G_4D](
+                                            K.address_of(out_tensormap),
+                                            K.int32(warp1_col_base),
+                                            K.int32(0),
+                                            K.cast(s_q_idx, "int32"),
+                                            K.cast(batch_idx, "int32"),
+                                            K.cuda.cvta_generic_to_shared(
+                                                K.ptr_byte_offset(
+                                                    o_smem.ptr_to([0, 0]),
+                                                    warp1_col_base * B_H * BF16_BYTES,
+                                                    "bfloat16",
+                                                )
+                                            ),
                                         )
 
                             emit_no_split_epilogue(0)
@@ -1118,35 +1105,31 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                             # copy into eight source-order TMA boxes instead of
                             # issuing one monolithic 64 KiB transaction.
                             with K.unroll(512 // 64) as q_tile:
-                                K.evaluate(
-                                    K.ptx[_TMA_G2S_4D_CACHE](
-                                        K.ptr_byte_offset(
-                                            q_sw128.ptr_to([0, 0]),
-                                            q_tile * B_H * 64 * BF16_BYTES,
-                                            "bfloat16",
-                                        ),
-                                        K.address_of(q_strided_tensormap),
-                                        K.cast(q_tile * 64, "int32"),
-                                        K.int32(0),
-                                        K.cast(s_q_idx, "int32"),
-                                        K.cast(batch_idx, "int32"),
-                                        K.cuda.cvta_generic_to_shared(bar_q_tma.ptr_to([0])),
-                                        _Q_TMA_CACHE_HINT,
-                                    )
+                                K.ptx[_TMA_G2S_4D_CACHE](
+                                    K.ptr_byte_offset(
+                                        q_sw128.ptr_to([0, 0]),
+                                        q_tile * B_H * 64 * BF16_BYTES,
+                                        "bfloat16",
+                                    ),
+                                    K.address_of(q_strided_tensormap),
+                                    K.cast(q_tile * 64, "int32"),
+                                    K.int32(0),
+                                    K.cast(s_q_idx, "int32"),
+                                    K.cast(batch_idx, "int32"),
+                                    K.cuda.cvta_generic_to_shared(bar_q_tma.ptr_to([0])),
+                                    _Q_TMA_CACHE_HINT,
                                 )
                             if is_v32:
-                                K.evaluate(
-                                    K.ptx[_TMA_G2S_5D_CACHE](
-                                        q_sw64.ptr_to([0, 0]),
-                                        K.address_of(q_tail_tensormap),
-                                        K.int32(0),
-                                        K.int32(0),
-                                        K.int32(16),
-                                        K.cast(s_q_idx, "int32"),
-                                        K.cast(batch_idx, "int32"),
-                                        K.cuda.cvta_generic_to_shared(bar_q_tma.ptr_to([0])),
-                                        _Q_TMA_CACHE_HINT,
-                                    )
+                                K.ptx[_TMA_G2S_5D_CACHE](
+                                    q_sw64.ptr_to([0, 0]),
+                                    K.address_of(q_tail_tensormap),
+                                    K.int32(0),
+                                    K.int32(0),
+                                    K.int32(16),
+                                    K.cast(s_q_idx, "int32"),
+                                    K.cast(batch_idx, "int32"),
+                                    K.cuda.cvta_generic_to_shared(bar_q_tma.ptr_to([0])),
+                                    _Q_TMA_CACHE_HINT,
                                 )
                             bar_q_tma.arrive(0, tx_count=B_H * d_qk * BF16_BYTES)
                             bar_q_tma.wait(0, batch_epoch.phase)
@@ -1158,25 +1141,21 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                     (q_main_flat % 4 * 1024 + q_main_flat // 4 % 4 * 2) * 16,
                                     "bfloat16",
                                 )
-                                K.evaluate(
-                                    K.ptx[_TCGEN_CP_128X256](
-                                        K.cast(
-                                            256 + q_main_flat % 4 * 32 + q_main_flat // 4 % 4 * 8,
-                                            "uint32",
-                                        ),
-                                        _replace_smem_desc_addr(q_main_cp_desc[0], q_main_src),
-                                    )
+                                K.ptx[_TCGEN_CP_128X256](
+                                    K.cast(
+                                        256 + q_main_flat % 4 * 32 + q_main_flat // 4 % 4 * 8,
+                                        "uint32",
+                                    ),
+                                    _replace_smem_desc_addr(q_main_cp_desc[0], q_main_src),
                                 )
                             if is_v32:
                                 with K.unroll(2) as q_tail_flat:
                                     q_tail_src = K.ptr_byte_offset(
                                         q_sw64.ptr_to([0, 0]), q_tail_flat % 2 * 2 * 16, "bfloat16"
                                     )
-                                    K.evaluate(
-                                        K.ptx[_TCGEN_CP_128X256](
-                                            K.cast(384 + q_tail_flat % 2 * 8, "uint32"),
-                                            _replace_smem_desc_addr(q_tail_cp_desc[0], q_tail_src),
-                                        )
+                                    K.ptx[_TCGEN_CP_128X256](
+                                        K.cast(384 + q_tail_flat % 2 * 8, "uint32"),
+                                        _replace_smem_desc_addr(q_tail_cp_desc[0], q_tail_src),
                                     )
                             bar_q_utccp.arrive(0)
                             bar_q_utccp.wait(0, batch_epoch.phase)
@@ -1194,17 +1173,13 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         qk_rope_offset = (
                                             rs_buf.stage * k_stage_elems + qk_rope_ki * 16
                                         ) // 8
-                                        K.evaluate(
-                                            K.ptx[_MMA_WS_F16](
-                                                K.uint32(400),
-                                                K.cast(384 + qk_rope_ki * 8, "uint32"),
-                                                _desc_add_16B_offset(
-                                                    qk_rope_desc.desc, qk_rope_offset
-                                                ),
-                                                K.uint32(69207184),
-                                                K.ptx.pred(K.Cast("bool", qk_rope_ki != 0)),
-                                                K.uint64(0),
-                                            )
+                                        K.ptx[_MMA_WS_F16](
+                                            K.uint32(400),
+                                            K.cast(384 + qk_rope_ki * 8, "uint32"),
+                                            _desc_add_16B_offset(qk_rope_desc.desc, qk_rope_offset),
+                                            K.uint32(69207184),
+                                            K.ptx.pred(K.Cast("bool", qk_rope_ki != 0)),
+                                            K.uint64(0),
                                         )
                                     bar_nope_ready.wait(rs_buf.stage, rs_buf.phase)
                                     K.ptx.tcgen05.fence__after_thread_sync()
@@ -1221,25 +1196,21 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         + qk_nope_ki % 2048 // 16 * 64
                                         + qk_nope_ki % 4 * 16
                                     ) // 8
-                                    K.evaluate(
-                                        K.ptx[_MMA_WS_F16](
-                                            K.uint32(400),
-                                            K.cast(256 + qk_nope_ki * 8, "uint32"),
-                                            _desc_add_16B_offset(qk_nope_desc.desc, qk_nope_offset),
-                                            K.uint32(69207184),
-                                            K.ptx.pred(
-                                                K.Cast(
-                                                    "bool",
-                                                    K.Or(
-                                                        qk_nope_ki != 0,
-                                                        K.cast(
-                                                            K.uint32(1 if is_v32 else 0), "bool"
-                                                        ),
-                                                    ),
-                                                )
-                                            ),
-                                            K.uint64(0),
-                                        )
+                                    K.ptx[_MMA_WS_F16](
+                                        K.uint32(400),
+                                        K.cast(256 + qk_nope_ki * 8, "uint32"),
+                                        _desc_add_16B_offset(qk_nope_desc.desc, qk_nope_offset),
+                                        K.uint32(69207184),
+                                        K.ptx.pred(
+                                            K.Cast(
+                                                "bool",
+                                                K.Or(
+                                                    qk_nope_ki != 0,
+                                                    K.cast(K.uint32(1 if is_v32 else 0), "bool"),
+                                                ),
+                                            )
+                                        ),
+                                        K.uint64(0),
                                     )
                                 bar_qk_done.arrive(rs_buf.stage)
 
@@ -1255,20 +1226,18 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         + rs_buf.stage * k_stage_elems
                                         + (pv_ki * 16) % 64 * 64
                                     ) // 8
-                                    K.evaluate(
-                                        K.ptx[_MMA_WS_F16](
-                                            K.uint32(0),
-                                            _desc_add_16B_offset(pv_a_lo_desc.desc, pv_a_offset),
-                                            _desc_add_16B_offset(pv_b_lo_desc.desc, pv_b_lo_offset),
-                                            K.uint32(71369872),
-                                            K.ptx.pred(
-                                                K.Cast(
-                                                    "bool",
-                                                    K.Or(pv_ki != 0, K.cast(mma_o_accum, "bool")),
-                                                )
-                                            ),
-                                            K.uint64(0),
-                                        )
+                                    K.ptx[_MMA_WS_F16](
+                                        K.uint32(0),
+                                        _desc_add_16B_offset(pv_a_lo_desc.desc, pv_a_offset),
+                                        _desc_add_16B_offset(pv_b_lo_desc.desc, pv_b_lo_offset),
+                                        K.uint32(71369872),
+                                        K.ptx.pred(
+                                            K.Cast(
+                                                "bool",
+                                                K.Or(pv_ki != 0, K.cast(mma_o_accum, "bool")),
+                                            )
+                                        ),
+                                        K.uint64(0),
                                     )
                                 with K.unroll(4) as pv_ki:
                                     pv_a_offset = (pv_ki % 4 * 1024 + pv_ki // 4 * 8) // 8
@@ -1278,20 +1247,18 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         + (pv_ki * 16) % 64 * 64
                                         + 16384
                                     ) // 8
-                                    K.evaluate(
-                                        K.ptx[_MMA_WS_F16](
-                                            K.uint32(128),
-                                            _desc_add_16B_offset(pv_a_hi_desc.desc, pv_a_offset),
-                                            _desc_add_16B_offset(pv_b_hi_desc.desc, pv_b_hi_offset),
-                                            K.uint32(71369872),
-                                            K.ptx.pred(
-                                                K.Cast(
-                                                    "bool",
-                                                    K.Or(pv_ki != 0, K.cast(mma_o_accum, "bool")),
-                                                )
-                                            ),
-                                            K.uint64(0),
-                                        )
+                                    K.ptx[_MMA_WS_F16](
+                                        K.uint32(128),
+                                        _desc_add_16B_offset(pv_a_hi_desc.desc, pv_a_offset),
+                                        _desc_add_16B_offset(pv_b_hi_desc.desc, pv_b_hi_offset),
+                                        K.uint32(71369872),
+                                        K.ptx.pred(
+                                            K.Cast(
+                                                "bool",
+                                                K.Or(pv_ki != 0, K.cast(mma_o_accum, "bool")),
+                                            )
+                                        ),
+                                        K.uint64(0),
                                     )
                                 bar_sv_done.arrive(rs_buf.stage)
                                 rs_buf.advance()
@@ -1349,20 +1316,18 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 )
                                             ),
                                         )
-                                    K.evaluate(
-                                        K.ptx[_TMA_GATHER4_2D_CACHE](
-                                            raw_nope.ptr_to([rs_buf.stage, row, 0]),
-                                            K.reinterpret(K.handle().ty, selected_nope_tensormap),
-                                            K.int32(0),
-                                            cur_indices[0],
-                                            cur_indices[1],
-                                            cur_indices[2],
-                                            cur_indices[3],
-                                            K.cuda.cvta_generic_to_shared(
-                                                bar_raw_ready.ptr_to([rs_buf.stage])
-                                            ),
-                                            _KV_TMA_CACHE_HINT,
-                                        )
+                                    K.ptx[_TMA_GATHER4_2D_CACHE](
+                                        raw_nope.ptr_to([rs_buf.stage, row, 0]),
+                                        K.reinterpret(K.handle().ty, selected_nope_tensormap),
+                                        K.int32(0),
+                                        cur_indices[0],
+                                        cur_indices[1],
+                                        cur_indices[2],
+                                        cur_indices[3],
+                                        K.cuda.cvta_generic_to_shared(
+                                            bar_raw_ready.ptr_to([rs_buf.stage])
+                                        ),
+                                        _KV_TMA_CACHE_HINT,
                                     )
                                     K.ptx.mov.b32(cur_indices[0], next_indices[0])
                                     K.ptx.mov.b32(cur_indices[1], next_indices[1])
@@ -1452,22 +1417,18 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                     ),
                                                 ),
                                             )
-                                        K.evaluate(
-                                            K.ptx[_TMA_GATHER4_2D_CACHE](
-                                                rope_tma_dst,
-                                                K.reinterpret(
-                                                    K.handle().ty, selected_rope_tensormap
-                                                ),
-                                                K.cast(rope_part * rope_tile, "int32"),
-                                                cur_indices[0],
-                                                cur_indices[1],
-                                                cur_indices[2],
-                                                cur_indices[3],
-                                                K.cuda.cvta_generic_to_shared(
-                                                    bar_rope_ready.ptr_to([rs_buf.stage])
-                                                ),
-                                                _KV_TMA_CACHE_HINT,
-                                            )
+                                        K.ptx[_TMA_GATHER4_2D_CACHE](
+                                            rope_tma_dst,
+                                            K.reinterpret(K.handle().ty, selected_rope_tensormap),
+                                            K.cast(rope_part * rope_tile, "int32"),
+                                            cur_indices[0],
+                                            cur_indices[1],
+                                            cur_indices[2],
+                                            cur_indices[3],
+                                            K.cuda.cvta_generic_to_shared(
+                                                bar_rope_ready.ptr_to([rs_buf.stage])
+                                            ),
+                                            _KV_TMA_CACHE_HINT,
                                         )
                                     K.ptx.mov.b32(cur_indices[0], next_indices[0])
                                     K.ptx.mov.b32(cur_indices[1], next_indices[1])

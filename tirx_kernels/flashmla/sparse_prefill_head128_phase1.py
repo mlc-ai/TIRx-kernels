@@ -576,17 +576,15 @@ def make_kernel(
             with K.If(warp_idx == 0), K.Then():
                 prologue_token = iket_range("h128-q-load")
                 with K.If(K.cuda.elect_sync()), K.Then():
-                    K.evaluate(
-                        K.ptx[_TMA_G2S_4D_CACHE](
-                            q_full.ptr_to([0, 0]),
-                            K.address_of(q_tensormap),
-                            K.int32(0),
-                            K.cast(cta_idx * (B_H // 2), "int32"),
-                            K.int32(0),
-                            K.cast(s_q_idx, "int32"),
-                            K.cuda.cvta_generic_to_shared(leader_mbar(bar_prologue_q.ptr_to([0]))),
-                            _Q_TMA_CACHE_HINT,
-                        )
+                    K.ptx[_TMA_G2S_4D_CACHE](
+                        q_full.ptr_to([0, 0]),
+                        K.address_of(q_tensormap),
+                        K.int32(0),
+                        K.cast(cta_idx * (B_H // 2), "int32"),
+                        K.int32(0),
+                        K.cast(s_q_idx, "int32"),
+                        K.cuda.cvta_generic_to_shared(leader_mbar(bar_prologue_q.ptr_to([0]))),
+                        _Q_TMA_CACHE_HINT,
                     )
 
                 K.ptx.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(
@@ -596,7 +594,7 @@ def make_kernel(
                 K.ptx.ld.shared.u32(allocated_tmem_start, tmem_start_addr.ptr_to([0]))
                 K.cuda.trap_when_assert_failed(allocated_tmem_start == K.uint32(0))
                 K.ptx.tcgen05.relinquish_alloc_permit.cta_group__2.sync.aligned()
-                K.evaluate(K.cuda.iket.range_end(prologue_token[0]))
+                K.cuda.iket.range_end(prologue_token[0])
 
             K.cuda.cta_sync()
 
@@ -646,14 +644,12 @@ def make_kernel(
                             pv_b_ptr = K.ptr_byte_offset(
                                 v_smem.ptr_to([0, 0]), pv_b_offset // 8 * 16, "bfloat16"
                             )
-                            K.evaluate(
-                                _mma_f16(
-                                    K.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
-                                    _recompute_smem_desc(pv_a_ptr, 0x00004008, 0x00400000),
-                                    _recompute_smem_desc(pv_b_ptr, 0x40004040, 0x04000000),
-                                    K.uint32(0x08410490),
-                                    K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
-                                )
+                            _mma_f16(
+                                K.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
+                                _recompute_smem_desc(pv_a_ptr, 0x00004008, 0x00400000),
+                                _recompute_smem_desc(pv_b_ptr, 0x40004040, 0x04000000),
+                                K.uint32(0x08410490),
+                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
                             )
                         elif mma_smem_desc == "encode":
                             pv_a_encode = K.SmemDescriptor()
@@ -674,34 +670,28 @@ def make_kernel(
                                 sdo=64,
                                 swizzle=3,
                             )
-                            K.evaluate(
-                                _mma_f16(
-                                    K.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
-                                    pv_a_encode.desc,
-                                    pv_b_encode.desc,
-                                    K.uint32(0x08410490),
-                                    K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
-                                )
+                            _mma_f16(
+                                K.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
+                                pv_a_encode.desc,
+                                pv_b_encode.desc,
+                                K.uint32(0x08410490),
+                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
                             )
                         elif mma_smem_desc == "local_hoist":
-                            K.evaluate(
-                                _mma_f16(
-                                    K.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
-                                    pv_a_local.add_16B_offset(pv_a_offset // 8),
-                                    pv_b_local.add_16B_offset(pv_b_offset // 8),
-                                    K.uint32(0x08410490),
-                                    K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
-                                )
+                            _mma_f16(
+                                K.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
+                                pv_a_local.add_16B_offset(pv_a_offset // 8),
+                                pv_b_local.add_16B_offset(pv_b_offset // 8),
+                                K.uint32(0x08410490),
+                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
                             )
                         else:
-                            K.evaluate(
-                                _mma_f16(
-                                    K.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
-                                    _add_smem_desc_offset(hoisted_a, pv_a_offset // 8),
-                                    _add_smem_desc_offset(hoisted_b, pv_b_offset // 8),
-                                    K.uint32(0x08410490),
-                                    K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
-                                )
+                            _mma_f16(
+                                K.cast(o_tmem_col + dest_offset + mma_ni * 128, "uint32"),
+                                _add_smem_desc_offset(hoisted_a, pv_a_offset // 8),
+                                _add_smem_desc_offset(hoisted_b, pv_b_offset // 8),
+                                K.uint32(0x08410490),
+                                K.Or(mma_ki != 0, K.cast(mma_o_accumulate[0], "bool")),
                             )
 
         def softmax_and_epilogue():
@@ -717,11 +707,11 @@ def make_kernel(
                 softmax_phase = ring_phase(k)
                 qk_wait_token = iket_range("h128-qk-wait")
                 bar_qk_done.wait(softmax_stage, softmax_phase)
-                K.evaluate(K.cuda.iket.range_end(qk_wait_token[0]))
+                K.cuda.iket.range_end(qk_wait_token[0])
                 K.ptx.tcgen05.fence__after_thread_sync()
 
                 p = K.alloc_local((P_TMEM_COLS,), "uint32")
-                K.evaluate(_tmem_load(p, K.uint32(tmem_p_col), P_TMEM_COLS))
+                _tmem_load(p, K.uint32(tmem_p_col), P_TMEM_COLS)
                 K.ptx.tcgen05.wait__ld.sync.aligned()
                 K.ptx.tcgen05.fence__before_thread_sync()
                 bar_p_free.arrive(softmax_stage, remote=K.uint32(0))
@@ -806,7 +796,7 @@ def make_kernel(
                     pv_wait_token = iket_range("h128-pv-wait")
                     bar_sv_done.wait(pv_stage, pv_phase)
                     K.ptx.fence.proxy.async_.shared__cta()
-                    K.evaluate(K.cuda.iket.range_end(pv_wait_token[0]))
+                    K.cuda.iket.range_end(pv_wait_token[0])
 
                 s_base = idx_in_warpgroup // 64 * 4096 + idx_in_warpgroup % 64 * 8
                 s_words = s_frag.view("uint32")
@@ -829,28 +819,23 @@ def make_kernel(
                     K.ptx.tcgen05.fence__after_thread_sync()
                     o_rescale = K.alloc_local((32,), "float32")
                     with K.unroll((D_V // 2) // 32) as chunk_idx:
-                        K.evaluate(
-                            _tmem_load(
-                                o_rescale,
-                                K.cuda.get_tmem_addr(K.uint32(o_tmem_col), 0, chunk_idx * 32),
-                                32,
-                            )
+                        _tmem_load(
+                            o_rescale,
+                            K.cuda.get_tmem_addr(K.uint32(o_tmem_col), 0, chunk_idx * 32),
+                            32,
                         )
                         K.ptx.tcgen05.wait__ld.sync.aligned()
                         with K.unroll(32 // 2) as scale_i:
                             mul_f32x2(o_rescale, scale_i * 2, scale_for_old)
-                        K.evaluate(
-                            _tmem_store(
-                                o_rescale,
-                                K.cuda.get_tmem_addr(K.uint32(o_tmem_col), 0, chunk_idx * 32),
-                            )
+                        _tmem_store(
+                            o_rescale, K.cuda.get_tmem_addr(K.uint32(o_tmem_col), 0, chunk_idx * 32)
                         )
                         K.ptx.tcgen05.wait__st.sync.aligned()
                     K.ptx.tcgen05.fence__before_thread_sync()
 
                 K.ptx.fence.proxy.async_.shared__cta()
                 bar_so_ready.arrive(softmax_stage, remote=K.uint32(0))
-                K.evaluate(K.cuda.iket.range_end(softmax_token[0]))
+                K.cuda.iket.range_end(softmax_token[0])
 
             epilogue_token = iket_range("h128-output")
             with K.If(real_mi == K.float32(-float("inf"))), K.Then():
@@ -918,12 +903,8 @@ def make_kernel(
             o_epi_bf16 = K.alloc_local((B_EPI,), "bfloat16")
             with K.unroll((D_V // 2) // B_EPI) as epi_k:
                 with K.If(have_valid_indices), K.Then():
-                    K.evaluate(
-                        _tmem_load(
-                            o_epi,
-                            K.cuda.get_tmem_addr(K.uint32(o_tmem_col), 0, epi_k * B_EPI),
-                            B_EPI,
-                        )
+                    _tmem_load(
+                        o_epi, K.cuda.get_tmem_addr(K.uint32(o_tmem_col), 0, epi_k * B_EPI), B_EPI
                     )
                     K.ptx.tcgen05.wait__ld.sync.aligned()
                 with K.unroll(B_EPI // 2) as scale_i:
@@ -966,37 +947,29 @@ def make_kernel(
                 with K.If(warp_idx == 0), K.Then():
                     with K.If(K.cuda.elect_sync()), K.Then():
                         o_part0_offset = epi_k * B_EPI * (B_H // 2) * BF16_BYTES
-                        K.evaluate(
-                            K.ptx[_TMA_S2G_3D](
-                                K.address_of(out_part0_tensormap),
-                                K.cast(epi_k * B_EPI, "int32"),
-                                K.cast(cta_idx * (B_H // 2), "int32"),
-                                K.cast(s_q_idx, "int32"),
-                                K.ptr_byte_offset(
-                                    o_smem.ptr_to([0, 0]), o_part0_offset, "bfloat16"
-                                ),
-                            )
+                        K.ptx[_TMA_S2G_3D](
+                            K.address_of(out_part0_tensormap),
+                            K.cast(epi_k * B_EPI, "int32"),
+                            K.cast(cta_idx * (B_H // 2), "int32"),
+                            K.cast(s_q_idx, "int32"),
+                            K.ptr_byte_offset(o_smem.ptr_to([0, 0]), o_part0_offset, "bfloat16"),
                         )
                 with K.If(warp_idx == 1), K.Then():
                     with K.If(K.cuda.elect_sync()), K.Then():
                         epi_k2 = epi_k + (D_V // B_EPI // 2)
                         K.evaluate(epi_k2)
                         o_part1_offset = (epi_k * B_EPI + D_V // 2) * (B_H // 2) * BF16_BYTES
-                        K.evaluate(
-                            K.ptx[_TMA_S2G_3D](
-                                K.address_of(out_part1_tensormap),
-                                K.cast(epi_k * B_EPI + D_V // 2, "int32"),
-                                K.cast(cta_idx * (B_H // 2), "int32"),
-                                K.cast(s_q_idx, "int32"),
-                                K.ptr_byte_offset(
-                                    o_smem.ptr_to([0, 0]), o_part1_offset, "bfloat16"
-                                ),
-                            )
+                        K.ptx[_TMA_S2G_3D](
+                            K.address_of(out_part1_tensormap),
+                            K.cast(epi_k * B_EPI + D_V // 2, "int32"),
+                            K.cast(cta_idx * (B_H // 2), "int32"),
+                            K.cast(s_q_idx, "int32"),
+                            K.ptr_byte_offset(o_smem.ptr_to([0, 0]), o_part1_offset, "bfloat16"),
                         )
 
             with K.If(warp_idx == 0), K.Then():
                 K.ptx.tcgen05.dealloc.cta_group__2.sync.aligned.b32(K.uint32(0), K.uint32(512))
-            K.evaluate(K.cuda.iket.range_end(epilogue_token[0]))
+            K.cuda.iket.range_end(epilogue_token[0])
 
         def k_loader():
             # CUDA phase1.cuh:387-446.  K producer warpgroup.
@@ -1047,24 +1020,20 @@ def make_kernel(
                                             (col_start + col_atom) * 64 * (B_TOPK // 2)
                                             + (wg1_warp_idx * 4 + row_group * 16) * 64
                                         ) * BF16_BYTES
-                                        K.evaluate(
-                                            K.ptx[_TMA_GATHER4_2D_CACHE](
-                                                K.ptr_byte_offset(
-                                                    k_smem.ptr_to([0, 0]),
-                                                    k_gather_offset,
-                                                    "bfloat16",
-                                                ),
-                                                K.address_of(tensormap),
-                                                K.cast((col_start + col_atom) * 64, "int32"),
-                                                indices_int4[row_group, 0],
-                                                indices_int4[row_group, 1],
-                                                indices_int4[row_group, 2],
-                                                indices_int4[row_group, 3],
-                                                K.cuda.cvta_generic_to_shared(
-                                                    leader_mbar(bar.ptr_to([k_stage]))
-                                                ),
-                                                _KV_TMA_CACHE_HINT,
-                                            )
+                                        K.ptx[_TMA_GATHER4_2D_CACHE](
+                                            K.ptr_byte_offset(
+                                                k_smem.ptr_to([0, 0]), k_gather_offset, "bfloat16"
+                                            ),
+                                            K.address_of(tensormap),
+                                            K.cast((col_start + col_atom) * 64, "int32"),
+                                            indices_int4[row_group, 0],
+                                            indices_int4[row_group, 1],
+                                            indices_int4[row_group, 2],
+                                            indices_int4[row_group, 3],
+                                            K.cuda.cvta_generic_to_shared(
+                                                leader_mbar(bar.ptr_to([k_stage]))
+                                            ),
+                                            _KV_TMA_CACHE_HINT,
                                         )
                             with K.Else():
                                 _rem1 = K.alloc_local([1], "uint64")
@@ -1094,7 +1063,7 @@ def make_kernel(
                         bar_k_part1_ready,
                         kv_k_part1_tensormap,
                     )
-            K.evaluate(K.cuda.iket.range_end(k_gather_token[0]))
+            K.cuda.iket.range_end(k_gather_token[0])
 
         def v_loader():
             # CUDA phase1.cuh:447-489.  V producer warpgroup.
@@ -1138,22 +1107,20 @@ def make_kernel(
                                     + col_atom * 64 * B_TOPK
                                     + (wg2_warp_idx * 4 + row_group * 16) * 64
                                 ) * BF16_BYTES
-                                K.evaluate(
-                                    K.ptx[_TMA_GATHER4_2D_CACHE](
-                                        K.ptr_byte_offset(
-                                            v_smem.ptr_to([0, 0]), v_gather_offset, "bfloat16"
-                                        ),
-                                        K.address_of(tensormap),
-                                        K.cast(src0 + col_atom * 64, "int32"),
-                                        token_buf[row_group, 0],
-                                        token_buf[row_group, 1],
-                                        token_buf[row_group, 2],
-                                        token_buf[row_group, 3],
-                                        K.cuda.cvta_generic_to_shared(
-                                            leader_mbar(bar.ptr_to([v_stage]))
-                                        ),
-                                        _KV_TMA_CACHE_HINT,
-                                    )
+                                K.ptx[_TMA_GATHER4_2D_CACHE](
+                                    K.ptr_byte_offset(
+                                        v_smem.ptr_to([0, 0]), v_gather_offset, "bfloat16"
+                                    ),
+                                    K.address_of(tensormap),
+                                    K.cast(src0 + col_atom * 64, "int32"),
+                                    token_buf[row_group, 0],
+                                    token_buf[row_group, 1],
+                                    token_buf[row_group, 2],
+                                    token_buf[row_group, 3],
+                                    K.cuda.cvta_generic_to_shared(
+                                        leader_mbar(bar.ptr_to([v_stage]))
+                                    ),
+                                    _KV_TMA_CACHE_HINT,
                                 )
 
                     token_idxs_part0 = K.alloc_local((WG2_ROWS_PER_PART, 4), "int32")
@@ -1171,7 +1138,7 @@ def make_kernel(
                         bar_v_part1_ready,
                         kv_v_part1_tensormap,
                     )
-            K.evaluate(K.cuda.iket.range_end(v_gather_token[0]))
+            K.cuda.iket.range_end(v_gather_token[0])
 
         def run_wg3_role(do_mma: K.constexpr):
             # CUDA phase1.cuh:490-606.  The constexpr selects one of the two
@@ -1189,22 +1156,16 @@ def make_kernel(
                                 (d_sq * 8 + q_copy_flat % 6 * 512 + q_copy_flat // 6 % 8) * 16,
                                 "bfloat16",
                             )
-                            K.evaluate(
-                                K.ptx[_TCGEN_CP_64X128](
-                                    K.cast(
-                                        q_tmem_col
-                                        + q_copy_flat % 6 * 32
-                                        + q_copy_flat // 6 % 8 * 4,
-                                        "uint32",
-                                    ),
-                                    _replace_smem_desc_addr(q_cp_desc[0], q_copy_src),
-                                )
+                            K.ptx[_TCGEN_CP_64X128](
+                                K.cast(
+                                    q_tmem_col + q_copy_flat % 6 * 32 + q_copy_flat // 6 % 8 * 4,
+                                    "uint32",
+                                ),
+                                _replace_smem_desc_addr(q_cp_desc[0], q_copy_src),
                             )
-                        K.evaluate(
-                            K.ptx[_TCGEN_COMMIT](
-                                K.cuda.cvta_generic_to_shared(bar_prologue_utccp.ptr_to([0])),
-                                K.uint16(3),
-                            )
+                        K.ptx[_TCGEN_COMMIT](
+                            K.cuda.cvta_generic_to_shared(bar_prologue_utccp.ptr_to([0])),
+                            K.uint16(3),
                         )
 
                         with K.serial(0, num_k_blocks + 1, unroll=False) as k:
@@ -1258,27 +1219,19 @@ def make_kernel(
                                                         qk_part0_offset // 8 * 16,
                                                         "bfloat16",
                                                     )
-                                                    K.evaluate(
-                                                        _mma_f16(
-                                                            K.cast(
-                                                                tmem_p_col + mma_ni * 64, "uint32"
-                                                            ),
-                                                            _recompute_smem_desc(
-                                                                qk_part0_a_ptr,
-                                                                0x40004040,
-                                                                0x02000000,
-                                                            ),
-                                                            _recompute_smem_desc(
-                                                                qk_part0_b_ptr,
-                                                                0x40004040,
-                                                                0x02000000,
-                                                            ),
-                                                            K.uint32(0x08200490),
-                                                            K.Or(
-                                                                mma_ki != 0,
-                                                                K.cast(mma_p_accumulate[0], "bool"),
-                                                            ),
-                                                        )
+                                                    _mma_f16(
+                                                        K.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                        _recompute_smem_desc(
+                                                            qk_part0_a_ptr, 0x40004040, 0x02000000
+                                                        ),
+                                                        _recompute_smem_desc(
+                                                            qk_part0_b_ptr, 0x40004040, 0x02000000
+                                                        ),
+                                                        K.uint32(0x08200490),
+                                                        K.Or(
+                                                            mma_ki != 0,
+                                                            K.cast(mma_p_accumulate[0], "bool"),
+                                                        ),
                                                     )
                                                 elif mma_smem_desc == "encode":
                                                     qk_part0_a_encode = K.SmemDescriptor()
@@ -1303,57 +1256,45 @@ def make_kernel(
                                                         sdo=64,
                                                         swizzle=3,
                                                     )
-                                                    K.evaluate(
-                                                        _mma_f16(
-                                                            K.cast(
-                                                                tmem_p_col + mma_ni * 64, "uint32"
-                                                            ),
-                                                            qk_part0_a_encode.desc,
-                                                            qk_part0_b_encode.desc,
-                                                            K.uint32(0x08200490),
-                                                            K.Or(
-                                                                mma_ki != 0,
-                                                                K.cast(mma_p_accumulate[0], "bool"),
-                                                            ),
-                                                        )
+                                                    _mma_f16(
+                                                        K.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                        qk_part0_a_encode.desc,
+                                                        qk_part0_b_encode.desc,
+                                                        K.uint32(0x08200490),
+                                                        K.Or(
+                                                            mma_ki != 0,
+                                                            K.cast(mma_p_accumulate[0], "bool"),
+                                                        ),
                                                     )
                                                 elif mma_smem_desc == "local_hoist":
-                                                    K.evaluate(
-                                                        _mma_f16(
-                                                            K.cast(
-                                                                tmem_p_col + mma_ni * 64, "uint32"
-                                                            ),
-                                                            qk_part0_a_local.add_16B_offset(
-                                                                qk_part0_offset // 8
-                                                            ),
-                                                            qk_part0_b_local.add_16B_offset(
-                                                                qk_part0_offset // 8
-                                                            ),
-                                                            K.uint32(0x08200490),
-                                                            K.Or(
-                                                                mma_ki != 0,
-                                                                K.cast(mma_p_accumulate[0], "bool"),
-                                                            ),
-                                                        )
+                                                    _mma_f16(
+                                                        K.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                        qk_part0_a_local.add_16B_offset(
+                                                            qk_part0_offset // 8
+                                                        ),
+                                                        qk_part0_b_local.add_16B_offset(
+                                                            qk_part0_offset // 8
+                                                        ),
+                                                        K.uint32(0x08200490),
+                                                        K.Or(
+                                                            mma_ki != 0,
+                                                            K.cast(mma_p_accumulate[0], "bool"),
+                                                        ),
                                                     )
                                                 else:
-                                                    K.evaluate(
-                                                        _mma_f16(
-                                                            K.cast(
-                                                                tmem_p_col + mma_ni * 64, "uint32"
-                                                            ),
-                                                            qk_part0_a_hoist.add_16B_offset(
-                                                                qk_part0_offset // 8
-                                                            ),
-                                                            qk_k_part0_desc.add_16B_offset(
-                                                                qk_part0_offset // 8
-                                                            ),
-                                                            K.uint32(0x08200490),
-                                                            K.Or(
-                                                                mma_ki != 0,
-                                                                K.cast(mma_p_accumulate[0], "bool"),
-                                                            ),
-                                                        )
+                                                    _mma_f16(
+                                                        K.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                        qk_part0_a_hoist.add_16B_offset(
+                                                            qk_part0_offset // 8
+                                                        ),
+                                                        qk_k_part0_desc.add_16B_offset(
+                                                            qk_part0_offset // 8
+                                                        ),
+                                                        K.uint32(0x08200490),
+                                                        K.Or(
+                                                            mma_ki != 0,
+                                                            K.cast(mma_p_accumulate[0], "bool"),
+                                                        ),
                                                     )
                                     K.assign(mma_p_accumulate[0], K.uint32(1))
                                 bar_qk_part_done.arrive(qk_stage, cta_group=2, cta_mask=3)
@@ -1385,19 +1326,17 @@ def make_kernel(
                                                     qk_part1_offset // 8 * 16,
                                                     "bfloat16",
                                                 )
-                                                K.evaluate(
-                                                    _mma_f16(
-                                                        K.cast(tmem_p_col + mma_ni * 64, "uint32"),
-                                                        K.cast(q_tmem_col + mma_ki * 8, "uint32"),
-                                                        _recompute_smem_desc(
-                                                            qk_part1_b_ptr, 0x40004040, 0x02000000
-                                                        ),
-                                                        K.uint32(0x08200490),
-                                                        K.Or(
-                                                            mma_ki != 0,
-                                                            K.cast(mma_p_accumulate[0], "bool"),
-                                                        ),
-                                                    )
+                                                _mma_f16(
+                                                    K.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                    K.cast(q_tmem_col + mma_ki * 8, "uint32"),
+                                                    _recompute_smem_desc(
+                                                        qk_part1_b_ptr, 0x40004040, 0x02000000
+                                                    ),
+                                                    K.uint32(0x08200490),
+                                                    K.Or(
+                                                        mma_ki != 0,
+                                                        K.cast(mma_p_accumulate[0], "bool"),
+                                                    ),
                                                 )
                                             elif mma_smem_desc == "encode":
                                                 qk_part1_b_encode = K.SmemDescriptor()
@@ -1411,47 +1350,41 @@ def make_kernel(
                                                     sdo=64,
                                                     swizzle=3,
                                                 )
-                                                K.evaluate(
-                                                    _mma_f16(
-                                                        K.cast(tmem_p_col + mma_ni * 64, "uint32"),
-                                                        K.cast(q_tmem_col + mma_ki * 8, "uint32"),
-                                                        qk_part1_b_encode.desc,
-                                                        K.uint32(0x08200490),
-                                                        K.Or(
-                                                            mma_ki != 0,
-                                                            K.cast(mma_p_accumulate[0], "bool"),
-                                                        ),
-                                                    )
+                                                _mma_f16(
+                                                    K.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                    K.cast(q_tmem_col + mma_ki * 8, "uint32"),
+                                                    qk_part1_b_encode.desc,
+                                                    K.uint32(0x08200490),
+                                                    K.Or(
+                                                        mma_ki != 0,
+                                                        K.cast(mma_p_accumulate[0], "bool"),
+                                                    ),
                                                 )
                                             elif mma_smem_desc == "local_hoist":
-                                                K.evaluate(
-                                                    _mma_f16(
-                                                        K.cast(tmem_p_col + mma_ni * 64, "uint32"),
-                                                        K.cast(q_tmem_col + mma_ki * 8, "uint32"),
-                                                        qk_part1_b_local.add_16B_offset(
-                                                            qk_part1_offset // 8
-                                                        ),
-                                                        K.uint32(0x08200490),
-                                                        K.Or(
-                                                            mma_ki != 0,
-                                                            K.cast(mma_p_accumulate[0], "bool"),
-                                                        ),
-                                                    )
+                                                _mma_f16(
+                                                    K.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                    K.cast(q_tmem_col + mma_ki * 8, "uint32"),
+                                                    qk_part1_b_local.add_16B_offset(
+                                                        qk_part1_offset // 8
+                                                    ),
+                                                    K.uint32(0x08200490),
+                                                    K.Or(
+                                                        mma_ki != 0,
+                                                        K.cast(mma_p_accumulate[0], "bool"),
+                                                    ),
                                                 )
                                             else:
-                                                K.evaluate(
-                                                    _mma_f16(
-                                                        K.cast(tmem_p_col + mma_ni * 64, "uint32"),
-                                                        K.cast(q_tmem_col + mma_ki * 8, "uint32"),
-                                                        qk_k_part1_desc.add_16B_offset(
-                                                            qk_part1_offset // 8
-                                                        ),
-                                                        K.uint32(0x08200490),
-                                                        K.Or(
-                                                            mma_ki != 0,
-                                                            K.cast(mma_p_accumulate[0], "bool"),
-                                                        ),
-                                                    )
+                                                _mma_f16(
+                                                    K.cast(tmem_p_col + mma_ni * 64, "uint32"),
+                                                    K.cast(q_tmem_col + mma_ki * 8, "uint32"),
+                                                    qk_k_part1_desc.add_16B_offset(
+                                                        qk_part1_offset // 8
+                                                    ),
+                                                    K.uint32(0x08200490),
+                                                    K.Or(
+                                                        mma_ki != 0,
+                                                        K.cast(mma_p_accumulate[0], "bool"),
+                                                    ),
                                                 )
                                 K.assign(mma_p_accumulate[0], K.uint32(1))
                                 bar_qk_done.arrive(qk_stage, cta_group=2, cta_mask=3)
@@ -1512,7 +1445,7 @@ def make_kernel(
                                     issue_pv_mma(128, 4096, 20480, K.uint64(0), K.uint64(0))
                                 K.assign(mma_o_accumulate[0], K.uint32(1))
                                 bar_sv_done.arrive(pv_stage, cta_group=2, cta_mask=3)
-                    K.evaluate(K.cuda.iket.range_end(mma_token[0]))
+                    K.cuda.iket.range_end(mma_token[0])
 
                 with K.Else():
                     valid_mask_token = iket_range("h128-valid-mask")
@@ -1521,20 +1454,16 @@ def make_kernel(
                         with K.serial(0, num_k_blocks, unroll=False) as k:
                             row_base = g_indices_base + k * B_TOPK + lane_idx * 8
                             lane_index_words = lane_indices.view("uint32")
-                            K.evaluate(
-                                K.ptx[
-                                    "ld.global.nc.L1::evict_normal.L2::evict_normal.L2::256B.v8.u32"
-                                ](
-                                    lane_index_words[0],
-                                    lane_index_words[1],
-                                    lane_index_words[2],
-                                    lane_index_words[3],
-                                    lane_index_words[4],
-                                    lane_index_words[5],
-                                    lane_index_words[6],
-                                    lane_index_words[7],
-                                    indices.ptr_to([row_base]),
-                                )
+                            K.ptx["ld.global.nc.L1::evict_normal.L2::evict_normal.L2::256B.v8.u32"](
+                                lane_index_words[0],
+                                lane_index_words[1],
+                                lane_index_words[2],
+                                lane_index_words[3],
+                                lane_index_words[4],
+                                lane_index_words[5],
+                                lane_index_words[6],
+                                lane_index_words[7],
+                                indices.ptr_to([row_base]),
                             )
                             abs_pos_start = k * B_TOPK
                             is_ks_valid_mask = pack_valid_mask8(
@@ -1548,7 +1477,7 @@ def make_kernel(
                                 K.reinterpret("uint8", is_ks_valid_mask),
                             )
                             bar_k_valid_ready.arrive(valid_stage)
-                    K.evaluate(K.cuda.iket.range_end(valid_mask_token[0]))
+                    K.cuda.iket.range_end(valid_mask_token[0])
 
         roles = K.specialize(chain_dispatch=True)
         softmax = roles.role("softmax", warps=range(0, 4), regs=144)

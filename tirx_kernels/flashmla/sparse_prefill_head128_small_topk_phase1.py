@@ -45,9 +45,9 @@ def _add_smem_desc_offset(dst, desc, offset):
     # encoded layout fields in the high half.
     desc_lo = K.alloc_local((1,), "uint32")
     desc_hi = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.mov.b64(desc_lo[0], desc_hi[0], desc))
-    K.evaluate(K.ptx.add.u32(desc_lo[0], desc_lo[0], K.cast(offset, "uint32")))
-    K.evaluate(K.ptx.mov.b64(dst, desc_lo[0], desc_hi[0]))
+    K.ptx.mov.b64(desc_lo[0], desc_hi[0], desc)
+    K.ptx.add.u32(desc_lo[0], desc_lo[0], K.cast(offset, "uint32"))
+    K.ptx.mov.b64(dst, desc_lo[0], desc_hi[0])
 
 
 @dataclass(frozen=True)
@@ -1653,11 +1653,9 @@ def make_kernel(
                         K.ptx.tcgen05("fence::after_thread_sync", "")
                         o_rescale = K.alloc_local((32,), "float32")
                         with K.unroll(8) as chunk_idx:
-                            K.evaluate(
-                                K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
-                                    *[o_rescale[i] for i in range(32)],
-                                    K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32),
-                                )
+                            K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                                *[o_rescale[i] for i in range(32)],
+                                K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32),
                             )
                             K.ptx.tcgen05("wait::ld", "sync", "aligned", "")
                             for f in range(16):
@@ -1669,11 +1667,9 @@ def make_kernel(
                                     buffer_23, buffer_23, buffer_24, "rz", "ftz", "", "f32x2", ""
                                 )
                                 K.ptx.mov.b64(o_rescale[f * 2], o_rescale[f * 2 + 1], buffer_23)
-                            K.evaluate(
-                                K.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
-                                    K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32),
-                                    *[o_rescale[i] for i in range(32)],
-                                )
+                            K.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
+                                K.cuda.get_tmem_addr(K.uint32(0), 0, chunk_idx * 32),
+                                *[o_rescale[i] for i in range(32)],
                             )
                             K.ptx.tcgen05("wait::st", "sync", "aligned", "")
                         K.ptx.tcgen05("fence::before_thread_sync", "")
