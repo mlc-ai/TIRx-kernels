@@ -105,26 +105,26 @@ def _fp32_vec_to_e2m1_16(vals):
     bytes_ = K.alloc_local([8], "uint8")
     for i in range(8):
         # cvt.rn.satfinite.e2m1x2.f32 d, hi, lo (second source operand is the low lane)
-        K.evaluate(K.ptx.cvt.rn.satfinite.e2m1x2.f32(bytes_[i], vals[2 * i + 1], vals[2 * i]))
+        K.ptx.cvt.rn.satfinite.e2m1x2.f32(bytes_[i], vals[2 * i + 1], vals[2 * i])
     w = [
         K.cast(bytes_[i], "uint16") | (K.cast(bytes_[i + 1], "uint16") << K.uint16(8))
         for i in (0, 2, 4, 6)
     ]
     v = K.alloc_local([2], "uint32")
-    K.evaluate(K.ptx.mov.b32(v[0], w[0], w[1]))
-    K.evaluate(K.ptx.mov.b32(v[1], w[2], w[3]))
-    out = K.alloc_local([1], "uint64")
-    K.evaluate(K.ptx.mov.b64(out[0], v[0], v[1]))
-    return out[0]
+    K.ptx.mov.b32(v[0], w[0], w[1])
+    K.ptx.mov.b32(v[1], w[2], w[3])
+    out = K.local_scalar("uint64")
+    K.ptx.mov.b64(out, v[0], v[1])
+    return out
 
 
 def _habs2(dtype):
     chain = K.ptx.abs.f16x2 if dtype == "float16" else K.ptx.abs.bf16x2
 
     def impl(a):
-        out = K.alloc_local([1], "uint32")
-        K.evaluate(chain(out[0], a))
-        return out[0]
+        out = K.local_scalar("uint32")
+        chain(out, a)
+        return out
 
     return impl
 
@@ -133,9 +133,9 @@ def _hmax2(dtype):
     chain = K.ptx.max.f16x2 if dtype == "float16" else K.ptx.max.bf16x2
 
     def impl(a, b):
-        out = K.alloc_local([1], "uint32")
-        K.evaluate(chain(out[0], a, b))
-        return out[0]
+        out = K.local_scalar("uint32")
+        chain(out, a, b)
+        return out
 
     return impl
 
@@ -146,10 +146,10 @@ def _hmax(dtype):
 
     def impl(a, b):
         pred = K.local_scalar("uint32")
-        out = K.alloc_local([1], "uint16")
-        K.evaluate(cmp_chain(pred, a, b))
-        K.evaluate(K.ptx.selp.b16(out[0], a, b, K.ptx.pred(pred)))
-        return out[0]
+        out = K.local_scalar("uint16")
+        cmp_chain(pred, a, b)
+        K.ptx.selp.b16(out, a, b, K.ptx.pred(pred))
+        return out
 
     return impl
 
@@ -192,95 +192,89 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
         tx = K.thread_id()
 
         # Expert partition (quantization.cuh:642-663).
-        tid32 = K.alloc_local([1], "int32")
-        K.assign(tid32[0], bx * block_x + tx)
-        stride = K.alloc_local([1], "int32")
-        K.assign(stride[0], K.truncdiv(grid_x * block_x, num_experts))
+        tid32 = K.local_scalar("int32", init=bx * block_x + tx)
+        stride = K.local_scalar("int32", init=K.truncdiv(grid_x * block_x, num_experts))
         part_rem = K.truncmod(grid_x * block_x, num_experts)
-        expert_idx = K.alloc_local([1], "int32")
-        tid_in_expert = K.alloc_local([1], "int32")
-        actual_stride = K.alloc_local([1], "int32")
-        K.assign(expert_idx[0], K.int32(0))
-        K.assign(tid_in_expert[0], K.int32(0))
-        K.assign(actual_stride[0], stride[0])
+        expert_idx = K.local_scalar("int32")
+        tid_in_expert = K.local_scalar("int32")
+        actual_stride = K.local_scalar("int32")
+        K.assign(expert_idx, K.int32(0))
+        K.assign(tid_in_expert, K.int32(0))
+        K.assign(actual_stride, stride)
         with K.If(part_rem > 0):
             with K.Then():
-                bound = K.alloc_local([1], "int32")
-                K.assign(bound[0], part_rem * (stride[0] + 1))
-                with K.If(tid32[0] < bound[0]):
+                bound = K.local_scalar("int32", init=part_rem * (stride + 1))
+                with K.If(tid32 < bound):
                     with K.Then():
-                        K.assign(expert_idx[0], K.truncdiv(tid32[0], stride[0] + 1))
-                        K.assign(tid_in_expert[0], K.truncmod(tid32[0], stride[0] + 1))
-                        K.assign(actual_stride[0], stride[0] + 1)
+                        K.assign(expert_idx, K.truncdiv(tid32, stride + 1))
+                        K.assign(tid_in_expert, K.truncmod(tid32, stride + 1))
+                        K.assign(actual_stride, stride + 1)
                     with K.Else():
-                        K.assign(
-                            expert_idx[0], part_rem + K.truncdiv(tid32[0] - bound[0], stride[0])
-                        )
-                        K.assign(tid_in_expert[0], K.truncmod(tid32[0] - bound[0], stride[0]))
-                        K.assign(actual_stride[0], stride[0])
+                        K.assign(expert_idx, part_rem + K.truncdiv(tid32 - bound, stride))
+                        K.assign(tid_in_expert, K.truncmod(tid32 - bound, stride))
+                        K.assign(actual_stride, stride)
             with K.Else():
-                K.assign(expert_idx[0], K.truncdiv(tid32[0], stride[0]))
-                K.assign(tid_in_expert[0], K.truncmod(tid32[0], stride[0]))
-                K.assign(actual_stride[0], stride[0])
+                K.assign(expert_idx, K.truncdiv(tid32, stride))
+                K.assign(tid_in_expert, K.truncmod(tid32, stride))
+                K.assign(actual_stride, stride)
 
         m_rows = K.truncdiv(num_rows, num_experts)
         padded_m = (m_rows + 127) // 128 * 128
-        cols_per_row = K.alloc_local([1], "int32")
-        K.assign(cols_per_row[0], K.truncdiv(num_cols, K.int32(ELTS_PER_THREAD)))
+        cols_per_row = K.local_scalar("int32", init=K.truncdiv(num_cols, K.int32(ELTS_PER_THREAD)))
         use_mask = K.reinterpret("uint64", K.address_of(mask[0])) != K.uint64(0)
-        actual_cols = K.alloc_local([1], "int32")
-        K.assign(actual_cols[0], cols_per_row[0])
+        actual_cols = K.local_scalar("int32", init=cols_per_row)
         with K.If(use_silu_and_mul != 0), K.Then():
-            K.assign(actual_cols[0], cols_per_row[0] * 2)
+            K.assign(actual_cols, cols_per_row * 2)
 
         xw = K.alloc_local([8], "uint32")
         yw = K.alloc_local([8], "uint32")
-        packed = K.alloc_local([1], "uint32")
+        packed = K.local_scalar("uint32")
         out_pair = K.alloc_local([2], "float32")
-        e_tmp = K.alloc_local([1], "float32")
-        r_tmp = K.alloc_local([1], "float32")
-        lm = K.alloc_local([1], "uint32")
-        e4m3_u16 = K.alloc_local([1], "uint16")
-        f16p = K.alloc_local([1], "uint32")
+        e_tmp = K.local_scalar("float32")
+        r_tmp = K.local_scalar("float32")
+        lm = K.local_scalar("uint32")
+        e4m3_u16 = K.local_scalar("uint16")
+        f16p = K.local_scalar("uint32")
         fp = K.alloc_local([16], "float32")
-        e2m1_v = K.alloc_local([1], "uint64")
-        sf_b8 = K.alloc_local([1], "uint8")
+        e2m1_v = K.local_scalar("uint64")
+        sf_b8 = K.local_scalar("uint8")
 
         # Grid-stride loop over this expert's chunks (quantization.cuh:675-720).
         def body():
-            global_idx = K.alloc_local([1], "int32")
-            loop_bound = K.alloc_local([1], "int32")
-            K.assign(global_idx[0], tid_in_expert[0] + expert_idx[0] * m_rows * cols_per_row[0])
-            K.assign(loop_bound[0], (expert_idx[0] + 1) * m_rows * cols_per_row[0])
-            with K.While(global_idx[0] < loop_bound[0]):
-                row_idx = K.alloc_local([1], "int32")
-                col_idx = K.alloc_local([1], "int32")
-                row_idx_in_expert = K.alloc_local([1], "int32")
-                K.assign(row_idx[0], K.truncdiv(global_idx[0], cols_per_row[0]))
-                K.assign(col_idx[0], K.truncmod(global_idx[0], cols_per_row[0]))
-                K.assign(row_idx_in_expert[0], row_idx[0] - expert_idx[0] * m_rows)
+            global_idx = K.local_scalar("int32")
+            loop_bound = K.local_scalar("int32")
+            K.assign(global_idx, tid_in_expert + expert_idx * m_rows * cols_per_row)
+            K.assign(loop_bound, (expert_idx + 1) * m_rows * cols_per_row)
+            with K.While(global_idx < loop_bound):
+                row_idx = K.local_scalar("int32")
+                col_idx = K.local_scalar("int32")
+                row_idx_in_expert = K.local_scalar("int32")
+                K.assign(row_idx, K.truncdiv(global_idx, cols_per_row))
+                K.assign(col_idx, K.truncmod(global_idx, cols_per_row))
+                K.assign(row_idx_in_expert, row_idx - expert_idx * m_rows)
 
                 with K.If(use_mask), K.Then():
-                    mask_rows = K.alloc_local([1], "int32")
-                    K.ptx.ld.global_.s32(mask_rows[0], mask.ptr_to([expert_idx[0]]))
-                    with K.If(row_idx_in_expert[0] >= mask_rows[0]), K.Then():
+                    mask_rows = K.local_scalar("int32")
+                    K.ptx.ld.global_.s32(mask_rows, mask.ptr_to([expert_idx]))
+                    with K.If(row_idx_in_expert >= mask_rows), K.Then():
                         K.Break()
 
-                in_offset = K.alloc_local([1], "int64")
-                K.assign(in_offset[0], K.cast(row_idx[0], "int64") * actual_cols[0] + col_idx[0])
+                in_offset = K.local_scalar(
+                    "int64", init=K.cast(row_idx, "int64") * actual_cols + col_idx
+                )
                 K.ptx.ld.global_.v4.b32(
                     xw[0],
                     xw[1],
                     xw[2],
                     xw[3],
-                    K.address_of(input_global[in_offset[0] * ELTS_PER_THREAD]),
+                    K.address_of(input_global[in_offset * ELTS_PER_THREAD]),
                 )
                 K.ptx.ld.global_.v4.b32(
                     xw[4],
                     xw[5],
                     xw[6],
                     xw[7],
-                    K.address_of(input_global[in_offset[0] * ELTS_PER_THREAD + 8]),
+                    K.address_of(input_global[in_offset * ELTS_PER_THREAD + 8]),
                 )
                 with K.If(use_silu_and_mul != 0), K.Then():
                     K.ptx.ld.global_.v4.b32(
@@ -288,9 +282,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
                         yw[1],
                         yw[2],
                         yw[3],
-                        K.address_of(
-                            input_global[(in_offset[0] + cols_per_row[0]) * ELTS_PER_THREAD]
-                        ),
+                        K.address_of(input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD]),
                     )
                     K.ptx.ld.global_.v4.b32(
                         yw[4],
@@ -298,7 +290,7 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
                         yw[6],
                         yw[7],
                         K.address_of(
-                            input_global[(in_offset[0] + cols_per_row[0]) * ELTS_PER_THREAD + 8]
+                            input_global[(in_offset + cols_per_row) * ELTS_PER_THREAD + 8]
                         ),
                     )
                     # silu_and_mul (utils:1142-1166): fp32 silu*mul per element,
@@ -308,94 +300,83 @@ def get_kernel(dtype: str, n_experts: int, m: int, k: int, mask_mode: str = "ran
                         x_hi = _unpack_hi_f32(xw[i], dtype)
                         y_lo = _unpack_lo_f32(yw[i], dtype)
                         y_hi = _unpack_hi_f32(yw[i], dtype)
-                        K.evaluate(
-                            K.ptx.ex2.approx.ftz.f32(
-                                e_tmp[0], x_lo * K.float32(-1.4426950408889634)
-                            )
-                        )
-                        K.ptx.mov.b32(out_pair[0], (x_lo / (K.float32(1.0) + e_tmp[0])) * y_lo)
-                        K.evaluate(
-                            K.ptx.ex2.approx.ftz.f32(
-                                e_tmp[0], x_hi * K.float32(-1.4426950408889634)
-                            )
-                        )
-                        K.ptx.mov.b32(out_pair[1], (x_hi / (K.float32(1.0) + e_tmp[0])) * y_hi)
+                        K.ptx.ex2.approx.ftz.f32(e_tmp, x_lo * K.float32(-1.4426950408889634))
+                        K.ptx.mov.b32(out_pair[0], (x_lo / (K.float32(1.0) + e_tmp)) * y_lo)
+                        K.ptx.ex2.approx.ftz.f32(e_tmp, x_hi * K.float32(-1.4426950408889634))
+                        K.ptx.mov.b32(out_pair[1], (x_hi / (K.float32(1.0) + e_tmp)) * y_hi)
                         if dtype == "float16":
-                            K.evaluate(K.ptx.cvt.rn.f16x2.f32(packed[0], out_pair[1], out_pair[0]))
+                            K.ptx.cvt.rn.f16x2.f32(packed, out_pair[1], out_pair[0])
                         else:
-                            K.evaluate(K.ptx.cvt.rn.bf16x2.f32(packed[0], out_pair[1], out_pair[0]))
-                        K.ptx.mov.b32(xw[i], packed[0])
+                            K.ptx.cvt.rn.bf16x2.f32(packed, out_pair[1], out_pair[0])
+                        K.ptx.mov.b32(xw[i], packed)
 
-                out_offset = K.alloc_local([1], "int64")
-                K.assign(out_offset[0], K.cast(row_idx[0], "int64") * cols_per_row[0] + col_idx[0])
+                out_offset = K.local_scalar(
+                    "int64", init=K.cast(row_idx, "int64") * cols_per_row + col_idx
+                )
 
                 # SFScale select (branch-lowered in the source).
-                sfscale_val = K.alloc_local([1], "float32")
-                K.assign(sfscale_val[0], K.float32(1.0))
+                sfscale_val = K.local_scalar("float32", init=K.float32(1.0))
                 with (
                     K.If(K.reinterpret("uint64", K.address_of(sf_scale[0])) != K.uint64(0)),
                     K.Then(),
                 ):
-                    K.ptx.ld.global_.f32(sfscale_val[0], sf_scale.ptr_to([expert_idx[0]]))
+                    K.ptx.ld.global_.f32(sfscale_val, sf_scale.ptr_to([expert_idx]))
 
                 # SF swizzled output address (utils:1096-1140 + quantization.cuh:706-714).
                 num_cols_padded = (
                     (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4) * (SF_VEC_SIZE * 4)
                 )
                 num_cols_sfout = num_cols_padded // SF_VEC_SIZE // 4
-                sf_expert_base = K.alloc_local([1], "int32")
-                K.assign(sf_expert_base[0], expert_idx[0] * padded_m * num_cols_sfout)
-                num_k_tiles = (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4)
-                sf_off = K.alloc_local([1], "int32")
-                K.assign(
-                    sf_off[0],
-                    (
-                        K.truncdiv(row_idx_in_expert[0], K.int32(128)) * (num_k_tiles * 512)
-                        + K.truncdiv(col_idx[0], K.int32(4)) * 512
-                        + (row_idx_in_expert[0] % 32) * 16
-                        + K.truncdiv(row_idx_in_expert[0] % 128, K.int32(32)) * 4
-                        + (col_idx[0] % 4)
-                    ),
+                sf_expert_base = K.local_scalar(
+                    "int32", init=expert_idx * padded_m * num_cols_sfout
                 )
-                sf_byte = K.cast(sf_expert_base[0], "int64") * 4 + K.cast(sf_off[0], "int64")
+                num_k_tiles = (num_cols + SF_VEC_SIZE * 4 - 1) // (SF_VEC_SIZE * 4)
+                sf_off = K.local_scalar(
+                    "int32",
+                    init=K.truncdiv(row_idx_in_expert, K.int32(128)) * (num_k_tiles * 512)
+                    + K.truncdiv(col_idx, K.int32(4)) * 512
+                    + (row_idx_in_expert % 32) * 16
+                    + K.truncdiv(row_idx_in_expert % 128, K.int32(32)) * 4
+                    + (col_idx % 4),
+                )
+                sf_byte = K.cast(sf_expert_base, "int64") * 4 + K.cast(sf_off, "int64")
 
                 # Local abs-max over the 8 packed pairs (silu-rounded values).
-                K.assign(lm[0], habs2(xw[0]))
+                K.assign(lm, habs2(xw[0]))
                 with K.unroll(7) as i:
-                    K.assign(lm[0], hmax2(lm[0], habs2(xw[i + 1])))
-                lm_lo = K.cast(K.bitwise_and(lm[0], K.uint32(0xFFFF)), "uint16")
-                lm_hi = K.cast(K.shift_right(lm[0], K.uint32(16)), "uint16")
+                    K.assign(lm, hmax2(lm, habs2(xw[i + 1])))
+                lm_lo = K.cast(K.bitwise_and(lm, K.uint32(0xFFFF)), "uint16")
+                lm_hi = K.cast(K.shift_right(lm, K.uint32(16)), "uint16")
                 vec_max = K.cast(K.reinterpret(dtype, hmax(lm_lo, lm_hi)), "float32")
 
                 # SF computation (default env: fast-math rcp, E4M3).
-                K.evaluate(K.ptx.rcp.approx.ftz.f32(r_tmp[0], K.float32(6.0)))
-                sf_value = sfscale_val[0] * (vec_max * r_tmp[0])
-                K.evaluate(K.ptx.cvt.rn.satfinite.e4m3x2.f32(e4m3_u16[0], K.float32(0.0), sf_value))
-                K.assign(sf_b8[0], K.cast(e4m3_u16[0], "uint8"))
-                K.evaluate(K.ptx.cvt.rn.f16x2.e4m3x2(f16p[0], e4m3_u16[0]))
-                sf_value_r = _unpack_lo_f32(f16p[0], "float16")
-                output_scale = K.alloc_local([1], "float32")
-                K.assign(output_scale[0], K.float32(0.0))
+                K.ptx.rcp.approx.ftz.f32(r_tmp, K.float32(6.0))
+                sf_value = sfscale_val * (vec_max * r_tmp)
+                K.ptx.cvt.rn.satfinite.e4m3x2.f32(e4m3_u16, K.float32(0.0), sf_value)
+                K.assign(sf_b8, K.cast(e4m3_u16, "uint8"))
+                K.ptx.cvt.rn.f16x2.e4m3x2(f16p, e4m3_u16)
+                sf_value_r = _unpack_lo_f32(f16p, "float16")
+                output_scale = K.local_scalar("float32", init=K.float32(0.0))
                 with K.If(vec_max != 0.0), K.Then():
-                    K.evaluate(K.ptx.rcp.approx.ftz.f32(r_tmp[0], sfscale_val[0]))
-                    K.evaluate(K.ptx.rcp.approx.ftz.f32(e_tmp[0], sf_value_r * r_tmp[0]))
-                    K.assign(output_scale[0], e_tmp[0])
+                    K.ptx.rcp.approx.ftz.f32(r_tmp, sfscale_val)
+                    K.ptx.rcp.approx.ftz.f32(e_tmp, sf_value_r * r_tmp)
+                    K.assign(output_scale, e_tmp)
 
                 # SF byte store (STG.8, per thread).
                 with (
                     K.If(K.reinterpret("uint64", K.address_of(sf_out[0])) != K.uint64(0)),
                     K.Then(),
                 ):
-                    K.ptx.st.global_.b8(K.address_of(sf_out[sf_byte]), sf_b8[0])
+                    K.ptx.st.global_.b8(K.address_of(sf_out[sf_byte]), sf_b8)
 
                 # Scale to e2m1 and pack (fp32_vec_to_e2m1 source asm block).
                 with K.unroll(8) as i:
-                    K.ptx.mov.b32(fp[2 * i], _unpack_lo_f32(xw[i], dtype) * output_scale[0])
-                    K.ptx.mov.b32(fp[2 * i + 1], _unpack_hi_f32(xw[i], dtype) * output_scale[0])
-                K.assign(e2m1_v[0], _fp32_vec_to_e2m1_16([fp[i] for i in range(16)]))
-                K.ptx.st.global_.b64(K.address_of(out_global[out_offset[0]]), e2m1_v[0])
+                    K.ptx.mov.b32(fp[2 * i], _unpack_lo_f32(xw[i], dtype) * output_scale)
+                    K.ptx.mov.b32(fp[2 * i + 1], _unpack_hi_f32(xw[i], dtype) * output_scale)
+                K.assign(e2m1_v, _fp32_vec_to_e2m1_16([fp[i] for i in range(16)]))
+                K.ptx.st.global_.b64(K.address_of(out_global[out_offset]), e2m1_v)
 
-                K.assign(global_idx[0], global_idx[0] + actual_stride[0])
+                K.assign(global_idx, global_idx + actual_stride)
 
         if block_x % 32:
             with K.If(tx < block_x), K.Then():
