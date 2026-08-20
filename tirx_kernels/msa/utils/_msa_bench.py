@@ -52,6 +52,29 @@ def prepare_scheduler_module():
     return _MSA_MODULE
 
 
+def compiled_fwd_split_atomic(case: dict):
+    """Compile (or fetch from MSA's AOT cache) the forward split-slot kernel.
+
+    Returns the compiled callable behind ``prepare_sparse_fwd_schedule_and_split``'s
+    NVTX range, so the timed closure covers the kernel launch alone -- not the
+    host wrapper's shape validation, its ``split_counts.zero_()``, or the
+    flat-schedule kernel it runs first.
+    """
+    module = prepare_scheduler_module()
+    return module._get_sparse_prepare_fwd_split_atomic(
+        case["k2q_row_ptr"],
+        case["k2q_q_indices"],
+        case["scheduler_metadata"],
+        case["work_count"],
+        case["k2q_qsplit_indices"],
+        case["split_counts"],
+        case["cu_seqlens_q"],
+        case["work_capacity"],
+        case["max_seqlen_q"],
+        case["topk"],
+    )
+
+
 def compiled_flat_schedule(case: dict):
     """Compile (or fetch from MSA's AOT cache) the flat-schedule kernel.
 

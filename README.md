@@ -98,9 +98,10 @@ point each port backs (`activation`, `quantization`, `norm` — CuTe-DSL backend
 
 `msa/` — MSA sparse attention ports:
 
-| Kernel                                   | Module                             | What it is |
-| ---------------------------------------- | ---------------------------------- | ---------- |
-| `msa_sparse_prepare_flat_schedule_sm100` | `sparse_prepare_flat_schedule.py`  | Flat work-list preparation for sparse attention |
+| Kernel                                     | Module                              | What it is |
+| ------------------------------------------ | ----------------------------------- | ---------- |
+| `msa_sparse_prepare_flat_schedule_sm100`   | `sparse_prepare_flat_schedule.py`   | Flat work-list preparation for sparse attention |
+| `msa_sparse_prepare_fwd_split_atomic_sm100` | `sparse_prepare_fwd_split_atomic.py` | Forward split-slot preparation (packed `q_idx`/slot metadata) |
 
 ## Performance
 

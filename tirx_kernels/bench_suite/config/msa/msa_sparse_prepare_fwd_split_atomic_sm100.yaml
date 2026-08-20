@@ -1,0 +1,11 @@
+kernel: msa_sparse_prepare_fwd_split_atomic_sm100
+selection_rationale: Edge count drives the emission loop while the capacity-sized grid drives the early-out, so the defaults pair the smallest prefill with the widest one and the deepest decode, whose grid is two orders of magnitude larger than its work count.
+configs:
+  - {config: prefill_b1_k8192_h2, default: true, selection_role: small}
+  - {config: prefill_b1_k32768_h2, default: false}
+  - {config: prefill_b1_k131072_h1, default: true, selection_role: medium}
+  - {config: prefill_b3_k8192_h2_varlen, default: false}
+  - {config: decode_b32_k8192_h4, default: false}
+  - {config: decode_b64_k16384_h4_varlen, default: false}
+  - {config: decode_b128_k65536_h4, default: true, selection_role: large}
+  - {config: edge_b1_k512_h1, default: false}
