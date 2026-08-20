@@ -54,11 +54,11 @@ before the kernel sees it, ``:607-611``).
 
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.utils import topk_radix as R
 from tirx_kernels.flashinfer.utils.filtered_topk_ops import st_global_bits
 from tirx_kernels.flashinfer.utils.topk_harness import source_module, torch_dtype
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 
 KERNEL_META = {"name": "fast_topk_clusters", "category": "flashinfer", "compute_capability": 10}
 
@@ -156,8 +156,8 @@ def _ld_nc32(buf, index):
     `const __restrict__` on the source side, so the reference reads all of them
     non-coherently. Only the overflow ring is deliberately unqualified -- this
     kernel writes it, so its parameter cannot be `const`."""
-    out = T.alloc_local((1,), "uint32")
-    T.evaluate(T.ptx.ld.global_.nc.b32(out[0], buf.ptr_to([index])))
+    out = K.alloc_local([1], "uint32")
+    K.evaluate(K.ptx.ld.global_.nc.b32(out[0], buf.ptr_to([index])))
     return out[0]
 
 
@@ -165,8 +165,8 @@ def _ld_nc_bits(buf, index, is32):
     """The scalar mirror of `_ld_vec4`: `ld.global.nc.b32` | `ld.global.nc.b16`."""
     if is32:
         return _ld_nc32(buf, index)
-    out = T.alloc_local((1,), "uint16")
-    T.evaluate(T.ptx.ld.global_.nc.b16(out[0], buf.ptr_to([index])))
+    out = K.alloc_local([1], "uint16")
+    K.evaluate(K.ptx.ld.global_.nc.b16(out[0], buf.ptr_to([index])))
     return out[0]
 
 
@@ -179,11 +179,11 @@ def _ld_vec4(buf, elem_index, is32):
     faithful one, and it carries almost all of this kernel's memory traffic.
     """
     if is32:
-        w = T.alloc_local((4,), "uint32", align=16)
-        T.evaluate(T.ptx["ld.global.nc.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index])))
+        w = K.alloc_local([4], "uint32", align=16)
+        K.evaluate(K.ptx["ld.global.nc.v4.b32"](w[0], w[1], w[2], w[3], buf.ptr_to([elem_index])))
         return w
-    w2 = T.alloc_local((2,), "uint32", align=8)
-    T.evaluate(T.ptx["ld.global.nc.v2.b32"](w2[0], w2[1], buf.ptr_to([elem_index])))
+    w2 = K.alloc_local([2], "uint32", align=8)
+    K.evaluate(K.ptx["ld.global.nc.v2.b32"](w2[0], w2[1], buf.ptr_to([elem_index])))
     return w2
 
 
@@ -201,21 +201,21 @@ def _st_idx(buf, index, value, i64: bool):
             # overflows a C long on the way in, and casting the signed constant
             # constant-folds into "cannot make uint from negative value". The
             # bit-complement of its magnitude produces the same pattern.
-            imm = T.bitwise_not(T.uint64(-value - 1)) if value < 0 else T.uint64(value)
-            T.evaluate(T.ptx.st.global_.b64(buf.ptr_to([index]), imm))
+            imm = K.bitwise_not(K.uint64(-value - 1)) if value < 0 else K.uint64(value)
+            K.evaluate(K.ptx.st.global_.b64(buf.ptr_to([index]), imm))
         else:
-            R.st_global_u32(buf, index, T.uint32(value & 0xFFFFFFFF))
+            R.st_global_u32(buf, index, K.uint32(value & 0xFFFFFFFF))
     elif i64:
-        T.evaluate(
-            T.ptx.st.global_.b64(buf.ptr_to([index]), T.cast(T.cast(value, "int64"), "uint64"))
+        K.evaluate(
+            K.ptx.st.global_.b64(buf.ptr_to([index]), K.cast(K.cast(value, "int64"), "uint64"))
         )
     else:
-        R.st_global_u32(buf, index, T.reinterpret("uint32", T.cast(value, "int32")))
+        R.st_global_u32(buf, index, K.reinterpret("uint32", K.cast(value, "int32")))
 
 
 def _ld_i32(buf, index):
     """One `ld.global.nc.b32` of an int32, returned as int32."""
-    return T.cast(_ld_nc32(buf, index), "int32")
+    return K.cast(_ld_nc32(buf, index), "int32")
 
 
 def get_kernel(
@@ -288,104 +288,84 @@ def get_kernel(
     # take (logits, indices, seq_lens, table_or_offsets, overflow). That arity
     # difference is the source's own (:410-413 vs :454-461 / :499-505), so the
     # entry points differ and the body is emitted by one shared function.
-    @T.macro
     def _threshold(hist, scal, tid, warp, lane, rank, bank, k_rem, sum_across):
         """`get_threshold_bin` (:116-154). Leaves the bin in `scal[THR]` and
-        updates the caller's `k_rem` local; a macro cannot return."""
-        T.evaluate(T.tvm_storage_sync("shared"))
+        walks the caller's `k_rem` register down."""
+        K.evaluate(K.tvm_storage_sync("shared"))
 
-        v = T.alloc_local((1,), "int32")
-        v[0] = T.int32(0)
-        if tid < RADIX:
-            v[0] = T.cast(R.ld_shared_u32(hist, bank * RADIX + tid), "int32")
+        v = K.local_scalar("int32", init=K.int32(0))
+        with K.If(tid < RADIX), K.Then():
+            K.assign(v, K.cast(R.ld_shared_u32(hist, bank * RADIX + tid), "int32"))
             # Five-step warp suffix scan (:21-31), unrolled. `.down` accumulates
             # toward lane 0, so the warp's total over its 32 bins lands THERE.
-            s1 = R.shfl_down_u32(T.reinterpret("uint32", v[0]), 1)
-            if lane < 31:
-                v[0] += T.cast(s1, "int32")
-            s2 = R.shfl_down_u32(T.reinterpret("uint32", v[0]), 2)
-            if lane < 30:
-                v[0] += T.cast(s2, "int32")
-            s4 = R.shfl_down_u32(T.reinterpret("uint32", v[0]), 4)
-            if lane < 28:
-                v[0] += T.cast(s4, "int32")
-            s8 = R.shfl_down_u32(T.reinterpret("uint32", v[0]), 8)
-            if lane < 24:
-                v[0] += T.cast(s8, "int32")
-            s16 = R.shfl_down_u32(T.reinterpret("uint32", v[0]), 16)
-            if lane < 16:
-                v[0] += T.cast(s16, "int32")
-            if lane == 0:
-                R.st_shared_u32(scal, CUM0 + warp, T.reinterpret("uint32", v[0]))
-        T.evaluate(T.tvm_storage_sync("shared"))
+            # Each shuffle is materialized BEFORE its lane guard, so the
+            # collective stays convergent across the whole warp.
+            for delta, keep in ((1, 31), (2, 30), (4, 28), (8, 24), (16, 16)):
+                peer = R.shfl_down_u32(K.reinterpret("uint32", v), delta)
+                with K.If(lane < keep), K.Then():
+                    K.assign(v, v + K.cast(peer, "int32"))
+            with K.If(lane == 0), K.Then():
+                R.st_shared_u32(scal, CUM0 + warp, K.reinterpret("uint32", v))
+        K.evaluate(K.tvm_storage_sync("shared"))
 
-        if warp == 0:
-            w = T.alloc_local((1,), "int32")
-            w[0] = T.int32(0)
-            if lane < 8:
-                w[0] = T.cast(R.ld_shared_u32(scal, CUM0 + lane), "int32")
-            t1 = R.shfl_down_u32(T.reinterpret("uint32", w[0]), 1)
-            if lane < 7:
-                w[0] += T.cast(t1, "int32")
-            t2 = R.shfl_down_u32(T.reinterpret("uint32", w[0]), 2)
-            if lane < 6:
-                w[0] += T.cast(t2, "int32")
-            t4 = R.shfl_down_u32(T.reinterpret("uint32", w[0]), 4)
-            if lane < 4:
-                w[0] += T.cast(t4, "int32")
+        with K.If(warp == 0), K.Then():
+            w = K.local_scalar("int32", init=K.int32(0))
+            with K.If(lane < 8), K.Then():
+                K.assign(w, K.cast(R.ld_shared_u32(scal, CUM0 + lane), "int32"))
+            for delta, keep in ((1, 7), (2, 6), (4, 4)):
+                peer = R.shfl_down_u32(K.reinterpret("uint32", w), delta)
+                with K.If(lane < keep), K.Then():
+                    K.assign(w, w + K.cast(peer, "int32"))
             # `__syncwarp` sits BETWEEN the scan and the write-back into the same
             # buffer (:48). After the store it would protect nothing.
-            T.evaluate(T.ptx.bar.warp.sync(T.uint32(0xFFFFFFFF)))
+            K.evaluate(K.ptx.bar.warp.sync(K.uint32(0xFFFFFFFF)))
             # The guard is load-bearing: cum_reduce_buf is 8 ints with
             # k_remaining_counter 32 B later, so an unguarded 32-lane store puts
             # 128 B where 32 are allocated (:49-51).
-            if lane < 8:
-                R.st_shared_u32(scal, CUM0 + lane, T.reinterpret("uint32", w[0]))
-        T.evaluate(T.tvm_storage_sync("shared"))
-        if warp < 7:
-            v[0] += T.cast(R.ld_shared_u32(scal, CUM0 + warp + 1), "int32")
+            with K.If(lane < 8), K.Then():
+                R.st_shared_u32(scal, CUM0 + lane, K.reinterpret("uint32", w))
+        K.evaluate(K.tvm_storage_sync("shared"))
+        with K.If(warp < 7), K.Then():
+            K.assign(v, v + K.cast(R.ld_shared_u32(scal, CUM0 + warp + 1), "int32"))
 
         # --- cluster-wide sum of the same bin (:120-138) --------------------
         if nc > 1 and sum_across:
-            if tid < RADIX:
+            with K.If(tid < RADIX), K.Then():
                 # This IS the DSMEM publication: peers read the PING-PONG bank.
-                R.st_shared_u32(hist, bank * RADIX + tid, T.reinterpret("uint32", v[0]))
-            T.evaluate(T.ptx.barrier.cluster.arrive())
-            T.evaluate(T.ptx.barrier.cluster.wait())
-            if tid < RADIX:
-                for c in T.unroll(nc - 1):
-                    peer = T.alloc_local((1,), "uint32")
-                    T.evaluate(
-                        T.ptx.mapa.shared__cluster.u32(
+                R.st_shared_u32(hist, bank * RADIX + tid, K.reinterpret("uint32", v))
+            K.evaluate(K.ptx.barrier.cluster.arrive())
+            K.evaluate(K.ptx.barrier.cluster.wait())
+            with K.If(tid < RADIX), K.Then():
+                with K.unroll(nc - 1) as c:
+                    peer = K.alloc_local([1], "uint32")
+                    K.evaluate(
+                        K.ptx.mapa.shared__cluster.u32(
                             peer[0],
-                            T.cuda.cvta_generic_to_shared(hist.ptr_to([bank * RADIX + tid])),
-                            T.cast((c + rank + 1) % nc, "uint32"),
+                            K.cuda.cvta_generic_to_shared(hist.ptr_to([bank * RADIX + tid])),
+                            K.cast((c + rank + 1) % nc, "uint32"),
                         )
                     )
-                    got = T.alloc_local((1,), "uint32")
-                    T.evaluate(T.ptx.ld.shared__cluster.b32(got[0], peer[0]))
-                    v[0] += T.cast(got[0], "int32")
-                R.st_shared_u32(hist, 2 * RADIX + tid, T.reinterpret("uint32", v[0]))
+                    got = K.alloc_local([1], "uint32")
+                    K.evaluate(K.ptx.ld.shared__cluster.b32(got[0], peer[0]))
+                    K.assign(v, v + K.cast(got[0], "int32"))
+                R.st_shared_u32(hist, 2 * RADIX + tid, K.reinterpret("uint32", v))
         else:
-            if tid < RADIX:
-                R.st_shared_u32(hist, 2 * RADIX + tid, T.reinterpret("uint32", v[0]))
-        T.evaluate(T.tvm_storage_sync("shared"))
+            with K.If(tid < RADIX), K.Then():
+                R.st_shared_u32(hist, 2 * RADIX + tid, K.reinterpret("uint32", v))
+        K.evaluate(K.tvm_storage_sync("shared"))
 
         # --- pick the crossing bin (:142-152) --------------------------------
-        nxt = T.alloc_local((1,), "int32")
-        nxt[0] = T.int32(0)
-        if tid < RADIX - 1:
-            nxt[0] = T.cast(R.ld_shared_u32(hist, 2 * RADIX + tid + 1), "int32")
-        if tid < RADIX:
-            if v[0] > k_rem[0] and nxt[0] <= k_rem[0]:
-                R.st_shared_u32(scal, THR, T.reinterpret("uint32", tid))
-        T.evaluate(T.tvm_storage_sync("shared"))
-        bin_ = T.alloc_local((1,), "int32")
-        bin_[0] = T.cast(R.ld_shared_u32(scal, THR), "int32")
-        if bin_[0] < RADIX - 1:
-            k_rem[0] -= T.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_[0] + 1), "int32")
+        nxt = K.local_scalar("int32", init=K.int32(0))
+        with K.If(tid < RADIX - 1), K.Then():
+            K.assign(nxt, K.cast(R.ld_shared_u32(hist, 2 * RADIX + tid + 1), "int32"))
+        with K.If(tid < RADIX), K.Then():
+            with K.If(K.And(v > k_rem, nxt <= k_rem)), K.Then():
+                R.st_shared_u32(scal, THR, K.reinterpret("uint32", tid))
+        K.evaluate(K.tvm_storage_sync("shared"))
+        bin_ = K.local_scalar("int32", init=K.cast(R.ld_shared_u32(scal, THR), "int32"))
+        with K.If(bin_ < RADIX - 1), K.Then():
+            K.assign(k_rem, k_rem - K.cast(R.ld_shared_u32(hist, 2 * RADIX + bin_ + 1), "int32"))
 
-    @T.macro
     def _classify(
         hist,
         scal,
@@ -402,53 +382,61 @@ def get_kernel(
         k_rem,
         exceeded,
         ring_base,
-        tid,
     ):
         """The three-way split of :189-217, shared by pass 1 and every round."""
-        d = T.alloc_local((1,), "int32")
         if is32:
-            d[0] = T.cast(T.shift_right(bits, T.uint32(shift)), "int32") & 0xFF
+            d = K.bitwise_and(K.cast(K.shift_right(bits, K.uint32(shift)), "int32"), 0xFF)
         else:
-            d[0] = T.cast(T.shift_right(bits, T.uint16(shift)), "int32") & 0xFF
-        if d[0] > bin_[0]:
-            # HAZARD: unguarded. The source's `if (topk_offset < TopK)` is
-            # commented out at :195-197; the writeback's `offs < TopK` is what
-            # bounds the global store. Reproduce, do not repair.
-            slot = R.atom_shared_add_u32(scal, FINAL, T.uint32(1))
-            R.st_shared_u32(topk_inds, T.cast(slot, "int32"), T.reinterpret("uint32", index))
-        else:
-            if d[0] == bin_[0]:
-                if not last:
-                    slot = T.cast(
-                        R.atom_shared_add_u32(scal, NCACHED + phase, T.uint32(1)), "int32"
-                    )
-                    keep = T.alloc_local((1,), "int32")
-                    keep[0] = T.int32(1)
-                    if slot < num_cached:
-                        R.st_shared_u32(
-                            cidx, phase * num_cached + slot, T.reinterpret("uint32", index)
+            d = K.bitwise_and(K.cast(K.shift_right(bits, K.uint16(shift)), "int32"), 0xFF)
+        with K.If(d > bin_):
+            with K.Then():
+                # HAZARD: unguarded. The source's `if (topk_offset < TopK)` is
+                # commented out at :195-197; the writeback's `offs < TopK` is what
+                # bounds the global store. Reproduce, do not repair.
+                slot = R.atom_shared_add_u32(scal, FINAL, K.uint32(1))
+                R.st_shared_u32(topk_inds, K.cast(slot, "int32"), K.reinterpret("uint32", index))
+            with K.Else():
+                with K.If(d == bin_), K.Then():
+                    if not last:
+                        slot = K.cast(
+                            R.atom_shared_add_u32(scal, NCACHED + phase, K.uint32(1)), "int32"
                         )
-                        R.st_shared_u32(cbits, phase * num_cached + slot, T.cast(bits, "uint32"))
+                        keep = K.local_scalar("int32", init=K.int32(1))
+                        with K.If(slot < num_cached):
+                            with K.Then():
+                                R.st_shared_u32(
+                                    cidx, phase * num_cached + slot, K.reinterpret("uint32", index)
+                                )
+                                R.st_shared_u32(
+                                    cbits, phase * num_cached + slot, K.cast(bits, "uint32")
+                                )
+                            with K.Else():
+                                with K.If(slot - num_cached < ovf_stride):
+                                    with K.Then():
+                                        off = (
+                                            ring_base
+                                            + phase * ovf_stride * 2
+                                            + (slot - num_cached) * 2
+                                        )
+                                        R.st_global_u32(ovf, off, K.cast(bits, "uint32"))
+                                        R.st_global_u32(
+                                            ovf, off + 1, K.reinterpret("uint32", index)
+                                        )
+                                    with K.Else():
+                                        # ring full: dropped (:210-214)
+                                        K.assign(keep, K.int32(0))
+                        with K.If(keep == 1), K.Then():
+                            if is32:
+                                nb = K.bitwise_and(
+                                    K.cast(K.shift_right(bits, K.uint32(shift - 8)), "int32"), 0xFF
+                                )
+                            else:
+                                nb = K.bitwise_and(
+                                    K.cast(K.shift_right(bits, K.uint16(shift - 8)), "int32"), 0xFF
+                                )
+                            R.atom_shared_add_u32(hist, (phase ^ 1) * RADIX + nb, K.uint32(1))
                     else:
-                        if slot - num_cached < ovf_stride:
-                            off = ring_base + phase * ovf_stride * 2 + (slot - num_cached) * 2
-                            R.st_global_u32(ovf, off, T.cast(bits, "uint32"))
-                            R.st_global_u32(ovf, off + 1, T.reinterpret("uint32", index))
-                        else:
-                            keep[0] = T.int32(0)  # ring full: dropped (:210-214)
-                    if keep[0] == 1:
-                        nb = T.alloc_local((1,), "int32")
-                        if is32:
-                            nb[0] = T.cast(T.shift_right(bits, T.uint32(shift - 8)), "int32") & 0xFF
-                        else:
-                            nb[0] = T.cast(T.shift_right(bits, T.uint16(shift - 8)), "int32") & 0xFF
-                        R.atom_shared_add_u32(hist, (phase ^ 1) * RADIX + nb[0], T.uint32(1))
-                else:
-                    # Final-round tie rationing on rank 0's counter (:300-319).
-                    # NOT guarded by nc > 1: at one CTA per cluster rank 0 is
-                    # this CTA, and the reference's NC==1 export still carries
-                    # the cluster atomic.
-                    if k_rem[0] > 0 and exceeded[0] == 0:
+                        # Final-round tie rationing on rank 0's counter (:300-319).
                         # NOT guarded by nc > 1. The source calls
                         # `map_shared_rank(s_k_remaining_counter, 0)`
                         # unconditionally (:309, :360) and its NC==1 export still
@@ -459,25 +447,30 @@ def get_kernel(
                         # works with no `clusterCtaIdx.x` tag bound, so at one
                         # CTA per cluster rank 0 is this CTA and the mapping is
                         # the identity.
-                        peer = T.alloc_local((1,), "uint32")
-                        T.evaluate(
-                            T.ptx.mapa.shared__cluster.u32(
-                                peer[0],
-                                T.cuda.cvta_generic_to_shared(scal.ptr_to([KREM])),
-                                T.uint32(0),
+                        with K.If(K.And(k_rem > 0, exceeded == 0)), K.Then():
+                            peer = K.alloc_local([1], "uint32")
+                            K.evaluate(
+                                K.ptx.mapa.shared__cluster.u32(
+                                    peer[0],
+                                    K.cuda.cvta_generic_to_shared(scal.ptr_to([KREM])),
+                                    K.uint32(0),
+                                )
                             )
-                        )
-                        got = T.alloc_local((1,), "uint32")
-                        T.evaluate(T.ptx.atom.shared__cluster.add.u32(got[0], peer[0], T.uint32(1)))
-                        if T.cast(got[0], "int32") < k_rem[0]:
-                            slot = R.atom_shared_add_u32(scal, FINAL, T.uint32(1))
-                            R.st_shared_u32(
-                                topk_inds, T.cast(slot, "int32"), T.reinterpret("uint32", index)
+                            got = K.alloc_local([1], "uint32")
+                            K.evaluate(
+                                K.ptx.atom.shared__cluster.add.u32(got[0], peer[0], K.uint32(1))
                             )
-                        else:
-                            exceeded[0] = T.int32(1)
+                            with K.If(K.cast(got[0], "int32") < k_rem):
+                                with K.Then():
+                                    slot = R.atom_shared_add_u32(scal, FINAL, K.uint32(1))
+                                    R.st_shared_u32(
+                                        topk_inds,
+                                        K.cast(slot, "int32"),
+                                        K.reinterpret("uint32", index),
+                                    )
+                                with K.Else():
+                                    K.assign(exceeded, K.int32(1))
 
-    @T.macro
     def _round(
         hist,
         scal,
@@ -498,41 +491,38 @@ def get_kernel(
 
         `t` arrives as a PYTHON int, so `phase`, `shift` and `last` are
         compile-time constants and the round is emitted as straight-line code.
-        Writing `for t in range(1, rounds)` inside a parsed body instead makes
-        TVMScript emit `T.serial` -- a real runtime loop -- which collapses the
-        four static `threshold()` regions into two, turns `last` into a runtime
-        predicate, and leaves the per-round `digit` forms unreachable.
+        A `K.serial` over the rounds instead would make `last` a runtime
+        predicate, collapse the four static `threshold()` regions into two, and
+        leave the per-round `digit` forms unreachable.
         """
         phase = t % 2
-        exceeded[0] = T.int32(0)  # :268 -- per round, per thread
+        K.assign(exceeded, K.int32(0))  # :268 -- per round, per thread
         if nc > 1:
-            T.evaluate(T.ptx.barrier.cluster.wait())
-        if tid < RADIX:
-            R.st_shared_u32(hist, (phase ^ 1) * RADIX + tid, T.uint32(0))
-        if tid == 0:
-            R.st_shared_u32(scal, NCACHED + phase, T.uint32(0))
+            K.evaluate(K.ptx.barrier.cluster.wait())
+        with K.If(tid < RADIX), K.Then():
+            R.st_shared_u32(hist, (phase ^ 1) * RADIX + tid, K.uint32(0))
+        with K.If(tid == 0), K.Then():
+            R.st_shared_u32(scal, NCACHED + phase, K.uint32(0))
         _threshold(hist, scal, tid, warp, lane, rank, phase, k_rem, True)
-        bin_t = T.alloc_local((1,), "int32")
-        bin_t[0] = T.cast(R.ld_shared_u32(scal, THR), "int32")
+        bin_t = K.local_scalar("int32", init=K.cast(R.ld_shared_u32(scal, THR), "int32"))
         if nc > 1 and t < rounds - 1:
             # Skipped on the final round: no further threshold() means no
             # further peer read of this bank (:260-263).
-            T.evaluate(T.ptx.barrier.cluster.arrive())
+            K.evaluate(K.ptx.barrier.cluster.arrive())
 
-        raw = T.alloc_local((1,), "int32")
-        raw[0] = T.cast(R.ld_shared_u32(scal, NCACHED + (phase ^ 1)), "int32")
-        n_sh = T.alloc_local((1,), "int32")
-        n_gl = T.alloc_local((1,), "int32")
-        n_sh[0] = T.min(T.int32(num_cached), raw[0])
-        n_gl[0] = T.min(T.int32(ovf_stride), T.max(T.int32(0), raw[0] - num_cached))
+        raw = K.local_scalar(
+            "int32", init=K.cast(R.ld_shared_u32(scal, NCACHED + (phase ^ 1)), "int32")
+        )
+        n_sh = K.local_scalar("int32", init=K.min(K.int32(num_cached), raw))
+        n_gl = K.local_scalar(
+            "int32", init=K.min(K.int32(ovf_stride), K.max(K.int32(0), raw - num_cached))
+        )
         shift = lshift_start - t * 8
         last = t == rounds - 1
 
         # Stride 1024, NOT 1024*nc: each CTA owns its own candidate slice and
         # the cluster does not re-partition here (:271-273).
-        for i in T.serial(tid, n_sh[0], step=BLOCK_THREADS):
-            b = R.ld_shared_u32(cached_bits, (phase ^ 1) * num_cached + i)
-            ix = T.cast(R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32")
+        with K.serial(tid, n_sh, step=BLOCK_THREADS) as i:
             _classify(
                 hist,
                 scal,
@@ -540,8 +530,8 @@ def get_kernel(
                 cached_bits,
                 cached_idx,
                 ovf,
-                b,
-                ix,
+                R.ld_shared_u32(cached_bits, (phase ^ 1) * num_cached + i),
+                K.cast(R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"),
                 bin_t,
                 phase,
                 shift,
@@ -549,12 +539,9 @@ def get_kernel(
                 k_rem,
                 exceeded,
                 ring_base,
-                tid,
             )
-        for i in T.serial(tid, n_gl[0], step=BLOCK_THREADS):
-            off = ring_base + (phase ^ 1) * ovf_stride * 2 + i * 2
-            b = R.ld_global_u32(ovf, off)
-            ix = T.cast(R.ld_global_u32(ovf, off + 1), "int32")
+        with K.serial(tid, n_gl, step=BLOCK_THREADS) as i2:
+            off = ring_base + (phase ^ 1) * ovf_stride * 2 + i2 * 2
             _classify(
                 hist,
                 scal,
@@ -562,8 +549,8 @@ def get_kernel(
                 cached_bits,
                 cached_idx,
                 ovf,
-                b,
-                ix,
+                R.ld_global_u32(ovf, off),
+                K.cast(R.ld_global_u32(ovf, off + 1), "int32"),
                 bin_t,
                 phase,
                 shift,
@@ -571,16 +558,12 @@ def get_kernel(
                 k_rem,
                 exceeded,
                 ring_base,
-                tid,
             )
 
-    @T.macro
     def _emit(logits, out_idx, out_val, seq_lens_g, aux, ovf):
-        T.device_entry()
-
-        cta = T.cta_id([grid])
-        rank = T.cta_id_in_cluster([nc]) if nc > 1 else T.int32(0)
-        tid = T.thread_id([BLOCK_THREADS])
+        cta = K.cta_id()
+        rank = K.cta_id_in_cluster([nc]) if nc > 1 else K.int32(0)
+        tid = K.thread_id()
         row = cta // nc
         warp = tid >> 5
         lane = tid & 31
@@ -588,137 +571,168 @@ def get_kernel(
         logit_base = row * seq_len
         ind_base = row * k
 
-        row_len = T.alloc_local((1,), "int32")
-        row_len[0] = T.int32(seq_len)
+        # The worker's shared arena is declared for the whole entry rather than
+        # inside the `row_len > TopK` arm: a traced kernel owns one pool, and the
+        # dynamic request is a launch property either way.  Nothing in the
+        # trivial branch touches it.
+        pool = K.smem_pool()
+        cached_bits = pool.alloc((2 * num_cached,), "uint32", align=128)
+        cached_idx = pool.alloc((2 * num_cached,), "int32")
+        topk_inds = pool.alloc((k,), "int32")
+        hist = pool.alloc((3 * RADIX,), "int32")
+        scal = pool.alloc((NSCAL,), "int32")
+
+        row_len = K.local_scalar("int32", init=K.int32(seq_len))
         if not plain:
-            row_len[0] = _ld_i32(seq_lens_g, row)
-        rag_off = T.alloc_local((1,), "int32")
-        rag_off[0] = T.int32(0)
+            K.assign(row_len, _ld_i32(seq_lens_g, row))
+        rag_off = K.local_scalar("int32", init=K.int32(0))
         # `page_table_offset` is hoisted ONCE per CTA in the source (:465) and
         # reused by both the trivial branch (:471) and the writeback (:490).
         # Recomputing `row * pt_stride` inside those loops costs a multiply-add
         # per element on the one path that has no other per-element arithmetic,
         # which is exactly where the page_table trivial shape loses to ragged.
-        pt_base = T.alloc_local((1,), "int32")
-        pt_base[0] = T.int32(0)
+        pt_base = K.local_scalar("int32", init=K.int32(0))
         if pt:
-            pt_base[0] = row * seq_len
+            K.assign(pt_base, row * seq_len)
         if ragged:
             # Hoisted above the trivial branch exactly as the source does (:510)
             # and reused by both it and the writeback.
-            rag_off[0] = _ld_i32(aux, row)
+            K.assign(rag_off, _ld_i32(aux, row))
 
         # ---- trivial branch (:417-429 / :467-476 / :511-520) ---------------
-        if row_len[0] <= k:
-            if pt and triv_trips * BLOCK_THREADS * nc == k:
-                # Stage the page-table loads into DISTINCT registers before any
-                # store. `T.serial(..., unroll=N)` reuses one destination local
-                # across the unrolled copies, so the loads serialize: each waits
-                # for the previous store to consume the register. Paired NCU on
-                # this shape measured long_scoreboard 22.48 vs the reference's
-                # 7.02 at IDENTICAL global load sectors (4352 both) -- exposed
-                # load latency, not extra traffic. An explicitly unrolled body
-                # with one register per load lets all `triv_trips` be in flight.
-                stage = T.alloc_local((triv_trips,), "int32")
-                tbase = tid + (cta % nc) * BLOCK_THREADS
-                for u in range(triv_trips):
-                    iu = tbase + u * BLOCK_THREADS * nc
-                    if iu < row_len[0]:
-                        stage[u] = _ld_i32(aux, pt_base[0] + iu)
-                    else:
-                        stage[u] = T.int32(-1)
-                for u in range(triv_trips):
-                    iu = tbase + u * BLOCK_THREADS * nc
-                    _st_idx(out_idx, ind_base + iu, stage[u], i64)
-            else:
-                for i in T.serial(
-                    tid + (cta % nc) * BLOCK_THREADS, k, step=BLOCK_THREADS * nc, unroll=triv_unroll
-                ):
-                    if i < row_len[0]:
-                        if plain:
-                            _st_idx(out_idx, ind_base + i, i, i64)
-                            st_global_bits(
-                                out_val,
-                                ind_base + i,
-                                _ld_nc_bits(logits, logit_base + i, is32),
-                                is32,
-                            )
-                        elif pt:
-                            _st_idx(out_idx, ind_base + i, _ld_i32(aux, pt_base[0] + i), i64)
-                        else:
-                            _st_idx(out_idx, ind_base + i, i + rag_off[0], i64)
-                    else:
-                        # output_values is left UNTOUCHED over the pad region
-                        # (:425-427) -- the port must not zero it.
-                        _st_idx(out_idx, ind_base + i, -1, i64)
-        else:
-            pool = T.SMEMPool()
-            cached_bits = pool.alloc((2 * num_cached,), "uint32", align=128)
-            cached_idx = pool.alloc((2 * num_cached,), "int32")
-            topk_inds = pool.alloc((k,), "int32")
-            hist = pool.alloc((3 * RADIX,), "int32")
-            scal = pool.alloc((NSCAL,), "int32")
-            pool.commit()
-
-            ring_base = cta * ovf_stride * 4
-            exceeded = T.alloc_local((1,), "int32")
-            exceeded[0] = T.int32(0)
-
-            # ---- zero banks 0/1 and three scalars (:158-170) ---------------
-            if tid < RADIX:
-                R.st_shared_u32(hist, tid, T.uint32(0))
-                R.st_shared_u32(hist, RADIX + tid, T.uint32(0))
-            if tid == 0:
-                R.st_shared_u32(scal, FINAL, T.uint32(0))
-                R.st_shared_u32(scal, KREM, T.uint32(0))
-                R.st_shared_u32(scal, NCACHED, T.uint32(0))
-                # threshold_bin is deliberately NOT initialized (:166-170): a
-                # round whose crossing test selects no lane reads the previous
-                # round's value. Reproduce, do not repair.
-            T.evaluate(T.tvm_storage_sync("shared"))
-
-            # ---- first histogram pass: SCALAR strided (:174-179) -----------
-            for i in T.serial(
-                tid + rank * BLOCK_THREADS, row_len[0], step=BLOCK_THREADS * nc, unroll=hist_unroll
-            ):
-                xb = _ld_nc_bits(logits, logit_base + i, is32)
-                ob = R.to_ordered_u32(xb) if is32 else R.to_ordered_u16(xb)
-                if is32:
-                    d0 = T.cast(T.shift_right(ob, T.uint32(lshift_start)), "int32") & 0xFF
+        with K.If(row_len <= k):
+            with K.Then():
+                if pt and triv_trips * BLOCK_THREADS * nc == k:
+                    # Stage the page-table loads into DISTINCT registers before
+                    # any store. `unroll=N` on a real loop reuses one destination
+                    # local across the unrolled copies, so the loads serialize:
+                    # each waits for the previous store to consume the register.
+                    # Paired NCU on this shape measured long_scoreboard 22.48 vs
+                    # the reference's 7.02 at IDENTICAL global load sectors (4352
+                    # both) -- exposed load latency, not extra traffic. A
+                    # trace-time unrolled body with one register per load lets
+                    # all `triv_trips` be in flight.
+                    stage = K.alloc_local([triv_trips], "int32")
+                    tbase = tid + (cta % nc) * BLOCK_THREADS
+                    for u in range(triv_trips):
+                        iu = tbase + u * BLOCK_THREADS * nc
+                        with K.If(iu < row_len):
+                            with K.Then():
+                                K.assign(stage[u], _ld_i32(aux, pt_base + iu))
+                            with K.Else():
+                                K.assign(stage[u], K.int32(-1))
+                    for u in range(triv_trips):
+                        iu = tbase + u * BLOCK_THREADS * nc
+                        _st_idx(out_idx, ind_base + iu, stage[u], i64)
                 else:
-                    d0 = T.cast(T.shift_right(ob, T.uint16(lshift_start)), "int32") & 0xFF
-                R.atom_shared_add_u32(hist, d0, T.uint32(1))
+                    with K.serial(
+                        tid + (cta % nc) * BLOCK_THREADS,
+                        k,
+                        step=BLOCK_THREADS * nc,
+                        unroll=triv_unroll,
+                    ) as i:
+                        with K.If(i < row_len):
+                            with K.Then():
+                                if plain:
+                                    _st_idx(out_idx, ind_base + i, i, i64)
+                                    st_global_bits(
+                                        out_val,
+                                        ind_base + i,
+                                        _ld_nc_bits(logits, logit_base + i, is32),
+                                        is32,
+                                    )
+                                elif pt:
+                                    _st_idx(out_idx, ind_base + i, _ld_i32(aux, pt_base + i), i64)
+                                else:
+                                    _st_idx(out_idx, ind_base + i, i + rag_off, i64)
+                            with K.Else():
+                                # output_values is left UNTOUCHED over the pad
+                                # region (:425-427) -- the port must not zero it.
+                                _st_idx(out_idx, ind_base + i, -1, i64)
+            with K.Else():
+                ring_base = cta * ovf_stride * 4
+                exceeded = K.local_scalar("int32", init=K.int32(0))
 
-            k_rem = T.alloc_local((1,), "int32")
-            k_rem[0] = T.int32(k)
-            _threshold(hist, scal, tid, warp, lane, rank, 0, k_rem, True)
-            bin0 = T.alloc_local((1,), "int32")
-            bin0[0] = T.cast(R.ld_shared_u32(scal, THR), "int32")
+                # ---- zero banks 0/1 and three scalars (:158-170) ------------
+                with K.If(tid < RADIX), K.Then():
+                    R.st_shared_u32(hist, tid, K.uint32(0))
+                    R.st_shared_u32(hist, RADIX + tid, K.uint32(0))
+                with K.If(tid == 0), K.Then():
+                    R.st_shared_u32(scal, FINAL, K.uint32(0))
+                    R.st_shared_u32(scal, KREM, K.uint32(0))
+                    R.st_shared_u32(scal, NCACHED, K.uint32(0))
+                    # threshold_bin is deliberately NOT initialized (:166-170): a
+                    # round whose crossing test selects no lane reads the
+                    # previous round's value. Reproduce, do not repair.
+                K.evaluate(K.tvm_storage_sync("shared"))
 
-            if nc > 1:
-                # SPLIT barrier: the matching wait heads round 1 (:218-225, :248).
-                T.evaluate(T.ptx.barrier.cluster.arrive())
-
-            # Vectorized classification (:227-236): four elements per issue,
-            # then a scalar tail (:237-239). Only THIS pass is vectorized -- the
-            # first histogram pass above is a plain strided scalar read, which is
-            # why the row is read from global twice in total.
-            vbase = (rank * BLOCK_THREADS + tid) * 4
-            for i in T.serial(
-                vbase, (row_len[0] // 4) * 4, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll
-            ):
-                w = _ld_vec4(logits, logit_base + i, is32)
-                for j in T.unroll(4):
+                # ---- first histogram pass: SCALAR strided (:174-179) --------
+                with K.serial(
+                    tid + rank * BLOCK_THREADS, row_len, step=BLOCK_THREADS * nc, unroll=hist_unroll
+                ) as i:
+                    xb = _ld_nc_bits(logits, logit_base + i, is32)
+                    ob = R.to_ordered_u32(xb) if is32 else R.to_ordered_u16(xb)
                     if is32:
-                        eb = w[j]
-                    else:
-                        eb = T.cast(
-                            T.bitwise_and(
-                                T.shift_right(w[j // 2], T.uint32(16 * (j % 2))), T.uint32(0xFFFF)
-                            ),
-                            "uint16",
+                        d0 = K.bitwise_and(
+                            K.cast(K.shift_right(ob, K.uint32(lshift_start)), "int32"), 0xFF
                         )
-                    ob = R.to_ordered_u32(eb) if is32 else R.to_ordered_u16(eb)
+                    else:
+                        d0 = K.bitwise_and(
+                            K.cast(K.shift_right(ob, K.uint16(lshift_start)), "int32"), 0xFF
+                        )
+                    R.atom_shared_add_u32(hist, d0, K.uint32(1))
+
+                k_rem = K.local_scalar("int32", init=K.int32(k))
+                _threshold(hist, scal, tid, warp, lane, rank, 0, k_rem, True)
+                bin0 = K.local_scalar("int32", init=K.cast(R.ld_shared_u32(scal, THR), "int32"))
+
+                if nc > 1:
+                    # SPLIT barrier: the matching wait heads round 1 (:218-225, :248).
+                    K.evaluate(K.ptx.barrier.cluster.arrive())
+
+                # Vectorized classification (:227-236): four elements per issue,
+                # then a scalar tail (:237-239). Only THIS pass is vectorized --
+                # the first histogram pass above is a plain strided scalar read,
+                # which is why the row is read from global twice in total.
+                vbase = (rank * BLOCK_THREADS + tid) * 4
+                with K.serial(
+                    vbase, (row_len // 4) * 4, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll
+                ) as i:
+                    w = _ld_vec4(logits, logit_base + i, is32)
+                    with K.unroll(4) as j:
+                        if is32:
+                            eb = w[j]
+                        else:
+                            eb = K.cast(
+                                K.bitwise_and(
+                                    K.shift_right(w[j // 2], K.uint32(16 * (j % 2))),
+                                    K.uint32(0xFFFF),
+                                ),
+                                "uint16",
+                            )
+                        _classify(
+                            hist,
+                            scal,
+                            topk_inds,
+                            cached_bits,
+                            cached_idx,
+                            ovf,
+                            R.to_ordered_u32(eb) if is32 else R.to_ordered_u16(eb),
+                            i + j,
+                            bin0,
+                            0,
+                            lshift_start,
+                            False,
+                            k_rem,
+                            exceeded,
+                            ring_base,
+                        )
+                with K.serial(
+                    (row_len // 4) * 4 + rank * BLOCK_THREADS + tid,
+                    row_len,
+                    step=BLOCK_THREADS * nc,
+                ) as i3:
+                    xb3 = _ld_nc_bits(logits, logit_base + i3, is32)
                     _classify(
                         hist,
                         scal,
@@ -726,8 +740,8 @@ def get_kernel(
                         cached_bits,
                         cached_idx,
                         ovf,
-                        ob,
-                        i + j,
+                        R.to_ordered_u32(xb3) if is32 else R.to_ordered_u16(xb3),
+                        i3,
                         bin0,
                         0,
                         lshift_start,
@@ -735,190 +749,107 @@ def get_kernel(
                         k_rem,
                         exceeded,
                         ring_base,
-                        tid,
                     )
-            for i in T.serial(
-                (row_len[0] // 4) * 4 + rank * BLOCK_THREADS + tid,
-                row_len[0],
-                step=BLOCK_THREADS * nc,
-            ):
-                xb = _ld_nc_bits(logits, logit_base + i, is32)
-                ob = R.to_ordered_u32(xb) if is32 else R.to_ordered_u16(xb)
-                _classify(
-                    hist,
-                    scal,
-                    topk_inds,
-                    cached_bits,
-                    cached_idx,
-                    ovf,
-                    ob,
-                    i,
-                    bin0,
-                    0,
-                    lshift_start,
-                    False,
-                    k_rem,
-                    exceeded,
-                    ring_base,
-                    tid,
-                )
 
-            # ---- refinement rounds (:241-373), emitted as straight-line code
-            # so each round's phase/shift/last stay compile-time, matching the
-            # source's `#pragma unroll` (:241).
-            _round(
-                hist,
-                scal,
-                topk_inds,
-                cached_bits,
-                cached_idx,
-                ovf,
-                tid,
-                warp,
-                lane,
-                rank,
-                ring_base,
-                k_rem,
-                exceeded,
-                1,
-            )
-            if rounds == 4:
-                _round(
-                    hist,
-                    scal,
-                    topk_inds,
-                    cached_bits,
-                    cached_idx,
-                    ovf,
-                    tid,
-                    warp,
-                    lane,
-                    rank,
-                    ring_base,
-                    k_rem,
-                    exceeded,
-                    2,
-                )
-                _round(
-                    hist,
-                    scal,
-                    topk_inds,
-                    cached_bits,
-                    cached_idx,
-                    ovf,
-                    tid,
-                    warp,
-                    lane,
-                    rank,
-                    ring_base,
-                    k_rem,
-                    exceeded,
-                    3,
-                )
-            # ---- epilogue: claim the output range (:374-404) ----------------
-            T.evaluate(T.tvm_storage_sync("shared"))
-            n_out = T.alloc_local((1,), "int32")
-            out_start = T.alloc_local((1,), "int32")
-            n_out[0] = T.int32(k)
-            out_start[0] = T.int32(0)
-            if nc > 1:
-                my_num = T.alloc_local((1,), "int32")
-                # Read own count BEFORE rank 0's cursor absorbs peers (:379-386).
-                my_num[0] = T.cast(R.ld_shared_u32(scal, FINAL), "int32")
-                T.evaluate(T.ptx.barrier.cluster.arrive())
-                T.evaluate(T.ptx.barrier.cluster.wait())
-                if rank > 0:
-                    if tid == 0:
-                        peer = T.alloc_local((1,), "uint32")
-                        T.evaluate(
-                            T.ptx.mapa.shared__cluster.u32(
-                                peer[0],
-                                T.cuda.cvta_generic_to_shared(scal.ptr_to([FINAL])),
-                                T.uint32(0),
-                            )
-                        )
-                        old = T.alloc_local((1,), "uint32")
-                        T.evaluate(
-                            T.ptx.atom.shared__cluster.add.u32(
-                                old[0], peer[0], T.reinterpret("uint32", my_num[0])
-                            )
-                        )
-                        R.st_shared_u32(scal, FINAL, old[0])  # broadcast (:392)
-                    T.evaluate(T.tvm_storage_sync("shared"))
-                    out_start[0] = T.cast(R.ld_shared_u32(scal, FINAL), "int32")
-                T.evaluate(T.ptx.barrier.cluster.arrive())
-                T.evaluate(T.ptx.barrier.cluster.wait())
-                n_out[0] = T.min(T.int32(k), my_num[0])
+                # ---- refinement rounds (:241-373), emitted as straight-line
+                # code so each round's phase/shift/last stay compile-time,
+                # matching the source's `#pragma unroll` (:241).
+                for t in range(1, rounds):
+                    _round(
+                        hist,
+                        scal,
+                        topk_inds,
+                        cached_bits,
+                        cached_idx,
+                        ovf,
+                        tid,
+                        warp,
+                        lane,
+                        rank,
+                        ring_base,
+                        k_rem,
+                        exceeded,
+                        t,
+                    )
 
-            # ---- writeback (:438-447 / :486-492 / :530-536) -----------------
-            for i in T.serial(tid, n_out[0], step=BLOCK_THREADS, unroll=wb_unroll):
-                offs = i + out_start[0]
-                if offs < k:
-                    ind = T.cast(R.ld_shared_u32(topk_inds, i), "int32")
-                    if plain:
-                        _st_idx(out_idx, ind_base + offs, ind, i64)
-                        # The value is RE-GATHERED from global, never carried
-                        # through shared (:444).
-                        st_global_bits(
-                            out_val,
-                            ind_base + offs,
-                            _ld_nc_bits(logits, logit_base + ind, is32),
-                            is32,
-                        )
-                    elif pt:
-                        _st_idx(out_idx, ind_base + offs, _ld_i32(aux, pt_base[0] + ind), i64)
-                    else:
-                        _st_idx(out_idx, ind_base + offs, ind + rag_off[0], i64)
+                # ---- epilogue: claim the output range (:374-404) ------------
+                K.evaluate(K.tvm_storage_sync("shared"))
+                n_out = K.local_scalar("int32", init=K.int32(k))
+                out_start = K.local_scalar("int32", init=K.int32(0))
+                if nc > 1:
+                    # Read own count BEFORE rank 0's cursor absorbs peers (:379-386).
+                    my_num = K.local_scalar(
+                        "int32", init=K.cast(R.ld_shared_u32(scal, FINAL), "int32")
+                    )
+                    K.evaluate(K.ptx.barrier.cluster.arrive())
+                    K.evaluate(K.ptx.barrier.cluster.wait())
+                    with K.If(rank > 0), K.Then():
+                        with K.If(tid == 0), K.Then():
+                            peer = K.alloc_local([1], "uint32")
+                            K.evaluate(
+                                K.ptx.mapa.shared__cluster.u32(
+                                    peer[0],
+                                    K.cuda.cvta_generic_to_shared(scal.ptr_to([FINAL])),
+                                    K.uint32(0),
+                                )
+                            )
+                            old = K.alloc_local([1], "uint32")
+                            K.evaluate(
+                                K.ptx.atom.shared__cluster.add.u32(
+                                    old[0], peer[0], K.reinterpret("uint32", my_num)
+                                )
+                            )
+                            R.st_shared_u32(scal, FINAL, old[0])  # broadcast (:392)
+                        K.evaluate(K.tvm_storage_sync("shared"))
+                        K.assign(out_start, K.cast(R.ld_shared_u32(scal, FINAL), "int32"))
+                    K.evaluate(K.ptx.barrier.cluster.arrive())
+                    K.evaluate(K.ptx.barrier.cluster.wait())
+                    K.assign(n_out, K.min(K.int32(k), my_num))
+
+                # ---- writeback (:438-447 / :486-492 / :530-536) -------------
+                with K.serial(tid, n_out, step=BLOCK_THREADS, unroll=wb_unroll) as i4:
+                    offs = i4 + out_start
+                    with K.If(offs < k), K.Then():
+                        ind = K.cast(R.ld_shared_u32(topk_inds, i4), "int32")
+                        if plain:
+                            _st_idx(out_idx, ind_base + offs, ind, i64)
+                            # The value is RE-GATHERED from global, never carried
+                            # through shared (:444).
+                            st_global_bits(
+                                out_val,
+                                ind_base + offs,
+                                _ld_nc_bits(logits, logit_base + ind, is32),
+                                is32,
+                            )
+                        elif pt:
+                            _st_idx(out_idx, ind_base + offs, _ld_i32(aux, pt_base + ind), i64)
+                        else:
+                            _st_idx(out_idx, ind_base + offs, ind + rag_off, i64)
 
     if plain:
 
-        @T.prim_func
+        @K.kernel(warps=BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
         def fast_topk_clusters_kernel(
-            logits_h: T.handle, indices_h: T.handle, values_h: T.handle, overflow_h: T.handle
+            logits: K.gptr[val_t, (batch * seq_len,)],
+            indices: K.gptr[idx_t, (batch * k,)],
+            values: K.gptr[val_t, (batch * k,)],
+            overflow: K.gptr[K.i32, (batch * 4 * ovf_stride * nc,)],
         ):
-            T.func_attr(
-                {"global_symbol": "fast_topk_clusters_kernel", "tirx.launch_tags": launch_tags(nc)}
-            )
-            _emit(
-                T.match_buffer(logits_h, (batch * seq_len,), val_t, scope="global"),
-                T.match_buffer(indices_h, (batch * k,), idx_t, scope="global"),
-                T.match_buffer(values_h, (batch * k,), val_t, scope="global"),
-                None,
-                None,
-                T.match_buffer(overflow_h, (batch * 4 * ovf_stride * nc,), "int32", scope="global"),
-            )
+            _emit(logits, indices, values, None, None, overflow)
 
     else:
 
-        @T.prim_func
+        @K.kernel(warps=BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
         def fast_topk_clusters_kernel(
-            logits_h: T.handle,
-            indices_h: T.handle,
-            seq_lens_h: T.handle,
-            aux_h: T.handle,
-            overflow_h: T.handle,
+            logits: K.gptr[val_t, (batch * seq_len,)],
+            indices: K.gptr[idx_t, (batch * k,)],
+            seq_lens: K.gptr[K.i32, (batch,)],
+            aux: K.gptr[K.i32, (batch * seq_len if pt else batch,)],
+            overflow: K.gptr[K.i32, (batch * 4 * ovf_stride * nc,)],
         ):
-            T.func_attr(
-                {"global_symbol": "fast_topk_clusters_kernel", "tirx.launch_tags": launch_tags(nc)}
-            )
-            _emit(
-                T.match_buffer(logits_h, (batch * seq_len,), val_t, scope="global"),
-                T.match_buffer(indices_h, (batch * k,), idx_t, scope="global"),
-                None,
-                T.match_buffer(seq_lens_h, (batch,), "int32", scope="global"),
-                T.match_buffer(aux_h, (batch * seq_len if pt else batch,), "int32", scope="global"),
-                T.match_buffer(overflow_h, (batch * 4 * ovf_stride * nc,), "int32", scope="global"),
-            )
+            _emit(logits, indices, None, seq_lens, aux, overflow)
 
-    return fast_topk_clusters_kernel
-
-
-@T.prim_func
-def fast_topk_clusters_kernel() -> None:
-    """Scaffold entry for the kernel-sketch stage."""
-    T.func_attr({"global_symbol": "fast_topk_clusters_kernel"})
-    # TIRX_TRANSCRIBE_START fast_topk_clusters
-    T.evaluate(0)
+    return fast_topk_clusters_kernel.func.with_attr("tirx.launch_tags", launch_tags(nc))
 
 
 # ---------------------------------------------------------------------------
