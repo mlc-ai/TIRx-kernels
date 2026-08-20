@@ -41,50 +41,46 @@ _BULK_G2S = "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"
 
 def _load_weight_nc(buffer, index, dtype: str):
     if dtype == "float32":
-        _t1 = K.alloc_local((1,), "uint32")
-        K.evaluate(K.ptx.ld.global_.nc.b32(_t1[0], buffer.ptr_to([index])))
-        return K.reinterpret("float32", _t1[0])
-    bf16_f32_0 = K.alloc_local((1,), "float32")
-    _t2 = K.alloc_local((1,), "uint16")
-    K.evaluate(K.ptx.ld.global_.nc.b16(_t2[0], buffer.ptr_to([index])))
-    K.evaluate(K.ptx.cvt.f32.bf16(bf16_f32_0[0], K.cast(_t2[0], "uint16")))
-    return bf16_f32_0[0]
+        _t1 = K.local_scalar("uint32")
+        K.ptx.ld.global_.nc.b32(_t1, buffer.ptr_to([index]))
+        return K.reinterpret("float32", _t1)
+    bf16_f32_0 = K.local_scalar("float32")
+    _t2 = K.local_scalar("uint16")
+    K.ptx.ld.global_.nc.b16(_t2, buffer.ptr_to([index]))
+    K.ptx.cvt.f32.bf16(bf16_f32_0, K.cast(_t2, "uint16"))
+    return bf16_f32_0
 
 
 def _mbarrier_arrive_wait(barrier):
-    token = K.alloc_local((1,), "uint64")
-    done = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.mbarrier.arrive.shared__cta.b64(token[0], barrier, K.uint32(1)))
+    token = K.local_scalar("uint64")
+    done = K.local_scalar("uint32")
+    K.ptx.mbarrier.arrive.shared__cta.b64(token, barrier, K.uint32(1))
     with K.While(True):
-        K.evaluate(K.ptx.mbarrier.try_wait.shared__cta.b64(done[0], barrier, token[0]))
-        with K.If(done[0] != K.uint32(0)), K.Then():
+        K.ptx.mbarrier.try_wait.shared__cta.b64(done, barrier, token)
+        with K.If(done != K.uint32(0)), K.Then():
             K.Break()
 
 
 def _tma_g2s(dst, tensor_state, d, head, batch, barrier):
-    K.evaluate(
-        K.ptx[_TMA_G2S_4D](
-            dst,
-            K.address_of(tensor_state),
-            K.int32(0),
-            K.cast(d, "int32"),
-            K.cast(head, "int32"),
-            K.cast(batch, "int32"),
-            barrier,
-        )
+    K.ptx[_TMA_G2S_4D](
+        dst,
+        K.address_of(tensor_state),
+        K.int32(0),
+        K.cast(d, "int32"),
+        K.cast(head, "int32"),
+        K.cast(batch, "int32"),
+        barrier,
     )
 
 
 def _tma_s2g(src, tensor_state, d, head, batch):
-    K.evaluate(
-        K.ptx[_TMA_S2G_4D](
-            K.address_of(tensor_state),
-            K.int32(0),
-            K.cast(d, "int32"),
-            K.cast(head, "int32"),
-            K.cast(batch, "int32"),
-            src,
-        )
+    K.ptx[_TMA_S2G_4D](
+        K.address_of(tensor_state),
+        K.int32(0),
+        K.cast(d, "int32"),
+        K.cast(head, "int32"),
+        K.cast(batch, "int32"),
+        src,
     )
 
 
@@ -189,45 +185,35 @@ CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
 
 
 def _philox4x32(random_words, random_seed, random_offset, *, PHILOX_ROUNDS):
-    c0 = K.local_scalar("uint32")
-    K.assign(c0, K.cast(random_offset, "uint32"))
-    c1 = K.local_scalar("uint32")
-    K.assign(c1, K.cast(K.shift_right(K.cast(random_offset, "uint64"), K.uint64(32)), "uint32"))
-    c2 = K.local_scalar("uint32")
-    K.assign(c2, 0)
-    c3 = K.local_scalar("uint32")
-    K.assign(c3, 0)
-    k0 = K.local_scalar("uint32")
-    K.assign(k0, K.cast(K.reinterpret("uint64", random_seed), "uint32"))
-    k1 = K.local_scalar("uint32")
-    K.assign(
-        k1, K.cast(K.shift_right(K.reinterpret("uint64", random_seed), K.uint64(32)), "uint32")
+    c0 = K.local_scalar("uint32", init=K.cast(random_offset, "uint32"))
+    c1 = K.local_scalar(
+        "uint32",
+        init=K.cast(K.shift_right(K.cast(random_offset, "uint64"), K.uint64(32)), "uint32"),
+    )
+    c2 = K.local_scalar("uint32", init=0)
+    c3 = K.local_scalar("uint32", init=0)
+    k0 = K.local_scalar("uint32", init=K.cast(K.reinterpret("uint64", random_seed), "uint32"))
+    k1 = K.local_scalar(
+        "uint32",
+        init=K.cast(K.shift_right(K.reinterpret("uint64", random_seed), K.uint64(32)), "uint32"),
     )
     with K.unroll(PHILOX_ROUNDS) as _round:
-        old_c0 = K.local_scalar("uint32")
-        K.assign(old_c0, c0)
-        old_c2 = K.local_scalar("uint32")
-        K.assign(old_c2, c2)
+        old_c0 = K.local_scalar("uint32", init=c0)
+        old_c2 = K.local_scalar("uint32", init=c2)
         hi_b = K.local_scalar("uint32")
-        K.evaluate(K.ptx["mul.hi.u32"](hi_b, K.uint32(0xCD9E8D57), old_c2))
-        next_c0 = K.local_scalar("uint32")
-        K.assign(next_c0, K.bitwise_xor(K.bitwise_xor(hi_b, c1), k0))
+        K.ptx["mul.hi.u32"](hi_b, K.uint32(0xCD9E8D57), old_c2)
+        next_c0 = K.local_scalar("uint32", init=K.bitwise_xor(K.bitwise_xor(hi_b, c1), k0))
         hi_a = K.local_scalar("uint32")
-        K.evaluate(K.ptx["mul.hi.u32"](hi_a, K.uint32(0xD2511F53), old_c0))
-        next_c2 = K.local_scalar("uint32")
-        K.assign(next_c2, K.bitwise_xor(K.bitwise_xor(hi_a, c3), k1))
+        K.ptx["mul.hi.u32"](hi_a, K.uint32(0xD2511F53), old_c0)
+        next_c2 = K.local_scalar("uint32", init=K.bitwise_xor(K.bitwise_xor(hi_a, c3), k1))
         next_c1_s = K.local_scalar("int32")
-        K.evaluate(
-            K.ptx["mul.lo.s32"](next_c1_s, K.int32(-845247145), K.reinterpret("int32", old_c2))
-        )
+        K.ptx["mul.lo.s32"](next_c1_s, K.int32(-845247145), K.reinterpret("int32", old_c2))
         next_c3_s = K.local_scalar("int32")
-        K.evaluate(
-            K.ptx["mul.lo.s32"](next_c3_s, K.int32(-766435501), K.reinterpret("int32", old_c0))
-        )
+        K.ptx["mul.lo.s32"](next_c3_s, K.int32(-766435501), K.reinterpret("int32", old_c0))
         next_k0_s = K.local_scalar("int32")
-        K.evaluate(K.ptx["add.s32"](next_k0_s, K.reinterpret("int32", k0), K.int32(-1640531527)))
+        K.ptx["add.s32"](next_k0_s, K.reinterpret("int32", k0), K.int32(-1640531527))
         next_k1_s = K.local_scalar("int32")
-        K.evaluate(K.ptx["add.s32"](next_k1_s, K.reinterpret("int32", k1), K.int32(-1150833019)))
+        K.ptx["add.s32"](next_k1_s, K.reinterpret("int32", k1), K.int32(-1150833019))
         K.assign(c0, next_c0)
         K.assign(c1, K.reinterpret("uint32", next_c1_s))
         K.assign(c2, next_c2)
@@ -418,47 +404,37 @@ def get_kernel(**kwargs: Any):
             # Phase 1, stage 0: vector inputs and the first optional state tile share
             # one full barrier transaction, exactly as in producer_func_vertical.
             _mbarrier_arrive_wait(empty_barriers_buf.ptr_to([0]))
-            K.evaluate(
+            K.ptx[_BULK_G2S](
+                s_x.ptr_to([0]),
+                x.ptr_to([(K.cast(batch_i, "int64") * x_stride_batch + head * DIM)]),
+                K.uint32(DIM * 2),
+                full_barriers_buf.ptr_to([0]),
+            )
+            K.ptx[_BULK_G2S](
+                s_b.ptr_to([0]),
+                matrix_b.ptr_to([(K.cast(batch_i, "int64") * b_stride_batch + group * DSTATE)]),
+                K.uint32(DSTATE * 2),
+                full_barriers_buf.ptr_to([0]),
+            )
+            K.ptx[_BULK_G2S](
+                s_c.ptr_to([0]),
+                matrix_c.ptr_to([(K.cast(batch_i, "int64") * c_stride_batch + group * DSTATE)]),
+                K.uint32(DSTATE * 2),
+                full_barriers_buf.ptr_to([0]),
+            )
+            if HAS_Z:
                 K.ptx[_BULK_G2S](
-                    s_x.ptr_to([0]),
-                    x.ptr_to([(K.cast(batch_i, "int64") * x_stride_batch + head * DIM)]),
+                    s_z.ptr_to([0]),
+                    z.ptr_to([(K.cast(batch_i, "int64") * z_stride_batch + head * DIM)]),
                     K.uint32(DIM * 2),
                     full_barriers_buf.ptr_to([0]),
                 )
-            )
-            K.evaluate(
-                K.ptx[_BULK_G2S](
-                    s_b.ptr_to([0]),
-                    matrix_b.ptr_to([(K.cast(batch_i, "int64") * b_stride_batch + group * DSTATE)]),
-                    K.uint32(DSTATE * 2),
-                    full_barriers_buf.ptr_to([0]),
-                )
-            )
-            K.evaluate(
-                K.ptx[_BULK_G2S](
-                    s_c.ptr_to([0]),
-                    matrix_c.ptr_to([(K.cast(batch_i, "int64") * c_stride_batch + group * DSTATE)]),
-                    K.uint32(DSTATE * 2),
-                    full_barriers_buf.ptr_to([0]),
-                )
-            )
-            if HAS_Z:
-                K.evaluate(
-                    K.ptx[_BULK_G2S](
-                        s_z.ptr_to([0]),
-                        z.ptr_to([(K.cast(batch_i, "int64") * z_stride_batch + head * DIM)]),
-                        K.uint32(DIM * 2),
-                        full_barriers_buf.ptr_to([0]),
-                    )
-                )
             if SCALE_STATE:
-                K.evaluate(
-                    K.ptx[_BULK_G2S](
-                        s_scale.ptr_to([0]),
-                        state_scale.ptr_to([(state_batch * state_scale_stride_batch + head * DIM)]),
-                        K.uint32(DIM * 4),
-                        full_barriers_buf.ptr_to([0]),
-                    )
+                K.ptx[_BULK_G2S](
+                    s_scale.ptr_to([0]),
+                    state_scale.ptr_to([(state_batch * state_scale_stride_batch + head * DIM)]),
+                    K.uint32(DIM * 4),
+                    full_barriers_buf.ptr_to([0]),
                 )
             if READ_STATE:
                 _tma_g2s(
@@ -469,16 +445,12 @@ def get_kernel(**kwargs: Any):
                     state_batch,
                     full_barriers_buf.ptr_to([0]),
                 )
-                K.evaluate(
-                    K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
-                        full_barriers_buf.ptr_to([0]), K.uint32(STATE_STAGE_BYTES + INPUT_BYTES)
-                    )
+                K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                    full_barriers_buf.ptr_to([0]), K.uint32(STATE_STAGE_BYTES + INPUT_BYTES)
                 )
             else:
-                K.evaluate(
-                    K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
-                        full_barriers_buf.ptr_to([0]), K.uint32(INPUT_BYTES)
-                    )
+                K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                    full_barriers_buf.ptr_to([0]), K.uint32(INPUT_BYTES)
                 )
 
             # Phase 1, stages 1 and 2: state-only fill.
@@ -495,16 +467,12 @@ def get_kernel(**kwargs: Any):
                         state_batch,
                         full_barriers_buf.ptr_to([fill_stage]),
                     )
-                    K.evaluate(
-                        K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
-                            full_barriers_buf.ptr_to([fill_stage]), K.uint32(STATE_STAGE_BYTES)
-                        )
+                    K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                        full_barriers_buf.ptr_to([fill_stage]), K.uint32(STATE_STAGE_BYTES)
                     )
                 else:
-                    K.evaluate(
-                        K.ptx.mbarrier.arrive.shared__cta.b64(
-                            full_barriers_buf.ptr_to([fill_stage]), K.uint32(1)
-                        )
+                    K.ptx.mbarrier.arrive.shared__cta.b64(
+                        full_barriers_buf.ptr_to([fill_stage]), K.uint32(1)
                     )
 
             # Phase 2: every reused stage is stored before its next load.
@@ -514,7 +482,7 @@ def get_kernel(**kwargs: Any):
                 d_write: K.int32 = steady_iter * 16
                 _mbarrier_arrive_wait(empty_barriers_buf.ptr_to([steady_stage]))
                 if READ_STATE or WRITE_STATE:
-                    K.evaluate(K.ptx.fence.proxy.async_.shared__cta())
+                    K.ptx.fence.proxy.async_.shared__cta()
                     if WRITE_STATE:
                         _tma_s2g(
                             s_state.ptr_to([steady_stage * STATE_STAGE_VALUES]),
@@ -523,8 +491,8 @@ def get_kernel(**kwargs: Any):
                             head,
                             dst_state_batch,
                         )
-                        K.evaluate(K.ptx.cp.async_.bulk.commit_group())
-                        K.evaluate(K.ptx.cp.async_.bulk.wait_group.read(0))
+                        K.ptx.cp.async_.bulk.commit_group()
+                        K.ptx.cp.async_.bulk.wait_group.read(0)
                     if READ_STATE:
                         _tma_g2s(
                             s_state.ptr_to([steady_stage * STATE_STAGE_VALUES]),
@@ -534,23 +502,16 @@ def get_kernel(**kwargs: Any):
                             state_batch,
                             full_barriers_buf.ptr_to([steady_stage]),
                         )
-                        K.evaluate(
-                            K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
-                                full_barriers_buf.ptr_to([steady_stage]),
-                                K.uint32(STATE_STAGE_BYTES),
-                            )
+                        K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+                            full_barriers_buf.ptr_to([steady_stage]), K.uint32(STATE_STAGE_BYTES)
                         )
                     else:
-                        K.evaluate(
-                            K.ptx.mbarrier.arrive.shared__cta.b64(
-                                full_barriers_buf.ptr_to([steady_stage]), K.uint32(1)
-                            )
-                        )
-                else:
-                    K.evaluate(
                         K.ptx.mbarrier.arrive.shared__cta.b64(
                             full_barriers_buf.ptr_to([steady_stage]), K.uint32(1)
                         )
+                else:
+                    K.ptx.mbarrier.arrive.shared__cta.b64(
+                        full_barriers_buf.ptr_to([steady_stage]), K.uint32(1)
                     )
 
             # Phase 3: wait for and drain the final three shared state tiles.
@@ -559,7 +520,7 @@ def get_kernel(**kwargs: Any):
                 drain_d: K.int32 = (DIM // 16 - 3 + drain_iter) * 16
                 _mbarrier_arrive_wait(empty_barriers_buf.ptr_to([drain_stage]))
                 if WRITE_STATE:
-                    K.evaluate(K.ptx.fence.proxy.async_.shared__cta())
+                    K.ptx.fence.proxy.async_.shared__cta()
                     _tma_s2g(
                         s_state.ptr_to([drain_stage * STATE_STAGE_VALUES]),
                         tensor_state,
@@ -567,8 +528,8 @@ def get_kernel(**kwargs: Any):
                         head,
                         dst_state_batch,
                     )
-                    K.evaluate(K.ptx.cp.async_.bulk.commit_group())
-                    K.evaluate(K.ptx.cp.async_.bulk.wait_group.read(0))
+                    K.ptx.cp.async_.bulk.commit_group()
+                    K.ptx.cp.async_.bulk.wait_group.read(0)
 
         def consumer_pipeline(
             lane,
@@ -581,32 +542,29 @@ def get_kernel(**kwargs: Any):
             state_ptr_offset,
             USE_STATE_CACHE: K.constexpr,
         ):
-            d_begin = K.local_scalar("int32")
-            K.assign(d_begin, 0)
+            d_begin = K.local_scalar("int32", init=0)
             state_pipe = K.PipelineState(3, phase=0)
             with K.While(d_begin < DIM):
                 _mbarrier_arrive_wait(full_barriers_buf.ptr_to([state_pipe.stage]))
                 with K.unroll(4) as row_iter:
                     dd: K.int32 = warp + row_iter * 4
                     row_d: K.int32 = d_begin + dd
-                    sload_0 = K.alloc_local((1,), "uint16")
-                    K.evaluate(K.ptx.ld.shared.b16(sload_0[0], s_x.ptr_to([row_d])))
-                    bf16_f32_1 = K.alloc_local((1,), "float32")
-                    K.evaluate(K.ptx.cvt.f32.bf16(bf16_f32_1[0], K.cast(sload_0[0], "uint16")))
-                    x_value: K.float32 = bf16_f32_1[0]
-                    mul_0 = K.alloc_local((1,), "float32")
-                    K.evaluate(K.ptx["mul.ftz.f32"](mul_0[0], d_value, x_value))
-                    d_times_x: K.float32 = mul_0[0]
+                    sload_0 = K.local_scalar("uint16")
+                    K.ptx.ld.shared.b16(sload_0, s_x.ptr_to([row_d]))
+                    bf16_f32_1 = K.local_scalar("float32")
+                    K.ptx.cvt.f32.bf16(bf16_f32_1, K.cast(sload_0, "uint16"))
+                    x_value: K.float32 = bf16_f32_1
+                    mul_0 = K.local_scalar("float32")
+                    K.ptx["mul.ftz.f32"](mul_0, d_value, x_value)
+                    d_times_x: K.float32 = mul_0
                     out_value = K.local_scalar("float32")
-                    K.evaluate(K.ptx["mul.ftz.f32"](out_value, d_times_x, lane_indicator))
-                    decode_scale = K.local_scalar("float32")
-                    K.assign(decode_scale, 1.0)
-                    new_state_max = K.local_scalar("float32")
-                    K.assign(new_state_max, K.float32(_FLT_LOWEST))
+                    K.ptx["mul.ftz.f32"](out_value, d_times_x, lane_indicator)
+                    decode_scale = K.local_scalar("float32", init=1.0)
+                    new_state_max = K.local_scalar("float32", init=K.float32(_FLT_LOWEST))
                     if SCALE_STATE:
-                        sload_1 = K.alloc_local((1,), "uint32")
-                        K.evaluate(K.ptx.ld.shared.b32(sload_1[0], s_scale.ptr_to([row_d])))
-                        K.assign(decode_scale, K.reinterpret("float32", sload_1[0]))
+                        sload_1 = K.local_scalar("uint32")
+                        K.ptx.ld.shared.b32(sload_1, s_scale.ptr_to([row_d]))
+                        K.assign(decode_scale, K.reinterpret("float32", sload_1))
                     new_states = K.alloc_local((NEW_STATE_COUNT,), "float32")
 
                     with K.serial(STATE_ITERATIONS) as state_iter:
@@ -638,53 +596,36 @@ def get_kernel(**kwargs: Any):
                                         PHILOX_ROUNDS=PHILOX_ROUNDS,
                                     )
                                 with K.unroll(STATE_VALUES_PER_BANK) as e:
-                                    state_value = K.local_scalar("float32")
-                                    K.assign(state_value, 0.0)
+                                    state_value = K.local_scalar("float32", init=0.0)
                                     if USE_STATE_CACHE:
                                         K.assign(
                                             state_value, _state_bits_to_f32(r_state[e], STATE_DTYPE)
                                         )
                                         if SCALE_STATE:
-                                            K.evaluate(
-                                                K.ptx["mul.ftz.f32"](
-                                                    state_value, state_value, decode_scale
-                                                )
+                                            K.ptx["mul.ftz.f32"](
+                                                state_value, state_value, decode_scale
                                             )
-                                    bf16_f32_2 = K.alloc_local((1,), "float32")
-                                    K.evaluate(
-                                        K.ptx.cvt.f32.bf16(
-                                            bf16_f32_2[0], K.cast(b_bits[e], "uint16")
-                                        )
-                                    )
-                                    b_value: K.float32 = bf16_f32_2[0]
-                                    bf16_f32_3 = K.alloc_local((1,), "float32")
-                                    K.evaluate(
-                                        K.ptx.cvt.f32.bf16(
-                                            bf16_f32_3[0], K.cast(c_bits[e], "uint16")
-                                        )
-                                    )
-                                    c_value: K.float32 = bf16_f32_3[0]
-                                    mul_1 = K.alloc_local((1,), "float32")
-                                    K.evaluate(K.ptx["mul.ftz.f32"](mul_1[0], b_value, dt_value))
-                                    db_value: K.float32 = mul_1[0]
-                                    mul_2 = K.alloc_local((1,), "float32")
-                                    K.evaluate(K.ptx["mul.ftz.f32"](mul_2[0], db_value, x_value))
-                                    db_x: K.float32 = mul_2[0]
-                                    fma_0 = K.alloc_local((1,), "float32")
-                                    K.evaluate(
-                                        K.ptx["fma.rn.ftz.f32"](
-                                            fma_0[0], state_value, da_value, db_x
-                                        )
-                                    )
-                                    new_state: K.float32 = fma_0[0]
+                                    bf16_f32_2 = K.local_scalar("float32")
+                                    K.ptx.cvt.f32.bf16(bf16_f32_2, K.cast(b_bits[e], "uint16"))
+                                    b_value: K.float32 = bf16_f32_2
+                                    bf16_f32_3 = K.local_scalar("float32")
+                                    K.ptx.cvt.f32.bf16(bf16_f32_3, K.cast(c_bits[e], "uint16"))
+                                    c_value: K.float32 = bf16_f32_3
+                                    mul_1 = K.local_scalar("float32")
+                                    K.ptx["mul.ftz.f32"](mul_1, b_value, dt_value)
+                                    db_value: K.float32 = mul_1
+                                    mul_2 = K.local_scalar("float32")
+                                    K.ptx["mul.ftz.f32"](mul_2, db_value, x_value)
+                                    db_x: K.float32 = mul_2
+                                    fma_0 = K.local_scalar("float32")
+                                    K.ptx["fma.rn.ftz.f32"](fma_0, state_value, da_value, db_x)
+                                    new_state: K.float32 = fma_0
                                     if SCALE_STATE:
-                                        abs_0 = K.alloc_local((1,), "float32")
-                                        K.evaluate(K.ptx["abs.ftz.f32"](abs_0[0], new_state))
-                                        magnitude: K.float32 = abs_0[0]
-                                        K.evaluate(
-                                            K.ptx["max.ftz.f32"](
-                                                new_state_max, new_state_max, magnitude
-                                            )
+                                        abs_0 = K.local_scalar("float32")
+                                        K.ptx["abs.ftz.f32"](abs_0, new_state)
+                                        magnitude: K.float32 = abs_0
+                                        K.ptx["max.ftz.f32"](
+                                            new_state_max, new_state_max, magnitude
                                         )
                                         K.ptx.mov.b32(
                                             new_states[state_iter * STATE_VALUES_PER_BANK + e],
@@ -694,37 +635,29 @@ def get_kernel(**kwargs: Any):
                                         random13: K.uint32 = K.bitwise_and(
                                             random_words[e], K.uint32(0x1FFF)
                                         )
-                                        K.evaluate(
-                                            K.ptx.cvt.rs.f16x2.f32(
-                                                sr_raw[e], K.float32(0.0), new_state, random13
-                                            )
+                                        K.ptx.cvt.rs.f16x2.f32(
+                                            sr_raw[e], K.float32(0.0), new_state, random13
                                         )
                                     else:
                                         K.ptx.mov.b16(
                                             r_state[e], _f32_to_state_bits(new_state, STATE_DTYPE)
                                         )
-                                    K.evaluate(
-                                        K.ptx["fma.rn.ftz.f32"](
-                                            out_value, new_state, c_value, out_value
-                                        )
+                                    K.ptx["fma.rn.ftz.f32"](
+                                        out_value, new_state, c_value, out_value
                                     )
 
                                 if not SCALE_STATE:
                                     if PHILOX_ROUNDS > 0:
-                                        prmt_0 = K.alloc_local((1,), "uint32")
-                                        K.evaluate(
-                                            K.ptx["prmt.b32"](
-                                                prmt_0[0],
-                                                K.cast(sr_raw[0], "uint32"),
-                                                K.cast(sr_raw[1], "uint32"),
-                                                K.uint32(0x5410),
-                                            )
+                                        prmt_0 = K.local_scalar("uint32")
+                                        K.ptx["prmt.b32"](
+                                            prmt_0,
+                                            K.cast(sr_raw[0], "uint32"),
+                                            K.cast(sr_raw[1], "uint32"),
+                                            K.uint32(0x5410),
                                         )
-                                        packed_sr: K.uint32 = prmt_0[0]
-                                        K.evaluate(
-                                            K.ptx.st.shared.b32(
-                                                s_state.ptr_to([state_index]), packed_sr
-                                            )
+                                        packed_sr: K.uint32 = prmt_0
+                                        K.ptx.st.shared.b32(
+                                            s_state.ptr_to([state_index]), packed_sr
                                         )
                                     else:
                                         _store_two_byte_vector(
@@ -735,50 +668,35 @@ def get_kernel(**kwargs: Any):
                                             "shared",
                                         )
                             else:
-                                sload_2 = K.alloc_local((1,), "uint32")
-                                K.evaluate(
-                                    K.ptx.ld.shared.b32(sload_2[0], s_state.ptr_to([state_index]))
-                                )
-                                state_word: K.uint32 = sload_2[0]
-                                state_value = K.local_scalar("float32")
-                                K.assign(state_value, 0.0)
+                                sload_2 = K.local_scalar("uint32")
+                                K.ptx.ld.shared.b32(sload_2, s_state.ptr_to([state_index]))
+                                state_word: K.uint32 = sload_2
+                                state_value = K.local_scalar("float32", init=0.0)
                                 if USE_STATE_CACHE:
                                     K.assign(state_value, K.reinterpret("float32", state_word))
-                                sload_3 = K.alloc_local((1,), "uint16")
-                                K.evaluate(K.ptx.ld.shared.b16(sload_3[0], s_b.ptr_to([state_i])))
-                                bf16_f32_4 = K.alloc_local((1,), "float32")
-                                K.evaluate(
-                                    K.ptx.cvt.f32.bf16(bf16_f32_4[0], K.cast(sload_3[0], "uint16"))
-                                )
-                                b_value: K.float32 = bf16_f32_4[0]
-                                sload_4 = K.alloc_local((1,), "uint16")
-                                K.evaluate(K.ptx.ld.shared.b16(sload_4[0], s_c.ptr_to([state_i])))
-                                bf16_f32_5 = K.alloc_local((1,), "float32")
-                                K.evaluate(
-                                    K.ptx.cvt.f32.bf16(bf16_f32_5[0], K.cast(sload_4[0], "uint16"))
-                                )
-                                c_value: K.float32 = bf16_f32_5[0]
-                                mul_3 = K.alloc_local((1,), "float32")
-                                K.evaluate(K.ptx["mul.ftz.f32"](mul_3[0], b_value, dt_value))
-                                db_value: K.float32 = mul_3[0]
-                                mul_4 = K.alloc_local((1,), "float32")
-                                K.evaluate(K.ptx["mul.ftz.f32"](mul_4[0], db_value, x_value))
-                                db_x: K.float32 = mul_4[0]
-                                fma_1 = K.alloc_local((1,), "float32")
-                                K.evaluate(
-                                    K.ptx["fma.rn.ftz.f32"](fma_1[0], state_value, da_value, db_x)
-                                )
-                                new_state: K.float32 = fma_1[0]
-                                K.evaluate(
-                                    K.ptx["fma.rn.ftz.f32"](
-                                        out_value, new_state, c_value, out_value
-                                    )
-                                )
-                                K.evaluate(
-                                    K.ptx.st.shared.b32(
-                                        s_state.ptr_to([state_index]),
-                                        K.reinterpret("uint32", new_state),
-                                    )
+                                sload_3 = K.local_scalar("uint16")
+                                K.ptx.ld.shared.b16(sload_3, s_b.ptr_to([state_i]))
+                                bf16_f32_4 = K.local_scalar("float32")
+                                K.ptx.cvt.f32.bf16(bf16_f32_4, K.cast(sload_3, "uint16"))
+                                b_value: K.float32 = bf16_f32_4
+                                sload_4 = K.local_scalar("uint16")
+                                K.ptx.ld.shared.b16(sload_4, s_c.ptr_to([state_i]))
+                                bf16_f32_5 = K.local_scalar("float32")
+                                K.ptx.cvt.f32.bf16(bf16_f32_5, K.cast(sload_4, "uint16"))
+                                c_value: K.float32 = bf16_f32_5
+                                mul_3 = K.local_scalar("float32")
+                                K.ptx["mul.ftz.f32"](mul_3, b_value, dt_value)
+                                db_value: K.float32 = mul_3
+                                mul_4 = K.local_scalar("float32")
+                                K.ptx["mul.ftz.f32"](mul_4, db_value, x_value)
+                                db_x: K.float32 = mul_4
+                                fma_1 = K.local_scalar("float32")
+                                K.ptx["fma.rn.ftz.f32"](fma_1, state_value, da_value, db_x)
+                                new_state: K.float32 = fma_1
+                                K.ptx["fma.rn.ftz.f32"](out_value, new_state, c_value, out_value)
+                                K.ptx.st.shared.b32(
+                                    s_state.ptr_to([state_index]),
+                                    K.reinterpret("uint32", new_state),
                                 )
 
                     with K.unroll(5) as delta_i:
@@ -786,12 +704,10 @@ def get_kernel(**kwargs: Any):
                         peer_out: K.float32 = K.cuda.__shfl_down_sync(
                             K.uint32(0xFFFFFFFF), out_value, delta, 32
                         )
-                        K.evaluate(K.ptx["add.ftz.f32"](out_value, out_value, peer_out))
+                        K.ptx["add.ftz.f32"](out_value, out_value, peer_out)
                     with K.If(lane == 0), K.Then():
-                        K.evaluate(
-                            K.ptx.st.shared.b32(
-                                s_out.ptr_to([row_d]), K.reinterpret("uint32", out_value)
-                            )
+                        K.ptx.st.shared.b32(
+                            s_out.ptr_to([row_d]), K.reinterpret("uint32", out_value)
                         )
 
                     if SCALE_STATE and USE_STATE_CACHE:
@@ -800,80 +716,60 @@ def get_kernel(**kwargs: Any):
                             peer_max: K.float32 = K.cuda.__shfl_down_sync(
                                 K.uint32(0xFFFFFFFF), new_state_max, delta, 32
                             )
-                            K.evaluate(K.ptx["max.ftz.f32"](new_state_max, new_state_max, peer_max))
+                            K.ptx["max.ftz.f32"](new_state_max, new_state_max, peer_max)
                         # Unlike the simple kernel, the frozen vertical source has no
                         # standalone __syncwarp between max reduction and broadcast.
                         K.assign(
                             new_state_max,
                             K.cuda.__shfl_sync(K.uint32(0xFFFFFFFF), new_state_max, 0, 32),
                         )
-                        encode_scale = K.local_scalar("float32")
-                        K.assign(encode_scale, 1.0)
+                        encode_scale = K.local_scalar("float32", init=1.0)
                         with K.If(new_state_max != K.float32(0.0)), K.Then():
-                            K.evaluate(
-                                K.ptx["div.approx.ftz.f32"](
-                                    encode_scale, K.float32(32767.0), new_state_max
-                                )
+                            K.ptx["div.approx.ftz.f32"](
+                                encode_scale, K.float32(32767.0), new_state_max
                             )
-                        rcp_0 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["rcp.approx.ftz.f32"](rcp_0[0], encode_scale))
-                        new_decode_scale: K.float32 = rcp_0[0]
+                        rcp_0 = K.local_scalar("float32")
+                        K.ptx["rcp.approx.ftz.f32"](rcp_0, encode_scale)
+                        new_decode_scale: K.float32 = rcp_0
                         with K.serial(STATE_ITERATIONS) as state_iter:
                             state_i: K.int32 = (state_iter * 32 + lane) * STATE_VALUES_PER_BANK
                             with K.If(state_i < DSTATE), K.Then():
                                 quantized = K.alloc_local((STATE_VALUES_PER_BANK,), "int32")
                                 with K.unroll(STATE_VALUES_PER_BANK) as e:
-                                    mul_5 = K.alloc_local((1,), "float32")
-                                    K.evaluate(
-                                        K.ptx["mul.ftz.f32"](
-                                            mul_5[0],
-                                            new_states[state_iter * STATE_VALUES_PER_BANK + e],
-                                            encode_scale,
-                                        )
+                                    mul_5 = K.local_scalar("float32")
+                                    K.ptx["mul.ftz.f32"](
+                                        mul_5,
+                                        new_states[state_iter * STATE_VALUES_PER_BANK + e],
+                                        encode_scale,
                                     )
-                                    scaled: K.float32 = mul_5[0]
-                                    max_0 = K.alloc_local((1,), "float32")
-                                    K.evaluate(
-                                        K.ptx["max.ftz.f32"](max_0[0], scaled, K.float32(-32767.0))
-                                    )
-                                    clipped_low: K.float32 = max_0[0]
-                                    min_0 = K.alloc_local((1,), "float32")
-                                    K.evaluate(
-                                        K.ptx["min.ftz.f32"](
-                                            min_0[0], clipped_low, K.float32(32767.0)
-                                        )
-                                    )
-                                    clipped: K.float32 = min_0[0]
-                                    K.evaluate(K.ptx.cvt.rni.ftz.s32.f32(quantized[e], clipped))
-                                prmt_1 = K.alloc_local((1,), "uint32")
-                                K.evaluate(
-                                    K.ptx["prmt.b32"](
-                                        prmt_1[0],
-                                        K.cast(K.reinterpret("uint32", quantized[0]), "uint32"),
-                                        K.cast(K.reinterpret("uint32", quantized[1]), "uint32"),
-                                        K.uint32(0x5410),
-                                    )
+                                    scaled: K.float32 = mul_5
+                                    max_0 = K.local_scalar("float32")
+                                    K.ptx["max.ftz.f32"](max_0, scaled, K.float32(-32767.0))
+                                    clipped_low: K.float32 = max_0
+                                    min_0 = K.local_scalar("float32")
+                                    K.ptx["min.ftz.f32"](min_0, clipped_low, K.float32(32767.0))
+                                    clipped: K.float32 = min_0
+                                    K.ptx.cvt.rni.ftz.s32.f32(quantized[e], clipped)
+                                prmt_1 = K.local_scalar("uint32")
+                                K.ptx["prmt.b32"](
+                                    prmt_1,
+                                    K.cast(K.reinterpret("uint32", quantized[0]), "uint32"),
+                                    K.cast(K.reinterpret("uint32", quantized[1]), "uint32"),
+                                    K.uint32(0x5410),
                                 )
-                                packed_i16: K.uint32 = prmt_1[0]
+                                packed_i16: K.uint32 = prmt_1
                                 state_index: K.int32 = (
                                     state_pipe.stage * STATE_STAGE_VALUES + dd * DSTATE + state_i
                                 )
-                                K.evaluate(
-                                    K.ptx.st.shared.b32(s_state.ptr_to([state_index]), packed_i16)
-                                )
+                                K.ptx.st.shared.b32(s_state.ptr_to([state_index]), packed_i16)
                         with K.If(lane == 0), K.Then():
-                            K.evaluate(
-                                K.ptx.st.shared.b32(
-                                    s_scale.ptr_to([row_d]),
-                                    K.reinterpret("uint32", new_decode_scale),
-                                )
+                            K.ptx.st.shared.b32(
+                                s_scale.ptr_to([row_d]), K.reinterpret("uint32", new_decode_scale)
                             )
 
-                K.evaluate(K.ptx.fence.proxy.async_.shared__cta())
-                K.evaluate(
-                    K.ptx.mbarrier.arrive.shared__cta.b64(
-                        empty_barriers_buf.ptr_to([state_pipe.stage]), K.uint32(1)
-                    )
+                K.ptx.fence.proxy.async_.shared__cta()
+                K.ptx.mbarrier.arrive.shared__cta.b64(
+                    empty_barriers_buf.ptr_to([state_pipe.stage]), K.uint32(1)
                 )
                 K.assign(d_begin, d_begin + 16)
                 state_pipe.advance()
@@ -882,10 +778,9 @@ def get_kernel(**kwargs: Any):
             flat_tid: K.int32 = K.thread_id()
             # TIRX_TRANSCRIBE_START selective_state_update_stp_vertical
 
-            random_seed = K.local_scalar("int64")
-            K.assign(random_seed, 0)
+            random_seed = K.local_scalar("int64", init=0)
             if PHILOX_ROUNDS > 0 and not SCALE_STATE:
-                K.evaluate(K.ptx.ld.global_.s64(random_seed, rand_seed.ptr_to([0])))
+                K.ptx.ld.global_.s64(random_seed, rand_seed.ptr_to([0]))
 
             lane: K.int32 = _lane_mask(flat_tid)
             warp: K.int32 = flat_tid >> 5
@@ -894,42 +789,34 @@ def get_kernel(**kwargs: Any):
             state_batch = K.local_scalar("int64")
             if HAS_STATE_INDICES:
                 if INDEX_DTYPE == "int32":
-                    _t3 = K.alloc_local((1,), "int32")
-                    K.evaluate(
-                        K.ptx.ld.global_.nc.s32(
-                            _t3[0], state_indices.ptr_to([(batch_i * state_indices_stride_batch)])
-                        )
+                    _t3 = K.local_scalar("int32")
+                    K.ptx.ld.global_.nc.s32(
+                        _t3, state_indices.ptr_to([(batch_i * state_indices_stride_batch)])
                     )
-                    K.assign(state_batch, K.cast(_t3[0], "int64"))
+                    K.assign(state_batch, K.cast(_t3, "int64"))
                 else:
-                    _t4 = K.alloc_local((1,), "int64")
-                    K.evaluate(
-                        K.ptx.ld.global_.nc.s64(
-                            _t4[0], state_indices.ptr_to([(batch_i * state_indices_stride_batch)])
-                        )
+                    _t4 = K.local_scalar("int64")
+                    K.ptx.ld.global_.nc.s64(
+                        _t4, state_indices.ptr_to([(batch_i * state_indices_stride_batch)])
                     )
-                    K.assign(state_batch, _t4[0])
+                    K.assign(state_batch, _t4)
             else:
                 K.assign(state_batch, K.cast(batch_i, "int64"))
 
             dst_state_batch = K.local_scalar("int64")
             if HAS_DST_INDICES:
                 if INDEX_DTYPE == "int32":
-                    _t5 = K.alloc_local((1,), "int32")
-                    K.evaluate(
-                        K.ptx.ld.global_.nc.s32(
-                            _t5[0], dst_indices.ptr_to([(batch_i * dst_indices_stride_batch)])
-                        )
+                    _t5 = K.local_scalar("int32")
+                    K.ptx.ld.global_.nc.s32(
+                        _t5, dst_indices.ptr_to([(batch_i * dst_indices_stride_batch)])
                     )
-                    K.assign(dst_state_batch, K.cast(_t5[0], "int64"))
+                    K.assign(dst_state_batch, K.cast(_t5, "int64"))
                 else:
-                    _t6 = K.alloc_local((1,), "int64")
-                    K.evaluate(
-                        K.ptx.ld.global_.nc.s64(
-                            _t6[0], dst_indices.ptr_to([(batch_i * dst_indices_stride_batch)])
-                        )
+                    _t6 = K.local_scalar("int64")
+                    K.ptx.ld.global_.nc.s64(
+                        _t6, dst_indices.ptr_to([(batch_i * dst_indices_stride_batch)])
                     )
-                    K.assign(dst_state_batch, _t6[0])
+                    K.assign(dst_state_batch, _t6)
             else:
                 K.assign(dst_state_batch, state_batch)
 
@@ -978,17 +865,14 @@ def get_kernel(**kwargs: Any):
                             )
             else:
                 with K.unroll(3) as arrive_stage:
-                    K.evaluate(
-                        K.ptx.mbarrier.arrive.shared__cta.b64(
-                            empty_barriers_buf.ptr_to([arrive_stage]), K.uint32(1)
-                        )
+                    K.ptx.mbarrier.arrive.shared__cta.b64(
+                        empty_barriers_buf.ptr_to([arrive_stage]), K.uint32(1)
                     )
 
-                _t7 = K.alloc_local((1,), "uint32")
-                K.evaluate(K.ptx.ld.global_.nc.b32(_t7[0], matrix_a.ptr_to([head])))
-                a_value: K.float32 = K.reinterpret("float32", _t7[0])
-                d_value = K.local_scalar("float32")
-                K.assign(d_value, 0.0)
+                _t7 = K.local_scalar("uint32")
+                K.ptx.ld.global_.nc.b32(_t7, matrix_a.ptr_to([head]))
+                a_value: K.float32 = K.reinterpret("float32", _t7)
+                d_value = K.local_scalar("float32", init=0.0)
                 if HAS_D:
                     K.assign(d_value, _load_weight_nc(d_weight, head, WEIGHT_DTYPE))
                 dt_value = K.local_scalar("float32")
@@ -1000,31 +884,31 @@ def get_kernel(**kwargs: Any):
                 )
                 if HAS_DT_BIAS:
                     bias_value: K.float32 = _load_weight_nc(dt_bias, head, WEIGHT_DTYPE)
-                    K.evaluate(K.ptx["add.ftz.f32"](dt_value, dt_value, bias_value))
+                    K.ptx["add.ftz.f32"](dt_value, dt_value, bias_value)
                 with K.If(dt_softplus != 0), K.Then():
                     with K.If(dt_value <= K.float32(20.0)), K.Then():
-                        mul_6 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["mul.ftz.f32"](mul_6[0], dt_value, K.float32(_LOG2_E)))
-                        exp_arg: K.float32 = mul_6[0]
-                        exp2_0 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["ex2.approx.ftz.f32"](exp2_0[0], exp_arg))
-                        exp_value: K.float32 = exp2_0[0]
-                        add_0 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["add.ftz.f32"](add_0[0], K.float32(1.0), exp_value))
-                        one_plus_exp: K.float32 = add_0[0]
-                        log2_0 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["lg2.approx.ftz.f32"](log2_0[0], one_plus_exp))
-                        log_value: K.float32 = log2_0[0]
-                        K.evaluate(K.ptx["mul.ftz.f32"](dt_value, log_value, K.float32(_LN_2)))
-                mul_7 = K.alloc_local((1,), "float32")
-                K.evaluate(K.ptx["mul.ftz.f32"](mul_7[0], a_value, dt_value))
-                da_arg: K.float32 = mul_7[0]
-                mul_8 = K.alloc_local((1,), "float32")
-                K.evaluate(K.ptx["mul.ftz.f32"](mul_8[0], da_arg, K.float32(_LOG2_E)))
-                da_exp_arg: K.float32 = mul_8[0]
-                exp2_1 = K.alloc_local((1,), "float32")
-                K.evaluate(K.ptx["ex2.approx.ftz.f32"](exp2_1[0], da_exp_arg))
-                da_value: K.float32 = exp2_1[0]
+                        mul_6 = K.local_scalar("float32")
+                        K.ptx["mul.ftz.f32"](mul_6, dt_value, K.float32(_LOG2_E))
+                        exp_arg: K.float32 = mul_6
+                        exp2_0 = K.local_scalar("float32")
+                        K.ptx["ex2.approx.ftz.f32"](exp2_0, exp_arg)
+                        exp_value: K.float32 = exp2_0
+                        add_0 = K.local_scalar("float32")
+                        K.ptx["add.ftz.f32"](add_0, K.float32(1.0), exp_value)
+                        one_plus_exp: K.float32 = add_0
+                        log2_0 = K.local_scalar("float32")
+                        K.ptx["lg2.approx.ftz.f32"](log2_0, one_plus_exp)
+                        log_value: K.float32 = log2_0
+                        K.ptx["mul.ftz.f32"](dt_value, log_value, K.float32(_LN_2))
+                mul_7 = K.local_scalar("float32")
+                K.ptx["mul.ftz.f32"](mul_7, a_value, dt_value)
+                da_arg: K.float32 = mul_7
+                mul_8 = K.local_scalar("float32")
+                K.ptx["mul.ftz.f32"](mul_8, da_arg, K.float32(_LOG2_E))
+                da_exp_arg: K.float32 = mul_8
+                exp2_1 = K.local_scalar("float32")
+                K.ptx["ex2.approx.ftz.f32"](exp2_1, da_exp_arg)
+                da_value: K.float32 = exp2_1
                 lane_indicator: K.float32 = K.if_then_else(
                     lane == 0, K.float32(1.0), K.float32(0.0)
                 )
@@ -1059,46 +943,42 @@ def get_kernel(**kwargs: Any):
                 row_d: K.int32 = warp * 32 + lane
                 with K.If(row_d < DIM), K.Then():
                     out_value = K.local_scalar("float32")
-                    sload_5 = K.alloc_local((1,), "uint32")
-                    K.evaluate(K.ptx.ld.shared.b32(sload_5[0], s_out.ptr_to([row_d])))
-                    K.assign(out_value, K.reinterpret("float32", sload_5[0]))
+                    sload_5 = K.local_scalar("uint32")
+                    K.ptx.ld.shared.b32(sload_5, s_out.ptr_to([row_d]))
+                    K.assign(out_value, K.reinterpret("float32", sload_5))
                     if HAS_Z:
-                        sload_6 = K.alloc_local((1,), "uint16")
-                        K.evaluate(K.ptx.ld.shared.b16(sload_6[0], s_z.ptr_to([row_d])))
-                        bf16_f32_6 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx.cvt.f32.bf16(bf16_f32_6[0], K.cast(sload_6[0], "uint16")))
-                        z_value: K.float32 = bf16_f32_6[0]
-                        sub_0 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["sub.ftz.f32"](sub_0[0], K.float32(0.0), z_value))
-                        neg_z: K.float32 = sub_0[0]
-                        mul_9 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["mul.ftz.f32"](mul_9[0], neg_z, K.float32(_LOG2_E)))
-                        z_exp_arg: K.float32 = mul_9[0]
-                        exp2_2 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["ex2.approx.ftz.f32"](exp2_2[0], z_exp_arg))
-                        exp_neg_z: K.float32 = exp2_2[0]
-                        add_1 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["add.ftz.f32"](add_1[0], K.float32(1.0), exp_neg_z))
-                        denominator: K.float32 = add_1[0]
-                        div_0 = K.alloc_local((1,), "float32")
-                        K.evaluate(
-                            K.ptx["div.approx.ftz.f32"](div_0[0], K.float32(1.0), denominator)
-                        )
-                        sigmoid_z: K.float32 = div_0[0]
-                        mul_10 = K.alloc_local((1,), "float32")
-                        K.evaluate(K.ptx["mul.ftz.f32"](mul_10[0], z_value, sigmoid_z))
-                        silu_z: K.float32 = mul_10[0]
-                        K.evaluate(K.ptx["mul.ftz.f32"](out_value, out_value, silu_z))
-                    f32_bf16_0 = K.alloc_local((1,), "uint16")
-                    K.evaluate(K.ptx.cvt.rn.bf16.f32(f32_bf16_0[0], out_value))
-                    output_bits: K.uint16 = f32_bf16_0[0]
-                    K.evaluate(
-                        K.ptx.st.global_.b16(
-                            output.ptr_to(
-                                [K.cast(batch_i, "int64") * out_stride_batch + head * DIM + row_d]
-                            ),
-                            output_bits,
-                        )
+                        sload_6 = K.local_scalar("uint16")
+                        K.ptx.ld.shared.b16(sload_6, s_z.ptr_to([row_d]))
+                        bf16_f32_6 = K.local_scalar("float32")
+                        K.ptx.cvt.f32.bf16(bf16_f32_6, K.cast(sload_6, "uint16"))
+                        z_value: K.float32 = bf16_f32_6
+                        sub_0 = K.local_scalar("float32")
+                        K.ptx["sub.ftz.f32"](sub_0, K.float32(0.0), z_value)
+                        neg_z: K.float32 = sub_0
+                        mul_9 = K.local_scalar("float32")
+                        K.ptx["mul.ftz.f32"](mul_9, neg_z, K.float32(_LOG2_E))
+                        z_exp_arg: K.float32 = mul_9
+                        exp2_2 = K.local_scalar("float32")
+                        K.ptx["ex2.approx.ftz.f32"](exp2_2, z_exp_arg)
+                        exp_neg_z: K.float32 = exp2_2
+                        add_1 = K.local_scalar("float32")
+                        K.ptx["add.ftz.f32"](add_1, K.float32(1.0), exp_neg_z)
+                        denominator: K.float32 = add_1
+                        div_0 = K.local_scalar("float32")
+                        K.ptx["div.approx.ftz.f32"](div_0, K.float32(1.0), denominator)
+                        sigmoid_z: K.float32 = div_0
+                        mul_10 = K.local_scalar("float32")
+                        K.ptx["mul.ftz.f32"](mul_10, z_value, sigmoid_z)
+                        silu_z: K.float32 = mul_10
+                        K.ptx["mul.ftz.f32"](out_value, out_value, silu_z)
+                    f32_bf16_0 = K.local_scalar("uint16")
+                    K.ptx.cvt.rn.bf16.f32(f32_bf16_0, out_value)
+                    output_bits: K.uint16 = f32_bf16_0
+                    K.ptx.st.global_.b16(
+                        output.ptr_to(
+                            [K.cast(batch_i, "int64") * out_stride_batch + head * DIM + row_d]
+                        ),
+                        output_bits,
                     )
                 with (
                     K.If(
@@ -1110,13 +990,11 @@ def get_kernel(**kwargs: Any):
                     K.Then(),
                 ):
                     with K.If(row_d < DIM), K.Then():
-                        sload_7 = K.alloc_local((1,), "uint32")
-                        K.evaluate(K.ptx.ld.shared.b32(sload_7[0], s_scale.ptr_to([row_d])))
-                        scale_bits: K.uint32 = sload_7[0]
-                        K.evaluate(
-                            K.ptx.st.global_.b32(
-                                state_scale.ptr_to([dst_scale_head_offset + row_d]), scale_bits
-                            )
+                        sload_7 = K.local_scalar("uint32")
+                        K.ptx.ld.shared.b32(sload_7, s_scale.ptr_to([row_d]))
+                        scale_bits: K.uint32 = sload_7
+                        K.ptx.st.global_.b32(
+                            state_scale.ptr_to([dst_scale_head_offset + row_d]), scale_bits
                         )
 
         with producer:
