@@ -38,6 +38,7 @@ i.e. 8 or 4 digit passes at cub's ``RADIX_BITS = 4``.
 
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.topk.filtered_topk import finalize_block_config
 from tirx_kernels.flashinfer.topk.radix_topk_single_cta import DTYPES, dtype_bytes
 from tirx_kernels.flashinfer.utils.block_radix_sort import (
@@ -58,7 +59,6 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
     st_global_u32,
 )
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 
 KERNEL_META = {
     "name": "stable_sort_topk_by_value",
@@ -129,11 +129,11 @@ def sort_key_u32(bits):
     not touch) moving in the opposite direction as an internal control.  Static
     instruction count is not the binding resource here; the form below stays.
     """
-    signed = T.reinterpret("int32", bits)
-    # T.Select, not T.if_then_else: the source's ternary is a predicated
+    signed = K.reinterpret("int32", bits)
+    # K.Select, not K.if_then_else: the source's ternary is a predicated
     # `selp.b32`, and if_then_else would lower to a real branch.
-    mask = T.Select(signed < T.int32(0), T.uint32(0), T.uint32(0x7FFFFFFF))
-    return T.bitwise_xor(mask, bits)
+    mask = K.Select(signed < K.int32(0), K.uint32(0), K.uint32(0x7FFFFFFF))
+    return K.bitwise_xor(mask, bits)
 
 
 def sort_key_u16(bits):
@@ -142,9 +142,9 @@ def sort_key_u16(bits):
     Same involution, in the dtype's own width (topk_common.cuh:61-64 forward,
     :67 for half and :93 for nv_bfloat16 on the way back).
     """
-    signed = T.reinterpret("int16", bits)
-    mask = T.Select(signed < T.int16(0), T.uint16(0), T.uint16(0x7FFF))
-    return T.bitwise_xor(mask, bits)
+    signed = K.reinterpret("int16", bits)
+    mask = K.Select(signed < K.int16(0), K.uint16(0), K.uint16(0x7FFF))
+    return K.bitwise_xor(mask, bits)
 
 
 def _validate(dtype: str, num_rows: int, k: int) -> dict[str, Any]:
@@ -185,15 +185,12 @@ def get_kernel(
     end_bit = plan["end_bit"]
     is32 = dtype == "float32"
 
-    @T.prim_func
-    def stable_sort_topk_by_value(output_indices_h: T.handle, output_values_h: T.handle):
-        T.func_attr({"global_symbol": "stable_sort_topk_by_value"})
-        out_idx = T.match_buffer(output_indices_h, (num_rows * k,), "int32", scope="global")
-        out_val = T.match_buffer(output_values_h, (num_rows * k,), dtype, scope="global")
-        T.device_entry()
-
-        row = T.cta_id([num_rows])
-        tx = T.thread_id([block_threads])
+    @K.kernel(warps=block_threads // 32, arch="sm_100a", grid=num_rows)
+    def stable_sort_topk_by_value(
+        out_idx: K.gptr[K.i32, (num_rows * k,)], out_val: K.gptr[dtype, (num_rows * k,)]
+    ):
+        row = K.cta_id()
+        tx = K.thread_id()
 
         # --- shared layout: the cub TempStorage union only (:3097) ----------
         # Static `__shared__`, as the source declares it -- not the dynamic pool.
@@ -205,7 +202,7 @@ def get_kernel(
         )
 
         # Row bases (:3102-3103).  The kernel is entirely in place.
-        row_base: T.int64 = T.cast(row, "int64") * T.int64(k)
+        row_base = K.cast(row, "int64") * K.int64(k)
         # One base per thread, so each item's address is that base plus a
         # compile-time offset, as the source does -- it keeps two address
         # registers for the whole prologue and reaches the other items by
@@ -213,11 +210,20 @@ def get_kernel(
         # displacement itself is not reachable from here, since these intrinsics
         # take the address as a register operand, so this only removes the
         # repeated 64-bit arithmetic (17 ops to 12) and measured neutral.
-        thread_base: T.int64 = row_base + T.cast(tx * items_per_thread, "int64")
+        #
+        # It has to be a snapshot rather than a lazy expression.  Left lazy, the
+        # simplifier proves `row * k + tx * IPT + i` fits in 32 bits and narrows
+        # every one of the 32 item addresses to an int index, which puts a
+        # sign-extend on each access instead of reusing one 64-bit base.  That
+        # costs 1.4% at k=300 -- the one rung where the `pos < k` branch does not
+        # fold, so nothing else absorbs it (f32/f16/bf16 all 1.014x).
+        thread_base = K.local_scalar(
+            "int64", init=row_base + K.cast(tx * items_per_thread, "int64")
+        )
 
-        keys = T.alloc_local((items_per_thread,), "uint32")
-        values = T.alloc_local((items_per_thread,), "uint32")
-        ranks = T.alloc_local((items_per_thread,), "int32")
+        keys = K.alloc_local([items_per_thread], "uint32")
+        values = K.alloc_local([items_per_thread], "uint32")
+        ranks = K.alloc_local([items_per_thread], "int32")
 
         # --- blocked load, descending key, ~0u padding (:3108-3119) --------
         # Item order follows the source: load the value, complement it, then load
@@ -225,28 +231,33 @@ def get_kernel(
         # a branch around each pair).  Issuing all the loads ahead of all the
         # conversions instead was measured on the shapes that reproduce to
         # +/-0.001 and is the same speed, so the source's order stands.
-        for i in T.unroll(items_per_thread):
-            pos: T.int32 = tx * items_per_thread + i
+        with K.unroll(items_per_thread) as i:
             # `pos < k` stays a runtime predicate: pos depends on %tid.x, so a
             # static k only turns the operand into an immediate.  It folds away
             # only at the six rungs where k == BLOCK_THREADS * ITEMS_PER_THREAD.
-            if pos < k:
-                slot: T.int64 = thread_base + T.cast(i, "int64")
-                # Source order (:3108-3115): load the value, complement it, then
-                # load the index.
-                if is32:
-                    keys[i] = sort_key_u32(ld_global_bits(out_val, slot, is32))
-                else:
-                    keys[i] = T.cast(
-                        sort_key_u16(T.cast(ld_global_bits(out_val, slot, is32), "uint16")),
-                        "uint32",
-                    )
-                values[i] = ld_global_u32(out_idx, slot)
-            else:
-                # ~0u is maximal within [0, end_bit) and every real key fits in
-                # end_bit bits, so padding sorts to the tail and is never written.
-                keys[i] = T.uint32(0xFFFFFFFF)
-                values[i] = T.uint32(0xFFFFFFFF)
+            pos = tx * items_per_thread + i
+            with K.If(pos < k):
+                with K.Then():
+                    slot = thread_base + K.cast(i, "int64")
+                    # Source order (:3108-3115): load the value, complement it,
+                    # then load the index.
+                    if is32:
+                        K.assign(keys[i], sort_key_u32(ld_global_bits(out_val, slot, is32)))
+                    else:
+                        K.assign(
+                            keys[i],
+                            K.cast(
+                                sort_key_u16(K.cast(ld_global_bits(out_val, slot, is32), "uint16")),
+                                "uint32",
+                            ),
+                        )
+                    K.assign(values[i], ld_global_u32(out_idx, slot))
+                with K.Else():
+                    # ~0u is maximal within [0, end_bit) and every real key fits
+                    # in end_bit bits, so padding sorts to the tail and is never
+                    # written.
+                    K.assign(keys[i], K.uint32(0xFFFFFFFF))
+                    K.assign(values[i], K.uint32(0xFFFFFFFF))
 
         # --- ascending, stable, blocked -> blocked (:3121-3122) -------------
         # Descending-by-value already lives in the complemented key, so this is
@@ -269,18 +280,18 @@ def get_kernel(
         )
 
         # --- blocked writeback (:3124-3132) --------------------------------
-        for i3 in T.unroll(items_per_thread):
-            pos3: T.int32 = tx * items_per_thread + i3
-            if pos3 < k:
-                slot3: T.int64 = thread_base + T.cast(i3, "int64")
+        with K.unroll(items_per_thread) as i3:
+            pos3 = tx * items_per_thread + i3
+            with K.If(pos3 < k), K.Then():
+                slot3 = thread_base + K.cast(i3, "int64")
                 st_global_u32(out_idx, slot3, values[i3])
                 # The same helper as the load: the map is an involution.
                 if is32:
                     st_global_u32(out_val, slot3, sort_key_u32(keys[i3]))
                 else:
-                    st_global_u16(out_val, slot3, sort_key_u16(T.cast(keys[i3], "uint16")))
+                    st_global_u16(out_val, slot3, sort_key_u16(K.cast(keys[i3], "uint16")))
 
-    return stable_sort_topk_by_value.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return stable_sort_topk_by_value.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 
 
 _ = (bench, dtype_bytes, PATTERNS)  # wired up with the config matrix and harness
@@ -294,8 +305,26 @@ _ = (bench, dtype_bytes, PATTERNS)  # wired up with the config matrix and harnes
 # to build `StableSortTopKByValue<DType, int32_t>` itself.  Precedent for the
 # mechanism: `tirx_kernels/basic/nvfp4_gemm.py`.
 # ---------------------------------------------------------------------------
-_FLASHINFER_DATA = "/home/bohanhou/flashinfer/flashinfer/data"
+_FLASHINFER_DATA_FALLBACK = "/home/bohanhou/flashinfer/flashinfer/data"
 _REFERENCE_EXT = None
+
+
+def flashinfer_data_dir() -> str:
+    """``flashinfer/data`` of the installed source checkout.
+
+    The headers this reference compiles against ship inside the flashinfer
+    package rather than the wheel's include path, so resolve them from the
+    imported package instead of a machine-specific absolute path.
+    """
+    import os
+
+    try:
+        import flashinfer
+    except ImportError:
+        return _FLASHINFER_DATA_FALLBACK
+    candidate = os.path.join(os.path.dirname(flashinfer.__file__), "data")
+    return candidate if os.path.isdir(candidate) else _FLASHINFER_DATA_FALLBACK
+
 
 _REF_DECL = r"""
 #include <torch/extension.h>
@@ -374,6 +403,7 @@ def load_reference_ext():
         "-lineinfo",
         f"-gencode=arch=compute_{arch},code=sm_{arch}",
     ]
+    data = flashinfer_data_dir()
     name = "tirx_stable_sort_topk_reference"
     build_directory = Path(cpp_extension._get_build_directory(name, verbose=False))
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -390,10 +420,10 @@ def load_reference_ext():
             functions=["stable_sort_ref"],
             with_cuda=True,
             extra_include_paths=[
-                f"{_FLASHINFER_DATA}/include",
-                f"{_FLASHINFER_DATA}/cccl/cub",
-                f"{_FLASHINFER_DATA}/cccl/libcudacxx/include",
-                f"{_FLASHINFER_DATA}/cccl/thrust",
+                f"{data}/include",
+                f"{data}/cccl/cub",
+                f"{data}/cccl/libcudacxx/include",
+                f"{data}/cccl/thrust",
             ],
             extra_cflags=["-O3", "-std=c++17"],
             extra_cuda_cflags=cuda_flags,
