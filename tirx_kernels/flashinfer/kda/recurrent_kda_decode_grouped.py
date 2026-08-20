@@ -166,9 +166,9 @@ def _pack_f32x2(lo, hi):
 
 def _vmul(a, b):
     """``mul.f32x2`` -- two packed FP32 lanes."""
-    out = K.alloc_local((1,), "uint64")
-    K.evaluate(K.ptx.mul.f32x2(out[0], a, b))
-    return out[0]
+    out = K.local_scalar("uint64")
+    K.ptx.mul.f32x2(out, a, b)
+    return out
 
 
 def _vadd(a, b):
@@ -178,28 +178,26 @@ def _vadd(a, b):
     multiply and add; there is no ``fma.*.f32x2`` anywhere in its PTX, so the
     port must not fuse them either.
     """
-    out = K.alloc_local((1,), "uint64")
-    K.evaluate(K.ptx.add.f32x2(out[0], a, b))
-    return out[0]
+    out = K.local_scalar("uint64")
+    K.ptx.add.f32x2(out, a, b)
+    return out
 
 
 def _ld_shared_b32(buffer, index):
     """``ld.shared.b32``."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.ld.shared.b32(out[0], buffer.ptr_to([index])))
-    return K.reinterpret("float32", out[0])
+    out = K.local_scalar("uint32")
+    K.ptx.ld.shared.b32(out, buffer.ptr_to([index]))
+    return K.reinterpret("float32", out)
 
 
 def _st_shared_f32(buffer, index, value):
     """``st.shared.b32``."""
-    K.evaluate(K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value)))
+    K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value))
 
 
 def _st_shared_f32_pred(buffer, index, value, pred):
     """``@p st.shared.b32`` -- the ``lane == 0 and wid < SW`` publication."""
-    K.evaluate(
-        K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value), pred=pred)
-    )
+    K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value), pred=pred)
 
 
 def _ld_shared_granule(buffer, index):
@@ -209,8 +207,8 @@ def _ld_shared_granule(buffer, index):
     vectors; ``index`` is an FP32 element index and must be 16 B aligned.
     """
     pairs = K.alloc_local((4,), "uint64")
-    K.evaluate(K.ptx.ld.shared.v2.b64(pairs[0], pairs[1], buffer.ptr_to([index])))
-    K.evaluate(K.ptx.ld.shared.v2.b64(pairs[2], pairs[3], buffer.ptr_to([index + 4])))
+    K.ptx.ld.shared.v2.b64(pairs[0], pairs[1], buffer.ptr_to([index]))
+    K.ptx.ld.shared.v2.b64(pairs[2], pairs[3], buffer.ptr_to([index + 4]))
     return pairs
 
 
@@ -221,20 +219,16 @@ def _ld_global_granule_no_alloc(buffer, index):
     on the state load (recurrent_kda.py:571).
     """
     words = K.alloc_local((4,), "uint32")
-    K.evaluate(
-        K.ptx["ld.global.L1::no_allocate.v4.b32"](
-            words[0], words[1], words[2], words[3], buffer.ptr_to([index])
-        )
+    K.ptx["ld.global.L1::no_allocate.v4.b32"](
+        words[0], words[1], words[2], words[3], buffer.ptr_to([index])
     )
     return words
 
 
 def _st_global_granule_no_alloc(buffer, index, words):
     """``st.global.L1::no_allocate.v4.b32`` -- one 16 B BF16 checkpoint granule."""
-    K.evaluate(
-        K.ptx["st.global.L1::no_allocate.v4.b32"](
-            buffer.ptr_to([index]), words[0], words[1], words[2], words[3]
-        )
+    K.ptx["st.global.L1::no_allocate.v4.b32"](
+        buffer.ptr_to([index]), words[0], words[1], words[2], words[3]
     )
 
 
@@ -496,10 +490,10 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         tid = K.thread_id()
         lane = K.lane_id()
         wid = K.warp_id()
-        h = K.alloc_local((1,), K.i32)
-        d = K.alloc_local((1,), K.i32)
-        K.assign(h[0], hv // RATIO)
-        K.assign(d[0], tid % HEAD_DIM)  # phase-A element base
+        h = K.local_scalar(K.i32)
+        d = K.local_scalar(K.i32)
+        K.assign(h, hv // RATIO)
+        K.assign(d, tid % HEAD_DIM)  # phase-A element base
         if NUM_TOKENS == 1:
             # Single-use coordinates are cheaper as expressions: materializing
             # them extends their live range across phase A on the decode shape.
@@ -508,12 +502,12 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         else:
             # The recurrent loop reuses both coordinates for every token.
             # Compute them once rather than rebuilding their address DAG.
-            v_idx_local = K.alloc_local((1,), K.i32)
-            part_local = K.alloc_local((1,), K.i32)
-            K.assign(v_idx_local[0], vz * CPB + tid // KS)
-            K.assign(part_local[0], tid % KS)
-            v_idx: K.int32 = v_idx_local[0]
-            part: K.int32 = part_local[0]
+            v_idx_local = K.local_scalar(K.i32)
+            part_local = K.local_scalar(K.i32)
+            K.assign(v_idx_local, vz * CPB + tid // KS)
+            K.assign(part_local, tid % KS)
+            v_idx: K.int32 = v_idx_local
+            part: K.int32 = part_local
 
         # --- shared memory (recurrent_kda.py:526-541) --------------------------
         # The pool is the single owner of type, layout, offsets, and total size.
@@ -554,10 +548,10 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         # --- loop-invariant gate constants (recurrent_kda.py:576-586) ----------
         av: K.float32 = K.float32(1.0)
         if GATE_MODE != GATE_MODE_PRECOMPUTED:
-            av = _exp2(_mul(_load_f32(a_log, h[0]), K.float32(LOG2_E)))
+            av = _exp2(_mul(_load_f32(a_log, h), K.float32(LOG2_E)))
         dtb = K.alloc_local((EPT,), "float32")
         for e in range(EPT):
-            K.assign(dtb[e], _load_f32(dt_bias, h[0] * HEAD_DIM + d[0] + e * NT))
+            K.assign(dtb[e], _load_f32(dt_bias, h * HEAD_DIM + d + e * NT))
 
         # =======================================================================
         # Phase A: stage every token's gate/key/query (recurrent_kda.py:588-640)
@@ -585,14 +579,14 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
             K.assign(ves[t], _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx))
             K.assign(b_bits[t], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
             for e in range(EPT):
-                de_l: K.int32 = d[0] + e * NT
+                de_l: K.int32 = d + e * NT
                 K.assign(
                     q_bits[t * EPT + e],
-                    _load_bf16_bits(q, (pidx * NUM_HEADS + h[0]) * HEAD_DIM + de_l),
+                    _load_bf16_bits(q, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l),
                 )
                 K.assign(
                     k_bits[t * EPT + e],
-                    _load_bf16_bits(k, (pidx * NUM_HEADS + h[0]) * HEAD_DIM + de_l),
+                    _load_bf16_bits(k, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l),
                 )
                 K.assign(
                     g_bits[t * EPT + e],
@@ -604,7 +598,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
             sqp: K.float32 = K.float32(0.0)
             skp: K.float32 = K.float32(0.0)
             for e in range(EPT):
-                de: K.int32 = d[0] + e * NT
+                de: K.int32 = d + e * NT
                 qe = q_bits[t * EPT + e]
                 ke = k_bits[t * EPT + e]
                 ge = g_bits[t * EPT + e]

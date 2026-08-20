@@ -102,16 +102,14 @@ def _mma_chain(taddr_d, b_lo, taddr_a, enable_d, *, b_offsets, dhi, idesc):
     b_lo32 = K.cast(b_lo, "uint32")
     for _i, _b_off in enumerate(b_offsets):
         _b_desc = (K.uint64(dhi) << K.uint64(32)) | K.cast(b_lo32 + K.uint32(_b_off), "uint64")
-        K.evaluate(
-            K.ptx[_TCGEN05_MMA_F16](
-                K.cast(taddr_d, "uint32"),
-                K.cast(taddr_a + 8 * _i, "uint32"),
-                _b_desc,
-                K.uint32(idesc),
-                *_MMA_ZERO_MASKS,
-                K.ptx.pred(enable_d if _i == 0 else 1),
-                pred=leader,
-            )
+        K.ptx[_TCGEN05_MMA_F16](
+            K.cast(taddr_d, "uint32"),
+            K.cast(taddr_a + 8 * _i, "uint32"),
+            _b_desc,
+            K.uint32(idesc),
+            *_MMA_ZERO_MASKS,
+            K.ptx.pred(enable_d if _i == 0 else 1),
+            pred=leader,
         )
 
 
@@ -796,7 +794,7 @@ def bf16_fused_m128(**kwargs: Any):
 
         with K.If(thread_idx == 0), K.Then():
             for _tmap in (q_tma, k_tma, v_tma, g_tma, beta_tma_tmap, out_tma):
-                K.evaluate(_tensormap_acquire(_tmap))
+                _tensormap_acquire(_tmap)
         K.cuda.cta_sync()
 
         smem = K.local_scalar(
@@ -868,9 +866,9 @@ def bf16_fused_m128(**kwargs: Any):
             )
         K.cuda.cta_sync()
         K.ptx.tcgen05.fence__after_thread_sync()
-        taddr_storage = K.alloc_local((1,), K.i32)
-        K.ptx.ld.volatile.shared.s32(taddr_storage[0], K.address_of(tmem_addr_storage[0]))
-        taddr = K.local_scalar("int32", init=taddr_storage[0])
+        taddr_storage = K.local_scalar(K.i32)
+        K.ptx.ld.volatile.shared.s32(taddr_storage, K.address_of(tmem_addr_storage[0]))
+        taddr = K.local_scalar("int32", init=taddr_storage)
         tmem_tmem_state_inp = taddr + TMEM_TMEM_STATE_INP_OFFSET
         tmem_tmem_u_acc = taddr + TMEM_TMEM_U_ACC_OFFSET
         tmem_tmem_u2_inp = taddr + TMEM_TMEM_U2_INP_OFFSET
@@ -1510,8 +1508,9 @@ def bf16_fused_m128(**kwargs: Any):
                                     beta_raw_pair[_pair + 0] & K.uint32(0xFFFF0000)
                                 ),
                             )
-                        beta_logit = K.local_scalar("float32")  # .cu:1373
-                        K.assign(beta_logit, beta_raw_pair_fp32[0])
+                        beta_logit = K.local_scalar(
+                            "float32", init=beta_raw_pair_fp32[0]
+                        )  # .cu:1373
                         with K.If(head_idx_3 % 2 != 0), K.Then():  # .cu:1374-1376
                             K.assign(beta_logit, beta_raw_pair_fp32[1])
                         _tanh = K.local_scalar("float32")
@@ -1591,8 +1590,7 @@ def bf16_fused_m128(**kwargs: Any):
                     K.ptx.cp.async_.wait_group(0)  # .cu:1415
                     _prep_bar_sync()
                 with K.If(K.And(prep_local_warp == 2, lane < 32)), K.Then():  # .cu:1430-1442
-                    beta_value = K.local_scalar("float32")  # .cu:1431
-                    K.assign(beta_value, early_beta_value)
+                    beta_value = K.local_scalar("float32", init=early_beta_value)  # .cu:1431
                     with K.If(chunk_is_full_2 == 0), K.Then():  # .cu:1432-1440
                         beta_token: K.int64 = bos_4 + K.cast(chunk_idx_3 * 32 + lane, "int64")
                         with K.If(chunk_idx_3 * 32 + lane < seq_len_4), K.Then():
@@ -1620,11 +1618,9 @@ def bf16_fused_m128(**kwargs: Any):
                     K.ptx.ld.shared.f32(gate_rate, smem_gate_rate_all.ptr_to([stage_f32]))
                     gate_bias = K.local_scalar("float32")  # .cu:1446
                     K.ptx.ld.global_.f32(gate_bias, dt_bias.ptr_to([head_idx_3 * 128 + gate_col]))
-                    prefix_log2 = K.local_scalar("float32")  # .cu:1447
-                    K.assign(prefix_log2, K.float32(0.0))
+                    prefix_log2 = K.local_scalar("float32", init=K.float32(0.0))  # .cu:1447
                     with K.serial(0, 32) as gate_row:  # .cu:1448-1471
-                        gate_log2 = K.local_scalar("float32")  # .cu:1450
-                        K.assign(gate_log2, K.float32(0.0))
+                        gate_log2 = K.local_scalar("float32", init=K.float32(0.0))  # .cu:1450
                         gate_needs_compute = K.local_scalar("int32")
                         K.assign(gate_needs_compute, 1)  # .cu:1451
                         with K.If(gate_row == 0), K.Then():  # .cu:1452-1457

@@ -85,21 +85,21 @@ LOG2_E = 1.4426950408889634
 
 
 def _ptx_un(chain: str, a, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a)
+    return out
 
 
 def _ptx_bin(chain: str, a, b, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a, b))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a, b)
+    return out
 
 
 def _ptx_ter(chain: str, a, b, c, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a, b, c))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a, b, c)
+    return out
 
 
 def _mul(a, b):
@@ -168,54 +168,46 @@ def _pack_bf16x2(hi, lo):
 
 def _shfl_bfly_f32(value, lane_xor):
     """``shfl.sync.bfly.b32`` with clamp 31 and the full member mask."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(
-        K.ptx.shfl_sync.bfly.b32(
-            out[0],
-            K.reinterpret("uint32", value),
-            K.uint32(lane_xor),
-            K.uint32(31),
-            K.uint32(0xFFFFFFFF),
-        )
+    out = K.local_scalar("uint32")
+    K.ptx.shfl_sync.bfly.b32(
+        out, K.reinterpret("uint32", value), K.uint32(lane_xor), K.uint32(31), K.uint32(0xFFFFFFFF)
     )
-    return K.reinterpret("float32", out[0])
+    return K.reinterpret("float32", out)
 
 
 def _shfl_idx_f32(value, source_lane):
     """``shfl.sync.idx.b32`` with clamp 31 and the full member mask."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(
-        K.ptx.shfl_sync.idx.b32(
-            out[0],
-            K.reinterpret("uint32", value),
-            K.cast(source_lane, "uint32"),
-            K.uint32(31),
-            K.uint32(0xFFFFFFFF),
-        )
+    out = K.local_scalar("uint32")
+    K.ptx.shfl_sync.idx.b32(
+        out,
+        K.reinterpret("uint32", value),
+        K.cast(source_lane, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
     )
-    return K.reinterpret("float32", out[0])
+    return K.reinterpret("float32", out)
 
 
 def _load_f32(buffer, index):
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.ld.global_.b32(out[0], buffer.ptr_to([index])))
-    return K.reinterpret("float32", out[0])
+    out = K.local_scalar("uint32")
+    K.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
+    return K.reinterpret("float32", out)
 
 
 def _load_i32(buffer, index):
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.ld.global_.b32(out[0], buffer.ptr_to([index])))
-    return K.reinterpret("int32", out[0])
+    out = K.local_scalar("uint32")
+    K.ptx.ld.global_.b32(out, buffer.ptr_to([index]))
+    return K.reinterpret("int32", out)
 
 
 def _load_bf16_bits(buffer, index):
-    out = K.alloc_local((1,), "uint16")
-    K.evaluate(K.ptx.ld.global_.b16(out[0], buffer.ptr_to([index])))
-    return out[0]
+    out = K.local_scalar("uint16")
+    K.ptx.ld.global_.b16(out, buffer.ptr_to([index]))
+    return out
 
 
 def _store_bf16_bits(buffer, index, bits):
-    K.evaluate(K.ptx.st.global_.b16(buffer.ptr_to([index]), bits))
+    K.ptx.st.global_.b16(buffer.ptr_to([index]), bits)
 
 
 def _store_bf16_bits_pred(buffer, index, bits, pred):
@@ -225,22 +217,20 @@ def _store_bf16_bits_pred(buffer, index, bits, pred):
     j".  Expressing it as `if cond: store` instead makes ptxas emit a real
     branch plus a BSYNC reconvergence per CTA, which the source does not have.
     """
-    K.evaluate(K.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=pred))
+    K.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=pred)
 
 
 def _load_bf16x4(buffer, index):
     """``ld.global.v4.b16`` -- one 8-byte tile of four bf16."""
     bits = K.alloc_local((4,), "uint16")
-    K.evaluate(K.ptx.ld.global_.v4.b16(bits[0], bits[1], bits[2], bits[3], buffer.ptr_to([index])))
+    K.ptx.ld.global_.v4.b16(bits[0], bits[1], bits[2], bits[3], buffer.ptr_to([index]))
     return bits
 
 
 def _load_bf16x8(buffer, index):
     """``ld.global.v4.b32`` -- one 16-byte tile, unpacked to eight bf16."""
     words = K.alloc_local((4,), "uint32")
-    K.evaluate(
-        K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
-    )
+    K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
     bits = K.alloc_local((8,), "uint16")
     for pair in range(4):
         K.buffer_store(
@@ -255,17 +245,13 @@ def _load_bf16x8(buffer, index):
 def _load_u32x4(buffer, index):
     """``ld.global.v4.b32`` -- one 16-byte tile, left packed."""
     words = K.alloc_local((4,), "uint32")
-    K.evaluate(
-        K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
-    )
+    K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
     return words
 
 
 def _store_bf16x8_words(buffer, index, words):
     """``st.global.v4.b32`` -- one 16-byte state row."""
-    K.evaluate(
-        K.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
-    )
+    K.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
 
 
 def _dot8(state, base, rhs, schedule: int):
@@ -467,58 +453,54 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
         # --- lane and CTA coordinates (recurrent_kda.py:229-246) ----------------
         bidx = K.cta_id()
         tidx_axis = K.thread_id()
-        tidx = K.alloc_local((1,), "int32")
-        v_tile_idx = K.alloc_local((1,), "int32")
-        bh = K.alloc_local((1,), "int32")
-        value_head_idx = K.alloc_local((1,), "int32")
-        batch_idx = K.alloc_local((1,), "int32")
-        query_head_idx = K.alloc_local((1,), "int32")
-        v_offset = K.alloc_local((1,), "int32")
-        k_lane = K.alloc_local((1,), "int32")
-        v_lane = K.alloc_local((1,), "int32")
-        K.assign(tidx[0], K.cast(K.bitwise_and(K.cast(tidx_axis, "uint32"), K.uint32(31)), "int32"))
-        K.assign(v_tile_idx[0], bidx % NUM_V_TILES)
-        K.assign(bh[0], bidx // NUM_V_TILES)
-        K.assign(value_head_idx[0], bh[0] % NUM_VALUE_HEADS)
-        K.assign(batch_idx[0], bh[0] // NUM_VALUE_HEADS)
-        K.assign(query_head_idx[0], value_head_idx[0] // GQA_RATIO)
-        K.assign(v_offset[0], v_tile_idx[0] * TILE_ROWS)
-        K.assign(k_lane[0], tidx[0] % K_LANES)
-        K.assign(v_lane[0], tidx[0] // K_LANES)
+        tidx = K.local_scalar("int32")
+        v_tile_idx = K.local_scalar("int32")
+        bh = K.local_scalar("int32")
+        value_head_idx = K.local_scalar("int32")
+        batch_idx = K.local_scalar("int32")
+        query_head_idx = K.local_scalar("int32")
+        v_offset = K.local_scalar("int32")
+        k_lane = K.local_scalar("int32")
+        v_lane = K.local_scalar("int32")
+        K.assign(tidx, K.cast(K.bitwise_and(K.cast(tidx_axis, "uint32"), K.uint32(31)), "int32"))
+        K.assign(v_tile_idx, bidx % NUM_V_TILES)
+        K.assign(bh, bidx // NUM_V_TILES)
+        K.assign(value_head_idx, bh % NUM_VALUE_HEADS)
+        K.assign(batch_idx, bh // NUM_VALUE_HEADS)
+        K.assign(query_head_idx, value_head_idx // GQA_RATIO)
+        K.assign(v_offset, v_tile_idx * TILE_ROWS)
+        K.assign(k_lane, tidx % K_LANES)
+        K.assign(v_lane, tidx // K_LANES)
 
-        global_offset = K.alloc_local((1,), "int32")
+        global_offset = K.local_scalar("int32")
 
         def gidx(offset):
-            K.assign(global_offset[0], offset)
-            return K.Cast("int64", global_offset[0])
+            K.assign(global_offset, offset)
+            return K.Cast("int64", global_offset)
 
         # --- sequence metadata (recurrent_kda.py:248-252) -----------------------
-        token_base_offset = K.alloc_local((1,), "int32")
-        seq_len = K.alloc_local((1,), "int32")
-        K.assign(token_base_offset[0], _load_i32(cu_seqlens, gidx(batch_idx[0])))
-        K.assign(seq_len[0], _load_i32(cu_seqlens, gidx(batch_idx[0] + 1)) - token_base_offset[0])
+        token_base_offset = K.local_scalar("int32")
+        seq_len = K.local_scalar("int32")
+        K.assign(token_base_offset, _load_i32(cu_seqlens, gidx(batch_idx)))
+        K.assign(seq_len, _load_i32(cu_seqlens, gidx(batch_idx + 1)) - token_base_offset)
 
         # --- zero-padded output prefill (recurrent_kda.py:253-255) --------------
         # Runs before the state load so inactive rows are defined even when the
         # token loop stores nothing.  Valid only because NUM_TOKENS == 1 makes the
         # token-axis index equal to batch_idx.
-        with K.If(tidx[0] < TILE_ROWS), K.Then():
+        with K.If(tidx < TILE_ROWS), K.Then():
             _store_bf16_bits(
                 out,
-                gidx(
-                    (batch_idx[0] * NUM_VALUE_HEADS + value_head_idx[0]) * HEAD_DIM
-                    + v_offset[0]
-                    + tidx[0]
-                ),
+                gidx((batch_idx * NUM_VALUE_HEADS + value_head_idx) * HEAD_DIM + v_offset + tidx),
                 K.uint16(0),
             )
         K.cuda.warp_sync()
 
         # --- initial-state slot (recurrent_kda.py:257-272) ----------------------
-        init_raw_slot = K.alloc_local((1,), "int32")
-        init_seq_idx = K.alloc_local((1,), "int32")
-        K.assign(init_raw_slot[0], _load_i32(ssm_state_indices, gidx(batch_idx[0] * NUM_TOKENS)))
-        K.assign(init_seq_idx[0], K.max(init_raw_slot[0], 0))
+        init_raw_slot = K.local_scalar("int32")
+        init_seq_idx = K.local_scalar("int32")
+        K.assign(init_raw_slot, _load_i32(ssm_state_indices, gidx(batch_idx * NUM_TOKENS)))
+        K.assign(init_seq_idx, K.max(init_raw_slot, 0))
 
         # --- register storage (recurrent_kda.py:280-293); no SMEM, no mbarrier --
         h_reg = K.alloc_local((ROWS * 8,), "float32")
@@ -530,13 +512,13 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
         gate_reg = K.alloc_local((8,), "float32")
 
         # --- state load (recurrent_kda.py:295-300) ------------------------------
-        state_head_base = K.alloc_local((1,), "int32")
-        read_base = K.alloc_local((1,), "int64")
-        K.assign(state_head_base[0], value_head_idx[0] * HEAD_ELEMENTS + 8 * k_lane[0])
+        state_head_base = K.local_scalar("int32")
+        read_base = K.local_scalar("int64")
+        K.assign(state_head_base, value_head_idx * HEAD_ELEMENTS + 8 * k_lane)
         K.assign(
-            read_base[0],
-            K.cast(init_seq_idx[0], "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-            + K.cast(state_head_base[0], "int64"),
+            read_base,
+            K.cast(init_seq_idx, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
+            + K.cast(state_head_base, "int64"),
         )
         # Issue every row's load before widening any of them.  bench_suite times a
         # cold L2, so the figure of merit here is how many DRAM misses are in
@@ -544,47 +526,43 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
         # on the critical path of the next load.
         h_words = K.alloc_local((4 * ROWS,), "uint32")
         for j in range(ROWS):
-            v_idx_l = K.alloc_local((1,), "int32")
-            K.assign(v_idx_l[0], v_offset[0] + v_lane[0] + V_LANES * j)
-            words = _load_u32x4(state, read_base[0] + K.cast(v_idx_l[0] * HEAD_DIM, "int64"))
+            v_idx_l = K.local_scalar("int32", init=v_offset + v_lane + V_LANES * j)
+            words = _load_u32x4(state, read_base + K.cast(v_idx_l * HEAD_DIM, "int64"))
             for pr in range(4):
                 K.ptx.mov.b32(h_words[j * 4 + pr], words[pr])
         for j in range(ROWS):
             for pr in range(4):
-                w = K.alloc_local((1,), "uint32")
-                K.assign(w[0], h_words[j * 4 + pr])
+                w = K.local_scalar("uint32", init=h_words[j * 4 + pr])
                 K.ptx.mov.b32(
                     h_reg[j * 8 + 2 * pr],
-                    _bf16_to_f32(K.cast(K.bitwise_and(w[0], K.uint32(0xFFFF)), "uint16")),
+                    _bf16_to_f32(K.cast(K.bitwise_and(w, K.uint32(0xFFFF)), "uint16")),
                 )
                 K.ptx.mov.b32(
                     h_reg[j * 8 + 2 * pr + 1],
-                    _bf16_to_f32(K.cast(K.shift_right(w[0], K.uint32(16)), "uint16")),
+                    _bf16_to_f32(K.cast(K.shift_right(w, K.uint32(16)), "uint16")),
                 )
 
         # --- per-head gate constants (recurrent_kda.py:302-305) -----------------
-        h_K_offset = K.alloc_local((1,), "int32")
-        A_log_val = K.alloc_local((1,), "float32")
-        K.assign(h_K_offset[0], query_head_idx[0] * HEAD_DIM)
-        K.assign(
-            A_log_val[0], _exp2(_mul(_load_f32(a_log, gidx(query_head_idx[0])), K.float32(LOG2_E)))
-        )
+        h_K_offset = K.local_scalar("int32")
+        A_log_val = K.local_scalar("float32")
+        K.assign(h_K_offset, query_head_idx * HEAD_DIM)
+        K.assign(A_log_val, _exp2(_mul(_load_f32(a_log, gidx(query_head_idx)), K.float32(LOG2_E))))
 
         # --- loop-invariant lower-bound gate constants (recurrent_kda.py:124-127)
         # Both live inside compute_gate_value's per-i loop in the source and are
         # loop-invariant, so they are hoisted here.  The neg is folded into the
         # negated log2(e) immediate and emits no neg.f32.
-        neg_A_log2e = K.alloc_local((1,), "float32")
-        lb_log2e = K.alloc_local((1,), "float32")
-        neg_A_log_val = K.alloc_local((1,), "float32")
-        K.assign(neg_A_log2e[0], K.float32(0.0))
-        K.assign(lb_log2e[0], K.float32(0.0))
-        K.assign(neg_A_log_val[0], K.float32(0.0))
+        neg_A_log2e = K.local_scalar("float32")
+        lb_log2e = K.local_scalar("float32")
+        neg_A_log_val = K.local_scalar("float32")
+        K.assign(neg_A_log2e, K.float32(0.0))
+        K.assign(lb_log2e, K.float32(0.0))
+        K.assign(neg_A_log_val, K.float32(0.0))
         if USE_LOWER_BOUND:
-            K.assign(neg_A_log2e[0], _mul(A_log_val[0], K.float32(-LOG2_E)))
-            K.assign(lb_log2e[0], _mul(lower_bound, K.float32(LOG2_E)))
+            K.assign(neg_A_log2e, _mul(A_log_val, K.float32(-LOG2_E)))
+            K.assign(lb_log2e, _mul(lower_bound, K.float32(LOG2_E)))
         else:
-            K.assign(neg_A_log_val[0], _mul(A_log_val[0], K.float32(-1.0)))
+            K.assign(neg_A_log_val, _mul(A_log_val, K.float32(-1.0)))
 
         # =======================================================================
         # Token loop.  NUM_TOKENS == 1, so this runs exactly once; the source keeps
@@ -597,89 +575,82 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
             # CuTe compiler CSEs them into a single ld.global.b32 + max.s32.  Our PTX
             # helpers are opaque inline asm, so CSE cannot fire across them; reusing
             # the prologue values reproduces the source's *emitted* code exactly.
-            raw_slot = K.alloc_local((1,), "int32")
-            has_token = K.alloc_local((1,), "int32")
-            is_active = K.alloc_local((1,), "int32")
-            token_offset = K.alloc_local((1,), "int32")
-            seq_idx = K.alloc_local((1,), "int32")
-            K.assign(raw_slot[0], init_raw_slot[0])
-            K.assign(has_token[0], K.cast(token_t < seq_len[0], "int32"))
+            raw_slot = K.local_scalar("int32")
+            has_token = K.local_scalar("int32")
+            is_active = K.local_scalar("int32")
+            token_offset = K.local_scalar("int32")
+            seq_idx = K.local_scalar("int32")
+            K.assign(raw_slot, init_raw_slot)
+            K.assign(has_token, K.cast(token_t < seq_len, "int32"))
+            K.assign(is_active, K.cast(K.cast(raw_slot >= 0, "int32") * has_token, "int32"))
             K.assign(
-                is_active[0], K.cast(K.cast(raw_slot[0] >= 0, "int32") * has_token[0], "int32")
+                token_offset,
+                K.if_then_else(token_t < seq_len, token_base_offset + token_t, K.int32(0)),
             )
-            K.assign(
-                token_offset[0],
-                K.if_then_else(token_t < seq_len[0], token_base_offset[0] + token_t, K.int32(0)),
-            )
-            K.assign(seq_idx[0], init_seq_idx[0])
+            K.assign(seq_idx, init_seq_idx)
 
             # --- per-head views and beta (recurrent_kda.py:333-346) ------------
-            q_base = K.alloc_local((1,), "int32")
-            v_base = K.alloc_local((1,), "int32")
-            beta_val = K.alloc_local((1,), "float32")
-            K.assign(q_base[0], (token_offset[0] * NUM_HEADS + query_head_idx[0]) * HEAD_DIM)
-            K.assign(v_base[0], (token_offset[0] * NUM_VALUE_HEADS + value_head_idx[0]) * HEAD_DIM)
+            q_base = K.local_scalar("int32")
+            v_base = K.local_scalar("int32")
+            beta_val = K.local_scalar("float32")
+            K.assign(q_base, (token_offset * NUM_HEADS + query_head_idx) * HEAD_DIM)
+            K.assign(v_base, (token_offset * NUM_VALUE_HEADS + value_head_idx) * HEAD_DIM)
             K.assign(
-                beta_val[0],
+                beta_val,
                 _bf16_to_f32(
-                    _load_bf16_bits(
-                        beta, gidx(token_offset[0] * NUM_VALUE_HEADS + value_head_idx[0])
-                    )
+                    _load_bf16_bits(beta, gidx(token_offset * NUM_VALUE_HEADS + value_head_idx))
                 ),
             )
 
             # --- q/k/gate vector loads (recurrent_kda.py:353-358) --------------
-            q_bits = _load_bf16x4(q, gidx(q_base[0] + VALUES_PER_THREAD * tidx[0]))
-            k_bits = _load_bf16x4(k, gidx(q_base[0] + VALUES_PER_THREAD * tidx[0]))
-            gate_bits = _load_bf16x4(g, gidx(v_base[0] + VALUES_PER_THREAD * tidx[0]))
+            q_bits = _load_bf16x4(q, gidx(q_base + VALUES_PER_THREAD * tidx))
+            k_bits = _load_bf16x4(k, gidx(q_base + VALUES_PER_THREAD * tidx))
+            gate_bits = _load_bf16x4(g, gidx(v_base + VALUES_PER_THREAD * tidx))
 
             # --- V load, hoisted only at TILE_ROWS == 16 (recurrent_kda.py:359-364)
-            v_loaded = K.alloc_local((1,), "float32")
-            K.assign(v_loaded[0], K.float32(0.0))
+            v_loaded = K.local_scalar("float32", init=K.float32(0.0))
             if TILE_ROWS == 16:
-                with K.If(tidx[0] < TILE_ROWS), K.Then():
+                with K.If(tidx < TILE_ROWS), K.Then():
                     K.assign(
-                        v_loaded[0],
-                        _bf16_to_f32(_load_bf16_bits(v, gidx(v_base[0] + v_offset[0] + tidx[0]))),
+                        v_loaded, _bf16_to_f32(_load_bf16_bits(v, gidx(v_base + v_offset + tidx)))
                     )
 
             # --- gate + q/k conversion (recurrent_kda.py:366-380, :88-148) -----
             for i in range(VALUES_PER_THREAD):
-                k_idx = K.alloc_local((1,), "int32")
-                g_val = K.alloc_local((1,), "float32")
-                K.assign(k_idx[0], tidx[0] * VALUES_PER_THREAD + i)
+                k_idx = K.local_scalar("int32")
+                g_val = K.local_scalar("float32")
+                K.assign(k_idx, tidx * VALUES_PER_THREAD + i)
                 K.ptx.mov.b32(q_src[i], _bf16_to_f32(q_bits[i]))
                 K.ptx.mov.b32(k_src[i], _bf16_to_f32(k_bits[i]))
                 K.assign(
-                    g_val[0],
-                    _add_bf16(gate_bits[i], _load_f32(dt_bias, gidx(h_K_offset[0] + k_idx[0]))),
+                    g_val, _add_bf16(gate_bits[i], _load_f32(dt_bias, gidx(h_K_offset + k_idx)))
                 )
                 if USE_LOWER_BOUND:
-                    denom = K.alloc_local((1,), "float32")
-                    K.assign(denom[0], _add(K.float32(1.0), _exp2(_mul(neg_A_log2e[0], g_val[0]))))
-                    K.ptx.mov.b32(gate_src[i], _exp2(_div_rn(lb_log2e[0], denom[0])))
+                    denom = K.local_scalar("float32")
+                    K.assign(denom, _add(K.float32(1.0), _exp2(_mul(neg_A_log2e, g_val))))
+                    K.ptx.mov.b32(gate_src[i], _exp2(_div_rn(lb_log2e, denom)))
                 else:
-                    exp_g = K.alloc_local((1,), "float32")
-                    log2_v = K.alloc_local((1,), "float32")
-                    K.assign(exp_g[0], _exp2(_mul(g_val[0], K.float32(LOG2_E))))
-                    K.assign(log2_v[0], _log2(_add(K.float32(1.0), exp_g[0])))
-                    K.ptx.mov.b32(gate_src[i], _exp2(_mul(neg_A_log_val[0], log2_v[0])))
+                    exp_g = K.local_scalar("float32")
+                    log2_v = K.local_scalar("float32")
+                    K.assign(exp_g, _exp2(_mul(g_val, K.float32(LOG2_E))))
+                    K.assign(log2_v, _log2(_add(K.float32(1.0), exp_g)))
+                    K.ptx.mov.b32(gate_src[i], _exp2(_mul(neg_A_log_val, log2_v)))
 
             # --- q/k sum of squares (recurrent_kda.py:382-404) -----------------
-            q_sum_sq = K.alloc_local((1,), "float32")
-            k_sum_sq = K.alloc_local((1,), "float32")
-            K.assign(q_sum_sq[0], K.float32(0.0))
-            K.assign(k_sum_sq[0], K.float32(0.0))
+            q_sum_sq = K.local_scalar("float32")
+            k_sum_sq = K.local_scalar("float32")
+            K.assign(q_sum_sq, K.float32(0.0))
+            K.assign(k_sum_sq, K.float32(0.0))
             if DOT_REDUCTION_SCHEDULE == DOT_REDUCTION_DUAL_ACCUM:
                 K.assign(
-                    q_sum_sq[0],
+                    q_sum_sq,
                     _add(
                         _fma_bf16(q_bits[2], q_bits[2], _mul(q_src[0], q_src[0])),
                         _fma_bf16(q_bits[3], q_bits[3], _mul(q_src[1], q_src[1])),
                     ),
                 )
                 K.assign(
-                    k_sum_sq[0],
+                    k_sum_sq,
                     _add(
                         _fma_bf16(k_bits[2], k_bits[2], _mul(k_src[0], k_src[0])),
                         _fma_bf16(k_bits[3], k_bits[3], _mul(k_src[1], k_src[1])),
@@ -687,14 +658,14 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
                 )
             else:
                 K.assign(
-                    q_sum_sq[0],
+                    q_sum_sq,
                     _add(
                         _fma_bf16(q_bits[0], q_bits[0], _mul(q_src[1], q_src[1])),
                         _fma_bf16(q_bits[2], q_bits[2], _mul(q_src[3], q_src[3])),
                     ),
                 )
                 K.assign(
-                    k_sum_sq[0],
+                    k_sum_sq,
                     _add(
                         _fma_bf16(k_bits[0], k_bits[0], _mul(k_src[1], k_src[1])),
                         _fma_bf16(k_bits[2], k_bits[2], _mul(k_src[3], k_src[3])),
@@ -703,45 +674,38 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
 
             # --- full-warp butterfly (recurrent_kda.py:405-411) ----------------
             for off_i in range(5):
-                shift = K.alloc_local((1,), "int32")
-                K.assign(shift[0], K.shift_right(K.int32(16), off_i))
-                K.assign(q_sum_sq[0], _add(q_sum_sq[0], _shfl_bfly_f32(q_sum_sq[0], shift[0])))
-                K.assign(k_sum_sq[0], _add(k_sum_sq[0], _shfl_bfly_f32(k_sum_sq[0], shift[0])))
+                shift = K.local_scalar("int32", init=K.shift_right(K.int32(16), off_i))
+                K.assign(q_sum_sq, _add(q_sum_sq, _shfl_bfly_f32(q_sum_sq, shift)))
+                K.assign(k_sum_sq, _add(k_sum_sq, _shfl_bfly_f32(k_sum_sq, shift)))
 
             # --- scale factors (recurrent_kda.py:413-417) ----------------------
-            q_scale_factor = K.alloc_local((1,), "float32")
-            k_scale_factor = K.alloc_local((1,), "float32")
-            K.assign(q_scale_factor[0], _mul(_rsqrt(_add(q_sum_sq[0], eps)), scale))
-            K.assign(k_scale_factor[0], _rsqrt(_add(k_sum_sq[0], eps)))
+            q_scale_factor = K.local_scalar("float32")
+            k_scale_factor = K.local_scalar("float32")
+            K.assign(q_scale_factor, _mul(_rsqrt(_add(q_sum_sq, eps)), scale))
+            K.assign(k_scale_factor, _rsqrt(_add(k_sum_sq, eps)))
 
             # --- broadcast the load view into the k_lane view (:418-436) -------
             for i in range(8):
-                source_lane = K.alloc_local((1,), "int32")
-                K.assign(source_lane[0], V_LANES * k_lane[0] + i // VALUES_PER_THREAD)
+                source_lane = K.local_scalar(
+                    "int32", init=V_LANES * k_lane + i // VALUES_PER_THREAD
+                )
                 K.ptx.mov.b32(
                     q_reg[i],
-                    _mul(
-                        _shfl_idx_f32(q_src[i % VALUES_PER_THREAD], source_lane[0]),
-                        q_scale_factor[0],
-                    ),
+                    _mul(_shfl_idx_f32(q_src[i % VALUES_PER_THREAD], source_lane), q_scale_factor),
                 )
                 K.ptx.mov.b32(
                     k_reg[i],
-                    _mul(
-                        _shfl_idx_f32(k_src[i % VALUES_PER_THREAD], source_lane[0]),
-                        k_scale_factor[0],
-                    ),
+                    _mul(_shfl_idx_f32(k_src[i % VALUES_PER_THREAD], source_lane), k_scale_factor),
                 )
                 K.ptx.mov.b32(
-                    gate_reg[i], _shfl_idx_f32(gate_src[i % VALUES_PER_THREAD], source_lane[0])
+                    gate_reg[i], _shfl_idx_f32(gate_src[i % VALUES_PER_THREAD], source_lane)
                 )
 
             # --- late V load for the other schedules (recurrent_kda.py:437-439)
             if TILE_ROWS != 16:
-                with K.If(tidx[0] < TILE_ROWS), K.Then():
+                with K.If(tidx < TILE_ROWS), K.Then():
                     K.assign(
-                        v_loaded[0],
-                        _bf16_to_f32(_load_bf16_bits(v, gidx(v_base[0] + v_offset[0] + tidx[0]))),
+                        v_loaded, _bf16_to_f32(_load_bf16_bits(v, gidx(v_base + v_offset + tidx)))
                     )
 
             # --- sequential rank-1 recurrence (recurrent_kda.py:440-460) -------
@@ -749,46 +713,42 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
                 for i in range(8):
                     K.ptx.mov.b32(h_reg[j * 8 + i], _mul(h_reg[j * 8 + i], gate_reg[i]))
 
-                pred = K.alloc_local((1,), "float32")
-                v_idx = K.alloc_local((1,), "int32")
-                v_val = K.alloc_local((1,), "float32")
-                delta = K.alloc_local((1,), "float32")
-                out_val = K.alloc_local((1,), "float32")
-                K.assign(
-                    pred[0], _reduce_k_group(_dot8(h_reg, j * 8, k_reg, DOT_REDUCTION_SCHEDULE))
-                )
-                K.assign(v_idx[0], v_offset[0] + v_lane[0] + V_LANES * j)
-                K.assign(v_val[0], _shfl_idx_f32(v_loaded[0], v_lane[0] + V_LANES * j))
-                K.assign(delta[0], _mul(_sub(v_val[0], pred[0]), beta_val[0]))
+                pred = K.local_scalar("float32")
+                v_idx = K.local_scalar("int32")
+                v_val = K.local_scalar("float32")
+                delta = K.local_scalar("float32")
+                out_val = K.local_scalar("float32")
+                K.assign(pred, _reduce_k_group(_dot8(h_reg, j * 8, k_reg, DOT_REDUCTION_SCHEDULE)))
+                K.assign(v_idx, v_offset + v_lane + V_LANES * j)
+                K.assign(v_val, _shfl_idx_f32(v_loaded, v_lane + V_LANES * j))
+                K.assign(delta, _mul(_sub(v_val, pred), beta_val))
 
                 for i in range(8):
-                    K.ptx.mov.b32(h_reg[j * 8 + i], _fma(k_reg[i], delta[0], h_reg[j * 8 + i]))
+                    K.ptx.mov.b32(h_reg[j * 8 + i], _fma(k_reg[i], delta, h_reg[j * 8 + i]))
 
                 K.assign(
-                    out_val[0], _reduce_k_group(_dot8(h_reg, j * 8, q_reg, DOT_REDUCTION_SCHEDULE))
+                    out_val, _reduce_k_group(_dot8(h_reg, j * 8, q_reg, DOT_REDUCTION_SCHEDULE))
                 )
 
                 _store_bf16_bits_pred(
                     out,
-                    gidx(v_base[0] + v_idx[0]),
-                    _f32_to_bf16(out_val[0]),
-                    K.And(is_active[0] != 0, k_lane[0] == j),
+                    gidx(v_base + v_idx),
+                    _f32_to_bf16(out_val),
+                    K.And(is_active != 0, k_lane == j),
                 )
 
             # --- state writeback (recurrent_kda.py:462-469) --------------------
             # The source rebinds h_out to seq_idx at :463.  At NUM_TOKENS == 1 that
             # is the same slot the prologue loaded from, and a negative slot cannot
             # reach here because it clears is_active (:327).
-            with K.If(is_active[0] != 0), K.Then():
-                write_base = K.alloc_local((1,), "int64")
-                K.assign(
-                    write_base[0],
-                    K.cast(seq_idx[0], "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-                    + K.cast(state_head_base[0], "int64"),
+            with K.If(is_active != 0), K.Then():
+                write_base = K.local_scalar(
+                    "int64",
+                    init=K.cast(seq_idx, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
+                    + K.cast(state_head_base, "int64"),
                 )
                 for j in range(ROWS):
-                    v_idx_w = K.alloc_local((1,), "int32")
-                    K.assign(v_idx_w[0], v_offset[0] + v_lane[0] + V_LANES * j)
+                    v_idx_w = K.local_scalar("int32", init=v_offset + v_lane + V_LANES * j)
                     words = K.alloc_local((4,), "uint32")
                     for pair in range(4):
                         K.ptx.mov.b32(
@@ -796,7 +756,7 @@ def _make_recurrent_kda_decode_one_warp(spec: dict[str, Any]):
                             _pack_bf16x2(h_reg[j * 8 + 2 * pair + 1], h_reg[j * 8 + 2 * pair]),
                         )
                     _store_bf16x8_words(
-                        state, write_base[0] + K.cast(v_idx_w[0] * HEAD_DIM, "int64"), words
+                        state, write_base + K.cast(v_idx_w * HEAD_DIM, "int64"), words
                     )
 
     return _recurrent_kda_decode_one_warp.func
