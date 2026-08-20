@@ -1460,11 +1460,11 @@ def build_kernel(spec: GemmSpec):
                                     K.ptx.fence.proxy.async_.shared__cta()
                             # `arrive(0u)` passes a destination CTA rank, not a count:
                             # every thread arrives on the leader CTA's barrier copy.
-                            rem = K.alloc_local((1,), "uint64")
+                            rem = K.local_scalar("uint64")
                             K.ptx.mapa.shared__cluster.u64(
-                                rem[0], with_sf_barriers.ptr_to([tr_pipe.stage]), K.uint32(0)
+                                rem, with_sf_barriers.ptr_to([tr_pipe.stage]), K.uint32(0)
                             )
-                            K.ptx.mbarrier.arrive.b64(rem[0], K.uint32(1), pred=K.bool(True))
+                            K.ptx.mbarrier.arrive.b64(rem, K.uint32(1), pred=K.bool(True))
                             K.assign(tr_k, tr_k + 1)
                             _advance_pipeline(tr_pipe, stages)
                 tr_sched.advance()
@@ -1635,14 +1635,14 @@ def build_kernel(spec: GemmSpec):
                                     with K.If(st == ep_stores - 1):
                                         with K.Then():
                                             K.ptx.tcgen05.fence__before_thread_sync()
-                                            rem_s = K.alloc_local((1,), "uint64")
+                                            rem_s = K.local_scalar("uint64")
                                             K.ptx.mapa.shared__cluster.u64(
-                                                rem_s[0],
+                                                rem_s,
                                                 tmem_empty_barriers.ptr_to([accum_pipe_e.stage]),
                                                 K.uint32(0),
                                             )
                                             K.ptx.mbarrier.arrive.b64(
-                                                rem_s[0], K.uint32(1), pred=K.bool(True)
+                                                rem_s, K.uint32(1), pred=K.bool(True)
                                             )
 
                                     K.ptx.fence.proxy.async_.shared__cta()
@@ -1760,14 +1760,14 @@ def build_kernel(spec: GemmSpec):
                                     with K.If(K.And(w == num_m_waves - 1, st == num_stores - 1)):
                                         with K.Then():
                                             K.ptx.tcgen05.fence__before_thread_sync()
-                                            rem_e = K.alloc_local((1,), "uint64")
+                                            rem_e = K.local_scalar("uint64")
                                             K.ptx.mapa.shared__cluster.u64(
-                                                rem_e[0],
+                                                rem_e,
                                                 tmem_empty_barriers.ptr_to([accum_pipe_e.stage]),
                                                 K.uint32(0),
                                             )
                                             K.ptx.mbarrier.arrive.b64(
-                                                rem_e[0], K.uint32(1), pred=K.bool(True)
+                                                rem_e, K.uint32(1), pred=K.bool(True)
                                             )
 
                                     K.ptx.fence.proxy.async_.shared__cta()

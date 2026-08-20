@@ -382,13 +382,13 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
     def add_smem_desc_offset(desc, offset):
         # orig:L404-413. Descriptor offsets wrap in the low 32 bits without
         # carrying into the encoded layout fields in the high half.
-        desc_lo = K.alloc_local((1,), "uint32")
-        desc_hi = K.alloc_local((1,), "uint32")
-        result = K.alloc_local((1,), "uint64")
-        K.ptx.mov.b64(desc_lo[0], desc_hi[0], desc)
-        K.ptx.add.u32(desc_lo[0], desc_lo[0], K.cast(offset, "uint32"))
-        K.ptx.mov.b64(result[0], desc_lo[0], desc_hi[0])
-        return result[0]
+        desc_lo = K.local_scalar("uint32")
+        desc_hi = K.local_scalar("uint32")
+        result = K.local_scalar("uint64")
+        K.ptx.mov.b64(desc_lo, desc_hi, desc)
+        K.ptx.add.u32(desc_lo, desc_lo, K.cast(offset, "uint32"))
+        K.ptx.mov.b64(result, desc_lo, desc_hi)
+        return result
 
     def cuda_grid_dependency_synchronize():
         K.ptx.griddepcontrol.wait()
@@ -572,13 +572,9 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                     # TMEM A columns and the swizzled B matrix descriptor match
                     # the former tcgen05 tile dispatch exactly.
                     a_col = local("int32", K.cast(cast_stage_idx[0] * K.uint32(block_k), "int32"))
-                    desc_b = K.alloc_local((1,), "uint64")
+                    desc_b = K.local_scalar("uint64")
                     K.cuda.tcgen05.encode_matrix_descriptor(
-                        K.address_of(desc_b[0]),
-                        smem_b_mma[0].ptr_to(0, 0),
-                        ldo=256,
-                        sdo=64,
-                        swizzle=3,
+                        K.address_of(desc_b), smem_b_mma[0].ptr_to(0, 0), ldo=256, sdo=64, swizzle=3
                     )
                     with K.unroll(block_k // umma_k) as ki:
                         with K.If(K.cuda.elect_sync()), K.Then():
@@ -586,7 +582,7 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
                                 K.uint32(d_tmem_start_col),
                                 K.cast(a_col[0] + ki * umma_k, "uint32"),
                                 add_smem_desc_offset(
-                                    desc_b[0],
+                                    desc_b,
                                     (
                                         K.cast((ki // 4) * 1024 + (ki % 4) * 8, "uint32")
                                         + stage_idx[0] * K.uint32(block_n * block_k)
@@ -679,10 +675,10 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
             # explicitly so the low-level IR contains a real PTX shared load.
             with K.If(mw == 1), K.Then():
                 K.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
-                tmem_dealloc_addr = K.alloc_local((1,), "uint32")
-                K.ptx.ld.shared.u32(tmem_dealloc_addr[0], tmem_ptr_in_smem.ptr_to([0]))
+                tmem_dealloc_addr = K.local_scalar("uint32")
+                K.ptx.ld.shared.u32(tmem_dealloc_addr, tmem_ptr_in_smem.ptr_to([0]))
                 K.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
-                    tmem_dealloc_addr[0], K.uint32(num_tmem_cols)
+                    tmem_dealloc_addr, K.uint32(num_tmem_cols)
                 )
 
         with cast_side:
@@ -767,14 +763,14 @@ def _make_kernel(*, m: int, n: int, k: int, num_splits: int, seed: int, num_sms:
 
                 def sqr_fma(lo, hi, acc):
                     """One packed fma.f32x2 sum-of-squares accumulation."""
-                    lhs = K.alloc_local((1,), "uint64")
-                    rhs = K.alloc_local((1,), "uint64")
-                    accu = K.alloc_local((1,), "uint64")
-                    K.ptx.mov.b64(lhs[0], lo, hi)
-                    K.ptx.mov.b64(rhs[0], lo, hi)
-                    K.ptx.mov.b64(accu[0], acc[0], acc[1])
-                    K.ptx.fma.rz.ftz.f32x2(lhs[0], lhs[0], rhs[0], accu[0])
-                    K.ptx.mov.b64(acc[0], acc[1], lhs[0])
+                    lhs = K.local_scalar("uint64")
+                    rhs = K.local_scalar("uint64")
+                    accu = K.local_scalar("uint64")
+                    K.ptx.mov.b64(lhs, lo, hi)
+                    K.ptx.mov.b64(rhs, lo, hi)
+                    K.ptx.mov.b64(accu, acc[0], acc[1])
+                    K.ptx.fma.rz.ftz.f32x2(lhs, lhs, rhs, accu)
+                    K.ptx.mov.b64(acc[0], acc[1], lhs)
 
                 # bf16->tf32 + sqr-fma + TMEM deposit: interleaved per 8-col atom on
                 # short mainloops (hand structure); single wide STTM.x8 on deep

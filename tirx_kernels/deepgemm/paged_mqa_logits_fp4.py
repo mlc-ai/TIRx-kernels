@@ -511,17 +511,17 @@ def get_kernel(**kwargs: Any):
     ):
         cache_policy_evict_normal = K.uint64(1152921504606846976)
 
-        sm_idx_u32 = K.alloc_local([1], "uint32")
-        K.ptx.mov.u32(sm_idx_u32[0], K.Cast("uint32", K.cta_id()))
+        sm_idx_u32 = K.local_scalar("uint32")
+        K.ptx.mov.u32(sm_idx_u32, K.Cast("uint32", K.cta_id()))
         warp_idx = K.warp_id()
         warp_idx_u32 = K.Cast("uint32", warp_idx)
-        warp_idx_presync_u32 = K.alloc_local([1], "uint32")
-        K.ptx.mov.u32(warp_idx_presync_u32[0], warp_idx_u32)
-        warp_idx_presync = K.Cast("int32", warp_idx_presync_u32[0])
+        warp_idx_presync_u32 = K.local_scalar("uint32")
+        K.ptx.mov.u32(warp_idx_presync_u32, warp_idx_u32)
+        warp_idx_presync = K.Cast("int32", warp_idx_presync_u32)
         warpgroup_idx = K.warpgroup_id([num_warps // 4])
         lane_idx = K.lane_id()
-        lane_idx_u32 = K.alloc_local([1], "uint32")
-        K.assign(lane_idx_u32[0], K.Cast("uint32", lane_idx))
+        lane_idx_u32 = K.local_scalar("uint32")
+        K.assign(lane_idx_u32, K.Cast("uint32", lane_idx))
 
         with K.If(warp_idx_presync == spec_warp_start), K.Then():
             K.ptx.prefetch.tensormap(K.address_of(tensor_map_q))
@@ -571,8 +571,8 @@ def get_kernel(**kwargs: Any):
         )
 
         scheduler_result = K.alloc_local([7], "uint32")
-        num_kv_result = K.alloc_local([1], "uint32")
-        atom_advance_result = K.alloc_local([1], "uint32")
+        num_kv_result = K.local_scalar("uint32")
+        atom_advance_result = K.local_scalar("uint32")
 
         # ---------------- trace-time helpers ----------------------------
 
@@ -623,20 +623,20 @@ def get_kernel(**kwargs: Any):
             return slot
 
         def relu2_fma_f32x2(a, w, c):
-            a_lo = K.alloc_local([1], "float32")
-            a_hi = K.alloc_local([1], "float32")
-            abs_lo = K.alloc_local([1], "float32")
-            abs_hi = K.alloc_local([1], "float32")
-            abs_pair = K.alloc_local([1], "uint64")
-            relu_pair = K.alloc_local([1], "uint64")
-            out = K.alloc_local([1], "uint64")
-            K.ptx.mov.b64(a_lo[0], a_hi[0], a)
-            K.ptx.abs.f32(abs_lo[0], a_lo[0])
-            K.ptx.abs.f32(abs_hi[0], a_hi[0])
-            K.ptx.mov.b64(abs_pair[0], abs_lo[0], abs_hi[0])
-            K.ptx.add.rn.f32x2(relu_pair[0], a, abs_pair[0])
-            K.ptx.fma.rn.f32x2(out[0], relu_pair[0], w, c)
-            return out[0]
+            a_lo = K.local_scalar("float32")
+            a_hi = K.local_scalar("float32")
+            abs_lo = K.local_scalar("float32")
+            abs_hi = K.local_scalar("float32")
+            abs_pair = K.local_scalar("uint64")
+            relu_pair = K.local_scalar("uint64")
+            out = K.local_scalar("uint64")
+            K.ptx.mov.b64(a_lo, a_hi, a)
+            K.ptx.abs.f32(abs_lo, a_lo)
+            K.ptx.abs.f32(abs_hi, a_hi)
+            K.ptx.mov.b64(abs_pair, abs_lo, abs_hi)
+            K.ptx.add.rn.f32x2(relu_pair, a, abs_pair)
+            K.ptx.fma.rn.f32x2(out, relu_pair, w, c)
+            return out
 
         def replace_smem_desc_addr(desc, smem_ptr):
             start_addr = K.Cast(
@@ -680,9 +680,8 @@ def get_kernel(**kwargs: Any):
                 i_u32 = local("uint32", K.uint32(i))
                 col = local(
                     "uint32",
-                    K.bitwise_xor(i_u32[0], K.shift_right(lane_idx_u32[0], K.uint32(3)))
-                    * K.uint32(32)
-                    + lane_idx_u32[0],
+                    K.bitwise_xor(i_u32[0], K.shift_right(lane_idx_u32, K.uint32(3))) * K.uint32(32)
+                    + lane_idx_u32,
                 )
                 K.ptx.ld.shared.u32(
                     values[i], buf.ptr_to([*prefix, K.Cast("int32", base_offset + col[0])])
@@ -692,8 +691,8 @@ def get_kernel(**kwargs: Any):
                 i_u32 = local("uint32", K.uint32(i))
                 col = local(
                     "uint32",
-                    lane_idx_u32[0] * K.uint32(4)
-                    + K.bitwise_xor(i_u32[0], K.shift_right(lane_idx_u32[0], K.uint32(3))),
+                    lane_idx_u32 * K.uint32(4)
+                    + K.bitwise_xor(i_u32[0], K.shift_right(lane_idx_u32, K.uint32(3))),
                 )
                 K.ptx.st.shared.u32(
                     buf.ptr_to([*prefix, K.Cast("int32", base_offset + col[0])]), values[i]
@@ -703,27 +702,23 @@ def get_kernel(**kwargs: Any):
             # The one-page specialization has exactly one positive BLOCK_KV
             # page, so it intentionally performs no metadata read.
             if not config.varlen and config.max_num_pages == 1:
-                K.assign(num_kv_result[0], K.uint32(1))
+                K.assign(num_kv_result, K.uint32(1))
             elif config.varlen:
                 context_idx = local("uint32", q_atom_idx_arg)
                 with K.If(q_atom_idx_arg + K.uint32(1) < runtime_batch_size_arg), K.Then():
-                    index_0 = K.alloc_local([1], "int32")
-                    index_1 = K.alloc_local([1], "int32")
+                    index_0 = K.local_scalar("int32")
+                    index_1 = K.local_scalar("int32")
+                    K.ptx.ld.global_.s32(index_0, indices.ptr_to([K.Cast("int32", q_atom_idx_arg)]))
                     K.ptx.ld.global_.s32(
-                        index_0[0], indices.ptr_to([K.Cast("int32", q_atom_idx_arg)])
+                        index_1, indices.ptr_to([K.Cast("int32", q_atom_idx_arg + K.uint32(1))])
                     )
-                    K.ptx.ld.global_.s32(
-                        index_1[0], indices.ptr_to([K.Cast("int32", q_atom_idx_arg + K.uint32(1))])
-                    )
-                    with K.If(index_0[0] == index_1[0]), K.Then():
+                    with K.If(index_0 == index_1), K.Then():
                         K.assign(context_idx[0], q_atom_idx_arg + K.uint32(1))
-                context_len = K.alloc_local([1], "uint32")
+                context_len = K.local_scalar("uint32")
                 K.ptx.ld.global_.u32(
-                    context_len[0], context_lens_flat.ptr_to([K.Cast("int32", context_idx[0])])
+                    context_len, context_lens_flat.ptr_to([K.Cast("int32", context_idx[0])])
                 )
-                K.assign(
-                    num_kv_result[0], (context_len[0] + K.uint32(umma_m - 1)) // K.uint32(umma_m)
-                )
+                K.assign(num_kv_result, (context_len + K.uint32(umma_m - 1)) // K.uint32(umma_m))
             else:
                 if num_next_n_atoms == 1:
                     q_idx = local("uint32", q_atom_idx_arg)
@@ -732,28 +727,24 @@ def get_kernel(**kwargs: Any):
                 lens_idx = local(
                     "uint32", q_idx[0] * K.uint32(config.next_n) + K.uint32(config.next_n - 1)
                 )
-                context_len = K.alloc_local([1], "uint32")
+                context_len = K.local_scalar("uint32")
                 K.ptx.ld.global_.u32(
-                    context_len[0], context_lens_flat.ptr_to([K.Cast("int32", lens_idx[0])])
+                    context_len, context_lens_flat.ptr_to([K.Cast("int32", lens_idx[0])])
                 )
-                K.assign(
-                    num_kv_result[0], (context_len[0] + K.uint32(umma_m - 1)) // K.uint32(umma_m)
-                )
+                K.assign(num_kv_result, (context_len + K.uint32(umma_m - 1)) // K.uint32(umma_m))
 
         def load_atom_advance(q_atom_idx_arg, bound_arg):
-            K.assign(atom_advance_result[0], K.uint32(1))
+            K.assign(atom_advance_result, K.uint32(1))
             if config.varlen:
                 with K.If(q_atom_idx_arg + K.uint32(1) < bound_arg), K.Then():
-                    index_0 = K.alloc_local([1], "int32")
-                    index_1 = K.alloc_local([1], "int32")
+                    index_0 = K.local_scalar("int32")
+                    index_1 = K.local_scalar("int32")
+                    K.ptx.ld.global_.s32(index_0, indices.ptr_to([K.Cast("int32", q_atom_idx_arg)]))
                     K.ptx.ld.global_.s32(
-                        index_0[0], indices.ptr_to([K.Cast("int32", q_atom_idx_arg)])
+                        index_1, indices.ptr_to([K.Cast("int32", q_atom_idx_arg + K.uint32(1))])
                     )
-                    K.ptx.ld.global_.s32(
-                        index_1[0], indices.ptr_to([K.Cast("int32", q_atom_idx_arg + K.uint32(1))])
-                    )
-                    with K.If(index_0[0] == index_1[0]), K.Then():
-                        K.assign(atom_advance_result[0], K.uint32(2))
+                    with K.If(index_0 == index_1), K.Then():
+                        K.assign(atom_advance_result, K.uint32(2))
 
         def fetch_next_task(cur_q_atom, cur_kv_idx, cur_num_kv, end_q_atom, end_kv):
             K.ptx.mov.b32(scheduler_result[0], cur_q_atom)
@@ -770,7 +761,7 @@ def get_kernel(**kwargs: Any):
                     with K.If(scheduler_result[5] >= cur_num_kv), K.Then():
                         K.ptx.mov.b32(scheduler_result[5], K.uint32(0))
                         load_atom_advance(cur_q_atom, end_q_atom)
-                        K.ptx.mov.b32(scheduler_result[4], cur_q_atom + atom_advance_result[0])
+                        K.ptx.mov.b32(scheduler_result[4], cur_q_atom + atom_advance_result)
                         with (
                             K.If(
                                 K.And(
@@ -781,7 +772,7 @@ def get_kernel(**kwargs: Any):
                             K.Then(),
                         ):
                             load_num_kv(scheduler_result[4], batch_size)
-                            K.ptx.mov.b32(scheduler_result[6], num_kv_result[0])
+                            K.ptx.mov.b32(scheduler_result[6], num_kv_result)
                     K.ptx.mov.b32(scheduler_result[3], K.uint32(1))
 
         def issue_tma_q(stage_idx, tma_q_atom_idx):
@@ -841,40 +832,40 @@ def get_kernel(**kwargs: Any):
             scope="global",
             elem_offset=0,
         )
-        start_q_atom_idx = K.alloc_local([1], "uint32")
-        start_kv_tile_idx = K.alloc_local([1], "uint32")
-        end_q_atom_idx = K.alloc_local([1], "uint32")
-        end_kv_tile_idx = K.alloc_local([1], "uint32")
+        start_q_atom_idx = K.local_scalar("uint32")
+        start_kv_tile_idx = K.local_scalar("uint32")
+        end_q_atom_idx = K.local_scalar("uint32")
+        end_kv_tile_idx = K.local_scalar("uint32")
         K.ptx.ld.global_.u32(
-            start_q_atom_idx[0],
-            schedule_meta_u32_flat.ptr_to([K.Cast("int32", sm_idx_u32[0] * K.uint32(2))]),
+            start_q_atom_idx,
+            schedule_meta_u32_flat.ptr_to([K.Cast("int32", sm_idx_u32 * K.uint32(2))]),
         )
         K.ptx.ld.global_.u32(
-            start_kv_tile_idx[0],
+            start_kv_tile_idx,
             schedule_meta_u32_flat.ptr_to(
-                [K.Cast("int32", sm_idx_u32[0] * K.uint32(2) + K.uint32(1))]
+                [K.Cast("int32", sm_idx_u32 * K.uint32(2) + K.uint32(1))]
             ),
         )
         K.ptx.ld.global_.u32(
-            end_q_atom_idx[0],
+            end_q_atom_idx,
             schedule_meta_u32_flat.ptr_to(
-                [K.Cast("int32", (sm_idx_u32[0] + K.uint32(1)) * K.uint32(2))]
+                [K.Cast("int32", (sm_idx_u32 + K.uint32(1)) * K.uint32(2))]
             ),
         )
         K.ptx.ld.global_.u32(
-            end_kv_tile_idx[0],
+            end_kv_tile_idx,
             schedule_meta_u32_flat.ptr_to(
-                [K.Cast("int32", (sm_idx_u32[0] + K.uint32(1)) * K.uint32(2) + K.uint32(1))]
+                [K.Cast("int32", (sm_idx_u32 + K.uint32(1)) * K.uint32(2) + K.uint32(1))]
             ),
         )
-        start_kv_idx = start_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
+        start_kv_idx = start_kv_tile_idx * K.uint32(num_tiles_per_split)
         # Clamp the context-length read for zero-work CTAs (start == total q
         # atoms); the value is stale but never used, because has_work is false.
         load_num_kv(
-            K.min(start_q_atom_idx[0], batch_size * K.uint32(num_next_n_atoms) - K.uint32(1)),
+            K.min(start_q_atom_idx, batch_size * K.uint32(num_next_n_atoms) - K.uint32(1)),
             batch_size,
         )
-        start_num_kv = num_kv_result[0]
+        start_num_kv = num_kv_result
 
         # Warm the block table into L2 as early as possible. Race-safe: a stale
         # prefetched line is invalidated by any later producer write, so the PDL
@@ -885,7 +876,7 @@ def get_kernel(**kwargs: Any):
                 line_idx = local(
                     "uint32",
                     (warp_idx_u32 - K.uint32(tma_warp_0)) * K.uint32(32)
-                    + lane_idx_u32[0]
+                    + lane_idx_u32
                     + K.uint32(pf_i * 64),
                 )
                 with K.If(line_idx[0] < K.uint32(num_prefetch_lines)), K.Then():
@@ -959,7 +950,7 @@ def get_kernel(**kwargs: Any):
                     "next_num_kv",
                 )
             }
-            K.assign(state["cur_q"][0], start_q_atom_idx[0])
+            K.assign(state["cur_q"][0], start_q_atom_idx)
             K.assign(state["cur_kv"][0], start_kv_idx)
             K.assign(state["cur_num_kv"][0], start_num_kv)
             K.assign(state["q_atom"][0], batch_size * K.uint32(num_next_n_atoms))
@@ -987,7 +978,7 @@ def get_kernel(**kwargs: Any):
                 state["cur_q"][0],
                 state["cur_kv"][0],
                 state["cur_num_kv"][0],
-                end_q_atom_idx[0],
+                end_q_atom_idx,
                 end_kv,
             )
             K.assign(state["next_q"][0], scheduler_result[0])
@@ -1017,7 +1008,7 @@ def get_kernel(**kwargs: Any):
                     "uint32",
                     state["kv_idx"][0]
                     + K.uint32(lane_offset_tiles)
-                    + lane_idx_u32[0] * K.uint32(num_tiles_per_split),
+                    + lane_idx_u32 * K.uint32(num_tiles_per_split),
                 )
                 block_table_index = local(
                     "uint64",
@@ -1091,7 +1082,7 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warp 8: Q + SFQ + weights, and KV for group 0 --
         with tma0:
-            tma0_end_kv_idx = end_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
+            tma0_end_kv_idx = end_kv_tile_idx * K.uint32(num_tiles_per_split)
             state = scheduler_state()
             q_state = K.RingState(num_q_stages)
             kv_state = K.RingState(num_kv_stages)
@@ -1103,13 +1094,13 @@ def get_kernel(**kwargs: Any):
             cached = K.alloc_local([num_pages_per_tile], "uint32")
             with K.While(fetched[0]):
                 load_atom_advance(state["next_q"][0], batch_size)
-                next_advance = local("uint32", atom_advance_result[0])
+                next_advance = local("uint32", atom_advance_result)
                 prefetch_q = local(
                     "bool",
                     K.And(
                         state["q_atom"][0] != state["next_q"][0],
                         exist_q_atom_idx_expr(
-                            state["next_q"][0] + next_advance[0], end_q_atom_idx[0], tma0_end_kv_idx
+                            state["next_q"][0] + next_advance[0], end_q_atom_idx, tma0_end_kv_idx
                         ),
                     ),
                 )
@@ -1130,7 +1121,7 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warp 9: KV for group 1 -------------------------
         with tma1:
-            tma1_end_kv_idx = end_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
+            tma1_end_kv_idx = end_kv_tile_idx * K.uint32(num_tiles_per_split)
             state = scheduler_state()
             kv_state = K.RingState(num_kv_stages)
             fetched = pump(state, tma1_end_kv_idx)
@@ -1148,17 +1139,17 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warps 10-11: UMMA + UTCCP issuers --------------
         with umma:
-            umma_end_kv_idx = end_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
+            umma_end_kv_idx = end_kv_tile_idx * K.uint32(num_tiles_per_split)
             umma_group_idx = warp_idx_u32 - K.uint32(umma_warp_0)
-            tmem_allocated = K.alloc_local([1], "uint32")
-            K.ptx.ld.shared.u32(tmem_allocated[0], tmem_ptr_in_smem.ptr_to([0]))
-            K.cuda.trap_when_assert_failed(tmem_allocated[0] == K.uint32(accum_tmem.elem_offset))
-            desc_i = K.alloc_local([1], "uint32")
-            desc_sf = K.alloc_local([1], "uint64")
-            desc_a = K.alloc_local([1], "uint64")
-            desc_b = K.alloc_local([1], "uint64")
+            tmem_allocated = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
+            K.cuda.trap_when_assert_failed(tmem_allocated == K.uint32(accum_tmem.elem_offset))
+            desc_i = K.local_scalar("uint32")
+            desc_sf = K.local_scalar("uint64")
+            desc_a = K.local_scalar("uint64")
+            desc_b = K.local_scalar("uint64")
             K.cuda.tcgen05.encode_instr_descriptor_block_scaled(
-                K.address_of(desc_i[0]),
+                K.address_of(desc_i),
                 d_dtype="float32",
                 a_dtype="float4_e2m1fn",
                 b_dtype="float4_e2m1fn",
@@ -1173,7 +1164,7 @@ def get_kernel(**kwargs: Any):
                 trans_b=False,
                 n_cta_groups=1,
             )
-            make_sf_desc(desc_sf[0], K.reinterpret("handle", K.uint64(0)))
+            make_sf_desc(desc_sf, K.reinterpret("handle", K.uint64(0)))
 
             state = scheduler_state()
             q_state = K.RingState(num_q_stages)
@@ -1197,10 +1188,9 @@ def get_kernel(**kwargs: Any):
                         )
                         K.ptx.fence.proxy.async_.shared__cta()
                         K.assign(
-                            desc_sf[0],
+                            desc_sf,
                             replace_smem_desc_addr(
-                                desc_sf[0],
-                                smem_sf_q.ptr_to([umma_group_idx, q_stage[0], sfq_base[0]]),
+                                desc_sf, smem_sf_q.ptr_to([umma_group_idx, q_stage[0], sfq_base[0]])
                             ),
                         )
                         with K.If(K.cuda.elect_sync()), K.Then():
@@ -1211,7 +1201,7 @@ def get_kernel(**kwargs: Any):
                                     + umma_group_idx * K.uint32(num_sfq_atom // 32)
                                     + sfq_i * 4,
                                 ),
-                                desc_sf[0],
+                                desc_sf,
                             )
                         K.cuda.warp_sync()
                 K.assign(state["q_atom"][0], state["next_q"][0])
@@ -1233,9 +1223,9 @@ def get_kernel(**kwargs: Any):
                     for sfkv_i in range(num_sfkv // num_utccp_aligned_elems):
                         sfkv_base = local("uint32", K.uint32(sfkv_i * num_utccp_aligned_elems))
                         K.assign(
-                            desc_sf[0],
+                            desc_sf,
                             replace_smem_desc_addr(
-                                desc_sf[0],
+                                desc_sf,
                                 smem_sf_kv.ptr_to([umma_group_idx, kv_stage_idx, sfkv_base[0]]),
                             ),
                         )
@@ -1246,7 +1236,7 @@ def get_kernel(**kwargs: Any):
                                 + umma_group_idx * K.uint32(num_sfkv // 32)
                                 + sfkv_i * 4,
                             ),
-                            desc_sf[0],
+                            desc_sf,
                         )
 
                 tmem_stage_idx = K.local_scalar("uint32", init=tmem_state.stage)
@@ -1270,16 +1260,16 @@ def get_kernel(**kwargs: Any):
                 with K.If(K.cuda.elect_sync()), K.Then():
                     for k in range(head_dim // umma_k):
                         runtime_desc_i = local(
-                            "uint64", make_runtime_instr_desc_with_sf_id(desc_i[0], k * 2, k * 2)
+                            "uint64", make_runtime_instr_desc_with_sf_id(desc_i, k * 2, k * 2)
                         )
                         make_smem_desc(
-                            desc_a[0],
+                            desc_a,
                             smem_kv.ptr_to([umma_group_idx, kv_stage_idx, 0, k * umma_k // 2]),
                         )
-                        make_smem_desc(desc_b[0], smem_q.ptr_to([q_stage[0], 0, k * umma_k // 2]))
+                        make_smem_desc(desc_b, smem_q.ptr_to([q_stage[0], 0, k * umma_k // 2]))
                         mma_mxf4_block32_ss(
-                            desc_a[0],
-                            desc_b[0],
+                            desc_a,
+                            desc_b,
                             tmem_addr[0],
                             K.uint32(k),
                             runtime_desc_i[0],
@@ -1301,7 +1291,7 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warps 0-7: math + epilogue ---------------------
         with math:
-            math_end_kv_idx = end_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
+            math_end_kv_idx = end_kv_tile_idx * K.uint32(num_tiles_per_split)
             state = scheduler_state()
             q_state = K.RingState(num_q_stages)
             tmem_state = K.RingState(num_tmem_stages)
@@ -1310,7 +1300,7 @@ def get_kernel(**kwargs: Any):
             math_wg_idx = local("int32", warpgroup_idx)
             math_wg_u32 = K.Cast("uint32", math_wg_idx[0])
             math_thread_idx = local(
-                "uint32", (warp_idx_u32 % K.uint32(4)) * K.uint32(32) + lane_idx_u32[0]
+                "uint32", (warp_idx_u32 % K.uint32(4)) * K.uint32(32) + lane_idx_u32
             )
             accum = K.alloc_local([num_heads], "float32")
             cached_weights = K.alloc_local([next_n_atom, num_heads], "float32")
@@ -1406,7 +1396,7 @@ def get_kernel(**kwargs: Any):
                             )
                     if config.varlen:
                         load_atom_advance(state["next_q"][0], batch_size)
-                        K.assign(is_paired_atom[0], atom_advance_result[0] == K.uint32(2))
+                        K.assign(is_paired_atom[0], atom_advance_result == K.uint32(2))
                 K.assign(state["q_atom"][0], state["next_q"][0])
                 kv_idx = local("uint32", state["next_kv"][0])
                 kv_offset = local(

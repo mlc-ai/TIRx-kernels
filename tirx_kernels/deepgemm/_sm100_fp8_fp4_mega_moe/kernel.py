@@ -299,28 +299,28 @@ def make_runtime_instr_desc_with_sf_id(desc, sfa_id, sfb_id):
 
 
 def st_async_cluster_task_info(dst_ptr, bar_ptr, dst_cta_idx, task_info_regs):
-    mapped_bar = K.alloc_local((1,), "uint32")
-    mapped_dst = K.alloc_local((1,), "uint32")
-    mapped_dst_hi = K.alloc_local((1,), "uint32")
+    mapped_bar = K.local_scalar("uint32")
+    mapped_dst = K.local_scalar("uint32")
+    mapped_dst_hi = K.local_scalar("uint32")
     cta = K.cast(dst_cta_idx, "uint32")
-    K.ptx.mapa.shared__cluster.u32(mapped_bar[0], K.cuda.cvta_generic_to_shared(bar_ptr), cta)
-    K.ptx.mapa.shared__cluster.u32(mapped_dst[0], K.cuda.cvta_generic_to_shared(dst_ptr), cta)
+    K.ptx.mapa.shared__cluster.u32(mapped_bar, K.cuda.cvta_generic_to_shared(bar_ptr), cta)
+    K.ptx.mapa.shared__cluster.u32(mapped_dst, K.cuda.cvta_generic_to_shared(dst_ptr), cta)
     K.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
-        mapped_dst[0],
+        mapped_dst,
         task_info_regs[0],
         task_info_regs[1],
         task_info_regs[2],
         task_info_regs[3],
-        mapped_bar[0],
+        mapped_bar,
     )
-    K.ptx.add.u32(mapped_dst_hi[0], mapped_dst[0], K.uint32(16))
+    K.ptx.add.u32(mapped_dst_hi, mapped_dst, K.uint32(16))
     return K.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.v4.u32(
-        mapped_dst_hi[0],
+        mapped_dst_hi,
         task_info_regs[4],
         task_info_regs[5],
         task_info_regs[6],
         task_info_regs[7],
-        mapped_bar[0],
+        mapped_bar,
     )
 
 
@@ -1548,7 +1548,7 @@ def get_kernel(
         selected_num_tokens = K.alloc_local((1,), "int32")
         pool_block_offset_sum = K.alloc_local((1,), "int32")
         task_info_regs = K.alloc_local((8,), "uint32")
-        sched_inclusive_vals = K.alloc_local((1,), "uint32")
+        sched_inclusive_vals = K.local_scalar("uint32")
         stored_rank_counts = K.alloc_local((num_ranks_per_lane,), "uint32")
         remaining_rank_counts = K.alloc_local((num_ranks_per_lane,), "uint32")
         combine_stored_topk_slot_idx = K.local_scalar("int32")
@@ -1805,13 +1805,13 @@ def get_kernel(
         def scheduler_release_task_info():
             # `release_task_info`: all epilogue threads (both CTAs) arrive at the
             # leader CTA's empty barrier of the just-consumed stage.
-            _rem1 = K.alloc_local([1], "uint64")
+            _rem1 = K.local_scalar("uint64")
             K.ptx.mapa.shared__cluster.u64(
-                _rem1[0],
+                _rem1,
                 task_info_empty_barriers.ptr_to([sched_state.stage ^ K.int32(1)]),
                 K.uint32(0),
             )
-            K.ptx.mbarrier.arrive.b64(_rem1[0], K.uint32(1), pred=K.bool(True))
+            K.ptx.mbarrier.arrive.b64(_rem1, K.uint32(1), pred=K.bool(True))
 
         def producer_create_task(task_block_phase, task_num_clusters, task_shape_n, task_shape_k):
             # `create_task`: resolve the owning expert / m-block / valid_m of the
@@ -1835,25 +1835,19 @@ def get_kernel(
                     // K.uint32(kernel_config.block_m),
                 )
                 # `math::warp_inclusive_sum`
-                K.assign(sched_inclusive_vals[0], sched_expert_num_m_blocks)
+                K.assign(sched_inclusive_vals, sched_expert_num_m_blocks)
                 with K.unroll(0, 5) as shuffle_offset:
                     K.assign(
                         sched_inclusive_sum,
                         K.tvm_warp_shuffle_up(
-                            K.uint32(0xFFFFFFFF),
-                            sched_inclusive_vals[0],
-                            1 << shuffle_offset,
-                            32,
-                            32,
+                            K.uint32(0xFFFFFFFF), sched_inclusive_vals, 1 << shuffle_offset, 32, 32
                         ),
                     )
                     with K.If(lane_idx >= (1 << shuffle_offset)), K.Then():
-                        K.assign(
-                            sched_inclusive_vals[0], (sched_inclusive_vals[0] + sched_inclusive_sum)
-                        )
+                        K.assign(sched_inclusive_vals, (sched_inclusive_vals + sched_inclusive_sum))
                 K.assign(
                     sched_lane_pool_block_offset,
-                    (sched_block_offset + sched_inclusive_vals[0] - sched_expert_num_m_blocks),
+                    (sched_block_offset + sched_inclusive_vals - sched_expert_num_m_blocks),
                 )
                 K.assign(
                     sched_owner_mask,
@@ -1913,7 +1907,7 @@ def get_kernel(
                     sched_block_offset,
                     sched_block_offset
                     + K.tvm_warp_shuffle(
-                        K.uint32(0xFFFFFFFF), sched_inclusive_vals[0], K.int32(31), 32, 32
+                        K.uint32(0xFFFFFFFF), sched_inclusive_vals, K.int32(31), 32, 32
                     ),
                 )
 
@@ -1994,14 +1988,12 @@ def get_kernel(
             # `publish_task`: lanes 0/1 arrive-and-expect-tx at each CTA's full
             # barrier, then st.async the 32-byte TaskInfo into that CTA's smem.
             with K.If(lane_idx < K.int32(2)), K.Then():
-                _rem_ti = K.alloc_local([1], "uint64")
+                _rem_ti = K.local_scalar("uint64")
                 K.ptx.mapa.shared__cluster.u64(
-                    _rem_ti[0],
-                    task_info_full_barriers.ptr_to([sched_state.stage]),
-                    K.uint32(lane_idx),
+                    _rem_ti, task_info_full_barriers.ptr_to([sched_state.stage]), K.uint32(lane_idx)
                 )
                 K.ptx.mbarrier.arrive.expect_tx.release.cluster.b64(
-                    _rem_ti[0], K.uint32(task_info_bytes), pred=K.bool(True)
+                    _rem_ti, K.uint32(task_info_bytes), pred=K.bool(True)
                 )
                 st_async_cluster_task_info(
                     smem_task_infos.ptr_to([sched_state.stage, 0]),
@@ -2081,9 +2073,9 @@ def get_kernel(
             K.cuda.mbarrier_wait(barrier_ptr, phase)
 
         def tmem_empty_barrier_arrive_cta0(tmem_empty_barrier_ptr):
-            _rem2 = K.alloc_local([1], "uint64")
-            K.ptx.mapa.shared__cluster.u64(_rem2[0], tmem_empty_barrier_ptr, K.uint32(0))
-            K.ptx.mbarrier.arrive.b64(_rem2[0], K.uint32(1), pred=K.bool(True))
+            _rem2 = K.local_scalar("uint64")
+            K.ptx.mapa.shared__cluster.u64(_rem2, tmem_empty_barrier_ptr, K.uint32(0))
+            K.ptx.mbarrier.arrive.b64(_rem2, K.uint32(1), pred=K.bool(True))
 
         def umma_arrive_multicast_2x1sm(barrier_ptr):
             with K.If(K.cuda.elect_sync()), K.Then():
@@ -2197,9 +2189,9 @@ def get_kernel(
             )
 
         def full_barrier_arrive_cta0(full_barrier_ptr):
-            _rem3 = K.alloc_local([1], "uint64")
-            K.ptx.mapa.shared__cluster.u64(_rem3[0], full_barrier_ptr, K.uint32(0))
-            K.ptx.mbarrier.arrive.b64(_rem3[0], K.uint32(1), pred=K.bool(True))
+            _rem3 = K.local_scalar("uint64")
+            K.ptx.mapa.shared__cluster.u64(_rem3, full_barrier_ptr, K.uint32(0))
+            K.ptx.mbarrier.arrive.b64(_rem3, K.uint32(1), pred=K.bool(True))
 
         def make_instr_desc_block_scaled():
             K.cuda.tcgen05.encode_instr_descriptor_block_scaled(
@@ -3541,7 +3533,7 @@ def get_kernel(
             scaled_upper = K.alloc_local((1,), "uint64")
             scaled_lower = K.alloc_local((1,), "uint64")
             epilogue_bf16_packed = K.alloc_local((4,), "uint32")
-            tmem_addr = K.alloc_local((1,), "uint32")
+            tmem_addr = K.local_scalar("uint32")
             reduced = K.alloc_local((num_uint4_per_lane * num_elems_per_uint4, 2), "float32")
             load_shared_u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
             K.cuda.trap_when_assert_failed(tmem_allocated == K.uint32(0))
@@ -3699,7 +3691,7 @@ def get_kernel(
                                     ),
                                 )
                                 K.assign(
-                                    tmem_addr[0],
+                                    tmem_addr,
                                     K.cast(
                                         accum_stage_idx * umma_n
                                         + epilogue_wg_idx * wg_block_m
@@ -3708,18 +3700,14 @@ def get_kernel(
                                     ),
                                 )
                                 K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
-                                    values[0],
-                                    values[1],
-                                    values[2],
-                                    values[3],
-                                    K.uint32(tmem_addr[0]),
+                                    values[0], values[1], values[2], values[3], K.uint32(tmem_addr)
                                 )
                                 K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
                                     values[4],
                                     values[5],
                                     values[6],
                                     values[7],
-                                    K.uint32(K.bitwise_or(tmem_addr[0], K.uint32(0x00100000))),
+                                    K.uint32(K.bitwise_or(tmem_addr, K.uint32(0x00100000))),
                                 )
                                 fence_view_async_tmem_load()
                                 with K.If(j == wg_block_m // atom_m - 1), K.Then():
@@ -3974,7 +3962,7 @@ def get_kernel(
                             with K.unroll(0, num_atoms_per_store) as i:
                                 j = s * num_atoms_per_store + i
                                 K.assign(
-                                    tmem_addr[0],
+                                    tmem_addr,
                                     K.cast(
                                         accum_stage_idx * umma_n
                                         + epilogue_wg_idx * wg_block_m
@@ -3983,18 +3971,14 @@ def get_kernel(
                                     ),
                                 )
                                 K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
-                                    values[0],
-                                    values[1],
-                                    values[2],
-                                    values[3],
-                                    K.uint32(tmem_addr[0]),
+                                    values[0], values[1], values[2], values[3], K.uint32(tmem_addr)
                                 )
                                 K.ptx["tcgen05.ld.sync.aligned.16x256b.x1.b32"](
                                     values[4],
                                     values[5],
                                     values[6],
                                     values[7],
-                                    K.uint32(K.bitwise_or(tmem_addr[0], K.uint32(0x00100000))),
+                                    K.uint32(K.bitwise_or(tmem_addr, K.uint32(0x00100000))),
                                 )
                                 fence_view_async_tmem_load()
                                 with K.If(K.And(i == 0, s > 0)), K.Then():
