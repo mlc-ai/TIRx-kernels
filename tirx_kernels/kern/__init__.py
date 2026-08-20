@@ -389,7 +389,18 @@ _BINDING_HELP = (
 )
 
 
+_EVALUATE_HELP = (
+    "Kern rejects 'evaluate': every K call emits itself.\n"
+    "K.ptx.* / K.cuda.* and table ops reached as K.<op>(...) all auto-emit their void result at\n"
+    "the call, so a K.evaluate(...) wrapper is dead code -- delete it. A helper whose emission\n"
+    "seemed to need K.evaluate was returning a raw expression; call the instruction through K\n"
+    "inside the helper instead."
+)
+
+
 def __getattr__(name):
+    if name == "evaluate":
+        raise AttributeError(_EVALUATE_HELP)
     if name in _FORBIDDEN_BINDING_NAMES:
         raise AttributeError(_BINDING_HELP.format(name=name))
     if name in _FORBIDDEN_TIRX_NAMES:
@@ -398,9 +409,12 @@ def __getattr__(name):
             "raw PTX, and K.smem_pool().alloc(..., swizzle=...)"
         )
     try:
-        return getattr(_T, name)
+        value = getattr(_T, name)
     except AttributeError as err:
         raise AttributeError(f"module 'tirx_kernels.kern' has no attribute {name!r}") from err
+    if callable(value) and not isinstance(value, type):
+        return _StmtProxy(value)
+    return value
 
 
 __all__ = [
