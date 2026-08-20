@@ -910,6 +910,9 @@ def bf16_fused_m128(**kwargs: Any):
     lower_bound = cfg.lower_bound
     use_initial_state = cfg.use_initial_state
     store_final_state = cfg.store_final_state
+    compute_regs, epilogue_regs, producer_regs_target, prep_regs = (
+        (160, 40, 32, 56) if cfg.packed else (152, 40, 40, 56)
+    )
 
     @K.kernel(
         warps=THREADS // 32, arch="sm_100a", min_blocks_per_sm=1, grid=num_seqs * h
@@ -936,16 +939,16 @@ def bf16_fused_m128(**kwargs: Any):
         lane = K.lane_id()
 
         roles = K.specialize()
-        compute = roles.role("compute", warps=range(4), regs=168)
-        epilogue = roles.role("epilogue", warps=range(4, 8), regs=48)
+        compute = roles.role("compute", warps=range(4), regs=compute_regs)
+        epilogue = roles.role("epilogue", warps=range(4, 8), regs=epilogue_regs)
         producer_regs = roles.register_scope(
-            "producer_regs", warps=range(8, 12), regs=48
+            "producer_regs", warps=range(8, 12), regs=producer_regs_target
         )
         roles.role("idle8", warps=[8], register_scope=producer_regs)
         mma = roles.role("mma", warps=[9], register_scope=producer_regs)
         load = roles.role("load", warps=[10], register_scope=producer_regs)
         roles.role("idle11", warps=[11], register_scope=producer_regs)
-        prep_role_owner = roles.role("prep", warps=range(12, 32), regs=48)
+        prep_role_owner = roles.role("prep", warps=range(12, 32), regs=prep_regs)
 
         smem_pool = K.smem_pool()
         # Declaration order preserves the frozen 0..616 barrier byte map.
@@ -1922,10 +1925,16 @@ def bf16_fused_m128(**kwargs: Any):
                                 beta_raw_pair = K.alloc_local(
                                     (1,), "uint32", align=4
                                 )  # .cu:1360
+                                beta_raw_addr = K.local_scalar("int32")
+                                K.ptx.add.s32(
+                                    beta_raw_addr,
+                                    smem_beta_raw_addr + prep_stage_byte_base,
+                                    lane * 16 + head_idx_3 % 8 // 2 * 4,
+                                )
                                 K.assign(beta_raw_pair[0], _ld_shared_b32(
                                     smem_raw,
                                     K.cast(smem, "int32"),
-                                    smem_beta_raw_addr + prep_stage_byte_base + lane * 16 + head_idx_3 % 8 // 2 * 4,
+                                    beta_raw_addr,
                                 ))  # .cu:1361  # fmt: skip
                                 beta_raw_pair_fp32 = K.alloc_local(
                                     (2,), "float32"
@@ -2014,17 +2023,26 @@ def bf16_fused_m128(**kwargs: Any):
                             gate_load_token: K.int64 = bos_4 + K.cast(
                                 chunk_idx_3 * 32 + gate_load_row, "int64"
                             )  # .cu:1407
-                            gate_load_base: K.int64 = (
-                                gate_load_token * K.cast(h, "int64")
-                                + K.cast(head_idx_3, "int64")
-                            ) * 128 + K.cast(gate_load_segment * 8, "int64")  # .cu:1408
+                            gate_load_base = K.local_scalar("int64")
+                            K.ptx.mad.lo.s64(
+                                gate_load_base,
+                                gate_load_token,
+                                K.int64(h),
+                                K.cast(head_idx_3, "int64"),
+                            )
+                            K.ptx.mad.lo.s64(
+                                gate_load_base,
+                                gate_load_base,
+                                K.int64(128),
+                                K.cast(gate_load_segment * 8, "int64"),
+                            )  # .cu:1408
                             K.ptx["cp.async.cg.shared.global"](
                                 smem_g_raw_all.ptr_to(
                                     [stage_bf16 + gate_load_item * 8]
                                 ),
                                 g.ptr_to([gate_load_base]),
                                 16,
-                                K.cast(K.if_then_else(K.if_then_else(gate_load_token < eos_4, 1, 0) != 0, 16, 0), "uint32"),
+                                K.cast(K.if_then_else(chunk_idx_3 * 32 + gate_load_row < seq_len_4, 16, 0), "uint32"),
                             )  # .cu:1409-1410  # fmt: skip
                 with K.If(chunk_is_full_2 == 0):
                     with K.Then():  # .cu:1413-1429
@@ -2062,7 +2080,7 @@ def bf16_fused_m128(**kwargs: Any):
                                 beta_token: K.int64 = bos_4 + K.cast(
                                     chunk_idx_3 * 32 + lane, "int64"
                                 )
-                                with K.If(beta_token < eos_4):
+                                with K.If(chunk_idx_3 * 32 + lane < seq_len_4):
                                     with K.Then():
                                         beta_logit_1: K.f32 = K.cuda.bfloat162float(
                                             _ld_global_bf16(
@@ -2092,9 +2110,6 @@ def bf16_fused_m128(**kwargs: Any):
                         prefix_log2 = K.local_scalar("float32")  # .cu:1447
                         K.assign(prefix_log2, K.float32(0.0))
                         with K.serial(0, 32) as gate_row:  # .cu:1448-1471
-                            gate_token: K.int64 = bos_4 + K.cast(
-                                chunk_idx_3 * 32 + gate_row, "int64"
-                            )  # .cu:1449
                             gate_log2 = K.local_scalar("float32")  # .cu:1450
                             K.assign(gate_log2, K.float32(0.0))
                             gate_needs_compute = K.local_scalar("int32")
@@ -2107,7 +2122,9 @@ def bf16_fused_m128(**kwargs: Any):
                                             K.assign(gate_needs_compute, 0)
                             with K.If(gate_needs_compute != 0):
                                 with K.Then():  # .cu:1458-1468
-                                    with K.If(gate_token < eos_4):
+                                    with K.If(
+                                        chunk_idx_3 * 32 + gate_row < seq_len_4
+                                    ):
                                         with K.Then():
                                             gate_raw: K.f32 = K.cuda.bfloat162float(
                                                 _ld_shared_bf16(
@@ -2196,14 +2213,15 @@ def bf16_fused_m128(**kwargs: Any):
                 with K.serial(
                     0, 4, unroll=False
                 ) as work_pass:  # .cu:1498-1694 (#pragma unroll 1)
-                    work_item: K.int32 = work_pass * 128 + prep_tid  # .cu:1500
+                    work_item = K.local_scalar("int32")
+                    K.assign(work_item, work_pass * 128 + prep_tid)  # .cu:1500
                     row_1: K.int32 = work_item // 16  # .cu:1501
                     segment_1: K.int32 = work_item % 16  # .cu:1502
                     token_1: K.int64 = bos_4 + K.cast(
                         chunk_idx_3 * 32 + row_1, "int64"
                     )  # .cu:1503
                     token_valid_1: K.int32 = K.if_then_else(
-                        token_1 < eos_4, 1, 0
+                        chunk_idx_3 * 32 + row_1 < seq_len_4, 1, 0
                     )  # .cu:1504
                     gmem_base: K.int64 = (
                         token_1 * K.cast(h, "int64") + K.cast(head_idx_3, "int64")
@@ -2219,8 +2237,8 @@ def bf16_fused_m128(**kwargs: Any):
                     q_raw_vec = K.alloc_local((8,), "float32")  # .cu:1506
                     k_raw_vec = K.alloc_local((8,), "float32")  # .cu:1507
                     with K.unroll(8) as _zi:  # .cu:1508-1523
-                        K.ptx.mov.b32(q_raw_vec[_zi], K.float32(0.0))
-                        K.ptx.mov.b32(k_raw_vec[_zi], K.float32(0.0))
+                        K.assign(q_raw_vec[_zi], K.float32(0.0))
+                        K.assign(k_raw_vec[_zi], K.float32(0.0))
                     with K.If(chunk_is_full_2 != 0):
                         with K.Then():  # .cu:1524-1562
                             packed = K.alloc_local((4,), "uint32", align=16)  # .cu:1525
@@ -2232,20 +2250,20 @@ def bf16_fused_m128(**kwargs: Any):
                             )  # .cu:1526-1528  # fmt: skip
                             packed_fp32 = K.alloc_local((8,), "float32")  # .cu:1529
                             with K.unroll(4) as _pair:  # .cu:1530-1539
-                                K.ptx.mov.b32(
+                                K.assign(
                                     packed_fp32[_pair * 2],
                                     K.cuda.uint_as_float(
                                         packed[_pair + 0] << K.uint32(16)
                                     ),
                                 )
-                                K.ptx.mov.b32(
+                                K.assign(
                                     packed_fp32[_pair * 2 + 1],
                                     K.cuda.uint_as_float(
                                         packed[_pair + 0] & K.uint32(0xFFFF0000)
                                     ),
                                 )
                             with K.unroll(8) as value_idx:  # .cu:1540-1543
-                                K.ptx.mov.b32(
+                                K.assign(
                                     q_raw_vec[value_idx], packed_fp32[value_idx]
                                 )
                             packed_0 = K.alloc_local(
@@ -2259,20 +2277,20 @@ def bf16_fused_m128(**kwargs: Any):
                             )  # .cu:1545-1547  # fmt: skip
                             packed_0_fp32 = K.alloc_local((8,), "float32")  # .cu:1548
                             with K.unroll(4) as _pair:  # .cu:1549-1558
-                                K.ptx.mov.b32(
+                                K.assign(
                                     packed_0_fp32[_pair * 2],
                                     K.cuda.uint_as_float(
                                         packed_0[_pair + 0] << K.uint32(16)
                                     ),
                                 )
-                                K.ptx.mov.b32(
+                                K.assign(
                                     packed_0_fp32[_pair * 2 + 1],
                                     K.cuda.uint_as_float(
                                         packed_0[_pair + 0] & K.uint32(0xFFFF0000)
                                     ),
                                 )
                             with K.unroll(8) as value_idx_1:  # .cu:1559-1562
-                                K.ptx.mov.b32(
+                                K.assign(
                                     k_raw_vec[value_idx_1], packed_0_fp32[value_idx_1]
                                 )
                         with K.Else():
@@ -2285,7 +2303,7 @@ def bf16_fused_m128(**kwargs: Any):
                                             q_u32.ptr_to([gmem_base // 2 + _blk * 4]),
                                         )
                                         with K.unroll(4) as _pair:
-                                            K.ptx.mov.b32(
+                                            K.assign(
                                                 q_raw_vec[0 + _blk * 8 + _pair * 2],
                                                 (
                                                     K.cuda.uint_as_float(
@@ -2293,7 +2311,7 @@ def bf16_fused_m128(**kwargs: Any):
                                                     )
                                                 ),
                                             )
-                                            K.ptx.mov.b32(
+                                            K.assign(
                                                 q_raw_vec[0 + _blk * 8 + _pair * 2 + 1],
                                                 (
                                                     K.cuda.uint_as_float(
@@ -2309,7 +2327,7 @@ def bf16_fused_m128(**kwargs: Any):
                                             k_u32.ptr_to([gmem_base // 2 + _blk * 4]),
                                         )
                                         with K.unroll(4) as _pair:
-                                            K.ptx.mov.b32(
+                                            K.assign(
                                                 k_raw_vec[0 + _blk * 8 + _pair * 2],
                                                 (
                                                     K.cuda.uint_as_float(
@@ -2317,7 +2335,7 @@ def bf16_fused_m128(**kwargs: Any):
                                                     )
                                                 ),
                                             )
-                                            K.ptx.mov.b32(
+                                            K.assign(
                                                 k_raw_vec[0 + _blk * 8 + _pair * 2 + 1],
                                                 (
                                                     K.cuda.uint_as_float(
@@ -2396,8 +2414,8 @@ def bf16_fused_m128(**kwargs: Any):
                             ),
                             K.cuda.make_float2(q_inv, q_inv),
                         )
-                        K.ptx.mov.b32(q_raw_vec[_ls * 2], K.cuda.float2_x(_pk))
-                        K.ptx.mov.b32(q_raw_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                        K.assign(q_raw_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(q_raw_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
                     with K.unroll(4) as _ls:  # .cu:1637-1640
                         _pk = _mul_f32x2_inplace(
                             K.cuda.make_float2(
@@ -2405,8 +2423,8 @@ def bf16_fused_m128(**kwargs: Any):
                             ),
                             K.cuda.make_float2(k_inv, k_inv),
                         )
-                        K.ptx.mov.b32(k_raw_vec[_ls * 2], K.cuda.float2_x(_pk))
-                        K.ptx.mov.b32(k_raw_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                        K.assign(k_raw_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(k_raw_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
                     qd_vec = K.alloc_local((8,), "float32")  # .cu:1641
                     kd_vec = K.alloc_local((8,), "float32")  # .cu:1642
                     ki_vec = K.alloc_local((8,), "float32")  # .cu:1643
@@ -2432,9 +2450,9 @@ def bf16_fused_m128(**kwargs: Any):
                         decay: K.f32 = _approx_exp2(
                             prefix - common_log2
                         )  # .cu:1648-1649
-                        K.ptx.mov.b32(qd_vec[elem_in_segment_1], decay)  # .cu:1650
-                        K.ptx.mov.b32(kd_vec[elem_in_segment_1], decay)  # .cu:1651
-                        K.ptx.mov.b32(
+                        K.assign(qd_vec[elem_in_segment_1], decay)  # .cu:1650
+                        K.assign(kd_vec[elem_in_segment_1], decay)  # .cu:1651
+                        K.assign(
                             ki_vec[elem_in_segment_1],
                             K.cuda.fdividef(k_raw_vec[elem_in_segment_1], decay),
                         )  # .cu:1652 (-use_fast_math: / -> div.approx.f32)
@@ -2445,15 +2463,15 @@ def bf16_fused_m128(**kwargs: Any):
                                 q_raw_vec[_ls * 2], q_raw_vec[_ls * 2 + 1]
                             ),
                         )
-                        K.ptx.mov.b32(qd_vec[_ls * 2], K.cuda.float2_x(_pk))
-                        K.ptx.mov.b32(qd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                        K.assign(qd_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(qd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
                     with K.unroll(4) as _ls:  # .cu:1657-1660
                         _pk = _mul_f32x2_inplace(
                             K.cuda.make_float2(qd_vec[_ls * 2], qd_vec[_ls * 2 + 1]),
                             K.cuda.make_float2(K.float32(scale), K.float32(scale)),
                         )
-                        K.ptx.mov.b32(qd_vec[_ls * 2], K.cuda.float2_x(_pk))
-                        K.ptx.mov.b32(qd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                        K.assign(qd_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(qd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
                     with K.unroll(4) as _ls:  # .cu:1661-1663
                         _pk = _mul_f32x2_inplace(
                             K.cuda.make_float2(kd_vec[_ls * 2], kd_vec[_ls * 2 + 1]),
@@ -2461,11 +2479,11 @@ def bf16_fused_m128(**kwargs: Any):
                                 k_raw_vec[_ls * 2], k_raw_vec[_ls * 2 + 1]
                             ),
                         )
-                        K.ptx.mov.b32(kd_vec[_ls * 2], K.cuda.float2_x(_pk))
-                        K.ptx.mov.b32(kd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                        K.assign(kd_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(kd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
                     packed_1 = K.alloc_local((4,), "uint32", align=4)  # .cu:1664
                     with K.unroll(4) as _lp:  # .cu:1665-1669
-                        K.ptx.mov.b32(
+                        K.assign(
                             packed_1[_lp],
                             K.cuda.float22bfloat162_rn(
                                 qd_vec[_lp * 2 + 0], qd_vec[_lp * 2 + 1 + 0]
@@ -2480,7 +2498,7 @@ def bf16_fused_m128(**kwargs: Any):
                         )  # fmt: skip
                     packed_0_1 = K.alloc_local((4,), "uint32", align=4)  # .cu:1674
                     with K.unroll(4) as _lp:  # .cu:1675-1679
-                        K.ptx.mov.b32(
+                        K.assign(
                             packed_0_1[_lp],
                             K.cuda.float22bfloat162_rn(
                                 kd_vec[_lp * 2 + 0], kd_vec[_lp * 2 + 1 + 0]
@@ -2495,7 +2513,7 @@ def bf16_fused_m128(**kwargs: Any):
                         )  # fmt: skip
                     packed_1_1 = K.alloc_local((4,), "uint32", align=4)  # .cu:1684
                     with K.unroll(4) as _lp:  # .cu:1685-1689
-                        K.ptx.mov.b32(
+                        K.assign(
                             packed_1_1[_lp],
                             K.cuda.float22bfloat162_rn(
                                 ki_vec[_lp * 2 + 0], ki_vec[_lp * 2 + 1 + 0]
@@ -2737,28 +2755,28 @@ def bf16_fused_m128(**kwargs: Any):
                             K.ptx.mov.b32(seed[_zi], K.float32(0.0))
                         with K.If(row0 > col0):
                             with K.Then():  # .cu:1840-1842
-                                K.ptx.mov.b32(seed[0], acc[0] * beta0)
+                                K.assign(seed[0], acc[0] * beta0)
                         with K.If(row0 > col0 + 1):
                             with K.Then():  # .cu:1843-1845
-                                K.ptx.mov.b32(seed[1], acc[1] * beta0)
+                                K.assign(seed[1], acc[1] * beta0)
                         with K.If(row1 > col0):
                             with K.Then():  # .cu:1846-1848
-                                K.ptx.mov.b32(seed[2], acc[2] * beta1)
+                                K.assign(seed[2], acc[2] * beta1)
                         with K.If(row1 > col0 + 1):
                             with K.Then():  # .cu:1849-1851
-                                K.ptx.mov.b32(seed[3], acc[3] * beta1)
+                                K.assign(seed[3], acc[3] * beta1)
                         with K.If(row0 > col0 + 8):
                             with K.Then():  # .cu:1852-1854
-                                K.ptx.mov.b32(seed[4], acc[4] * beta0)
+                                K.assign(seed[4], acc[4] * beta0)
                         with K.If(row0 > col0 + 9):
                             with K.Then():  # .cu:1855-1857
-                                K.ptx.mov.b32(seed[5], acc[5] * beta0)
+                                K.assign(seed[5], acc[5] * beta0)
                         with K.If(row1 > col0 + 8):
                             with K.Then():  # .cu:1858-1860
-                                K.ptx.mov.b32(seed[6], acc[6] * beta1)
+                                K.assign(seed[6], acc[6] * beta1)
                         with K.If(row1 > col0 + 9):
                             with K.Then():  # .cu:1861-1863
-                                K.ptx.mov.b32(seed[7], acc[7] * beta1)
+                                K.assign(seed[7], acc[7] * beta1)
                         seed_packed = K.alloc_local((4,), "uint32", align=4)  # .cu:1864
                         with K.unroll(4) as _lp:  # .cu:1865-1869
                             K.ptx.mov.b32(
@@ -2926,28 +2944,28 @@ def bf16_fused_m128(**kwargs: Any):
                     K.ptx.mov.b32(mqk[_zi], K.float32(0.0))
                 with K.If(row0_1 >= col0_1):
                     with K.Then():  # .cu:2013-2015
-                        K.ptx.mov.b32(mqk[0], acc[0])
+                        K.assign(mqk[0], acc[0])
                 with K.If(row0_1 >= col0_1 + 1):
                     with K.Then():  # .cu:2016-2018
-                        K.ptx.mov.b32(mqk[1], acc[1])
+                        K.assign(mqk[1], acc[1])
                 with K.If(row1_1 >= col0_1):
                     with K.Then():  # .cu:2019-2021
-                        K.ptx.mov.b32(mqk[2], acc[2])
+                        K.assign(mqk[2], acc[2])
                 with K.If(row1_1 >= col0_1 + 1):
                     with K.Then():  # .cu:2022-2024
-                        K.ptx.mov.b32(mqk[3], acc[3])
+                        K.assign(mqk[3], acc[3])
                 with K.If(row0_1 >= col0_1 + 8):
                     with K.Then():  # .cu:2025-2027
-                        K.ptx.mov.b32(mqk[4], acc[4])
+                        K.assign(mqk[4], acc[4])
                 with K.If(row0_1 >= col0_1 + 9):
                     with K.Then():  # .cu:2028-2030
-                        K.ptx.mov.b32(mqk[5], acc[5])
+                        K.assign(mqk[5], acc[5])
                 with K.If(row1_1 >= col0_1 + 8):
                     with K.Then():  # .cu:2031-2033
-                        K.ptx.mov.b32(mqk[6], acc[6])
+                        K.assign(mqk[6], acc[6])
                 with K.If(row1_1 >= col0_1 + 9):
                     with K.Then():  # .cu:2034-2036
-                        K.ptx.mov.b32(mqk[7], acc[7])
+                        K.assign(mqk[7], acc[7])
                 mqk_packed = K.alloc_local((4,), "uint32", align=4)  # .cu:2037
                 with K.unroll(4) as _lp:  # .cu:2038-2042
                     K.ptx.mov.b32(
@@ -3267,7 +3285,7 @@ def bf16_fused_m128(**kwargs: Any):
                         with K.unroll(8) as diag_elem:  # .cu:2214-2219
                             with K.If(lane_in_diag == diag_elem):
                                 with K.Then():
-                                    K.ptx.mov.b32(inv_row[diag_elem], K.float32(1.0))
+                                    K.assign(inv_row[diag_elem], K.float32(1.0))
                         diag_group_base: K.int32 = lane - lane_in_diag  # .cu:2220
                         row_scale: K.f32 = -inv_row[
                             0
@@ -3599,27 +3617,12 @@ def bf16_fused_m128(**kwargs: Any):
                         swizzled_off_3: K.int32 = byte_off_2 ^ (
                             (byte_off_2 >> 7 & 7) << 4
                         )  # .cu:2260
-                        d_addr: K.int32 = (
-                            smem_inv_work_addr + prep_stage_byte_base + swizzled_off_3
+                        matrix_addr = K.local_scalar("int32")
+                        K.ptx.add.s32(
+                            matrix_addr,
+                            smem_inv_work_addr + prep_stage_byte_base,
+                            swizzled_off_3,
                         )  # .cu:2261
-                        byte_off_0: K.int32 = (
-                            prep_local_warp * 16 + 8 + lane_row
-                        ) * 128 + (prep_local_warp * 16 * 2)  # .cu:2262
-                        swizzled_off_1_1: K.int32 = byte_off_0 ^ (
-                            (byte_off_0 >> 7 & 7) << 4
-                        )  # .cu:2263
-                        c_addr: K.int32 = (
-                            smem_inv_work_addr + prep_stage_byte_base + swizzled_off_1_1
-                        )  # .cu:2264
-                        byte_off_2_1: K.int32 = (
-                            prep_local_warp * 16 + lane_row
-                        ) * 128 + (prep_local_warp * 16 * 2)  # .cu:2265
-                        swizzled_off_3_1: K.int32 = byte_off_2_1 ^ (
-                            (byte_off_2_1 >> 7 & 7) << 4
-                        )  # .cu:2266
-                        a_addr: K.int32 = (
-                            smem_inv_work_addr + prep_stage_byte_base + swizzled_off_3_1
-                        )  # .cu:2267
                         d_frag = K.alloc_local((2,), "uint32", align=4)  # .cu:2268
                         c_frag = K.alloc_local((1,), "uint32", align=4)  # .cu:2269
                         dc_acc = K.alloc_local((4,), "float32", align=4)  # .cu:2270
@@ -3630,17 +3633,18 @@ def bf16_fused_m128(**kwargs: Any):
                         # .cu:2275-2278 ldmatrix.x1 d_frag[0]
                         K.ptx.ldmatrix.sync.aligned.m8n8.x1.shared.b16(
                             d_frag[0],
-                            smem_raw.ptr_to([(d_addr) - K.cast(smem, "int32")]),
+                            smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")]),
                         )
                         # .cu:2279-2282 ldmatrix.x1 d_frag[1] (same address)
                         K.ptx.ldmatrix.sync.aligned.m8n8.x1.shared.b16(
                             d_frag[1],
-                            smem_raw.ptr_to([(d_addr) - K.cast(smem, "int32")]),
+                            smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")]),
                         )
                         # .cu:2283-2286 ldmatrix.x1.trans c_frag
+                        K.ptx.xor.b32(matrix_addr, matrix_addr, K.int32(16))
                         K.ptx.ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16(
                             c_frag[0],
-                            smem_raw.ptr_to([(c_addr) - K.cast(smem, "int32")]),
+                            smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")]),
                         )
                         _mma_m16n8k8_bf16_zero(dc_acc, d_frag, c_frag)  # .cu:2287-2289
                         with K.unroll(2) as _ls:  # .cu:2290-2293
@@ -3660,9 +3664,10 @@ def bf16_fused_m128(**kwargs: Any):
                                 ),
                             )
                         # .cu:2299-2302 ldmatrix.x1.trans inv_a_frag
+                        K.ptx.add.s32(matrix_addr, matrix_addr, K.int32(-1024))
                         K.ptx.ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16(
                             inv_a_frag[0],
-                            smem_raw.ptr_to([(a_addr) - K.cast(smem, "int32")]),
+                            smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")]),
                         )
                         _mma_m16n8k8_bf16_zero(
                             o_acc, dc_bf16, inv_a_frag
@@ -3674,18 +3679,10 @@ def bf16_fused_m128(**kwargs: Any):
                                     o_acc[_lp * 2 + 0], o_acc[_lp * 2 + 1 + 0]
                                 ),
                             )
-                        byte_off_4: K.int32 = (
-                            prep_local_warp * 16 + 8 + lane_row
-                        ) * 128 + (prep_local_warp * 16 * 2)  # .cu:2311
-                        swizzled_off_5: K.int32 = byte_off_4 ^ (
-                            (byte_off_4 >> 7 & 7) << 4
-                        )  # .cu:2312
-                        o_addr: K.int32 = (
-                            smem_inv_work_addr + prep_stage_byte_base + swizzled_off_5
-                        )  # .cu:2313
+                        K.ptx.add.s32(matrix_addr, matrix_addr, K.int32(1024))
                         # .cu:2314-2317 stmatrix.x1
                         K.ptx.stmatrix.sync.aligned.m8n8.x1.shared.b16(
-                            smem_raw.ptr_to([(o_addr) - K.cast(smem, "int32")]),
+                            smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")]),
                             o_bf16[0],
                         )
                         with K.If(K.cuda.elect_sync()):

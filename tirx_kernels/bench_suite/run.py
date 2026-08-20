@@ -2060,6 +2060,16 @@ def main() -> None:
         help="Optional baseline JSON to diff against instead of the pinned baseline.json",
     )
     ap.add_argument(
+        "--ab-before",
+        type=str,
+        default=None,
+        metavar="REV",
+        help=(
+            "Run REV and the current committed checkout as a paired A/B campaign; "
+            "each workload uses the same physical GPU on both sides"
+        ),
+    )
+    ap.add_argument(
         "--threshold",
         type=float,
         default=DEFAULT_REGRESSION_THRESHOLD,
@@ -2192,11 +2202,53 @@ def main() -> None:
     }
 
     if args.check_imports:
+        if args.ab_before:
+            print(
+                "[bench-suite] --check-imports cannot be combined with --ab-before", file=sys.stderr
+            )
+            sys.exit(2)
         from tirx_kernels.registry import check_workload_imports
 
         names = check_workload_imports(workloads, strict=True)
         print(f"[bench-suite] import check ok ({len(names)} kernels from {workloads_path})")
         return
+
+    if args.ab_before:
+        if args.baseline is not None:
+            print("[bench-suite] --baseline cannot be combined with --ab-before", file=sys.stderr)
+            sys.exit(2)
+        if args.max_prepare_processes is not None or args.ready_backlog is not None:
+            print(
+                "[bench-suite] --ab-before owns one one-shot child per GPU worker; "
+                "--max-prepare-processes/--ready-backlog do not apply",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        from tirx_kernels.bench_suite.ab import run_ab
+
+        try:
+            exit_code = run_ab(
+                workloads,
+                selection=selection,
+                before_revision=args.ab_before,
+                out_dir=args.out_dir,
+                label=args.label,
+                threshold=args.threshold,
+                rounds=args.rounds,
+                cooldown=args.cooldown,
+                no_probe=args.no_probe,
+                probe_timeout=args.probe_timeout,
+                util_threshold=args.util_threshold,
+                mem_threshold=args.mem_threshold,
+                no_report=args.no_report,
+            )
+        except ValueError as error:
+            print(f"[bench-suite] invalid A/B configuration: {error}", file=sys.stderr)
+            sys.exit(2)
+        except RuntimeError as error:
+            print(f"[bench-suite] A/B setup failed: {error}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(exit_code)
 
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

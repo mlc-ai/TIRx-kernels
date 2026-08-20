@@ -12,7 +12,7 @@ references are explicit diagnostics through `python -m tirx_kernels.bench
 registered kernel has one file. Files with `default_suite: true` select one to
 three representative single-GPU rows with `default: true`; curated three-row
 files label them `small`, `medium`, and `large`. The current default roster is
-149 rows across 51 device kernels.
+143 rows across 49 device kernels.
 
 With no `--workloads`, the suite writes the selected rows to
 `.bench-suite/workloads.generated.yaml`. Inspect that file before freezing a
@@ -89,9 +89,29 @@ otherwise incomparable rows fail. A complete matrix discovers crossings;
 after that, rerun only configs that are missing, changed, failed, or polluted.
 An explicit workload file or filter records a targeted selection, so the gate
 requires exactly those after rows while still requiring the immutable before
-baseline to contain the complete 149-row roster. Do not rerun clean passing rows
+baseline to contain the complete 143-row roster. Do not rerun clean passing rows
 or splice selected samples into the baseline. Byte-identical CUDA, fatbin, and
 final SASS already establish implementation alignment.
+
+## Run a same-GPU paired A/B
+
+Use `--ab-before` when the before and after samples must be collected in one
+campaign instead of comparing against the pinned run:
+
+```bash
+python -m tirx_kernels.bench_suite \
+  --ab-before <before-revision> \
+  --workloads workloads.yaml \
+  --rounds 15
+```
+
+The current checkout is the after side and must be clean and committed. The
+suite runs the current benchmark harness against both kernel revisions. Each
+workload is assigned to one available physical GPU; its before and after sides
+run on that same GPU UUID, while other workloads may run concurrently on other
+GPUs. If either side observes interference, both samples are discarded and the
+pair is retried. Artifacts are written under `.bench-suite/ab/` and the direct
+gate remains strict `after/before < 1.01`.
 
 ## Execution model
 
@@ -111,6 +131,7 @@ Useful options:
 | Option | Meaning |
 |---|---|
 | `--workloads PATH` | Run an explicit workload list |
+| `--ab-before REV` | Run REV/current as a same-GPU paired campaign |
 | `--filter TEXT` | Keep selected kernel names containing `TEXT` |
 | `--rounds N` | Independent standard-timer samples |
 | `--cooldown S` | Delay before each implementation |

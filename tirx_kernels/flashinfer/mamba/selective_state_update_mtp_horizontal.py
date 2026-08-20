@@ -367,7 +367,7 @@ def get_kernel(**kwargs: Any):
     @K.kernel(
         warps=5,
         arch="sm_100a",
-        min_blocks_per_sm=6,
+        min_blocks_per_sm=7,
         grid=(spec["BATCH"], spec["NHEADS"]),
         thread_layout="lane_warp",
     )
@@ -457,7 +457,7 @@ def get_kernel(**kwargs: Any):
         out_ready_barrier = out_ready.buf
 
         def run_update(IS_PAD: K.constexpr):
-            lane: K.int32 = K.tid_in_role() & 31
+            lane: K.int32 = K.lane_id()
             compute_warp: K.int32 = K.warp_id_in_role()
             random_seed = K.local_scalar("int64")
             K.assign(random_seed, 0)
@@ -541,13 +541,13 @@ def get_kernel(**kwargs: Any):
                                 _shared_load_v4_b32(s_state_words, state_word_index, state_words)
                                 with K.unroll(PAIRS_PER_TILE_MEMBER) as pair:
                                     if STATE_DTYPE == "bfloat16":
-                                        K.ptx.mov.b64(
+                                        K.assign(
                                             state_values[pair_base + pair],
                                             _bf16_word_to_f32x2(state_words[pair]),
                                         )
                                     else:
                                         if STATE_DTYPE == "float16":
-                                            K.ptx.mov.b64(
+                                            K.assign(
                                                 state_values[pair_base + pair],
                                                 (
                                                     K.cuda.make_float2(
@@ -561,7 +561,7 @@ def get_kernel(**kwargs: Any):
                                                 ),
                                             )
                                         else:
-                                            K.ptx.mov.b64(
+                                            K.assign(
                                                 state_values[pair_base + pair],
                                                 (
                                                     K.cuda.make_float2(
@@ -576,7 +576,7 @@ def get_kernel(**kwargs: Any):
                                             )
                             with K.Else():
                                 with K.unroll(PAIRS_PER_TILE_MEMBER) as pair:
-                                    K.ptx.mov.b64(
+                                    K.assign(
                                         state_values[pair_base + pair],
                                         K.cuda.make_float2(K.float32(0.0), K.float32(0.0)),
                                     )

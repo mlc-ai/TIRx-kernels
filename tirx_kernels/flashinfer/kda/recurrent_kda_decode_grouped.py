@@ -497,13 +497,23 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         lane = K.lane_id()
         wid = K.warp_id()
         h = K.alloc_local((1,), K.i32)
-        v_idx = K.alloc_local((1,), K.i32)
-        part = K.alloc_local((1,), K.i32)
         d = K.alloc_local((1,), K.i32)
         K.assign(h[0], hv // RATIO)
-        K.assign(v_idx[0], vz * CPB + tid // KS)  # the state column this thread owns
-        K.assign(part[0], tid % KS)  # which K-slice of that column
         K.assign(d[0], tid % HEAD_DIM)  # phase-A element base
+        if NUM_TOKENS == 1:
+            # Single-use coordinates are cheaper as expressions: materializing
+            # them extends their live range across phase A on the decode shape.
+            v_idx: K.int32 = vz * CPB + tid // KS
+            part: K.int32 = tid % KS
+        else:
+            # The recurrent loop reuses both coordinates for every token.
+            # Compute them once rather than rebuilding their address DAG.
+            v_idx_local = K.alloc_local((1,), K.i32)
+            part_local = K.alloc_local((1,), K.i32)
+            K.assign(v_idx_local[0], vz * CPB + tid // KS)
+            K.assign(part_local[0], tid % KS)
+            v_idx: K.int32 = v_idx_local[0]
+            part: K.int32 = part_local[0]
 
         # --- shared memory (recurrent_kda.py:526-541) --------------------------
         # The pool is the single owner of type, layout, offsets, and total size.
@@ -528,7 +538,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         # --- state load: one (8, G) granule per thread (recurrent_kda.py:562-574)
         # Element (e, gi) sits at e + gi*KS*8 + part*8, so each granule's eight
         # elements are contiguous: one 16B eviction-hinted vector load.
-        head_row: K.int32 = hv * HEAD_DIM * HEAD_DIM + v_idx[0] * HEAD_DIM
+        head_row: K.int32 = hv * HEAD_DIM * HEAD_DIM + v_idx * HEAD_DIM
         read_base = K.cast(slot0, "int64") * K.cast(STATE_SLOT_STRIDE, "int64") + K.cast(
             head_row, "int64"
         )
@@ -536,10 +546,10 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         s_words = K.alloc_local((4 * G,), "uint32")  # BF16 pairs, widened after the barrier
         for gi in range(G):
             words = _ld_global_granule_no_alloc(
-                state, read_base + K.cast(gi * KS * 8 + part[0] * 8, "int64")
+                state, read_base + K.cast(gi * KS * 8 + part * 8, "int64")
             )
             for pr in range(4):
-                K.ptx.mov.b32(s_words[gi * 4 + pr], words[pr])
+                K.assign(s_words[gi * 4 + pr], words[pr])
 
         # --- loop-invariant gate constants (recurrent_kda.py:576-586) ----------
         av: K.float32 = K.float32(1.0)
@@ -547,7 +557,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
             av = _exp2(_mul(_load_f32(a_log, h[0]), K.float32(LOG2_E)))
         dtb = K.alloc_local((EPT,), "float32")
         for e in range(EPT):
-            K.ptx.mov.b32(dtb[e], _load_f32(dt_bias, h[0] * HEAD_DIM + d[0] + e * NT))
+            K.assign(dtb[e], _load_f32(dt_bias, h[0] * HEAD_DIM + d[0] + e * NT))
 
         # =======================================================================
         # Phase A: stage every token's gate/key/query (recurrent_kda.py:588-640)
@@ -568,30 +578,31 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         g_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
         b_bits = K.alloc_local((NUM_TOKENS,), "uint16")
         for t in range(NUM_TOKENS):
-            K.ptx.mov.b32(slots[t], _load_i32(ssm_idx, n * NUM_TOKENS + t))
+            K.assign(slots[t], _load_i32(ssm_idx, n * NUM_TOKENS + t))
             # Out-of-row tokens clamp to token 0 so the loads stay in bounds; the
             # value is discarded by the `active` predicate in phase B.
             pidx: K.int32 = K.if_then_else(t < seq_len, token_base + t, 0)
-            K.ptx.mov.b16(
-                ves[t], _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx[0])
+            K.assign(
+                ves[t],
+                _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx),
             )
-            K.ptx.mov.b16(b_bits[t], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
+            K.assign(b_bits[t], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
             for e in range(EPT):
                 de_l: K.int32 = d[0] + e * NT
-                K.ptx.mov.b16(
+                K.assign(
                     q_bits[t * EPT + e],
                     _load_bf16_bits(q, (pidx * NUM_HEADS + h[0]) * HEAD_DIM + de_l),
                 )
-                K.ptx.mov.b16(
+                K.assign(
                     k_bits[t * EPT + e],
                     _load_bf16_bits(k, (pidx * NUM_HEADS + h[0]) * HEAD_DIM + de_l),
                 )
-                K.ptx.mov.b16(
+                K.assign(
                     g_bits[t * EPT + e],
                     _load_bf16_bits(g, pidx * g_stride_q + hv * HEAD_DIM + de_l),
                 )
         for t in range(NUM_TOKENS):
-            K.ptx.mov.b32(bbs[t], _bf16_to_f32(b_bits[t]))
+            K.assign(bbs[t], _bf16_to_f32(b_bits[t]))
 
             sqp: K.float32 = K.float32(0.0)
             skp: K.float32 = K.float32(0.0)
@@ -647,7 +658,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                 w = s_words[gi * 4 + pr]
                 lo = _bf16_to_f32(K.cast(w, "uint16"))
                 hi = _bf16_to_f32(K.cast(K.shift_right(w, K.uint32(16)), "uint16"))
-                K.ptx.mov.b64(s_pairs[gi * 4 + pr], _pack_f32x2(lo, hi))
+                K.assign(s_pairs[gi * 4 + pr], _pack_f32x2(lo, hi))
 
         # =======================================================================
         # Phase B: sequential recurrence over the tokens (recurrent_kda.py:645-717)
@@ -665,7 +676,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
             with K.If(active):
                 with K.Then():
                     pidx_b: K.int32 = token_base + t
-                    base_t: K.int32 = t * HEAD_DIM + part[0] * 8
+                    base_t: K.int32 = t * HEAD_DIM + part * 8
 
                     # ---- L2 factors (recurrent_kda.py:657-664); eps is hardcoded ----
                     sqt: K.float32 = K.float32(0.0)
@@ -682,23 +693,23 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                     krp = _ld_shared_granule(s_kr, base_t)
                     for pr in range(4):
                         sv = _vmul(s_pairs[pr], egp[pr])
-                        K.ptx.mov.b64(s_pairs[pr], sv)
-                        K.ptx.mov.b64(kreg[pr], krp[pr])
-                        K.ptx.mov.b64(pvec[pr], _vmul(krp[pr], sv))
+                        K.assign(s_pairs[pr], sv)
+                        K.assign(kreg[pr], krp[pr])
+                        K.assign(pvec[pr], _vmul(krp[pr], sv))
                     for gi in range(1, G):
                         egp = _ld_shared_granule(s_eg, base_t + gi * KS * 8)
                         krp = _ld_shared_granule(s_kr, base_t + gi * KS * 8)
                         for pr in range(4):
                             sv = _vmul(s_pairs[gi * 4 + pr], egp[pr])
-                            K.ptx.mov.b64(s_pairs[gi * 4 + pr], sv)
-                            K.ptx.mov.b64(kreg[gi * 4 + pr], krp[pr])
+                            K.assign(s_pairs[gi * 4 + pr], sv)
+                            K.assign(kreg[gi * 4 + pr], krp[pr])
                             # mul then add -- the source emits no fma.*.f32x2.
-                            K.ptx.mov.b64(pvec[pr], _vadd(pvec[pr], _vmul(krp[pr], sv)))
+                            K.assign(pvec[pr], _vadd(pvec[pr], _vmul(krp[pr], sv)))
 
                     # ---- balanced 8-term tree, then the KS butterfly join ----
                     for pr in range(4):
-                        K.ptx.mov.b32(pf[2 * pr], K.cuda.float2_x(pvec[pr]))
-                        K.ptx.mov.b32(pf[2 * pr + 1], K.cuda.float2_y(pvec[pr]))
+                        K.assign(pf[2 * pr], K.cuda.float2_x(pvec[pr]))
+                        K.assign(pf[2 * pr + 1], K.cuda.float2_y(pvec[pr]))
                     pred: K.float32 = _add(
                         _add(_add(pf[0], pf[1]), _add(pf[2], pf[3])),
                         _add(_add(pf[4], pf[5]), _add(pf[6], pf[7])),
@@ -713,18 +724,18 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                     qrp = _ld_shared_granule(s_qr, base_t)
                     for pr in range(4):
                         sv = _vadd(s_pairs[pr], _vmul(kreg[pr], dpair))
-                        K.ptx.mov.b64(s_pairs[pr], sv)
-                        K.ptx.mov.b64(ovec[pr], _vmul(qrp[pr], sv))
+                        K.assign(s_pairs[pr], sv)
+                        K.assign(ovec[pr], _vmul(qrp[pr], sv))
                     for gi in range(1, G):
                         qrp = _ld_shared_granule(s_qr, base_t + gi * KS * 8)
                         for pr in range(4):
                             sv = _vadd(s_pairs[gi * 4 + pr], _vmul(kreg[gi * 4 + pr], dpair))
-                            K.ptx.mov.b64(s_pairs[gi * 4 + pr], sv)
-                            K.ptx.mov.b64(ovec[pr], _vadd(ovec[pr], _vmul(qrp[pr], sv)))
+                            K.assign(s_pairs[gi * 4 + pr], sv)
+                            K.assign(ovec[pr], _vadd(ovec[pr], _vmul(qrp[pr], sv)))
 
                     for pr in range(4):
-                        K.ptx.mov.b32(pf[2 * pr], K.cuda.float2_x(ovec[pr]))
-                        K.ptx.mov.b32(pf[2 * pr + 1], K.cuda.float2_y(ovec[pr]))
+                        K.assign(pf[2 * pr], K.cuda.float2_x(ovec[pr]))
+                        K.assign(pf[2 * pr + 1], K.cuda.float2_y(ovec[pr]))
                     o: K.float32 = _add(
                         _add(_add(pf[0], pf[1]), _add(pf[2], pf[3])),
                         _add(_add(pf[4], pf[5]), _add(pf[6], pf[7])),
@@ -736,9 +747,9 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                     # ptxas, so an `if` around an asm store can never be if-converted.
                     _store_bf16_bits_pred(
                         out,
-                        (pidx_b * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx[0],
+                        (pidx_b * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx,
                         _f32_to_bf16(_mul(o, rq)),
-                        K.cast(part[0] == 0, "int32"),
+                        K.cast(part == 0, "int32"),
                     )
 
                     # ---- BF16 checkpoint write, eviction-hinted (:702-713) ----
@@ -747,7 +758,7 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                     ) + K.cast(head_row, "int64")
                     for gi in range(G):
                         for pr in range(4):
-                            K.ptx.mov.b32(
+                            K.assign(
                                 words_w[pr],
                                 _pack_bf16x2(
                                     K.cuda.float2_y(s_pairs[gi * 4 + pr]),
@@ -755,16 +766,16 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
                                 ),
                             )
                         _st_global_granule_no_alloc(
-                            state, write_base + K.cast(gi * KS * 8 + part[0] * 8, "int64"), words_w
+                            state, write_base + K.cast(gi * KS * 8 + part * 8, "int64"), words_w
                         )
                 with K.Else():
                     # Pad rows still own their output element: the host allocates `out`
                     # uninitialized because the kernel defines every slot.
                     _store_bf16_bits_pred(
                         out,
-                        ((token_base + t) * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx[0],
+                        ((token_base + t) * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx,
                         K.uint16(0),
-                        K.And(in_row, part[0] == 0),
+                        K.And(in_row, part == 0),
                     )
 
         # --- orphan packed suffix (recurrent_kda.py:719-725) --------------------
