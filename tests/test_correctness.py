@@ -25,37 +25,22 @@ def _correctness_cases() -> list[Any]:
         if len(labels) != len(set(labels)):
             raise RuntimeError(f"correctness config labels are not unique for {kernel_name}")
         for config, label in zip(module.CONFIGS, labels, strict=True):
-            required_devices = int(
-                config.get("num_processes", config.get("world_size", 1))
-            )
+            required_devices = int(config.get("num_processes", config.get("world_size", 1)))
             cases.append(
-                pytest.param(
-                    kernel_name,
-                    label,
-                    required_devices,
-                    id=f"{kernel_name}[{label}]",
-                )
+                pytest.param(kernel_name, label, required_devices, id=f"{kernel_name}[{label}]")
             )
     return cases
 
 
 def _visible_gpu_memory() -> list[tuple[str, int, bool]]:
     output = subprocess.check_output(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,uuid,memory.free",
-            "--format=csv,noheader,nounits",
-        ],
+        ["nvidia-smi", "--query-gpu=index,uuid,memory.free", "--format=csv,noheader,nounits"],
         text=True,
     )
     compute_processes = {
         line.strip()
         for line in subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-compute-apps=gpu_uuid",
-                "--format=csv,noheader,nounits",
-            ],
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid", "--format=csv,noheader,nounits"],
             text=True,
         ).splitlines()
         if line.strip()
@@ -149,9 +134,7 @@ def _last_json_object(output: str) -> dict[str, Any]:
     raise AssertionError(f"correctness child did not emit JSON:\n{output[-12000:]}")
 
 
-@pytest.mark.parametrize(
-    ("kernel_name", "config_label", "required_devices"), _correctness_cases()
-)
+@pytest.mark.parametrize(("kernel_name", "config_label", "required_devices"), _correctness_cases())
 def test_kernel_correctness(
     kernel_name: str, config_label: str, required_devices: int, testrun_uid: str
 ) -> None:

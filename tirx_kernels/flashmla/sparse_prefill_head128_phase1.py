@@ -357,10 +357,8 @@ def make_kernel(
 
         def encode(data, rank, *shape):
             descriptor = K.stack_alloca("tensormap", 1)
-            K.evaluate(
-                K.call_packed(
-                    "runtime.cuTensorMapEncodeTiled", descriptor, "bfloat16", rank, data, *shape
-                )
+            K.call_packed(
+                "runtime.cuTensorMapEncodeTiled", descriptor, "bfloat16", rank, data, *shape
             )
             return descriptor
 
@@ -956,8 +954,6 @@ def make_kernel(
                         )
                 with K.If(warp_idx == 1), K.Then():
                     with K.If(K.cuda.elect_sync()), K.Then():
-                        epi_k2 = epi_k + (D_V // B_EPI // 2)
-                        K.evaluate(epi_k2)
                         o_part1_offset = (epi_k * B_EPI + D_V // 2) * (B_H // 2) * BF16_BYTES
                         K.ptx[_TMA_S2G_3D](
                             K.address_of(out_part1_tensormap),

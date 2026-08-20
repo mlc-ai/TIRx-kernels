@@ -2414,10 +2414,8 @@ def get_kernel(
                         )
                         K.assign(dispatch_expert_idx, K.cast(ordinary_global_s64, "int32"))
                         with K.If(dispatch_expert_idx >= 0), K.Then():
-                            K.evaluate(
-                                K.cuda.atomic_add(
-                                    smem_expert_count.ptr_to([dispatch_expert_idx]), 1
-                                )
+                            K.ptx.red.shared.add.u32(
+                                smem_expert_count.ptr_to([dispatch_expert_idx]), 1
                             )
                 K.cuda.warp_sync()
                 K.assign(

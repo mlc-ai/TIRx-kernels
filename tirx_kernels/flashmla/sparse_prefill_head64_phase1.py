@@ -312,10 +312,8 @@ def make_kernel(
 
         def encode(data, rank, *shape):
             descriptor = K.stack_alloca("tensormap", 1)
-            K.evaluate(
-                K.call_packed(
-                    "runtime.cuTensorMapEncodeTiled", descriptor, "bfloat16", rank, data, *shape
-                )
+            K.call_packed(
+                "runtime.cuTensorMapEncodeTiled", descriptor, "bfloat16", rank, data, *shape
             )
             return descriptor
 

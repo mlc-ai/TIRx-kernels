@@ -830,7 +830,7 @@ def get_kernel(**kwargs: Any):
                 head * DIM, "int64"
             )
 
-            K.evaluate(state.data)
+            K.keep_alive(state.data)
 
             if ROLE == "producer":
                 read_state: K.bool = state_batch != K.cast(pad_slot_id, "int64")

@@ -35,15 +35,30 @@ def test_stack_alloca_matches_bound_tvm_stack_alloca():
 
     def bind_form(out):
         handle = _I.Bind(K.tvm_stack_alloca("tensormap", 1))
-        K.evaluate(handle)
+        K.keep_alive(handle)
         K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
     def sanctioned_form(out):
         handle = K.stack_alloca("tensormap", 1)
-        K.evaluate(handle)
+        K.keep_alive(handle)
         K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
     assert _tir(bind_form) == _tir(sanctioned_form)
+
+
+def test_call_packed_has_statement_semantics():
+    from tvm.script import tirx as _T
+    from tvm.tirx.script.builder import ir as _I
+
+    def sanctioned_form(out):
+        K.call_packed("runtime.probe", K.int32(1))
+        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    def reference_form(out):
+        _I.evaluate(_T.call_packed("runtime.probe", K.int32(1)))
+        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    assert _tir(sanctioned_form) == _tir(reference_form)
 
 
 def test_retired_binding_forms_are_rejected_with_guidance():
@@ -52,3 +67,5 @@ def test_retired_binding_forms_are_rejected_with_guidance():
     for name in ("Bind", "let", "Let"):
         with pytest.raises(AttributeError, match="two spellings"):
             getattr(K, name)
+    with pytest.raises(AttributeError, match="emits itself"):
+        K.evaluate

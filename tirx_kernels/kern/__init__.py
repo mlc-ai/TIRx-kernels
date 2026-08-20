@@ -101,11 +101,24 @@ def _is_void_call(value):
     )
 
 
-def evaluate(value):
-    """Emit a value expression; accept void K calls that already emitted themselves."""
-    if value is None:
-        return None
-    return _I.evaluate(value)
+def keep_alive(value):
+    """Emit a no-op use that pins an otherwise-unreferenced value.
+
+    The one sanctioned way to keep a buffer parameter in the kernel signature
+    when the body only reaches it through a tensor map: without a textual use
+    the parameter is dead-code-eliminated and the launch ABI changes.
+    """
+    _I.evaluate(value)
+
+
+def call_packed(*args):
+    """Emit a packed-function call as a statement.
+
+    ``tvm_call_packed`` returns int32, so it is not covered by the void
+    auto-emit; every kernel-side use discards the result, so ``K`` gives it
+    statement semantics directly.
+    """
+    _I.evaluate(_T.call_packed(*args))
 
 
 # ---------------------------------------------------------------------------

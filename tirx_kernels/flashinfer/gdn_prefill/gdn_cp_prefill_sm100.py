@@ -2152,7 +2152,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
                             m_state.advance()
 
                 with idle:
-                    K.evaluate(0)
+                    pass
 
     return fixup_utcmma
 
