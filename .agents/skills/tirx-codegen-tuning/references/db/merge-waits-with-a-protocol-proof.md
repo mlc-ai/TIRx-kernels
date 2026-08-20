@@ -42,6 +42,24 @@ if STAGES == 8:
     )
 ```
 
+A drain that waits on everything the thread has outstanding merges the same
+way. Where an epilogue reads a tile with several `tcgen05.ld` instructions and
+waits after each, one wait after the last issue still orders all of them ahead
+of the first consuming store, and the reads then overlap instead of draining
+one at a time:
+
+```python
+# before: each read drains before the next is issued.
+for chunk in range(CHUNKS):
+    _tmem_load(frag[chunk], addr(chunk))
+    _tmem_wait_ld()
+
+# after: issue them all, drain once.
+for chunk in range(CHUNKS):
+    _tmem_load(frag[chunk], addr(chunk))
+_tmem_wait_ld()
+```
+
 ## Rationale
 
 Before editing, write the producer-consumer happens-before argument; the merge
@@ -52,6 +70,16 @@ contribution.
 
 Do not merge visibility domains, permit ring overwrite, remove a release
 witness, or weaken cross-stream ordering.
+
+A wait that looks like a pure release may still be load-bearing. Where a named
+barrier is reused across phases by several warpgroups, replacing its trailing
+`bar.sync` with `bar.arrive` -- on the argument that the warpgroup only needs
+to release another warp and never needs the return trip -- deadlocked: the
+arrival counts fall out of phase with the matching `bar.sync` elsewhere. Match
+the reference's instruction only after the phase argument holds for the port's
+own barrier assignment, which may differ if the barrier ids were renumbered.
+The merged form above is safe by contrast because the drain is per-thread, with
+no other participant to fall out of step with.
 
 ## Verification
 
