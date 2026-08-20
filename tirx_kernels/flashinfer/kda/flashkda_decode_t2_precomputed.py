@@ -63,21 +63,21 @@ _MMA_ZERO_C = (K.float32(0.0), K.float32(0.0), K.float32(0.0), K.float32(0.0))
 
 
 def _ptx_un(chain: str, a, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a)
+    return out
 
 
 def _ptx_bin(chain: str, a, b, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a, b))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a, b)
+    return out
 
 
 def _ptx_ter(chain: str, a, b, c, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a, b, c))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a, b, c)
+    return out
 
 
 def _mul(a, b):
@@ -112,17 +112,11 @@ def _expf(a):
 
 def _shfl_bfly(value, lane_xor):
     """``shfl.sync.bfly.b32``, clamp 31 and full member mask."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(
-        K.ptx.shfl_sync.bfly.b32(
-            out[0],
-            K.reinterpret("uint32", value),
-            K.uint32(lane_xor),
-            K.uint32(31),
-            K.uint32(0xFFFFFFFF),
-        )
+    out = K.local_scalar("uint32")
+    K.ptx.shfl_sync.bfly.b32(
+        out, K.reinterpret("uint32", value), K.uint32(lane_xor), K.uint32(31), K.uint32(0xFFFFFFFF)
     )
-    return K.reinterpret("float32", out[0])
+    return K.reinterpret("float32", out)
 
 
 def _swz(byte_off):
@@ -132,93 +126,83 @@ def _swz(byte_off):
 
 def _st_shared_f32(region, byte_off, value):
     """Store one FP32 payload through a region-local byte address."""
-    K.evaluate(K.ptx.st.shared.b32(region.ptr_to([byte_off]), K.reinterpret("uint32", value)))
+    K.ptx.st.shared.b32(region.ptr_to([byte_off]), K.reinterpret("uint32", value))
 
 
 def _ld_shared_f32(region, byte_off):
     """Load one FP32 payload through a region-local byte address."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.ld.shared.b32(out[0], region.ptr_to([byte_off])))
-    return K.reinterpret("float32", out[0])
+    out = K.local_scalar("uint32")
+    K.ptx.ld.shared.b32(out, region.ptr_to([byte_off]))
+    return K.reinterpret("float32", out)
 
 
 def _st_shared_i32(region, byte_off, value):
     """Store one int32 payload through a region-local byte address."""
-    K.evaluate(K.ptx.st.shared.b32(region.ptr_to([byte_off]), K.reinterpret("uint32", value)))
+    K.ptx.st.shared.b32(region.ptr_to([byte_off]), K.reinterpret("uint32", value))
 
 
 def _ld_shared_i32(region, byte_off):
     """Load one int32 payload through a region-local byte address."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(K.ptx.ld.shared.b32(out[0], region.ptr_to([byte_off])))
-    return K.reinterpret("int32", out[0])
+    out = K.local_scalar("uint32")
+    K.ptx.ld.shared.b32(out, region.ptr_to([byte_off]))
+    return K.reinterpret("int32", out)
 
 
 def _ld_shared_f32x4(region, byte_off, dst, base):
     """Load four contiguous FP32 values through a region-local byte address."""
     words = K.alloc_local((4,), "uint32")
-    K.evaluate(
-        K.ptx.ld.shared.v4.b32(words[0], words[1], words[2], words[3], region.ptr_to([byte_off]))
-    )
+    K.ptx.ld.shared.v4.b32(words[0], words[1], words[2], words[3], region.ptr_to([byte_off]))
     for index in range(4):
         K.buffer_store(dst, K.reinterpret("float32", words[index]), [base + index])
 
 
 def _st_shared_u32x4(region, byte_off, words):
     """Store four contiguous words through a region-local byte address."""
-    K.evaluate(
-        K.ptx.st.shared.v4.b32(region.ptr_to([byte_off]), words[0], words[1], words[2], words[3])
-    )
+    K.ptx.st.shared.v4.b32(region.ptr_to([byte_off]), words[0], words[1], words[2], words[3])
 
 
 def _st_shared_b16(region, byte_off, bits):
     """Store one 16-bit payload through a region-local byte address."""
-    K.evaluate(K.ptx.st.shared.b16(region.ptr_to([byte_off]), bits))
+    K.ptx.st.shared.b16(region.ptr_to([byte_off]), bits)
 
 
 def _ldmatrix_x4(region, byte_off, frag, trans: bool):
     """Load one x4 matrix fragment from a region-local byte address."""
     if trans:
-        K.evaluate(
-            K.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                frag[0], frag[1], frag[2], frag[3], region.ptr_to([byte_off])
-            )
+        K.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+            frag[0], frag[1], frag[2], frag[3], region.ptr_to([byte_off])
         )
     else:
-        K.evaluate(
-            K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                frag[0], frag[1], frag[2], frag[3], region.ptr_to([byte_off])
-            )
+        K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
+            frag[0], frag[1], frag[2], frag[3], region.ptr_to([byte_off])
         )
 
 
 def _shfl_idx(value, source_lane):
     """``shfl.sync.idx.b32``, clamp 31 and full member mask."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(
-        K.ptx.shfl_sync.idx.b32(
-            out[0],
-            K.reinterpret("uint32", value),
-            K.cast(source_lane, "uint32"),
-            K.uint32(31),
-            K.uint32(0xFFFFFFFF),
-        )
+    out = K.local_scalar("uint32")
+    K.ptx.shfl_sync.idx.b32(
+        out,
+        K.reinterpret("uint32", value),
+        K.cast(source_lane, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
     )
-    return K.reinterpret("float32", out[0])
+    return K.reinterpret("float32", out)
 
 
 def _load_i32(buffer, index):
     """``ld.global.nc.b32`` -- the read-only metadata loads."""
-    out = K.alloc_local((1,), "int32")
-    K.evaluate(K.ptx.ld.global_.nc.b32(out[0], buffer.ptr_to([index])))
-    return out[0]
+    out = K.local_scalar("int32")
+    K.ptx.ld.global_.nc.b32(out, buffer.ptr_to([index]))
+    return out
 
 
 def _load_bf16_f32(buffer, index):
     """``ld.global.nc.b16`` + ``cvt.f32.bf16`` -- the scalar v and beta loads."""
-    bits = K.alloc_local((1,), "uint16")
-    K.evaluate(K.ptx.ld.global_.nc.b16(bits[0], buffer.ptr_to([index])))
-    return _ptx_un("cvt.f32.bf16", bits[0])
+    bits = K.local_scalar("uint16")
+    K.ptx.ld.global_.nc.b16(bits, buffer.ptr_to([index]))
+    return _ptx_un("cvt.f32.bf16", bits)
 
 
 def _widen_lo(word):
@@ -234,7 +218,7 @@ def _widen_hi(word):
 def _load_u32x2(buffer, index):
     """``ld.global.nc.v2.b32`` -- one 8-byte tile (four bf16), left packed."""
     words = K.alloc_local((2,), "uint32")
-    K.evaluate(K.ptx.ld.global_.nc.v2.b32(words[0], words[1], buffer.ptr_to([index])))
+    K.ptx.ld.global_.nc.v2.b32(words[0], words[1], buffer.ptr_to([index]))
     return words
 
 
@@ -244,17 +228,13 @@ def _load_u32x4(buffer, index):
     Not ``.nc``: the same kernel writes `state`.
     """
     words = K.alloc_local((4,), "uint32")
-    K.evaluate(
-        K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
-    )
+    K.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
     return words
 
 
 def _store_u32x4(buffer, index, words):
     """``st.global.v4.b32`` -- one 16-byte state tile."""
-    K.evaluate(
-        K.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
-    )
+    K.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
 
 
 def _pack_bf16x2(hi, lo):
@@ -265,31 +245,27 @@ def _pack_bf16x2(hi, lo):
 def _store_f32_as_bf16(buffer, index, value, pred):
     """``cvt.rn.bf16.f32`` + predicated ``st.global.b16``."""
     bits = _ptx_un("cvt.rn.bf16.f32", value, dtype="uint16")
-    K.evaluate(K.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=pred))
+    K.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=pred)
 
 
 def _mma_zero(acc, a, b):
     """``mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`` with an explicit zero C."""
-    K.evaluate(
-        K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
             acc[0], acc[1], acc[2], acc[3],
             a[0], a[1], a[2], a[3],
             b[0], b[1],
             *_MMA_ZERO_C,
-        )
-    )  # fmt: skip
+        )  # fmt: skip
 
 
 def _mma_acc(acc, a, b):
     """Same, accumulating: C aliases D, matching the source's `+f` tied registers."""
-    K.evaluate(
-        K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
             acc[0], acc[1], acc[2], acc[3],
             a[0], a[1], a[2], a[3],
             b[0], b[1],
             acc[0], acc[1], acc[2], acc[3],
-        )
-    )  # fmt: skip
+        )  # fmt: skip
 
 
 def _case(label: str, **overrides: Any) -> dict[str, Any]:
@@ -470,17 +446,17 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
             K.ptx.st.shared.b32(ptr, K.reinterpret("uint32", value))
 
         def ld_shared_f32(ptr):
-            word = K.alloc_local((1,), "uint32")
-            K.ptx.ld.shared.b32(word[0], ptr)
-            return K.reinterpret("float32", word[0])
+            word = K.local_scalar("uint32")
+            K.ptx.ld.shared.b32(word, ptr)
+            return K.reinterpret("float32", word)
 
         def st_shared_i32(ptr, value):
             K.ptx.st.shared.b32(ptr, K.reinterpret("uint32", value))
 
         def ld_shared_i32(ptr):
-            word = K.alloc_local((1,), "uint32")
-            K.ptx.ld.shared.b32(word[0], ptr)
-            return K.reinterpret("int32", word[0])
+            word = K.local_scalar("uint32")
+            K.ptx.ld.shared.b32(word, ptr)
+            return K.reinterpret("int32", word)
 
         def ld_shared_f32x4(ptr, dst, base):
             words = K.alloc_local((4,), "uint32")
@@ -505,38 +481,25 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
                 )
 
         # --- work decomposition and lane roles (:142-160) ----------------------
-        value_tile = K.alloc_local((1,), "int32")
-        K.assign(value_tile[0], work % VALUE_SPLIT)
-        hv = K.alloc_local((1,), "int32")
-        K.assign(hv[0], work // VALUE_SPLIT)
-        query_head = K.alloc_local((1,), "int32")
-        K.assign(query_head[0], hv[0] // HEAD_RATIO)
-        warp = K.alloc_local((1,), "int32")
-        K.assign(warp[0], tid // 32)  # == token index in phases A and C
-        lane = K.alloc_local((1,), "int32")
-        K.assign(lane[0], tid % 32)
-        lane_quad = K.alloc_local((1,), "int32")
-        K.assign(lane_quad[0], lane[0] % 4)
-        frag_row = K.alloc_local((1,), "int32")
-        K.assign(frag_row[0], lane[0] // 4)
-        quad_base = K.alloc_local((1,), "int32")
-        K.assign(quad_base[0], lane[0] - lane_quad[0])
-        group = K.alloc_local((1,), "int32")
-        K.assign(group[0], tid // 16)
-        lane_group = K.alloc_local((1,), "int32")
-        K.assign(lane_group[0], tid % 16)
-        k_start = K.alloc_local((1,), "int32")
-        K.assign(k_start[0], lane_group[0] * 8)
-        elem_start = K.alloc_local((1,), "int32")
-        K.assign(elem_start[0], lane[0] * 4)
-        tile_row_base = K.alloc_local((1,), "int32")
-        K.assign(tile_row_base[0], value_tile[0] * ROWS_PER_CTA)
-        owned_row_base = K.alloc_local((1,), "int32")
-        K.assign(owned_row_base[0], group[0] * 8)
-        token_base = K.alloc_local((1,), "int32")
-        K.assign(token_base[0], _load_i32(cu, n))
-        seq_len = K.alloc_local((1,), "int32")
-        K.assign(seq_len[0], _load_i32(cu, n + 1) - token_base[0])
+        value_tile = K.local_scalar("int32", init=work % VALUE_SPLIT)
+        hv = K.local_scalar("int32", init=work // VALUE_SPLIT)
+        query_head = K.local_scalar("int32", init=hv // HEAD_RATIO)
+        warp = K.local_scalar("int32")
+        K.assign(warp, tid // 32)  # == token index in phases A and C
+        lane = K.local_scalar("int32", init=tid % 32)
+        lane_quad = K.local_scalar("int32", init=lane % 4)
+        frag_row = K.local_scalar("int32", init=lane // 4)
+        quad_base = K.local_scalar("int32", init=lane - lane_quad)
+        group = K.local_scalar("int32", init=tid // 16)
+        lane_group = K.local_scalar("int32", init=tid % 16)
+        k_start = K.local_scalar("int32", init=lane_group * 8)
+        elem_start = K.local_scalar("int32", init=lane * 4)
+        tile_row_base = K.local_scalar("int32", init=value_tile * ROWS_PER_CTA)
+        owned_row_base = K.local_scalar("int32", init=group * 8)
+        token_base = K.local_scalar("int32")
+        K.assign(token_base, _load_i32(cu, n))
+        seq_len = K.local_scalar("int32")
+        K.assign(seq_len, _load_i32(cu, n + 1) - token_base)
 
         r_q = K.alloc_local((4,), "float32")
         r_k = K.alloc_local((4,), "float32")
@@ -545,24 +508,22 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
         # =======================================================================
         # Phase A: token preprocess, warp <-> token  (:180-290)
         # =======================================================================
-        with K.If(warp[0] < NUM_TOKENS), K.Then():
-            token = K.alloc_local((1,), "int32")
-            K.assign(token[0], warp[0])
-            active_token = token[0] < seq_len[0]
-            token_pos = K.alloc_local((1,), "int32")
-            K.assign(token_pos[0], K.if_then_else(active_token, token_base[0] + token[0], 0))
-            qk_base = K.alloc_local((1,), "int32")
-            K.assign(
-                qk_base[0], (token_pos[0] * NUM_HEADS + query_head[0]) * HEAD_DIM + elem_start[0]
+        with K.If(warp < NUM_TOKENS), K.Then():
+            token = K.local_scalar("int32", init=warp)
+            active_token = token < seq_len
+            token_pos = K.local_scalar(
+                "int32", init=K.if_then_else(active_token, token_base + token, 0)
             )
-            gate_base = K.alloc_local((1,), "int32")
-            K.assign(
-                gate_base[0], token_pos[0] * GATE_TOKEN_STRIDE + hv[0] * HEAD_DIM + elem_start[0]
+            qk_base = K.local_scalar(
+                "int32", init=(token_pos * NUM_HEADS + query_head) * HEAD_DIM + elem_start
+            )
+            gate_base = K.local_scalar(
+                "int32", init=token_pos * GATE_TOKEN_STRIDE + hv * HEAD_DIM + elem_start
             )
 
-            q_words = _load_u32x2(q, qk_base[0])
-            k_words = _load_u32x2(k, qk_base[0])
-            g_words = _load_u32x2(g, gate_base[0])
+            q_words = _load_u32x2(q, qk_base)
+            k_words = _load_u32x2(k, qk_base)
+            g_words = _load_u32x2(g, gate_base)
             for pair in range(2):
                 K.assign(r_q[2 * pair], _widen_lo(q_words[pair]))
                 K.assign(r_q[2 * pair + 1], _widen_hi(q_words[pair]))
@@ -572,10 +533,10 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
                 K.assign(r_d[2 * pair + 1], _widen_hi(g_words[pair]))
 
             # Index-ordered accumulation (:241-244); the first term has a zero addend.
-            q_sq = K.alloc_local((1,), "float32")
-            k_sq = K.alloc_local((1,), "float32")
+            q_sq = K.local_scalar("float32")
+            k_sq = K.local_scalar("float32")
             K.assign(
-                q_sq[0],
+                q_sq,
                 _fma(
                     r_q[3],
                     r_q[3],
@@ -585,7 +546,7 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
                 ),
             )
             K.assign(
-                k_sq[0],
+                k_sq,
                 _fma(
                     r_k[3],
                     r_k[3],
@@ -596,143 +557,128 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
             )
             # Two sequential full-warp butterflies, not interleaved (:245-254).
             for off in range(5):
-                K.assign(q_sq[0], _add(q_sq[0], _shfl_bfly(q_sq[0], 16 >> off)))
+                K.assign(q_sq, _add(q_sq, _shfl_bfly(q_sq, 16 >> off)))
             for off in range(5):
-                K.assign(k_sq[0], _add(k_sq[0], _shfl_bfly(k_sq[0], 16 >> off)))
-            q_norm = K.alloc_local((1,), "float32")
-            K.assign(q_norm[0], _mul(_rsqrt(_add(q_sq[0], K.float32(L2_EPS))), scale))
-            k_norm = K.alloc_local((1,), "float32")
-            K.assign(k_norm[0], _rsqrt(_add(k_sq[0], K.float32(L2_EPS))))
+                K.assign(k_sq, _add(k_sq, _shfl_bfly(k_sq, 16 >> off)))
+            q_norm = K.local_scalar("float32")
+            K.assign(q_norm, _mul(_rsqrt(_add(q_sq, K.float32(L2_EPS))), scale))
+            k_norm = K.local_scalar("float32")
+            K.assign(k_norm, _rsqrt(_add(k_sq, K.float32(L2_EPS))))
 
             k_pub = K.alloc_local((4,), "uint32")
             d_pub = K.alloc_local((4,), "uint32")
             for i in range(4):
-                K.assign(r_q[i], _mul(r_q[i], q_norm[0]))
-                K.assign(r_k[i], _mul(r_k[i], k_norm[0]))
+                K.assign(r_q[i], _mul(r_q[i], q_norm))
+                K.assign(r_k[i], _mul(r_k[i], k_norm))
                 K.assign(r_d[i], _expf(r_d[i]))
                 K.assign(k_pub[i], K.reinterpret("uint32", r_k[i]))
                 K.assign(d_pub[i], K.reinterpret("uint32", r_d[i]))
-            st_shared_u32x4(s_k.ptr_to([token[0], elem_start[0]]), k_pub)
-            st_shared_u32x4(s_d.ptr_to([token[0], elem_start[0]]), d_pub)
+            st_shared_u32x4(s_k.ptr_to([token, elem_start]), k_pub)
+            st_shared_u32x4(s_d.ptr_to([token, elem_start]), d_pub)
 
-            with K.If(lane[0] == 0), K.Then():
-                raw_slot = K.alloc_local((1,), "int32")
-                K.assign(raw_slot[0], _load_i32(ssm_idx, n * NUM_TOKENS + token[0]))
-                st_shared_i32(
-                    s_slot.ptr_to([token[0]]), K.if_then_else(active_token, raw_slot[0], -1)
-                )
-                st_shared_i32(s_token.ptr_to([token[0]]), token_pos[0])
+            with K.If(lane == 0), K.Then():
+                raw_slot = K.local_scalar("int32")
+                K.assign(raw_slot, _load_i32(ssm_idx, n * NUM_TOKENS + token))
+                st_shared_i32(s_slot.ptr_to([token]), K.if_then_else(active_token, raw_slot, -1))
+                st_shared_i32(s_token.ptr_to([token]), token_pos)
                 st_shared_f32(
-                    s_beta.ptr_to([token[0]]),
-                    _load_bf16_f32(beta, token_pos[0] * NUM_VALUE_HEADS + hv[0]),
+                    s_beta.ptr_to([token]), _load_bf16_f32(beta, token_pos * NUM_VALUE_HEADS + hv)
                 )
-                with K.If(token[0] == 0), K.Then():
+                with K.If(token == 0), K.Then():
                     # nat is live at T=2: it picks the initial checkpoint slot,
                     # clamped at both ends (:279-287).
-                    accepted = K.alloc_local((1,), "int32")
-                    K.assign(accepted[0], K.min(K.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1))
-                    initial_slot = K.alloc_local((1,), "int32")
-                    K.assign(initial_slot[0], _load_i32(ssm_idx, n * NUM_TOKENS + accepted[0]))
-                    st_shared_i32(s_init.ptr_to([0]), K.max(initial_slot[0], 0))
+                    accepted = K.local_scalar("int32")
+                    K.assign(accepted, K.min(K.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1))
+                    initial_slot = K.local_scalar("int32")
+                    K.assign(initial_slot, _load_i32(ssm_idx, n * NUM_TOKENS + accepted))
+                    st_shared_i32(s_init.ptr_to([0]), K.max(initial_slot, 0))
 
         K.ptx.bar.sync(K.uint32(0), K.uint32(THREADS))
 
         # =======================================================================
         # Phase B: state gather and sState stage, all 64 threads  (:292-329)
         # =======================================================================
-        init_slot = K.alloc_local((1,), "int32")
-        K.assign(init_slot[0], ld_shared_i32(s_init.ptr_to([0])))
+        init_slot = K.local_scalar("int32")
+        K.assign(init_slot, ld_shared_i32(s_init.ptr_to([0])))
         # Materialised, not left as an expression: the eight unrolled row loads
         # below share this 64-bit base, and re-expanding it per row keeps its
         # int32 inputs live all the way to the tail, which costs register
         # spills inside the body.
-        head_base = K.alloc_local((1,), "int64")
-        K.assign(
-            head_base[0],
-            K.cast(init_slot[0], "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-            + K.cast(hv[0] * HEAD_DIM * HEAD_DIM, "int64"),
+        head_base = K.local_scalar(
+            "int64",
+            init=K.cast(init_slot, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
+            + K.cast(hv * HEAD_DIM * HEAD_DIM, "int64"),
         )
         hist = K.alloc_local((8 * 8,), "float32")
         for row_local in range(8):
-            row_l = K.alloc_local((1,), "int32")
-            K.assign(row_l[0], owned_row_base[0] + row_local)
+            row_l = K.local_scalar("int32", init=owned_row_base + row_local)
             pack = _load_u32x4(
-                state,
-                head_base[0]
-                + K.cast((tile_row_base[0] + row_l[0]) * HEAD_DIM + k_start[0], "int64"),
+                state, head_base + K.cast((tile_row_base + row_l) * HEAD_DIM + k_start, "int64")
             )
             for pr in range(4):
                 K.assign(hist[row_local * 8 + 2 * pr], _widen_lo(pack[pr]))
                 K.assign(hist[row_local * 8 + 2 * pr + 1], _widen_hi(pack[pr]))
             # The bf16 bits go to shared unmodified; the swizzle is on the byte
             # offset. lane_group < 8 lands in sState0, the rest in sState1.
-            with K.If(lane_group[0] < 8):
+            with K.If(lane_group < 8):
                 with K.Then():
-                    st_shared_u32x4(s_state0.ptr_to(row_l[0], k_start[0]), pack)
+                    st_shared_u32x4(s_state0.ptr_to(row_l, k_start), pack)
                 with K.Else():
-                    st_shared_u32x4(s_state1.ptr_to(row_l[0], k_start[0] - 64), pack)
+                    st_shared_u32x4(s_state1.ptr_to(row_l, k_start - 64), pack)
 
         # =======================================================================
         # Phase C: sVec columns and the WY coefficients  (:330-404)
         # =======================================================================
-        with K.If(warp[0] < NUM_TOKENS), K.Then():
-            token_c = K.alloc_local((1,), "int32")
-            K.assign(token_c[0], warp[0])
+        with K.If(warp < NUM_TOKENS), K.Then():
+            token_c = K.local_scalar("int32", init=warp)
             for i in range(4):
-                k_idx = K.alloc_local((1,), "int32")
-                K.assign(k_idx[0], elem_start[0] + i)
-                prefix = K.alloc_local((1,), "float32")
-                K.assign(prefix[0], K.float32(1.0))
+                k_idx = K.local_scalar("int32", init=elem_start + i)
+                prefix = K.local_scalar("float32", init=K.float32(1.0))
                 for j in range(NUM_TOKENS):
-                    with K.If(token_c[0] >= j), K.Then():
-                        K.assign(
-                            prefix[0], _mul(prefix[0], ld_shared_f32(s_d.ptr_to([j, k_idx[0]])))
-                        )
+                    with K.If(token_c >= j), K.Then():
+                        K.assign(prefix, _mul(prefix, ld_shared_f32(s_d.ptr_to([j, k_idx]))))
                 st_shared_b16(
-                    vec_ptr(k_idx[0], token_c[0]),
-                    _ptx_un("cvt.rn.bf16.f32", _mul(prefix[0], r_k[i]), dtype="uint16"),
+                    vec_ptr(k_idx, token_c),
+                    _ptx_un("cvt.rn.bf16.f32", _mul(prefix, r_k[i]), dtype="uint16"),
                 )
                 st_shared_b16(
-                    vec_ptr(k_idx[0], 4 + token_c[0]),
-                    _ptx_un("cvt.rn.bf16.f32", _mul(prefix[0], r_q[i]), dtype="uint16"),
+                    vec_ptr(k_idx, 4 + token_c),
+                    _ptx_un("cvt.rn.bf16.f32", _mul(prefix, r_q[i]), dtype="uint16"),
                 )
 
             ratio = K.alloc_local((4,), "float32")
             for i in range(4):
                 K.assign(ratio[i], K.float32(1.0))
             for source_offset in range(NUM_TOKENS):
-                source_token = K.alloc_local((1,), "int32")
-                K.assign(source_token[0], token_c[0] - source_offset)
-                with K.If(source_token[0] >= 0), K.Then():
-                    dot_kk = K.alloc_local((1,), "float32")
-                    dot_qk = K.alloc_local((1,), "float32")
-                    K.assign(dot_kk[0], K.float32(0.0))
-                    K.assign(dot_qk[0], K.float32(0.0))
+                source_token = K.local_scalar("int32", init=token_c - source_offset)
+                with K.If(source_token >= 0), K.Then():
+                    dot_kk = K.local_scalar("float32")
+                    dot_qk = K.local_scalar("float32")
+                    K.assign(dot_kk, K.float32(0.0))
+                    K.assign(dot_qk, K.float32(0.0))
                     sk_vec = K.alloc_local((4,), "float32")
-                    ld_shared_f32x4(s_k.ptr_to([source_token[0], elem_start[0]]), sk_vec, 0)
+                    ld_shared_f32x4(s_k.ptr_to([source_token, elem_start]), sk_vec, 0)
                     for i in range(4):
                         # Source order: r * source_k * ratio  (:372-375).
-                        K.assign(dot_kk[0], _fma(_mul(r_k[i], sk_vec[i]), ratio[i], dot_kk[0]))
-                        K.assign(dot_qk[0], _fma(_mul(r_q[i], sk_vec[i]), ratio[i], dot_qk[0]))
+                        K.assign(dot_kk, _fma(_mul(r_k[i], sk_vec[i]), ratio[i], dot_kk))
+                        K.assign(dot_qk, _fma(_mul(r_q[i], sk_vec[i]), ratio[i], dot_qk))
                     for off in range(5):
-                        K.assign(dot_kk[0], _add(dot_kk[0], _shfl_bfly(dot_kk[0], 16 >> off)))
+                        K.assign(dot_kk, _add(dot_kk, _shfl_bfly(dot_kk, 16 >> off)))
                     for off in range(5):
-                        K.assign(dot_qk[0], _add(dot_qk[0], _shfl_bfly(dot_qk[0], 16 >> off)))
-                    with K.If(lane[0] == 0), K.Then():
-                        beta_source = K.alloc_local((1,), "float32")
-                        K.assign(beta_source[0], ld_shared_f32(s_beta.ptr_to([source_token[0]])))
-                        with K.If(source_token[0] < token_c[0]), K.Then():
+                        K.assign(dot_qk, _add(dot_qk, _shfl_bfly(dot_qk, 16 >> off)))
+                    with K.If(lane == 0), K.Then():
+                        beta_source = K.local_scalar("float32")
+                        K.assign(beta_source, ld_shared_f32(s_beta.ptr_to([source_token])))
+                        with K.If(source_token < token_c), K.Then():
                             st_shared_f32(
-                                s_l.ptr_to([token_c[0], source_token[0]]),
-                                _mul(beta_source[0], dot_kk[0]),
+                                s_l.ptr_to([token_c, source_token]), _mul(beta_source, dot_kk)
                             )
                         st_shared_f32(
-                            s_r.ptr_to([token_c[0], source_token[0]]),
-                            _mul(beta_source[0], dot_qk[0]),
+                            s_r.ptr_to([token_c, source_token]), _mul(beta_source, dot_qk)
                         )
-                    with K.If(source_token[0] > 0), K.Then():
+                    with K.If(source_token > 0), K.Then():
                         sd_vec = K.alloc_local((4,), "float32")
-                        ld_shared_f32x4(s_d.ptr_to([source_token[0], elem_start[0]]), sd_vec, 0)
+                        ld_shared_f32x4(s_d.ptr_to([source_token, elem_start]), sd_vec, 0)
                         for i in range(4):
                             K.assign(ratio[i], _mul(ratio[i], sd_vec[i]))
 
@@ -742,31 +688,23 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
         # Phase D: the MMA chain, warp <-> 16 value rows  (:406-438)
         # =======================================================================
         acc = K.alloc_local((4,), "float32", align=4)
-        with K.If(warp[0] < NUM_TOKENS), K.Then():
+        with K.If(warp < NUM_TOKENS), K.Then():
             vec_frag = K.alloc_local((4,), "uint32", align=4)
             state_frag = K.alloc_local((4,), "uint32", align=4)
             for state_half in range(2):
                 for mma_step in range(4):
-                    mma_k = K.alloc_local((1,), "int32")
-                    K.assign(mma_k[0], mma_step * 16)
-                    global_k = K.alloc_local((1,), "int32")
-                    K.assign(global_k[0], state_half * 64 + mma_k[0])
-                    ldmatrix_x4(
-                        vec_ptr(global_k[0] + lane[0] % 16, lane[0] // 16 * 8), vec_frag, True
-                    )
+                    mma_k = K.local_scalar("int32", init=mma_step * 16)
+                    global_k = K.local_scalar("int32", init=state_half * 64 + mma_k)
+                    ldmatrix_x4(vec_ptr(global_k + lane % 16, lane // 16 * 8), vec_frag, True)
                     if state_half == 0:
                         ldmatrix_x4(
-                            s_state0.ptr_to(
-                                warp[0] * 16 + lane[0] % 16, mma_k[0] + lane[0] // 16 * 8
-                            ),
+                            s_state0.ptr_to(warp * 16 + lane % 16, mma_k + lane // 16 * 8),
                             state_frag,
                             False,
                         )
                     else:
                         ldmatrix_x4(
-                            s_state1.ptr_to(
-                                warp[0] * 16 + lane[0] % 16, mma_k[0] + lane[0] // 16 * 8
-                            ),
+                            s_state1.ptr_to(warp * 16 + lane % 16, mma_k + lane // 16 * 8),
                             state_frag,
                             False,
                         )
@@ -780,74 +718,71 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
         # =======================================================================
         u_lo = K.alloc_local((NUM_TOKENS,), "float32")
         u_hi = K.alloc_local((NUM_TOKENS,), "float32")
-        with K.If(warp[0] < NUM_TOKENS), K.Then():
+        with K.If(warp < NUM_TOKENS), K.Then():
             ha_lo = K.alloc_local((NUM_TOKENS,), "float32")
             ha_hi = K.alloc_local((NUM_TOKENS,), "float32")
             for t in range(NUM_TOKENS):
-                K.assign(ha_lo[t], _shfl_idx(acc[t], quad_base[0]))
-                K.assign(ha_hi[t], _shfl_idx(acc[2 + t], quad_base[0]))
+                K.assign(ha_lo[t], _shfl_idx(acc[t], quad_base))
+                K.assign(ha_hi[t], _shfl_idx(acc[2 + t], quad_base))
 
-            with K.If(lane_quad[0] == 2), K.Then():
-                row_lo = K.alloc_local((1,), "int32")
-                K.assign(row_lo[0], warp[0] * 16 + frag_row[0])
-                row_hi = K.alloc_local((1,), "int32")
-                K.assign(row_hi[0], row_lo[0] + 8)
+            with K.If(lane_quad == 2), K.Then():
+                row_lo = K.local_scalar("int32", init=warp * 16 + frag_row)
+                row_hi = K.local_scalar("int32", init=row_lo + 8)
                 for t in range(NUM_TOKENS):
-                    base_t = K.alloc_local((1,), "int32")
+                    base_t = K.local_scalar("int32")
                     K.assign(
-                        base_t[0],
-                        (ld_shared_i32(s_token.ptr_to([t])) * NUM_VALUE_HEADS + hv[0]) * HEAD_DIM,
+                        base_t,
+                        (ld_shared_i32(s_token.ptr_to([t])) * NUM_VALUE_HEADS + hv) * HEAD_DIM,
                     )
-                    solved_lo = K.alloc_local((1,), "float32")
-                    solved_hi = K.alloc_local((1,), "float32")
+                    solved_lo = K.local_scalar("float32")
+                    solved_hi = K.local_scalar("float32")
                     K.assign(
-                        solved_lo[0],
-                        _sub(_load_bf16_f32(v, base_t[0] + tile_row_base[0] + row_lo[0]), ha_lo[t]),
+                        solved_lo,
+                        _sub(_load_bf16_f32(v, base_t + tile_row_base + row_lo), ha_lo[t]),
                     )
                     K.assign(
-                        solved_hi[0],
-                        _sub(_load_bf16_f32(v, base_t[0] + tile_row_base[0] + row_hi[0]), ha_hi[t]),
+                        solved_hi,
+                        _sub(_load_bf16_f32(v, base_t + tile_row_base + row_hi), ha_hi[t]),
                     )
                     for prev in range(NUM_TOKENS):
                         if prev < t:
-                            lts = K.alloc_local((1,), "float32")
-                            K.assign(lts[0], ld_shared_f32(s_l.ptr_to([t, prev])))
-                            K.assign(solved_lo[0], _sub(solved_lo[0], _mul(lts[0], u_lo[prev])))
-                            K.assign(solved_hi[0], _sub(solved_hi[0], _mul(lts[0], u_hi[prev])))
-                    K.assign(u_lo[t], solved_lo[0])
-                    K.assign(u_hi[t], solved_hi[0])
+                            lts = K.local_scalar("float32")
+                            K.assign(lts, ld_shared_f32(s_l.ptr_to([t, prev])))
+                            K.assign(solved_lo, _sub(solved_lo, _mul(lts, u_lo[prev])))
+                            K.assign(solved_hi, _sub(solved_hi, _mul(lts, u_hi[prev])))
+                    K.assign(u_lo[t], solved_lo)
+                    K.assign(u_hi[t], solved_hi)
 
                 # ---- outputs, both tokens (:484-531) --------------------------
                 for t in range(NUM_TOKENS):
-                    out_lo = K.alloc_local((1,), "float32")
-                    out_hi = K.alloc_local((1,), "float32")
-                    K.assign(out_lo[0], acc[t])
-                    K.assign(out_hi[0], acc[2 + t])
+                    out_lo = K.local_scalar("float32")
+                    out_hi = K.local_scalar("float32")
+                    K.assign(out_lo, acc[t])
+                    K.assign(out_hi, acc[2 + t])
                     for src in range(NUM_TOKENS):
                         # The s > t coefficient is a real zero-operand fma, not a
                         # skipped iteration (:491-493, :515-517).
-                        coef = K.alloc_local((1,), "float32")
-                        K.assign(coef[0], K.float32(0.0))
+                        coef = K.local_scalar("float32", init=K.float32(0.0))
                         if src <= t:
-                            K.assign(coef[0], ld_shared_f32(s_r.ptr_to([t, src])))
-                        K.assign(out_lo[0], _fma(coef[0], u_lo[src], out_lo[0]))
-                        K.assign(out_hi[0], _fma(coef[0], u_hi[src], out_hi[0]))
+                            K.assign(coef, ld_shared_f32(s_r.ptr_to([t, src])))
+                        K.assign(out_lo, _fma(coef, u_lo[src], out_lo))
+                        K.assign(out_hi, _fma(coef, u_hi[src], out_hi))
                     active_t = ld_shared_i32(s_slot.ptr_to([t])) >= 0
-                    base_o = K.alloc_local((1,), "int32")
+                    base_o = K.local_scalar("int32")
                     K.assign(
-                        base_o[0],
-                        (ld_shared_i32(s_token.ptr_to([t])) * NUM_VALUE_HEADS + hv[0]) * HEAD_DIM
-                        + tile_row_base[0],
+                        base_o,
+                        (ld_shared_i32(s_token.ptr_to([t])) * NUM_VALUE_HEADS + hv) * HEAD_DIM
+                        + tile_row_base,
                     )
-                    _store_f32_as_bf16(out, base_o[0] + row_lo[0], out_lo[0], active_t)
-                    _store_f32_as_bf16(out, base_o[0] + row_hi[0], out_hi[0], active_t)
-                    _store_f32_as_bf16(out, base_o[0] + row_lo[0], K.float32(0.0), K.Not(active_t))
-                    _store_f32_as_bf16(out, base_o[0] + row_hi[0], K.float32(0.0), K.Not(active_t))
+                    _store_f32_as_bf16(out, base_o + row_lo, out_lo, active_t)
+                    _store_f32_as_bf16(out, base_o + row_hi, out_hi, active_t)
+                    _store_f32_as_bf16(out, base_o + row_lo, K.float32(0.0), K.Not(active_t))
+                    _store_f32_as_bf16(out, base_o + row_hi, K.float32(0.0), K.Not(active_t))
 
                 # ---- publish sU (:532-541) ------------------------------------
                 for t in range(NUM_TOKENS):
-                    st_shared_f32(s_u.ptr_to([t, row_lo[0]]), u_lo[t])
-                    st_shared_f32(s_u.ptr_to([t, row_hi[0]]), u_hi[t])
+                    st_shared_f32(s_u.ptr_to([t, row_lo]), u_lo[t])
+                    st_shared_f32(s_u.ptr_to([t, row_hi]), u_hi[t])
             # A warp barrier suffices: the sU rows this warp writes are exactly the
             # rows its own threads read back below (:543).
             K.cuda.warp_sync()
@@ -859,23 +794,22 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
         sd_t = K.alloc_local((8,), "float32")
         sk_t = K.alloc_local((8,), "float32")
         for t in range(NUM_TOKENS):
-            slot_t = K.alloc_local((1,), "int32")
-            K.assign(slot_t[0], ld_shared_i32(s_slot.ptr_to([t])))
-            beta_t = K.alloc_local((1,), "float32")
-            K.assign(beta_t[0], ld_shared_f32(s_beta.ptr_to([t])))
+            slot_t = K.local_scalar("int32")
+            K.assign(slot_t, ld_shared_i32(s_slot.ptr_to([t])))
+            beta_t = K.local_scalar("float32")
+            K.assign(beta_t, ld_shared_f32(s_beta.ptr_to([t])))
             # The gate and key slices depend only on (t, k_start), not on the row,
             # so the source loads each 8-float slice once per token as two 16-byte
             # reads instead of reloading them in the row loop (:673 is 12
             # ld.shared.v4.b32 with no scalar shared loads at all).
-            ld_shared_f32x4(s_d.ptr_to([t, k_start[0]]), sd_t, 0)
-            ld_shared_f32x4(s_d.ptr_to([t, k_start[0] + 4]), sd_t, 4)
-            ld_shared_f32x4(s_k.ptr_to([t, k_start[0]]), sk_t, 0)
-            ld_shared_f32x4(s_k.ptr_to([t, k_start[0] + 4]), sk_t, 4)
+            ld_shared_f32x4(s_d.ptr_to([t, k_start]), sd_t, 0)
+            ld_shared_f32x4(s_d.ptr_to([t, k_start + 4]), sd_t, 4)
+            ld_shared_f32x4(s_k.ptr_to([t, k_start]), sk_t, 0)
+            ld_shared_f32x4(s_k.ptr_to([t, k_start + 4]), sk_t, 4)
             for row_local in range(8):
-                row_h = K.alloc_local((1,), "int32")
-                K.assign(row_h[0], owned_row_base[0] + row_local)
-                update = K.alloc_local((1,), "float32")
-                K.assign(update[0], _mul(ld_shared_f32(s_u.ptr_to([t, row_h[0]])), beta_t[0]))
+                row_h = K.local_scalar("int32", init=owned_row_base + row_local)
+                update = K.local_scalar("float32")
+                K.assign(update, _mul(ld_shared_f32(s_u.ptr_to([t, row_h])), beta_t))
                 for i in range(8):
                     # The source writes `hist*sD + update*sK` (:673) and the
                     # compiler contracts the FIRST product: update*sK is rounded,
@@ -883,7 +817,7 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
                     # it feeds both the checkpoint and token 1's history.
                     K.assign(
                         hist[row_local * 8 + i],
-                        _fma(hist[row_local * 8 + i], sd_t[i], _mul(update[0], sk_t[i])),
+                        _fma(hist[row_local * 8 + i], sd_t[i], _mul(update, sk_t[i])),
                     )
                 for pr in range(4):
                     K.assign(
@@ -894,14 +828,12 @@ def _make_flashkda_decode_t2_precomputed(spec: dict[str, Any]):
                     )
                 # The recurrence advances unconditionally; only the store is
                 # slot-predicated.
-                with K.If(slot_t[0] >= 0), K.Then():
+                with K.If(slot_t >= 0), K.Then():
                     _store_u32x4(
                         state,
-                        K.cast(slot_t[0], "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
+                        K.cast(slot_t, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
                         + K.cast(
-                            hv[0] * HEAD_DIM * HEAD_DIM
-                            + (tile_row_base[0] + row_h[0]) * HEAD_DIM
-                            + k_start[0],
+                            hv * HEAD_DIM * HEAD_DIM + (tile_row_base + row_h) * HEAD_DIM + k_start,
                             "int64",
                         ),
                         words_w,

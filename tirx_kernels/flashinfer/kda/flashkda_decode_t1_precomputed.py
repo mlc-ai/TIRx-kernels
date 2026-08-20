@@ -59,21 +59,21 @@ ROWS_PER_BLOCK = V_LANES * 4  # 8 value rows per row_block iteration
 
 
 def _ptx_un(chain: str, a, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a)
+    return out
 
 
 def _ptx_bin(chain: str, a, b, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a, b))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a, b)
+    return out
 
 
 def _ptx_ter(chain: str, a, b, c, dtype: str = "float32"):
-    out = K.alloc_local((1,), dtype)
-    K.evaluate(K.ptx[chain](out[0], a, b, c))
-    return out[0]
+    out = K.local_scalar(dtype)
+    K.ptx[chain](out, a, b, c)
+    return out
 
 
 def _mul(a, b):
@@ -112,39 +112,31 @@ def _expf(a):
 
 def _shfl_bfly(value, lane_xor):
     """``shfl.sync.bfly.b32``, clamp 31 and full member mask."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(
-        K.ptx.shfl_sync.bfly.b32(
-            out[0],
-            K.reinterpret("uint32", value),
-            K.uint32(lane_xor),
-            K.uint32(31),
-            K.uint32(0xFFFFFFFF),
-        )
+    out = K.local_scalar("uint32")
+    K.ptx.shfl_sync.bfly.b32(
+        out, K.reinterpret("uint32", value), K.uint32(lane_xor), K.uint32(31), K.uint32(0xFFFFFFFF)
     )
-    return K.reinterpret("float32", out[0])
+    return K.reinterpret("float32", out)
 
 
 def _shfl_idx(value, source_lane):
     """``shfl.sync.idx.b32``, clamp 31 and full member mask."""
-    out = K.alloc_local((1,), "uint32")
-    K.evaluate(
-        K.ptx.shfl_sync.idx.b32(
-            out[0],
-            K.reinterpret("uint32", value),
-            K.cast(source_lane, "uint32"),
-            K.uint32(31),
-            K.uint32(0xFFFFFFFF),
-        )
+    out = K.local_scalar("uint32")
+    K.ptx.shfl_sync.idx.b32(
+        out,
+        K.reinterpret("uint32", value),
+        K.cast(source_lane, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
     )
-    return K.reinterpret("float32", out[0])
+    return K.reinterpret("float32", out)
 
 
 def _load_i32(buffer, index):
     """``ld.global.nc.b32`` -- the read-only metadata loads."""
-    out = K.alloc_local((1,), "int32")
-    K.evaluate(K.ptx.ld.global_.nc.b32(out[0], buffer.ptr_to([index])))
-    return out[0]
+    out = K.local_scalar("int32")
+    K.ptx.ld.global_.nc.b32(out, buffer.ptr_to([index]))
+    return out
 
 
 def _load_bf16_f32(buffer, index):
@@ -153,9 +145,9 @@ def _load_bf16_f32(buffer, index):
     The scalar path really does use cvt while the vector paths use the shl/and
     pair; both forms are in the source PTX and the asymmetry is deliberate.
     """
-    bits = K.alloc_local((1,), "uint16")
-    K.evaluate(K.ptx.ld.global_.nc.b16(bits[0], buffer.ptr_to([index])))
-    return _ptx_un("cvt.f32.bf16", bits[0])
+    bits = K.local_scalar("uint16")
+    K.ptx.ld.global_.nc.b16(bits, buffer.ptr_to([index]))
+    return _ptx_un("cvt.f32.bf16", bits)
 
 
 # One 32-bit word carries two bf16. The source widens it with an integer pair
@@ -177,7 +169,7 @@ def _widen_hi(word):
 def _load_u32x2(buffer, index):
     """``ld.global.nc.v2.b32`` -- one 8-byte tile (four bf16), left packed."""
     words = K.alloc_local((2,), "uint32")
-    K.evaluate(K.ptx.ld.global_.nc.v2.b32(words[0], words[1], buffer.ptr_to([index])))
+    K.ptx.ld.global_.nc.v2.b32(words[0], words[1], buffer.ptr_to([index]))
     return words
 
 
@@ -188,10 +180,8 @@ def _load_state_row(buffer, index):
     through exactly once, so L1 is left to q/k/g/v.
     """
     words = K.alloc_local((4,), "uint32")
-    K.evaluate(
-        K.ptx["ld.global.L1::no_allocate.v4.b32"](
-            words[0], words[1], words[2], words[3], buffer.ptr_to([index])
-        )
+    K.ptx["ld.global.L1::no_allocate.v4.b32"](
+        words[0], words[1], words[2], words[3], buffer.ptr_to([index])
     )
     return words
 
@@ -203,9 +193,7 @@ def _pack_bf16x2(hi, lo):
 
 def _store_u32x4(buffer, index, words):
     """``st.global.v4.b32`` -- one 16-byte state row slice."""
-    K.evaluate(
-        K.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
-    )
+    K.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
 
 
 def _store_f32_as_bf16(buffer, index, value, pred):
@@ -215,7 +203,7 @@ def _store_f32_as_bf16(buffer, index, value, pred):
     if-wrapped asm block cannot be if-converted by ptxas and costs a real branch.
     """
     bits = _ptx_un("cvt.rn.bf16.f32", value, dtype="uint16")
-    K.evaluate(K.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=pred))
+    K.ptx.st.global_.b16(buffer.ptr_to([index]), bits, pred=pred)
 
 
 def _case(label: str, **overrides: Any) -> dict[str, Any]:
@@ -376,63 +364,60 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
         # --- work decomposition and lane roles (:63-71) ------------------------
         work, n = K.cta_id()
         lane = K.thread_id()
-        value_tile = K.alloc_local((1,), "int32")
-        hv = K.alloc_local((1,), "int32")
-        query_head = K.alloc_local((1,), "int32")
-        k_lane = K.alloc_local((1,), "int32")
-        v_lane = K.alloc_local((1,), "int32")
-        K.assign(value_tile[0], work % VALUE_SPLIT)
-        K.assign(hv[0], work // VALUE_SPLIT)
-        K.assign(query_head[0], hv[0] // HEAD_RATIO)  # the GQA fold
-        K.assign(k_lane[0], lane % K_LANES)  # 16 lanes x 8 elements = 128 K
-        K.assign(v_lane[0], lane // K_LANES)  # one of two interleaved value rows
+        value_tile = K.local_scalar("int32")
+        hv = K.local_scalar("int32")
+        query_head = K.local_scalar("int32")
+        k_lane = K.local_scalar("int32")
+        v_lane = K.local_scalar("int32")
+        K.assign(value_tile, work % VALUE_SPLIT)
+        K.assign(hv, work // VALUE_SPLIT)
+        K.assign(query_head, hv // HEAD_RATIO)  # the GQA fold
+        K.assign(k_lane, lane % K_LANES)  # 16 lanes x 8 elements = 128 K
+        K.assign(v_lane, lane // K_LANES)  # one of two interleaved value rows
 
         # K.gptr deliberately has an int64 axis.  The source computes these
         # offsets in int32 and widens once at the pointer; materialize that
         # boundary so repeated uses do not rebuild an IMAD.WIDE expression.
-        global_offset = K.alloc_local((1,), "int32")
+        global_offset = K.local_scalar("int32")
 
         def gidx(offset):
-            K.assign(global_offset[0], offset)
-            return K.Cast("int64", global_offset[0])
+            K.assign(global_offset, offset)
+            return K.Cast("int64", global_offset)
 
         # --- row activity, resolved before any load (:72-79) -------------------
-        raw_token_pos = K.alloc_local((1,), "int32")
-        seq_len = K.alloc_local((1,), "int32")
-        has_token = K.alloc_local((1,), "bool")
-        token_pos = K.alloc_local((1,), "int32")
-        raw_slot = K.alloc_local((1,), "int32")
-        initial_slot = K.alloc_local((1,), "int32")
-        active = K.alloc_local((1,), "bool")
-        tile_row_base = K.alloc_local((1,), "int32")
-        K.assign(raw_token_pos[0], _load_i32(cu, gidx(n)))
-        K.assign(seq_len[0], _load_i32(cu, gidx(n + 1)) - raw_token_pos[0])
+        raw_token_pos = K.local_scalar("int32")
+        seq_len = K.local_scalar("int32")
+        has_token = K.local_scalar("bool")
+        token_pos = K.local_scalar("int32")
+        raw_slot = K.local_scalar("int32")
+        initial_slot = K.local_scalar("int32")
+        active = K.local_scalar("bool")
+        tile_row_base = K.local_scalar("int32")
+        K.assign(raw_token_pos, _load_i32(cu, gidx(n)))
+        K.assign(seq_len, _load_i32(cu, gidx(n + 1)) - raw_token_pos)
         # `raw_token_pos < gridDim.y` is why the body only accepts an identity
         # cu_seqlens; the host forbids a user-supplied T=1 cu_seqlens.
-        K.assign(
-            has_token[0],
-            K.And(K.And(raw_token_pos[0] >= 0, raw_token_pos[0] < NUM_SEQS), seq_len[0] > 0),
-        )
-        K.assign(token_pos[0], K.if_then_else(has_token[0], raw_token_pos[0], 0))
-        K.assign(raw_slot[0], _load_i32(ssm_idx, gidx(n)))
-        K.assign(initial_slot[0], K.max(raw_slot[0], 0))  # inactive rows clamp to slot 0
-        K.assign(active[0], K.And(raw_slot[0] >= 0, has_token[0]))
-        K.assign(tile_row_base[0], value_tile[0] * TILE_ROW_STRIDE)
+        K.assign(has_token, K.And(K.And(raw_token_pos >= 0, raw_token_pos < NUM_SEQS), seq_len > 0))
+        K.assign(token_pos, K.if_then_else(has_token, raw_token_pos, 0))
+        K.assign(raw_slot, _load_i32(ssm_idx, gidx(n)))
+        K.assign(initial_slot, K.max(raw_slot, 0))  # inactive rows clamp to slot 0
+        K.assign(active, K.And(raw_slot >= 0, has_token))
+        K.assign(tile_row_base, value_tile * TILE_ROW_STRIDE)
 
         # --- phase 1: q, k, g vector loads, 4 elements per lane (:88-132) ------
-        elem_start = K.alloc_local((1,), "int32")
-        q_base = K.alloc_local((1,), "int32")
-        gate_base = K.alloc_local((1,), "int32")
-        K.assign(elem_start[0], lane * ELEMS_PER_LANE)
-        K.assign(q_base[0], (token_pos[0] * NUM_HEADS + query_head[0]) * HEAD_DIM + elem_start[0])
-        K.assign(gate_base[0], token_pos[0] * GATE_TOKEN_STRIDE + hv[0] * HEAD_DIM + elem_start[0])
+        elem_start = K.local_scalar("int32")
+        q_base = K.local_scalar("int32")
+        gate_base = K.local_scalar("int32")
+        K.assign(elem_start, lane * ELEMS_PER_LANE)
+        K.assign(q_base, (token_pos * NUM_HEADS + query_head) * HEAD_DIM + elem_start)
+        K.assign(gate_base, token_pos * GATE_TOKEN_STRIDE + hv * HEAD_DIM + elem_start)
 
         q_src = K.alloc_local((ELEMS_PER_LANE,), "float32")
         k_src = K.alloc_local((ELEMS_PER_LANE,), "float32")
         gate_src = K.alloc_local((ELEMS_PER_LANE,), "float32")
-        q_words = _load_u32x2(q, gidx(q_base[0]))
-        k_words = _load_u32x2(k, gidx(q_base[0]))
-        g_words = _load_u32x2(g, gidx(gate_base[0]))
+        q_words = _load_u32x2(q, gidx(q_base))
+        k_words = _load_u32x2(k, gidx(q_base))
+        g_words = _load_u32x2(g, gidx(gate_base))
         for pair in range(2):
             K.ptx.mov.b32(q_src[2 * pair], _widen_lo(q_words[pair]))
             K.ptx.mov.b32(q_src[2 * pair + 1], _widen_hi(q_words[pair]))
@@ -443,17 +428,17 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
 
         # --- phase 2: QK L2 norms, full 32-lane butterflies (:133-152) ---------
         # Association order copied from :136: a0*a0 + a1*a1 + (a2*a2 + a3*a3).
-        q_sum_sq = K.alloc_local((1,), "float32")
-        k_sum_sq = K.alloc_local((1,), "float32")
+        q_sum_sq = K.local_scalar("float32")
+        k_sum_sq = K.local_scalar("float32")
         K.assign(
-            q_sum_sq[0],
+            q_sum_sq,
             _add(
                 _fma(q_src[1], q_src[1], _mul(q_src[0], q_src[0])),
                 _fma(q_src[3], q_src[3], _mul(q_src[2], q_src[2])),
             ),
         )
         K.assign(
-            k_sum_sq[0],
+            k_sum_sq,
             _add(
                 _fma(k_src[1], k_src[1], _mul(k_src[0], k_src[0])),
                 _fma(k_src[3], k_src[3], _mul(k_src[2], k_src[2])),
@@ -462,38 +447,35 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
         # Two independent loops, run back to back (:139-143 then :144-148); the
         # source does not interleave them.
         for offset in range(5):
-            K.assign(q_sum_sq[0], _add(q_sum_sq[0], _shfl_bfly(q_sum_sq[0], 16 >> offset)))
+            K.assign(q_sum_sq, _add(q_sum_sq, _shfl_bfly(q_sum_sq, 16 >> offset)))
         for offset in range(5):
-            K.assign(k_sum_sq[0], _add(k_sum_sq[0], _shfl_bfly(k_sum_sq[0], 16 >> offset)))
+            K.assign(k_sum_sq, _add(k_sum_sq, _shfl_bfly(k_sum_sq, 16 >> offset)))
         # eps is hardcoded in the source (:149,:151); `scale` multiplies q only.
-        q_scale = K.alloc_local((1,), "float32")
-        k_scale = K.alloc_local((1,), "float32")
-        K.assign(q_scale[0], _mul(_rsqrt(_add(q_sum_sq[0], K.float32(L2_EPS))), scale))
-        K.assign(k_scale[0], _rsqrt(_add(k_sum_sq[0], K.float32(L2_EPS))))
+        q_scale = K.local_scalar("float32")
+        k_scale = K.local_scalar("float32")
+        K.assign(q_scale, _mul(_rsqrt(_add(q_sum_sq, K.float32(L2_EPS))), scale))
+        K.assign(k_scale, _rsqrt(_add(k_sum_sq, K.float32(L2_EPS))))
 
         # --- phase 3: 4-per-lane -> 8-per-lane redistribution + gate (:153-164) -
         q_reg = K.alloc_local((K_PER_LANE,), "float32")
         k_reg = K.alloc_local((K_PER_LANE,), "float32")
         gate_reg = K.alloc_local((K_PER_LANE,), "float32")
         for i in range(K_PER_LANE):
-            source_lane = K.alloc_local((1,), "int32")
-            K.assign(source_lane[0], 2 * k_lane[0] + i // ELEMS_PER_LANE)
+            source_lane = K.local_scalar("int32", init=2 * k_lane + i // ELEMS_PER_LANE)
             K.ptx.mov.b32(
-                q_reg[i], _mul(_shfl_idx(q_src[i % ELEMS_PER_LANE], source_lane[0]), q_scale[0])
+                q_reg[i], _mul(_shfl_idx(q_src[i % ELEMS_PER_LANE], source_lane), q_scale)
             )
             K.ptx.mov.b32(
-                k_reg[i], _mul(_shfl_idx(k_src[i % ELEMS_PER_LANE], source_lane[0]), k_scale[0])
+                k_reg[i], _mul(_shfl_idx(k_src[i % ELEMS_PER_LANE], source_lane), k_scale)
             )
-            K.ptx.mov.b32(
-                gate_reg[i], _expf(_shfl_idx(gate_src[i % ELEMS_PER_LANE], source_lane[0]))
-            )
+            K.ptx.mov.b32(gate_reg[i], _expf(_shfl_idx(gate_src[i % ELEMS_PER_LANE], source_lane)))
 
         # --- phase 4: k_dot_q, 16-lane butterfly (:165-176) --------------------
         # Association order copied from :167: (k0q0 + k1q1 + (k2q2 + k3q3))
         #                                   + (k4q4 + k5q5 + (k6q6 + k7q7)).
-        k_dot_q = K.alloc_local((1,), "float32")
+        k_dot_q = K.local_scalar("float32")
         K.assign(
-            k_dot_q[0],
+            k_dot_q,
             _add(
                 _add(
                     _fma(k_reg[1], q_reg[1], _mul(k_reg[0], q_reg[0])),
@@ -508,18 +490,18 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
         # Offsets stop at 8, so each half-warp reduces within itself; the
         # instruction stays full-warp (clamp 31, mask 0xFFFFFFFF).
         for offset in range(4):
-            K.assign(k_dot_q[0], _add(k_dot_q[0], _shfl_bfly(k_dot_q[0], 8 >> offset)))
+            K.assign(k_dot_q, _add(k_dot_q, _shfl_bfly(k_dot_q, 8 >> offset)))
 
-        beta_value = K.alloc_local((1,), "float32")
-        head_base = K.alloc_local((1,), "int64")
-        vg_base = K.alloc_local((1,), "int32")
-        K.assign(beta_value[0], _load_bf16_f32(beta, gidx(token_pos[0] * NUM_VALUE_HEADS + hv[0])))
+        beta_value = K.local_scalar("float32")
+        head_base = K.local_scalar("int64")
+        vg_base = K.local_scalar("int32")
+        K.assign(beta_value, _load_bf16_f32(beta, gidx(token_pos * NUM_VALUE_HEADS + hv)))
         K.assign(
-            head_base[0],
-            K.cast(initial_slot[0], "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
-            + K.cast(hv[0] * HEAD_DIM * HEAD_DIM, "int64"),
+            head_base,
+            K.cast(initial_slot, "int64") * K.cast(STATE_SLOT_STRIDE, "int64")
+            + K.cast(hv * HEAD_DIM * HEAD_DIM, "int64"),
         )
-        K.assign(vg_base[0], (token_pos[0] * NUM_VALUE_HEADS + hv[0]) * HEAD_DIM)
+        K.assign(vg_base, (token_pos * NUM_VALUE_HEADS + hv) * HEAD_DIM)
 
         # --- phase 5: the row loop (:181-268) ----------------------------------
         state_rows = K.alloc_local((4 * K_PER_LANE,), "float32")
@@ -530,10 +512,11 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
             # Issue all four row loads before any math (:184-208). The decay pass
             # below depends on every row, so interleaving would serialise the misses.
             for row_local in range(4):
-                row_a = K.alloc_local((1,), "int32")
-                K.assign(row_a[0], tile_row_base[0] + v_lane[0] + 2 * (row_block * 4 + row_local))
+                row_a = K.local_scalar(
+                    "int32", init=tile_row_base + v_lane + 2 * (row_block * 4 + row_local)
+                )
                 words = _load_state_row(
-                    state, head_base[0] + K.cast(row_a[0] * HEAD_DIM + k_lane[0] * 8, "int64")
+                    state, head_base + K.cast(row_a * HEAD_DIM + k_lane * 8, "int64")
                 )
                 for pr in range(4):
                     K.ptx.mov.b32(state_rows[row_local * K_PER_LANE + 2 * pr], _widen_lo(words[pr]))
@@ -542,45 +525,45 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
                     )
 
             for row_local in range(4):
-                row = K.alloc_local((1,), "int32")
-                K.assign(row[0], tile_row_base[0] + v_lane[0] + 2 * (row_block * 4 + row_local))
+                row = K.local_scalar(
+                    "int32", init=tile_row_base + v_lane + 2 * (row_block * 4 + row_local)
+                )
 
                 # Decay and both projections share one pass; the source accumulates
                 # sequentially (:217-223), not as a tree.
-                pred = K.alloc_local((1,), "float32")
-                base = K.alloc_local((1,), "float32")
-                K.assign(pred[0], K.float32(0.0))
-                K.assign(base[0], K.float32(0.0))
+                pred = K.local_scalar("float32")
+                base = K.local_scalar("float32")
+                K.assign(pred, K.float32(0.0))
+                K.assign(base, K.float32(0.0))
                 for i in range(K_PER_LANE):
                     K.ptx.mov.b32(
                         h_decay[i], _mul(state_rows[row_local * K_PER_LANE + i], gate_reg[i])
                     )
-                    K.assign(pred[0], _fma(h_decay[i], k_reg[i], pred[0]))
-                    K.assign(base[0], _fma(h_decay[i], q_reg[i], base[0]))
+                    K.assign(pred, _fma(h_decay[i], k_reg[i], pred))
+                    K.assign(base, _fma(h_decay[i], q_reg[i], base))
                 for offset in range(4):
-                    K.assign(pred[0], _add(pred[0], _shfl_bfly(pred[0], 8 >> offset)))
+                    K.assign(pred, _add(pred, _shfl_bfly(pred, 8 >> offset)))
                 for offset in range(4):
-                    K.assign(base[0], _add(base[0], _shfl_bfly(base[0], 8 >> offset)))
+                    K.assign(base, _add(base, _shfl_bfly(base, 8 >> offset)))
 
                 # One scalar v load on k_lane == 0, then a broadcast (:240-245).
-                v_value = K.alloc_local((1,), "float32")
-                K.assign(v_value[0], K.float32(0.0))
-                with K.If(k_lane[0] == 0), K.Then():
-                    K.assign(v_value[0], _load_bf16_f32(v, gidx(vg_base[0] + row[0])))
-                K.assign(v_value[0], _shfl_idx(v_value[0], v_lane[0] * K_LANES))
+                v_value = K.local_scalar("float32", init=K.float32(0.0))
+                with K.If(k_lane == 0), K.Then():
+                    K.assign(v_value, _load_bf16_f32(v, gidx(vg_base + row)))
+                K.assign(v_value, _shfl_idx(v_value, v_lane * K_LANES))
 
-                delta = K.alloc_local((1,), "float32")
-                K.assign(delta[0], _mul(_sub(v_value[0], pred[0]), beta_value[0]))
+                delta = K.local_scalar("float32")
+                K.assign(delta, _mul(_sub(v_value, pred), beta_value))
 
                 # Rank-1 update. The source writes `state*gate + delta*k` (:249) but
                 # the decayed product is the h_decay above and the compiler keeps it:
                 # .loc :249 emits 8 fma per row and zero mul.
                 for i in range(K_PER_LANE):
                     K.ptx.mov.b32(
-                        state_rows[row_local * K_PER_LANE + i], _fma(delta[0], k_reg[i], h_decay[i])
+                        state_rows[row_local * K_PER_LANE + i], _fma(delta, k_reg[i], h_decay[i])
                     )
 
-                with K.If(active[0]), K.Then():
+                with K.If(active), K.Then():
                     for pr in range(4):
                         K.ptx.mov.b32(
                             words_w[pr],
@@ -590,25 +573,20 @@ def _make_flashkda_decode_t1_precomputed(spec: dict[str, Any]):
                             ),
                         )
                     _store_u32x4(
-                        state,
-                        head_base[0] + K.cast(row[0] * HEAD_DIM + k_lane[0] * 8, "int64"),
-                        words_w,
+                        state, head_base + K.cast(row * HEAD_DIM + k_lane * 8, "int64"), words_w
                     )
                 # `o = q.S_new` is folded as base + delta*k_dot_q, so the updated
                 # state is never re-read. The source contracts it to one fma (:262);
                 # spelling it mul-then-add would round twice.
                 _store_f32_as_bf16(
-                    out,
-                    gidx(vg_base[0] + row[0]),
-                    _fma(delta[0], k_dot_q[0], base[0]),
-                    K.And(active[0], k_lane[0] == 0),
+                    out, gidx(vg_base + row), _fma(delta, k_dot_q, base), K.And(active, k_lane == 0)
                 )
                 # An in-row but inactive sequence zeroes its output (:264-266).
                 _store_f32_as_bf16(
                     out,
-                    gidx(vg_base[0] + row[0]),
+                    gidx(vg_base + row),
                     K.float32(0.0),
-                    K.And(K.And(has_token[0], K.Not(active[0])), k_lane[0] == 0),
+                    K.And(K.And(has_token, K.Not(active)), k_lane == 0),
                 )
 
     return _flashkda_decode_t1_precomputed.func
