@@ -792,12 +792,7 @@ class _PreparedAttempt:
 
 
 def _prepared_child_command(
-    workload: dict,
-    *,
-    control_fd: int,
-    rounds: int,
-    cooldown: float,
-    with_references: bool,
+    workload: dict, *, control_fd: int, rounds: int, cooldown: float, with_references: bool
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1497,7 +1492,7 @@ def _finalize_bench_record(
         return
     protocol_cooldown = protocol.get("cooldown_s", protocol.get("round_cooldown_s"))
     if (
-        not isinstance(protocol_cooldown, (int, float))
+        not isinstance(protocol_cooldown, int | float)
         or isinstance(protocol_cooldown, bool)
         or not math.isclose(float(protocol_cooldown), cooldown, rel_tol=0.0, abs_tol=1e-9)
     ):
@@ -1541,7 +1536,7 @@ def _finalize_bench_record(
         impl: value
         for impl, values in samples.items()
         for value in values
-        if not isinstance(value, (int, float))
+        if not isinstance(value, int | float)
         or isinstance(value, bool)
         or not math.isfinite(value)
         or value <= 0
@@ -1649,10 +1644,7 @@ def run_scheduled_jobs(
     ) -> None:
         if item.state not in ("ASSIGNED", "RUNNING_GPU") or item.pending_interference:
             return
-        item.pending_interference = {
-            "intruder_pids": intruders,
-            "detail": detail[:240],
-        }
+        item.pending_interference = {"intruder_pids": intruders, "detail": detail[:240]}
         item.interference_stop_deadline = time.monotonic() + 30.0
         item.state = "STOPPING_INTERFERED_GPU"
         log(
@@ -1682,6 +1674,7 @@ def run_scheduled_jobs(
         release_gpus(item)
         item.gpus = ()
         item.physical_gpu_uuids = ()
+        item.gpu_affinity = ()
         item.pending_interference = None
         item.interference_stop_deadline = None
         item.attempt += 1
@@ -1909,7 +1902,9 @@ def run_scheduled_jobs(
                         records.append(record)
                         completed += 1
                         impls = record.get("impls") or {}
-                        impl_str = ", ".join(f"{name}={value:.3f}µs" for name, value in impls.items())
+                        impl_str = ", ".join(
+                            f"{name}={value:.3f}µs" for name, value in impls.items()
+                        )
                         log(
                             f"[bench-suite] {record['finished_at']} "
                             f"gpus={record.get('gpu') or '-'} {record.get('status', 'ok'):4s} "
