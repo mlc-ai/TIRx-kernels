@@ -452,33 +452,31 @@ def skip():
 def _host_prelude(params):
     """Encode the six TensorMaps promised by the public PrimFunc ABI."""
 
-    A_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
-    A_tensor_map_1 = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
-    ag_out_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
-    ag_out_tensor_map_1 = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
-    B_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
-    out_tensor_map = Kern.Bind(Kern.tvm_stack_alloca("tensormap", 1))
+    A_tensor_map = Kern.stack_alloca("tensormap", 1)
+    A_tensor_map_1 = Kern.stack_alloca("tensormap", 1)
+    ag_out_tensor_map = Kern.stack_alloca("tensormap", 1)
+    ag_out_tensor_map_1 = Kern.stack_alloca("tensormap", 1)
+    B_tensor_map = Kern.stack_alloca("tensormap", 1)
+    out_tensor_map = Kern.stack_alloca("tensormap", 1)
 
     def encode(descriptor, data, dtype, dim0, dim1, stride, box0, box1):
-        Kern.evaluate(
-            Kern.call_packed(
-                "runtime.cuTensorMapEncodeTiled",
-                descriptor,
-                dtype,
-                2,
-                data,
-                dim0,
-                dim1,
-                stride,
-                box0,
-                box1,
-                1,
-                1,
-                0,
-                SWIZZLE,
-                2,
-                0,
-            )
+        Kern.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            descriptor,
+            dtype,
+            2,
+            data,
+            dim0,
+            dim1,
+            stride,
+            box0,
+            box1,
+            1,
+            1,
+            0,
+            SWIZZLE,
+            2,
+            0,
         )
 
     A = params["A"]
@@ -530,7 +528,7 @@ def _make_device_kernel():
         gemm_head = gemm_head.view(1)
         cbx_expr, cby_expr = I.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
         cbx = cbx_expr
-        cby = Kern.Bind(cby_expr)
+        cby = cby_expr
         bx = Kern.cta_id()
         warp_id_in_cta = Kern.warp_id()
         wg_id = warp_id_in_cta // WARP_NUMBER
@@ -602,11 +600,11 @@ def _make_device_kernel():
         gemm_queue = GEMMMPMCQueue(
             CAPACITY, gemm_task_types, gemm_task_idxs, gemm_head, GEMM_M_CLUSTERS * GEMM_N_CLUSTERS
         )
-        packed_ptr: Kern.let[Kern.Var(name="packed_ptr", ty=PointerType(PrimType("uint64")))] = (
-            Kern.reinterpret(
-                PointerType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
-            )
-        )  # rank: 0
+        # rank: 0 -- _mapa_u64_tx already materializes the mapa into a local
+        # scalar, so the reinterpret over it is a pure type re-tag.
+        packed_ptr = Kern.reinterpret(
+            PointerType(PrimType("uint64")), _mapa_u64_tx(packed_buf.ptr_to([0]), 0)
+        )
         packed_value = Kern.decl_buffer([1], "uint64", data=packed_ptr, scope="shared")
         # Initialize in source order after the packed-value mapa.
         ab_pipe.full.leader = tid == 0
@@ -617,7 +615,7 @@ def _make_device_kernel():
         ab_pipe.empty.init(NUM_CONSUMER)
         out_pipe.full.init(1)
         out_pipe.empty.init(128 * NUM_CONSUMER)
-        ptr: Kern.let[Kern.Var(name="ptr", ty=PointerType(PrimType("uint64")))] = Kern.reinterpret(
+        ptr = Kern.reinterpret(
             PointerType(PrimType("uint64")), _mapa_u64_tx(ab_pipe.full.ptr_to([0]), 0)
         )
         tma_finished = Kern.decl_buffer([PIPELINE_DEPTH], "uint64", data=ptr, scope="shared")
@@ -713,10 +711,17 @@ def _make_device_kernel():
                             # GMEM -> SMEM  (tma)
                             with Kern.If(Kern.cuda.elect_sync()):
                                 with Kern.Then():
-                                    n_start = Kern.Bind((n_idx * CTA_GROUP + cbx) * BLK_N)
+                                    # Materialized, not plain: this is bound out
+                                    # here but read inside `tma_load`, which the
+                                    # pipeline emits once per unrolled stage. A
+                                    # plain name would re-emit the expression --
+                                    # re-loading n_idx -- in every iteration.
+                                    n_start = Kern.local_scalar(
+                                        "int32", init=(n_idx * CTA_GROUP + cbx) * BLK_N
+                                    )
 
                                     def tma_load(is_remain, ks, tile_idx):
-                                        stage_k = Kern.Bind(tile_idx * BLK_K)
+                                        stage_k = tile_idx * BLK_K
                                         ab_pipe.empty.wait(ks, ab_state.phase)
                                         with Kern.If(
                                             Kern.And(
@@ -725,25 +730,19 @@ def _make_device_kernel():
                                             )
                                         ):
                                             with Kern.Then():
-                                                m_start0 = Kern.Bind(
-                                                    (
-                                                        (m_idx % LOCAL_GEMM_M_CLUSTERS)
-                                                        * NUM_CONSUMER
-                                                        * CTA_GROUP
-                                                        + cbx
-                                                    )
-                                                    * BLK_M
-                                                )
-                                                m_start1 = Kern.Bind(
-                                                    (
-                                                        (m_idx % LOCAL_GEMM_M_CLUSTERS)
-                                                        * NUM_CONSUMER
-                                                        * CTA_GROUP
-                                                        + CTA_GROUP
-                                                        + cbx
-                                                    )
-                                                    * BLK_M
-                                                )
+                                                m_start0 = (
+                                                    (m_idx % LOCAL_GEMM_M_CLUSTERS)
+                                                    * NUM_CONSUMER
+                                                    * CTA_GROUP
+                                                    + cbx
+                                                ) * BLK_M
+                                                m_start1 = (
+                                                    (m_idx % LOCAL_GEMM_M_CLUSTERS)
+                                                    * NUM_CONSUMER
+                                                    * CTA_GROUP
+                                                    + CTA_GROUP
+                                                    + cbx
+                                                ) * BLK_M
                                                 Kern.ptx[_TMA_G2S_CG2](
                                                     A_smem[ks].ptr_to(0, 0),
                                                     Kern.address_of(A_tensor_map),
@@ -763,17 +762,14 @@ def _make_device_kernel():
                                                     ),
                                                 )
                                             with Kern.Else():
-                                                m_start0 = Kern.Bind(
-                                                    (m_idx * NUM_CONSUMER * CTA_GROUP + cbx) * BLK_M
-                                                )
-                                                m_start1 = Kern.Bind(
-                                                    (
-                                                        m_idx * NUM_CONSUMER * CTA_GROUP
-                                                        + CTA_GROUP
-                                                        + cbx
-                                                    )
-                                                    * BLK_M
-                                                )
+                                                m_start0 = (
+                                                    m_idx * NUM_CONSUMER * CTA_GROUP + cbx
+                                                ) * BLK_M
+                                                m_start1 = (
+                                                    m_idx * NUM_CONSUMER * CTA_GROUP
+                                                    + CTA_GROUP
+                                                    + cbx
+                                                ) * BLK_M
                                                 Kern.ptx[_TMA_G2S_CG2](
                                                     A_smem[ks].ptr_to(0, 0),
                                                     Kern.address_of(ag_out_tensor_map),
@@ -913,7 +909,7 @@ def _make_device_kernel():
                         Kern.ptx.tcgen05.fence__after_thread_sync()
                         # TMEM -> RF (ld)
                         for i in range(MMA_N // TMEM_LD_SIZE):  # load (MMA_M // 2, MMA_N)
-                            col_st = Kern.Bind(wg_id * MMA_N + i * TMEM_LD_SIZE)
+                            col_st = wg_id * MMA_N + i * TMEM_LD_SIZE
                             Kern.ptx[_TMEM_LD_64](
                                 *[reg[j] for j in range(TMEM_LD_SIZE)], Kern.cast(col_st, "uint32")
                             )
@@ -941,7 +937,7 @@ def _make_device_kernel():
                                 Kern.cuda.warpgroup_sync(wg_id)
 
                             for jv in range(EPI_TILE // 8):
-                                r0 = Kern.Bind(jv * 4)
+                                r0 = jv * 4
                                 Kern.ptx.st.shared.v4.u32(
                                     D_smem.ptr_to(wg_id * BLK_M + warp_id * 32 + lane_id, jv * 8),
                                     reg_fp16[r0],
@@ -954,11 +950,10 @@ def _make_device_kernel():
                             # st to gmem
                             with Kern.If((lane_id == 0) & (warp_id == 0)):
                                 with Kern.Then():
-                                    m_st = Kern.Bind(
-                                        (m_idx * NUM_CONSUMER * CTA_GROUP + wg_id * CTA_GROUP + cbx)
-                                        * BLK_M
-                                    )
-                                    n_st = Kern.Bind(n_idx * BLK_N * CTA_GROUP + i * EPI_TILE)
+                                    m_st = (
+                                        m_idx * NUM_CONSUMER * CTA_GROUP + wg_id * CTA_GROUP + cbx
+                                    ) * BLK_M
+                                    n_st = n_idx * BLK_N * CTA_GROUP + i * EPI_TILE
                                     Kern.ptx[_TMA_S2G](
                                         Kern.address_of(out_tensor_map),
                                         Kern.cast(n_st, "int32"),
