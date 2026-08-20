@@ -241,7 +241,13 @@ def for_each_score(inp, row_in, tx, row_len, body, cfg):
     The kernel re-runs this in full on every phase that rescans the row, so the
     same load widths reappear in the histogram, the filter, and both fallbacks.
     """
+    # A loop bound is re-evaluated by the loop condition on every iteration, so a
+    # lazy one puts its whole expression inside the loop.  On Plain this folds to
+    # a literal; on the transform modes `row_len` is a runtime read and the bound
+    # would otherwise carry a shift and a multiply per trip.
     aligned = row_len // cfg.vec * cfg.vec
+    if not isinstance(aligned, int):
+        aligned = K.local_scalar("int32", init=aligned)
     with K.serial(tx * cfg.vec, aligned, step=cfg.block * cfg.vec, unroll=cfg.scan_unroll) as i:
         if cfg.vec == 1:
             body(ld_global_nc_bits(inp, row_in + K.cast(i, "int64"), cfg.is32), i)
@@ -325,7 +331,8 @@ def body_filter(s_hist2, s_scal, s_indices, s_input, threshold_bin, cfg, bits, i
     row.  The source's ``__builtin_expect(pos < SMEM_INPUT_SIZE, 1)`` marks that
     arm cold.
     """
-    bin_id = coarse_key(bits, cfg.is32)
+    # Compared against the threshold twice, once per element of the whole row.
+    bin_id = K.local_scalar("int32", init=coarse_key(bits, cfg.is32))
     with K.If(bin_id > threshold_bin):
         with K.Then():
             pos = K.reinterpret("int32", atom_shared_add_u32(s_scal, SC_COUNTER, K.uint32(1)))
@@ -411,7 +418,8 @@ def block_exclusive_sum_raking(out, total_out, s_scan, tx, value):
     shape and is warp-aligned: warp 0 enters whole, so the collective stays
     convergent and must not be hoisted out of the guard.
     """
-    off = raking_offset(tx)
+    # Read by both the scatter and the gather of every scan instance.
+    off = K.local_scalar("int32", init=raking_offset(tx))
     st_shared_u32(s_scan, off, value)
     bar_sync()
     with K.If(tx < RAKING_THREADS), K.Then():
@@ -455,7 +463,9 @@ def det_thread_strided_collect(inp, s_scan, s_indices, tx, row_in, row_len, cfg,
     with K.If(count > K.uint32(0)), K.Then():
         with K.If(prefix < K.cast(eq_needed, "uint32")), K.Then():
             pos = K.local_scalar("uint32", init=prefix)
-            end = K.min(prefix + count, K.cast(eq_needed, "uint32"))
+            # Loop-invariant but read inside the walk below: a plain binding
+            # would sink the min back into the loop body.
+            end = K.local_scalar("uint32", init=K.min(prefix + count, K.cast(eq_needed, "uint32")))
             done = K.local_scalar("int32", init=K.int32(0))
             with K.serial(tx, row_len, step=cfg.block) as i2:
                 with K.If(done == 0), K.Then():
@@ -495,6 +505,8 @@ def det_contiguous_collect(
     bar_sync()
     chunk_items = cfg.block * DET_ITEMS_PER_THREAD
     num_chunks = (row_len + chunk_items - 1) // chunk_items
+    if not isinstance(num_chunks, int):
+        num_chunks = K.local_scalar("int32", init=num_chunks)
     stop = K.local_scalar("int32", init=K.int32(0))
     with K.serial(0, num_chunks) as chunk:
         with K.If(stop == 0), K.Then():
@@ -502,7 +514,9 @@ def det_contiguous_collect(
             sel_of = K.alloc_local([DET_ITEMS_PER_THREAD], "uint32")
             cnt = K.local_scalar("uint32", init=K.uint32(0))
             with K.unroll(DET_ITEMS_PER_THREAD) as item:
-                linear = chunk * chunk_items + tx * DET_ITEMS_PER_THREAD + item
+                linear = K.local_scalar(
+                    "int32", init=chunk * chunk_items + tx * DET_ITEMS_PER_THREAD + item
+                )
                 K.assign(rows_of[item], K.int32(0))
                 K.assign(sel_of[item], K.uint32(0))
                 with K.If(linear < row_len), K.Then():
@@ -540,7 +554,8 @@ def det_contiguous_collect(
             with K.If(cnt > K.uint32(0)), K.Then():
                 with K.If(prefix < chunk_take), K.Then():
                     epos = K.local_scalar("uint32", init=prefix)
-                    eend = K.min(prefix + cnt, chunk_take)
+                    # Same: invariant across the item walk that reads it.
+                    eend = K.local_scalar("uint32", init=K.min(prefix + cnt, chunk_take))
                     fin = K.local_scalar("int32", init=K.int32(0))
                     with K.unroll(DET_ITEMS_PER_THREAD) as item2:
                         with K.If(fin == 0), K.Then():
@@ -649,7 +664,7 @@ def run_refine_round(
     ``resolved`` when the round fully resolves the pivot.
     """
     raw = K.reinterpret("int32", ld_shared_u32(s_scal, SC_NUM_INPUT + r_idx))
-    num_input = K.min(raw, cfg.smem_input)
+    num_input = K.local_scalar("int32", init=K.min(raw, cfg.smem_input))
 
     update_refine_threshold(s_hist2, s_scal, tx, cfg, topk, r_idx ^ 1, True)
 
@@ -681,15 +696,8 @@ def run_refine_round(
                     idx2 = K.reinterpret(
                         "int32", ld_shared_u32(s_input, r_idx * cfg.smem_input + i2)
                     )
-                    collect_gt_and_nondet_eq(
-                        s_scal,
-                        s_indices,
-                        cfg,
-                        _refine_bin(inp, row_in, idx2, offset, cfg),
-                        threshold,
-                        idx2,
-                        True,
-                    )
+                    bin2 = K.local_scalar("int32", init=_refine_bin(inp, row_in, idx2, offset, cfg))
+                    collect_gt_and_nondet_eq(s_scal, s_indices, cfg, bin2, threshold, idx2, True)
                 bar_sync()
             else:
                 # collect_with_threshold_non_last_round (:2646-2672): three
@@ -769,8 +777,12 @@ def body_recollect_threshold_bin(s_scal, s_indices, threshold_bin, cfg, bits, in
     re-collect every strict winner the filter stage already appended.
     """
     with K.If(coarse_key(bits, cfg.is32) == threshold_bin), K.Then():
-        sub = K.cast(
-            K.bitwise_and(K.cast(ordered_key(bits, cfg.is32), "uint32"), K.uint32(0xFF)), "int32"
+        sub = K.local_scalar(
+            "int32",
+            init=K.cast(
+                K.bitwise_and(K.cast(ordered_key(bits, cfg.is32), "uint32"), K.uint32(0xFF)),
+                "int32",
+            ),
         )
         threshold = K.reinterpret("int32", ld_shared_u32(s_scal, SC_THRESH_BIN))
         collect_gt_and_nondet_eq(s_scal, s_indices, cfg, sub, threshold, index, True)
@@ -798,7 +810,9 @@ def body_fallback_rehist(s_hist2, threshold_bytes, threshold_bin, cfg, rnd, bits
     ``threshold_bytes`` is the per-thread register array of ``:2805``.
     """
     with K.If(coarse_key(bits, cfg.is32) == threshold_bin), K.Then():
-        ordered = K.cast(ordered_key(bits, cfg.is32), "uint32")
+        # Read once per already-fixed byte plus once for this round's bump, on
+        # every element of the row, on each of the four rebuild rounds.
+        ordered = K.local_scalar("uint32", init=K.cast(ordered_key(bits, cfg.is32), "uint32"))
         match = K.local_scalar("int32", init=K.int32(1))
         _prefix_match(match, ordered, threshold_bytes, rnd)
         with K.If(match == 1), K.Then():
@@ -819,20 +833,18 @@ def body_collect_by_pivot(s_scal, s_indices, threshold_bin, cfg, pivot, eq_neede
     out-of-bin elements are dropped; threshold-bin elements are compared on the
     full 32-bit ordered key against the rebuilt pivot.
     """
-    bin_id = coarse_key(bits, cfg.is32)
+    # Both keys are read twice by the collector they are handed to.
+    bin_id = K.local_scalar("int32", init=coarse_key(bits, cfg.is32))
     with K.If(bin_id > threshold_bin):
         with K.Then():
             collect_gt_and_nondet_eq(s_scal, s_indices, cfg, bin_id, threshold_bin, index, False)
         with K.Else():
             with K.If(bin_id == threshold_bin), K.Then():
+                ordered = K.local_scalar(
+                    "uint32", init=K.cast(ordered_key(bits, cfg.is32), "uint32")
+                )
                 collect_gt_and_nondet_eq(
-                    s_scal,
-                    s_indices,
-                    cfg,
-                    K.cast(ordered_key(bits, cfg.is32), "uint32"),
-                    pivot,
-                    index,
-                    eq_needed > 0,
+                    s_scal, s_indices, cfg, ordered, pivot, index, eq_needed > 0
                 )
 
 
@@ -1289,7 +1301,8 @@ def emit_filtered_topk_main(
     # nothing is padded here; only the trivial path emits -1.
     with K.serial(tx, cfg.top_k, step=cfg.block, unroll=2) as base:
         sel = K.reinterpret("int32", ld_shared_u32(s_indices, base))
-        slot = row_out + K.cast(base, "int64")
+        # Materialized: a lazy 64-bit slot address is re-narrowed per store.
+        slot = K.local_scalar("int64", init=row_out + K.cast(base, "int64"))
         if cfg.basic:
             st_global_u32(out_idx, slot, K.reinterpret("uint32", sel))
             st_global_bits(

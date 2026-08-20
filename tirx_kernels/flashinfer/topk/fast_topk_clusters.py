@@ -383,11 +383,17 @@ def get_kernel(
         exceeded,
         ring_base,
     ):
-        """The three-way split of :189-217, shared by pass 1 and every round."""
+        """The three-way split of :189-217, shared by pass 1 and every round.
+
+        The digit is snapshotted rather than re-emitted: it is read by both arms
+        of the split, this runs once per element of a row that can be 512K long,
+        and the source keeps it in a register too.
+        """
         if is32:
-            d = K.bitwise_and(K.cast(K.shift_right(bits, K.uint32(shift)), "int32"), 0xFF)
+            digit = K.bitwise_and(K.cast(K.shift_right(bits, K.uint32(shift)), "int32"), 0xFF)
         else:
-            d = K.bitwise_and(K.cast(K.shift_right(bits, K.uint16(shift)), "int32"), 0xFF)
+            digit = K.bitwise_and(K.cast(K.shift_right(bits, K.uint16(shift)), "int32"), 0xFF)
+        d = K.local_scalar("int32", init=digit)
         with K.If(d > bin_):
             with K.Then():
                 # HAZARD: unguarded. The source's `if (topk_offset < TopK)` is
@@ -398,8 +404,14 @@ def get_kernel(
             with K.Else():
                 with K.If(d == bin_), K.Then():
                     if not last:
-                        slot = K.cast(
-                            R.atom_shared_add_u32(scal, NCACHED + phase, K.uint32(1)), "int32"
+                        # Read five times below: the capacity test, both cache
+                        # stores, and the ring offset.  Every boundary-bin
+                        # element of the row takes this arm.
+                        slot = K.local_scalar(
+                            "int32",
+                            init=K.cast(
+                                R.atom_shared_add_u32(scal, NCACHED + phase, K.uint32(1)), "int32"
+                            ),
                         )
                         keep = K.local_scalar("int32", init=K.int32(1))
                         with K.If(slot < num_cached):
@@ -531,7 +543,10 @@ def get_kernel(
                 cached_idx,
                 ovf,
                 R.ld_shared_u32(cached_bits, (phase ^ 1) * num_cached + i),
-                K.cast(R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"),
+                K.local_scalar(
+                    "int32",
+                    init=K.cast(R.ld_shared_u32(cached_idx, (phase ^ 1) * num_cached + i), "int32"),
+                ),
                 bin_t,
                 phase,
                 shift,
@@ -550,7 +565,7 @@ def get_kernel(
                 cached_idx,
                 ovf,
                 R.ld_global_u32(ovf, off),
-                K.cast(R.ld_global_u32(ovf, off + 1), "int32"),
+                K.local_scalar("int32", init=K.cast(R.ld_global_u32(ovf, off + 1), "int32")),
                 bin_t,
                 phase,
                 shift,
@@ -568,8 +583,10 @@ def get_kernel(
         warp = tid >> 5
         lane = tid & 31
 
-        logit_base = row * seq_len
-        ind_base = row * k
+        # Per-CTA invariants that every element loop indexes off; the source
+        # holds both in registers rather than recomputing `row * stride`.
+        logit_base = K.local_scalar("int32", init=row * seq_len)
+        ind_base = K.local_scalar("int32", init=row * k)
 
         # The worker's shared arena is declared for the whole entry rather than
         # inside the `row_len > TopK` arm: a traced kernel owns one pool, and the
@@ -650,7 +667,9 @@ def get_kernel(
                                 # region (:425-427) -- the port must not zero it.
                                 _st_idx(out_idx, ind_base + i, -1, i64)
             with K.Else():
-                ring_base = cta * ovf_stride * 4
+                # Per-CTA constant, but every spilling element reads it from
+                # inside the classification loops.
+                ring_base = K.local_scalar("int32", init=cta * ovf_stride * 4)
                 exceeded = K.local_scalar("int32", init=K.int32(0))
 
                 # ---- zero banks 0/1 and three scalars (:158-170) ------------
@@ -671,7 +690,9 @@ def get_kernel(
                     tid + rank * BLOCK_THREADS, row_len, step=BLOCK_THREADS * nc, unroll=hist_unroll
                 ) as i:
                     xb = _ld_nc_bits(logits, logit_base + i, is32)
-                    ob = R.to_ordered_u32(xb) if is32 else R.to_ordered_u16(xb)
+                    ob = K.local_scalar(
+                        bits_t, init=R.to_ordered_u32(xb) if is32 else R.to_ordered_u16(xb)
+                    )
                     if is32:
                         d0 = K.bitwise_and(
                             K.cast(K.shift_right(ob, K.uint32(lshift_start)), "int32"), 0xFF
@@ -695,9 +716,9 @@ def get_kernel(
                 # the first histogram pass above is a plain strided scalar read,
                 # which is why the row is read from global twice in total.
                 vbase = (rank * BLOCK_THREADS + tid) * 4
-                with K.serial(
-                    vbase, (row_len // 4) * 4, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll
-                ) as i:
+                # Snapshotted: as a loop bound it is re-evaluated every trip.
+                vec_end = K.local_scalar("int32", init=(row_len // 4) * 4)
+                with K.serial(vbase, vec_end, step=BLOCK_THREADS * nc * 4, unroll=vec_unroll) as i:
                     w = _ld_vec4(logits, logit_base + i, is32)
                     with K.unroll(4) as j:
                         if is32:
@@ -717,7 +738,9 @@ def get_kernel(
                             cached_bits,
                             cached_idx,
                             ovf,
-                            R.to_ordered_u32(eb) if is32 else R.to_ordered_u16(eb),
+                            K.local_scalar(
+                                bits_t, init=R.to_ordered_u32(eb) if is32 else R.to_ordered_u16(eb)
+                            ),
                             i + j,
                             bin0,
                             0,
@@ -728,9 +751,7 @@ def get_kernel(
                             ring_base,
                         )
                 with K.serial(
-                    (row_len // 4) * 4 + rank * BLOCK_THREADS + tid,
-                    row_len,
-                    step=BLOCK_THREADS * nc,
+                    vec_end + rank * BLOCK_THREADS + tid, row_len, step=BLOCK_THREADS * nc
                 ) as i3:
                     xb3 = _ld_nc_bits(logits, logit_base + i3, is32)
                     _classify(
@@ -740,7 +761,9 @@ def get_kernel(
                         cached_bits,
                         cached_idx,
                         ovf,
-                        R.to_ordered_u32(xb3) if is32 else R.to_ordered_u16(xb3),
+                        K.local_scalar(
+                            bits_t, init=R.to_ordered_u32(xb3) if is32 else R.to_ordered_u16(xb3)
+                        ),
                         i3,
                         bin0,
                         0,
