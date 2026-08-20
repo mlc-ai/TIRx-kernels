@@ -219,6 +219,7 @@ MIT License
 
 tirx_kernels/deepgemm/ (ports of deepseek-ai/DeepGEMM kernels)
 tirx_kernels/flashmla/ (ports of deepseek-ai/FlashMLA kernels)
+tirx_kernels/msa/ (ports of MiniMax-AI/MSA kernels)
 
 
 BSD 3-Clause "New" or "Revised" License

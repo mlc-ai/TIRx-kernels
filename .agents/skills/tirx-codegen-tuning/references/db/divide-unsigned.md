@@ -24,7 +24,9 @@ def _umod(x, d):
 
 
 def _uceil(x, d):
-    return T.cast((T.cast(x, "uint32") + T.uint32(d - 1)) // T.uint32(d), "int32")
+    """Runtime divisor; a compile-time one folds the subtraction away."""
+    du: T.uint32 = T.cast(d, "uint32")
+    return T.cast((T.cast(x, "uint32") + du - T.uint32(1)) // du, "int32")
 ```
 
 An index variable can also be born unsigned, which removes the per-site cast:
@@ -47,6 +49,16 @@ a count, so each division emits an absolute value, a sign compare and a chain of
 moves that a reference written in unsigned arithmetic throughout does not have.
 The cast took the masked-layout shape from 3.868M to 3.537M instructions against
 the reference's 3.388M, and from 0.976x to above the gate.
+
+The correction is charged per quotient, so what decides the size of the win is
+where the quotients sit, not how many there are. A scheduler whose decode divides
+inside a serial scan run once per batch, nested in a binary search, paid it on
+its whole latency chain: the same seven-site cast took that loop body from
+22 instructions to 14 against a reference's 15, and the shapes with the deepest
+search from 0.824x and 0.853x to 1.405x and 1.368x, with the worst required
+shape moving 0.824x to 1.082x. Static totals had already matched the reference
+exactly at that point -- same load, store, divide, atomic and barrier counts --
+because the correction is arithmetic the totals do not separate from the work.
 
 ## Boundary
 

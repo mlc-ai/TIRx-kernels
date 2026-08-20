@@ -96,6 +96,12 @@ point each port backs (`activation`, `quantization`, `norm` — CuTe-DSL backend
 | `deepep_dispatch` | `dispatch.py` | V2 elastic dispatch, single-domain NVLink path (multi-GPU, 8 ranks) |
 | `deepep_combine` | `combine.py` | V2 elastic combine, single-domain NVLink path (multi-GPU, 8 ranks) |
 
+`msa/` — MSA sparse attention ports:
+
+| Kernel                                   | Module                             | What it is |
+| ---------------------------------------- | ---------------------------------- | ---------- |
+| `msa_sparse_prepare_flat_schedule_sm100` | `sparse_prepare_flat_schedule.py`  | Flat work-list preparation for sparse attention |
+
 ## Performance
 
 Per-workload numbers — our kernel time, every reference impl, and the
@@ -138,6 +144,7 @@ remain externally managed runtime/compiler dependencies.
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | `deep_ep`        | `deepep_*` correctness and baselines | Reference implementation. |
 | `flash_kda`      | `flashkda_*` optional baselines | Raw FlashKDA benchmark peer. |
+| `fmha_sm100` (MSA) | `msa_*` correctness and baselines | Reference implementation; set `MSA_PATH` to use a checkout elsewhere. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
 
 Correctness tests import and run these upstream implementations. The bench suite
@@ -194,7 +201,7 @@ License 2.0; see [LICENSE](LICENSE). Required Apache attribution notices are
 collected in [NOTICE](NOTICE).
 
 Every Python source file carries SPDX tags. Kernel ports derived from third-party projects
-(DeepGEMM, FlashMLA, flash-attention, FlashInfer) additionally cite the upstream
+(DeepGEMM, FlashMLA, flash-attention, FlashInfer, MSA) additionally cite the upstream
 project and the exact commit ported, retain the upstream copyright notice, and
 declare the combined terms — for example `Apache-2.0 AND MIT`. Where an upstream
 license requires its conditions text to travel with the source, that text is kept
