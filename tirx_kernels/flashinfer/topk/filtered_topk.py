@@ -358,7 +358,11 @@ def get_kernel(
         page_start = K.int32(0)
         row_len = length
         if not basic:
-            row_len = K.reinterpret("int32", ld_global_nc_u32(lengths_g, row))
+            # Snapshotted: it is the bound of every full-row loop below, and a
+            # loop condition re-evaluates its expression each trip.
+            row_len = K.local_scalar(
+                "int32", init=K.reinterpret("int32", ld_global_nc_u32(lengths_g, row))
+            )
             if row_starts:
                 row_start = K.reinterpret("int32", ld_global_nc_u32(row_starts_g, row))
             if page_table:
@@ -366,8 +370,15 @@ def get_kernel(
                     page_start = K.reinterpret("int32", ld_global_nc_u32(pt_starts_g, row))
                 else:
                     page_start = row_start
-        row_in = K.cast(row, "int64") * K.int64(length) + K.cast(row_start, "int64")
-        row_out = K.cast(row, "int64") * K.int64(k)
+        # The two row base addresses are materialized, not re-emitted per use.
+        # Left lazy, the simplifier proves each element index fits in 32 bits and
+        # narrows every address, which trades one reused 64-bit base for a
+        # sign-extend on every access -- 32 `(int64_t)` casts in the source
+        # become 74.
+        row_in = K.local_scalar(
+            "int64", init=K.cast(row, "int64") * K.int64(length) + K.cast(row_start, "int64")
+        )
+        row_out = K.local_scalar("int64", init=K.cast(row, "int64") * K.int64(k))
 
         batch_idx = row
         offset_val = K.int32(0)
@@ -380,7 +391,7 @@ def get_kernel(
         def emit_trivial():
             """The ``length <= top_k`` early-out (:2409-2429)."""
             with K.serial(tx, k, step=FILTERED_TOPK_BLOCK_THREADS) as i0:
-                slot0 = row_out + K.cast(i0, "int64")
+                slot0 = K.local_scalar("int64", init=row_out + K.cast(i0, "int64"))
                 if basic:
                     with K.If(i0 < row_len):
                         with K.Then():
@@ -533,7 +544,8 @@ def get_finalize_kernel(
                 smem.pool, block_threads, items_per_thread, dtype, val_bytes
             )
 
-        row_out = K.cast(row, "int64") * K.int64(k)
+        # Materialized for the same reason as the unified kernel's bases.
+        row_out = K.local_scalar("int64", init=K.cast(row, "int64") * K.int64(k))
         keys = K.alloc_local([items_per_thread], "uint32")
         values = K.alloc_local([items_per_thread], "uint32")
 
@@ -543,7 +555,7 @@ def get_finalize_kernel(
             K.assign(keys[i], K.uint32(0xFFFFFFFF))
             K.assign(values[i], K.uint32(0))
             with K.If(pos < k), K.Then():
-                slot = row_out + K.cast(pos, "int64")
+                slot = K.local_scalar("int64", init=row_out + K.cast(pos, "int64"))
                 idx = K.reinterpret("int32", ld_global_u32(out_idx, slot))
                 # `(idx >= 0) ? idx : ~0u` -- nvcc folds the clamp to a single
                 # max.s32 against immediate -1 (:2981).
@@ -591,7 +603,7 @@ def get_finalize_kernel(
         with K.unroll(items_per_thread) as i2:
             pos2 = tx * items_per_thread + i2
             with K.If(pos2 < k), K.Then():
-                slot2 = row_out + K.cast(pos2, "int64")
+                slot2 = K.local_scalar("int64", init=row_out + K.cast(pos2, "int64"))
                 key = keys[i2]
                 if basic:
                     # `~0u` reinterprets to -1 for free, so both stores are
@@ -607,7 +619,7 @@ def get_finalize_kernel(
                 elif page_table:
                     page_id = K.local_scalar("int32", init=K.int32(-1))
                     with K.If(key != K.uint32(0xFFFFFFFF)), K.Then():
-                        src = K.cast(batch_idx, "int64") * aux_stride
+                        src = K.local_scalar("int64", init=K.cast(batch_idx, "int64") * aux_stride)
                         K.assign(
                             page_id,
                             K.reinterpret(
