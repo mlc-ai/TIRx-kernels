@@ -520,8 +520,7 @@ def get_kernel(**kwargs: Any):
         warp_idx_presync = K.Cast("int32", warp_idx_presync_u32)
         warpgroup_idx = K.warpgroup_id([num_warps // 4])
         lane_idx = K.lane_id()
-        lane_idx_u32 = K.local_scalar("uint32")
-        K.assign(lane_idx_u32, K.Cast("uint32", lane_idx))
+        lane_idx_u32 = K.local_scalar("uint32", init=K.Cast("uint32", lane_idx))
 
         with K.If(warp_idx_presync == spec_warp_start), K.Then():
             K.ptx.prefetch.tensormap(K.address_of(tensor_map_q))

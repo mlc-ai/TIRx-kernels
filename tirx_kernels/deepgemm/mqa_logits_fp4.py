@@ -581,15 +581,14 @@ def get_kernel(**kwargs: Any):
                 K.ptx.st.global_.b16(logits_flat.ptr_to([flat_offset]), value)
 
         def load_schedule(q_idx):
-            schedule_start = K.local_scalar("uint32")
-            K.assign(schedule_start, K.uint32(0xFFFFFFFF))
-            schedule_end = K.local_scalar("uint32")
-            K.assign(schedule_end, K.uint32(0))
+            schedule_start = K.local_scalar("uint32", init=K.uint32(0xFFFFFFFF))
+            schedule_end = K.local_scalar("uint32", init=K.uint32(0))
             for schedule_i in range(block_q):
-                row_idx = K.local_scalar("uint32")
-                K.assign(
-                    row_idx,
-                    K.min(q_idx * K.uint32(block_q) + K.uint32(schedule_i), seq_len - K.uint32(1)),
+                row_idx = K.local_scalar(
+                    "uint32",
+                    init=K.min(
+                        q_idx * K.uint32(block_q) + K.uint32(schedule_i), seq_len - K.uint32(1)
+                    ),
                 )
                 row_start = K.local_scalar("int32")
                 row_end = K.local_scalar("int32")
@@ -604,10 +603,9 @@ def get_kernel(**kwargs: Any):
                 K.assign(schedule_start, K.min(schedule_start, seq_k_start[schedule_i]))
                 K.assign(schedule_end, K.max(schedule_end, seq_k_end[schedule_i]))
             K.assign(schedule_start, schedule_start // K.uint32(4) * K.uint32(4))
-            num_kv_blocks = K.local_scalar("uint32")
-            K.assign(
-                num_kv_blocks,
-                (schedule_end - schedule_start + K.uint32(block_kv - 1)) // K.uint32(block_kv),
+            num_kv_blocks = K.local_scalar(
+                "uint32",
+                init=(schedule_end - schedule_start + K.uint32(block_kv - 1)) // K.uint32(block_kv),
             )
             K.ptx.mov.b32(schedule_result[0], schedule_start)
             K.ptx.mov.b32(schedule_result[1], num_kv_blocks)
@@ -624,8 +622,9 @@ def get_kernel(**kwargs: Any):
             )
         K.cuda.cta_sync()
 
-        num_q_blocks = K.local_scalar("uint32")
-        K.assign(num_q_blocks, (seq_len + K.uint32(block_q - 1)) // K.uint32(block_q))
+        num_q_blocks = K.local_scalar(
+            "uint32", init=(seq_len + K.uint32(block_q - 1)) // K.uint32(block_q)
+        )
         K.ptx.griddepcontrol.wait()
 
         # ---------------- roles ----------------------------------------
@@ -649,14 +648,12 @@ def get_kernel(**kwargs: Any):
             # loop-level rule means this placement is preserved exactly.
             with K.If(K.cuda.elect_sync()), K.Then():
                 q_state = K.RingState(num_q_stages)
-                q_idx = K.local_scalar("uint32")
-                K.assign(q_idx, sm_idx)
+                q_idx = K.local_scalar("uint32", init=sm_idx)
                 with K.While(q_idx < num_q_blocks):
                     q_pipe.empty.wait(q_state.stage, q_state.phase ^ K.uint32(1))
                     # u32 row base -- the copy_async(tma) gmem-layout grouping now
                     # handles unsigned shape extents (no int32 cast needed).
-                    q_row0 = K.local_scalar("uint32")
-                    K.assign(q_row0, q_idx * K.uint32(block_q * num_heads))
+                    q_row0 = K.local_scalar("uint32", init=q_idx * K.uint32(block_q * num_heads))
                     K.ptx[TMA_G2S_2D](
                         smem_q[q_state.stage].ptr_to(0, 0),
                         K.address_of(q_map),
@@ -665,8 +662,7 @@ def get_kernel(**kwargs: Any):
                         q_pipe.full.ptr_to([q_state.stage]),
                         cache_policy_evict_normal,
                     )
-                    q_blk0 = K.local_scalar("uint32")
-                    K.assign(q_blk0, q_idx * K.uint32(block_q))
+                    q_blk0 = K.local_scalar("uint32", init=q_idx * K.uint32(block_q))
                     K.ptx[TMA_G2S_2D](
                         smem_sf_q_2d.ptr_to([q_state.stage, 0, 0]),
                         K.address_of(sf_q_map),
@@ -697,20 +693,17 @@ def get_kernel(**kwargs: Any):
         with kv_tma:
             with K.If(K.cuda.elect_sync()), K.Then():
                 kv_state = K.RingState(num_kv_stages)
-                q_idx = K.local_scalar("uint32")
-                K.assign(q_idx, sm_idx)
+                q_idx = K.local_scalar("uint32", init=sm_idx)
                 with K.While(q_idx < num_q_blocks):
                     load_schedule(q_idx)
-                    kv_start = K.local_scalar("uint32")
-                    K.assign(kv_start, schedule_result[0])
-                    num_kv_blocks = K.local_scalar("uint32")
-                    K.assign(num_kv_blocks, schedule_result[1])
-                    kv_idx = K.local_scalar("uint32")
-                    K.assign(kv_idx, K.uint32(0))
+                    kv_start = K.local_scalar("uint32", init=schedule_result[0])
+                    num_kv_blocks = K.local_scalar("uint32", init=schedule_result[1])
+                    kv_idx = K.local_scalar("uint32", init=K.uint32(0))
                     with K.While(kv_idx < num_kv_blocks):
                         kv_pipe.empty.wait(kv_state.stage, kv_state.phase ^ K.uint32(1))
-                        kv_row0 = K.local_scalar("uint32")
-                        K.assign(kv_row0, kv_start + kv_idx * K.uint32(block_kv))
+                        kv_row0 = K.local_scalar(
+                            "uint32", init=kv_start + kv_idx * K.uint32(block_kv)
+                        )
                         K.ptx[TMA_G2S_2D](
                             smem_kv[kv_state.stage].ptr_to(0, 0),
                             K.address_of(kv_map),
@@ -771,16 +764,12 @@ def get_kernel(**kwargs: Any):
             tmem_state = K.RingState(num_tmem_stages)
             # The SFQ overwrite waits only when a previous MMA commit exists;
             # its stage/phase come from the K-owned current cursor.
-            has_tmem_issue = K.local_scalar("uint32")
-            K.assign(has_tmem_issue, K.uint32(0))
-            q_idx = K.local_scalar("uint32")
-            K.assign(q_idx, sm_idx)
+            has_tmem_issue = K.local_scalar("uint32", init=K.uint32(0))
+            q_idx = K.local_scalar("uint32", init=sm_idx)
             with K.While(q_idx < num_q_blocks):
                 load_schedule(q_idx)
-                kv_start = K.local_scalar("uint32")
-                K.assign(kv_start, schedule_result[0])
-                num_kv_blocks = K.local_scalar("uint32")
-                K.assign(num_kv_blocks, schedule_result[1])
+                kv_start = K.local_scalar("uint32", init=schedule_result[0])
+                num_kv_blocks = K.local_scalar("uint32", init=schedule_result[1])
                 q_pipe.full.wait(q_state.stage, q_state.phase)
                 emit_sf_transpose(smem_sf_q, smem_sf_q_t, lane_idx, q_state.stage, 0)
                 K.cuda.warp_sync()
@@ -806,8 +795,7 @@ def get_kernel(**kwargs: Any):
                         replace_smem_desc_addr(desc_sf, smem_sf_q_t.ptr_to([q_state.stage, 0])),
                     )
                 K.cuda.warp_sync()
-                kv_idx = K.local_scalar("uint32")
-                K.assign(kv_idx, K.uint32(0))
+                kv_idx = K.local_scalar("uint32", init=K.uint32(0))
                 with K.While(kv_idx < num_kv_blocks):
                     # UMMA reads smem_kv (kv full); staged SF comes from the
                     # transpose worker (sf_ready).
@@ -827,20 +815,20 @@ def get_kernel(**kwargs: Any):
                                 ),
                             )
                         for math_wg_i in range(num_math_warpgroups):
-                            tmem_addr = K.local_scalar("uint32")
-                            K.assign(
-                                tmem_addr,
-                                K.uint32(tmem.elem_offset) + tmem_state.stage * K.uint32(umma_n),
+                            tmem_addr = K.local_scalar(
+                                "uint32",
+                                init=K.uint32(tmem.elem_offset)
+                                + tmem_state.stage * K.uint32(umma_n),
                             )
                             tmem_pipe.empty.wait(tmem_state.stage, tmem_state.phase ^ K.uint32(1))
                             # REGION D: block-scaled FP4 UMMA, D = KV @ Q^K.  The
                             # first K=64 phase overwrites and the second accumulates;
                             # scale ids 0/2 select the two block-32 factors.
-                            desc_i_local = K.local_scalar("uint32")
-                            K.assign(desc_i_local, desc_i)
+                            desc_i_local = K.local_scalar("uint32", init=desc_i)
                             for ki in range(head_dim // umma_k):
-                                sf_linear = K.local_scalar("int32")
-                                K.assign(sf_linear, K.int32(ki * (umma_k // 32)))
+                                sf_linear = K.local_scalar(
+                                    "int32", init=K.int32(ki * (umma_k // 32))
+                                )
                                 K.cuda.runtime_instr_desc(
                                     K.address_of(desc_i_local), sf_linear % (umma_k // 16)
                                 )
@@ -880,14 +868,11 @@ def get_kernel(**kwargs: Any):
         with sf_transpose:
             # Overlaps transpose(k+1) with the tcgen05 warp's UTCCP+MMA of block k.
             kv_state = K.RingState(num_kv_stages)
-            t_q_idx = K.local_scalar("uint32")
-            K.assign(t_q_idx, sm_idx)
+            t_q_idx = K.local_scalar("uint32", init=sm_idx)
             with K.While(t_q_idx < num_q_blocks):
                 load_schedule(t_q_idx)
-                t_num_kv = K.local_scalar("uint32")
-                K.assign(t_num_kv, schedule_result[1])
-                t_kv_i = K.local_scalar("uint32")
-                K.assign(t_kv_i, K.uint32(0))
+                t_num_kv = K.local_scalar("uint32", init=schedule_result[1])
+                t_kv_i = K.local_scalar("uint32", init=K.uint32(0))
                 with K.While(t_kv_i < t_num_kv):
                     kv_pipe.full.wait(kv_state.stage, kv_state.phase)
                     # The preceding tcgen05.cp read of this transposed stage
@@ -919,20 +904,16 @@ def get_kernel(**kwargs: Any):
                 num_tmem_stages, stage=warpgroup_idx, stride=num_math_warpgroups
             )
             math_thread_idx = K.Cast("uint32", K.tid_in_role())
-            q_idx = K.local_scalar("uint32")
-            K.assign(q_idx, sm_idx)
+            q_idx = K.local_scalar("uint32", init=sm_idx)
             with K.While(q_idx < num_q_blocks):
                 load_schedule(q_idx)
-                kv_start = K.local_scalar("uint32")
-                K.assign(kv_start, schedule_result[0])
-                num_kv_blocks = K.local_scalar("uint32")
-                K.assign(num_kv_blocks, schedule_result[1])
+                kv_start = K.local_scalar("uint32", init=schedule_result[0])
+                num_kv_blocks = K.local_scalar("uint32", init=schedule_result[1])
                 q_pipe.full.wait(q_state.stage, q_state.phase)
                 with K.If(num_kv_blocks > K.uint32(0)), K.Then():
                     for weight_i in range(block_q):
                         for weight_j in range(num_heads // 4):
-                            weight_col = K.local_scalar("int32")
-                            K.assign(weight_col, K.int32(weight_j * 4))
+                            weight_col = K.local_scalar("int32", init=K.int32(weight_j * 4))
                             K.ptx.ld.shared.v4.f32(
                                 cached_weights[weight_i, weight_col],
                                 cached_weights[weight_i, weight_col + 1],
@@ -951,23 +932,18 @@ def get_kernel(**kwargs: Any):
                                 * K.Cast("uint64", logits_stride)
                                 + K.Cast("uint64", kv_start + math_thread_idx),
                             )
-                    kv_idx = K.local_scalar("uint32")
-                    K.assign(kv_idx, K.uint32(0))
+                    kv_idx = K.local_scalar("uint32", init=K.uint32(0))
                     with K.While(kv_idx < num_kv_blocks):
-                        kv_offset = K.local_scalar("uint32")
-                        K.assign(
-                            kv_offset, (kv_start + kv_idx * K.uint32(block_kv) + math_thread_idx)
+                        kv_offset = K.local_scalar(
+                            "uint32", init=kv_start + kv_idx * K.uint32(block_kv) + math_thread_idx
                         )
                         tmem_pipe.full.wait(tmem_state.stage, tmem_state.phase)
                         for q_inner_i in range(block_q):
-                            tmem_addr = K.local_scalar("uint32")
-                            K.assign(
-                                tmem_addr,
-                                (
-                                    K.uint32(tmem.elem_offset)
-                                    + tmem_state.stage * K.uint32(umma_n)
-                                    + K.uint32(q_inner_i * num_heads)
-                                ),
+                            tmem_addr = K.local_scalar(
+                                "uint32",
+                                init=K.uint32(tmem.elem_offset)
+                                + tmem_state.stage * K.uint32(umma_n)
+                                + K.uint32(q_inner_i * num_heads),
                             )
                             # REGION E: TMEM->register read as 2x tcgen05.ld.32x32b.x32
                             # (DeepGEMM's 64-head shape); accum stays flat for the reduce.
@@ -976,8 +952,9 @@ def get_kernel(**kwargs: Any):
                                 K.cuda.get_tmem_addr(K.uint32(tmem.elem_offset), 0, tmem_addr),
                             )
                             K.ptx.tcgen05.wait__ld.sync.aligned()
-                            tmem_addr_hi = K.local_scalar("uint32")
-                            K.assign(tmem_addr_hi, tmem_addr + K.uint32(num_heads // 2))
+                            tmem_addr_hi = K.local_scalar(
+                                "uint32", init=tmem_addr + K.uint32(num_heads // 2)
+                            )
                             K.ptx[TCGEN05_LD_X32](
                                 *[
                                     accum[num_heads // 2 + head_i]
@@ -991,21 +968,19 @@ def get_kernel(**kwargs: Any):
                             result_f32 = _weighted_relu_reduce(
                                 accum, cached_weights, q_inner_i, num_heads
                             )
-                            result = K.local_scalar(logits_tir_dtype)
-                            K.assign(result, K.Cast(logits_tir_dtype, result_f32))
+                            result = K.local_scalar(
+                                logits_tir_dtype, init=K.Cast(logits_tir_dtype, result_f32)
+                            )
                             if config.compressed_logits:
-                                q_offset = K.local_scalar("uint64")
-                                K.assign(
-                                    q_offset,
-                                    K.Cast(
+                                q_offset = K.local_scalar(
+                                    "uint64",
+                                    init=K.Cast(
                                         "uint64", q_idx * K.uint32(block_q) + K.uint32(q_inner_i)
                                     )
                                     * K.Cast("uint64", logits_stride),
                                 )
-                                row_k_start = K.local_scalar("uint32")
-                                K.assign(row_k_start, seq_k_start[q_inner_i])
-                                row_k_end = K.local_scalar("uint32")
-                                K.assign(row_k_end, seq_k_end[q_inner_i])
+                                row_k_start = K.local_scalar("uint32", init=seq_k_start[q_inner_i])
+                                row_k_end = K.local_scalar("uint32", init=seq_k_end[q_inner_i])
                                 # Range-guarded store: if-converts to a predicated @P STG
                                 # for this kernel (unlike fp8's clamp-to-padding variant).
                                 with (
@@ -1026,10 +1001,9 @@ def get_kernel(**kwargs: Any):
                                 store_logits(token_store_off[q_inner_i], result)
                             else:
                                 # bf16-dense: per-iter offset; see token_store_off note.
-                                q_offset_bf16 = K.local_scalar("uint64")
-                                K.assign(
-                                    q_offset_bf16,
-                                    K.Cast(
+                                q_offset_bf16 = K.local_scalar(
+                                    "uint64",
+                                    init=K.Cast(
                                         "uint64", q_idx * K.uint32(block_q) + K.uint32(q_inner_i)
                                     )
                                     * K.Cast("uint64", logits_stride),

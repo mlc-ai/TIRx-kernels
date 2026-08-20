@@ -1977,8 +1977,7 @@ def get_kernel(
                             sched_required_l1_tasks,
                             (task_info_regs[4] + K.uint32(1)) * K.uint32(num_l1_clusters),
                         )
-                        sched_l1_count = K.local_scalar("uint32")
-                        K.assign(sched_l1_count, K.uint32(0))
+                        sched_l1_count = K.local_scalar("uint32", init=K.uint32(0))
                         load_volatile_u32(sched_l1_count, workspace_l1_task_count.ptr_to([0]))
                         with K.While(sched_l1_count < sched_required_l1_tasks):
                             load_volatile_u32(sched_l1_count, workspace_l1_task_count.ptr_to([0]))
@@ -3610,8 +3609,7 @@ def get_kernel(
                         # rhythm than the s loop, so resetting per-s would leave the cache zero on
                         # iterations between loads. Upstream 559d79f defaults the weight
                         # to 1.0f (weightless shared-expert path multiplies by 1).
-                        stored_cached_weight = K.local_scalar("float32")
-                        K.assign(stored_cached_weight, K.float32(1.0))
+                        stored_cached_weight = K.local_scalar("float32", init=K.float32(1.0))
                         with K.serial(
                             0, wg_block_m // kernel_config.store_block_m, unroll=True
                         ) as s:
