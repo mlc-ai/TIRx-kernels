@@ -1,4 +1,5 @@
 kernel: flash_mla_sparse_fwd
+default_suite: false
 configs:
   - {config: bench_dqk512_hq64_s4096_kv8192_topk512, default: false}
   - {config: bench_dqk512_hq64_s4096_kv32768_topk512, default: false}

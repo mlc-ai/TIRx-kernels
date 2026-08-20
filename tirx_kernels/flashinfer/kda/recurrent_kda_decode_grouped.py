@@ -43,14 +43,12 @@ the sibling: ``GATE_MODE=0`` (pre-computed gate), ``USE_SRC=1``
 GQA (``HV != H``), and single-token decode with ``N * HV >= 128`` (one-warp).
 """
 
-from __future__ import annotations
-
 from typing import Any
 from unittest import SkipTest
 
 import torch
 
-from tvm.script import tirx as T
+import tirx_kernels.kern as K
 
 # Sibling import: the one-warp port is the canonical home for the shared PTX,
 # bf16-conversion and shuffle helpers (mamba's convention, e.g.
@@ -71,10 +69,6 @@ SOFTPLUS_LINEAR_THRESHOLD = 20.0
 GATE_MODE_PRECOMPUTED = 0
 GATE_MODE_SOFTPLUS = 1
 GATE_MODE_LOWER_BOUND = 2
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return (value + alignment - 1) // alignment * alignment
 
 
 def _row_lengths(num_seqs: int, num_tokens: int, empty_rows: int) -> list[int]:
@@ -167,13 +161,13 @@ def _sub_bf16(bf_bits, f):
 
 def _pack_f32x2(lo, hi):
     """One ``.f32x2`` operand: ``lo`` is the low half, i.e. the lower address."""
-    return T.cuda.make_float2(lo, hi)
+    return K.cuda.make_float2(lo, hi)
 
 
 def _vmul(a, b):
     """``mul.f32x2`` -- two packed FP32 lanes."""
-    out = T.alloc_local((1,), "uint64")
-    T.evaluate(T.ptx.mul.f32x2(out[0], a, b))
+    out = K.alloc_local((1,), "uint64")
+    K.evaluate(K.ptx.mul.f32x2(out[0], a, b))
     return out[0]
 
 
@@ -184,27 +178,27 @@ def _vadd(a, b):
     multiply and add; there is no ``fma.*.f32x2`` anywhere in its PTX, so the
     port must not fuse them either.
     """
-    out = T.alloc_local((1,), "uint64")
-    T.evaluate(T.ptx.add.f32x2(out[0], a, b))
+    out = K.alloc_local((1,), "uint64")
+    K.evaluate(K.ptx.add.f32x2(out[0], a, b))
     return out[0]
 
 
 def _ld_shared_b32(buffer, index):
     """``ld.shared.b32``."""
-    out = T.alloc_local((1,), "uint32")
-    T.evaluate(T.ptx.ld.shared.b32(out[0], buffer.ptr_to([index])))
-    return T.reinterpret("float32", out[0])
+    out = K.alloc_local((1,), "uint32")
+    K.evaluate(K.ptx.ld.shared.b32(out[0], buffer.ptr_to([index])))
+    return K.reinterpret("float32", out[0])
 
 
 def _st_shared_f32(buffer, index, value):
     """``st.shared.b32``."""
-    T.evaluate(T.ptx.st.shared.b32(buffer.ptr_to([index]), T.reinterpret("uint32", value)))
+    K.evaluate(K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value)))
 
 
 def _st_shared_f32_pred(buffer, index, value, pred):
     """``@p st.shared.b32`` -- the ``lane == 0 and wid < SW`` publication."""
-    T.evaluate(
-        T.ptx.st.shared.b32(buffer.ptr_to([index]), T.reinterpret("uint32", value), pred=pred)
+    K.evaluate(
+        K.ptx.st.shared.b32(buffer.ptr_to([index]), K.reinterpret("uint32", value), pred=pred)
     )
 
 
@@ -214,9 +208,9 @@ def _ld_shared_granule(buffer, index):
     A granule is 8 contiguous FP32 (32 B), which the source reads as two 16 B
     vectors; ``index`` is an FP32 element index and must be 16 B aligned.
     """
-    pairs = T.alloc_local((4,), "uint64")
-    T.evaluate(T.ptx.ld.shared.v2.b64(pairs[0], pairs[1], buffer.ptr_to([index])))
-    T.evaluate(T.ptx.ld.shared.v2.b64(pairs[2], pairs[3], buffer.ptr_to([index + 4])))
+    pairs = K.alloc_local((4,), "uint64")
+    K.evaluate(K.ptx.ld.shared.v2.b64(pairs[0], pairs[1], buffer.ptr_to([index])))
+    K.evaluate(K.ptx.ld.shared.v2.b64(pairs[2], pairs[3], buffer.ptr_to([index + 4])))
     return pairs
 
 
@@ -226,9 +220,9 @@ def _ld_global_granule_no_alloc(buffer, index):
     Mirrors the source's ``autovec_copy(..., CacheEvictionPriority.NO_ALLOCATE)``
     on the state load (recurrent_kda.py:571).
     """
-    words = T.alloc_local((4,), "uint32")
-    T.evaluate(
-        T.ptx["ld.global.L1::no_allocate.v4.b32"](
+    words = K.alloc_local((4,), "uint32")
+    K.evaluate(
+        K.ptx["ld.global.L1::no_allocate.v4.b32"](
             words[0], words[1], words[2], words[3], buffer.ptr_to([index])
         )
     )
@@ -237,8 +231,8 @@ def _ld_global_granule_no_alloc(buffer, index):
 
 def _st_global_granule_no_alloc(buffer, index, words):
     """``st.global.L1::no_allocate.v4.b32`` -- one 16 B BF16 checkpoint granule."""
-    T.evaluate(
-        T.ptx["st.global.L1::no_allocate.v4.b32"](
+    K.evaluate(
+        K.ptx["st.global.L1::no_allocate.v4.b32"](
             buffer.ptr_to([index]), words[0], words[1], words[2], words[3]
         )
     )
@@ -275,8 +269,8 @@ def _softplus(x):
     minimax chain.  Only GATE_MODE=1 uses it, and no benchmark row does, so this
     is a correctness obligation rather than a performance-alignment target.
     """
-    sp = T.log1p(_exp2(_mul(x, LOG2_E)))
-    return T.Select(x > SOFTPLUS_LINEAR_THRESHOLD, x, sp)
+    sp = K.log1p(_exp2(_mul(x, LOG2_E)))
+    return K.Select(x > SOFTPLUS_LINEAR_THRESHOLD, x, sp)
 
 
 def _grouped_tiling(num_tokens: int) -> dict[str, int]:
@@ -357,7 +351,7 @@ CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
     # (A short *spec* row is out of contract -- see _row_lengths.)
     _dec("dec_hv16_b6_empty", num_seqs=6, empty_rows=1),
     # Allocated scratch stride S > T (tests use T+2): ssm index stride is
-    # scratch_steps, not T.
+    # scratch_steps, not K.
     _case("ver_t4_hv16_b8_s6", num_seqs=8, num_tokens=4, scratch_steps=6),
     # Orphan packed suffix: q_total > cu[n_seq] must be zero-filled by the
     # kernel's tail loop (:719-725).  Decode-only -- spec mode sizes out_buf as
@@ -414,15 +408,6 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
 
     empty_rows = int(kwargs.get("empty_rows", 0))
     q_total = sum(_row_lengths(num_seqs, num_tokens, empty_rows)) + orphan_tokens
-    # Shared memory: three T*D f32 planes plus the T*16 f32 reduce scratch,
-    # each 16-byte aligned (recurrent_kda.py:526-530).
-    plane = 4 * num_tokens * HEAD_DIM
-    off_eg = 0
-    off_kr = _align_up(off_eg + plane, 16)
-    off_qr = _align_up(off_kr + plane, 16)
-    off_red = _align_up(off_qr + plane, 16)
-    shared_bytes = _align_up(off_red + 4 * num_tokens * 16, 16)
-
     # State pool: committed [pool, HV, D, D] for decode; scratch viewed as
     # [N*S, HV, D, D] for verify (recurrent_kda.py kda_flashinfer.py:307-309).
     state_slots = pool_size if mode == "decode" else num_seqs * scratch_steps
@@ -456,384 +441,350 @@ def _specialization(kwargs: dict[str, Any]) -> dict[str, Any]:
         "CU_ELEMENTS": num_seqs + 1,
         "SSM_IDX_ELEMENTS": num_seqs * num_tokens,
         "NAT_ELEMENTS": num_seqs,
-        "OFF_EG": off_eg,
-        "OFF_KR": off_kr,
-        "OFF_QR": off_qr,
-        "OFF_RED": off_red,
-        "SHARED_BYTES": shared_bytes,
     }
 
 
-@T.jit
-def _recurrent_kda_decode_grouped(
-    q_h: T.handle,
-    k_h: T.handle,
-    v_h: T.handle,
-    g_h: T.handle,
-    beta_h: T.handle,
-    a_log_h: T.handle,
-    dt_bias_h: T.handle,
-    cu_h: T.handle,
-    ssm_idx_h: T.handle,
-    nat_h: T.handle,
-    state_h: T.handle,
-    out_h: T.handle,
-    q_total: T.int32,
-    g_stride_q: T.int32,
-    state_slot_stride: T.int64,
-    scale: T.float32,
-    lower_bound: T.float32,
-    *,
-    NUM_SEQS: T.constexpr,
-    NUM_TOKENS: T.constexpr,
-    NUM_HEADS: T.constexpr,
-    NUM_VALUE_HEADS: T.constexpr,
-    RATIO: T.constexpr,
-    KS: T.constexpr,
-    G: T.constexpr,
-    CPB: T.constexpr,
-    NT: T.constexpr,
-    EPT: T.constexpr,
-    SW: T.constexpr,
-    NUM_WARPS: T.constexpr,
-    VSPLIT: T.constexpr,
-    GATE_MODE: T.constexpr,
-    Q_TOTAL: T.constexpr,
-    QK_ELEMENTS: T.constexpr,
-    V_ELEMENTS: T.constexpr,
-    BETA_ELEMENTS: T.constexpr,
-    STATE_ELEMENTS: T.constexpr,
-    STATE_SLOT_STRIDE: T.constexpr,
-    A_LOG_ELEMENTS: T.constexpr,
-    DT_BIAS_ELEMENTS: T.constexpr,
-    CU_ELEMENTS: T.constexpr,
-    SSM_IDX_ELEMENTS: T.constexpr,
-    NAT_ELEMENTS: T.constexpr,
-    OFF_EG: T.constexpr,
-    OFF_KR: T.constexpr,
-    OFF_QR: T.constexpr,
-    OFF_RED: T.constexpr,
-    SHARED_BYTES: T.constexpr,
-):
-    q = T.match_buffer(q_h, (QK_ELEMENTS,), "bfloat16", scope="global")
-    k = T.match_buffer(k_h, (QK_ELEMENTS,), "bfloat16", scope="global")
-    v = T.match_buffer(v_h, (V_ELEMENTS,), "bfloat16", scope="global")
-    g = T.match_buffer(g_h, (V_ELEMENTS,), "bfloat16", scope="global")
-    beta = T.match_buffer(beta_h, (BETA_ELEMENTS,), "bfloat16", scope="global")
-    a_log = T.match_buffer(a_log_h, (A_LOG_ELEMENTS,), "float32", scope="global")
-    dt_bias = T.match_buffer(dt_bias_h, (DT_BIAS_ELEMENTS,), "float32", scope="global")
-    cu = T.match_buffer(cu_h, (CU_ELEMENTS,), "int32", scope="global")
-    ssm_idx = T.match_buffer(ssm_idx_h, (SSM_IDX_ELEMENTS,), "int32", scope="global")
-    nat = T.match_buffer(nat_h, (NAT_ELEMENTS,), "int32", scope="global")
-    state = T.match_buffer(state_h, (STATE_ELEMENTS,), "bfloat16", scope="global")
-    out = T.match_buffer(out_h, (V_ELEMENTS,), "bfloat16", scope="global")
-    T.device_entry()
-    # TIRX_TRANSCRIBE_START recurrent_kda_decode_grouped
-    # --- CTA and thread coordinates (recurrent_kda.py:512-524) -------------
-    hv, n, vz = T.cta_id([NUM_VALUE_HEADS, NUM_SEQS, VSPLIT])
-    # A flat NT-thread block, matching the source's block=(NT, 1, 1); a 2-D
-    # [32, NUM_WARPS] block would make every use of `tid` read two special
-    # registers instead of one.
-    tid = T.thread_id([NT])
-    lane: T.int32 = tid % 32
-    wid: T.int32 = tid // 32
-    h: T.int32 = hv // RATIO
-    v_idx: T.int32 = vz * CPB + tid // KS  # the state column this thread owns
-    part: T.int32 = tid % KS  # which K-slice of that column
-    d: T.int32 = tid % HEAD_DIM  # phase-A element base
+def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
+    """Trace the grouped recurrence with K-owned launch and shared storage."""
+    NUM_SEQS = spec["NUM_SEQS"]
+    NUM_TOKENS = spec["NUM_TOKENS"]
+    NUM_HEADS = spec["NUM_HEADS"]
+    NUM_VALUE_HEADS = spec["NUM_VALUE_HEADS"]
+    RATIO = spec["RATIO"]
+    KS = spec["KS"]
+    G = spec["G"]
+    CPB = spec["CPB"]
+    NT = spec["NT"]
+    EPT = spec["EPT"]
+    SW = spec["SW"]
+    NUM_WARPS = spec["NUM_WARPS"]
+    GATE_MODE = spec["GATE_MODE"]
+    STATE_SLOT_STRIDE = spec["STATE_SLOT_STRIDE"]
+    QK_ELEMENTS = spec["QK_ELEMENTS"]
+    V_ELEMENTS = spec["V_ELEMENTS"]
+    BETA_ELEMENTS = spec["BETA_ELEMENTS"]
+    STATE_ELEMENTS = spec["STATE_ELEMENTS"]
+    A_LOG_ELEMENTS = spec["A_LOG_ELEMENTS"]
+    DT_BIAS_ELEMENTS = spec["DT_BIAS_ELEMENTS"]
+    CU_ELEMENTS = spec["CU_ELEMENTS"]
+    SSM_IDX_ELEMENTS = spec["SSM_IDX_ELEMENTS"]
+    NAT_ELEMENTS = spec["NAT_ELEMENTS"]
 
-    # --- shared memory (recurrent_kda.py:526-541) --------------------------
-    # One 16B-aligned arena carved into the three T-batched staging planes plus
-    # the reduction scratch.  Every access below is raw PTX: low_level_ir.py:26
-    # forbids BufferLoad/BufferStore on `shared` just as it does on `global`.
-    shared_raw = T.alloc_buffer((SHARED_BYTES,), "uint8", scope="shared", align=16)
-    s_eg = T.decl_buffer(
-        (NUM_TOKENS * HEAD_DIM,),
-        "float32",
-        data=shared_raw.data,
-        scope="shared",
-        byte_offset=OFF_EG,
-        align=16,
-    )
-    s_kr = T.decl_buffer(
-        (NUM_TOKENS * HEAD_DIM,),
-        "float32",
-        data=shared_raw.data,
-        scope="shared",
-        byte_offset=OFF_KR,
-        align=16,
-    )
-    s_qr = T.decl_buffer(
-        (NUM_TOKENS * HEAD_DIM,),
-        "float32",
-        data=shared_raw.data,
-        scope="shared",
-        byte_offset=OFF_QR,
-        align=16,
-    )
-    s_red = T.decl_buffer(
-        (NUM_TOKENS * 16,),
-        "float32",
-        data=shared_raw.data,
-        scope="shared",
-        byte_offset=OFF_RED,
-        align=16,
-    )
+    @K.kernel(warps=NUM_WARPS, arch="sm_100a", grid=(NUM_VALUE_HEADS, NUM_SEQS, VSPLIT))
+    def _recurrent_kda_decode_grouped(
+        q: K.gptr[K.bf16, (QK_ELEMENTS,)],
+        k: K.gptr[K.bf16, (QK_ELEMENTS,)],
+        v: K.gptr[K.bf16, (V_ELEMENTS,)],
+        g: K.gptr[K.bf16, (V_ELEMENTS,)],
+        beta: K.gptr[K.bf16, (BETA_ELEMENTS,)],
+        a_log: K.gptr[K.f32, (A_LOG_ELEMENTS,)],
+        dt_bias: K.gptr[K.f32, (DT_BIAS_ELEMENTS,)],
+        cu: K.gptr[K.i32, (CU_ELEMENTS,)],
+        ssm_idx: K.gptr[K.i32, (SSM_IDX_ELEMENTS,)],
+        nat: K.gptr[K.i32, (NAT_ELEMENTS,)],
+        state: K.gptr[K.bf16, (STATE_ELEMENTS,)],
+        out: K.gptr[K.bf16, (V_ELEMENTS,)],
+        q_total: K.i32,
+        g_stride_q: K.i32,
+        state_slot_stride: K.i64,
+        scale: K.f32,
+        lower_bound: K.f32,
+    ):
+        # TIRX_TRANSCRIBE_START recurrent_kda_decode_grouped
+        # --- CTA and thread coordinates (recurrent_kda.py:512-524) -------------
+        hv, n, vz = K.cta_id()
+        tid = K.thread_id()
+        lane = K.lane_id()
+        wid = K.warp_id()
+        h = K.alloc_local((1,), K.i32)
+        v_idx = K.alloc_local((1,), K.i32)
+        part = K.alloc_local((1,), K.i32)
+        d = K.alloc_local((1,), K.i32)
+        K.assign(h[0], hv // RATIO)
+        K.assign(v_idx[0], vz * CPB + tid // KS)  # the state column this thread owns
+        K.assign(part[0], tid % KS)  # which K-slice of that column
+        K.assign(d[0], tid % HEAD_DIM)  # phase-A element base
 
-    # --- row bounds (recurrent_kda.py:543-544) -----------------------------
-    token_base: T.int32 = _load_i32(cu, n)
-    seq_len: T.int32 = _load_i32(cu, n + 1) - token_base
+        # --- shared memory (recurrent_kda.py:526-541) --------------------------
+        # The pool is the single owner of type, layout, offsets, and total size.
+        smem = K.smem_pool()
+        s_eg = smem.alloc((NUM_TOKENS * HEAD_DIM,), K.f32, align=16)
+        s_kr = smem.alloc((NUM_TOKENS * HEAD_DIM,), K.f32, align=16)
+        s_qr = smem.alloc((NUM_TOKENS * HEAD_DIM,), K.f32, align=16)
+        s_red = smem.alloc((NUM_TOKENS * 16,), K.f32, align=16)
 
-    # --- initial checkpoint slot (recurrent_kda.py:551-560) ----------------
-    # `nat` is read only for T > 1; SGLang never supplies it, so FlashInfer
-    # substitutes a cached ones vector and `ic` collapses to 0.
-    ic: T.int32 = 0
-    if NUM_TOKENS > 1:
-        ic = T.min(T.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1)
-    slot0: T.int32 = T.max(_load_i32(ssm_idx, n * NUM_TOKENS + ic), 0)
+        # --- row bounds (recurrent_kda.py:543-544) -----------------------------
+        token_base: K.int32 = _load_i32(cu, n)
+        seq_len: K.int32 = _load_i32(cu, n + 1) - token_base
 
-    # --- state load: one (8, G) granule per thread (recurrent_kda.py:562-574)
-    # Element (e, gi) sits at e + gi*KS*8 + part*8, so each granule's eight
-    # elements are contiguous: one 16B eviction-hinted vector load.
-    head_row: T.int32 = hv * HEAD_DIM * HEAD_DIM + v_idx * HEAD_DIM
-    read_base = T.cast(slot0, "int64") * T.cast(STATE_SLOT_STRIDE, "int64") + T.cast(
-        head_row, "int64"
-    )
-    s_pairs = T.alloc_local((4 * G,), "uint64")  # THE recurrent carry
-    s_words = T.alloc_local((4 * G,), "uint32")  # BF16 pairs, widened after the barrier
-    for gi in range(G):
-        words = _ld_global_granule_no_alloc(
-            state, read_base + T.cast(gi * KS * 8 + part * 8, "int64")
+        # --- initial checkpoint slot (recurrent_kda.py:551-560) ----------------
+        # `nat` is read only for T > 1; SGLang never supplies it, so FlashInfer
+        # substitutes a cached ones vector and `ic` collapses to 0.
+        ic: K.int32 = 0
+        if NUM_TOKENS > 1:
+            ic = K.min(K.max(_load_i32(nat, n) - 1, 0), NUM_TOKENS - 1)
+        slot0: K.int32 = K.max(_load_i32(ssm_idx, n * NUM_TOKENS + ic), 0)
+
+        # --- state load: one (8, G) granule per thread (recurrent_kda.py:562-574)
+        # Element (e, gi) sits at e + gi*KS*8 + part*8, so each granule's eight
+        # elements are contiguous: one 16B eviction-hinted vector load.
+        head_row: K.int32 = hv * HEAD_DIM * HEAD_DIM + v_idx[0] * HEAD_DIM
+        read_base = K.cast(slot0, "int64") * K.cast(STATE_SLOT_STRIDE, "int64") + K.cast(
+            head_row, "int64"
         )
-        for pr in range(4):
-            s_words[gi * 4 + pr] = words[pr]
+        s_pairs = K.alloc_local((4 * G,), "uint64")  # THE recurrent carry
+        s_words = K.alloc_local((4 * G,), "uint32")  # BF16 pairs, widened after the barrier
+        for gi in range(G):
+            words = _ld_global_granule_no_alloc(
+                state, read_base + K.cast(gi * KS * 8 + part[0] * 8, "int64")
+            )
+            for pr in range(4):
+                K.ptx.mov.b32(s_words[gi * 4 + pr], words[pr])
 
-    # --- loop-invariant gate constants (recurrent_kda.py:576-586) ----------
-    av: T.float32 = T.float32(1.0)
-    if GATE_MODE != GATE_MODE_PRECOMPUTED:
-        av = _exp2(_mul(_load_f32(a_log, h), T.float32(LOG2_E)))
-    dtb = T.alloc_local((EPT,), "float32")
-    for e in range(EPT):
-        dtb[e] = _load_f32(dt_bias, h * HEAD_DIM + d + e * NT)
-
-    # =======================================================================
-    # Phase A: stage every token's gate/key/query (recurrent_kda.py:588-640)
-    # Thread mapping is `d + e*NT` here, NOT the (v_idx, part) mapping below.
-    # =======================================================================
-    slots = T.alloc_local((NUM_TOKENS,), "int32")
-    ves = T.alloc_local((NUM_TOKENS,), "uint16")  # stays BF16 until :681
-    bbs = T.alloc_local((NUM_TOKENS,), "float32")
-
-    # Issue every token's global loads before consuming any of them.  With a
-    # cold L2 -- which is what bench_suite measures, and what an inference
-    # server sees -- the kernel is bound by how many DRAM misses are in flight,
-    # not by instruction count.  Loading and consuming one token at a time keeps
-    # only EPT*3+2 requests outstanding; hoisting all T tokens keeps T times as
-    # many.
-    q_bits = T.alloc_local((NUM_TOKENS * EPT,), "uint16")
-    k_bits = T.alloc_local((NUM_TOKENS * EPT,), "uint16")
-    g_bits = T.alloc_local((NUM_TOKENS * EPT,), "uint16")
-    b_bits = T.alloc_local((NUM_TOKENS,), "uint16")
-    for t in range(NUM_TOKENS):
-        slots[t] = _load_i32(ssm_idx, n * NUM_TOKENS + t)
-        # Out-of-row tokens clamp to token 0 so the loads stay in bounds; the
-        # value is discarded by the `active` predicate in phase B.
-        pidx: T.int32 = T.if_then_else(t < seq_len, token_base + t, 0)
-        ves[t] = _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx)
-        b_bits[t] = _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv)
+        # --- loop-invariant gate constants (recurrent_kda.py:576-586) ----------
+        av: K.float32 = K.float32(1.0)
+        if GATE_MODE != GATE_MODE_PRECOMPUTED:
+            av = _exp2(_mul(_load_f32(a_log, h[0]), K.float32(LOG2_E)))
+        dtb = K.alloc_local((EPT,), "float32")
         for e in range(EPT):
-            de_l: T.int32 = d + e * NT
-            q_bits[t * EPT + e] = _load_bf16_bits(q, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l)
-            k_bits[t * EPT + e] = _load_bf16_bits(k, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l)
-            g_bits[t * EPT + e] = _load_bf16_bits(g, pidx * g_stride_q + hv * HEAD_DIM + de_l)
-    for t in range(NUM_TOKENS):
-        bbs[t] = _bf16_to_f32(b_bits[t])
+            K.ptx.mov.b32(dtb[e], _load_f32(dt_bias, h[0] * HEAD_DIM + d[0] + e * NT))
 
-        sqp: T.float32 = T.float32(0.0)
-        skp: T.float32 = T.float32(0.0)
-        for e in range(EPT):
-            de: T.int32 = d + e * NT
-            qe = q_bits[t * EPT + e]
-            ke = k_bits[t * EPT + e]
-            ge = g_bits[t * EPT + e]
+        # =======================================================================
+        # Phase A: stage every token's gate/key/query (recurrent_kda.py:588-640)
+        # Thread mapping is `d + e*NT` here, NOT the (v_idx, part) mapping below.
+        # =======================================================================
+        slots = K.alloc_local((NUM_TOKENS,), "int32")
+        ves = K.alloc_local((NUM_TOKENS,), "uint16")  # stays BF16 until :681
+        bbs = K.alloc_local((NUM_TOKENS,), "float32")
 
-            # The L2 partials consume the raw BF16 registers.
-            sqp = _fma_bf16(qe, qe, sqp)
-            skp = _fma_bf16(ke, ke, skp)
-
-            x: T.float32 = _add_bf16(ge, dtb[e])
-            gate: T.float32 = T.float32(0.0)
-            if GATE_MODE == GATE_MODE_SOFTPLUS:
-                gate = _mul(_softplus(x), _neg(av))
-            else:
-                # The negation is its own instruction; it is not folded into a
-                # negative LOG2_E constant (recurrent_kda.py:623-627).
-                sig_e = _exp2(_mul(_mul(av, _neg(x)), T.float32(LOG2_E)))
-                gate = _mul(lower_bound, _rcp_rn(_add(sig_e, T.float32(1.0))))
-
-            # The staged key/query are the RAW values; L2 normalization is a
-            # scalar factor applied in phase B.  They convert here because the
-            # staging planes are FP32.
-            _st_shared_f32(s_eg, t * HEAD_DIM + de, _exp2(_mul(gate, T.float32(LOG2_E))))
-            _st_shared_f32(s_kr, t * HEAD_DIM + de, _bf16_to_f32(ke))
-            _st_shared_f32(s_qr, t * HEAD_DIM + de, _bf16_to_f32(qe))
-
-        # Full 32-lane butterfly, five rounds, DESCENDING offsets: the source's
-        # warp_reduction_sum halves a group width.  FP32 addition is not
-        # associative and the checkpoints must be exact, so the order matters.
-        sqp = _warp_reduce_sum(sqp)
-        skp = _warp_reduce_sum(skp)
-        publish = T.And(lane == 0, wid < SW)
-        _st_shared_f32_pred(s_red, t * 16 + wid, sqp, publish)
-        _st_shared_f32_pred(s_red, t * 16 + 8 + wid, skp, publish)
-
-    # The ONLY barrier: it separates the two thread-index mappings.
-    T.cuda.cta_sync()
-
-    # Nothing in phase A reads the state, so this placement reaches only
-    # scheduling: same op, same extent, same instruction, same dependence order
-    # as widening at the load site.  It is worth 15-20% on the T = 1 decode
-    # shapes (dec_hv16_b4 0.855 -> 1.06-1.09 measured on a clock-verified GPU)
-    # and is within run-to-run noise on every T > 1 shape, so it is
-    # unconditional.  It used to sit behind a `T <= 2` constexpr because before
-    # phase A issued all T tokens' loads up front it cost 2-3% at T = 8; that
-    # cost is gone, and with it the boundary.
-    for gi in range(G):
-        for pr in range(4):
-            w = s_words[gi * 4 + pr]
-            lo = _bf16_to_f32(T.cast(w, "uint16"))
-            hi = _bf16_to_f32(T.cast(T.shift_right(w, T.uint32(16)), "uint16"))
-            s_pairs[gi * 4 + pr] = _pack_f32x2(lo, hi)
-
-    # =======================================================================
-    # Phase B: sequential recurrence over the tokens (recurrent_kda.py:645-717)
-    # =======================================================================
-    kreg = T.alloc_local((4 * G,), "uint64")  # keys, loaded in pass 1, reused in pass 2
-    pvec = T.alloc_local((4,), "uint64")
-    ovec = T.alloc_local((4,), "uint64")
-    pf = T.alloc_local((8,), "float32")
-    words_w = T.alloc_local((4,), "uint32")
-
-    for t in range(NUM_TOKENS):
-        slot: T.int32 = slots[t]
-        in_row = t < seq_len
-        active = T.And(in_row, slot >= 0)
-        if active:
-            pidx_b: T.int32 = token_base + t
-            base_t: T.int32 = t * HEAD_DIM + part * 8
-
-            # ---- L2 factors (recurrent_kda.py:657-664); eps is hardcoded ----
-            sqt: T.float32 = T.float32(0.0)
-            skt: T.float32 = T.float32(0.0)
-            for w in range(SW):
-                sqt = _add(sqt, _ld_shared_b32(s_red, t * 16 + w))
-                skt = _add(skt, _ld_shared_b32(s_red, t * 16 + 8 + w))
-            rk: T.float32 = _rsqrt_no_ftz(_add(skt, T.float32(L2_EPS)))
-            rq: T.float32 = _mul(_rsqrt_no_ftz(_add(sqt, T.float32(L2_EPS))), scale)
-
-            # ---- pass 1: decay the state, accumulate the raw prediction ----
-            # gi == 0 is peeled so pvec is initialized by a mul, not fill+add.
-            egp = _ld_shared_granule(s_eg, base_t)
-            krp = _ld_shared_granule(s_kr, base_t)
-            for pr in range(4):
-                sv = _vmul(s_pairs[pr], egp[pr])
-                s_pairs[pr] = sv
-                kreg[pr] = krp[pr]
-                pvec[pr] = _vmul(krp[pr], sv)
-            for gi in range(1, G):
-                egp = _ld_shared_granule(s_eg, base_t + gi * KS * 8)
-                krp = _ld_shared_granule(s_kr, base_t + gi * KS * 8)
-                for pr in range(4):
-                    sv = _vmul(s_pairs[gi * 4 + pr], egp[pr])
-                    s_pairs[gi * 4 + pr] = sv
-                    kreg[gi * 4 + pr] = krp[pr]
-                    # mul then add -- the source emits no fma.*.f32x2.
-                    pvec[pr] = _vadd(pvec[pr], _vmul(krp[pr], sv))
-
-            # ---- balanced 8-term tree, then the KS butterfly join ----
-            for pr in range(4):
-                pf[2 * pr] = T.cuda.float2_x(pvec[pr])
-                pf[2 * pr + 1] = T.cuda.float2_y(pvec[pr])
-            pred: T.float32 = _add(
-                _add(_add(pf[0], pf[1]), _add(pf[2], pf[3])),
-                _add(_add(pf[4], pf[5]), _add(pf[6], pf[7])),
+        # Issue every token's global loads before consuming any of them.  With a
+        # cold L2 -- which is what bench_suite measures, and what an inference
+        # server sees -- the kernel is bound by how many DRAM misses are in flight,
+        # not by instruction count.  Loading and consuming one token at a time keeps
+        # only EPT*3+2 requests outstanding; hoisting all T tokens keeps T times as
+        # many.
+        q_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
+        k_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
+        g_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
+        b_bits = K.alloc_local((NUM_TOKENS,), "uint16")
+        for t in range(NUM_TOKENS):
+            K.ptx.mov.b32(slots[t], _load_i32(ssm_idx, n * NUM_TOKENS + t))
+            # Out-of-row tokens clamp to token 0 so the loads stay in bounds; the
+            # value is discarded by the `active` predicate in phase B.
+            pidx: K.int32 = K.if_then_else(t < seq_len, token_base + t, 0)
+            K.ptx.mov.b16(
+                ves[t], _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx[0])
             )
-            pred = _ks_join(pred, KS)
-
-            # ---- delta rule (:681): rk appears TWICE, by design ----
-            deltak: T.float32 = _mul(_mul(rk, bbs[t]), _sub_bf16(ves[t], _mul(rk, pred)))
-            dpair = _pack_f32x2(deltak, deltak)
-
-            # ---- pass 2: rank-1 update, accumulate the raw output ----
-            qrp = _ld_shared_granule(s_qr, base_t)
-            for pr in range(4):
-                sv = _vadd(s_pairs[pr], _vmul(kreg[pr], dpair))
-                s_pairs[pr] = sv
-                ovec[pr] = _vmul(qrp[pr], sv)
-            for gi in range(1, G):
-                qrp = _ld_shared_granule(s_qr, base_t + gi * KS * 8)
-                for pr in range(4):
-                    sv = _vadd(s_pairs[gi * 4 + pr], _vmul(kreg[gi * 4 + pr], dpair))
-                    s_pairs[gi * 4 + pr] = sv
-                    ovec[pr] = _vadd(ovec[pr], _vmul(qrp[pr], sv))
-
-            for pr in range(4):
-                pf[2 * pr] = T.cuda.float2_x(ovec[pr])
-                pf[2 * pr + 1] = T.cuda.float2_y(ovec[pr])
-            o: T.float32 = _add(
-                _add(_add(pf[0], pf[1]), _add(pf[2], pf[3])),
-                _add(_add(pf[4], pf[5]), _add(pf[6], pf[7])),
-            )
-            o = _ks_join(o, KS)
-
-            # ---- output store, owned by part == 0 (:698-699) ----
-            # Predicated rather than branch-guarded: inline asm is opaque to
-            # ptxas, so an `if` around an asm store can never be if-converted.
-            _store_bf16_bits_pred(
-                out,
-                (pidx_b * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx,
-                _f32_to_bf16(_mul(o, rq)),
-                part == 0,
-            )
-
-            # ---- BF16 checkpoint write, eviction-hinted (:702-713) ----
-            write_base = T.cast(slot, "int64") * T.cast(STATE_SLOT_STRIDE, "int64") + T.cast(
-                head_row, "int64"
-            )
-            for gi in range(G):
-                for pr in range(4):
-                    words_w[pr] = _pack_bf16x2(
-                        T.cuda.float2_y(s_pairs[gi * 4 + pr]), T.cuda.float2_x(s_pairs[gi * 4 + pr])
-                    )
-                _st_global_granule_no_alloc(
-                    state, write_base + T.cast(gi * KS * 8 + part * 8, "int64"), words_w
-                )
-        else:
-            # Pad rows still own their output element: the host allocates `out`
-            # uninitialized because the kernel defines every slot.
-            _store_bf16_bits_pred(
-                out,
-                ((token_base + t) * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx,
-                T.uint16(0),
-                T.And(in_row, part == 0),
-            )
-
-    # --- orphan packed suffix (recurrent_kda.py:719-725) --------------------
-    # Carrier tokens owned by no row.  Reachable only in the T == 1 decode
-    # layout: spec mode sizes `out` as N*NUM_TOKENS while cu_seqlens must step
-    # by T, so q_total == cu[n_seq] there and this loop is empty.
-    if T.And(T.And(n == 0, vz == 0), tid < HEAD_DIM):
-        covered: T.int32 = _load_i32(cu, NUM_SEQS)
-        for pos in T.serial(covered, q_total):
+            K.ptx.mov.b16(b_bits[t], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
             for e in range(EPT):
-                _store_bf16_bits(
-                    out, (pos * NUM_VALUE_HEADS + hv) * HEAD_DIM + tid + e * NT, T.uint16(0)
+                de_l: K.int32 = d[0] + e * NT
+                K.ptx.mov.b16(
+                    q_bits[t * EPT + e],
+                    _load_bf16_bits(q, (pidx * NUM_HEADS + h[0]) * HEAD_DIM + de_l),
                 )
+                K.ptx.mov.b16(
+                    k_bits[t * EPT + e],
+                    _load_bf16_bits(k, (pidx * NUM_HEADS + h[0]) * HEAD_DIM + de_l),
+                )
+                K.ptx.mov.b16(
+                    g_bits[t * EPT + e],
+                    _load_bf16_bits(g, pidx * g_stride_q + hv * HEAD_DIM + de_l),
+                )
+        for t in range(NUM_TOKENS):
+            K.ptx.mov.b32(bbs[t], _bf16_to_f32(b_bits[t]))
+
+            sqp: K.float32 = K.float32(0.0)
+            skp: K.float32 = K.float32(0.0)
+            for e in range(EPT):
+                de: K.int32 = d[0] + e * NT
+                qe = q_bits[t * EPT + e]
+                ke = k_bits[t * EPT + e]
+                ge = g_bits[t * EPT + e]
+
+                # The L2 partials consume the raw BF16 registers.
+                sqp = _fma_bf16(qe, qe, sqp)
+                skp = _fma_bf16(ke, ke, skp)
+
+                x: K.float32 = _add_bf16(ge, dtb[e])
+                gate: K.float32 = K.float32(0.0)
+                if GATE_MODE == GATE_MODE_SOFTPLUS:
+                    gate = _mul(_softplus(x), _neg(av))
+                else:
+                    # The negation is its own instruction; it is not folded into a
+                    # negative LOG2_E constant (recurrent_kda.py:623-627).
+                    sig_e = _exp2(_mul(_mul(av, _neg(x)), K.float32(LOG2_E)))
+                    gate = _mul(lower_bound, _rcp_rn(_add(sig_e, K.float32(1.0))))
+
+                # The staged key/query are the RAW values; L2 normalization is a
+                # scalar factor applied in phase B.  They convert here because the
+                # staging planes are FP32.
+                _st_shared_f32(s_eg, t * HEAD_DIM + de, _exp2(_mul(gate, K.float32(LOG2_E))))
+                _st_shared_f32(s_kr, t * HEAD_DIM + de, _bf16_to_f32(ke))
+                _st_shared_f32(s_qr, t * HEAD_DIM + de, _bf16_to_f32(qe))
+
+            # Full 32-lane butterfly, five rounds, DESCENDING offsets: the source's
+            # warp_reduction_sum halves a group width.  FP32 addition is not
+            # associative and the checkpoints must be exact, so the order matters.
+            sqp = _warp_reduce_sum(sqp)
+            skp = _warp_reduce_sum(skp)
+            publish = K.And(lane == 0, wid < SW)
+            _st_shared_f32_pred(s_red, t * 16 + wid, sqp, publish)
+            _st_shared_f32_pred(s_red, t * 16 + 8 + wid, skp, publish)
+
+        # The ONLY barrier: it separates the two thread-index mappings.
+        K.cuda.cta_sync()
+
+        # Nothing in phase A reads the state, so this placement reaches only
+        # scheduling: same op, same extent, same instruction, same dependence order
+        # as widening at the load site.  It is worth 15-20% on the T = 1 decode
+        # shapes (dec_hv16_b4 0.855 -> 1.06-1.09 measured on a clock-verified GPU)
+        # and is within run-to-run noise on every T > 1 shape, so it is
+        # unconditional.  It used to sit behind a `T <= 2` constexpr because before
+        # phase A issued all T tokens' loads up front it cost 2-3% at T = 8; that
+        # cost is gone, and with it the boundary.
+        for gi in range(G):
+            for pr in range(4):
+                w = s_words[gi * 4 + pr]
+                lo = _bf16_to_f32(K.cast(w, "uint16"))
+                hi = _bf16_to_f32(K.cast(K.shift_right(w, K.uint32(16)), "uint16"))
+                K.ptx.mov.b64(s_pairs[gi * 4 + pr], _pack_f32x2(lo, hi))
+
+        # =======================================================================
+        # Phase B: sequential recurrence over the tokens (recurrent_kda.py:645-717)
+        # =======================================================================
+        kreg = K.alloc_local((4 * G,), "uint64")  # keys, loaded in pass 1, reused in pass 2
+        pvec = K.alloc_local((4,), "uint64")
+        ovec = K.alloc_local((4,), "uint64")
+        pf = K.alloc_local((8,), "float32")
+        words_w = K.alloc_local((4,), "uint32")
+
+        for t in range(NUM_TOKENS):
+            slot: K.int32 = slots[t]
+            in_row = t < seq_len
+            active = K.And(in_row, slot >= 0)
+            with K.If(active):
+                with K.Then():
+                    pidx_b: K.int32 = token_base + t
+                    base_t: K.int32 = t * HEAD_DIM + part[0] * 8
+
+                    # ---- L2 factors (recurrent_kda.py:657-664); eps is hardcoded ----
+                    sqt: K.float32 = K.float32(0.0)
+                    skt: K.float32 = K.float32(0.0)
+                    for w in range(SW):
+                        sqt = _add(sqt, _ld_shared_b32(s_red, t * 16 + w))
+                        skt = _add(skt, _ld_shared_b32(s_red, t * 16 + 8 + w))
+                    rk: K.float32 = _rsqrt_no_ftz(_add(skt, K.float32(L2_EPS)))
+                    rq: K.float32 = _mul(_rsqrt_no_ftz(_add(sqt, K.float32(L2_EPS))), scale)
+
+                    # ---- pass 1: decay the state, accumulate the raw prediction ----
+                    # gi == 0 is peeled so pvec is initialized by a mul, not fill+add.
+                    egp = _ld_shared_granule(s_eg, base_t)
+                    krp = _ld_shared_granule(s_kr, base_t)
+                    for pr in range(4):
+                        sv = _vmul(s_pairs[pr], egp[pr])
+                        K.ptx.mov.b64(s_pairs[pr], sv)
+                        K.ptx.mov.b64(kreg[pr], krp[pr])
+                        K.ptx.mov.b64(pvec[pr], _vmul(krp[pr], sv))
+                    for gi in range(1, G):
+                        egp = _ld_shared_granule(s_eg, base_t + gi * KS * 8)
+                        krp = _ld_shared_granule(s_kr, base_t + gi * KS * 8)
+                        for pr in range(4):
+                            sv = _vmul(s_pairs[gi * 4 + pr], egp[pr])
+                            K.ptx.mov.b64(s_pairs[gi * 4 + pr], sv)
+                            K.ptx.mov.b64(kreg[gi * 4 + pr], krp[pr])
+                            # mul then add -- the source emits no fma.*.f32x2.
+                            K.ptx.mov.b64(pvec[pr], _vadd(pvec[pr], _vmul(krp[pr], sv)))
+
+                    # ---- balanced 8-term tree, then the KS butterfly join ----
+                    for pr in range(4):
+                        K.ptx.mov.b32(pf[2 * pr], K.cuda.float2_x(pvec[pr]))
+                        K.ptx.mov.b32(pf[2 * pr + 1], K.cuda.float2_y(pvec[pr]))
+                    pred: K.float32 = _add(
+                        _add(_add(pf[0], pf[1]), _add(pf[2], pf[3])),
+                        _add(_add(pf[4], pf[5]), _add(pf[6], pf[7])),
+                    )
+                    pred = _ks_join(pred, KS)
+
+                    # ---- delta rule (:681): rk appears TWICE, by design ----
+                    deltak: K.float32 = _mul(_mul(rk, bbs[t]), _sub_bf16(ves[t], _mul(rk, pred)))
+                    dpair = _pack_f32x2(deltak, deltak)
+
+                    # ---- pass 2: rank-1 update, accumulate the raw output ----
+                    qrp = _ld_shared_granule(s_qr, base_t)
+                    for pr in range(4):
+                        sv = _vadd(s_pairs[pr], _vmul(kreg[pr], dpair))
+                        K.ptx.mov.b64(s_pairs[pr], sv)
+                        K.ptx.mov.b64(ovec[pr], _vmul(qrp[pr], sv))
+                    for gi in range(1, G):
+                        qrp = _ld_shared_granule(s_qr, base_t + gi * KS * 8)
+                        for pr in range(4):
+                            sv = _vadd(s_pairs[gi * 4 + pr], _vmul(kreg[gi * 4 + pr], dpair))
+                            K.ptx.mov.b64(s_pairs[gi * 4 + pr], sv)
+                            K.ptx.mov.b64(ovec[pr], _vadd(ovec[pr], _vmul(qrp[pr], sv)))
+
+                    for pr in range(4):
+                        K.ptx.mov.b32(pf[2 * pr], K.cuda.float2_x(ovec[pr]))
+                        K.ptx.mov.b32(pf[2 * pr + 1], K.cuda.float2_y(ovec[pr]))
+                    o: K.float32 = _add(
+                        _add(_add(pf[0], pf[1]), _add(pf[2], pf[3])),
+                        _add(_add(pf[4], pf[5]), _add(pf[6], pf[7])),
+                    )
+                    o = _ks_join(o, KS)
+
+                    # ---- output store, owned by part == 0 (:698-699) ----
+                    # Predicated rather than branch-guarded: inline asm is opaque to
+                    # ptxas, so an `if` around an asm store can never be if-converted.
+                    _store_bf16_bits_pred(
+                        out,
+                        (pidx_b * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx[0],
+                        _f32_to_bf16(_mul(o, rq)),
+                        K.cast(part[0] == 0, "int32"),
+                    )
+
+                    # ---- BF16 checkpoint write, eviction-hinted (:702-713) ----
+                    write_base = K.cast(slot, "int64") * K.cast(
+                        STATE_SLOT_STRIDE, "int64"
+                    ) + K.cast(head_row, "int64")
+                    for gi in range(G):
+                        for pr in range(4):
+                            K.ptx.mov.b32(
+                                words_w[pr],
+                                _pack_bf16x2(
+                                    K.cuda.float2_y(s_pairs[gi * 4 + pr]),
+                                    K.cuda.float2_x(s_pairs[gi * 4 + pr]),
+                                ),
+                            )
+                        _st_global_granule_no_alloc(
+                            state, write_base + K.cast(gi * KS * 8 + part[0] * 8, "int64"), words_w
+                        )
+                with K.Else():
+                    # Pad rows still own their output element: the host allocates `out`
+                    # uninitialized because the kernel defines every slot.
+                    _store_bf16_bits_pred(
+                        out,
+                        ((token_base + t) * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx[0],
+                        K.uint16(0),
+                        K.And(in_row, part[0] == 0),
+                    )
+
+        # --- orphan packed suffix (recurrent_kda.py:719-725) --------------------
+        # Carrier tokens owned by no row.  Reachable only in the T == 1 decode
+        # layout: spec mode sizes `out` as N*NUM_TOKENS while cu_seqlens must step
+        # by T, so q_total == cu[n_seq] there and this loop is empty.
+        with K.If(K.And(K.And(n == 0, vz == 0), tid < HEAD_DIM)), K.Then():
+            covered: K.int32 = _load_i32(cu, NUM_SEQS)
+            with K.serial(covered, q_total, unroll=False) as pos:
+                for e in range(EPT):
+                    _store_bf16_bits(
+                        out, (pos * NUM_VALUE_HEADS + hv) * HEAD_DIM + tid + e * NT, K.uint16(0)
+                    )
+
+    return _recurrent_kda_decode_grouped
 
 
 def get_kernel(**kwargs: Any):
     """Return the specialized grouped-CTA recurrent-KDA decode PrimFunc."""
-    return _recurrent_kda_decode_grouped.specialize(**_specialization(kwargs))
+    return _make_recurrent_kda_decode_grouped(_specialization(kwargs)).func
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:

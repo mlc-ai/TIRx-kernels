@@ -43,10 +43,7 @@ def set_external_references_enabled(enabled: bool) -> None:
     """Select explicit diagnostic reference timing for the current process."""
     if not isinstance(enabled, bool):
         raise TypeError("external reference mode must be a bool")
-    if enabled:
-        os.environ[_EXTERNAL_REFERENCES_ENV] = "1"
-    else:
-        os.environ[_EXTERNAL_REFERENCES_ENV] = "0"
+    os.environ[_EXTERNAL_REFERENCES_ENV] = "1" if enabled else "0"
 
 
 def external_references_enabled() -> bool:
@@ -158,7 +155,16 @@ _ORIGINAL_TVM_COMPILE = tvm.compile
 _CUDA_ASSIGNMENT: _CudaAssignment | None = None
 
 
-def _current_process_cuda_gpu_uuids(*, required: bool = False) -> tuple[str, ...]:
+def _canonical_cuda_uuid(value: str | bytes) -> str:
+    if isinstance(value, bytes):
+        value = value.decode()
+    prefix, separator, suffix = value.partition("-")
+    if separator and prefix.lower() == "gpu":
+        return f"GPU-{suffix.lower()}"
+    return value
+
+
+def _current_process_cuda_uuids(*, required: bool = False) -> tuple[str, ...]:
     """Return physical GPU UUIDs on which this PID owns a CUDA compute context."""
     global _NVML_MODULE, _NVML_UNAVAILABLE
     if _NVML_UNAVAILABLE:
@@ -197,8 +203,7 @@ def _current_process_cuda_gpu_uuids(*, required: bool = False) -> tuple[str, ...
         for index in range(count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(index)
             if any(int(process.pid) == pid for process in process_query(handle)):
-                uuid = pynvml.nvmlDeviceGetUUID(handle)
-                owned.append(uuid.decode() if isinstance(uuid, bytes) else str(uuid))
+                owned.append(_canonical_cuda_uuid(pynvml.nvmlDeviceGetUUID(handle)))
     except Exception as error:
         # Torch remains an independent oracle. NVML sampling failures must not
         # make ordinary standalone CPU tooling unusable.
@@ -212,7 +217,7 @@ def cuda_is_initialized() -> bool:
     """Report framework or driver-level CUDA initialization without creating it."""
     torch = sys.modules.get("torch")
     torch_initialized = bool(torch is not None and torch.cuda.is_initialized())
-    return torch_initialized or bool(_current_process_cuda_gpu_uuids())
+    return torch_initialized or bool(_current_process_cuda_uuids())
 
 
 def hardware_num_sms(default: int = 148) -> int:
@@ -333,7 +338,7 @@ def validate_current_cuda_assignment(stage: str, *, restore: bool = False) -> tu
         raise RuntimeError(
             f"{stage}: assigned CUDA UUIDs changed from {_CUDA_ASSIGNMENT.uuids!r} to {actual!r}"
         )
-    unexpected = set(_current_process_cuda_gpu_uuids(required=True)) - (
+    unexpected = set(_current_process_cuda_uuids(required=True)) - (
         _CUDA_ASSIGNMENT.previously_assigned_uuids
     )
     if unexpected:
@@ -568,11 +573,31 @@ def cuda_initialization_guard(*, require_uninitialized: bool = False):
         )
 
 
-def compile_kernel(func):
-    """Compile a single TIR PrimFunc via the tirx pipeline."""
-    target = cuda_target()
-    mod = tvm.IRModule({"main": func})
-    return tvm.compile(mod, target=target, tir_pipeline="tirx")
+@contextmanager
+def _cuda_compile_mode(mode: str | None):
+    """Select one synchronous CUDA backend without leaking process state."""
+    if mode is None:
+        yield
+        return
+    mode = mode.lower()
+    if mode not in {"nvcc", "nvrtc"}:
+        raise ValueError(f"cuda_compile_mode must be 'nvcc' or 'nvrtc', got {mode!r}")
+    with _PREPARE_COMPILE_LOCK:
+        previous = os.environ.get("TVM_CUDA_COMPILE_MODE")
+        os.environ["TVM_CUDA_COMPILE_MODE"] = mode
+        try:
+            yield
+        finally:
+            _restore_environment("TVM_CUDA_COMPILE_MODE", previous)
+
+
+def compile_kernel(func, *, arch: str | None = None, cuda_compile_mode: str | None = None):
+    """Compile one TIR PrimFunc with an optional target/backend contract."""
+    with _cuda_compile_mode(cuda_compile_mode):
+        target = cuda_target(arch=arch)
+        mod = tvm.IRModule({"main": func})
+        with target:
+            return tvm.compile(mod, target=target, tir_pipeline="tirx")
 
 
 def run_kernel_test(kernel_name: str, config: dict[str, Any], *, registry=None):

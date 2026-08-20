@@ -17,8 +17,8 @@ remainder loop, and ``griddepcontrol`` PDL intrinsics.
 
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 
 KERNEL_META = {"name": "act_and_mul", "category": "flashinfer", "compute_capability": 10}
 
@@ -60,27 +60,27 @@ _GELU_TANH_C1 = 0.7978845608028654
 
 def _tanh_approx(x):
     # tanh.approx.f32 (matches flashinfer math.cuh math::tanh(float))
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.tanh.approx.f32(out[0], x))
+    out = K.alloc_local([1], "float32")
+    K.ptx.tanh.approx.f32(out[0], x)
     return out[0]
 
 
 def _fmaf_rn(a, b, c):
     # __fmaf_rn under the production -use_fast_math build (fma.rn.ftz.f32)
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.fma.rn.ftz.f32(out[0], a, b, c))
+    out = K.alloc_local([1], "float32")
+    K.ptx.fma.rn.ftz.f32(out[0], a, b, c)
     return out[0]
 
 
 def _unpack_lo(word, dtype):
-    return T.cast(
-        T.reinterpret(dtype, T.cast(T.bitwise_and(word, T.uint32(0xFFFF)), "uint16")), "float32"
+    return K.cast(
+        K.reinterpret(dtype, K.cast(K.bitwise_and(word, K.uint32(0xFFFF)), "uint16")), "float32"
     )
 
 
 def _unpack_hi(word, dtype):
-    return T.cast(
-        T.reinterpret(dtype, T.cast(T.shift_right(word, T.uint32(16)), "uint16")), "float32"
+    return K.cast(
+        K.reinterpret(dtype, K.cast(K.shift_right(word, K.uint32(16)), "uint16")), "float32"
     )
 
 
@@ -92,128 +92,154 @@ def get_kernel(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
     rem = d % (block_size * VEC_SIZE)
     rem_off = d - rem
 
-    @T.prim_func
-    def act_and_mul(input_ptr: T.handle, out_ptr: T.handle):
-        input_global = T.match_buffer(
-            input_ptr, shape=[num_tokens, 2 * d], dtype=dtype, scope="global"
-        )
-        out_global = T.match_buffer(out_ptr, shape=[num_tokens, d], dtype=dtype, scope="global")
-        T.device_entry()
-        token = T.cta_id([num_tokens])
-        tid = T.thread_id([block_size], dtype="uint32")
-        T.evaluate(T.ptx.griddepcontrol.wait())
+    @K.kernel(warps=(block_size + 31) // 32, arch="sm_100a", grid=num_tokens)
+    def act_and_mul(input_global: K.gptr[dtype, 2], out_global: K.gptr[dtype, 2]):
+        token = K.cta_id()
+        tid = K.thread_id()
+        K.ptx.griddepcontrol.wait()
 
-        x_bits: T.uint32[4]
-        y_bits: T.uint32[4]
-        o_bits: T.uint32[4]
-        x_vec: T.f32[8]
-        y_vec: T.f32[8]
-        out_vec: T.f32[8]
-        e_tmp: T.f32[1]
+        x_bits = K.alloc_local([4], "uint32")
+        y_bits = K.alloc_local([4], "uint32")
+        o_bits = K.alloc_local([4], "uint32")
+        x_vec = K.alloc_local([8], "float32")
+        y_vec = K.alloc_local([8], "float32")
+        out_vec = K.alloc_local([8], "float32")
+        e_tmp = K.alloc_local([1], "float32")
 
         # Main vector loop (source: #pragma unroll 1 grid-stride loop).
-        idx: T.uint32 = tid
-        while idx < n_vec:
-            T.ptx.ld.global_.nc.v4.b32(
+        idx = K.alloc_local([1], "uint32")
+        K.assign(idx[0], tid)
+        with K.While(idx[0] < n_vec):
+            K.ptx.ld.global_.nc.v4.b32(
                 x_bits[0],
                 x_bits[1],
                 x_bits[2],
                 x_bits[3],
-                T.address_of(input_global[token, T.cast(idx, "int64") * VEC_SIZE]),
+                K.address_of(
+                    input_global[
+                        0, K.cast(token, "int64") * (2 * d) + K.cast(idx[0], "int64") * VEC_SIZE
+                    ]
+                ),
             )
-            T.ptx.ld.global_.nc.v4.b32(
+            K.ptx.ld.global_.nc.v4.b32(
                 y_bits[0],
                 y_bits[1],
                 y_bits[2],
                 y_bits[3],
-                T.address_of(input_global[token, T.cast(idx, "int64") * VEC_SIZE + d]),
+                K.address_of(
+                    input_global[
+                        0, K.cast(token, "int64") * (2 * d) + K.cast(idx[0], "int64") * VEC_SIZE + d
+                    ]
+                ),
             )
-            for p in T.unroll(4):
-                x_vec[2 * p] = _unpack_lo(x_bits[p], dtype)
-                x_vec[2 * p + 1] = _unpack_hi(x_bits[p], dtype)
-            for p in T.unroll(4):
-                y_vec[2 * p] = _unpack_lo(y_bits[p], dtype)
-                y_vec[2 * p + 1] = _unpack_hi(y_bits[p], dtype)
-            for i in T.unroll(8):
+            for p in range(4):
+                K.ptx.mov.b32(x_vec[2 * p], _unpack_lo(x_bits[p], dtype))
+                K.ptx.mov.b32(x_vec[2 * p + 1], _unpack_hi(x_bits[p], dtype))
+            for p in range(4):
+                K.ptx.mov.b32(y_vec[2 * p], _unpack_lo(y_bits[p], dtype))
+                K.ptx.mov.b32(y_vec[2 * p + 1], _unpack_hi(y_bits[p], dtype))
+            for i in range(8):
                 if act == "silu":
-                    T.evaluate(T.ptx.ex2.approx.ftz.f32(e_tmp[0], x_vec[i] * T.float32(-_LOG2E)))
-                    out_vec[i] = (x_vec[i] / (T.float32(1.0) + e_tmp[0])) * y_vec[i]
+                    K.ptx.ex2.approx.ftz.f32(e_tmp[0], x_vec[i] * K.float32(-_LOG2E))
+                    K.ptx.mov.b32(out_vec[i], (x_vec[i] / (K.float32(1.0) + e_tmp[0])) * y_vec[i])
                 elif act == "gelu":
-                    out_vec[i] = (
-                        (x_vec[i] * T.float32(0.5))
-                        * (T.float32(1.0) + T.erf(x_vec[i] * T.float32(_SQRT1_2)))
-                    ) * y_vec[i]
+                    K.ptx.mov.b32(
+                        out_vec[i],
+                        (
+                            (x_vec[i] * K.float32(0.5))
+                            * (K.float32(1.0) + K.erf(x_vec[i] * K.float32(_SQRT1_2)))
+                        )
+                        * y_vec[i],
+                    )
                 else:  # gelu_tanh
-                    t1 = x_vec[i] * T.float32(_GELU_TANH_C0)
+                    t1 = x_vec[i] * K.float32(_GELU_TANH_C0)
                     t2 = x_vec[i] * t1
                     u = _fmaf_rn(x_vec[i], t2, x_vec[i])
-                    w = u * T.float32(_GELU_TANH_C1)
+                    w = u * K.float32(_GELU_TANH_C1)
                     h = _tanh_approx(w)
-                    a = T.float32(1.0) + h
-                    c = a * T.float32(0.5)
-                    out_vec[i] = (x_vec[i] * c) * y_vec[i]
-            for p in T.unroll(4):
+                    a = K.float32(1.0) + h
+                    c = a * K.float32(0.5)
+                    K.ptx.mov.b32(out_vec[i], (x_vec[i] * c) * y_vec[i])
+            for p in range(4):
                 if dtype == "float16":
-                    T.evaluate(
-                        T.ptx.cvt.rn.f16x2.f32(o_bits[p], out_vec[2 * p + 1], out_vec[2 * p])
-                    )
+                    K.ptx.cvt.rn.f16x2.f32(o_bits[p], out_vec[2 * p + 1], out_vec[2 * p])
                 else:
-                    T.evaluate(
-                        T.ptx.cvt.rn.bf16x2.f32(o_bits[p], out_vec[2 * p + 1], out_vec[2 * p])
-                    )
-            T.ptx.st.global_.v4.b32(
-                T.address_of(out_global[token, T.cast(idx, "int64") * VEC_SIZE]),
+                    K.ptx.cvt.rn.bf16x2.f32(o_bits[p], out_vec[2 * p + 1], out_vec[2 * p])
+            K.ptx.st.global_.v4.b32(
+                K.address_of(
+                    out_global[0, K.cast(token, "int64") * d + K.cast(idx[0], "int64") * VEC_SIZE]
+                ),
                 o_bits[0],
                 o_bits[1],
                 o_bits[2],
                 o_bits[3],
             )
-            idx = idx + block_size
+            K.assign(idx[0], idx[0] + block_size)
 
         # Scalar remainder loop (source: #pragma unroll 1; dead when REM == 0).
         if rem > 0:
-            ridx: T.uint32 = tid
-            while ridx < rem:
-                xr16 = T.alloc_local([1], "uint16")
-                yr16 = T.alloc_local([1], "uint16")
-                ob16 = T.alloc_local([1], "uint16")
-                er = T.alloc_local([1], "float32")
-                T.ptx.ld.global_.nc.b16(
-                    xr16[0], T.address_of(input_global[token, T.cast(ridx, "int64") + rem_off])
+            ridx = K.alloc_local([1], "uint32")
+            K.assign(ridx[0], tid)
+            with K.While(ridx[0] < rem):
+                xr16 = K.alloc_local([1], "uint16")
+                yr16 = K.alloc_local([1], "uint16")
+                ob16 = K.alloc_local([1], "uint16")
+                er = K.alloc_local([1], "float32")
+                K.ptx.ld.global_.nc.b16(
+                    xr16[0],
+                    K.address_of(
+                        input_global[
+                            0, K.cast(token, "int64") * (2 * d) + K.cast(ridx[0], "int64") + rem_off
+                        ]
+                    ),
                 )
-                T.ptx.ld.global_.nc.b16(
-                    yr16[0], T.address_of(input_global[token, T.cast(ridx, "int64") + rem_off + d])
+                K.ptx.ld.global_.nc.b16(
+                    yr16[0],
+                    K.address_of(
+                        input_global[
+                            0,
+                            K.cast(token, "int64") * (2 * d)
+                            + K.cast(ridx[0], "int64")
+                            + rem_off
+                            + d,
+                        ]
+                    ),
                 )
-                xr = T.cast(T.reinterpret(dtype, xr16[0]), "float32")
-                yr = T.cast(T.reinterpret(dtype, yr16[0]), "float32")
+                xr = K.cast(K.reinterpret(dtype, xr16[0]), "float32")
+                yr = K.cast(K.reinterpret(dtype, yr16[0]), "float32")
                 if act == "silu":
-                    T.evaluate(T.ptx.ex2.approx.ftz.f32(er[0], xr * T.float32(-_LOG2E)))
-                    out_r = (xr / (T.float32(1.0) + er[0])) * yr
+                    K.ptx.ex2.approx.ftz.f32(er[0], xr * K.float32(-_LOG2E))
+                    out_r = (xr / (K.float32(1.0) + er[0])) * yr
                 elif act == "gelu":
                     out_r = (
-                        (xr * T.float32(0.5)) * (T.float32(1.0) + T.erf(xr * T.float32(_SQRT1_2)))
+                        (xr * K.float32(0.5)) * (K.float32(1.0) + K.erf(xr * K.float32(_SQRT1_2)))
                     ) * yr
                 else:  # gelu_tanh
-                    t1 = xr * T.float32(_GELU_TANH_C0)
+                    t1 = xr * K.float32(_GELU_TANH_C0)
                     t2 = xr * t1
                     u = _fmaf_rn(xr, t2, xr)
-                    w = u * T.float32(_GELU_TANH_C1)
+                    w = u * K.float32(_GELU_TANH_C1)
                     h = _tanh_approx(w)
-                    a = T.float32(1.0) + h
-                    c = a * T.float32(0.5)
+                    a = K.float32(1.0) + h
+                    c = a * K.float32(0.5)
                     out_r = (xr * c) * yr
                 if dtype == "float16":
-                    T.evaluate(T.ptx.cvt.rn.f16.f32(ob16[0], out_r))
+                    K.ptx.cvt.rn.f16.f32(ob16[0], out_r)
                 else:
-                    T.evaluate(T.ptx.cvt.rn.bf16.f32(ob16[0], out_r))
-                T.ptx.st.global_.b16(
-                    T.address_of(out_global[token, T.cast(ridx, "int64") + rem_off]), ob16[0]
+                    K.ptx.cvt.rn.bf16.f32(ob16[0], out_r)
+                K.ptx.st.global_.b16(
+                    K.address_of(
+                        out_global[
+                            0, K.cast(token, "int64") * d + K.cast(ridx[0], "int64") + rem_off
+                        ]
+                    ),
+                    ob16[0],
                 )
-                ridx = ridx + block_size
+                K.assign(ridx[0], ridx[0] + block_size)
 
-        T.ptx.griddepcontrol.launch_dependents()
+        K.ptx.griddepcontrol.launch_dependents()
 
-    return act_and_mul
+    return act_and_mul.func
 
 
 def prepare_data(act: str, dtype: str, num_tokens: int, d: int, **kwargs):
