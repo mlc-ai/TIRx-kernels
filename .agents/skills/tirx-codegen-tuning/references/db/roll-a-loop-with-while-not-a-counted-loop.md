@@ -79,6 +79,27 @@ load and divide traffic of the serial chain the kernel's latency sat on.
 | `div.s32` | 6 | 24 | 6 |
 | `.pragma "nounroll"` | 4, one per scan | 5, none on a scan | 6, all four scans |
 
+A search converges, which a counted loop cannot exploit. Where the loop is a
+binary search transcribed as a fixed step count with the body predicated off
+after convergence, writing the `While` on the search's own condition also
+retires it as soon as it converges instead of running out the remaining steps:
+
+```python
+# before: a fixed step count, predicated off once converged.
+for _step in T.serial(0, SEARCH_STEPS, unroll=False):
+    if lo[0] < hi[0]:
+        ...one probe load, then narrow...
+
+# after: rolled, and it exits when the interval closes.
+while lo[0] < hi[0]:
+    ...one probe load, then narrow...
+```
+
+That is the same predicted profile from the other end of the range: the shape
+with the fewest search iterations moved 0.9727 to 1.0631 and the next 0.9902 to
+1.0343, while the long-sequence shapes, which run the search deepest and
+amortize it over the most work, moved by under half a percent.
+
 ## Boundary
 
 Only where the reference's loop is genuinely rolled -- whether it says so with a
