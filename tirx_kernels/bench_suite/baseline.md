@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '3df3e86a', 'tirx-kernels': '919f1c6b-dirty', 'tirx-bench-ci': None}`
-- Workloads: 347 ok, 0 failed
+- Git:       `{'tir': 'f20fa692', 'tirx-kernels': 'fc344e9e-dirty', 'tirx-bench-ci': None}`
+- Workloads: 381 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -143,6 +143,45 @@ Grouped workloads show one row per config and one timing column per implementati
 | `m64_n24_k28672_s112` | tirx | 7.2039 | deepgemm | 7.2959 | 1.013 | — |
 | `m8192_n24_k16384_s1` | tirx | 50.5342 | deepgemm | 60.5773 | 1.199 | — |
 | `m8192_n24_k28672_s1` | tirx | 83.9610 | deepgemm | 91.6330 | 1.091 | — |
+
+## fast_topk_clusters
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_plain_b16_l16384_k256` | tirx | 9.3154 | flashinfer | 10.6364 | 1.142 | — |
+| `bf16_plain_b64_l16384_k1024_tie_heavy` | tirx | 11.8087 | flashinfer | 12.8890 | 1.091 | — |
+| `bf16_plain_b64_l65536_k1024` | tirx | 15.9838 | flashinfer | 17.3796 | 1.087 | — |
+| `bf16_pt_b16_l16384_k256` | tirx | 10.1353 | flashinfer | 11.3160 | 1.116 | — |
+| `bf16_rag_b16_l16384_k256` | tirx | 9.1481 | flashinfer | 10.1417 | 1.109 | — |
+| `bf16_rag_b300_l16384_k256` | tirx | 17.7368 | flashinfer | 18.8113 | 1.061 | — |
+| `f16_plain_b16_l16384_k256` | tirx | 9.3304 | flashinfer | 10.3677 | 1.111 | — |
+| `f16_plain_b16_l4096_k256` | tirx | 4.7626 | flashinfer | 5.7208 | 1.201 | — |
+| `f16_plain_b64_l16384_k1024_tie_heavy` | tirx | 10.3107 | flashinfer | 10.8340 | 1.051 | — |
+| `f16_plain_b64_l65536_k2048_i64` | tirx | 17.8662 | flashinfer | 18.9118 | 1.059 | — |
+| `f16_pt_b16_l16384_k256` | tirx | 9.9901 | flashinfer | 10.8917 | 1.090 | — |
+| `f16_rag_b16_l16384_k256` | tirx | 9.0958 | flashinfer | 9.9043 | 1.089 | — |
+| `f32_plain_b16_l16384_k2048_all_equal` | tirx | 17.0291 | flashinfer | 18.8449 | 1.107 | — |
+| `f32_plain_b16_l16384_k256` | tirx | 13.4667 | flashinfer | 14.4000 | 1.069 | — |
+| `f32_plain_b16_l16384_k256_all_equal` | tirx | 16.6239 | flashinfer | 18.1541 | 1.092 | — |
+| `f32_plain_b16_l16384_k256_i64` | tirx | 13.4207 | flashinfer | 14.4828 | 1.079 | — |
+| `f32_plain_b16_l16384_k256_neg` | tirx | 13.5699 | flashinfer | 15.4026 | 1.135 | — |
+| `f32_plain_b16_l16384_k256_tie_heavy` | tirx | 15.3688 | flashinfer | 16.3504 | 1.064 | — |
+| `f32_plain_b16_l4096_k256` | tirx | 6.7054 | flashinfer | 7.2985 | 1.088 | — |
+| `f32_plain_b200_l16384_k256` | tirx | 24.8602 | flashinfer | 25.4059 | 1.022 | — |
+| `f32_plain_b200_l65536_k1024` | tirx | 45.5855 | flashinfer | 46.1854 | 1.013 | — |
+| `f32_plain_b300_l16384_k256` | tirx | 20.9741 | flashinfer | 22.0863 | 1.053 | — |
+| `f32_plain_b64_l16384_k1024` | tirx | 14.8711 | flashinfer | 15.6528 | 1.053 | — |
+| `f32_plain_b64_l16384_k2048` | tirx | 15.0511 | flashinfer | 15.8014 | 1.050 | — |
+| `f32_plain_b64_l16384_k256` | tirx | 13.6511 | flashinfer | 14.2689 | 1.045 | — |
+| `f32_plain_b64_l65536_k1024` | tirx | 20.9928 | flashinfer | 21.4147 | 1.020 | — |
+| `f32_plain_b8_l4096_k4096` | tirx | 2.6726 | flashinfer | 2.7113 | 1.014 | — |
+| `f32_pt_b16_l16384_k256` | tirx | 14.1769 | flashinfer | 15.3828 | 1.085 | — |
+| `f32_pt_b16_l16384_k256_rowvar` | tirx | 12.4331 | flashinfer | 12.9034 | 1.038 | — |
+| `f32_pt_b200_l16384_k256` | tirx | 26.7335 | flashinfer | 26.7933 | 1.002 | — |
+| `f32_pt_b8_l4096_k4096` | tirx | 2.9397 | flashinfer | 2.9337 | 0.998 | — |
+| `f32_rag_b16_l16384_k256` | tirx | 13.3519 | flashinfer | 13.9303 | 1.043 | — |
+| `f32_rag_b16_l16384_k256_rowvar` | tirx | 11.5922 | flashinfer | 11.9020 | 1.027 | — |
+| `f32_rag_b8_l4096_k4096` | tirx | 2.1011 | flashinfer | 2.2161 | 1.055 | — |
 
 ## filtered_topk
 
