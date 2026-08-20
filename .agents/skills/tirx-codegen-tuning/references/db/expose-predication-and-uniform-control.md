@@ -149,6 +149,24 @@ non-protocol path but moved the dependency-protocol path from 3.386 to 3.425
 microseconds, so the shared rewrite was reverted. Match the source topology,
 then retain the hoist only on the paths where the gate confirms it.
 
+The grouping width itself is a scheduling parameter. In one asynchronous-copy
+path, merging guards across the complete copy group reduced control and address
+instructions but regressed every guarded shape by roughly 4.6-8.1%. Grouping
+only two adjacent copies still removed dynamic instructions and preserved
+logical memory traffic, but regressed the affected shapes by roughly 5.3-10.3%
+because more addresses and predicates stayed live together. Compare the
+smallest legal group, intermediate groups, and the original per-issue form;
+fewer reconvergence instructions do not prove that a broader branch is useful.
+
+Encoding a row predicate as an asynchronous copy's zero-fill source size is
+also path-sensitive. One measured rewrite removed more than two million dynamic
+warp instructions, removed more than sixty million predicated-on thread
+instructions, and lowered the allocation without spilling, yet both
+dependency-protocol shapes fell to about 0.987x while their non-protocol guards
+held. Source-size predication changes issue and dependency behavior, not just
+branch syntax, so preserve protocol-on and protocol-off shapes as separate
+performance guards.
+
 ## Verification
 
 Confirm predicate polarity and inactive-lane memory behavior, then compare BRA,
