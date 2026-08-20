@@ -98,9 +98,8 @@ def _mma_bf16(accum, a_frag, b_frag):
 
 
 def _materialize(value):
-    local = K.alloc_local((1,), str(value.ty.dtype))
-    K.assign(local[0], value)
-    return local[0]
+    local = K.local_scalar(str(value.ty.dtype), init=value)
+    return local
 
 
 def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int):
@@ -127,11 +126,10 @@ def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int)
 
         smem_total = 52352 if stages == 4 else 101504
         smem = K.smem_pool()
-        init_leader = K.alloc_local((1,), K.u32)
-        K.assign(init_leader[0], K.uint32(0))
-        weight_ready = K.TMABar(smem, stages, leader=init_leader[0] != K.uint32(0))
-        activation_ready = K.TMABar(smem, stages, leader=init_leader[0] != K.uint32(0))
-        consumed = K.MBarrier(smem, stages, phase_offset=1, leader=init_leader[0] != K.uint32(0))
+        init_leader = K.local_scalar(K.u32, init=K.uint32(0))
+        weight_ready = K.TMABar(smem, stages, leader=init_leader != K.uint32(0))
+        activation_ready = K.TMABar(smem, stages, leader=init_leader != K.uint32(0))
+        consumed = K.MBarrier(smem, stages, phase_offset=1, leader=init_leader != K.uint32(0))
         if smem.bytes != 3 * stages * 8:
             raise AssertionError(f"unexpected TinyGEMM2 barrier header: {smem.bytes}")
         weight_smem = smem.alloc((stages, 64, 64), K.bf16, swizzle=K.SW128B)
@@ -152,7 +150,7 @@ def _make_tinygemm2_kernel(stages: int, use_pdl: bool, grid_x: int, grid_y: int)
             K.ptx.prefetch.tensormap(K.address_of(b_tmap_act))
 
         with K.If(warp == 0), K.Then():
-            K.assign(init_leader[0], K.cuda.elect_sync())
+            K.assign(init_leader, K.cuda.elect_sync())
 
         weight_ready.init(1)
         activation_ready.init(1)
