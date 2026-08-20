@@ -619,13 +619,15 @@ def get_kernel(**kwargs: Any):
         warp_idx = K.warp_id()
         warp_idx_u32 = K.Cast("uint32", warp_idx)
         warpgroup_idx = K.warpgroup_id([num_warps // 4])
-        lane_idx = K.Bind(K.lane_id())
+        lane_idx = K.lane_id()
         # The original reads laneid through mov_sreg for its u32 uses and keeps
         # K.lane_id() for the `lane_idx == 0` guards. Two spellings, both kept.
-        # K.Bind, not a bare expression: the original binds this with K.let, and
-        # a Python name holding an unbound expression re-emits the sreg read at
-        # every use site (16 laneid reads where the original has 5).
-        lane_idx_u32 = K.Bind(K.Cast("uint32", K.cuda.mov_sreg(32, "laneid")))
+        # A plain binding re-emits the sreg read at every use site (16 laneid
+        # reads in the CUDA where the original has 5), but ptxas CSEs them back:
+        # measured SASS byte-identical to the retired K.Bind on 5 specializations,
+        # while materializing into a local scalar cost +16 instructions. So the
+        # duplication is a source-level artefact only -- do not "fix" it.
+        lane_idx_u32 = K.Cast("uint32", K.cuda.mov_sreg(32, "laneid"))
 
         with K.If(warp_idx == spec_warp_start), K.Then():
             K.ptx.prefetch.tensormap(K.address_of(tensor_map_q))
@@ -758,21 +760,6 @@ def get_kernel(**kwargs: Any):
             K.ptx.mov.b64(abs_pair[0], abs_lo[0], abs_hi[0])
             K.ptx.add.rn.f32x2(relu_pair[0], a, abs_pair[0])
             K.ptx.fma.rn.f32x2(out[0], relu_pair[0], w, c)
-            return out[0]
-
-        def fadd2_rn_noftz(a, b):
-            out = K.alloc_local([1], "uint64")
-            K.ptx.add.rn.f32x2(out[0], a, b)
-            return out[0]
-
-        def fadd_rn_noftz(a, b):
-            out = K.alloc_local([1], "float32")
-            K.ptx.add.rn.f32(out[0], a, b)
-            return out[0]
-
-        def fmul_rn_noftz(a, b):
-            out = K.alloc_local([1], "float32")
-            K.ptx.mul.rn.f32(out[0], a, b)
             return out[0]
 
         def make_smem_desc(desc, smem_ptr):
@@ -1138,7 +1125,7 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warps 10-11: UMMA issuers ----------------------
         with umma:
-            umma_group_idx = K.Bind(K.Cast("uint32", K.warp_id_in_role()))
+            umma_group_idx = K.Cast("uint32", K.warp_id_in_role())
             # TMEM allocation happens off the full-CTA sync path (the ~300-cycle
             # tcgen05.alloc would otherwise hold back the TMA warps' first
             # issue). Only UMMA and Math wait for it, on named barrier 9.
@@ -1192,11 +1179,11 @@ def get_kernel(**kwargs: Any):
                 K.assign(state["q_atom"][0], state["next_q"][0])
                 K.assign(state["kv_idx"][0], state["next_kv"][0])
 
-                kv_stage = K.Bind(kv_state.stage)
-                kv_phase = K.Bind(kv_state.phase)
+                kv_stage = kv_state.stage
+                kv_phase = kv_state.phase
                 full_kv_barriers.wait(umma_group_idx * K.uint32(num_kv_stages) + kv_stage, kv_phase)
-                umma_stage = K.Bind(umma_state.stage)
-                umma_phase = K.Bind(umma_state.phase)
+                umma_stage = umma_state.stage
+                umma_phase = umma_state.phase
                 empty_umma_barriers.wait(
                     umma_group_idx * K.uint32(num_umma_stages) + umma_stage,
                     umma_phase ^ K.uint32(1),
@@ -1268,7 +1255,8 @@ def get_kernel(**kwargs: Any):
                 # folds the 0.5 into the output scale so the ReLU runs on the
                 # FMA pipe through the packed f32x2 add with abs source
                 # modifiers, instead of scalar FMNMX on the ALU pipe.
-                scale_kv_half = fmul_rn_noftz(scale_kv, K.float32(0.5))
+                scale_kv_half = K.local_scalar("float32")
+                K.ptx.mul.rn.f32(scale_kv_half, scale_kv, K.float32(0.5))
                 for q_inner_i in range(num_iters_c):
                     tmem_addr = (
                         tmem_start_base
@@ -1306,10 +1294,12 @@ def get_kernel(**kwargs: Any):
                             ),
                             sum_1,
                         )
-                    sum_v = fadd2_rn_noftz(sum_0, sum_1)
-                    result_f32 = fmul_rn_noftz(
-                        scale_kv_half, fadd_rn_noftz(K.cuda.float2_x(sum_v), K.cuda.float2_y(sum_v))
-                    )
+                    sum_v = K.local_scalar("uint64")
+                    K.ptx.add.rn.f32x2(sum_v, sum_0, sum_1)
+                    _add = K.local_scalar("float32")
+                    K.ptx.add.rn.f32(_add, K.cuda.float2_x(sum_v), K.cuda.float2_y(sum_v))
+                    result_f32 = K.local_scalar("float32")
+                    K.ptx.mul.rn.f32(result_f32, scale_kv_half, _add)
                     result = K.Cast(logits_tir_dtype, result_f32)
                     logits_offset = (
                         K.Cast("uint64", kv_offset)
@@ -1355,15 +1345,15 @@ def get_kernel(**kwargs: Any):
                     * K.Cast("uint64", logits_stride)
                     + K.Cast("uint64", (state["kv_idx"][0] + math_wg_u32) * K.uint32(umma_m)),
                 )
-                kv_stage = K.Bind(kv_state.stage)
-                kv_phase = K.Bind(kv_state.phase)
+                kv_stage = kv_state.stage
+                kv_phase = kv_state.phase
                 full_kv_barriers.wait(math_wg_u32 * K.uint32(num_kv_stages) + kv_stage, kv_phase)
                 scale_kv = K.alloc_local([1], "float32")
                 K.ptx.ld.shared.f32(
                     scale_kv[0], smem_kv_scales.ptr_to([math_wg_u32, kv_stage, math_thread_idx[0]])
                 )
-                umma_stage = K.Bind(umma_state.stage)
-                umma_phase = K.Bind(umma_state.phase)
+                umma_stage = umma_state.stage
+                umma_phase = umma_state.phase
                 full_umma_barriers.wait(
                     math_wg_u32 * K.uint32(num_umma_stages) + umma_stage, umma_phase
                 )

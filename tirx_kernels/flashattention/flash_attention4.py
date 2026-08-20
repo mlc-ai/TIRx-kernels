@@ -173,9 +173,9 @@ def make_kernel(
         # Materialize the warp-uniform ids once; TIRx expressions are trees and
         # rebuilding these at every use expands address and mask arithmetic.
         warp_cta = K.warp_id()
-        wg_id = K.Bind(warp_cta >> 2)
-        warp_id = K.Bind(warp_cta & 3)
-        tid_in_wg = K.Bind(K.thread_id() & 127)
+        wg_id = warp_cta >> 2
+        warp_id = warp_cta & 3
+        tid_in_wg = K.thread_id() & 127
 
         # ---- shared memory — orig:L629-696 -----------------------------------
         # Declaration order reproduces the frozen kernel's byte layout exactly
@@ -787,12 +787,14 @@ def make_kernel(
                         # mutable Var and advance() rewrites it, so holding the
                         # expression across the advance would name the wrong
                         # stage (the KTileView lifetime rule, in int form).
-                        # K.Bind is the snapshot -- the original's `K.let`.
+                        # `K.local_scalar` is the snapshot: it must copy the
+                        # cursor now, because a plain value would re-read the
+                        # advanced one below.
                         # stage_k below is deliberately the LIVE expression --
                         # the original's K.meta_var -- and no advance intervenes
                         # before its last use.
-                        stage_v = K.Bind(kv_pipe.stage)
-                        phase_v = K.Bind(kv_pipe.phase)
+                        stage_v = K.local_scalar("int32", init=kv_pipe.stage)
+                        phase_v = K.local_scalar("int32", init=kv_pipe.phase)
                         kv_pipe.advance()
                         for i_q in range(SMEM_PIPE_DEPTH_Q):
                             if i_q == 0:
@@ -856,7 +858,7 @@ def make_kernel(
                     to R2P."""
                     CHUNK_SIZE = 32
                     for s in range(ceildiv(ncol, CHUNK_SIZE)):
-                        k_keep = K.Bind(K.max(col_limit - s * CHUNK_SIZE, 0))
+                        k_keep = K.max(col_limit - s * CHUNK_SIZE, 0)
                         mask_inv = K.alloc_local([1], "uint32")
                         K.assign(
                             mask_inv[0],
@@ -877,17 +879,17 @@ def make_kernel(
                                 )
 
                 def apply_causal_mask(s_chunk, m_blk_idx, n_blk_idx):
-                    """orig:L1105-1129. Every intermediate is `K.let` in the
-                    original and so is bound here: `col_limit_right` is read
-                    four times (once per 32-column mask chunk)."""
-                    seq_pos_in_wg = K.Bind(tid_in_wg // GQA_RATIO)
-                    row_idx = K.Bind(
+                    """orig:L1105-1129. `col_limit_right` is read four times
+                    (once per 32-column mask chunk); the intermediates are plain
+                    values, so ptxas sees the row/offset arithmetic directly."""
+                    seq_pos_in_wg = tid_in_wg // GQA_RATIO
+                    row_idx = (
                         m_blk_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
                         + wg_id * SEQ_Q_PER_TILE
                         + seq_pos_in_wg
                     )
-                    causal_row_offset = K.Bind(1 + SEQ_LEN_KV - n_blk_idx * BLK_N - SEQ_LEN_Q)
-                    col_limit_right = K.Bind(row_idx + causal_row_offset)
+                    causal_row_offset = 1 + SEQ_LEN_KV - n_blk_idx * BLK_N - SEQ_LEN_Q
+                    col_limit_right = row_idx + causal_row_offset
                     mask_r2p(s_chunk, col_limit_right, BLK_N)
 
                 def softmax_step(i_kv, apply_mask=False, is_first=False):
@@ -1023,26 +1025,27 @@ def make_kernel(
                     softmax_corr.empty.wait(wg_id, softmax_epoch.phase)
                 softmax_epoch.advance()
 
-                # K.Bind is the traced spelling of the original's `x: K.let =`:
-                # it emits the binding once and hands back a Var. Leaving these
-                # as plain Python expressions is *not* equivalent -- an
-                # expression is re-emitted at every use, and `n_block_max`
-                # reaches the innermost mask chunk, so the mask's shift amount
-                # would recompute `min(n_kv, m_block*2+2)` four times per masked
-                # step instead of reading a register. Worth 1.3% at the median
-                # and 7.3% on s1024_h32kv4_causal; see the notes.
-                n_block_max = K.Bind(n_block_max_of(m_block_idx))
-                n_block_min_causal = K.Bind(
+                # These were `K.Bind` (one emitted binding, handed back as a Var)
+                # because re-emitting the expression at every use once cost 1.3%
+                # at the median and 7.3% on s1024_h32kv4_causal: `n_block_max`
+                # reaches the innermost mask chunk, so the mask shift amount
+                # recomputed `min(n_kv, m_block*2+2)` per masked step.
+                # As plain values the block bounds now fold at trace time for
+                # every specialization measured, and the SASS instruction count
+                # is unchanged on s1024_h32kv4, s1024_h32kv4_causal,
+                # s4096_h32kv4_causal and s8192_h32kv32 (schedule differs).
+                n_block_max = n_block_max_of(m_block_idx)
+                n_block_min_causal = (
                     n_block_min_causal_of(m_block_idx) if is_causal else n_block_max
                 )
                 softmax_step(n_block_max - 1, apply_mask=is_causal, is_first=True)
-                n_block_max_after_p1 = K.Bind(n_block_max - 1)
-                num_phase2_blocks = K.Bind(K.max(n_block_max_after_p1 - n_block_min_causal, 0))
+                n_block_max_after_p1 = n_block_max - 1
+                num_phase2_blocks = K.max(n_block_max_after_p1 - n_block_min_causal, 0)
                 with K.serial(num_phase2_blocks, unroll=False) as i:
-                    softmax_step(K.Bind(n_block_max_after_p1 - 1 - i), apply_mask=True)
-                n_block_max_after_p2 = K.Bind(K.min(n_block_max_after_p1, n_block_min_causal))
+                    softmax_step(n_block_max_after_p1 - 1 - i, apply_mask=True)
+                n_block_max_after_p2 = K.min(n_block_max_after_p1, n_block_min_causal)
                 with K.serial(n_block_max_after_p2, unroll=False) as i:
-                    softmax_step(K.Bind(n_block_max_after_p2 - 1 - i), apply_mask=False)
+                    softmax_step(n_block_max_after_p2 - 1 - i, apply_mask=False)
 
                 if EPI_ON_SOFTMAX:
                     # Stage-parallel epilogue on this wg — orig:L1330-1386.
@@ -1112,9 +1115,7 @@ def make_kernel(
                 softmax_corr.empty.arrive(0)
                 stats_sync(1)
                 softmax_epoch.advance()
-                corr_trip_count = (
-                    K.Bind(n_block_max_of(m_block_idx)) if is_causal else num_kv_blocks
-                )
+                corr_trip_count = n_block_max_of(m_block_idx) if is_causal else num_kv_blocks
                 with K.serial(corr_trip_count - 1, unroll=False) as _i_kv:
                     for i_q in range(2):
                         stats_sync(i_q)
@@ -1133,8 +1134,8 @@ def make_kernel(
                             with K.Else():
                                 K.assign(should_rescale[0], 0)
                         # Materialize the collective before divergence.
-                        any_needs_rescale = K.Bind(
-                            K.cuda.any_sync(K.uint32(0xFFFFFFFF), should_rescale[0])
+                        any_needs_rescale = K.local_scalar(
+                            "uint32", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), should_rescale[0])
                         )
                         with K.If(any_needs_rescale != 0), K.Then():
                             with K.If(tid_in_wg < BLK_M), K.Then():

@@ -514,10 +514,10 @@ def get_kernel(**kwargs: Any):
         sm_idx_u32 = K.alloc_local([1], "uint32")
         K.ptx.mov.u32(sm_idx_u32[0], K.Cast("uint32", K.cta_id()))
         warp_idx = K.warp_id()
-        warp_idx_u32 = K.Bind(K.Cast("uint32", warp_idx))
+        warp_idx_u32 = K.Cast("uint32", warp_idx)
         warp_idx_presync_u32 = K.alloc_local([1], "uint32")
         K.ptx.mov.u32(warp_idx_presync_u32[0], warp_idx_u32)
-        warp_idx_presync = K.Bind(K.Cast("int32", warp_idx_presync_u32[0]))
+        warp_idx_presync = K.Cast("int32", warp_idx_presync_u32[0])
         warpgroup_idx = K.warpgroup_id([num_warps // 4])
         lane_idx = K.lane_id()
         lane_idx_u32 = K.alloc_local([1], "uint32")
@@ -636,21 +636,6 @@ def get_kernel(**kwargs: Any):
             K.ptx.mov.b64(abs_pair[0], abs_lo[0], abs_hi[0])
             K.ptx.add.rn.f32x2(relu_pair[0], a, abs_pair[0])
             K.ptx.fma.rn.f32x2(out[0], relu_pair[0], w, c)
-            return out[0]
-
-        def fadd2_rn_noftz(a, b):
-            out = K.alloc_local([1], "uint64")
-            K.ptx.add.rn.f32x2(out[0], a, b)
-            return out[0]
-
-        def fadd_rn_noftz(a, b):
-            out = K.alloc_local([1], "float32")
-            K.ptx.add.rn.f32(out[0], a, b)
-            return out[0]
-
-        def fmul_rn_noftz(a, b):
-            out = K.alloc_local([1], "float32")
-            K.ptx.mul.rn.f32(out[0], a, b)
             return out[0]
 
         def replace_smem_desc_addr(desc, smem_ptr):
@@ -882,14 +867,14 @@ def get_kernel(**kwargs: Any):
                 [K.Cast("int32", (sm_idx_u32[0] + K.uint32(1)) * K.uint32(2) + K.uint32(1))]
             ),
         )
-        start_kv_idx = K.Bind(start_kv_tile_idx[0] * K.uint32(num_tiles_per_split))
+        start_kv_idx = start_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
         # Clamp the context-length read for zero-work CTAs (start == total q
         # atoms); the value is stale but never used, because has_work is false.
         load_num_kv(
             K.min(start_q_atom_idx[0], batch_size * K.uint32(num_next_n_atoms) - K.uint32(1)),
             batch_size,
         )
-        start_num_kv = K.Bind(num_kv_result[0])
+        start_num_kv = num_kv_result[0]
 
         # Warm the block table into L2 as early as possible. Race-safe: a stale
         # prefetched line is invalidated by any later producer write, so the PDL
@@ -1076,8 +1061,8 @@ def get_kernel(**kwargs: Any):
             return kv_block_idx
 
         def issue_kv_tma(group, kv_state, kv_block_idx):
-            kv_stage_idx = K.Bind(kv_state.stage)
-            kv_phase = K.Bind(kv_state.phase)
+            kv_stage_idx = K.local_scalar("uint32", init=kv_state.stage)
+            kv_phase = K.local_scalar("uint32", init=kv_state.phase)
             kv_state.advance()
             base = K.uint32(group * num_kv_stages)
             empty_kv_barriers.wait(base + kv_stage_idx, kv_phase ^ K.uint32(1))
@@ -1106,7 +1091,7 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warp 8: Q + SFQ + weights, and KV for group 0 --
         with tma0:
-            tma0_end_kv_idx = K.Bind(end_kv_tile_idx[0] * K.uint32(num_tiles_per_split))
+            tma0_end_kv_idx = end_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
             state = scheduler_state()
             q_state = K.RingState(num_q_stages)
             kv_state = K.RingState(num_kv_stages)
@@ -1145,7 +1130,7 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warp 9: KV for group 1 -------------------------
         with tma1:
-            tma1_end_kv_idx = K.Bind(end_kv_tile_idx[0] * K.uint32(num_tiles_per_split))
+            tma1_end_kv_idx = end_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
             state = scheduler_state()
             kv_state = K.RingState(num_kv_stages)
             fetched = pump(state, tma1_end_kv_idx)
@@ -1163,8 +1148,8 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warps 10-11: UMMA + UTCCP issuers --------------
         with umma:
-            umma_end_kv_idx = K.Bind(end_kv_tile_idx[0] * K.uint32(num_tiles_per_split))
-            umma_group_idx = K.Bind(warp_idx_u32 - K.uint32(umma_warp_0))
+            umma_end_kv_idx = end_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
+            umma_group_idx = warp_idx_u32 - K.uint32(umma_warp_0)
             tmem_allocated = K.alloc_local([1], "uint32")
             K.ptx.ld.shared.u32(tmem_allocated[0], tmem_ptr_in_smem.ptr_to([0]))
             K.cuda.trap_when_assert_failed(tmem_allocated[0] == K.uint32(accum_tmem.elem_offset))
@@ -1202,7 +1187,7 @@ def get_kernel(**kwargs: Any):
                     # then copy this group's Q scale factors into its own TMEM
                     # sfb region (duplicated per group to stay cross-warp-free).
                     K.assign(q_stage[0], q_state.stage)
-                    q_phase = K.Bind(q_state.phase)
+                    q_phase = K.local_scalar("uint32", init=q_state.phase)
                     q_state.advance()
                     full_q_barriers.wait(q_stage[0], q_phase)
                     for sfq_i in range(num_sfq_atom // num_utccp_aligned_elems):
@@ -1232,8 +1217,8 @@ def get_kernel(**kwargs: Any):
                 K.assign(state["q_atom"][0], state["next_q"][0])
                 K.assign(state["kv_idx"][0], state["next_kv"][0])
 
-                kv_stage_idx = K.Bind(kv_state.stage)
-                kv_phase = K.Bind(kv_state.phase)
+                kv_stage_idx = K.local_scalar("uint32", init=kv_state.stage)
+                kv_phase = K.local_scalar("uint32", init=kv_state.phase)
                 kv_state.advance()
                 full_kv_barriers.wait(
                     umma_group_idx * K.uint32(num_kv_stages) + kv_stage_idx, kv_phase
@@ -1264,8 +1249,8 @@ def get_kernel(**kwargs: Any):
                             desc_sf[0],
                         )
 
-                tmem_stage_idx = K.Bind(tmem_state.stage)
-                tmem_phase = K.Bind(tmem_state.phase)
+                tmem_stage_idx = K.local_scalar("uint32", init=tmem_state.stage)
+                tmem_phase = K.local_scalar("uint32", init=tmem_state.phase)
                 tmem_state.advance()
                 empty_tmem_barriers.wait(
                     umma_group_idx * K.uint32(num_tmem_stages) + tmem_stage_idx,
@@ -1316,14 +1301,14 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- warps 0-7: math + epilogue ---------------------
         with math:
-            math_end_kv_idx = K.Bind(end_kv_tile_idx[0] * K.uint32(num_tiles_per_split))
+            math_end_kv_idx = end_kv_tile_idx[0] * K.uint32(num_tiles_per_split)
             state = scheduler_state()
             q_state = K.RingState(num_q_stages)
             tmem_state = K.RingState(num_tmem_stages)
             q_stage = local("uint32", K.uint32(0))
             has_q_stage = local("bool", K.bool(False))
             math_wg_idx = local("int32", warpgroup_idx)
-            math_wg_u32 = K.Bind(K.Cast("uint32", math_wg_idx[0]))
+            math_wg_u32 = K.Cast("uint32", math_wg_idx[0])
             math_thread_idx = local(
                 "uint32", (warp_idx_u32 % K.uint32(4)) * K.uint32(32) + lane_idx_u32[0]
             )
@@ -1381,15 +1366,14 @@ def get_kernel(**kwargs: Any):
                                 sum_1[0],
                             ),
                         )
-                    sum_v = K.Bind(fadd2_rn_noftz(sum_0[0], sum_1[0]))
+                    sum_v = K.local_scalar("uint64")
+                    K.ptx.add.rn.f32x2(sum_v, sum_0[0], sum_1[0])
                     # The 0.5 completes relu(x) = (x + |x|) * 0.5, folded across
                     # the packed-f32x2 ReLU accumulation in relu2_fma_f32x2.
-                    result_f32 = K.Bind(
-                        fmul_rn_noftz(
-                            K.float32(0.5),
-                            fadd_rn_noftz(K.cuda.float2_x(sum_v), K.cuda.float2_y(sum_v)),
-                        )
-                    )
+                    _add = K.local_scalar("float32")
+                    K.ptx.add.rn.f32(_add, K.cuda.float2_x(sum_v), K.cuda.float2_y(sum_v))
+                    result_f32 = K.local_scalar("float32")
+                    K.ptx.mul.rn.f32(result_f32, K.float32(0.5), _add)
                     result = local(logits_tir_dtype, K.Cast(logits_tir_dtype, result_f32))
                     logits_offset = local(
                         "uint64",
@@ -1407,7 +1391,7 @@ def get_kernel(**kwargs: Any):
                         empty_q_barriers.arrive(q_state.stage)
                         q_state.advance()
                     K.assign(q_stage[0], q_state.stage)
-                    q_phase = K.Bind(q_state.phase)
+                    q_phase = q_state.phase
                     full_q_barriers.wait(q_stage[0], q_phase)
                     K.assign(has_q_stage[0], K.bool(True))
                     for weight_i in range(next_n_atom):
@@ -1432,8 +1416,8 @@ def get_kernel(**kwargs: Any):
                     + K.Cast("uint64", (kv_idx[0] + math_wg_u32) * K.uint32(umma_m))
                     + K.Cast("uint64", math_thread_idx[0]),
                 )
-                tmem_stage_idx = K.Bind(tmem_state.stage)
-                tmem_phase = K.Bind(tmem_state.phase)
+                tmem_stage_idx = K.local_scalar("uint32", init=tmem_state.stage)
+                tmem_phase = K.local_scalar("uint32", init=tmem_state.phase)
                 tmem_state.advance()
                 full_tmem_barriers.wait(
                     math_wg_u32 * K.uint32(num_tmem_stages) + tmem_stage_idx, tmem_phase

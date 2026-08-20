@@ -152,9 +152,9 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         a = params["a"]
         b = params["b"]
         d = params["d"]
-        a_map = K.Bind(K.tvm_stack_alloca("tensormap", 1))
-        b_map = K.Bind(K.tvm_stack_alloca("tensormap", 1))
-        d_map = K.Bind(K.tvm_stack_alloca("tensormap", 1))
+        a_map = K.stack_alloca("tensormap", 1)
+        b_map = K.stack_alloca("tensormap", 1)
+        d_map = K.stack_alloca("tensormap", 1)
 
         def encode(descriptor, rank, data, *shape):
             K.evaluate(
@@ -163,50 +163,20 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
                 )
             )
 
+        # A and B encode identically apart from their map, data pointer, row count
+        # and block tile.
+        ab_operands = ((a_map, a.data, M, BLK_M), (b_map, b.data, N, BLK_N))
         if BLK_K == 128:
-            encode(
-                a_map,
-                3,
-                a.data,
-                64,
-                M,
-                Kdim // 64,
-                Kdim * ELEM_BYTES,
-                64 * ELEM_BYTES,
-                64,
-                BLK_M,
-                BLK_K // 64,
-                1,
-                1,
-                1,
-                0,
-                3,
-                2,
-                0,
-            )
-            encode(
-                b_map,
-                3,
-                b.data,
-                64,
-                N,
-                Kdim // 64,
-                Kdim * ELEM_BYTES,
-                64 * ELEM_BYTES,
-                64,
-                BLK_N,
-                BLK_K // 64,
-                1,
-                1,
-                1,
-                0,
-                3,
-                2,
-                0,
-            )
+            for _map, _data, _dim, _blk in ab_operands:
+                encode(
+                    _map, 3, _data, 64, _dim, Kdim // 64, Kdim * ELEM_BYTES,
+                    64 * ELEM_BYTES, 64, _blk, BLK_K // 64, 1, 1, 1, 0, 3, 2, 0,
+                )  # fmt: skip
         else:
-            encode(a_map, 2, a.data, Kdim, M, Kdim * ELEM_BYTES, BLK_K, BLK_M, 1, 1, 0, 3, 2, 0)
-            encode(b_map, 2, b.data, Kdim, N, Kdim * ELEM_BYTES, BLK_K, BLK_N, 1, 1, 0, 3, 2, 0)
+            for _map, _data, _dim, _blk in ab_operands:
+                encode(
+                    _map, 2, _data, Kdim, _dim, Kdim * ELEM_BYTES, BLK_K, _blk, 1, 1, 0, 3, 2, 0,
+                )  # fmt: skip
         encode(d_map, 2, d.data, N, M, N * ELEM_BYTES, EPI_N, BLK_M, 1, 1, 0, D_SWIZZLE.value, 2, 0)
         return a_map, b_map, d_map
 

@@ -388,8 +388,24 @@ _FORBIDDEN_TIRX_NAMES = {
     "wg_reg_tile",
 }
 
+# Binding forms retired by measurement: every kernel migrated to the two direct
+# spellings, and the mis-read-prone middle forms are rejected at the API.
+_FORBIDDEN_BINDING_NAMES = {"Bind", "Let", "let"}
+
+_BINDING_HELP = (
+    "Kern rejects {name!r}: bindings use exactly two spellings.\n"
+    "  - cheap pure arithmetic       -> a plain Python variable (re-emitted per use; ptxas CSEs it)\n"
+    "  - anything that must run once -> x = K.local_scalar(dtype, init=expr)\n"
+    "    (loads, div/rcp/rsqrt, warp collectives, cvta-of-allocation, volatile-ordered reads,\n"
+    "     and SNAPSHOTS of mutable state -- e.g. a RingState/PipelineState cursor read before .advance())\n"
+    "  - stack allocations           -> K.stack_alloca(kind, size)\n"
+    "Annotated `x: K.<dtype> = expr` is inert under tracing (it is a plain variable, NOT a binding)."
+)
+
 
 def __getattr__(name):
+    if name in _FORBIDDEN_BINDING_NAMES:
+        raise AttributeError(_BINDING_HELP.format(name=name))
     if name in _FORBIDDEN_TIRX_NAMES:
         raise AttributeError(
             f"Kern deliberately does not expose {name!r}: use default-layout tensors, "

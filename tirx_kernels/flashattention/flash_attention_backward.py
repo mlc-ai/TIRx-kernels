@@ -533,22 +533,14 @@ def build_kernel(
         def elected():
             return K.cuda.elect_sync() != K.uint32(0)
 
-        def copy_128b(dst, value):
-            # The dialect takes the payload as one 128-bit register; callers
-            # pass a uint128 view element rather than a pointer into a local.
-            K.ptx.st.weak.shared__cta.b128(dst, value)
-
-        def tmem_at(base, row, col):
-            return K.cuda.get_tmem_addr(K.uint32(base), row, col)
-
         def tmem_load(width, dst, dst_offset, base, row, col):
             K.ptx[f"tcgen05.ld.sync.aligned.32x32b.x{width}.b32"](
-                *[dst[dst_offset + i] for i in range(width)], tmem_at(base, row, col)
+                *[dst[dst_offset + i] for i in range(width)], K.cuda.get_tmem_addr(K.uint32(base), row, col)
             )
 
         def tmem_store(width, src, src_offset, base, row, col):
             K.ptx[f"tcgen05.st.sync.aligned.32x32b.x{width}.b32"](
-                tmem_at(base, row, col), *[src[src_offset + i] for i in range(width)]
+                K.cuda.get_tmem_addr(K.uint32(base), row, col), *[src[src_offset + i] for i in range(width)]
             )
 
         def tma_g2s(dim, dst_ptr, mbar, tensormap, *coords):
@@ -731,13 +723,17 @@ def build_kernel(
                 # Every operand is one of three physical layouts. Their fields
                 # are compile-time constants; only the start address is live.
                 anchor = Q_row[0]
-                anchor_start = K.Bind(
-                    K.cast(
+                # Materialized: `descriptor` below reads it once textually but
+                # is called eight times, so a lazy binding would re-issue the
+                # cvta per descriptor.
+                anchor_start = K.local_scalar(
+                    "uint64",
+                    init=K.cast(
                         K.shift_right(
                             K.cuda.cvta_generic_to_shared(anchor.ptr_to(0, 0)), K.uint32(4)
                         ),
                         "uint64",
-                    )
+                    ),
                 )
 
                 def descriptor(base, view):
@@ -747,7 +743,10 @@ def build_kernel(
                     start = K.bitwise_and(
                         anchor_start + K.uint64(delta16), K.uint64(0x3FFF)
                     )
-                    return K.Bind(K.bitwise_or(K.uint64(base), start))
+                    # Plain value: cheap arithmetic over the materialized anchor.
+                    # Routing each descriptor through a local instead spills the
+                    # MMA warp (STACK 8 -> 136 B on the causal shapes, measured).
+                    return K.bitwise_or(K.uint64(base), start)
 
                 def k_major_off(ldo):
                     return lambda kp: (kp % 4) * 2 + (kp // 4) * ldo
@@ -845,11 +844,13 @@ def build_kernel(
                     with K.If(elected()), K.Then():
                         tcgen05_commit(buf_a_consumed.ptr_to([0]))
 
-                def phase_d():
+                def phase_d(*, is_last=False):
                     """dK += dS_tmem @ Q_col^K.
 
                     Once issued, ordered UMMA execution lets the following dP
-                    reuse the dS/dP TMEM region.
+                    reuse the dS/dP TMEM region.  ``is_last`` is the post-loop
+                    Phase D[N-1]: it releases dK with the same elect, and skips
+                    the accumulate flag no later trip reads.
                     """
                     wg02mma_tmem.wait(0, wg0_ph.phase)
                     wg0_ph.advance()
@@ -862,7 +863,12 @@ def build_kernel(
                         )
                     with K.If(elected()), K.Then():
                         tcgen05_commit(qcol_consumed.ptr_to([0]))
-                    K.assign(accum_dk[0], 1)
+                        if is_last:
+                            # sdKVaccum stage 1: release dK independently after
+                            # its final update, while the final dQ path is live.
+                            tcgen05_commit(dk_done.ptr_to([0]))
+                    if not is_last:
+                        K.assign(accum_dk[0], 1)
 
                 def phase_e_issue():
                     K.assign(accum_var[0], 0)
@@ -917,20 +923,7 @@ def build_kernel(
                     tcgen05_commit(dv_done.ptr_to([0]))
 
                 # ---- after the loop: Phase D[N-1], Phase E[N-1] ----
-                wg02mma_tmem.wait(0, wg0_ph.phase)
-                wg0_ph.advance()
-                tma_qcol.wait(0, qcol_ph.phase)
-                qcol_ph.advance()
-                with K.If(elected()), K.Then():
-                    mma_chain2(
-                        TMEM_OFF_C, a=TMEM_OFF_DP, b=d_q_col,
-                        idesc=ID_TS, accumulate=accum_dk[0],
-                    )
-                with K.If(elected()), K.Then():
-                    tcgen05_commit(qcol_consumed.ptr_to([0]))
-                    # sdKVaccum stage 1: release dK independently after its final
-                    # update, while the final dQ path remains live.
-                    tcgen05_commit(dk_done.ptr_to([0]))
+                phase_d(is_last=True)
 
                 # The final dQ reuses the same TMEM destination; unlike a loop
                 # trip there is no following Phase-A prologue to carry this
@@ -991,9 +984,6 @@ def build_kernel(
             dk_done_ph = K.PipelineState(1, phase=0)
             ds_exch_consumed_ph = K.PipelineState(1, phase=1)
 
-            def cast_f32x2_to_f16x2(dst, src):
-                K.cuda.float22half2(dst, src)
-
             def fma_scale_sub_f32x2(scores, scale, lse):
                 """``scores * scale - lse``, all three packed f32x2."""
                 neg_lse = K.alloc_local([1], "uint64")
@@ -1004,9 +994,6 @@ def build_kernel(
                 K.ptx.xor.b64(neg_lse[0], lse, sign_mask)
                 K.ptx.fma.rn.f32x2(result[0], scores, scale, neg_lse[0])
                 return result[0]
-
-            def f2(a, b):
-                return K.cuda.make_float2(a, b)
 
             with K.serial(
                 num_m_tiles_this_n, annotations={"disable_unroll": True}
@@ -1046,9 +1033,9 @@ def build_kernel(
                             lse_pair[0], lse_pair[1], sLSE.ptr_to([0, strip_off + 2 * j])
                         )
                         scaled_pair = fma_scale_sub_f32x2(
-                            f2(S_strip[2 * j], S_strip[2 * j + 1]),
-                            f2(K.float32(scale_log2), K.float32(scale_log2)),
-                            f2(lse_pair[0], lse_pair[1]),
+                            K.cuda.make_float2(S_strip[2 * j], S_strip[2 * j + 1]),
+                            K.cuda.make_float2(K.float32(scale_log2), K.float32(scale_log2)),
+                            K.cuda.make_float2(lse_pair[0], lse_pair[1]),
                         )
                         K.ptx.mov.b32(S_strip[2 * j], K.cuda.float2_x(scaled_pair))
                         K.ptx.mov.b32(S_strip[2 * j + 1], K.cuda.float2_y(scaled_pair))
@@ -1074,7 +1061,7 @@ def build_kernel(
                                 ))
                     for j_inner in range(32 // 2):
                         j = stage * (32 // 2) + j_inner
-                        cast_f32x2_to_f16x2(
+                        K.cuda.float22half2(
                             K.address_of(P_f16[2 * j]), K.address_of(S_strip[2 * j])
                         )
 
@@ -1121,13 +1108,13 @@ def build_kernel(
                     )
                     K.ptx.sub.rn.ftz.f32x2(
                         dP_pairs[j],
-                        f2(dP_strip[2 * j], dP_strip[2 * j + 1]),
-                        f2(dpsum_pair[0], dpsum_pair[1]),
+                        K.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1]),
+                        K.cuda.make_float2(dpsum_pair[0], dpsum_pair[1]),
                     )
                     K.ptx.mul.rn.ftz.f32x2(
                         dP_pairs[j],
-                        f2(S_strip[2 * j], S_strip[2 * j + 1]),
-                        f2(dP_strip[2 * j], dP_strip[2 * j + 1]),
+                        K.cuda.make_float2(S_strip[2 * j], S_strip[2 * j + 1]),
+                        K.cuda.make_float2(dP_strip[2 * j], dP_strip[2 * j + 1]),
                     )
 
                 dpsum_ph.advance()
@@ -1135,7 +1122,7 @@ def build_kernel(
 
                 dS_full_f16 = K.alloc_local([STRIP_SIZE], "float16")
                 for j in range(STRIP_SIZE // 2):
-                    cast_f32x2_to_f16x2(
+                    K.cuda.float22half2(
                         K.address_of(dS_full_f16[2 * j]), K.address_of(dP_strip[2 * j])
                     )
 
@@ -1166,13 +1153,13 @@ def build_kernel(
                 with K.If(compute_wg == id_in_pair):
                     with K.Then():
                         for ni in range(STRIP_SIZE // 8):
-                            copy_128b(
+                            K.ptx.st.weak.shared__cta.b128(
                                 dS_exch.ptr_to(id_in_pair * CTA_N + row_local, ni * 8),
                                 dS_full_f16.view("uint128")[ni],
                             )
                     with K.Else():
                         for ni in range(STRIP_SIZE // 8):
-                            copy_128b(
+                            K.ptx.st.weak.shared__cta.b128(
                                 dS_send.ptr_to(row_local, ni * 8),
                                 dS_full_f16.view("uint128")[ni],
                             )
@@ -1230,12 +1217,12 @@ def build_kernel(
                     if scale_by is not None:
                         K.ptx.mul.rn.ftz.f32x2(
                             acc_pairs[j],
-                            f2(acc[2 * j], acc[2 * j + 1]),
-                            f2(K.float32(scale_by), K.float32(scale_by)),
+                            K.cuda.make_float2(acc[2 * j], acc[2 * j + 1]),
+                            K.cuda.make_float2(K.float32(scale_by), K.float32(scale_by)),
                         )
-                    cast_f32x2_to_f16x2(K.address_of(out[2 * j]), K.address_of(acc[2 * j]))
+                    K.cuda.float22half2(K.address_of(out[2 * j]), K.address_of(acc[2 * j]))
                 for ni in range(EPI_N // 8):
-                    copy_128b(
+                    K.ptx.st.weak.shared__cta.b128(
                         epi_tile[compute_wg].ptr_to(row_local, ni * 8),
                         out.view("uint128")[ni],
                     )
@@ -1298,7 +1285,7 @@ def build_kernel(
                     smem_slot = stage % DQ_STAGES
                     dq_reg_st = ((stage + DQ_REDUCE_ITERS // 2) % DQ_REDUCE_ITERS) * DQ_RED_N
                     for chunk in range(DQ_RED_N // 4):
-                        copy_128b(
+                        K.ptx.st.weak.shared__cta.b128(
                             dQ_smem.ptr_to([smem_slot, chunk * BLK_M * 4 + row_local * 4]),
                             dQ_full.view("uint128")[(dq_reg_st + chunk * 4) // 4],
                         )
