@@ -701,10 +701,9 @@ def get_kernel(**kwargs: Any):
 
                     with K.unroll(5) as delta_i:
                         delta: K.int32 = K.shift_right(K.int32(16), delta_i)
-                        peer_out: K.float32 = K.cuda.__shfl_down_sync(
-                            K.uint32(0xFFFFFFFF), out_value, delta, 32
+                        K.ptx["add.ftz.f32"](
+                            out_value, out_value, _simple._shfl_down_f32(out_value, delta)
                         )
-                        K.ptx["add.ftz.f32"](out_value, out_value, peer_out)
                     with K.If(lane == 0), K.Then():
                         K.ptx.st.shared.b32(
                             s_out.ptr_to([row_d]), K.reinterpret("uint32", out_value)
@@ -713,16 +712,14 @@ def get_kernel(**kwargs: Any):
                     if SCALE_STATE and USE_STATE_CACHE:
                         with K.unroll(5) as delta_i:
                             delta: K.int32 = K.shift_right(K.int32(16), delta_i)
-                            peer_max: K.float32 = K.cuda.__shfl_down_sync(
-                                K.uint32(0xFFFFFFFF), new_state_max, delta, 32
+                            K.ptx["max.ftz.f32"](
+                                new_state_max,
+                                new_state_max,
+                                _simple._shfl_down_f32(new_state_max, delta),
                             )
-                            K.ptx["max.ftz.f32"](new_state_max, new_state_max, peer_max)
                         # Unlike the simple kernel, the frozen vertical source has no
                         # standalone __syncwarp between max reduction and broadcast.
-                        K.assign(
-                            new_state_max,
-                            K.cuda.__shfl_sync(K.uint32(0xFFFFFFFF), new_state_max, 0, 32),
-                        )
+                        K.assign(new_state_max, _simple._shfl_idx_f32(new_state_max, K.int32(0)))
                         encode_scale = K.local_scalar("float32", init=1.0)
                         with K.If(new_state_max != K.float32(0.0)), K.Then():
                             K.ptx["div.approx.ftz.f32"](

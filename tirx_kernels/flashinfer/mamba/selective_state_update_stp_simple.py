@@ -32,6 +32,37 @@ def _lane_mask(raw_lane):
     return K.cast(K.bitwise_and(K.cast(raw_lane, "uint32"), K.uint32(31)), "int32")
 
 
+def _shfl_down_f32(value, delta):
+    """``shfl.sync.down.b32`` at width 32: clamp/segmask 31, full member mask.
+
+    DPS: the destination pins the warp collective to the call site, so the
+    shuffle is emitted once here rather than re-emitted at every textual use
+    of the returned value.
+    """
+    shfl_down = K.local_scalar("uint32")
+    K.ptx.shfl_sync.down.b32(
+        shfl_down,
+        K.reinterpret("uint32", value),
+        K.cast(delta, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.reinterpret("float32", shfl_down)
+
+
+def _shfl_idx_f32(value, source_lane):
+    """``shfl.sync.idx.b32`` at width 32: clamp/segmask 31, full member mask."""
+    shfl_idx = K.local_scalar("uint32")
+    K.ptx.shfl_sync.idx.b32(
+        shfl_idx,
+        K.reinterpret("uint32", value),
+        K.cast(source_lane, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.reinterpret("float32", shfl_idx)
+
+
 def _global_load_index_s64(buffer, index, dtype):
     if dtype == "int32":
         gload_0 = K.local_scalar("int32")
@@ -815,10 +846,7 @@ def get_kernel(**kwargs: Any):
 
                     with K.unroll(5) as delta_i:
                         delta: K.int32 = K.shift_right(K.int32(16), delta_i)
-                        peer_out: K.float32 = K.cuda.__shfl_down_sync(
-                            K.uint32(0xFFFFFFFF), out_value, delta, 32
-                        )
-                        K.ptx["add.ftz.f32"](out_value, out_value, peer_out)
+                        K.ptx["add.ftz.f32"](out_value, out_value, _shfl_down_f32(out_value, delta))
                     with K.If(lane == 0), K.Then():
                         K.ptx.st.shared.b32(
                             s_out.ptr_to([local_row]), K.reinterpret("uint32", out_value)
@@ -835,15 +863,11 @@ def get_kernel(**kwargs: Any):
                     ):
                         with K.unroll(5) as delta_i:
                             delta: K.int32 = K.shift_right(K.int32(16), delta_i)
-                            peer_max: K.float32 = K.cuda.__shfl_down_sync(
-                                K.uint32(0xFFFFFFFF), new_state_max, delta, 32
+                            K.ptx["max.ftz.f32"](
+                                new_state_max, new_state_max, _shfl_down_f32(new_state_max, delta)
                             )
-                            K.ptx["max.ftz.f32"](new_state_max, new_state_max, peer_max)
                         K.cuda.warp_sync()
-                        K.assign(
-                            new_state_max,
-                            K.cuda.__shfl_sync(K.uint32(0xFFFFFFFF), new_state_max, 0, 32),
-                        )
+                        K.assign(new_state_max, _shfl_idx_f32(new_state_max, K.int32(0)))
                         encode_scale = K.local_scalar("float32", init=1.0)
                         with K.If(new_state_max != K.float32(0.0)), K.Then():
                             K.ptx["div.approx.ftz.f32"](

@@ -18,7 +18,7 @@ import tirx_kernels.kern as K
 
 from . import selective_state_update_mtp_simple as _simple
 from . import selective_state_update_mtp_vertical as _vertical
-from .selective_state_update_mtp_simple import _case
+from .selective_state_update_mtp_simple import _case, _shfl_down_f32
 
 KERNEL_META = {
     "name": "selective_state_update_mtp_horizontal",
@@ -648,13 +648,11 @@ def get_kernel(**kwargs: Any):
                             out_value, K.cuda.float2_x(out_pair), K.cuda.float2_y(out_pair)
                         )
                         with K.unroll(3) as delta_idx:
-                            peer_out: K.float32 = K.cuda.__shfl_down_sync(
-                                K.uint32(0xFFFFFFFF),
+                            K.ptx["add.ftz.f32"](
                                 out_value,
-                                K.shift_right(K.int32(4), delta_idx),
-                                32,
+                                out_value,
+                                _shfl_down_f32(out_value, K.shift_right(K.int32(4), delta_idx)),
                             )
-                            K.ptx["add.ftz.f32"](out_value, out_value, peer_out)
                         with K.If(member == 0), K.Then():
                             fma_0 = K.local_scalar("float32")
                             K.ptx["fma.rn.ftz.f32"](fma_0, d_value, x_value, out_value)

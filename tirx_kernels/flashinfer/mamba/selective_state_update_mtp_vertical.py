@@ -17,7 +17,7 @@ import torch
 import tirx_kernels.kern as K
 
 from . import selective_state_update_mtp_simple as _simple
-from .selective_state_update_mtp_simple import _case
+from .selective_state_update_mtp_simple import _case, _shfl_down_f32
 
 KERNEL_META = {
     "name": "selective_state_update_mtp_vertical",
@@ -698,10 +698,9 @@ def get_kernel(**kwargs: Any):
                                     )
                         with K.unroll(5) as delta_i:
                             delta: K.int32 = K.shift_right(K.int32(16), delta_i)
-                            peer: K.float32 = K.cuda.__shfl_down_sync(
-                                K.uint32(0xFFFFFFFF), out_value, delta, 32
+                            K.ptx["add.ftz.f32"](
+                                out_value, out_value, _shfl_down_f32(out_value, delta)
                             )
-                            K.ptx["add.ftz.f32"](out_value, out_value, peer)
                         with K.If(lane == 0), K.Then():
                             K.ptx.st.shared.b32(
                                 s_out.ptr_to([group * NTOKENS * DIM + step * DIM + dd]),

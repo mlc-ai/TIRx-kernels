@@ -825,10 +825,9 @@ def get_kernel(**kwargs: Any):
                         )
 
                 out_value = K.local_scalar("float32", init=out_accum[0])
-                peer_value: K.float32 = K.cuda.__shfl_down_sync(
-                    K.uint32(0xFFFFFFFF), out_value, 16, 32
+                K.ptx["add.ftz.f32"](
+                    out_value, out_value, _simple._shfl_down_f32(out_value, K.int32(16))
                 )
-                K.ptx["add.ftz.f32"](out_value, out_value, peer_value)
                 with K.If(member == 0), K.Then():
                     K.ptx["fma.rn.ftz.f32"](out_value, d_value, x_value, out_value)
                     if HAS_Z:
