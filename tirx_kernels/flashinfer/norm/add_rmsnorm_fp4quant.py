@@ -16,7 +16,7 @@ from __future__ import annotations
 import functools
 from typing import Any
 
-from tirx_kernels.flashinfer.norm.rmsnorm import _cvt_from_f32, _cvt_pair_from_f32
+from tirx_kernels.flashinfer.norm._parser_helpers import _cvt_from_f32, _cvt_pair_from_f32
 from tirx_kernels.flashinfer.norm.rmsnorm_fp4quant import (
     _add_f32,
     _add_s32,

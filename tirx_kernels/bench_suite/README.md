@@ -12,7 +12,7 @@ references are explicit diagnostics through `python -m tirx_kernels.bench
 registered kernel has one file. Files with `default_suite: true` select one to
 three representative single-GPU rows with `default: true`; curated three-row
 files label them `small`, `medium`, and `large`. The current default roster is
-143 rows across 49 device kernels.
+191 rows across 65 device kernels.
 
 With no `--workloads`, the suite writes the selected rows to
 `.bench-suite/workloads.generated.yaml`. Inspect that file before freezing a
@@ -89,7 +89,7 @@ otherwise incomparable rows fail. A complete matrix discovers crossings;
 after that, rerun only configs that are missing, changed, failed, or polluted.
 An explicit workload file or filter records a targeted selection, so the gate
 requires exactly those after rows while still requiring the immutable before
-baseline to contain the complete 143-row roster. Do not rerun clean passing rows
+baseline to contain the complete 191-row roster. Do not rerun clean passing rows
 or splice selected samples into the baseline. Byte-identical CUDA, fatbin, and
 final SASS already establish implementation alignment.
 

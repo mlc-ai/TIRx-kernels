@@ -3,17 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Shared plain-TIRx helpers for the FlashInfer quantization kernel ports.
+"""Shared kern helpers for the FlashInfer quantization kernel ports.
 
 Every helper mirrors the source CuTe-DSL inline-asm block instruction for
 instruction (``flashinfer/quantization/quantization_cute_dsl_utils.py`` and
 ``flashinfer/cute_dsl/fp4_common.py``); see the kernel sketches under
 ``.agents/sketch/`` for the validated instruction selections.  All helpers run
-at TIRx parse time inside a ``@T.prim_func`` body: they build PrimExprs or emit
-statements into the active builder frame.  No tile primitives are used.
+while a ``@K.kernel`` body is traced: they build PrimExprs or emit statements
+into the active builder frame.  No tile primitives are used.
 """
 
-from tvm.script import tirx as T
+import tirx_kernels.kern as K
 
 # ---------------------------------------------------------------------------
 # Global memory copies (fp4_common.py:134 ld_global_v4_u32, :242 st_global_u64)
@@ -22,19 +22,19 @@ from tvm.script import tirx as T
 
 def ld_global_v4_u32(addr):
     """One ``ld.global.v4.u32`` (no ``.nc``); returns the 4-word local tile."""
-    v = T.alloc_local([4], "uint32")
-    T.evaluate(T.ptx.ld.global_.v4.b32(v[0], v[1], v[2], v[3], addr))
+    v = K.alloc_local([4], "uint32")
+    K.ptx.ld.global_.v4.b32(v[0], v[1], v[2], v[3], addr)
     return v
 
 
 def st_global_u64(addr, val):
     """One ``st.global.u64`` (emitted as st.global.b64)."""
-    T.evaluate(T.ptx.st.global_.b64(addr, val))
+    K.ptx.st.global_.b64(addr, val)
 
 
 def st_global_u8(addr, val):
     """One byte store (emitted as st.global.b8)."""
-    T.evaluate(T.ptx.st.global_.b8(addr, val))
+    K.ptx.st.global_.b8(addr, val)
 
 
 # ---------------------------------------------------------------------------
@@ -44,17 +44,17 @@ def st_global_u8(addr, val):
 
 def habs2(x):
     """``and.b32`` with 0x7FFF7FFF: clear both fp16/bf16 sign bits."""
-    return T.bitwise_and(x, T.uint32(0x7FFF7FFF))
+    return K.bitwise_and(x, K.uint32(0x7FFF7FFF))
 
 
 def hmax2(a, b, dtype):
     """``max.f16x2`` / ``max.bf16x2`` on packed pairs."""
-    out = T.alloc_local([1], "uint32")
+    out = K.local_scalar("uint32")
     if dtype == "float16":
-        T.evaluate(T.ptx.max.f16x2(out[0], a, b))
+        K.ptx.max.f16x2(out, a, b)
     else:
-        T.evaluate(T.ptx.max.bf16x2(out[0], a, b))
-    return out[0]
+        K.ptx.max.bf16x2(out, a, b)
+    return out
 
 
 def absmax_8(v, dtype):
@@ -79,22 +79,22 @@ def unpack_lo_f32(word, dtype):
     """Low lane of a packed pair as f32 (mov.b32 {lo,hi} + cvt.f32.f16; bf16:
     and.b32 + shl.b32 + mov.b32)."""
     if dtype == "float16":
-        return T.cast(
-            T.reinterpret("float16", T.cast(T.bitwise_and(word, T.uint32(0xFFFF)), "uint16")),
+        return K.cast(
+            K.reinterpret("float16", K.cast(K.bitwise_and(word, K.uint32(0xFFFF)), "uint16")),
             "float32",
         )
-    return T.reinterpret(
-        "float32", T.shift_left(T.bitwise_and(word, T.uint32(0xFFFF)), T.uint32(16))
+    return K.reinterpret(
+        "float32", K.shift_left(K.bitwise_and(word, K.uint32(0xFFFF)), K.uint32(16))
     )
 
 
 def unpack_hi_f32(word, dtype):
     """High lane of a packed pair as f32 (bf16: shr.b32 + shl.b32 + mov.b32)."""
     if dtype == "float16":
-        return T.cast(
-            T.reinterpret("float16", T.cast(T.shift_right(word, T.uint32(16)), "uint16")), "float32"
+        return K.cast(
+            K.reinterpret("float16", K.cast(K.shift_right(word, K.uint32(16)), "uint16")), "float32"
         )
-    return T.reinterpret("float32", T.shift_left(T.shift_right(word, T.uint32(16)), T.uint32(16)))
+    return K.reinterpret("float32", K.shift_left(K.shift_right(word, K.uint32(16)), K.uint32(16)))
 
 
 def pair_max_to_f32(x, dtype):
@@ -110,24 +110,18 @@ def pair_max_to_f32(x, dtype):
 
 def fmax_f32(a, b):
     """``max.f32``."""
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.max.f32(out[0], a, b))
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.max.f32(out, a, b)
+    return out
 
 
 def shfl_xor_f32(val, lane_xor):
     """``shfl.sync.bfly.b32`` with full membermask (utils:498 shuffle_xor_f32)."""
-    out = T.alloc_local([1], "uint32")
-    T.evaluate(
-        T.ptx.shfl_sync.bfly.b32(
-            out[0],
-            T.reinterpret("uint32", val),
-            T.uint32(lane_xor),
-            T.uint32(31),
-            T.uint32(0xFFFFFFFF),
-        )
+    out = K.local_scalar("uint32")
+    K.ptx.shfl_sync.bfly.b32(
+        out, K.reinterpret("uint32", val), K.uint32(lane_xor), K.uint32(31), K.uint32(0xFFFFFFFF)
     )
-    return T.reinterpret("float32", out[0])
+    return K.reinterpret("float32", out)
 
 
 def reduce_max_2threads(val):
@@ -148,9 +142,9 @@ def reduce_max_4threads(val):
 
 def mul_f32(a, b):
     """``mul.f32`` (non-ftz, exactly as the source asm blocks)."""
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.mul.f32(out[0], a, b))
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.mul.f32(out, a, b)
+    return out
 
 
 def float_to_ue8m0(value):
@@ -161,29 +155,29 @@ def float_to_ue8m0(value):
     setp.gt.u32 / selp.u32 x2 -- all explicit so the FTZ-flagged host
     compiler cannot reinterpret the float compare or the selects.
     """
-    bits = T.reinterpret("uint32", value)
-    exp = T.bitwise_and(T.shift_right(bits, T.uint32(23)), T.uint32(255))
-    mant = T.bitwise_and(bits, T.uint32(0x7FFFFF))
-    p_zero = T.local_scalar("uint32")
-    T.evaluate(T.ptx.setp.le.f32(p_zero, value, T.float32(0.0)))
-    p_has_mant = T.local_scalar("uint32")
-    T.evaluate(T.ptx.setp.ne.u32(p_has_mant, mant, T.uint32(0)))
-    bump = T.alloc_local([1], "uint32")
-    T.evaluate(T.ptx.selp.u32(bump[0], T.uint32(1), T.uint32(0), T.ptx.pred(p_has_mant)))
-    p_exp_zero = T.local_scalar("uint32")
-    T.evaluate(T.ptx.setp.eq.u32(p_exp_zero, exp, T.uint32(0)))
-    p_tiny = T.local_scalar("uint32")
-    T.evaluate(T.ptx.setp.le.u32(p_tiny, mant, T.uint32(0x400000)))
-    T.evaluate(T.ptx.and_.pred(p_tiny, T.ptx.pred(p_exp_zero), T.ptx.pred(p_tiny)))
+    bits = K.reinterpret("uint32", value)
+    exp = K.bitwise_and(K.shift_right(bits, K.uint32(23)), K.uint32(255))
+    mant = K.bitwise_and(bits, K.uint32(0x7FFFFF))
+    p_zero = K.local_scalar("uint32")
+    K.ptx.setp.le.f32(p_zero, value, K.float32(0.0))
+    p_has_mant = K.local_scalar("uint32")
+    K.ptx.setp.ne.u32(p_has_mant, mant, K.uint32(0))
+    bump = K.local_scalar("uint32")
+    K.ptx.selp.u32(bump, K.uint32(1), K.uint32(0), K.ptx.pred(p_has_mant))
+    p_exp_zero = K.local_scalar("uint32")
+    K.ptx.setp.eq.u32(p_exp_zero, exp, K.uint32(0))
+    p_tiny = K.local_scalar("uint32")
+    K.ptx.setp.le.u32(p_tiny, mant, K.uint32(0x400000))
+    K.ptx.and_.pred(p_tiny, K.ptx.pred(p_exp_zero), K.ptx.pred(p_tiny))
     # @p_tiny mov.u32 bump, 0  (selp form)
-    T.evaluate(T.ptx.selp.u32(bump[0], T.uint32(0), bump[0], T.ptx.pred(p_tiny)))
-    result = exp + bump[0]
-    p_ovf = T.local_scalar("uint32")
-    T.evaluate(T.ptx.setp.gt.u32(p_ovf, result, T.uint32(254)))
-    out = T.alloc_local([1], "uint32")
-    T.evaluate(T.ptx.selp.u32(out[0], T.uint32(254), result, T.ptx.pred(p_ovf)))
-    T.evaluate(T.ptx.selp.u32(out[0], T.uint32(0), out[0], T.ptx.pred(p_zero)))
-    return out[0]
+    K.ptx.selp.u32(bump, K.uint32(0), bump, K.ptx.pred(p_tiny))
+    result = exp + bump
+    p_ovf = K.local_scalar("uint32")
+    K.ptx.setp.gt.u32(p_ovf, result, K.uint32(254))
+    out = K.local_scalar("uint32")
+    K.ptx.selp.u32(out, K.uint32(254), result, K.ptx.pred(p_ovf))
+    K.ptx.selp.u32(out, K.uint32(0), out, K.ptx.pred(p_zero))
+    return out
 
 
 def ue8m0_to_inv_scale(ue8m0_val):
@@ -191,13 +185,13 @@ def ue8m0_to_inv_scale(ue8m0_val):
 
     setp.eq.u32 / sub.s32 / max.s32 / shl.b32 / mov.b32 / @p_zero mov (selp).
     """
-    p_zero = T.local_scalar("uint32")
-    T.evaluate(T.ptx.setp.eq.u32(p_zero, ue8m0_val, T.uint32(0)))
-    new_exp = T.max(T.int32(254) - T.cast(ue8m0_val, "int32"), T.int32(0))
-    inv = T.reinterpret("float32", T.shift_left(T.cast(new_exp, "uint32"), T.uint32(23)))
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.selp.f32(out[0], T.float32(0.0), inv, T.ptx.pred(p_zero)))
-    return out[0]
+    p_zero = K.local_scalar("uint32")
+    K.ptx.setp.eq.u32(p_zero, ue8m0_val, K.uint32(0))
+    new_exp = K.max(K.int32(254) - K.cast(ue8m0_val, "int32"), K.int32(0))
+    inv = K.reinterpret("float32", K.shift_left(K.cast(new_exp, "uint32"), K.uint32(23)))
+    out = K.local_scalar("float32")
+    K.ptx.selp.f32(out, K.float32(0.0), inv, K.ptx.pred(p_zero))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -212,24 +206,24 @@ def fp8x2_scaled(word, inv_scale, dtype):
     """
     lo = mul_f32(unpack_lo_f32(word, dtype), inv_scale)
     hi = mul_f32(unpack_hi_f32(word, dtype), inv_scale)
-    pair = T.alloc_local([1], "uint16")
-    T.evaluate(T.ptx.cvt.rn.satfinite.e4m3x2.f32(pair[0], hi, lo))
-    return T.cast(pair[0], "uint32")
+    pair = K.local_scalar("uint16")
+    K.ptx.cvt.rn.satfinite.e4m3x2.f32(pair, hi, lo)
+    return K.cast(pair, "uint32")
 
 
 def pack_fp8x8_to_u64(b01, b23, b45, b67):
     """Gather 4 x (2 FP8 bytes in low u16) into one uint64 (utils:326)."""
-    lo = T.bitwise_or(
-        T.bitwise_and(b01, T.uint32(0xFFFF)),
-        T.shift_left(T.bitwise_and(b23, T.uint32(0xFFFF)), T.uint32(16)),
+    lo = K.bitwise_or(
+        K.bitwise_and(b01, K.uint32(0xFFFF)),
+        K.shift_left(K.bitwise_and(b23, K.uint32(0xFFFF)), K.uint32(16)),
     )
-    hi = T.bitwise_or(
-        T.bitwise_and(b45, T.uint32(0xFFFF)),
-        T.shift_left(T.bitwise_and(b67, T.uint32(0xFFFF)), T.uint32(16)),
+    hi = K.bitwise_or(
+        K.bitwise_and(b45, K.uint32(0xFFFF)),
+        K.shift_left(K.bitwise_and(b67, K.uint32(0xFFFF)), K.uint32(16)),
     )
-    out = T.alloc_local([1], "uint64")
-    T.evaluate(T.ptx.mov.b64(out[0], lo, hi))
-    return out[0]
+    out = K.local_scalar("uint64")
+    K.ptx.mov.b64(out, lo, hi)
+    return out
 
 
 def fp8x8_scaled(v, inv_scale, dtype):
@@ -250,11 +244,11 @@ def fp8x8_scaled(v, inv_scale, dtype):
 def sf_offset_128x4(row, col, padded_cols):
     """Swizzled 128x4 SF byte offset; padded_cols is a compile-time int."""
     return (
-        T.truncmod(col, T.int32(4))
-        + T.truncdiv(col, T.int32(4)) * 512
-        + T.truncmod(row, T.int32(32)) * 16
-        + T.truncdiv(T.truncmod(row, T.int32(128)), T.int32(32)) * 4
-        + T.truncdiv(row, T.int32(128)) * (128 * padded_cols)
+        K.truncmod(col, K.int32(4))
+        + K.truncdiv(col, K.int32(4)) * 512
+        + K.truncmod(row, K.int32(32)) * 16
+        + K.truncdiv(K.truncmod(row, K.int32(128)), K.int32(32)) * 4
+        + K.truncdiv(row, K.int32(128)) * (128 * padded_cols)
     )
 
 
@@ -262,10 +256,10 @@ def sf_offset_8x4(row, col, padded_cols):
     """Swizzled 8x4 SF byte offset ([mTiles, kTiles, 8, 4] tiles of 32)."""
     num_k_tiles = (padded_cols + 3) // 4
     return (
-        T.truncdiv(row, T.int32(8)) * (num_k_tiles * 32)
-        + T.truncdiv(col, T.int32(4)) * 32
-        + T.truncmod(row, T.int32(8)) * 4
-        + T.truncmod(col, T.int32(4))
+        K.truncdiv(row, K.int32(8)) * (num_k_tiles * 32)
+        + K.truncdiv(col, K.int32(4)) * 32
+        + K.truncmod(row, K.int32(8)) * 4
+        + K.truncmod(col, K.int32(4))
     )
 
 
@@ -276,9 +270,9 @@ def sf_offset_8x4(row, col, padded_cols):
 
 def rcp_approx_ftz(a):
     """``rcp.approx.ftz.f32`` (fp4_common.py:394)."""
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.rcp.approx.ftz.f32(out[0], a))
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.rcp.approx.ftz.f32(out, a)
+    return out
 
 
 def float2_scaled(word, inv_scale, dtype):
@@ -296,19 +290,19 @@ def cvt_e2m1x8(vals):
     (2 x b16) -- the native form proven by silu_and_mul_nvfp4_experts_quantize.
     ``vals`` is 8 f32 in element order; the cvt takes the high element first.
     """
-    bytes_ = T.alloc_local([4], "uint8")
+    bytes_ = K.alloc_local([4], "uint8")
     for i in range(4):
-        T.evaluate(T.ptx.cvt.rn.satfinite.e2m1x2.f32(bytes_[i], vals[2 * i + 1], vals[2 * i]))
-    w0 = T.cast(bytes_[0], "uint16") | (T.cast(bytes_[1], "uint16") << T.uint16(8))
-    w1 = T.cast(bytes_[2], "uint16") | (T.cast(bytes_[3], "uint16") << T.uint16(8))
-    out = T.alloc_local([1], "uint32")
-    T.evaluate(T.ptx.mov.b32(out[0], w0, w1))
-    return out[0]
+        K.ptx.cvt.rn.satfinite.e2m1x2.f32(bytes_[i], vals[2 * i + 1], vals[2 * i])
+    w0 = K.cast(bytes_[0], "uint16") | (K.cast(bytes_[1], "uint16") << K.uint16(8))
+    w1 = K.cast(bytes_[2], "uint16") | (K.cast(bytes_[3], "uint16") << K.uint16(8))
+    out = K.local_scalar("uint32")
+    K.ptx.mov.b32(out, w0, w1)
+    return out
 
 
 def pack_u32x2_to_u64(lo, hi):
     """(u64(hi) << 32) | u64(lo): plain u64 shift/or (utils:996-997)."""
-    return T.bitwise_or(T.shift_left(T.cast(hi, "uint64"), T.uint64(32)), T.cast(lo, "uint64"))
+    return K.bitwise_or(K.shift_left(K.cast(hi, "uint64"), K.uint64(32)), K.cast(lo, "uint64"))
 
 
 # ---------------------------------------------------------------------------
@@ -318,55 +312,55 @@ def pack_u32x2_to_u64(lo, hi):
 
 def add_f32(a, b):
     """``add.f32`` (non-ftz, as the source asm/lowering)."""
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.add.f32(out[0], a, b))
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.add.f32(out, a, b)
+    return out
 
 
 def div_rn_f32(a, b):
     """``div.rn.f32`` (fp4_common.py fdiv_rn; the silu path is not fast-div)."""
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.div.rn.f32(out[0], a, b))
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.div.rn.f32(out, a, b)
+    return out
 
 
 def ex2_approx_ftz(a):
     """``ex2.approx.ftz.f32``."""
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.ex2.approx.ftz.f32(out[0], a))
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.ex2.approx.ftz.f32(out, a)
+    return out
 
 
 def silu_f32(g):
     """_silu_f32 (utils:1731): mul.f32 by -log2e (folds -g) + ex2.approx.ftz.f32
     + add.f32(+1.0) + div.rn.f32."""
-    e = ex2_approx_ftz(mul_f32(g, T.float32(-1.4426950408889634)))
-    return div_rn_f32(g, add_f32(e, T.float32(1.0)))
+    e = ex2_approx_ftz(mul_f32(g, K.float32(-1.4426950408889634)))
+    return div_rn_f32(g, add_f32(e, K.float32(1.0)))
 
 
 def cvt_f32x2_to_packed(lo, hi, dtype):
     """cvt_f32x2_to_half2/bfloat2 (fp4_common:880/:910): 2x scalar cvt +
     mov.b32 {h0,h1}."""
-    h0 = T.alloc_local([1], "uint16")
-    h1 = T.alloc_local([1], "uint16")
+    h0 = K.local_scalar("uint16")
+    h1 = K.local_scalar("uint16")
     if dtype == "float16":
-        T.evaluate(T.ptx.cvt.rn.f16.f32(h0[0], lo))
-        T.evaluate(T.ptx.cvt.rn.f16.f32(h1[0], hi))
+        K.ptx.cvt.rn.f16.f32(h0, lo)
+        K.ptx.cvt.rn.f16.f32(h1, hi)
     else:
-        T.evaluate(T.ptx.cvt.rn.bf16.f32(h0[0], lo))
-        T.evaluate(T.ptx.cvt.rn.bf16.f32(h1[0], hi))
-    out = T.alloc_local([1], "uint32")
-    T.evaluate(T.ptx.mov.b32(out[0], h0[0], h1[0]))
-    return out[0]
+        K.ptx.cvt.rn.bf16.f32(h0, lo)
+        K.ptx.cvt.rn.bf16.f32(h1, hi)
+    out = K.local_scalar("uint32")
+    K.ptx.mov.b32(out, h0, h1)
+    return out
 
 
 def silu_and_mul_pair(gate, up, dtype):
     """_silu_and_mul_half2/_bfloat2 (utils:1740/:1752): unpack both pairs with
     scale 1.0, silu(g)*u per scalar in f32, repack."""
-    g0 = mul_f32(unpack_lo_f32(gate, dtype), T.float32(1.0))
-    g1 = mul_f32(unpack_hi_f32(gate, dtype), T.float32(1.0))
-    u0 = mul_f32(unpack_lo_f32(up, dtype), T.float32(1.0))
-    u1 = mul_f32(unpack_hi_f32(up, dtype), T.float32(1.0))
+    g0 = mul_f32(unpack_lo_f32(gate, dtype), K.float32(1.0))
+    g1 = mul_f32(unpack_hi_f32(gate, dtype), K.float32(1.0))
+    u0 = mul_f32(unpack_lo_f32(up, dtype), K.float32(1.0))
+    u1 = mul_f32(unpack_hi_f32(up, dtype), K.float32(1.0))
     a0 = mul_f32(silu_f32(g0), u0)
     a1 = mul_f32(silu_f32(g1), u1)
     return cvt_f32x2_to_packed(a0, a1, dtype)
@@ -375,30 +369,29 @@ def silu_and_mul_pair(gate, up, dtype):
 def cvt_f32_to_e4m3(a):
     """cvt_f32_to_e4m3 (fp4_common.py:811): mov.f32 0 +
     cvt.rn.satfinite.e4m3x2.f32 + cvt.u32.u16."""
-    pair = T.alloc_local([1], "uint16")
-    T.evaluate(T.ptx.cvt.rn.satfinite.e4m3x2.f32(pair[0], T.float32(0.0), a))
-    return T.cast(pair[0], "uint32")
+    pair = K.local_scalar("uint16")
+    K.ptx.cvt.rn.satfinite.e4m3x2.f32(pair, K.float32(0.0), a)
+    return K.cast(pair, "uint32")
 
 
 def nvfp4_compute_output_scale(sf_u32, global_scale):
     """nvfp4_compute_output_scale (fp4_common.py:973), instruction for
     instruction: decode the E4M3 SF through the f16x2 path, then
     rcp(SF_f32 * rcp(global_scale)), with the zero-SF select."""
-    pair16 = T.alloc_local([1], "uint16")
-    T.evaluate(T.ptx.cvt.u16.u32(pair16[0], sf_u32))
-    h2 = T.alloc_local([1], "uint32")
-    T.evaluate(T.ptx.cvt.rn.f16x2.e4m3x2(h2[0], pair16[0]))
-    sf_f32 = T.cast(
-        T.reinterpret("float16", T.cast(T.bitwise_and(h2[0], T.uint32(0xFFFF)), "uint16")),
-        "float32",
+    pair16 = K.local_scalar("uint16")
+    K.ptx.cvt.u16.u32(pair16, sf_u32)
+    h2 = K.local_scalar("uint32")
+    K.ptx.cvt.rn.f16x2.e4m3x2(h2, pair16)
+    sf_f32 = K.cast(
+        K.reinterpret("float16", K.cast(K.bitwise_and(h2, K.uint32(0xFFFF)), "uint16")), "float32"
     )
     product = mul_f32(sf_f32, rcp_approx_ftz(global_scale))
     result = rcp_approx_ftz(product)
-    p_zero = T.local_scalar("uint32")
-    T.evaluate(T.ptx.setp.eq.f32(p_zero, sf_f32, T.float32(0.0)))
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.selp.f32(out[0], T.float32(0.0), result, T.ptx.pred(p_zero)))
-    return out[0]
+    p_zero = K.local_scalar("uint32")
+    K.ptx.setp.eq.f32(p_zero, sf_f32, K.float32(0.0))
+    out = K.local_scalar("float32")
+    K.ptx.selp.f32(out, K.float32(0.0), result, K.ptx.pred(p_zero))
+    return out
 
 
 def opaque_i32(x):
@@ -407,9 +400,9 @@ def opaque_i32(x):
     per iteration the way the source's own binary does (avoids the heavy
     up-front pointer-induction chains nvcc otherwise builds in the prologue).
     Purely a loop-bookkeeping device; the value is unchanged."""
-    out = T.alloc_local([1], "int32")
-    T.evaluate(T.ptx.mov.s32(out[0], x))
-    return out[0]
+    out = K.local_scalar("int32")
+    K.ptx.mov.s32(out, x)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +412,9 @@ def opaque_i32(x):
 
 def ld_global_f32(buf, idx):
     """Plain ``ld.global.f32`` scalar load (non-nc), as the source emits."""
-    out = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.ld.global_.f32(out[0], T.address_of(buf[idx])))
-    return out[0]
+    out = K.local_scalar("float32")
+    K.ptx.ld.global_.f32(out, K.address_of(buf[idx]))
+    return out
 
 
 def warp_reduce_max(val):

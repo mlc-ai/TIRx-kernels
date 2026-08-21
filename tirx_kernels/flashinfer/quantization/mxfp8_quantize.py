@@ -26,7 +26,7 @@ The implementation structure follows the reviewer-approved sketch
 from typing import Any
 
 import tirx_kernels.kern as K
-from tirx_kernels.flashinfer.utils.fp_quant import (
+from tirx_kernels.flashinfer.utils.fp_quant_kern import (
     absmax_4,
     absmax_8,
     float_to_ue8m0,
