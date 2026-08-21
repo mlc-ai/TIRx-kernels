@@ -89,3 +89,13 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
     with pytest.raises(LowLevelIRContractError):
         build()
     build(check_ir=False)  # explicit opt-out still traces
+
+
+def test_retired_cuda_value_members_are_rejected_with_guidance():
+    import pytest
+
+    for name in ("_shfl_xor_sync", "ldg", "any_sync", "atomic_add"):
+        with pytest.raises(AttributeError, match="spelled DPS"):
+            getattr(K.cuda, name)
+    K.cuda.elect_sync  # exempt: pred= idiom
+    K.cuda.make_float2  # exempt: pure computation

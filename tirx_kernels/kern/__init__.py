@@ -222,7 +222,49 @@ class _PTXProxy(_StmtProxy):
 
 
 ptx = _PTXProxy(_T.ptx)
-cuda = _StmtProxy(_T.cuda)
+_RETIRED_CUDA_VALUE_MEMBERS = {
+    "_shfl_sync": "K.ptx.shfl_sync.idx.b32(dst, v, lane, clamp, mask)",
+    "_shfl_xor_sync": "K.ptx.shfl_sync.bfly.b32(dst, v, xor, clamp, mask)",
+    "_shfl_up_sync": "K.ptx.shfl_sync.up.b32(dst, v, delta, clamp, mask)",
+    "_shfl_down_sync": "K.ptx.shfl_sync.down.b32(dst, v, delta, clamp, mask)",
+    "__shfl_sync": "K.ptx.shfl_sync.idx.b32(dst, v, lane, clamp, mask)",
+    "__shfl_xor_sync": "K.ptx.shfl_sync.bfly.b32(dst, v, xor, clamp, mask)",
+    "__shfl_up_sync": "K.ptx.shfl_sync.up.b32(dst, v, delta, clamp, mask)",
+    "__shfl_down_sync": "K.ptx.shfl_sync.down.b32(dst, v, delta, clamp, mask)",
+    "ldg": "K.ptx.ld.global_.nc.<ty>(dst, addr)",
+    "any_sync": "K.ptx.vote_sync.any.pred(dst, pred, mask)",
+    "ballot_sync": "the vote_sync ballot table entry (dst, pred, mask)",
+    "atomic_add": "K.ptx.atom.<space>.add.<ty>(dst, ptr, val); discarded result -> K.ptx.red",
+    "atomic_cas": "K.ptx.atom.<space>.cas.<ty>(dst, ptr, cmp, val)",
+    "reduce_add_sync_u32": "K.ptx.redux_sync.add.u32(dst, v, mask)",
+    "reduce_min_sync_u32": "K.ptx.redux_sync.min.u32(dst, v, mask)",
+    "syncthreads_and": "the barrier-reduce ptx spelling",
+    "syncthreads_or": "the barrier-reduce ptx spelling",
+}
+
+
+class _CUDAProxy(_StmtProxy):
+    """K.cuda with the non-pure value intrinsics retired.
+
+    A value-returning warp/memory intrinsic used lazily re-evaluates per
+    textual use and cannot be hoisted; the DPS ptx spelling forces an explicit
+    destination, so the hazard is unspellable. Pure computation (conversions,
+    packing, math) and single-use idioms (``elect_sync`` in ``pred=``,
+    ``clock64`` -- no sreg mov exists in the table) stay.
+    """
+
+    def __getattr__(self, name):
+        hint = _RETIRED_CUDA_VALUE_MEMBERS.get(name)
+        if hint is not None:
+            raise AttributeError(
+                f"K.cuda.{name} is retired: non-pure value intrinsics are spelled DPS "
+                f"through the ptx table so the destination (and evaluation count) is "
+                f"explicit. Use {hint}."
+            )
+        return super().__getattr__(name)
+
+
+cuda = _CUDAProxy(_T.cuda)
 
 
 # ---------------------------------------------------------------------------
