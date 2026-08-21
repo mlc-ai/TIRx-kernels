@@ -196,14 +196,15 @@ def build_preprocess(B, S, H, D):
                 )
 
             # Keep the shuffle collective outside the row-leader guard.
+            # width=PRE_THREADS_PER_ROW packs into shfl's clamp operand as
+            # ((32 - width) << 8) | 0x1F.
+            shfl_clamp = K.uint32(((32 - PRE_THREADS_PER_ROW) << 8) | 0x1F)
+            peer_acc = K.local_scalar("float32")
             for delta in (8, 4, 2, 1):
-                K.assign(
-                    acc[0],
-                    acc[0]
-                    + K.cuda.__shfl_xor_sync(
-                        K.uint32(0xFFFFFFFF), acc[0], delta, PRE_THREADS_PER_ROW
-                    ),
+                K.ptx.shfl_sync.bfly.b32(
+                    peer_acc, acc[0], K.uint32(delta), shfl_clamp, K.uint32(0xFFFFFFFF)
                 )
+                K.assign(acc[0], acc[0] + peer_acc)
             with K.If(col_in_row == 0), K.Then():
                 K.ptx.st.global_.f32(dpsum_g.ptr_to([(bz * H + by) * S + s]), acc[0])
 

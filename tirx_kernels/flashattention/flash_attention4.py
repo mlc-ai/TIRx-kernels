@@ -1127,8 +1127,9 @@ def make_kernel(
                             with K.Else():
                                 K.assign(should_rescale, 0)
                         # Materialize the collective before divergence.
-                        any_needs_rescale = K.local_scalar(
-                            "uint32", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), should_rescale)
+                        any_needs_rescale = K.local_scalar("uint32")
+                        K.ptx.vote_sync.any.pred(
+                            any_needs_rescale, K.ptx.pred(should_rescale), K.uint32(0xFFFFFFFF)
                         )
                         with K.If(any_needs_rescale != 0), K.Then():
                             with K.If(tid_in_wg < BLK_M), K.Then():
