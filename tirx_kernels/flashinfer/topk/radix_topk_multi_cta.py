@@ -487,12 +487,6 @@ def get_kernel(
                     # One fenced arrival from thread 0 (:176), an acquire spin to the
                     # absolute target (:179), then TWO CTA barriers: wait_ge ends with
                     # one (:133) and the phase bump is followed by another (:182).
-                    # Complete every CTA-local state update before thread 0
-                    # publishes the group arrival.  The following acquire
-                    # spin is the inter-CTA handoff; without this CTA
-                    # rendezvous, another warp could still be folding its
-                    # histogram when the consumer observes the arrival.
-                    bar_sync()
                     if tx == 0:
                         red_release_gpu_add_s32(state, arrival_word, T.int32(1))
                     bar_target0: T.int32 = (barrier_phase + T.int32(1)) * T.int32(ctas_per_group)
@@ -551,7 +545,6 @@ def get_kernel(
                         # One fenced arrival from thread 0 (:176), an acquire spin to the
                         # absolute target (:179), then TWO CTA barriers: wait_ge ends with
                         # one (:133) and the phase bump is followed by another (:182).
-                        bar_sync()
                         if tx == 0:
                             red_release_gpu_add_s32(state, arrival_word, T.int32(1))
                         bar_target1: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
@@ -683,7 +676,6 @@ def get_kernel(
                         # One fenced arrival from thread 0 (:176), an acquire spin to the
                         # absolute target (:179), then TWO CTA barriers: wait_ge ends with
                         # one (:133) and the phase bump is followed by another (:182).
-                        bar_sync()
                         if tx == 0:
                             red_release_gpu_add_s32(state, arrival_word, T.int32(1))
                         bar_target2: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
@@ -728,7 +720,6 @@ def get_kernel(
                         # One fenced arrival from thread 0 (:176), an acquire spin to the
                         # absolute target (:179), then TWO CTA barriers: wait_ge ends with
                         # one (:133) and the phase bump is followed by another (:182).
-                        bar_sync()
                         if tx == 0:
                             red_release_gpu_add_s32(state, arrival_word, T.int32(1))
                         bar_target3: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
@@ -892,7 +883,6 @@ def get_kernel(
                         # One fenced arrival from thread 0 (:176), an acquire spin to the
                         # absolute target (:179), then TWO CTA barriers: wait_ge ends with
                         # one (:133) and the phase bump is followed by another (:182).
-                        bar_sync()
                         if tx == 0:
                             red_release_gpu_add_s32(state, arrival_word, T.int32(1))
                         bar_target4: T.int32 = (barrier_phase + T.int32(1)) * T.int32(

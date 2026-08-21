@@ -514,6 +514,11 @@ def get_kernel(
         _threshold(hist, scal, tid, warp, lane, rank, phase, k_rem, True)
         bin_t = T.alloc_local((1,), "int32")
         bin_t[0] = T.cast(R.ld_shared_u32(scal, THR), "int32")
+        if nc > 1 and t < rounds - 1:
+            # Skipped on the final round: no further threshold() means no
+            # further peer read of this bank (:260-263).
+            T.evaluate(T.ptx.barrier.cluster.arrive())
+
         raw = T.alloc_local((1,), "int32")
         raw[0] = T.cast(R.ld_shared_u32(scal, NCACHED + (phase ^ 1)), "int32")
         n_sh = T.alloc_local((1,), "int32")
@@ -568,13 +573,6 @@ def get_kernel(
                 ring_base,
                 tid,
             )
-
-        if nc > 1 and t < rounds - 1:
-            # Publish only after every thread has consumed the previous
-            # ping-pong bank.  Arriving immediately after threshold selection
-            # lets the next round overwrite that bank while another warp is
-            # still reading its cached candidates.
-            T.evaluate(T.ptx.barrier.cluster.arrive())
 
     @T.macro
     def _emit(logits, out_idx, out_val, seq_lens_g, aux, ovf):
