@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '135a054f', 'tirx-kernels': 'b405c5cb', 'tirx-bench-ci': None}`
-- Workloads: 428 ok, 0 failed
+- Git:       `{'tir': '135a054f', 'tirx-kernels': '359c47fd', 'tirx-bench-ci': None}`
+- Workloads: 438 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -239,6 +239,21 @@ Grouped workloads show one row per config and one timing column per implementati
 | `b2_s4096_h16_causal` | tir | 388.0339 | flashattn_sm100 | 390.3185 | 1.006 | — |
 | `b4_s8192_h16_causal` | tir | 2473.1056 | flashattn_sm100 | 2496.3857 | 1.009 | — |
 | `b4_s8192_h16_noncausal` | tir | 5549.1120 | flashattn_sm100 | 5662.1554 | 1.020 | — |
+
+## flashinfer_add_rmsnorm_fp4quant
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bench_mx_bf16_m32_h4096_b32_ue8m0_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 7.7207 | flashinfer_cutedsl | 7.8867 | 1.021 | — |
+| `bench_mx_both_bf16_m32_h4096_b32_ue8m0_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 7.6994 | flashinfer_cutedsl | 7.8751 | 1.023 | — |
+| `bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 2.9511 | flashinfer_cutedsl | 2.9984 | 1.016 | — |
+| `bench_nv_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.6376 | flashinfer_cutedsl | 5.7757 | 1.024 | — |
+| `bench_nv_both_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.7419 | flashinfer_cutedsl | 5.8897 | 1.026 | — |
+| `bench_nv_both_global_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsone_preallocated_random` | tirx | 5.6859 | flashinfer_cutedsl | 5.8198 | 1.024 | — |
+| `bench_nv_both_large_bf16_m64_h8192_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 6.0994 | flashinfer_cutedsl | 6.1585 | 1.010 | — |
+| `bench_nv_global_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsone_preallocated_random` | tirx | 5.6352 | flashinfer_cutedsl | 5.7696 | 1.024 | — |
+| `bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.9640 | flashinfer_cutedsl | 6.0530 | 1.015 | — |
+| `bench_nv_swizzled_bf16_m32_h4096_b16_e4m3_sw1_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.6895 | flashinfer_cutedsl | 5.8211 | 1.023 | — |
 
 ## flashinfer_fused_add_rmsnorm
 

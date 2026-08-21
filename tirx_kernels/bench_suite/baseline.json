@@ -3,12 +3,12 @@
   "label": "post-refactor",
   "git": {
     "tir": "135a054f",
-    "tirx-kernels": "b405c5cb",
+    "tirx-kernels": "359c47fd",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "44b38022bd0b8643153e5c8de42da53d998e704c"
+    "tirx-kernels:tirx_kernels": "95c1d639f26f6c93c475c43a8a2d743a12029361"
   },
   "baselines": {
     "torch": {
@@ -2082,6 +2082,146 @@
       "impls": {
         "tir": 5549.111992647058,
         "flashattn_sm100": 5662.155411764706
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_mx_bf16_m32_h4096_b32_ue8m0_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "label": "bench_mx_bf16_m32_h4096_b32_ue8m0_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 7.720722131127593,
+        "flashinfer_cutedsl": 7.886697324960348
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_mx_both_bf16_m32_h4096_b32_ue8m0_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "label": "bench_mx_both_bf16_m32_h4096_b32_ue8m0_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 7.6994118407291845,
+        "flashinfer_cutedsl": 7.875118813744586
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "label": "bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 2.9510970245915575,
+        "flashinfer_cutedsl": 2.998385455950631
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_nv_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "label": "bench_nv_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.637615117253418,
+        "flashinfer_cutedsl": 5.775713977805708
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_nv_both_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "label": "bench_nv_both_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.741885649567213,
+        "flashinfer_cutedsl": 5.889707903937606
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_nv_both_global_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsone_preallocated_random",
+      "label": "bench_nv_both_global_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.685883698758787,
+        "flashinfer_cutedsl": 5.819831426804824
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_nv_both_large_bf16_m64_h8192_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "label": "bench_nv_both_large_bf16_m64_h8192_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 6.099396045275293,
+        "flashinfer_cutedsl": 6.15851926123798
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_nv_global_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsone_preallocated_random",
+      "label": "bench_nv_global_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.635236709029221,
+        "flashinfer_cutedsl": 5.769568938570171
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "label": "bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.963950825946344,
+        "flashinfer_cutedsl": 6.053008608825112
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_add_rmsnorm_fp4quant",
+      "config": "bench_nv_swizzled_bf16_m32_h4096_b16_e4m3_sw1_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "label": "bench_nv_swizzled_bf16_m32_h4096_b16_e4m3_sw1_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random",
+      "status": "ok",
+      "impls": {
+        "tirx": 5.689546898829335,
+        "flashinfer_cutedsl": 5.821100472708933
       },
       "aggregated": {
         "rounds": 5,
