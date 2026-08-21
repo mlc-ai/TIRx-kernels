@@ -1275,14 +1275,13 @@ def make_kernel(
                     )
                     K.assign(cur_pi_max, K.max(cur_pi_max, peer_pi_max))
                     K.assign(real_mi, K.max(real_mi, cur_pi_max))
-                    should_scale_o = K.local_scalar(
-                        "bool",
-                        init=K.cuda.any_sync(K.uint32(4294967295), cur_pi_max - mi > K.float32(6.0))
-                        != 0,
+                    should_scale_o = K.local_scalar("uint32")
+                    K.ptx.vote_sync.any.pred(
+                        should_scale_o, cur_pi_max - mi > K.float32(6.0), K.uint32(4294967295)
                     )
                     new_max = K.local_scalar("float32")
                     scale_for_old = K.local_scalar("float32")
-                    with K.If(K.Not(should_scale_o)):
+                    with K.If(should_scale_o == K.uint32(0)):
                         with K.Then():
                             K.assign(scale_for_old, K.float32(1.0))
                             K.assign(new_max, mi)
@@ -1339,7 +1338,7 @@ def make_kernel(
                             r_words[r_w + 2],
                             r_words[r_w + 3],
                         )
-                    with K.If(K.bitwise_and(k > 0, should_scale_o)), K.Then():
+                    with K.If(K.bitwise_and(k > 0, should_scale_o != K.uint32(0))), K.Then():
                         K.ptx["tcgen05.fence::after_thread_sync"]()
                         o_rescale = K.alloc_local((32,), "float32")
                         with K.unroll(8) as chunk_idx:

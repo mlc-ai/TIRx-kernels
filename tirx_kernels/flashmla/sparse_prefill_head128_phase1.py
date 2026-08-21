@@ -463,9 +463,8 @@ def make_kernel(
             return token
 
         if have_topk_length:
-            topk_len = K.local_scalar(
-                "int32", init=K.cuda.ldg(topk_length.ptr_to([s_q_idx]), "int32")
-            )
+            topk_len = K.local_scalar("int32")
+            K.ptx.ld.global_.nc.s32(topk_len, topk_length.ptr_to([s_q_idx]))
         else:
             topk_len = K.int32(topk)
         num_k_blocks = K.max((topk_len + B_TOPK - 1) // B_TOPK, 1)
@@ -755,13 +754,14 @@ def make_kernel(
                 K.ptx.ld.shared.f32(peer_pi_max, rowwise_max_buf.ptr_to([idx_in_warpgroup ^ 64]))
                 K.assign(cur_pi_max, K.max(cur_pi_max, peer_pi_max))
                 K.assign(real_mi, K.max(real_mi, cur_pi_max))
-                should_scale_o = K.local_scalar(
-                    "bool", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), cur_pi_max - mi > 6.0) != 0
+                should_scale_o = K.local_scalar("uint32")
+                K.ptx.vote_sync.any.pred(
+                    should_scale_o, cur_pi_max - mi > K.float32(6.0), K.uint32(0xFFFFFFFF)
                 )
 
                 new_max = K.local_scalar("float32")
                 scale_for_old = K.local_scalar("float32")
-                with K.If(K.Not(should_scale_o)):
+                with K.If(should_scale_o == K.uint32(0)):
                     with K.Then():
                         K.assign(scale_for_old, 1.0)
                         K.assign(new_max, mi)
@@ -813,7 +813,7 @@ def make_kernel(
                         s_words[s_word + 3],
                     )
 
-                with K.If((k > 0) & should_scale_o), K.Then():
+                with K.If((k > 0) & (should_scale_o != K.uint32(0))), K.Then():
                     K.ptx.tcgen05.fence__after_thread_sync()
                     o_rescale = K.alloc_local((32,), "float32")
                     with K.unroll((D_V // 2) // 32) as chunk_idx:
@@ -877,30 +877,32 @@ def make_kernel(
             K.ptx.fence.proxy.async_.shared__cta()
             K.ptx.tcgen05.fence__after_thread_sync()
 
-            attn_sink_log2 = K.if_then_else(
-                have_attn_sink,
-                K.cuda.ldg(
-                    attn_sink.ptr_to([cta_idx * (B_H // 2) + (idx_in_warpgroup % 64)]), "float32"
+            if have_attn_sink:
+                attn_sink_val = K.local_scalar("float32")
+                K.ptx.ld.global_.nc.f32(
+                    attn_sink_val,
+                    attn_sink.ptr_to([cta_idx * (B_H // 2) + (idx_in_warpgroup % 64)]),
                 )
-                * LOG_2_E,
-                K.float32(-float("inf")),
-            )
+                attn_sink_log2 = attn_sink_val * LOG_2_E
+            else:
+                attn_sink_log2 = K.float32(-float("inf"))
             sink_exp = K.local_scalar("float32")
             K.ptx.ex2.approx.ftz.f32(sink_exp, attn_sink_log2 - mi)
             output_scale = K.local_scalar(
                 "float32", init=K.cuda.fdividef(K.float32(1.0), li + sink_exp)
             )
             o_epi = K.alloc_local((B_EPI,), "float32")
-            have_valid_indices = K.local_scalar(
-                "bool", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), li != 0.0) != 0
+            have_valid_indices = K.local_scalar("uint32")
+            K.ptx.vote_sync.any.pred(
+                have_valid_indices, K.Not(li == K.float32(0.0)), K.uint32(0xFFFFFFFF)
             )
-            with K.If(K.Not(have_valid_indices)), K.Then():
+            with K.If(have_valid_indices == K.uint32(0)), K.Then():
                 with K.unroll(B_EPI) as o_zero_i:
                     K.ptx.mov.b32(o_epi[o_zero_i], K.float32(0.0))
                 K.assign(output_scale, 1.0)
             o_epi_bf16 = K.alloc_local((B_EPI,), "bfloat16")
             with K.unroll((D_V // 2) // B_EPI) as epi_k:
-                with K.If(have_valid_indices), K.Then():
+                with K.If(have_valid_indices != K.uint32(0)), K.Then():
                     _tmem_load(
                         o_epi, K.cuda.get_tmem_addr(K.uint32(o_tmem_col), 0, epi_k * B_EPI), B_EPI
                     )

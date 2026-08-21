@@ -422,7 +422,7 @@ def make_kernel(
         s_q_idx = K.cta_id()
         topk_len_buf = K.local_scalar("int32", init=K.int32(topk))
         if have_topk_length:
-            K.assign(topk_len_buf, K.cuda.ldg(topk_length.ptr_to([s_q_idx]), "int32"))
+            K.ptx.ld.global_.nc.s32(topk_len_buf, topk_length.ptr_to([s_q_idx]))
         num_k_blocks_buf = K.local_scalar("int32", init=(topk_len_buf + B_TOPK - 1) // B_TOPK)
 
         # ---- descriptor prefetch — orig:478-496 --------------------------
@@ -792,12 +792,13 @@ def make_kernel(
                 # G3: the warp collective lands in a local *before* the guard
                 # that reads it, which is where the original's typed
                 # declaration puts it too (orig:776-778).
-                should_scale_o = K.local_scalar(
-                    "bool", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), cur_pi_max - mi > 6.0) != 0
+                should_scale_o = K.local_scalar("uint32")
+                K.ptx.vote_sync.any.pred(
+                    should_scale_o, cur_pi_max - mi > K.float32(6.0), K.uint32(0xFFFFFFFF)
                 )
                 new_max = K.local_scalar("float32")
                 scale_for_old = K.local_scalar("float32")
-                with K.If(K.Not(should_scale_o)):
+                with K.If(should_scale_o == K.uint32(0)):
                     with K.Then():
                         K.assign(scale_for_old, K.float32(1.0))
                         K.assign(new_max, mi)
@@ -860,7 +861,7 @@ def make_kernel(
                         s_words[s_word + 2],
                         s_words[s_word + 3],
                     )
-                with K.If((k > 0) & should_scale_o), K.Then():
+                with K.If((k > 0) & (should_scale_o != K.uint32(0))), K.Then():
                     K.ptx.tcgen05.fence__after_thread_sync()
                     # CUDA common_subroutine.h:147-168 rescale_O.
                     o_rescale = K.alloc_local((32,), "float32")
@@ -928,9 +929,9 @@ def make_kernel(
             K.ptx.fence.proxy.async_.shared__cta()
 
             if have_attn_sink:
-                attn_sink_log2 = (
-                    K.cuda.ldg(attn_sink.ptr_to([idx_in_warpgroup % B_H]), "float32") * LOG_2_E
-                )
+                attn_sink_val = K.local_scalar("float32")
+                K.ptx.ld.global_.nc.f32(attn_sink_val, attn_sink.ptr_to([idx_in_warpgroup % B_H]))
+                attn_sink_log2 = attn_sink_val * LOG_2_E
             else:
                 attn_sink_log2 = K.float32(-float("inf"))
             sink_exp = K.local_scalar("float32")
@@ -945,16 +946,17 @@ def make_kernel(
             # has to execute once for the whole warp, so it is held in a
             # register; left as an expression it would be re-issued at each of
             # the two guards below.
-            have_valid_indices = K.local_scalar(
-                "bool", init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), li != 0.0) != 0
+            have_valid_indices = K.local_scalar("uint32")
+            K.ptx.vote_sync.any.pred(
+                have_valid_indices, K.Not(li == K.float32(0.0)), K.uint32(0xFFFFFFFF)
             )
-            with K.If(K.Not(have_valid_indices)), K.Then():
+            with K.If(have_valid_indices == K.uint32(0)), K.Then():
                 for o_zero_i in range(64):
                     K.ptx.mov.b32(o_epi[o_zero_i], K.float32(0.0))
                 K.assign(output_scale, K.float32(1.0))
             for epi_c in range(2):
                 for epi_k in range((D_V // 4) // 64):
-                    with K.If(have_valid_indices), K.Then():
+                    with K.If(have_valid_indices != K.uint32(0)), K.Then():
                         # orig:927-935, CUDA phase1.cuh:314-317 TMEM O load/fence.
                         tmem_load(
                             o_epi,
@@ -1396,18 +1398,10 @@ def make_kernel(
                 with K.serial(num_k_blocks_buf, unroll=False) as k:
                     rope_indices = K.alloc_local(((B_TOPK // (64 // 8)),), "int32")
                     for local_row in range(B_TOPK // (64 // 8)):
-                        K.ptx.mov.b32(
+                        K.ptx.ld.global_.nc.s32(
                             rope_indices[local_row],
-                            K.cuda.ldg(
-                                indices.ptr_to(
-                                    [
-                                        g_indices_base
-                                        + k * B_TOPK
-                                        + group_idx
-                                        + local_row * (64 // 8)
-                                    ]
-                                ),
-                                "int32",
+                            indices.ptr_to(
+                                [g_indices_base + k * B_TOPK + group_idx + local_row * (64 // 8)]
                             ),
                         )
                     bar_qk_rope_done.wait(

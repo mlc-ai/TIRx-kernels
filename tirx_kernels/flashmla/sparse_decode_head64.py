@@ -487,11 +487,11 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             # three roles walk the schedule with exactly this arithmetic.
             topk_len = K.local_scalar("int32", init=topk)
             with K.If(have_topk_length), K.Then():
-                K.assign(topk_len, K.cuda.ldg(topk_length.ptr_to([batch_idx]), "int32"))
+                K.ptx.ld.global_.nc.s32(topk_len, topk_length.ptr_to([batch_idx]))
             orig_topk_padded = K.max(((topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK, B_TOPK)
             extra_topk_len = K.local_scalar("int32", init=extra_topk)
             with K.If(have_extra_topk_length), K.Then():
-                K.assign(extra_topk_len, K.cuda.ldg(extra_topk_length.ptr_to([batch_idx]), "int32"))
+                K.ptx.ld.global_.nc.s32(extra_topk_len, extra_topk_length.ptr_to([batch_idx]))
             total_topk_padded = (
                 orig_topk_padded + ((extra_topk_len + B_TOPK - 1) // B_TOPK) * B_TOPK
             )
@@ -566,10 +566,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             scale_pair = K.cuda.make_float2(sm_scale_div_log2, sm_scale_div_log2)
             attn_sink_log2 = K.local_scalar("float32", init=K.float32(-float("inf")))
             with K.If(have_attn_sink), K.Then():
-                K.assign(
-                    attn_sink_log2,
-                    (K.cuda.ldg(attn_sink.ptr_to([idx_in_warpgroup % B_H]), "float32") * LOG_2_E),
-                )
+                attn_sink_val = K.local_scalar("float32")
+                K.ptx.ld.global_.nc.f32(attn_sink_val, attn_sink.ptr_to([idx_in_warpgroup % B_H]))
+                K.assign(attn_sink_log2, attn_sink_val * LOG_2_E)
 
             # kernel.cuh:77-118 expanded at the role call site to avoid the
             # register spilling explicitly called out by the CUDA source.
@@ -605,14 +604,15 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                     # Both LSE and O epilogues address their split row with
                     # this index; keep the num_splits fetch off the store's
                     # dependence chain by loading it once here.
+                    batch_num_splits = K.local_scalar("int32")
+                    K.ptx.ld.global_.nc.s32(batch_num_splits, num_splits.ptr_to([batch_idx]))
                     n_split_idx = K.local_scalar(
                         "int32",
                         init=(
                             K.if_then_else(
                                 batch_idx == sched_begin_req,
-                                K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32")
-                                + sched_begin_split,
-                                K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32"),
+                                batch_num_splits + sched_begin_split,
+                                batch_num_splits,
                             )
                         ),
                     )
@@ -734,9 +734,9 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                         )
                         K.assign(cur_pi_max, K.max(cur_pi_max, peer_pi_max))
                         K.assign(real_mi, K.max(real_mi, cur_pi_max))
-                        should_scale_o = K.local_scalar(
-                            "uint32",
-                            init=K.cuda.any_sync(K.uint32(0xFFFFFFFF), cur_pi_max - mi > 6.0),
+                        should_scale_o = K.local_scalar("uint32")
+                        K.ptx.vote_sync.any.pred(
+                            should_scale_o, cur_pi_max - mi > K.float32(6.0), K.uint32(0xFFFFFFFF)
                         )
                         new_max = K.local_scalar("float32")
                         scale_for_old = K.local_scalar("float32")
@@ -1531,19 +1531,15 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 )
                                             ),
                                         )
-                                        K.cuda.ldg(
+                                        K.ptx.ld.global_.nc.v4.f32(
+                                            values[pair_i, 0],
+                                            values[pair_i, 1],
+                                            values[pair_i, 2],
+                                            values[pair_i, 3],
                                             K.reinterpret(
                                                 PointerType(PrimType("float32")),
                                                 scales_ptr_u64 + byte_offsets[pair_i],
                                             ),
-                                            "float32",
-                                            dst=(
-                                                values.ptr_to([pair_i, 0]),
-                                                values.ptr_to([pair_i, 1]),
-                                                values.ptr_to([pair_i, 2]),
-                                                values.ptr_to([pair_i, 3]),
-                                            ),
-                                            vec="v4",
                                         )
                                     else:
                                         K.ptx.mov.b64(
@@ -1554,22 +1550,20 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                                 + K.cast(index_in_block, "uint64") * 8
                                             ),
                                         )
-                                        K.ptx.mov.b64(
-                                            words[pair_i],
-                                            (
-                                                K.if_then_else(
-                                                    K.Cast("bool", token_valid),
-                                                    K.cuda.ldg(
-                                                        K.reinterpret(
-                                                            PointerType(PrimType("uint64")),
-                                                            scales_ptr_u64 + byte_offsets[pair_i],
-                                                        ),
-                                                        "uint64",
+                                        # The offset is unguarded here (unlike the
+                                        # V32 arm, which zeroes it), so the load stays
+                                        # inside the validity branch.
+                                        with K.If(K.Cast("bool", token_valid)):
+                                            with K.Then():
+                                                K.ptx.ld.global_.nc.u64(
+                                                    words[pair_i],
+                                                    K.reinterpret(
+                                                        PointerType(PrimType("uint64")),
+                                                        scales_ptr_u64 + byte_offsets[pair_i],
                                                     ),
-                                                    K.uint64(0),
                                                 )
-                                            ),
-                                        )
+                                            with K.Else():
+                                                K.ptx.mov.b64(words[pair_i], K.uint64(0))
 
                                 valid_mask = K.local_scalar("int8", init=K.int8(0))
                                 with K.unroll(2) as pair_i:
@@ -1662,33 +1656,33 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                                         "int8",
                                     ),
                                 )
-                                K.assign(
-                                    valid_mask,
-                                    K.cast(
-                                        K.bitwise_or(
-                                            K.cast(valid_mask, "int32"),
-                                            K.cuda.__shfl_xor_sync(
-                                                K.uint32(0xFFFFFFFF),
-                                                K.cast(valid_mask, "int32"),
-                                                1,
-                                                32,
-                                            ),
-                                        ),
-                                        "int8",
-                                    ),
+                                peer_valid_mask = K.local_scalar("int32")
+                                K.ptx.shfl_sync.bfly.b32(
+                                    peer_valid_mask,
+                                    K.cast(valid_mask, "int32"),
+                                    K.uint32(1),
+                                    K.uint32(0x1F),
+                                    K.uint32(0xFFFFFFFF),
                                 )
                                 K.assign(
                                     valid_mask,
                                     K.cast(
-                                        K.bitwise_or(
-                                            K.cast(valid_mask, "int32"),
-                                            K.cuda.__shfl_xor_sync(
-                                                K.uint32(0xFFFFFFFF),
-                                                K.cast(valid_mask, "int32"),
-                                                2,
-                                                32,
-                                            ),
-                                        ),
+                                        K.bitwise_or(K.cast(valid_mask, "int32"), peer_valid_mask),
+                                        "int8",
+                                    ),
+                                )
+                                peer_valid_mask = K.local_scalar("int32")
+                                K.ptx.shfl_sync.bfly.b32(
+                                    peer_valid_mask,
+                                    K.cast(valid_mask, "int32"),
+                                    K.uint32(2),
+                                    K.uint32(0x1F),
+                                    K.uint32(0xFFFFFFFF),
+                                )
+                                K.assign(
+                                    valid_mask,
+                                    K.cast(
+                                        K.bitwise_or(K.cast(valid_mask, "int32"), peer_valid_mask),
                                         "int8",
                                     ),
                                 )
@@ -2001,12 +1995,10 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
         with K.If(warp_idx >= num_valid_heads), K.Then():
             K.Return(K.int32(0))
 
-        start_split = K.local_scalar(
-            "int32", init=K.cuda.ldg(num_splits.ptr_to([batch_idx]), "int32")
-        )
-        end_split = K.local_scalar(
-            "int32", init=K.cuda.ldg(num_splits.ptr_to([batch_idx + 1]), "int32")
-        )
+        start_split = K.local_scalar("int32")
+        K.ptx.ld.global_.nc.s32(start_split, num_splits.ptr_to([batch_idx]))
+        end_split = K.local_scalar("int32")
+        K.ptx.ld.global_.nc.s32(end_split, num_splits.ptr_to([batch_idx + 1]))
         my_num_splits = K.local_scalar("int32", init=end_split - start_split)
         with K.If(my_num_splits == 1), K.Then():
             K.Return(K.int32(0))
@@ -2082,13 +2074,15 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             K.assign(max_lse[0], K.max(max_lse[0], local_lse[lse_i]))
         with K.unroll(5) as reduce_i:
             xor_offset = K.local_scalar("int32", init=16 >> reduce_i)
-            K.assign(
+            peer_max_lse = K.local_scalar("float32")
+            K.ptx.shfl_sync.bfly.b32(
+                peer_max_lse,
                 max_lse[0],
-                K.max(
-                    max_lse[0],
-                    K.cuda.__shfl_xor_sync(K.uint32(0xFFFFFFFF), max_lse[0], xor_offset, 32),
-                ),
+                K.cast(xor_offset, "uint32"),
+                K.uint32(0x1F),
+                K.uint32(0xFFFFFFFF),
             )
+            K.assign(max_lse[0], K.max(max_lse[0], peer_max_lse))
         K.assign(
             max_lse[0],
             K.if_then_else(max_lse[0] == K.float32(-float("inf")), K.float32(0.0), max_lse[0]),
@@ -2101,11 +2095,15 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             K.assign(sum_lse[0], sum_lse[0] + lse_exp[0])
         with K.unroll(5) as reduce_i:
             xor_offset = K.local_scalar("int32", init=16 >> reduce_i)
-            K.assign(
+            peer_sum_lse = K.local_scalar("float32")
+            K.ptx.shfl_sync.bfly.b32(
+                peer_sum_lse,
                 sum_lse[0],
-                sum_lse[0]
-                + K.cuda.__shfl_xor_sync(K.uint32(0xFFFFFFFF), sum_lse[0], xor_offset, 32),
+                K.cast(xor_offset, "uint32"),
+                K.uint32(0x1F),
+                K.uint32(0xFFFFFFFF),
             )
+            K.assign(sum_lse[0], sum_lse[0] + peer_sum_lse)
         global_lse = K.alloc_local((1,), "float32")
         K.assign(
             global_lse[0],
@@ -2119,9 +2117,8 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
             K.ptx.st.global_.f32(g_lse.ptr_to([warp_idx]), global_lse[0] / K.float32(LOG_2_E))
 
         if have_attn_sink:
-            sink = K.local_scalar(
-                "float32", init=K.cuda.ldg(attn_sink.ptr_to([head_idx]), "float32")
-            )
+            sink = K.local_scalar("float32")
+            K.ptx.ld.global_.nc.f32(sink, attn_sink.ptr_to([head_idx]))
             with K.If(global_lse[0] != K.float32(float("inf"))):
                 with K.Then():
                     sink_lse_exp = K.alloc_local((1,), "float32")
