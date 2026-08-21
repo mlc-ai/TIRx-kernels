@@ -69,3 +69,23 @@ def test_retired_binding_forms_are_rejected_with_guidance():
             getattr(K, name)
     with pytest.raises(AttributeError, match="emits itself"):
         K.evaluate
+
+
+def test_kernel_build_runs_low_level_ir_check_by_default():
+    import pytest
+
+    from tirx_kernels.low_level_ir import LowLevelIRContractError
+
+    def build(**kw):
+        @K.kernel(warps=1, arch="sm_100a", grid=False, thread_layout=False, **kw)
+        def probe(out: K.gptr("float32")):
+            # a direct shared-memory buffer store is a contract violation
+            smem = K.alloc_buffer([4], "float32", scope="shared")
+            K.buffer_store(smem, K.float32(1.0), [0])
+            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+        return probe
+
+    with pytest.raises(LowLevelIRContractError):
+        build()
+    build(check_ir=False)  # explicit opt-out still traces

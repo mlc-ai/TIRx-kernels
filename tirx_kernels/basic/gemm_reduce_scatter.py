@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 import tirx_kernels.kern as Kern
 import tvm
+from tirx_kernels.low_level_ir import NVSHMEM_RUNTIME_FUNC_CALLS
 from tvm.ir.type import PointerType, PrimType
 from tvm.tirx.script.builder import ir as I
 
@@ -528,7 +529,13 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         )
         return A_tensor_map, B_tensor_map, D_tensor_map
 
-    @Kern.kernel(warps=NUM_THREADS // 32, arch="sm_100a", grid=SM_NUMBER, host_prelude=host_prelude)
+    @Kern.kernel(
+        warps=NUM_THREADS // 32,
+        arch="sm_100a",
+        grid=SM_NUMBER,
+        host_prelude=host_prelude,
+        allowed_func_calls=tuple(NVSHMEM_RUNTIME_FUNC_CALLS),
+    )
     def test_mma_ss_tma_2sm_persistent(
         A: Kern.gptr[Kern.f16, (M, K_LOCAL)],
         B: Kern.gptr[Kern.f16, (N, K_LOCAL)],

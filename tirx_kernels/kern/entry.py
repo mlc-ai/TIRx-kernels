@@ -316,6 +316,8 @@ def kernel(
     grid=None,
     thread_layout: str | bool = "flat",
     host_prelude=None,
+    allowed_func_calls: tuple[str, ...] = (),
+    check_ir: bool = True,
 ):
     """Declare a kernel entry.
 
@@ -441,6 +443,13 @@ def kernel(
             # left open across sibling `with role:` blocks would swallow any
             # CTA-scope code between them into the previous role's branch.
             func = session.specialize.chain_dispatch(func)
+        if check_ir:
+            # Every kern build passes the low-level IR contract by default:
+            # direct global/shared buffer accesses and unlisted func_calls are
+            # trace-time errors, not something a later test run discovers.
+            from tirx_kernels.low_level_ir import check_low_level_ir
+
+            check_low_level_ir(func, allowed_func_calls=allowed_func_calls)
         return Kernel(func, session)
 
     return decorator
