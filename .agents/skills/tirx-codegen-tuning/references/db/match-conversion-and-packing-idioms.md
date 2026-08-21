@@ -41,6 +41,24 @@ chains, or store width diverges from the reference's transaction width.
   in another kernel instead of inventing a new lowering.
 - Match shuffle masks and saturation/rounding modifiers exactly.
 
+When one source helper converts four pairs and packs the four byte results with
+the four-input form of `mov.b32`, keep the conversion results inside one typed
+compound intrinsic. Returning each byte through an ordinary scalar helper can
+force a shift/or pack even though the final PTX idiom is native.
+
+```python
+# before: four separately returned byte carriers are shifted and ORed.
+for pair in T.unroll(4):
+    byte[pair] = _cvt_pair_to_byte(values[2 * pair], values[2 * pair + 1])
+packed = _shift_or_four_bytes(byte)
+
+# after: the helper owns four paired conversions and one four-input mov.b32.
+packed = T.cuda.cvt_e2m1x8_f32(
+    values[0], values[1], values[2], values[3],
+    values[4], values[5], values[6], values[7],
+)
+```
+
 The store keeps its own width independent of both:
 
 ```python
@@ -61,6 +79,19 @@ else:
     if PACKED_STORE:
         for pair in T.unroll(NUM_VALUES // 2):
             T.ptx.mov.b32(words[pair], halves[2 * pair], halves[2 * pair + 1])
+```
+
+The PTX store's data carrier is independent as well. If the reference feeds the
+low byte of a word directly to `st.global.b8`, preserve the word carrier instead
+of inserting a TIR-level narrowing operation.
+
+```python
+# before: narrowing is introduced only to satisfy the wrapper's source dtype.
+byte = T.cast(scale_word, "uint8")
+T.ptx.st.global_.b8(address, byte)
+
+# after: the certified overload consumes the low byte of the uint32 carrier.
+T.ptx.st.global_.b8(address, scale_word)
 ```
 
 Derive both selectors from fresh reference PTX for the complete static fragment
@@ -84,6 +115,13 @@ scalar-narrowed eight-element path still repacked its results for a
 correctness matrix and retained a final 1.003-1.010x three-shape benchmark
 matrix.
 
+In a second measured packed-4-bit family, one eight-value group became exactly
+four `cvt.rn.satfinite.e2m1x2.f32` plus one `mov.b32` instead of separate byte
+returns and a shift/or chain. Its scale byte also flowed from a uint32 word to
+one `st.global.b8` without a narrowing instruction. Exact packed-output and
+scale-byte comparison passed 1,025 configurations, and all six measured shapes
+retained 1.018-1.046x reference/port ratios.
+
 ## Boundary
 
 The exact packed/scalar selector is a property of the source fragment layout
@@ -91,10 +129,17 @@ and compiler version, not a universal power-of-two or vector-width rule. Record
 the observed selector as compile-time specialization data and re-probe its
 boundary when either changes.
 
+Only add a wider source-carrier overload after ptxas certifies that exact PTX
+operand class. A byte store consuming the low byte of a uint32 register does not
+justify weakening every b8 operation's dtype contract. Likewise, use a compound
+intrinsic for a native multi-output packing idiom, not as a container for an
+arbitrary workload-specific instruction sequence.
+
 ## Verification
 
 Confirm packed words bitwise before judging instruction count. Trace the
 conversion-to-store def-use chain in SASS instead of comparing conversion
 mnemonics in isolation. Probe adjacent fragment extents and both dtypes, then
 count scalar conversions, packed conversions, explicit packs, and final store
-transactions independently.
+transactions independently. For low-byte stores, also check that final PTX has
+no cast or narrowing instruction between the producing word and `st.global.b8`.

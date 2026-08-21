@@ -55,6 +55,25 @@ while cursor[0] < num_items:
     cursor[0] = cursor[0] + 1
 ```
 
+When the reference itself changes policy at a compile-time trip count, branch
+on that derived count rather than using one blanket loop form. Preserve any
+partial unroll visible inside the rolled body.
+
+```python
+# The threshold and body unroll come from adjacent fresh reference profiles.
+if trips < ROLL_THRESHOLD:
+    for u in T.unroll(trips):
+        consume(u)
+else:
+    cursor: T.int32 = T.int32(0)
+    while True:
+        consume(cursor)
+        consume(cursor + 1)
+        cursor = cursor + 2
+        if cursor >= trips:
+            break
+```
+
 ## Rationale
 
 The unrolled body is the same dynamic work, but several copies of it on a grid
@@ -100,6 +119,17 @@ with the fewest search iterations moved 0.9727 to 1.0631 and the next 0.9902 to
 1.0343, while the long-sequence shapes, which run the search deepest and
 amortize it over the most work, moved by under half a percent.
 
+One source-exact quantization loop provided a sharp adjacent-profile boundary.
+Seven scale groups per thread were fully expanded: the PTX was 98,957 bytes,
+had no backward branch, and contained seven static output stores. At eight
+groups the source switched to a two-group rolled body: PTX fell to 47,230 bytes
+and one backedge, with two static stores in the body. Branching on the derived
+group count and using `While` on the rolled side reproduced both structures;
+the surrounding port passed 1,025 correctness configurations and its complete
+six-shape performance matrix. Those timings do not isolate the large-trip loop,
+so the reusable result is the measured structural boundary, not a claimed
+speedup at eight groups.
+
 ## Boundary
 
 Only where the reference's loop is genuinely rolled -- whether it says so with a
@@ -107,6 +137,11 @@ Only where the reference's loop is genuinely rolled -- whether it says so with a
 on a counted loop. If it unrolls its own loop, match that instead. Rolling is
 not a general win: it trades code size against loop overhead, and a loop whose
 body is small relative to its trip count can prefer the unrolled form.
+
+A source threshold is specific to its compiler version and the derived trip
+count, not to a convenient tensor dimension. Re-export adjacent profiles when
+the source compiler changes, and do not extrapolate the seven-to-eight boundary
+to a different loop body.
 
 ## Verification
 
