@@ -483,16 +483,8 @@ def get_kernel(
                     bar_sync()
 
                     # === initial group rendezvous (:679-687) ===============
-                    # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                    # One fenced arrival from thread 0 (:176), an acquire spin to the
-                    # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                    # one (:133) and the phase bump is followed by another (:182).
-                    # Complete every CTA-local state update before thread 0
-                    # publishes the group arrival.  The following acquire
-                    # spin is the inter-CTA handoff; without this CTA
-                    # rendezvous, another warp could still be folding its
-                    # histogram when the consumer observes the arrival.
-                    bar_sync()
+                    # The CTA barrier above completes the initial local state
+                    # setup before thread 0 publishes the group arrival.
                     if tx == 0:
                         red_release_gpu_add_s32(state, arrival_word, T.int32(1))
                     bar_target0: T.int32 = (barrier_phase + T.int32(1)) * T.int32(ctas_per_group)
@@ -548,9 +540,8 @@ def get_kernel(
                             for bc in T.serial(tx, RADIX, step=BLOCK_THREADS):
                                 st_global_u32(state, next_hist + bc, T.uint32(0))
                         # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                        # One fenced arrival from thread 0 (:176), an acquire spin to the
-                        # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                        # one (:133) and the phase bump is followed by another (:182).
+                        # The fold writes group-visible histogram state, so every
+                        # CTA thread must finish before thread 0 publishes arrival.
                         bar_sync()
                         if tx == 0:
                             red_release_gpu_add_s32(state, arrival_word, T.int32(1))
@@ -680,9 +671,8 @@ def get_kernel(
                                     dtype,
                                 )
                         # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                        # One fenced arrival from thread 0 (:176), an acquire spin to the
-                        # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                        # one (:133) and the phase bump is followed by another (:182).
+                        # Complete all greater-than-pivot output writes before
+                        # another CTA allocates the equal-pivot output slots.
                         bar_sync()
                         if tx == 0:
                             red_release_gpu_add_s32(state, arrival_word, T.int32(1))
@@ -724,11 +714,8 @@ def get_kernel(
                             st_shared_u32(s_hist, 4, T.uint32(0))
                             st_global_u32(state, det_base + cta_in_group, gt_count)
                             st_global_u32(state, det_base + T.int32(RADIX) + cta_in_group, eq_count)
-                        # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                        # One fenced arrival from thread 0 (:176), an acquire spin to the
-                        # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                        # one (:133) and the phase bump is followed by another (:182).
-                        bar_sync()
+                        # The deterministic scratch writes below are issued only
+                        # by thread 0; its release fence publishes them directly.
                         if tx == 0:
                             red_release_gpu_add_s32(state, arrival_word, T.int32(1))
                         bar_target3: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
@@ -888,11 +875,11 @@ def get_kernel(
 
                     # === Stage 5: PageTable gather, split (:1359-1371) =====
                     if page_table:
-                        # --- group barrier (AdvanceRadixGroupBarrier, :174-182) ---------
-                        # One fenced arrival from thread 0 (:176), an acquire spin to the
-                        # absolute target (:179), then TWO CTA barriers: wait_ge ends with
-                        # one (:133) and the phase bump is followed by another (:182).
-                        bar_sync()
+                        # Non-deterministic collect has no trailing CTA barrier
+                        # after its final output writes; deterministic collect
+                        # already synchronizes at the end of its output loop.
+                        if not deterministic:
+                            bar_sync()
                         if tx == 0:
                             red_release_gpu_add_s32(state, arrival_word, T.int32(1))
                         bar_target4: T.int32 = (barrier_phase + T.int32(1)) * T.int32(
