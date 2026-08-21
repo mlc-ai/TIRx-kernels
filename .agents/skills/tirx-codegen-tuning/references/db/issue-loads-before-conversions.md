@@ -54,6 +54,12 @@ gains when multiple token loads were previously serialized. In the
 matching-counters case above, the lever that worked was raising the number of
 outstanding misses.
 
+The pattern holds across instruction mixes, not just the one it was found on.
+A block-scaled dequantization with a different unpack chain and half the trip
+count -- four shared loads per thread rather than eight -- gained on every
+specialization that ran it (+0.0015, +0.0056, +0.0022) with an untouched control
+dispatch flat, once the batch covered the whole trip count.
+
 ## Boundary
 
 It can regress when the staged raw values spill or the loads usually hit cache.

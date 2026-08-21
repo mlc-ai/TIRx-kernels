@@ -59,6 +59,20 @@ both, at 1.0421 and 1.0208.
 
 ## Boundary
 
+The same split governs staging depth outside shared memory. Issuing every
+tensor-memory read of an epilogue before its single wait, instead of draining
+one column pass at a time, gained on eight shapes of one matrix and lost on two
+-- the specializations whose operand dtype left least room for the extra live
+fragments, one of them by 13%. Binding the form to the compile-time predicate
+that names the operand dtype and the load program kept every gain and undid both
+regressions. Raising a load pipeline from two stages to three splits the same
+way, helping one dtype and costing another 0.023.
+
+A targeted subset will hide this. The four-shape set used while iterating showed
+that epilogue rewrite improving everything it touched; only the complete matrix
+exposed the two regressions. Judge a depth or form change on every dispatch that
+takes each branch, not on the shapes that motivated it.
+
 The depth is not transferable between kernels or between passes. Concurrency is
 one axis among several that set it: the per-thread trip count sets how much
 parallelism there is to extract, and the live range of the staged registers sets

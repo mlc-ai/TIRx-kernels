@@ -62,6 +62,14 @@ the cache stays small: the register array is live across the whole region, so a
 cache sized by an inner index trades the stall for pressure. Reads that a warp
 broadcasts (every lane the same address) are already cheap and gain nothing.
 
+Fewer loads is not the same objective as fewer conflicts, and the two can
+oppose. Two index arrays read per store were folded into one packed word decoded
+by a mask and a shift -- 19% fewer shared-load instructions, correctness intact,
+and the shape lost 0.008. Concentrating the accesses into one array cost more in
+distribution than the removed loads returned, and the decode lengthened the
+dependency chain. Reduce the reads whose index is loop-invariant; do not merge
+distinct arrays to reduce the count.
+
 An access pattern that looks conflict-free on paper can still be the worst one
 in the kernel. This read distributes as eight distinct rows per warp with
 four-way broadcast, which is textbook conflict-free, and it was nonetheless
