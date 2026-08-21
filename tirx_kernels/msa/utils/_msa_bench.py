@@ -64,6 +64,28 @@ def cutedsl_paths() -> list[str]:
     return [str(prefix), str(packages)]
 
 
+# The import roots the MSA reference pulls in, and the only ones this recovery
+# is allowed to touch. `tirx_kernels` and `tvm` are excluded above because
+# dropping them mid-process would unload the module doing the dropping.
+# Matched as prefixes, so a subtree can be named without its parent.
+#
+# Only the STRUCTURAL check below may act on these -- drop a subtree whose
+# submodule is present in `sys.modules` but unreachable from its own parent.
+# Purging a root wholesale on retry was tried and reverted twice: `cutlass`
+# carries native nanobind extensions whose types register process-globally, so
+# re-importing aborts the interpreter ("refusing to add duplicate key ERROR",
+# SIGABRT), and `torch._dynamo` re-registers its PGO mega-cache artifact and
+# fails every subsequent compile ("Artifact of type=pgo already registered").
+# A rare missed recovery costs one workload, which the suite retries; a bad
+# purge costs the whole process.
+# `torch._dynamo` is listed rather than `torch`: the failure mode is the same
+# (a retry finds it partially initialized, here without `utils`), but purging
+# all of `torch` mid-process would be both expensive and wrong -- plenty of
+# torch submodules are legitimately absent from their parent until imported,
+# and torch owns live CUDA state this recovery must not disturb.
+_REFERENCE_ROOTS = ("cutlass", "quack", "sympy", "src", "fmha_sm100", "torch._dynamo")
+
+
 def _drop_interrupted_imports() -> None:
     """Forget modules whose import was cut off partway through.
 
@@ -92,11 +114,27 @@ def _drop_interrupted_imports() -> None:
         if spec is not None and getattr(spec, "_initializing", False):
             del sys.modules[name]
 
-    for package, attribute in (("sympy", "core"), ("quack", "rounding")):
-        module = sys.modules.get(package)
-        if module is not None and not hasattr(module, attribute):
-            for name in [n for n in sys.modules if n == package or n.startswith(package + ".")]:
-                del sys.modules[name]
+    # A named-attribute probe per package cannot be made complete. The import can
+    # be cut at ANY statement of any `__init__`, so whichever attribute the probe
+    # names, there is a stop position that leaves that one bound and a later one
+    # missing -- which is exactly how this failed twice in a row on two different
+    # packages (`quack` without `copy_utils`, then `cutlass.base_dsl` without
+    # `runtime`). Instead of extending the list a third time, check the invariant
+    # that actually matters: a package left half-executed has submodules in
+    # `sys.modules` that are not reachable as attributes of their own parent.
+    def _in_scope(name: str) -> bool:
+        return any(name == root or name.startswith(root + ".") for root in _REFERENCE_ROOTS)
+
+    for name in [n for n in sys.modules if _in_scope(n)]:
+        parent_name, _, leaf = name.rpartition(".")
+        if not parent_name:
+            continue
+        parent = sys.modules.get(parent_name)
+        if parent is not None and not hasattr(parent, leaf):
+            for stale in [
+                n for n in sys.modules if n == parent_name or n.startswith(parent_name + ".")
+            ]:
+                del sys.modules[stale]
 
 
 def ensure_msa_importable() -> None:
@@ -265,6 +303,146 @@ def compiled_sparse_atten_fwd(case: dict):
         compiled(
             case["k"],
             case["v"],
+            case["k2q_q_indices"],
+            case["k2q_qsplit_indices"],
+            case["k2q_row_ptr"],
+            case["scheduler_metadata"],
+            case["work_count"],
+            o_partial_flat,
+            case["lse_partial"],
+            lse_temperature,
+            q_flat,
+            gather4_desc,
+            None,
+            None,
+            case["cu_seqlens_q"],
+            case["cu_seqlens_k"],
+            case["softmax_scale"],
+            case["lse_temperature_inv_scale"],
+            case["num_kv_blocks"],
+            case["head_kv"],
+            case["max_seqlen_q"],
+            case["work_capacity"],
+        )
+
+    return launch
+
+
+_FWD_NVFP4_CACHE: dict = {}
+
+
+def compiled_sparse_atten_nvfp4_kv(case: dict):
+    """Compile (or fetch) ``SparseAttentionForwardNvfp4KvSm100`` and return the launchable.
+
+    Mirrors the compile step of ``_call_sparse_forward_sm100_csr_varlen_nvfp4_kv``
+    (interface.py:1840-2011) for the same reason the BF16/FP8 sibling adapter
+    mirrors its own host entry: the timed closure has to cover the kernel launch
+    alone.
+
+    Two contract details the host entry hides. ``O_partial`` reaches the kernel
+    as ``reshape(-1, head_dim)``, and the caller must pass a **view** of the
+    buffer it later reads -- the host entry's ``.contiguous()`` would silently
+    hand the kernel a detached copy. And the V tensor scale never reaches this
+    kernel at all: the interface pins ``has_v_global_scale`` false and applies
+    that scale once in the combine kernel (interface.py:1862-1866), so
+    ``v_global_scale`` is accepted here only to keep the contract visible.
+
+    Every tensor is wrapped **before** ``cute.compile``; wrapping one afterwards
+    poisons this process's host ``cuTensorMapEncodeTiled`` path.
+    """
+    ensure_msa_importable()
+
+    import cutlass.cute as cute
+    import torch
+    from cutlass import Float32, Int32
+    from src.common.cute_dsl_utils import to_cute_tensor
+    from src.common.tma_utils import create_q_gather4_tma_desc
+    from src.sm100.fwd.atten_fwd_nvfp4_kv import SparseAttentionForwardNvfp4KvSm100
+
+    qhead_per_kv = case["qhead_per_kv"]
+    q_flat = case["q_flat"]
+    o_partial_flat = case["o_partial_flat"]
+    lse_temperature = case.get("lse_temperature_partial")
+    k_global_scale = case.get("k_global_scale")
+    gather4_desc = (
+        create_q_gather4_tma_desc(q_flat, box_x=128 if q_flat.dtype == torch.float8_e4m3fn else 64)
+        if qhead_per_kv in (1, 2, 4)
+        else None
+    )
+
+    key = (
+        "sparse_forward_sm100_csr_varlen_nvfp4_kv",
+        case["head_dim"],
+        case["blk_kv"],
+        qhead_per_kv,
+        q_flat.dtype,
+        o_partial_flat.dtype,
+        bool(case["causal"]),
+        False,  # paged_kv
+        True,  # use_prepare_scheduler
+        None,  # page_size
+        False,  # seqused_k
+        lse_temperature is not None,
+        True,  # fp8_pair_dequant: pinned, never read from the environment
+        k_global_scale is not None,
+        False,  # has_v_global_scale: applied in the combine kernel instead
+    )
+    if key not in _FWD_NVFP4_CACHE:
+        kernel = SparseAttentionForwardNvfp4KvSm100(
+            head_dim=case["head_dim"],
+            qheadperkv=qhead_per_kv,
+            n_block_size=case["blk_kv"],
+            paged_kv=False,
+            page_size=None,
+            has_seqused_k=False,
+            causal=bool(case["causal"]),
+            use_prepare_scheduler=True,
+            fp8_pair_dequant=True,
+            has_k_global_scale=k_global_scale is not None,
+            has_v_global_scale=False,
+        )
+        _FWD_NVFP4_CACHE[key] = cute.compile(
+            kernel,
+            to_cute_tensor(case["k"]),
+            to_cute_tensor(case["v"]),
+            to_cute_tensor(case["k_scale_128x4"]),
+            to_cute_tensor(case["v_scale_128x4"]),
+            None if k_global_scale is None else to_cute_tensor(k_global_scale),
+            None,  # v_global_scale
+            to_cute_tensor(case["k2q_q_indices"]),
+            to_cute_tensor(case["k2q_qsplit_indices"]),
+            to_cute_tensor(case["k2q_row_ptr"]),
+            to_cute_tensor(case["scheduler_metadata"]),
+            to_cute_tensor(case["work_count"]),
+            to_cute_tensor(o_partial_flat),
+            to_cute_tensor(case["lse_partial"]),
+            None if lse_temperature is None else to_cute_tensor(lse_temperature),
+            to_cute_tensor(q_flat),
+            None if gather4_desc is None else to_cute_tensor(gather4_desc),
+            None,  # page_table
+            None,  # seqused_k
+            to_cute_tensor(case["cu_seqlens_q"]),
+            to_cute_tensor(case["cu_seqlens_k"]),
+            Float32(case["softmax_scale"]),
+            Float32(case["lse_temperature_inv_scale"]),
+            Int32(case["num_kv_blocks"]),
+            Int32(case["head_kv"]),
+            Int32(case["max_seqlen_q"]),
+            Int32(case["work_capacity"]),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+
+    compiled = _FWD_NVFP4_CACHE[key]
+
+    def launch() -> None:
+        compiled(
+            case["k"],
+            case["v"],
+            case["k_scale_128x4"],
+            case["v_scale_128x4"],
+            k_global_scale,
+            None,
             case["k2q_q_indices"],
             case["k2q_qsplit_indices"],
             case["k2q_row_ptr"],
