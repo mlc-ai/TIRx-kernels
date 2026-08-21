@@ -174,6 +174,37 @@ def _mma_m16n8k16_bf16_acc_off4(acc, a, b):
     )
 
 
+def _shfl_bfly_f32(value, lane_xor):
+    """``shfl.sync.bfly.b32`` at width 32: clamp/segmask 31, full member mask.
+
+    DPS: the destination pins the warp collective to the call site, so the
+    shuffle is emitted once here rather than re-emitted at every textual use
+    of the returned value.
+    """
+    shfl_bfly = K.local_scalar("uint32")
+    K.ptx.shfl_sync.bfly.b32(
+        shfl_bfly,
+        K.reinterpret("uint32", value),
+        K.cast(lane_xor, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.reinterpret("float32", shfl_bfly)
+
+
+def _shfl_idx_f32(value, source_lane):
+    """``shfl.sync.idx.b32`` at width 32: clamp/segmask 31, full member mask."""
+    shfl_idx = K.local_scalar("uint32")
+    K.ptx.shfl_sync.idx.b32(
+        shfl_idx,
+        K.reinterpret("uint32", value),
+        K.cast(source_lane, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.reinterpret("float32", shfl_idx)
+
+
 def _mbarrier_wait(barrier, stage, phase):
     # .cu:158-171 -> native K.cuda.mbarrier_wait: same LAB_WAIT spin loop with
     # ticks=0x989680; mbarrier.try_wait.parity.shared::cta defaults to .acquire.cta
@@ -1791,10 +1822,7 @@ def bf16_fused_m128(**kwargs: Any):
                     # .cu:1613-1628 butterfly reduction over the 16-lane segment (q then k per step).
                     for _off in (8, 4, 2, 1):
                         for _acc in (q_sum, k_sum):
-                            K.assign(
-                                _acc,
-                                _acc + K.cuda._shfl_xor_sync(K.uint32(0xFFFFFFFF), _acc, _off, 32),
-                            )
+                            K.assign(_acc, _acc + _shfl_bfly_f32(_acc, K.int32(_off)))
                     q_inv = K.local_scalar("float32")  # .cu:1629-1630
                     K.ptx.rsqrt.approx.ftz.f32(q_inv, q_sum + K.float32(1e-06))
                     k_inv = K.local_scalar("float32")  # .cu:1631-1632
@@ -2204,10 +2232,7 @@ def bf16_fused_m128(**kwargs: Any):
                         for _j in range(_p):
                             pivot_lane: K.int32 = diag_group_base + _p  # .cu:2226
                             pivot = K.local_scalar(
-                                "float32",
-                                init=K.cuda._shfl_sync(
-                                    K.uint32(0xFFFFFFFF), inv_row[_j], pivot_lane, 32
-                                ),
+                                "float32", init=_shfl_idx_f32(inv_row[_j], pivot_lane)
                             )  # .cu:2227-2228
                             with K.If(lane_in_diag > _p), K.Then():  # .cu:2229-2232
                                 K.ptx.fma.rn.f32(
