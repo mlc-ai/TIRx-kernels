@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '135a054f', 'tirx-kernels': '359c47fd', 'tirx-bench-ci': None}`
-- Workloads: 438 ok, 0 failed
+- Git:       `{'tir': '135a054f', 'tirx-kernels': 'f2210e41-dirty', 'tirx-bench-ci': None}`
+- Workloads: 453 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -273,6 +273,26 @@ Grouped workloads show one row per config and one timing column per implementati
 | `bf16_e4m3_m32_h4096_xc_rc_yc_pdl0_s1` | tirx | 3.3662 | flashinfer_cutedsl | 3.4006 | 1.010 | — |
 | `bf16_e4m3_m32_h4096_xc_rc_yc_pdl1_s1` | tirx | 3.7142 | flashinfer_cutedsl | 3.7284 | 1.004 | — |
 | `bf16_e4m3_m64_h8192_xc_rc_yc_pdl0_s1` | tirx | 3.8163 | flashinfer_cutedsl | 3.8988 | 1.022 | — |
+
+## flashinfer_fused_dit_layernorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `grgb_bf16_b1_r1920` | tirx | 16.5549 | flashinfer_cuda | 16.9264 | 1.022 | — |
+| `grgb_bf16_b1_r768` | tirx | 8.4855 | flashinfer_cuda | 8.6850 | 1.024 | — |
+| `grgb_bf16_b2_r1920` | tirx | 28.9023 | flashinfer_cuda | 29.4032 | 1.017 | — |
+| `grgb_bf16_b2_r768` | tirx | 13.5105 | flashinfer_cuda | 13.9487 | 1.032 | — |
+| `grgb_bf16_b4_r1920` | tirx | 52.1808 | flashinfer_cuda | 53.3738 | 1.023 | — |
+| `grss_bf16_b1_r1920` | tirx | 23.0819 | flashinfer_cuda | 23.0937 | 1.001 | — |
+| `grss_bf16_b1_r768` | tirx | 10.9591 | flashinfer_cuda | 11.0709 | 1.010 | — |
+| `grss_bf16_b2_r1920` | tirx | 40.8214 | flashinfer_cuda | 40.9645 | 1.004 | — |
+| `grss_bf16_b2_r768` | tirx | 18.5933 | flashinfer_cuda | 18.6946 | 1.005 | — |
+| `grss_bf16_b4_r1920` | tirx | 73.0063 | flashinfer_cuda | 73.5404 | 1.007 | — |
+| `rss_bf16_b1_r1920` | tirx | 17.4164 | flashinfer_cuda | 17.5859 | 1.010 | — |
+| `rss_bf16_b1_r768` | tirx | 8.5374 | flashinfer_cuda | 8.6840 | 1.017 | — |
+| `rss_bf16_b2_r1920` | tirx | 31.5483 | flashinfer_cuda | 31.7315 | 1.006 | — |
+| `rss_bf16_b2_r768` | tirx | 14.4482 | flashinfer_cuda | 14.6750 | 1.016 | — |
+| `rss_bf16_b4_r1920` | tirx | 57.3485 | flashinfer_cuda | 57.7074 | 1.006 | — |
 
 ## flashinfer_layernorm
 
