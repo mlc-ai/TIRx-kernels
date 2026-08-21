@@ -44,6 +44,7 @@ point each port backs (`activation`, `quantization`, `norm` — CuTe-DSL backend
 | `flashinfer_layernorm`                  | `norm/layernorm.py`                                 | BF16 LayerNorm with FP32 affine parameters, independent int64 row strides, and optional PDL |
 | `flashinfer_fused_add_rmsnorm`          | `norm/fused_add_rmsnorm.py`                         | Shared fused residual-add RMSNorm / Gemma family with compact, int64-strided, PDL, async-copy, and cluster-reduction paths |
 | `flashinfer_fused_add_rmsnorm_quant`    | `norm/fused_add_rmsnorm_quant.py`                   | Fused residual add, RMSNorm, and FP8 quantization with compact, int64-strided, PDL, async-copy, and cluster-reduction paths |
+| `flashinfer_fused_dit_layernorm`        | `norm/fused_dit_layernorm.py`                       | WAN DIT fused gate/residual LayerNorm with gamma/beta or scale/shift epilogues and BF16, NVFP4, or MXFP8 output |
 | `flashinfer_qk_rmsnorm`                 | `norm/qk_rmsnorm.py`                                | Shared 3-D QK RMSNorm / Gemma RMSNorm family with arbitrary int64 batch/head strides, PDL, and sync/async copy paths |
 | `selective_state_update_stp_simple`     | `mamba/selective_state_update_stp_simple.py`        | Single-token, `algorithm="simple"` |
 | `selective_state_update_stp_vertical`   | `mamba/selective_state_update_stp_vertical.py`      | Single-token, `algorithm="vertical"` |
