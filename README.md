@@ -39,6 +39,7 @@ point each port backs (`activation`, `quantization`, `norm` — CuTe-DSL backend
 | `mxfp4_quantize`                        | `quantization/mxfp4_quantize.py`                    | Block quantization with UE8M0 scales |
 | `mxfp8_quantize`                        | `quantization/mxfp8_quantize.py`                    | Block quantization with UE8M0 scales |
 | `flashinfer_rmsnorm`                    | `norm/rmsnorm.py`                                   | Shared 2-D RMSNorm / Gemma RMSNorm family with compact, int64-strided, PDL, async-copy, and cluster-reduction paths |
+| `flashinfer_rmsnorm_fp4quant`           | `norm/rmsnorm_fp4quant.py`                          | RMSNorm fused with packed E2M1 FP4 quantization, E4M3 or UE8M0 block scales, optional scale swizzling, PDL, and cluster reduction |
 | `flashinfer_layernorm`                  | `norm/layernorm.py`                                 | BF16 LayerNorm with FP32 affine parameters, independent int64 row strides, and optional PDL |
 | `flashinfer_fused_add_rmsnorm`          | `norm/fused_add_rmsnorm.py`                         | Shared fused residual-add RMSNorm / Gemma family with compact, int64-strided, PDL, async-copy, and cluster-reduction paths |
 | `flashinfer_fused_add_rmsnorm_quant`    | `norm/fused_add_rmsnorm_quant.py`                   | Fused residual add, RMSNorm, and FP8 quantization with compact, int64-strided, PDL, async-copy, and cluster-reduction paths |
