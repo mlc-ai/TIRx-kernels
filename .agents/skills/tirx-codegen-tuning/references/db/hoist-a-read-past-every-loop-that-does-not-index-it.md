@@ -41,6 +41,12 @@ straight-line region, so the instruction count does not move and the change
 looks worthless. It does not CSE across the outer loop, which is where the
 duplication actually lives.
 
+Values held in one-element local buffers collapse the same way, which is worth
+knowing because the storage looks per-thread and real. Binding six such fields,
+read 14 and 8 times, to scalars so the reads coalesce left every SASS counter
+unmoved -- 3552 static instructions on both sides. Hand-caching within a region
+is never the lever; crossing the loop is.
+
 ## Rationale
 
 One epilogue read of a per-row reciprocal, issued once per 128-bit store,
