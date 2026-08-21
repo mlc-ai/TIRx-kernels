@@ -52,7 +52,7 @@ def _visible_gpu_memory() -> list[tuple[str, int, bool]]:
 
     configured = os.environ.get("CUDA_VISIBLE_DEVICES")
     if configured is None:
-        visible = {index for index, _uuid, _free_memory in rows}
+        visible = {index for index, _uuid, _free_memory, _has_compute_process in rows}
     else:
         visible = {token.strip() for token in configured.split(",") if token.strip()}
     return [
