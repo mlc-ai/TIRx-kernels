@@ -3,12 +3,12 @@
   "label": "post-refactor",
   "git": {
     "tir": "135a054f",
-    "tirx-kernels": "359c47fd",
+    "tirx-kernels": "f2210e41-dirty",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "4cbcd19685bc44fc81a64ae7708807a6f9bada7b",
-    "tirx-kernels:tirx_kernels": "95c1d639f26f6c93c475c43a8a2d743a12029361"
+    "tirx-kernels:tirx_kernels": "540c7f7e9904ebd86834d18b458e34eea1f3e8c3"
   },
   "baselines": {
     "torch": {
@@ -2348,6 +2348,216 @@
       "impls": {
         "tirx": 3.8162779479448434,
         "flashinfer_cutedsl": 3.898806482512027
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grgb_bf16_b1_r1920",
+      "label": "grgb_bf16_b1_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 16.554921760341088,
+        "flashinfer_cuda": 16.926425777612465
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grgb_bf16_b1_r768",
+      "label": "grgb_bf16_b1_r768",
+      "status": "ok",
+      "impls": {
+        "tirx": 8.48553728484952,
+        "flashinfer_cuda": 8.684978720650145
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grgb_bf16_b2_r1920",
+      "label": "grgb_bf16_b2_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 28.90225468781187,
+        "flashinfer_cuda": 29.403238043442887
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grgb_bf16_b2_r768",
+      "label": "grgb_bf16_b2_r768",
+      "status": "ok",
+      "impls": {
+        "tirx": 13.510463037885032,
+        "flashinfer_cuda": 13.948722863275776
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grgb_bf16_b4_r1920",
+      "label": "grgb_bf16_b4_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 52.180766932723905,
+        "flashinfer_cuda": 53.37378188564974
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grss_bf16_b1_r1920",
+      "label": "grss_bf16_b1_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 23.081869985737896,
+        "flashinfer_cuda": 23.093724749260456
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grss_bf16_b1_r768",
+      "label": "grss_bf16_b1_r768",
+      "status": "ok",
+      "impls": {
+        "tirx": 10.959134800138894,
+        "flashinfer_cuda": 11.070855048127719
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grss_bf16_b2_r1920",
+      "label": "grss_bf16_b2_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 40.82137864634635,
+        "flashinfer_cuda": 40.96453618088016
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grss_bf16_b2_r768",
+      "label": "grss_bf16_b2_r768",
+      "status": "ok",
+      "impls": {
+        "tirx": 18.593254022557513,
+        "flashinfer_cuda": 18.69461194098422
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "grss_bf16_b4_r1920",
+      "label": "grss_bf16_b4_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 73.00627573783414,
+        "flashinfer_cuda": 73.5403711990731
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "rss_bf16_b1_r1920",
+      "label": "rss_bf16_b1_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 17.416447890523088,
+        "flashinfer_cuda": 17.585854350378437
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "rss_bf16_b1_r768",
+      "label": "rss_bf16_b1_r768",
+      "status": "ok",
+      "impls": {
+        "tirx": 8.537359069073187,
+        "flashinfer_cuda": 8.684042477341125
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "rss_bf16_b2_r1920",
+      "label": "rss_bf16_b2_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 31.54825560820634,
+        "flashinfer_cuda": 31.731525016773265
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "rss_bf16_b2_r768",
+      "label": "rss_bf16_b2_r768",
+      "status": "ok",
+      "impls": {
+        "tirx": 14.448186534199149,
+        "flashinfer_cuda": 14.67498084331852
+      },
+      "aggregated": {
+        "rounds": 5,
+        "method": "mean"
+      }
+    },
+    {
+      "kernel": "flashinfer_fused_dit_layernorm",
+      "config": "rss_bf16_b4_r1920",
+      "label": "rss_bf16_b4_r1920",
+      "status": "ok",
+      "impls": {
+        "tirx": 57.34849170808811,
+        "flashinfer_cuda": 57.70744821067791
       },
       "aggregated": {
         "rounds": 5,
