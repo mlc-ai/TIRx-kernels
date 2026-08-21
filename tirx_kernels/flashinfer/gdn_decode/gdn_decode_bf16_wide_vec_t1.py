@@ -40,6 +40,24 @@ LN_2 = 0.6931471805599453
 SCALE = 1.0 / math.sqrt(K)
 
 
+def _shfl_bfly_f32(value, lane_xor):
+    """``shfl.sync.bfly.b32`` at width 32: clamp/segmask 31, full member mask.
+
+    DPS: the destination pins the warp collective to the call site, so the
+    shuffle is emitted once here rather than re-emitted at every textual use
+    of the returned value.
+    """
+    shfl_bfly = TK.local_scalar("uint32")
+    TK.ptx.shfl_sync.bfly.b32(
+        shfl_bfly,
+        TK.reinterpret("uint32", value),
+        TK.cast(lane_xor, "uint32"),
+        TK.uint32(31),
+        TK.uint32(4294967295),
+    )
+    return TK.reinterpret("float32", shfl_bfly)
+
+
 def _local_scalar(dtype: str, value):
     out = TK.alloc_local((1,), dtype)
     TK.assign(out[0], value)
@@ -315,11 +333,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                     )
                 for delta_index in range(4):
                     delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
-                    TK.ptx["add.f32"](
-                        sum_q[0],
-                        sum_q[0],
-                        TK.cuda.__shfl_xor_sync(TK.uint32(4294967295), sum_q[0], delta[0], 32),
-                    )
+                    TK.ptx["add.f32"](sum_q[0], sum_q[0], _shfl_bfly_f32(sum_q[0], delta[0]))
                 _add = TK.local_scalar("float32")
                 TK.ptx["add.f32"](_add, sum_q[0], TK.float32(1e-06))
                 _rsqrt = TK.local_scalar("float32")
@@ -359,11 +373,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
                     )
                 for delta_index in range(4):
                     delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
-                    TK.ptx["add.f32"](
-                        sum_k[0],
-                        sum_k[0],
-                        TK.cuda.__shfl_xor_sync(TK.uint32(4294967295), sum_k[0], delta[0], 32),
-                    )
+                    TK.ptx["add.f32"](sum_k[0], sum_k[0], _shfl_bfly_f32(sum_k[0], delta[0]))
                 _add2 = TK.local_scalar("float32")
                 TK.ptx["add.f32"](_add2, sum_k[0], TK.float32(1e-06))
                 _rsqrt2 = TK.local_scalar("float32")
@@ -528,11 +538,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
             for delta_index in range(4):
                 delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
                 for row in range(ILP_ROWS):
-                    TK.ptx["add.f32"](
-                        sums[row],
-                        sums[row],
-                        TK.cuda.__shfl_xor_sync(TK.uint32(4294967295), sums[row], delta[0], 32),
-                    )
+                    TK.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
 
             values = TK.alloc_local((ILP_ROWS,), "float32")
             value_bits = TK.alloc_local((ILP_ROWS,), "uint16")
@@ -582,11 +588,7 @@ def _make_gdn_decode_bf16_wide_vec_t1(
             for delta_index in range(4):
                 delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
                 for row in range(ILP_ROWS):
-                    TK.ptx["add.f32"](
-                        sums[row],
-                        sums[row],
-                        TK.cuda.__shfl_xor_sync(TK.uint32(4294967295), sums[row], delta[0], 32),
-                    )
+                    TK.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
 
             with TK.If(lane[0] == 0), TK.Then():
                 output_base = _local_scalar(
