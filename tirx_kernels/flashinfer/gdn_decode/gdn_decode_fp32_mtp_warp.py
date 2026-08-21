@@ -16,7 +16,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as TK
-from tvm.tirx.bench import bench
+from tirx_kernels.runner import bench
 
 KERNEL_META = {
     "name": "gdn_decode_fp32_mtp_warp",
