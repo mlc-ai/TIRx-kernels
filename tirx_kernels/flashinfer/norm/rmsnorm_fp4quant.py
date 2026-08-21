@@ -248,12 +248,8 @@ def _quantize_and_pack_16(values, output_scale):
     scaled = T.alloc_local((16,), "float32")
     for value in range(16):
         T.evaluate(T.ptx.mul.f32(scaled[value], values[value], output_scale))
-    low = cvt_e2m1x8(
-        scaled[0], scaled[1], scaled[2], scaled[3], scaled[4], scaled[5], scaled[6], scaled[7]
-    )
-    high = cvt_e2m1x8(
-        scaled[8], scaled[9], scaled[10], scaled[11], scaled[12], scaled[13], scaled[14], scaled[15]
-    )
+    low = cvt_e2m1x8([scaled[index] for index in range(8)])
+    high = cvt_e2m1x8([scaled[index] for index in range(8, 16)])
     return pack_u32x2_to_u64(low, high)
 
 
