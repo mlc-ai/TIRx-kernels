@@ -134,15 +134,21 @@ def make_kernel(hidden_size: int):
         def warp_sum(acc):
             """Butterfly sum of ``acc[0]`` over the 32 lanes — orig:L725-729.
 
-            The shuffle is a warp collective and a traced body emits a
-            value-returning intrinsic where it is *used*; here the use is the
-            store into ``acc``, which is a statement at this convergent point,
-            so each round lands where the original's annotated assignment does.
+            ``shfl.sync.bfly.b32`` in DPS form: the destination pins the warp
+            collective to this convergent point, one instruction per round,
+            where the original's annotated assignment puts it.  ``bdx`` is 32,
+            so the clamp/segmask operand is the width-32 value 31.
             """
+            peer = K.local_scalar("uint32")
             for delta in (16, 8, 4, 2, 1):
-                K.assign(
-                    acc[0], acc[0] + K.cuda.__shfl_xor_sync(K.uint32(FULL_MASK), acc[0], delta, bdx)
+                K.ptx.shfl_sync.bfly.b32(
+                    peer,
+                    K.reinterpret("uint32", acc[0]),
+                    K.uint32(delta),
+                    K.uint32(31),
+                    K.uint32(FULL_MASK),
                 )
+                K.assign(acc[0], acc[0] + K.reinterpret("float32", peer))
 
         def scale_pair(dst, i, a, b):
             """``dst[2i:2i+2] = a * b`` as one packed f32x2 multiply.
