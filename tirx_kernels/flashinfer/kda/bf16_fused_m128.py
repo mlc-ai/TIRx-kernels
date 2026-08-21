@@ -15,8 +15,6 @@ Target instance: BF16, head_dim 128, sm_100a, grid = num_seqs * num_heads,
 1024 threads, 227328 B dynamic smem, six host-encoded TMA descriptors.
 """
 
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass, fields
 from typing import Any
@@ -24,12 +22,20 @@ from unittest import SkipTest
 
 import torch
 
-from tvm.script import tirx as T
+import tirx_kernels.kern as K
 
 D_HEAD = 128
 THREADS = 1024
 SMEM_TOTAL = 227328
 DEFAULT_LOWER_BOUND = -5.0
+
+# Canonical five-stage shared allocation.  Every typed element stride and raw
+# byte stride below derives from this one shape; the overlay views keep their
+# source offsets, but no role reconstructs the stage geometry independently.
+SMEM_STAGE_ALLOCATION = (5, 20992)
+SMEM_STAGE_BF16_STRIDE = SMEM_STAGE_ALLOCATION[1]
+SMEM_STAGE_F32_STRIDE = SMEM_STAGE_BF16_STRIDE // 2
+SMEM_STAGE_BYTE_STRIDE = SMEM_STAGE_BF16_STRIDE * 2
 
 # .cu:29-106 (#define block, source order).
 TMEM_TMEM_STATE_OFFSET = 64
@@ -39,20 +45,6 @@ TMEM_TMEM_U2_INP_OFFSET = 224
 TMEM_TMEM_U2_ACC_OFFSET = 0
 TMEM_TMEM_OUT_OFFSET = 192
 TMEM_TMEM_STATE_OUT_OFFSET = 64
-SMEM_SMEM_QD_OFF = 1024
-SMEM_SMEM_G_RAW_OFF = 1024
-SMEM_SMEM_KD_OFF = 9216
-SMEM_SMEM_Q_RAW_PREFETCH_OFF = 17408
-SMEM_SMEM_FINAL_TRANS_OFF = 17408
-SMEM_SMEM_KR_TRANS_OFF = 17408
-SMEM_SMEM_MQK_TRANS_OFF = 25600
-SMEM_SMEM_INV_OFF = 29696
-SMEM_SMEM_V_OFF = 32384
-SMEM_SMEM_KI_OFF = 17408
-SMEM_SMEM_GATE_OFF = 25600
-SMEM_SMEM_BETA_RAW_OFF = 41984
-SMEM_SMEM_INV_WORK_OFF = 32384
-SMEM_SMEM_OUT_OFF = 210944
 SMEM_SMEM_G_RAW_ALL_OFF = 1024
 SMEM_SMEM_G_RAW_ALL_STAGE_BYTES = 176128
 SMEM_SMEM_RESTORE_FACTOR_ALL_OFF = 41984
@@ -70,26 +62,6 @@ SMEM_SMEM_V_ALL_STAGE_BYTES = 176128
 SMEM_SMEM_GATE_ALL_OFF = 25600
 SMEM_SMEM_GATE_ALL_STAGE_BYTES = 184320
 
-# Mbarrier group byte offsets within the smem barrier area (.cu:695-711).
-MBAR_QK_FULL_OFF = 0
-MBAR_GATE_RAW_FULL_OFF = 40
-MBAR_QK_RAW_FULL_OFF = 80
-MBAR_V_FULL_OFF = 120
-MBAR_V_FREE_OFF = 160
-MBAR_SMEM_FREE_OFF = 200
-MBAR_RAW_INPUTS_FREE_OFF = 240
-MBAR_STATE_INP_READY_OFF = 280
-MBAR_OLD_OUT_READY_OFF = 320
-MBAR_U_INP_READY_OFF = 360
-MBAR_U2_ACC_READY_OFF = 400
-MBAR_U2_INP_READY_OFF = 440
-MBAR_FINAL_READY_OFF = 480
-MBAR_OUT_EMPTY_OFF = 520
-MBAR_TMEM_DEALLOC_READY_OFF = 528
-MBAR_PREP_DIAG_READY_OFF = 536
-MBAR_PREP_INV16_READY_OFF = 576
-SMEM_TMEM_ADDR_STORAGE_OFF = 616
-
 # TMA descriptor byte slots inside descriptor_storage (binding_common.cuh:435-440).
 TMA_SLOT_Q = 0
 TMA_SLOT_K = 128
@@ -104,7 +76,7 @@ LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 # CUDA device helpers, transcribed in source order from
 # csrc/kda/flashkda_bf16_fused_m128.cu:110-496.
 #
-# Helpers use the exact T.ptx/T.cuda wrappers available in the target TVM.
+# Helpers use the exact K.ptx/K.cuda wrappers available in the target TVM.
 # ---------------------------------------------------------------------------
 
 # tcgen05.mma spelling: kind::f16 from the (float32, bfloat16, bfloat16) dtypes; the A
@@ -113,7 +85,7 @@ _TCGEN05_MMA_F16 = "tcgen05.mma.cta_group::1.kind::f16"
 # cta_group::1 disable-output-lane mask group: the explicit default {0, 0, 0, 0}.
 _MMA_ZERO_MASKS = (0, 0, 0, 0)
 # Warp-level mma.sync zero-C operand group (the four "f"(0.f) inline-asm literals).
-_MMA_ZERO_C = (T.float32(0.0), T.float32(0.0), T.float32(0.0), T.float32(0.0))
+_MMA_ZERO_C = (K.float32(0.0), K.float32(0.0), K.float32(0.0), K.float32(0.0))
 # TMA spellings: unicast g2s at CTA scope (the sm_100 wrapper emits the explicit default
 # .cta_group::1 suffix for the unqualified inline instruction) and plain tile s2g.
 _TMA_G2S_CTA = (
@@ -122,183 +94,39 @@ _TMA_G2S_CTA = (
 _TMA_S2G = "cp.async.bulk.tensor.{dim}d.global.shared::cta.tile.bulk_group"
 
 
-def _mma_qk_8step(taddr_d, b_lo, taddr_a, enable_d):
-    # .cu:1114-1150 and .cu:1153-1189 (same verbatim block, two call sites) ->
-    # 8 native tcgen05.mma issues: b_lo offsets 0,2,4,6,256,258,260,262 (adds 2,2,2,250,2,2,2),
-    # taddr_a +8 per step, dhi=0x40004040, idesc=134743184, step0 enable_d / steps1-7 tied 1,
-    # all @leader-predicated. Native emits the explicit default disable-output-lane {0,0,0,0}.
-    leader = T.cuda.elect_sync()
-    b_lo32 = T.cast(b_lo, "uint32")
-    for _i in range(8):
-        _b_desc = (T.uint64(0x40004040) << T.uint64(32)) | T.cast(
-            b_lo32 + T.uint32((0, 2, 4, 6, 256, 258, 260, 262)[_i]), "uint64"
-        )
-        T.evaluate(
-            T.ptx[_TCGEN05_MMA_F16](
-                T.cast(taddr_d, "uint32"),
-                T.cast(taddr_a + 8 * _i, "uint32"),
-                _b_desc,
-                T.uint32(134743184),
-                *_MMA_ZERO_MASKS,
-                T.ptx.pred(enable_d if _i == 0 else 1),
-                pred=leader,
-            )
+def _mma_chain(taddr_d, b_lo, taddr_a, enable_d, *, b_offsets, dhi, idesc):
+    # One @leader-predicated tcgen05.mma chain: `b_offsets` walks the B descriptor's
+    # low half, taddr_a advances 8 per step, step 0 carries enable_d and the rest tie
+    # it to 1.  Native emits the explicit default disable-output-lane {0, 0, 0, 0}.
+    leader = K.cuda.elect_sync()
+    b_lo32 = K.cast(b_lo, "uint32")
+    for _i, _b_off in enumerate(b_offsets):
+        _b_desc = (K.uint64(dhi) << K.uint64(32)) | K.cast(b_lo32 + K.uint32(_b_off), "uint64")
+        K.ptx[_TCGEN05_MMA_F16](
+            K.cast(taddr_d, "uint32"),
+            K.cast(taddr_a + 8 * _i, "uint32"),
+            _b_desc,
+            K.uint32(idesc),
+            *_MMA_ZERO_MASKS,
+            K.ptx.pred(enable_d if _i == 0 else 1),
+            pred=leader,
         )
 
 
-def _mma_inv_2step(taddr_d, b_lo, taddr_a, enable_d):
-    # .cu:1194-1212 -> 2 native tcgen05.mma issues (b_lo add 64; dhi=0xC0004010)
-    leader = T.cuda.elect_sync()
-    b_lo32 = T.cast(b_lo, "uint32")
-    for _i in range(2):
-        _b_desc = (T.uint64(0xC0004010) << T.uint64(32)) | T.cast(
-            b_lo32 + T.uint32(64 * _i), "uint64"
-        )
-        T.evaluate(
-            T.ptx[_TCGEN05_MMA_F16](
-                T.cast(taddr_d, "uint32"),
-                T.cast(taddr_a + 8 * _i, "uint32"),
-                _b_desc,
-                T.uint32(134743184),
-                *_MMA_ZERO_MASKS,
-                T.ptx.pred(enable_d if _i == 0 else 1),
-                pred=leader,
-            )
-        )
-
-
-def _mma_final_2step(taddr_d, b_lo, taddr_a, enable_d):
-    # .cu:1217-1235 -> 2 native tcgen05.mma issues (b_lo add 128; dhi=0x40004040)
-    leader = T.cuda.elect_sync()
-    b_lo32 = T.cast(b_lo, "uint32")
-    for _i in range(2):
-        _b_desc = (T.uint64(0x40004040) << T.uint64(32)) | T.cast(
-            b_lo32 + T.uint32(128 * _i), "uint64"
-        )
-        T.evaluate(
-            T.ptx[_TCGEN05_MMA_F16](
-                T.cast(taddr_d, "uint32"),
-                T.cast(taddr_a + 8 * _i, "uint32"),
-                _b_desc,
-                T.uint32(136905872),
-                *_MMA_ZERO_MASKS,
-                T.ptx.pred(enable_d if _i == 0 else 1),
-                pred=leader,
-            )
-        )
-
-
-def _ld_global_v4_u32(dst, ptr):
-    # verbatim plain uint4 load (.cu:783-806/1564-1601 pattern; plain ld.global.v4, NOT .nc)
-    return T.ptx.ld.global_.v4.b32(dst[0], dst[1], dst[2], dst[3], ptr)
-
-
-def _ld_global_s32(buffer, index):
-    out = T.alloc_local((1,), "int32")
-    T.evaluate(T.ptx.ld.global_.s32(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _ld_global_s64(buffer, index):
-    out = T.alloc_local((1,), "int64")
-    T.evaluate(T.ptx.ld.global_.s64(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _ld_global_f32(buffer, index):
-    out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.ld.global_.f32(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _ld_global_bf16(buffer, index):
-    bits = T.alloc_local((1,), "uint16")
-    T.evaluate(T.ptx.ld.global_.b16(bits[0], buffer.ptr_to([index])))
-    return T.reinterpret("bfloat16", bits[0])
-
-
-def _st_global_bf16(buffer, index, value):
-    return T.ptx.st.global_.b16(buffer.ptr_to([index]), T.reinterpret("uint16", value))
-
-
-def _ld_shared_f32(buffer, index):
-    out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.ld.shared.f32(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _ld_shared_v4_f32(dst, dst_offset, buffer, index):
-    return T.ptx.ld.shared.v4.f32(
-        dst[dst_offset],
-        dst[dst_offset + 1],
-        dst[dst_offset + 2],
-        dst[dst_offset + 3],
-        buffer.ptr_to([index]),
-    )
-
-
-def _ld_shared_bf16(buffer, index):
-    bits = T.alloc_local((1,), "uint16")
-    T.evaluate(T.ptx.ld.shared.b16(bits[0], buffer.ptr_to([index])))
-    return T.reinterpret("bfloat16", bits[0])
-
-
-def _st_shared_f32(buffer, index, value):
-    return T.ptx.st.shared.f32(buffer.ptr_to([index]), value)
-
-
-def _tanh_approx(x):
-    # tanh.approx.f32 (prep-role sigmoid)
-    result = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.tanh.approx.f32(result[0], x))
-    return result[0]
-
-
-def _expf(x):
-    # .cu:1317 __expf -> ex2.approx.ftz.f32(x * log2(e)) under -use_fast_math
-    _out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.ex2.approx.ftz.f32(_out[0], x * T.float32(1.4426950408889634)))
-    return _out[0]
-
-
-def _rsqrtf(x):
-    # CUDA's fast-math rsqrtf lowers to this exact PTX form.
-    result = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.rsqrt.approx.ftz.f32(result[0], x))
-    return result[0]
-
-
-def _fmaf_rn(a, b, c):
-    result = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.fma.rn.f32(result[0], a, b, c))
-    return result[0]
+# The three chains this kernel issues, by .cu block.
+_MMA_QK_8STEP = dict(b_offsets=(0, 2, 4, 6, 256, 258, 260, 262), dhi=0x40004040, idesc=134743184)
+_MMA_INV_2STEP = dict(b_offsets=(0, 64), dhi=0xC0004010, idesc=134743184)
+_MMA_FINAL_2STEP = dict(b_offsets=(0, 128), dhi=0x40004040, idesc=136905872)
 
 
 def _tensormap_acquire(tmap):
-    return T.ptx.fence.proxy.tensormap__generic.acquire.gpu(tmap)
-
-
-def _ld_shared_b32(smem_raw, smem, addr):
-    # ld.shared.b32
-    _out = T.alloc_local((1,), "uint32")
-    T.evaluate(T.ptx.ld.shared.b32(_out[0], smem_raw.ptr_to([addr - smem])))
-    return _out[0]
-
-
-def _ld_shared_v4(smem_raw, smem, dst, addr):
-    # ld.shared.v4.b32 (dst: 4-elem uint32 local array)
-    return T.ptx.ld.shared.v4.b32(dst[0], dst[1], dst[2], dst[3], smem_raw.ptr_to([addr - smem]))
-
-
-def _st_shared_b32(smem_raw, smem, addr, val):
-    # st.shared.b32
-    return T.ptx.st.shared.b32(smem_raw.ptr_to([addr - smem]), val)
+    return K.ptx.fence.proxy.tensormap__generic.acquire.gpu(tmap)
 
 
 def _mma_m16n8k16_bf16_zero(acc, a, b):
     # mma.sync m16n8k16 bf16, zero C (acc/a/b: local arrays) -> native register-fragment
     # form; the explicit zero C slots feed "f"(0.f) == inline's 0f00000000 literals
-    return T.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    return K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
         *[acc[i] for i in range(4)],
         *[a[i] for i in range(4)],
         *[b[i] for i in range(2)],
@@ -308,7 +136,7 @@ def _mma_m16n8k16_bf16_zero(acc, a, b):
 
 def _mma_m16n8k16_bf16_acc(acc, a, b):
     # mma.sync m16n8k16 bf16, accumulating C (C aliases acc == inline "+f" tied regs)
-    return T.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    return K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
         *[acc[i] for i in range(4)],
         *[a[i] for i in range(4)],
         *[b[i] for i in range(2)],
@@ -318,7 +146,7 @@ def _mma_m16n8k16_bf16_acc(acc, a, b):
 
 def _mma_m16n8k8_bf16_zero(acc, a, b):
     # mma.sync m16n8k8 bf16, zero C -> native register-fragment form
-    return T.ptx.mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32(
+    return K.ptx.mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32(
         *[acc[i] for i in range(4)],
         *[a[i] for i in range(2)],
         *[b[i] for i in range(1)],
@@ -328,7 +156,7 @@ def _mma_m16n8k8_bf16_zero(acc, a, b):
 
 def _mma_m16n8k16_bf16_zero_off4(acc, a, b):
     # second zero-C mma writing acc[4..7] with b_frag[2..3] (e.g. .cu:1725-1727)
-    return T.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    return K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
         *[acc[4 + i] for i in range(4)],
         *[a[i] for i in range(4)],
         *[b[2 + i] for i in range(2)],
@@ -338,7 +166,7 @@ def _mma_m16n8k16_bf16_zero_off4(acc, a, b):
 
 def _mma_m16n8k16_bf16_acc_off4(acc, a, b):
     # second accumulating mma writing acc[4..7] with b_frag[2..3]
-    return T.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
+    return K.ptx.mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32(
         *[acc[4 + i] for i in range(4)],
         *[a[i] for i in range(4)],
         *[b[2 + i] for i in range(2)],
@@ -346,132 +174,105 @@ def _mma_m16n8k16_bf16_acc_off4(acc, a, b):
     )
 
 
-def _st_global_v4_u32(ptr, a, b, c, d):
-    # verbatim uint4 store (STG.128 shape) used by the final-state store path
-    return T.ptx.st.global_.v4.b32(ptr, a, b, c, d)
+def _shfl_bfly_f32(value, lane_xor):
+    """``shfl.sync.bfly.b32`` at width 32: clamp/segmask 31, full member mask.
+
+    DPS: the destination pins the warp collective to the call site, so the
+    shuffle is emitted once here rather than re-emitted at every textual use
+    of the returned value.
+    """
+    shfl_bfly = K.local_scalar("uint32")
+    K.ptx.shfl_sync.bfly.b32(
+        shfl_bfly,
+        K.reinterpret("uint32", value),
+        K.cast(lane_xor, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.reinterpret("float32", shfl_bfly)
 
 
-def _mbarrier_wait(smem_raw, smem, mbar_addr, phase):
-    # .cu:158-171 -> native T.cuda.mbarrier_wait: same LAB_WAIT spin loop with
+def _shfl_idx_f32(value, source_lane):
+    """``shfl.sync.idx.b32`` at width 32: clamp/segmask 31, full member mask."""
+    shfl_idx = K.local_scalar("uint32")
+    K.ptx.shfl_sync.idx.b32(
+        shfl_idx,
+        K.reinterpret("uint32", value),
+        K.cast(source_lane, "uint32"),
+        K.uint32(31),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.reinterpret("float32", shfl_idx)
+
+
+def _mbarrier_wait(barrier, stage, phase):
+    # .cu:158-171 -> native K.cuda.mbarrier_wait: same LAB_WAIT spin loop with
     # ticks=0x989680; mbarrier.try_wait.parity.shared::cta defaults to .acquire.cta
     # (the token/cluster wait variants at .cu:130-156,173-198 had no call sites)
-    return T.cuda.mbarrier_wait(smem_raw.ptr_to([mbar_addr - smem]), phase)
+    return K.cuda.mbarrier_wait(barrier.ptr_to([stage]), phase ^ barrier.phase_offset)
 
 
 def _elect_commit(mbar_addr):
     # .cu:239-248
-    leader = T.cuda.elect_sync()
-    return T.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
+    leader = K.cuda.elect_sync()
+    return K.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
         mbar_addr, pred=leader
     )
 
 
-def _mbarrier_arrive(smem_raw, smem, mbar_addr):
+def _elect_commit2(barrier_a, barrier_b, stage):
+    # .cu:239-248 two-barrier form: one elect_sync predicating both commits.
+    leader = K.cuda.elect_sync()
+    for _bar in (barrier_a, barrier_b):
+        K.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
+            _bar.ptr_to([stage]), pred=leader
+        )
+
+
+def _mbarrier_arrive(barrier, stage):
     # .cu:251-255 -> native; emits the same mbarrier.arrive.release.cta.shared::cta.b64 _, [addr]
-    return T.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
-        smem_raw.ptr_to([mbar_addr - smem]), T.uint32(1)
-    )
+    return K.ptx.mbarrier.arrive.release.cta.shared__cta.b64(barrier.ptr_to([stage]), K.uint32(1))
 
 
-def _mbarrier_arrive_expect_tx(mbar_addr, bytes_):
+def _mbarrier_arrive_expect_tx(barrier, stage, bytes_):
     # .cu:258-262
-    return T.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(mbar_addr, T.uint32(bytes_))
-
-
-def _tmem_ld_x32(dst, tmem_addr):
-    # .cu:265-281
-    return T.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
-        *[dst[j] for j in range(32)], T.cast(tmem_addr, "uint32")
+    return K.ptx.mbarrier.arrive.expect_tx.release.cta.shared__cta.b64(
+        barrier.ptr_to([stage]), K.uint32(bytes_)
     )
-
-
-def _tmem_st_x32_f32(tmem_addr, src):
-    # .cu:297-313
-    return T.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
-        T.cast(tmem_addr, "uint32"), *[src[j] for j in range(32)]
-    )
-
-
-def _approx_exp2(x):
-    # .cu:326-330
-    _out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.ex2.approx.ftz.f32(_out[0], x))
-    return _out[0]
-
-
-def _mul_f32x2_inplace(a, b):
-    # .cu:342-345
-    _out = T.alloc_local((1,), "uint64")
-    T.evaluate(T.ptx.mul.rn.ftz.f32x2(_out[0], a, b))
-    return _out[0]
-
-
-def _sub_f32x2_inplace(a, b):
-    # .cu:352-355
-    _out = T.alloc_local((1,), "uint64")
-    T.evaluate(T.ptx.sub.rn.ftz.f32x2(_out[0], a, b))
-    return _out[0]
 
 
 def _fence_async_shared():
     # .cu:416-418
-    return T.ptx.fence.proxy.async_.shared__cta()
+    return K.ptx.fence.proxy.async_.shared__cta()
 
 
-def _tma_3d_gmem2smem(smem_raw, smem, dst, tmap_ptr, x, y, z, mbar_addr):
+def _tma_3d_gmem2smem(smem_raw, smem, dst, tmap_ptr, x, y, z, mbar_ptr):
     # .cu:430-438 (raw tensor-map pointer form) -> native; on sm_100 the wrapper emits
     # the explicit default .cta_group::1 suffix for the unqualified inline instruction
-    return T.ptx[_TMA_G2S_CTA.format(dim=3)](
-        smem_raw.ptr_to([dst - smem]),
-        T.reinterpret("uint64", tmap_ptr),
-        x,
-        y,
-        z,
-        smem_raw.ptr_to([mbar_addr - smem]),
+    return K.ptx[_TMA_G2S_CTA.format(dim=3)](
+        smem_raw.ptr_to([dst - smem]), K.reinterpret("uint64", tmap_ptr), x, y, z, mbar_ptr
     )
 
 
-def _tma_2d_gmem2smem(smem_raw, smem, dst, tmap_ptr, x, y, mbar_addr):
+def _tma_2d_gmem2smem(smem_raw, smem, dst, tmap_ptr, x, y, mbar_ptr):
     # .cu:441-449 -> native (see _tma_3d_gmem2smem note)
-    return T.ptx[_TMA_G2S_CTA.format(dim=2)](
-        smem_raw.ptr_to([dst - smem]),
-        T.reinterpret("uint64", tmap_ptr),
-        x,
-        y,
-        smem_raw.ptr_to([mbar_addr - smem]),
+    return K.ptx[_TMA_G2S_CTA.format(dim=2)](
+        smem_raw.ptr_to([dst - smem]), K.reinterpret("uint64", tmap_ptr), x, y, mbar_ptr
     )
 
 
-def _tma_4d_gmem2smem(smem_raw, smem, dst, tmap_ptr, x, y, z, w, mbar_addr):
+def _tma_4d_gmem2smem(smem_raw, smem, dst, tmap_ptr, x, y, z, w, mbar_ptr):
     # .cu:452-460 -> native (see _tma_3d_gmem2smem note)
-    return T.ptx[_TMA_G2S_CTA.format(dim=4)](
-        smem_raw.ptr_to([dst - smem]),
-        T.reinterpret("uint64", tmap_ptr),
-        x,
-        y,
-        z,
-        w,
-        smem_raw.ptr_to([mbar_addr - smem]),
+    return K.ptx[_TMA_G2S_CTA.format(dim=4)](
+        smem_raw.ptr_to([dst - smem]), K.reinterpret("uint64", tmap_ptr), x, y, z, w, mbar_ptr
     )
 
 
 def _tma_store_4d(smem_raw, smem, tmap, x, y, z, w, smem_addr):
     # .cu:463-469 -> native s2g (cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group)
-    return T.ptx[_TMA_S2G.format(dim=4)](
-        T.reinterpret("uint64", tmap), x, y, z, w, smem_raw.ptr_to([smem_addr - smem])
+    return K.ptx[_TMA_S2G.format(dim=4)](
+        K.reinterpret("uint64", tmap), x, y, z, w, smem_raw.ptr_to([smem_addr - smem])
     )
-
-
-def _tmem_st_x8_u32(addr, src):
-    # .cu:480-487
-    return T.ptx["tcgen05.st.sync.aligned.32x32b.x8.b32"](
-        T.cast(addr, "uint32"), *[src[j] for j in range(8)]
-    )
-
-
-def _make_warp_uniform(val):
-    # .cu:490-495
-    return T.cuda._shfl_sync(T.uint32(0xFFFFFFFF), val, 0, 32)
 
 
 @dataclass
@@ -903,2501 +704,1803 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-@T.jit
-def _kernel(
-    q: T.Buffer((total_tokens * h * D_HEAD,), "bfloat16"),
-    k: T.Buffer((total_tokens * h * D_HEAD,), "bfloat16"),
-    v: T.Buffer((total_tokens * h * D_HEAD,), "bfloat16"),
-    g: T.Buffer((total_tokens * h * D_HEAD,), "bfloat16"),
-    beta: T.Buffer((total_tokens * h,), "bfloat16"),
-    beta_tma: T.Buffer((beta_tma_tokens, beta_tma_heads), "bfloat16"),
-    A_log: T.Buffer((h,), "float32"),
-    dt_bias: T.Buffer((h * D_HEAD,), "float32"),
-    cu_seqlens: T.Buffer((num_seqs + 1,), "int64"),
-    seq_order: T.Buffer((num_seqs,), "int32"),
-    initial_state: T.Buffer((num_seqs * h * D_HEAD * D_HEAD,), "bfloat16"),
-    out: T.Buffer((total_tokens * h * D_HEAD,), "bfloat16"),
-    final_state: T.Buffer((num_seqs * h * D_HEAD * D_HEAD,), "bfloat16"),
-    descriptor_storage: T.Buffer((768,), "uint8"),
-    *,
-    total_tokens: T.constexpr,
-    h: T.constexpr,
-    num_seqs: T.constexpr,
-    beta_tma_tokens: T.constexpr,
-    beta_tma_heads: T.constexpr,
-    scale: T.constexpr,
-    lower_bound: T.constexpr,
-    use_initial_state: T.constexpr,
-    store_final_state: T.constexpr,
-):
-    T.device_entry()
-    T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1})
-    # CUDA_TRANSCRIBE_START: kernel_flashkda_bf16_fused_m128,
-    # flashkda_bf16_fused_m128.cu:504 (tensor-map acquire fences), then source
-    # order. Grid = num_seqs * h CTAs, 1024 threads, SMEM_TOTAL dynamic smem.
-    block_idx = T.cta_id([num_seqs * h])
-    thread_idx = T.thread_id([THREADS])
-    T.warpgroup_id([THREADS // 128])
-    T.warp_id_in_wg([4])
-    T.lane_id([32])
-    T.thread_id_in_wg([128])
-
-    pool = T.SMEMPool()
-    smem_raw = pool.alloc((SMEM_TOTAL,), "uint8", align=1024)
-    tmem_addr_storage = T.decl_buffer(
-        (1,),
-        "int32",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_TMEM_ADDR_STORAGE_OFF,
-        align=4,
-    )
-    smem_g_raw_all = T.decl_buffer(
-        (SMEM_SMEM_G_RAW_ALL_STAGE_BYTES // 2,),
-        "bfloat16",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_SMEM_G_RAW_ALL_OFF,
-        align=1024,
-    )
-    smem_v_all = T.decl_buffer(
-        (SMEM_SMEM_V_ALL_STAGE_BYTES // 2,),
-        "bfloat16",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_SMEM_V_ALL_OFF,
-        align=1024,
-    )
-    smem_gate_all = T.decl_buffer(
-        (SMEM_SMEM_GATE_ALL_STAGE_BYTES // 4,),
-        "float32",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_SMEM_GATE_ALL_OFF,
-        align=1024,
-    )
-    smem_gt_all = T.decl_buffer(
-        (SMEM_SMEM_GT_ALL_STAGE_BYTES // 4,),
-        "float32",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_SMEM_GT_ALL_OFF,
-        align=1024,
-    )
-    smem_gt_prefix_all = T.decl_buffer(
-        (SMEM_SMEM_GT_PREFIX_ALL_STAGE_BYTES // 4,),
-        "float32",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_SMEM_GT_PREFIX_ALL_OFF,
-        align=1024,
-    )
-    smem_restore_factor_all = T.decl_buffer(
-        (SMEM_SMEM_RESTORE_FACTOR_ALL_STAGE_BYTES // 4,),
-        "float32",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_SMEM_RESTORE_FACTOR_ALL_OFF,
-        align=1024,
-    )
-    smem_prep_beta_all = T.decl_buffer(
-        (SMEM_SMEM_PREP_BETA_ALL_STAGE_BYTES // 4,),
-        "float32",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_SMEM_PREP_BETA_ALL_OFF,
-        align=1024,
-    )
-    smem_gate_rate_all = T.decl_buffer(
-        (SMEM_SMEM_GATE_RATE_ALL_STAGE_BYTES // 4,),
-        "float32",
-        data=smem_raw.data,
-        scope="shared.dyn",
-        byte_offset=SMEM_SMEM_GATE_RATE_ALL_OFF,
-        align=1024,
-    )
-    pool.commit()
-
-    # Kernel TMA descriptor pointers (descriptor_storage slots, .cu:501 ABI).
-    q_tma = descriptor_storage.ptr_to([TMA_SLOT_Q])
-    k_tma = descriptor_storage.ptr_to([TMA_SLOT_K])
-    v_tma = descriptor_storage.ptr_to([TMA_SLOT_V])
-    g_tma = descriptor_storage.ptr_to([TMA_SLOT_G])
-    beta_tma_tmap = descriptor_storage.ptr_to([TMA_SLOT_BETA])
-    out_tma = descriptor_storage.ptr_to([TMA_SLOT_OUT])
-
-    # .cu:504-521 (FLASHINFER INTEGRATION: acquire global tensor maps).
-    if thread_idx == 0:
-        _tensormap_acquire(q_tma)
-        _tensormap_acquire(k_tma)
-        _tensormap_acquire(v_tma)
-        _tensormap_acquire(g_tma)
-        _tensormap_acquire(beta_tma_tmap)
-        _tensormap_acquire(out_tma)
-    T.cuda.cta_sync()  # .cu:520 __syncthreads()
-
-    # .cu:522-524
-    tid: T.let = thread_idx
-    warp = _make_warp_uniform(T.cast(tid, "uint32") // T.uint32(32))
-    lane: T.let = tid % 32
-    # .cu:526-528
-    smem: T.uint32 = T.cuda.cvta_generic_to_shared(T.address_of(smem_raw[0]))
-    # .cu:530-531
-    bid: T.let = block_idx
-    num_bids: T.let = num_seqs * h
-
-    # .cu:533-577 Kernel setup ops (smem aliases; int addresses).
-    smem_qd_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_QD_OFF
-    smem_g_raw_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_G_RAW_OFF
-    smem_g_raw_all_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_G_RAW_ALL_OFF
-    smem_kd_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_KD_OFF
-    smem_q_raw_prefetch_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_Q_RAW_PREFETCH_OFF
-    smem_final_trans_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_FINAL_TRANS_OFF
-    smem_kr_trans_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_KR_TRANS_OFF
-    smem_mqk_trans_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_MQK_TRANS_OFF
-    smem_inv_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_INV_OFF
-    smem_v_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_V_OFF
-    smem_ki_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_KI_OFF
-    smem_gate_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_GATE_OFF
-    smem_beta_raw_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_BETA_RAW_OFF
-    smem_inv_work_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_INV_WORK_OFF
-    smem_out_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_OUT_OFF
-    smem_restore_factor_all_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_RESTORE_FACTOR_ALL_OFF
-    smem_gt_prefix_all_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_GT_PREFIX_ALL_OFF
-    smem_gt_all_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_GT_ALL_OFF
-    smem_prep_beta_all_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_PREP_BETA_ALL_OFF
-    smem_gate_rate_all_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_GATE_RATE_ALL_OFF
-    smem_v_all_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_V_ALL_OFF
-    smem_gate_all_addr: T.int32 = T.cast(smem, "int32") + SMEM_SMEM_GATE_ALL_OFF
-
-    # .cu:579-682 Mbarrier init (17 groups, 77 barriers at smem_raw[0..616)).
-    if warp == 0:
-        leader = T.cuda.elect_sync()
-        if leader:
-            # qk_full: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([0]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([8]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([16]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([24]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([32]), T.uint32(1))
-            # gate_raw_full: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([40]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([48]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([56]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([64]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([72]), T.uint32(1))
-            # qk_raw_full: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([80]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([88]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([96]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([104]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([112]), T.uint32(1))
-            # v_full: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([120]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([128]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([136]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([144]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([152]), T.uint32(1))
-            # v_free: 5 barriers, init_count=4
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([160]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([168]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([176]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([184]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([192]), T.uint32(4))
-            # smem_free: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([200]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([208]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([216]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([224]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([232]), T.uint32(1))
-            # raw_inputs_free: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([240]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([248]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([256]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([264]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([272]), T.uint32(1))
-            # state_inp_ready: 5 barriers, init_count=4
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([280]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([288]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([296]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([304]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([312]), T.uint32(4))
-            # old_out_ready: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([320]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([328]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([336]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([344]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([352]), T.uint32(1))
-            # u_inp_ready: 5 barriers, init_count=4
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([360]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([368]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([376]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([384]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([392]), T.uint32(4))
-            # u2_acc_ready: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([400]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([408]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([416]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([424]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([432]), T.uint32(1))
-            # u2_inp_ready: 5 barriers, init_count=4
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([440]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([448]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([456]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([464]), T.uint32(4))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([472]), T.uint32(4))
-            # final_ready: 5 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([480]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([488]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([496]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([504]), T.uint32(1))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([512]), T.uint32(1))
-            # out_empty: 1 barriers, init_count=1
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([520]), T.uint32(1))
-            # tmem_dealloc_ready: 1 barriers, init_count=2
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([528]), T.uint32(2))
-            # prep_diag_ready: 5 barriers, init_count=2
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([536]), T.uint32(2))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([544]), T.uint32(2))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([552]), T.uint32(2))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([560]), T.uint32(2))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([568]), T.uint32(2))
-            # prep_inv16_ready: 5 barriers, init_count=2
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([576]), T.uint32(2))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([584]), T.uint32(2))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([592]), T.uint32(2))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([600]), T.uint32(2))
-            T.ptx.mbarrier.init.shared.b64(smem_raw.ptr_to([608]), T.uint32(2))
-        T.ptx.fence.mbarrier_init.release.cluster()  # .cu:679 fence.mbarrier_init.release.cluster
-    T.cuda.cta_sync()  # .cu:682 __syncthreads()
-
-    # .cu:684-689 TMEM alloc (256 columns, 256 used).
-    if warp == 0:
-        T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
-            T.address_of(tmem_addr_storage[0]), T.uint32(256)
-        )
-    T.cuda.cta_sync()  # .cu:691 __syncthreads()
-    T.ptx.tcgen05.fence__after_thread_sync()  # .cu:692
-
-    # .cu:694-712 mbarrier group bases + taddr read (volatile int load).
-    mbar_base: T.int32 = T.cast(smem, "int32")
-    taddr: T.int32
-    T.ptx.ld.volatile.shared.s32(taddr, T.address_of(tmem_addr_storage[0]))
-
-    # .cu:714-721 Kernel post-init ops (TMEM column offsets).
-    tmem_tmem_state: T.int32 = taddr + TMEM_TMEM_STATE_OFFSET
-    tmem_tmem_state_inp: T.int32 = taddr + TMEM_TMEM_STATE_INP_OFFSET
-    tmem_tmem_u_acc: T.int32 = taddr + TMEM_TMEM_U_ACC_OFFSET
-    tmem_tmem_u2_inp: T.int32 = taddr + TMEM_TMEM_U2_INP_OFFSET
-    tmem_tmem_u2_acc: T.int32 = taddr + TMEM_TMEM_U2_ACC_OFFSET
-    tmem_tmem_out: T.int32 = taddr + TMEM_TMEM_OUT_OFFSET
-    tmem_tmem_state_out: T.int32 = taddr + TMEM_TMEM_STATE_OUT_OFFSET
-
-    # .cu:723-727 Register redistribution: dec phase first (warps 8-11).
-    if warp >= 8 and warp <= 11:
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(48)
-
-    # ---- Role dispatch (.cu:729-2550); role bodies transcribed in source order.
-    if warp <= 3:
-        # ---- Role: compute (.cu:730-963) ----
-        T.ptx.setmaxnreg.inc.sync.aligned.u32(168)  # .cu:731
-        # .cu:732 compute_main
-        task_idx: T.int32 = bid  # .cu:733
-        seq_idx: T.int32 = _ld_global_s32(seq_order, task_idx // h)  # .cu:734
-        head_idx: T.int32 = task_idx % h  # .cu:735
-        bos: T.int64 = _ld_global_s64(cu_seqlens, seq_idx)  # .cu:736
-        eos: T.int64 = _ld_global_s64(cu_seqlens, seq_idx + 1)  # .cu:737
-        seq_len: T.int32 = T.cast(eos - bos, "int32")  # .cu:738
-        num_chunks: T.int32 = (seq_len + 32 - 1) // 32  # .cu:739
-        warp_in_wg: T.int32 = warp % 4  # .cu:740
-        tmem_row_base: T.int32 = (warp_in_wg * 32) << 16  # .cu:741
-        state_row: T.int32 = warp_in_wg * 32 + lane  # .cu:742
-        warp_id_in_role: T.int32 = warp - 0  # .cu:743
-        compute_local_warp: T.int32 = warp_id_in_role  # .cu:744
-        state_base: T.int64 = (
-            (T.cast(seq_idx, "int64") * T.cast(h, "int64") + T.cast(head_idx, "int64")) * 128
-            + T.cast(state_row, "int64")
-        ) * 128  # .cu:745
-        initial_state_u32 = T.decl_buffer(
-            (num_seqs * h * D_HEAD * D_HEAD // 2,), "uint32", data=initial_state.data
-        )
-        final_state_u32 = T.decl_buffer(
-            (num_seqs * h * D_HEAD * D_HEAD // 2,), "uint32", data=final_state.data
-        )
-        for state_col_block in T.unroll(4):  # .cu:746-822 (#pragma unroll)
-            state_frag: T.f32[32]
-            for _zi in T.unroll(32):  # .cu:749-780
-                state_frag[_zi] = T.float32(0.0)
-            if use_initial_state:  # .cu:781
-                # .cu:783-800: 2x uint4 loads + bf16->f32 shl/and unpack (frag 0-15)
-                for _blk in T.unroll(2):
-                    _vld = T.alloc_local((4,), "uint32", align=16)
-                    _ld_global_v4_u32(
-                        _vld,
-                        initial_state_u32.ptr_to(
-                            [(state_base + state_col_block * 32) // 2 + _blk * 4]
-                        ),
-                    )
-                    for _pair in T.unroll(4):
-                        state_frag[0 + _blk * 8 + _pair * 2] = T.cuda.uint_as_float(
-                            _vld[_pair] << T.uint32(16)
-                        )
-                        state_frag[0 + _blk * 8 + _pair * 2 + 1] = T.cuda.uint_as_float(
-                            _vld[_pair] & T.uint32(0xFFFF0000)
-                        )
-                # .cu:801-819: same at +16 elements (frag 16-31)
-                for _blk in T.unroll(2):
-                    _vld1 = T.alloc_local((4,), "uint32", align=16)
-                    _ld_global_v4_u32(
-                        _vld1,
-                        initial_state_u32.ptr_to(
-                            [(state_base + state_col_block * 32 + 16) // 2 + _blk * 4]
-                        ),
-                    )
-                    for _pair in T.unroll(4):
-                        state_frag[16 + _blk * 8 + _pair * 2] = T.cuda.uint_as_float(
-                            _vld1[_pair] << T.uint32(16)
-                        )
-                        state_frag[16 + _blk * 8 + _pair * 2 + 1] = T.cuda.uint_as_float(
-                            _vld1[_pair] & T.uint32(0xFFFF0000)
-                        )
-            _tmem_st_x32_f32(
-                taddr + 64 + tmem_row_base + state_col_block * 32, state_frag
-            )  # .cu:821
-        T.ptx.tcgen05.wait__st.sync.aligned()  # .cu:823 tcgen05.wait::st.sync.aligned
-        compute_stage: T.uint32 = 0  # .cu:824
-        _phase_qk_full: T.uint32 = 0  # .cu:825
-        _phase_v_full: T.uint32 = 0  # .cu:826
-        _phase_old_out_ready: T.uint32 = 0  # .cu:827
-        _phase_u2_acc_ready: T.uint32 = 0  # .cu:828
-        _phase_final_ready: T.uint32 = 0  # .cu:829
-        for chunk_idx in T.serial(0, num_chunks, unroll=False):  # .cu:830-831 (#pragma unroll 1)
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_QK_FULL_OFF + compute_stage * 8,
-                _phase_qk_full,
-            )  # .cu:832
-            for state_col_block_1 in T.serial(0, 4, unroll=False):  # .cu:833-834 (#pragma unroll 1)
-                state_addr: T.int32 = taddr + 64 + tmem_row_base + state_col_block_1 * 32  # .cu:835
-                _tmem_load_0: T.f32[32]
-                _tmem_ld_x32(_tmem_load_0, state_addr)  # .cu:836-837
-                _tmem_load_0_bf16: T.uint32[16]
-                for _lp in T.unroll(16):  # .cu:839-843
-                    _tmem_load_0_bf16[_lp] = T.cuda.float22bfloat162_rn(
-                        _tmem_load_0[_lp * 2 + 0], _tmem_load_0[_lp * 2 + 1 + 0]
-                    )
-                # .cu:844-848 (inline tcgen05.st x16 of packed bf16 pairs)
-                T.ptx["tcgen05.st.sync.aligned.32x32b.x16.b32"](
-                    T.cast(taddr + tmem_row_base + state_col_block_1 * 16, "uint32"),
-                    *[_tmem_load_0_bf16[_j] for _j in range(16)],
-                )
-                state_scale: T.f32[16]
-                for state_half in T.unroll(2):  # .cu:850-859
-                    for state_vec in T.unroll(4):
-                        _ld_shared_v4_f32(
-                            state_scale,
-                            state_vec * 4,
-                            smem_gt_all,
-                            compute_stage * 10496
-                            + state_col_block_1 * 32
-                            + state_half * 16
-                            + state_vec * 4,
-                        )  # .cu:854
-                    for _ls in T.unroll(8):  # .cu:857-858
-                        _pk = _mul_f32x2_inplace(
-                            T.cuda.make_float2(
-                                _tmem_load_0[state_half * 16 + _ls * 2],
-                                _tmem_load_0[state_half * 16 + _ls * 2 + 1],
-                            ),
-                            T.cuda.make_float2(state_scale[_ls * 2], state_scale[_ls * 2 + 1]),
-                        )
-                        _tmem_load_0[state_half * 16 + _ls * 2] = T.cuda.float2_x(_pk)
-                        _tmem_load_0[state_half * 16 + _ls * 2 + 1] = T.cuda.float2_y(_pk)
-                _tmem_st_x32_f32(state_addr, _tmem_load_0)  # .cu:860
-            T.ptx.tcgen05.wait__st.sync.aligned()  # .cu:862
-            if T.cuda.elect_sync():  # .cu:863-865
-                _mbarrier_arrive(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    mbar_base + MBAR_STATE_INP_READY_OFF + compute_stage * 8,
-                )
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_V_FULL_OFF + compute_stage * 8,
-                _phase_v_full,
-            )  # .cu:866
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_OLD_OUT_READY_OFF + compute_stage * 8,
-                _phase_old_out_ready,
-            )  # .cu:867
-            _tmem_load_1: T.f32[32]
-            _tmem_ld_x32(_tmem_load_1, taddr + 224 + tmem_row_base)  # .cu:868-869
-            for residual_half in T.unroll(2):  # .cu:870-895
-                residual_v: T.f32[16]
-                residual_beta: T.f32[16]
-                for residual_col in T.unroll(16):  # .cu:874-881
-                    token_col: T.int32 = residual_half * 16 + residual_col  # .cu:876
-                    residual_v[residual_col] = T.cuda.bfloat162float(
-                        _ld_shared_bf16(
-                            smem_v_all, compute_stage * 20992 + token_col * 128 + state_row
-                        )
-                    )  # .cu:877-879
-                    residual_beta[residual_col] = _ld_shared_f32(
-                        smem_prep_beta_all, compute_stage * 10496 + token_col
-                    )  # .cu:880
-                for _ls in T.unroll(8):  # .cu:882-884
-                    _pk = _sub_f32x2_inplace(
-                        T.cuda.make_float2(residual_v[_ls * 2], residual_v[_ls * 2 + 1]),
-                        T.cuda.make_float2(
-                            _tmem_load_1[residual_half * 16 + _ls * 2],
-                            _tmem_load_1[residual_half * 16 + _ls * 2 + 1],
-                        ),
-                    )
-                    residual_v[_ls * 2] = T.cuda.float2_x(_pk)
-                    residual_v[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                for _ls in T.unroll(8):  # .cu:885-887
-                    _pk = _mul_f32x2_inplace(
-                        T.cuda.make_float2(residual_v[_ls * 2], residual_v[_ls * 2 + 1]),
-                        T.cuda.make_float2(residual_beta[_ls * 2], residual_beta[_ls * 2 + 1]),
-                    )
-                    residual_v[_ls * 2] = T.cuda.float2_x(_pk)
-                    residual_v[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                residual_v_bf16: T.uint32[8]
-                for _lp in T.unroll(8):  # .cu:888-893
-                    residual_v_bf16[_lp] = T.cuda.float22bfloat162_rn(
-                        residual_v[_lp * 2 + 0], residual_v[_lp * 2 + 1 + 0]
-                    )
-                _tmem_st_x8_u32(
-                    taddr + 224 + tmem_row_base + residual_half * 8, residual_v_bf16
-                )  # .cu:894
-            T.ptx.tcgen05.wait__st.sync.aligned()  # .cu:896
-            if T.cuda.elect_sync():  # .cu:897-900
-                _mbarrier_arrive(
-                    smem_raw, T.cast(smem, "int32"), mbar_base + MBAR_V_FREE_OFF + compute_stage * 8
-                )
-                _mbarrier_arrive(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    mbar_base + MBAR_U_INP_READY_OFF + compute_stage * 8,
-                )
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_U2_ACC_READY_OFF + compute_stage * 8,
-                _phase_u2_acc_ready,
-            )  # .cu:901
-            _tmem_load_2: T.f32[32]
-            _tmem_ld_x32(_tmem_load_2, taddr + tmem_row_base)  # .cu:902-903
-            _tmem_load_2_bf16: T.uint32[16]
-            for _lp in T.unroll(16):  # .cu:904-909
-                _tmem_load_2_bf16[_lp] = T.cuda.float22bfloat162_rn(
-                    _tmem_load_2[_lp * 2 + 0], _tmem_load_2[_lp * 2 + 1 + 0]
-                )
-            # .cu:910-914 (inline tcgen05.st x16)
-            T.ptx["tcgen05.st.sync.aligned.32x32b.x16.b32"](
-                T.cast(taddr + 224 + tmem_row_base, "uint32"),
-                *[_tmem_load_2_bf16[_j] for _j in range(16)],
-            )
-            T.ptx.tcgen05.wait__st.sync.aligned()  # .cu:915
-            if T.cuda.elect_sync():  # .cu:916-918
-                _mbarrier_arrive(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    mbar_base + MBAR_U2_INP_READY_OFF + compute_stage * 8,
-                )
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_FINAL_READY_OFF + compute_stage * 8,
-                _phase_final_ready,
-            )  # .cu:919
-            compute_stage += 1  # .cu:920
-            if compute_stage == 5:  # .cu:921
-                compute_stage = T.uint32(0)
-                _phase_qk_full = _phase_qk_full ^ T.uint32(1)
-                _phase_v_full = _phase_v_full ^ T.uint32(1)
-                _phase_old_out_ready = _phase_old_out_ready ^ T.uint32(1)
-                _phase_u2_acc_ready = _phase_u2_acc_ready ^ T.uint32(1)
-                _phase_final_ready = _phase_final_ready ^ T.uint32(1)
-        if store_final_state:  # .cu:923-955
-            for state_col_block_2 in T.unroll(4):
-                _tmem_load_3: T.f32[32]
-                _tmem_ld_x32(
-                    _tmem_load_3, taddr + 64 + tmem_row_base + state_col_block_2 * 32
-                )  # .cu:926-927
-                for _half2 in T.unroll(2):  # .cu:928-953 (two 16-float groups)
-                    _pk: T.uint32[8]
-                    for _pj in T.unroll(8):
-                        _pk[_pj] = T.cuda.float22bfloat162_rn(
-                            _tmem_load_3[_half2 * 16 + _pj * 2],
-                            _tmem_load_3[_half2 * 16 + _pj * 2 + 1],
-                        )
-                    _st_global_v4_u32(
-                        final_state_u32.ptr_to(
-                            [(state_base + state_col_block_2 * 32 + _half2 * 16) // 2]
-                        ),
-                        _pk[0],
-                        _pk[1],
-                        _pk[2],
-                        _pk[3],
-                    )  # .cu:938/951 first uint4
-                    _st_global_v4_u32(
-                        final_state_u32.ptr_to(
-                            [(state_base + state_col_block_2 * 32 + _half2 * 16) // 2 + 4]
-                        ),
-                        _pk[4],
-                        _pk[5],
-                        _pk[6],
-                        _pk[7],
-                    )  # .cu:939/952 second uint4
-        T.ptx.bar.sync(T.uint32(10), T.uint32(128))  # .cu:956 barrier.sync 10, 128
-        if compute_local_warp == 0:  # .cu:957-961
-            if T.cuda.elect_sync():
-                _mbarrier_arrive(
-                    smem_raw, T.cast(smem, "int32"), mbar_base + MBAR_TMEM_DEALLOC_READY_OFF
-                )
-    elif warp >= 4 and warp <= 7:
-        # ---- Role: epilogue (.cu:964-1090) ----
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(48)  # .cu:965
-        # .cu:966 epilogue_main
-        task_idx_1: T.int32 = bid  # .cu:967
-        seq_idx_1: T.int32 = _ld_global_s32(seq_order, task_idx_1 // h)  # .cu:968
-        head_idx_1: T.int32 = task_idx_1 % h  # .cu:969
-        bos_1: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_1)  # .cu:970
-        eos_1: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_1 + 1)  # .cu:971
-        seq_len_1: T.int32 = T.cast(eos_1 - bos_1, "int32")  # .cu:972
-        num_chunks_1: T.int32 = (seq_len_1 + 32 - 1) // 32  # .cu:973
-        warp_id_in_role_1: T.int32 = warp - 4  # .cu:974
-        epilogue_local_warp: T.int32 = warp_id_in_role_1  # .cu:975
-        warp_in_wg_1: T.int32 = warp % 4  # .cu:976
-        tmem_row_base_1: T.int32 = (warp_in_wg_1 * 32) << 16  # .cu:977
-        state_row_1: T.int32 = warp_in_wg_1 * 32 + lane  # .cu:978
-        epilogue_stage: T.uint32 = 0  # .cu:979
-        output_stage: T.uint32 = 0  # .cu:980
-        _phase_final_ready_1: T.uint32 = 0  # .cu:981
-        for chunk_idx_1 in T.serial(0, num_chunks_1, unroll=False):  # .cu:982-983
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_FINAL_READY_OFF + epilogue_stage * 8,
-                _phase_final_ready_1,
-            )  # .cu:984
-            chunk_is_full: T.int32 = T.if_then_else(
-                seq_len_1 >= (chunk_idx_1 + 1) * 32, 1, 0
-            )  # .cu:985
-            if chunk_is_full != 0:  # .cu:986
-                # .cu:987-993 (inline tcgen05.ld.16x256b.x4, 16 uint32 regs)
-                _tmem_load_4: T.uint32[16]
-                T.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
-                    *[_tmem_load_4[_j] for _j in range(16)],
-                    T.cast(taddr + 192 + tmem_row_base_1, "uint32"),
-                )
-                # .cu:994-1000 (same at TMEM row +16)
-                _tmem_load_5: T.uint32[16]
-                T.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
-                    *[_tmem_load_5[_j] for _j in range(16)],
-                    T.cast(taddr + 192 + tmem_row_base_1 + 1048576, "uint32"),
-                )
-                T.ptx.tcgen05.wait__ld.sync.aligned()  # .cu:1001
-                T.ptx.bar.sync(T.uint32(9), T.uint32(128))  # .cu:1002 barrier.sync 9, 128
-                if epilogue_local_warp == 0:  # .cu:1003-1007
-                    if T.cuda.elect_sync():
-                        _mbarrier_arrive(
-                            smem_raw, T.cast(smem, "int32"), mbar_base + MBAR_OUT_EMPTY_OFF
-                        )
-                if epilogue_local_warp == 0:  # .cu:1008-1012
-                    if chunk_idx_1 >= 2:
-                        T.ptx.cp.async_.bulk.wait_group.read(1)
-                T.ptx.bar.sync(T.uint32(9), T.uint32(128))  # .cu:1013
-                out_stage_addr: T.int32 = (
-                    smem_out_addr + T.cast(output_stage, "int32") * 8192
-                )  # .cu:1014
-                for dim_half in T.unroll(2):  # .cu:1015-1049
-                    out_packed = T.alloc_local((8,), "uint32", align=4)  # .cu:1017
-                    if dim_half == 0:  # .cu:1018-1023
-                        for _lp in T.unroll(8):
-                            out_packed[_lp] = T.cuda.float22bfloat162_rn(
-                                T.cuda.uint_as_float(_tmem_load_4[_lp * 2 + 0]),
-                                T.cuda.uint_as_float(_tmem_load_4[_lp * 2 + 1 + 0]),
-                            )
-                    else:  # .cu:1024-1030
-                        for _lp in T.unroll(8):
-                            out_packed[_lp] = T.cuda.float22bfloat162_rn(
-                                T.cuda.uint_as_float(_tmem_load_5[_lp * 2 + 0]),
-                                T.cuda.uint_as_float(_tmem_load_5[_lp * 2 + 1 + 0]),
-                            )
-                    for token_group in T.unroll(2):  # .cu:1031-1048
-                        mtx_idx: T.int32 = lane // 8  # .cu:1033
-                        row_addr: T.int32 = lane & 7  # .cu:1034
-                        dim_base: T.int32 = (
-                            epilogue_local_warp * 32 + dim_half * 16 + (mtx_idx & 1) * 8
-                        )  # .cu:1035
-                        token_base: T.int32 = token_group * 16 + mtx_idx // 2 * 8  # .cu:1036
-                        token_addr: T.int32 = token_base + row_addr  # .cu:1037
-                        token_pair: T.int32 = token_addr // 2  # .cu:1038
-                        token_parity: T.int32 = token_addr & 1  # .cu:1039
-                        raw_row: T.int32 = token_pair + dim_base // 64 * 16  # .cu:1040
-                        raw_col: T.int32 = (
-                            dim_base & 63 ^ (token_pair & 3) << 4 ^ token_parity << 3
-                        ) + token_parity * 64  # .cu:1041
-                        stsm_offset: T.int32 = (raw_row * 128 + raw_col) * 2  # .cu:1042
-                        pack_base: T.int32 = token_group * 4  # .cu:1043
-                        # .cu:1044-1047 stmatrix.x4.trans
-                        T.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                            smem_raw.ptr_to([T.cast(out_stage_addr, "uint32") - smem + T.cast(stsm_offset, "uint32")]),
-                            out_packed[pack_base],
-                            out_packed[pack_base + 1],
-                            out_packed[pack_base + 2],
-                            out_packed[pack_base + 3],
-                        )  # fmt: skip
-                _fence_async_shared()  # .cu:1050
-                T.ptx.bar.sync(T.uint32(9), T.uint32(128))  # .cu:1051
-                if epilogue_local_warp == 0:  # .cu:1052-1057
-                    if T.cuda.elect_sync():
-                        _tma_store_4d(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            out_tma,
-                            0,
-                            T.cast(bos_1 + T.cast(chunk_idx_1 * 32, "int64"), "int32"),
-                            head_idx_1,
-                            0,
-                            T.cast(smem_out_addr + T.cast(output_stage, "int32") * 8192, "uint32"),
-                        )  # .cu:1054
-                    T.ptx.cp.async_.bulk.commit_group()  # .cu:1056
-                output_stage = output_stage ^ T.uint32(1)  # .cu:1058
-            else:  # .cu:1059-1077 (partial chunk: scalar out stores)
-                _tmem_load_6: T.f32[32]
-                _tmem_ld_x32(_tmem_load_6, taddr + 192 + tmem_row_base_1)  # .cu:1060-1061
-                T.ptx.tcgen05.wait__ld.sync.aligned()  # .cu:1062
-                T.ptx.bar.sync(T.uint32(9), T.uint32(128))  # .cu:1063
-                if epilogue_local_warp == 0:  # .cu:1064-1068
-                    if T.cuda.elect_sync():
-                        _mbarrier_arrive(
-                            smem_raw, T.cast(smem, "int32"), mbar_base + MBAR_OUT_EMPTY_OFF
-                        )
-                for token_col_1 in T.unroll(32):  # .cu:1069-1076
-                    out_token: T.int64 = bos_1 + T.cast(
-                        chunk_idx_1 * 32 + token_col_1, "int64"
-                    )  # .cu:1071
-                    if out_token < eos_1:  # .cu:1072
-                        out_idx: T.int64 = (
-                            out_token * T.cast(h, "int64") + T.cast(head_idx_1, "int64")
-                        ) * 128 + T.cast(state_row_1, "int64")  # .cu:1073
-                        _st_global_bf16(
-                            out, out_idx, T.cast(_tmem_load_6[token_col_1], "bfloat16")
-                        )  # .cu:1074
-            epilogue_stage += 1  # .cu:1078
-            if epilogue_stage == 5:  # .cu:1079
-                epilogue_stage = T.uint32(0)
-                _phase_final_ready_1 = _phase_final_ready_1 ^ T.uint32(1)
-        if epilogue_local_warp == 0:  # .cu:1081-1083
-            T.ptx.cp.async_.bulk.wait_group(0)
-        T.ptx.bar.sync(T.uint32(9), T.uint32(128))  # .cu:1084
-        if epilogue_local_warp == 0:  # .cu:1085-1089
-            if T.cuda.elect_sync():
-                _mbarrier_arrive(
-                    smem_raw, T.cast(smem, "int32"), mbar_base + MBAR_TMEM_DEALLOC_READY_OFF
-                )
-    elif warp == 9:
-        # ---- Role: mma (.cu:1092-1247) ----
-        # .cu:1093 mma_main
-        task_idx_2: T.int32 = bid  # .cu:1094
-        seq_idx_2: T.int32 = _ld_global_s32(seq_order, task_idx_2 // h)  # .cu:1095
-        bos_2: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_2)  # .cu:1096
-        eos_2: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_2 + 1)  # .cu:1097
-        seq_len_2: T.int32 = T.cast(eos_2 - bos_2, "int32")  # .cu:1098
-        num_chunks_2: T.int32 = (seq_len_2 + 32 - 1) // 32  # .cu:1099
-        mma_stage: T.uint32 = 0  # .cu:1100
-        _phase_qk_full_1: T.uint32 = 0  # .cu:1101
-        _phase_state_inp_ready: T.uint32 = 0  # .cu:1102
-        _phase_out_empty_0: T.uint32 = 1  # .cu:1103
-        _phase_u_inp_ready: T.uint32 = 0  # .cu:1104
-        _phase_u2_inp_ready: T.uint32 = 0  # .cu:1105
-        for _chunk_idx in T.serial(0, num_chunks_2, unroll=False):  # .cu:1106-1107
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_QK_FULL_OFF + mma_stage * 8,
-                _phase_qk_full_1,
-            )  # .cu:1108
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_STATE_INP_READY_OFF + mma_stage * 8,
-                _phase_state_inp_ready,
-            )  # .cu:1109
-            _mbarrier_wait(
-                smem_raw, T.cast(smem, "int32"), mbar_base + MBAR_OUT_EMPTY_OFF, _phase_out_empty_0
-            )  # .cu:1110
-            _phase_out_empty_0 = _phase_out_empty_0 ^ T.uint32(1)  # .cu:1111
-            _mma_b_addr_0: T.int32 = smem_qd_addr + T.cast(mma_stage, "int32") * 41984  # .cu:1112
-            _mma_b_lo_0 = _make_warp_uniform(
-                T.cast((_mma_b_addr_0 >> 4) & 0x3FFF, "uint32")
-            )  # .cu:1113
-            _mma_qk_8step(
-                tmem_tmem_out, T.cast(_mma_b_lo_0, "int32"), tmem_tmem_state_inp, 0
-            )  # .cu:1114-1150
-            _mma_b_addr_1: T.int32 = smem_kd_addr + T.cast(mma_stage, "int32") * 41984  # .cu:1151
-            _mma_b_lo_1 = _make_warp_uniform(
-                T.cast((_mma_b_addr_1 >> 4) & 0x3FFF, "uint32")
-            )  # .cu:1152
-            _mma_qk_8step(
-                tmem_tmem_u_acc, T.cast(_mma_b_lo_1, "int32"), tmem_tmem_state_inp, 0
-            )  # .cu:1153-1189
-            # .cu:1190 elect_commit2(old_out_ready + stage*8, raw_inputs_free + stage*8)
-            _leader_1190 = T.cuda.elect_sync()
-            T.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
-                smem_raw.ptr_to(
-                    [(mbar_base + MBAR_OLD_OUT_READY_OFF + mma_stage * 8) - T.cast(smem, "int32")]
-                ),
-                pred=_leader_1190,
-            )
-            T.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
-                smem_raw.ptr_to(
-                    [(mbar_base + MBAR_RAW_INPUTS_FREE_OFF + mma_stage * 8) - T.cast(smem, "int32")]
-                ),
-                pred=_leader_1190,
-            )
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_U_INP_READY_OFF + mma_stage * 8,
-                _phase_u_inp_ready,
-            )  # .cu:1191
-            _mma_b_addr_2: T.int32 = smem_inv_addr + T.cast(mma_stage, "int32") * 41984  # .cu:1192
-            _mma_b_lo_2 = _make_warp_uniform(
-                T.cast((_mma_b_addr_2 >> 4) & 0x3FFF, "uint32")
-            )  # .cu:1193
-            _mma_inv_2step(
-                tmem_tmem_u2_acc, T.cast(_mma_b_lo_2, "int32"), tmem_tmem_u2_inp, 0
-            )  # .cu:1194-1212
-            _elect_commit(
-                smem_raw.ptr_to(
-                    [(mbar_base + MBAR_U2_ACC_READY_OFF + mma_stage * 8) - T.cast(smem, "int32")]
-                )
-            )  # .cu:1213
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_U2_INP_READY_OFF + mma_stage * 8,
-                _phase_u2_inp_ready,
-            )  # .cu:1214
-            _mma_b_addr_3: T.int32 = (
-                smem_final_trans_addr + T.cast(mma_stage, "int32") * 41984
-            )  # .cu:1215
-            _mma_b_lo_3 = _make_warp_uniform(
-                T.cast(((_mma_b_addr_3 >> 4) & 0x3FFF) | 0x1000000, "uint32")
-            )  # .cu:1216
-            _mma_final_2step(
-                tmem_tmem_state_out, T.cast(_mma_b_lo_3, "int32"), tmem_tmem_u2_inp, 1
-            )  # .cu:1217-1235
-            # .cu:1236 elect_commit2(final_ready + stage*8, smem_free + stage*8)
-            _leader_1236 = T.cuda.elect_sync()
-            T.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
-                smem_raw.ptr_to(
-                    [(mbar_base + MBAR_FINAL_READY_OFF + mma_stage * 8) - T.cast(smem, "int32")]
-                ),
-                pred=_leader_1236,
-            )
-            T.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
-                smem_raw.ptr_to(
-                    [(mbar_base + MBAR_SMEM_FREE_OFF + mma_stage * 8) - T.cast(smem, "int32")]
-                ),
-                pred=_leader_1236,
-            )
-            mma_stage += 1  # .cu:1237
-            if mma_stage == 5:  # .cu:1238
-                mma_stage = T.uint32(0)
-                _phase_qk_full_1 = _phase_qk_full_1 ^ T.uint32(1)
-                _phase_state_inp_ready = _phase_state_inp_ready ^ T.uint32(1)
-                _phase_u_inp_ready = _phase_u_inp_ready ^ T.uint32(1)
-                _phase_u2_inp_ready = _phase_u2_inp_ready ^ T.uint32(1)
-        _phase_tmem_dealloc_ready_0: T.uint32 = 0  # .cu:1240
-        _mbarrier_wait(
-            smem_raw,
-            T.cast(smem, "int32"),
-            mbar_base + MBAR_TMEM_DEALLOC_READY_OFF,
-            _phase_tmem_dealloc_ready_0,
-        )  # .cu:1241
-        _phase_tmem_dealloc_ready_0 = _phase_tmem_dealloc_ready_0 ^ T.uint32(1)  # .cu:1242
-        _tmem_dealloc_addr: T.int32  # .cu:1243
-        T.ptx.ld.volatile.shared.s32(_tmem_dealloc_addr, T.address_of(tmem_addr_storage[0]))
-        T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-            T.cast(_tmem_dealloc_addr, "uint32"), T.uint32(256)
-        )  # .cu:1244
-        T.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()  # .cu:1245
-    elif warp == 10:
-        # ---- Role: load (.cu:1248-1296) ----
-        # .cu:1249 load_main
-        task_idx_3: T.int32 = bid  # .cu:1250
-        seq_idx_3: T.int32 = _ld_global_s32(seq_order, task_idx_3 // h)  # .cu:1251
-        head_idx_2: T.int32 = task_idx_3 % h  # .cu:1252
-        bos_3: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_3)  # .cu:1253
-        eos_3: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_3 + 1)  # .cu:1254
-        seq_len_3: T.int32 = T.cast(eos_3 - bos_3, "int32")  # .cu:1255
-        num_chunks_3: T.int32 = (seq_len_3 + 32 - 1) // 32  # .cu:1256
-        load_stage: T.uint32 = 0  # .cu:1257
-        _phase_v_free: T.uint32 = 1  # .cu:1258
-        _phase_qk_full_2: T.uint32 = 0  # .cu:1259
-        for chunk_idx_2 in T.serial(0, num_chunks_3, unroll=False):  # .cu:1260-1261
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_V_FREE_OFF + load_stage * 8,
-                _phase_v_free,
-            )  # .cu:1262
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_QK_FULL_OFF + load_stage * 8,
-                _phase_qk_full_2,
-            )  # .cu:1263
-            chunk_is_full_1: T.int32 = T.if_then_else(
-                seq_len_3 >= (chunk_idx_2 + 1) * 32, 1, 0
-            )  # .cu:1264
-            if T.cuda.elect_sync():  # .cu:1265-1270
-                if chunk_is_full_1 != 0:
-                    _mbarrier_arrive_expect_tx(
-                        smem_raw.ptr_to(
-                            [(mbar_base + MBAR_V_FULL_OFF + load_stage * 8) - T.cast(smem, "int32")]
-                        ),
-                        8192,
-                    )  # .cu:1267
-                    _tma_3d_gmem2smem(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        smem_v_addr + T.cast(load_stage, "int32") * 41984,
-                        v_tma,
-                        0,
-                        head_idx_2,
-                        T.cast(bos_3 + T.cast(chunk_idx_2 * 32, "int64"), "int32"),
-                        mbar_base + MBAR_V_FULL_OFF + load_stage * 8,
-                    )  # .cu:1268
-            if chunk_is_full_1 == 0:  # .cu:1271-1285
-                for v_load_iter in T.unroll(16):  # .cu:1272-1282
-                    v_item: T.int32 = v_load_iter * 32 + lane  # .cu:1274
-                    row: T.int32 = v_item // 16  # .cu:1275
-                    segment: T.int32 = v_item % 16  # .cu:1276
-                    token: T.int64 = bos_3 + T.cast(chunk_idx_2 * 32 + row, "int64")  # .cu:1277
-                    token_valid: T.int32 = T.if_then_else(token < eos_3, 1, 0)  # .cu:1278
-                    v_src: T.int64 = (
-                        token * T.cast(h, "int64") + T.cast(head_idx_2, "int64")
-                    ) * 128 + T.cast(segment * 8, "int64")  # .cu:1279
-                    T.ptx["cp.async.cg.shared.global"](
-                        smem_raw.ptr_to([SMEM_SMEM_V_OFF + T.cast(load_stage, "int32") * 41984 + (row * 128 + segment * 8) * 2]),
-                        v.ptr_to([v_src]),
-                        16,
-                        T.cast(T.if_then_else(token_valid != 0, 16, 0), "uint32"),
-                    )  # .cu:1280-1281  # fmt: skip
-                T.ptx.cp.async_.commit_group()  # .cu:1283
-                T.ptx.cp.async_.wait_group(0)  # .cu:1284
-            T.ptx.bar.sync(T.uint32(8), T.uint32(32))  # .cu:1286 barrier.sync 8, 32
-            if T.cuda.elect_sync():  # .cu:1287-1292
-                if chunk_is_full_1 == 0:
-                    _fence_async_shared()  # .cu:1289
-                    _mbarrier_arrive(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        mbar_base + MBAR_V_FULL_OFF + load_stage * 8,
-                    )  # .cu:1290
-            load_stage += 1  # .cu:1293
-            if load_stage == 5:  # .cu:1294
-                load_stage = T.uint32(0)
-                _phase_v_free = _phase_v_free ^ T.uint32(1)
-                _phase_qk_full_2 = _phase_qk_full_2 ^ T.uint32(1)
-    elif warp >= 12 and warp <= 31:
-        # ---- Role: prep (.cu:1298-2550) ----
-        T.ptx.setmaxnreg.dec.sync.aligned.u32(48)  # .cu:1299
-        # .cu:1300 prep_main
-        task_idx_4: T.int32 = bid  # .cu:1301
-        seq_idx_4: T.int32 = _ld_global_s32(seq_order, task_idx_4 // h)  # .cu:1302
-        head_idx_3: T.int32 = task_idx_4 % h  # .cu:1303
-        bos_4: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_4)  # .cu:1304
-        eos_4: T.int64 = _ld_global_s64(cu_seqlens, seq_idx_4 + 1)  # .cu:1305
-        seq_len_4: T.int32 = T.cast(eos_4 - bos_4, "int32")  # .cu:1306
-        num_chunks_4: T.int32 = (seq_len_4 + 32 - 1) // 32  # .cu:1307
-        instance_id: T.int32 = (warp - 12) // 4  # .cu:1308
-        prep_instance: T.int32 = instance_id  # .cu:1309
-        warp_id_in_role_2: T.int32 = warp - 12  # .cu:1310
-        prep_local_warp: T.int32 = warp_id_in_role_2 - prep_instance * 4  # .cu:1311
-        prep_tid: T.int32 = prep_local_warp * 32 + lane  # .cu:1312
-        num_prep_iters: T.int32 = (num_chunks_4 + 4 - prep_instance) // 5  # .cu:1313
-        prep_stage: T.uint32 = T.cast(prep_instance, "uint32")  # .cu:1314
-        gate_rate_stage_f32: T.int32 = prep_instance * 10496  # .cu:1315
-        if prep_tid == 0:  # .cu:1316-1319
-            a_log_value: T.f32 = _ld_global_f32(A_log, head_idx_3)
-            _st_shared_f32(smem_gate_rate_all, gate_rate_stage_f32, _expf(a_log_value))
-        if prep_instance == 0:  # .cu:1320-1332
-            T.ptx.bar.sync(T.uint32(11), T.uint32(128))
-        elif prep_instance == 1:
-            T.ptx.bar.sync(T.uint32(12), T.uint32(128))
-        else:
-            if prep_instance == 2:
-                T.ptx.bar.sync(T.uint32(13), T.uint32(128))
-            elif prep_instance == 3:
-                T.ptx.bar.sync(T.uint32(14), T.uint32(128))
-            else:
-                T.ptx.bar.sync(T.uint32(15), T.uint32(128))
-        _phase_raw_inputs_free: T.uint32 = 1  # .cu:1333
-        _phase_gate_raw_full: T.uint32 = 0  # .cu:1334
-        _phase_smem_free: T.uint32 = 1  # .cu:1335
-        _phase_qk_raw_full: T.uint32 = 0  # .cu:1336
-        _phase_prep_diag_ready: T.uint32 = 0  # .cu:1337
-        _phase_prep_inv16_ready: T.uint32 = 0  # .cu:1338
-        for prep_iter in T.serial(0, num_prep_iters, unroll=False):  # .cu:1339-1340
-            chunk_idx_3: T.int32 = prep_iter * 5 + prep_instance  # .cu:1341
-            stage_f32: T.int32 = T.cast(prep_stage, "int32") * 10496  # .cu:1342
-            stage_bf16: T.int32 = T.cast(prep_stage, "int32") * 20992  # .cu:1343
-            chunk_is_full_2: T.int32 = T.if_then_else(
-                seq_len_4 >= (chunk_idx_3 + 1) * 32, 1, 0
-            )  # .cu:1344
-            early_beta_value: T.f32 = T.float32(0.0)  # .cu:1345
-            early_gate0: T.f32 = T.float32(0.0)  # .cu:1346
-            if chunk_is_full_2 != 0:  # .cu:1347-1392
-                _mbarrier_wait(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    mbar_base + MBAR_RAW_INPUTS_FREE_OFF + prep_stage * 8,
-                    _phase_raw_inputs_free,
-                )  # .cu:1348
-                if prep_local_warp == 0:  # .cu:1349-1357
-                    if T.cuda.elect_sync():
-                        _mbarrier_arrive_expect_tx(
-                            smem_raw.ptr_to([(mbar_base + MBAR_GATE_RAW_FULL_OFF + prep_stage * 8) - T.cast(smem, "int32")]),
-                            8704,
-                        )  # .cu:1351  # fmt: skip
-                        _tma_3d_gmem2smem(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_g_raw_addr + T.cast(prep_stage, "int32") * 41984,
-                            g_tma,
-                            0,
-                            head_idx_3,
-                            T.cast(bos_4 + T.cast(chunk_idx_3 * 32, "int64"), "int32"),
-                            mbar_base + MBAR_GATE_RAW_FULL_OFF + prep_stage * 8,
-                        )  # .cu:1352
-                        _tma_2d_gmem2smem(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_beta_raw_addr + T.cast(prep_stage, "int32") * 41984,
-                            beta_tma_tmap,
-                            head_idx_3 // 8 * 8,
-                            T.cast(bos_4 + T.cast(chunk_idx_3 * 32, "int64"), "int32"),
-                            mbar_base + MBAR_GATE_RAW_FULL_OFF + prep_stage * 8,
-                        )  # .cu:1353
-                        _mbarrier_arrive_expect_tx(
-                            smem_raw.ptr_to([(mbar_base + MBAR_QK_RAW_FULL_OFF + prep_stage * 8) - T.cast(smem, "int32")]),
-                            16384,
-                        )  # .cu:1354  # fmt: skip
-                        _tma_4d_gmem2smem(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_kd_addr + T.cast(prep_stage, "int32") * 41984,
-                            k_tma,
-                            0,
-                            T.cast(bos_4 + T.cast(chunk_idx_3 * 32, "int64"), "int32"),
-                            head_idx_3,
-                            0,
-                            mbar_base + MBAR_QK_RAW_FULL_OFF + prep_stage * 8,
-                        )  # .cu:1355
-                _mbarrier_wait(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    mbar_base + MBAR_GATE_RAW_FULL_OFF + prep_stage * 8,
-                    _phase_gate_raw_full,
-                )  # .cu:1358
-                if prep_local_warp == 2 and lane < 32:  # .cu:1359-1380
-                    beta_raw_pair = T.alloc_local((1,), "uint32", align=4)  # .cu:1360
-                    beta_raw_pair[0] = _ld_shared_b32(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        smem_beta_raw_addr + T.cast(prep_stage, "int32") * 41984 + lane * 16 + head_idx_3 % 8 // 2 * 4,
-                    )  # .cu:1361  # fmt: skip
-                    beta_raw_pair_fp32: T.f32[2]  # .cu:1362
-                    for _pair in T.unroll(1):  # .cu:1363-1372
-                        beta_raw_pair_fp32[_pair * 2] = T.cuda.uint_as_float(
-                            beta_raw_pair[_pair + 0] << T.uint32(16)
-                        )
-                        beta_raw_pair_fp32[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            beta_raw_pair[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    beta_logit: T.f32 = beta_raw_pair_fp32[0]  # .cu:1373
-                    if head_idx_3 % 2 != 0:  # .cu:1374-1376
-                        beta_logit = beta_raw_pair_fp32[1]
-                    early_beta_value = _tanh_approx(beta_logit * T.float32(0.5)) * T.float32(
-                        0.5
-                    ) + T.float32(0.5)  # .cu:1377-1379
-                if prep_tid < 128:  # .cu:1381-1391
-                    early_gate_rate: T.f32 = _ld_shared_f32(
-                        smem_gate_rate_all, stage_f32
-                    )  # .cu:1382
-                    early_gate_bias: T.f32 = _ld_global_f32(
-                        dt_bias, head_idx_3 * 128 + prep_tid
-                    )  # .cu:1383
-                    early_gate_raw: T.f32 = T.cuda.bfloat162float(
-                        _ld_shared_bf16(smem_g_raw_all, stage_bf16 + prep_tid)
-                    )  # .cu:1384-1385
-                    early_gate_arg: T.f32 = early_gate_rate * (
-                        early_gate_raw + early_gate_bias
-                    )  # .cu:1386
-                    early_gate_sigmoid: T.f32 = _tanh_approx(
-                        early_gate_arg * T.float32(0.5)
-                    ) * T.float32(0.5) + T.float32(0.5)  # .cu:1387-1389
-                    early_gate0 = (
-                        T.float32(lower_bound) * T.float32(1.4426950408889634) * early_gate_sigmoid
-                    )  # .cu:1390
-            _mbarrier_wait(
-                smem_raw,
-                T.cast(smem, "int32"),
-                mbar_base + MBAR_SMEM_FREE_OFF + prep_stage * 8,
-                _phase_smem_free,
-            )  # .cu:1393
-            if chunk_is_full_2 != 0:  # .cu:1394-1400
-                if prep_local_warp == 0:
-                    if T.cuda.elect_sync():
-                        _tma_4d_gmem2smem(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_q_raw_prefetch_addr + T.cast(prep_stage, "int32") * 41984,
-                            q_tma,
-                            0,
-                            T.cast(bos_4 + T.cast(chunk_idx_3 * 32, "int64"), "int32"),
-                            head_idx_3,
-                            0,
-                            mbar_base + MBAR_QK_RAW_FULL_OFF + prep_stage * 8,
-                        )  # .cu:1397
-            if chunk_is_full_2 == 0:  # .cu:1401-1412
-                for gate_load_pass in T.unroll(4):
-                    gate_load_item: T.int32 = gate_load_pass * 128 + prep_tid  # .cu:1404
-                    gate_load_row: T.int32 = gate_load_item // 16  # .cu:1405
-                    gate_load_segment: T.int32 = gate_load_item % 16  # .cu:1406
-                    gate_load_token: T.int64 = bos_4 + T.cast(
-                        chunk_idx_3 * 32 + gate_load_row, "int64"
-                    )  # .cu:1407
-                    gate_load_base: T.int64 = (
-                        gate_load_token * T.cast(h, "int64") + T.cast(head_idx_3, "int64")
-                    ) * 128 + T.cast(gate_load_segment * 8, "int64")  # .cu:1408
-                    T.ptx["cp.async.cg.shared.global"](
-                        smem_raw.ptr_to([SMEM_SMEM_G_RAW_OFF + T.cast(prep_stage, "int32") * 41984 + gate_load_item * 16]),
-                        g.ptr_to([gate_load_base]),
-                        16,
-                        T.cast(T.if_then_else(T.if_then_else(gate_load_token < eos_4, 1, 0) != 0, 16, 0), "uint32"),
-                    )  # .cu:1409-1410  # fmt: skip
-            if chunk_is_full_2 == 0:  # .cu:1413-1429
-                T.ptx.cp.async_.commit_group()  # .cu:1414
-                T.ptx.cp.async_.wait_group(0)  # .cu:1415
-                if prep_instance == 0:
-                    T.ptx.bar.sync(T.uint32(11), T.uint32(128))
-                elif prep_instance == 1:
-                    T.ptx.bar.sync(T.uint32(12), T.uint32(128))
-                else:
-                    if prep_instance == 2:
-                        T.ptx.bar.sync(T.uint32(13), T.uint32(128))
-                    elif prep_instance == 3:
-                        T.ptx.bar.sync(T.uint32(14), T.uint32(128))
-                    else:
-                        T.ptx.bar.sync(T.uint32(15), T.uint32(128))
-            if prep_local_warp == 2 and lane < 32:  # .cu:1430-1442
-                beta_value: T.f32 = early_beta_value  # .cu:1431
-                if chunk_is_full_2 == 0:  # .cu:1432-1440
-                    beta_token: T.int64 = bos_4 + T.cast(chunk_idx_3 * 32 + lane, "int64")
-                    if beta_token < eos_4:
-                        beta_logit_1: T.f32 = T.cuda.bfloat162float(
-                            _ld_global_bf16(
-                                beta, beta_token * T.cast(h, "int64") + T.cast(head_idx_3, "int64")
-                            )
-                        )  # .cu:1435
-                        beta_value = _tanh_approx(beta_logit_1 * T.float32(0.5)) * T.float32(
-                            0.5
-                        ) + T.float32(0.5)  # .cu:1436-1438
-                _st_shared_f32(smem_prep_beta_all, stage_f32 + lane, beta_value)  # .cu:1441
-            if prep_tid < 128:  # .cu:1443-1472
-                gate_col: T.int32 = prep_tid  # .cu:1444
-                gate_rate: T.f32 = _ld_shared_f32(smem_gate_rate_all, stage_f32)  # .cu:1445
-                gate_bias: T.f32 = _ld_global_f32(dt_bias, head_idx_3 * 128 + gate_col)  # .cu:1446
-                prefix_log2: T.f32 = T.float32(0.0)  # .cu:1447
-                for gate_row in T.serial(0, 32):  # .cu:1448-1471
-                    gate_token: T.int64 = bos_4 + T.cast(
-                        chunk_idx_3 * 32 + gate_row, "int64"
-                    )  # .cu:1449
-                    gate_log2: T.f32 = T.float32(0.0)  # .cu:1450
-                    gate_needs_compute: T.int32 = 1  # .cu:1451
-                    if gate_row == 0:  # .cu:1452-1457
-                        if chunk_is_full_2 != 0:
-                            gate_log2 = early_gate0
-                            gate_needs_compute = 0
-                    if gate_needs_compute != 0:  # .cu:1458-1468
-                        if gate_token < eos_4:
-                            gate_raw: T.f32 = T.cuda.bfloat162float(
-                                _ld_shared_bf16(
-                                    smem_g_raw_all, stage_bf16 + gate_row * 128 + gate_col
-                                )
-                            )  # .cu:1460-1461
-                            gate_arg: T.f32 = gate_rate * (gate_raw + gate_bias)  # .cu:1462
-                            gate_sigmoid: T.f32 = _tanh_approx(
-                                gate_arg * T.float32(0.5)
-                            ) * T.float32(0.5) + T.float32(0.5)  # .cu:1463-1465
-                            gate_log2 = (
-                                T.float32(lower_bound)
-                                * T.float32(1.4426950408889634)
-                                * gate_sigmoid
-                            )  # .cu:1466
-                    prefix_log2 += gate_log2  # .cu:1469
-                    _st_shared_f32(
-                        smem_gate_all, stage_f32 + gate_row * 128 + gate_col, prefix_log2
-                    )  # .cu:1470
-            if prep_instance == 0:  # .cu:1473-1485
-                T.ptx.bar.sync(T.uint32(11), T.uint32(128))
-            elif prep_instance == 1:
-                T.ptx.bar.sync(T.uint32(12), T.uint32(128))
-            else:
-                if prep_instance == 2:
-                    T.ptx.bar.sync(T.uint32(13), T.uint32(128))
-                elif prep_instance == 3:
-                    T.ptx.bar.sync(T.uint32(14), T.uint32(128))
-                else:
-                    T.ptx.bar.sync(T.uint32(15), T.uint32(128))
-            if chunk_is_full_2 != 0:  # .cu:1486-1488
-                _mbarrier_wait(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    mbar_base + MBAR_QK_RAW_FULL_OFF + prep_stage * 8,
-                    _phase_qk_raw_full,
-                )
-            if prep_tid < 128:  # .cu:1489-1493
-                total_log2: T.f32 = _ld_shared_f32(
-                    smem_gt_prefix_all, stage_f32 + prep_tid
-                )  # .cu:1490
-                _st_shared_f32(
-                    smem_restore_factor_all,
-                    stage_f32 + prep_tid,
-                    _approx_exp2(
-                        total_log2
-                        - T.float32(lower_bound) * T.float32(1.4426950408889634) * T.float32(16.0)
-                    ),
-                )  # .cu:1491-1492
-            if prep_tid == 0:  # .cu:1494-1497
-                _st_shared_f32(
-                    smem_restore_factor_all,
-                    stage_f32 + 128,
-                    _approx_exp2(
-                        T.float32(lower_bound) * T.float32(1.4426950408889634) * T.float32(16.0)
-                    ),
-                )
-            q_u32 = T.decl_buffer((total_tokens * h * D_HEAD // 2,), "uint32", data=q.data)
-            k_u32 = T.decl_buffer((total_tokens * h * D_HEAD // 2,), "uint32", data=k.data)
-            for work_pass in T.serial(0, 4, unroll=False):  # .cu:1498-1694 (#pragma unroll 1)
-                work_item: T.int32 = work_pass * 128 + prep_tid  # .cu:1500
-                row_1: T.int32 = work_item // 16  # .cu:1501
-                segment_1: T.int32 = work_item % 16  # .cu:1502
-                token_1: T.int64 = bos_4 + T.cast(chunk_idx_3 * 32 + row_1, "int64")  # .cu:1503
-                token_valid_1: T.int32 = T.if_then_else(token_1 < eos_4, 1, 0)  # .cu:1504
-                gmem_base: T.int64 = (
-                    token_1 * T.cast(h, "int64") + T.cast(head_idx_3, "int64")
-                ) * 128 + T.cast(segment_1 * 8, "int64")  # .cu:1505
-                # q/k smem swizzle byte offset (spelled inline at each .cu use site:
-                # 1528, 1547, 1672, 1682, 1692)
-                q_raw_vec: T.f32[8]  # .cu:1506
-                k_raw_vec: T.f32[8]  # .cu:1507
-                for _zi in T.unroll(8):  # .cu:1508-1523
-                    q_raw_vec[_zi] = T.float32(0.0)
-                    k_raw_vec[_zi] = T.float32(0.0)
-                if chunk_is_full_2 != 0:  # .cu:1524-1562
-                    packed = T.alloc_local((4,), "uint32", align=16)  # .cu:1525
-                    _ld_shared_v4(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        packed,
-                        smem_q_raw_prefetch_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
-                    )  # .cu:1526-1528  # fmt: skip
-                    packed_fp32: T.f32[8]  # .cu:1529
-                    for _pair in T.unroll(4):  # .cu:1530-1539
-                        packed_fp32[_pair * 2] = T.cuda.uint_as_float(
-                            packed[_pair + 0] << T.uint32(16)
-                        )
-                        packed_fp32[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            packed[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    for value_idx in T.unroll(8):  # .cu:1540-1543
-                        q_raw_vec[value_idx] = packed_fp32[value_idx]
-                    packed_0 = T.alloc_local((4,), "uint32", align=16)  # .cu:1544
-                    _ld_shared_v4(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        packed_0,
-                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
-                    )  # .cu:1545-1547  # fmt: skip
-                    packed_0_fp32: T.f32[8]  # .cu:1548
-                    for _pair in T.unroll(4):  # .cu:1549-1558
-                        packed_0_fp32[_pair * 2] = T.cuda.uint_as_float(
-                            packed_0[_pair + 0] << T.uint32(16)
-                        )
-                        packed_0_fp32[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            packed_0[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    for value_idx_1 in T.unroll(8):  # .cu:1559-1562
-                        k_raw_vec[value_idx_1] = packed_0_fp32[value_idx_1]
-                elif token_valid_1 != 0:  # .cu:1563-1602
-                    for _blk in T.unroll(1):  # .cu:1564-1582
-                        _vldq = T.alloc_local((4,), "uint32", align=16)
-                        _ld_global_v4_u32(_vldq, q_u32.ptr_to([gmem_base // 2 + _blk * 4]))
-                        for _pair in T.unroll(4):
-                            q_raw_vec[0 + _blk * 8 + _pair * 2] = T.cuda.uint_as_float(
-                                _vldq[_pair] << T.uint32(16)
-                            )
-                            q_raw_vec[0 + _blk * 8 + _pair * 2 + 1] = T.cuda.uint_as_float(
-                                _vldq[_pair] & T.uint32(0xFFFF0000)
-                            )
-                    for _blk in T.unroll(1):  # .cu:1583-1601
-                        _vldk = T.alloc_local((4,), "uint32", align=16)
-                        _ld_global_v4_u32(_vldk, k_u32.ptr_to([gmem_base // 2 + _blk * 4]))
-                        for _pair in T.unroll(4):
-                            k_raw_vec[0 + _blk * 8 + _pair * 2] = T.cuda.uint_as_float(
-                                _vldk[_pair] << T.uint32(16)
-                            )
-                            k_raw_vec[0 + _blk * 8 + _pair * 2 + 1] = T.cuda.uint_as_float(
-                                _vldk[_pair] & T.uint32(0xFFFF0000)
-                            )
-                q_sum: T.f32 = T.float32(0.0)  # .cu:1603
-                k_sum: T.f32 = T.float32(0.0)  # .cu:1604
-                for elem_in_segment in T.serial(0, 8):  # .cu:1605-1612
-                    q_sum = _fmaf_rn(
-                        q_raw_vec[elem_in_segment], q_raw_vec[elem_in_segment], q_sum
-                    )  # .cu:1608
-                    k_sum = _fmaf_rn(
-                        k_raw_vec[elem_in_segment], k_raw_vec[elem_in_segment], k_sum
-                    )  # .cu:1610
-                q_sum += T.cuda._shfl_xor_sync(T.uint32(0xFFFFFFFF), q_sum, 8, 32)  # .cu:1613-1614
-                k_sum += T.cuda._shfl_xor_sync(T.uint32(0xFFFFFFFF), k_sum, 8, 32)  # .cu:1615-1616
-                q_sum += T.cuda._shfl_xor_sync(T.uint32(0xFFFFFFFF), q_sum, 4, 32)  # .cu:1617-1618
-                k_sum += T.cuda._shfl_xor_sync(T.uint32(0xFFFFFFFF), k_sum, 4, 32)  # .cu:1619-1620
-                q_sum += T.cuda._shfl_xor_sync(T.uint32(0xFFFFFFFF), q_sum, 2, 32)  # .cu:1621-1622
-                k_sum += T.cuda._shfl_xor_sync(T.uint32(0xFFFFFFFF), k_sum, 2, 32)  # .cu:1623-1624
-                q_sum += T.cuda._shfl_xor_sync(T.uint32(0xFFFFFFFF), q_sum, 1, 32)  # .cu:1625-1626
-                k_sum += T.cuda._shfl_xor_sync(T.uint32(0xFFFFFFFF), k_sum, 1, 32)  # .cu:1627-1628
-                q_inv: T.f32 = _rsqrtf(q_sum + T.float32(1e-06))  # .cu:1629-1630
-                k_inv: T.f32 = _rsqrtf(k_sum + T.float32(1e-06))  # .cu:1631-1632
-                for _ls in T.unroll(4):  # .cu:1633-1636
-                    _pk = _mul_f32x2_inplace(
-                        T.cuda.make_float2(q_raw_vec[_ls * 2], q_raw_vec[_ls * 2 + 1]),
-                        T.cuda.make_float2(q_inv, q_inv),
-                    )
-                    q_raw_vec[_ls * 2] = T.cuda.float2_x(_pk)
-                    q_raw_vec[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                for _ls in T.unroll(4):  # .cu:1637-1640
-                    _pk = _mul_f32x2_inplace(
-                        T.cuda.make_float2(k_raw_vec[_ls * 2], k_raw_vec[_ls * 2 + 1]),
-                        T.cuda.make_float2(k_inv, k_inv),
-                    )
-                    k_raw_vec[_ls * 2] = T.cuda.float2_x(_pk)
-                    k_raw_vec[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                qd_vec: T.f32[8]  # .cu:1641
-                kd_vec: T.f32[8]  # .cu:1642
-                ki_vec: T.f32[8]  # .cu:1643
-                prefix_vec: T.f32[8]
-                for prefix_vec_idx in T.unroll(2):
-                    _ld_shared_v4_f32(
-                        prefix_vec,
-                        prefix_vec_idx * 4,
-                        smem_gate_all,
-                        stage_f32 + row_1 * 128 + segment_1 * 8 + prefix_vec_idx * 4,
-                    )
-                for elem_in_segment_1 in T.serial(0, 8):  # .cu:1644-1653
-                    col: T.int32 = segment_1 * 8 + elem_in_segment_1  # .cu:1645
-                    prefix: T.f32 = prefix_vec[elem_in_segment_1]  # .cu:1646
-                    common_log2: T.f32 = (
-                        T.float32(lower_bound) * T.float32(1.4426950408889634) * T.float32(16.0)
-                    )  # .cu:1647
-                    decay: T.f32 = _approx_exp2(prefix - common_log2)  # .cu:1648-1649
-                    qd_vec[elem_in_segment_1] = decay  # .cu:1650
-                    kd_vec[elem_in_segment_1] = decay  # .cu:1651
-                    ki_vec[elem_in_segment_1] = T.cuda.fdividef(
-                        k_raw_vec[elem_in_segment_1], decay
-                    )  # .cu:1652 (-use_fast_math: / -> div.approx.f32)
-                for _ls in T.unroll(4):  # .cu:1654-1656
-                    _pk = _mul_f32x2_inplace(
-                        T.cuda.make_float2(qd_vec[_ls * 2], qd_vec[_ls * 2 + 1]),
-                        T.cuda.make_float2(q_raw_vec[_ls * 2], q_raw_vec[_ls * 2 + 1]),
-                    )
-                    qd_vec[_ls * 2] = T.cuda.float2_x(_pk)
-                    qd_vec[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                for _ls in T.unroll(4):  # .cu:1657-1660
-                    _pk = _mul_f32x2_inplace(
-                        T.cuda.make_float2(qd_vec[_ls * 2], qd_vec[_ls * 2 + 1]),
-                        T.cuda.make_float2(T.float32(scale), T.float32(scale)),
-                    )
-                    qd_vec[_ls * 2] = T.cuda.float2_x(_pk)
-                    qd_vec[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                for _ls in T.unroll(4):  # .cu:1661-1663
-                    _pk = _mul_f32x2_inplace(
-                        T.cuda.make_float2(kd_vec[_ls * 2], kd_vec[_ls * 2 + 1]),
-                        T.cuda.make_float2(k_raw_vec[_ls * 2], k_raw_vec[_ls * 2 + 1]),
-                    )
-                    kd_vec[_ls * 2] = T.cuda.float2_x(_pk)
-                    kd_vec[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                packed_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:1664
-                for _lp in T.unroll(4):  # .cu:1665-1669
-                    packed_1[_lp] = T.cuda.float22bfloat162_rn(
-                        qd_vec[_lp * 2 + 0], qd_vec[_lp * 2 + 1 + 0]
-                    )
-                for word in T.unroll(4):  # .cu:1670-1673
-                    _st_shared_b32(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word * 4,
-                        packed_1[word],
-                    )  # fmt: skip
-                packed_0_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:1674
-                for _lp in T.unroll(4):  # .cu:1675-1679
-                    packed_0_1[_lp] = T.cuda.float22bfloat162_rn(
-                        kd_vec[_lp * 2 + 0], kd_vec[_lp * 2 + 1 + 0]
-                    )
-                for word_1 in T.unroll(4):  # .cu:1680-1683
-                    _st_shared_b32(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_1 * 4,
-                        packed_0_1[word_1],
-                    )  # fmt: skip
-                packed_1_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:1684
-                for _lp in T.unroll(4):  # .cu:1685-1689
-                    packed_1_1[_lp] = T.cuda.float22bfloat162_rn(
-                        ki_vec[_lp * 2 + 0], ki_vec[_lp * 2 + 1 + 0]
-                    )
-                for word_2 in T.unroll(4):  # .cu:1690-1693
-                    _st_shared_b32(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 ^ ((segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_2 * 4,
-                        packed_1_1[word_2],
-                    )  # fmt: skip
-            if prep_instance == 0:  # .cu:1695-1707
-                T.ptx.bar.sync(T.uint32(11), T.uint32(128))
-            elif prep_instance == 1:
-                T.ptx.bar.sync(T.uint32(12), T.uint32(128))
-            else:
-                if prep_instance == 2:
-                    T.ptx.bar.sync(T.uint32(13), T.uint32(128))
-                elif prep_instance == 3:
-                    T.ptx.bar.sync(T.uint32(14), T.uint32(128))
-                else:
-                    T.ptx.bar.sync(T.uint32(15), T.uint32(128))
-            pair_row_base: T.int32 = prep_local_warp // 2 * 16  # .cu:1708
-            pair_col_base: T.int32 = prep_local_warp % 2 * 16  # .cu:1709
-            a_frag = T.alloc_local((4,), "uint32", align=4)  # .cu:1710
-            b_frag = T.alloc_local((4,), "uint32", align=4)  # .cu:1711
-            acc = T.alloc_local((8,), "float32", align=4)  # .cu:1712
-            if pair_row_base >= pair_col_base:  # .cu:1713-1990
-                # .cu:1714-1727 chain step 0 (kd a, ki b, 2x zero-C mma)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_zero(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_zero_off4(acc, a_frag, b_frag)
-                # .cu:1728-1741 chain step 1
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                # .cu:1742-1755 chain step 2
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                # .cu:1756-1769 chain step 3
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                # .cu:1770-1783 chain step 4
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                # .cu:1784-1797 chain step 5
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                # .cu:1798-1811 chain step 6
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256 + 256 ^ 6) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                # .cu:1812-1825 chain step 7
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6 ^ 2) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                row0: T.int32 = pair_row_base + lane // 4  # .cu:1826
-                row1: T.int32 = row0 + 8  # .cu:1827
-                col0: T.int32 = pair_col_base + lane % 4 * 2  # .cu:1828
-                beta0: T.f32 = _ld_shared_f32(smem_prep_beta_all, stage_f32 + row0)  # .cu:1829
-                beta1: T.f32 = _ld_shared_f32(smem_prep_beta_all, stage_f32 + row1)  # .cu:1830
-                seed: T.f32[8]  # .cu:1831
-                for _zi in T.unroll(8):  # .cu:1832-1839
-                    seed[_zi] = T.float32(0.0)
-                if row0 > col0:  # .cu:1840-1842
-                    seed[0] = acc[0] * beta0
-                if row0 > col0 + 1:  # .cu:1843-1845
-                    seed[1] = acc[1] * beta0
-                if row1 > col0:  # .cu:1846-1848
-                    seed[2] = acc[2] * beta1
-                if row1 > col0 + 1:  # .cu:1849-1851
-                    seed[3] = acc[3] * beta1
-                if row0 > col0 + 8:  # .cu:1852-1854
-                    seed[4] = acc[4] * beta0
-                if row0 > col0 + 9:  # .cu:1855-1857
-                    seed[5] = acc[5] * beta0
-                if row1 > col0 + 8:  # .cu:1858-1860
-                    seed[6] = acc[6] * beta1
-                if row1 > col0 + 9:  # .cu:1861-1863
-                    seed[7] = acc[7] * beta1
-                seed_packed = T.alloc_local((4,), "uint32", align=4)  # .cu:1864
-                for _lp in T.unroll(4):  # .cu:1865-1869
-                    seed_packed[_lp] = T.cuda.float22bfloat162_rn(
-                        seed[_lp * 2 + 0], seed[_lp * 2 + 1 + 0]
-                    )
-                seed_lane_row: T.int32 = lane % 16  # .cu:1870
-                seed_lane_col: T.int32 = lane // 16 * 8  # .cu:1871
-                byte_off: T.int32 = (pair_row_base + seed_lane_row) * 128 + (
-                    pair_col_base + seed_lane_col
-                ) * 2  # .cu:1872
-                swizzled_off: T.int32 = byte_off ^ ((byte_off >> 7 & 7) << 4)  # .cu:1873
-                seed_addr: T.int32 = (
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off
-                )  # .cu:1874
-                # .cu:1875-1878 stmatrix.x4 (seed into inv_work)
-                T.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    smem_raw.ptr_to([(seed_addr) - T.cast(smem, "int32")]),
-                    seed_packed[0],
-                    seed_packed[1],
-                    seed_packed[2],
-                    seed_packed[3],
-                )
-                # .cu:1879-1990 second chain (qd a-side, ki b-side), same address pattern
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_zero(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_zero_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + ((((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256 + 256 ^ 6) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    a_frag[0],
-                    a_frag[1],
-                    a_frag[2],
-                    a_frag[3],
-                    smem_raw.ptr_to([(smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + ((((lane // 16 // 8 * 256 + (pair_row_base + lane % 16) * 8 + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16) ^ 2 ^ 6 ^ 2 ^ 6) + 256) ^ 2 ^ 6 ^ 2) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    b_frag[0],
-                    b_frag[1],
-                    b_frag[2],
-                    b_frag[3],
-                    smem_raw.ptr_to([(smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (((((((((lane % 16 // 8 // 8 * 256 + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8 + (lane % 16 // 8 % 8 * 16 ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)) // 16) + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256 + 256 ^ 6) + 256 - 256 + 256 ^ 2) - 256 + 256 ^ 6) - 256 + 256 ^ 2) - 256) * 16) - T.cast(smem, "int32")]),
-                )  # fmt: skip
-                _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
-                _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
-            else:  # .cu:1991-2000
-                for _zi in T.unroll(8):
-                    acc[_zi] = T.float32(0.0)
-            row0_1: T.int32 = pair_row_base + lane // 4  # .cu:2001
-            row1_1: T.int32 = row0_1 + 8  # .cu:2002
-            col0_1: T.int32 = pair_col_base + lane % 4 * 2  # .cu:2003
-            mqk: T.f32[8]  # .cu:2004
-            for _zi in T.unroll(8):  # .cu:2005-2012
-                mqk[_zi] = T.float32(0.0)
-            if row0_1 >= col0_1:  # .cu:2013-2015
-                mqk[0] = acc[0]
-            if row0_1 >= col0_1 + 1:  # .cu:2016-2018
-                mqk[1] = acc[1]
-            if row1_1 >= col0_1:  # .cu:2019-2021
-                mqk[2] = acc[2]
-            if row1_1 >= col0_1 + 1:  # .cu:2022-2024
-                mqk[3] = acc[3]
-            if row0_1 >= col0_1 + 8:  # .cu:2025-2027
-                mqk[4] = acc[4]
-            if row0_1 >= col0_1 + 9:  # .cu:2028-2030
-                mqk[5] = acc[5]
-            if row1_1 >= col0_1 + 8:  # .cu:2031-2033
-                mqk[6] = acc[6]
-            if row1_1 >= col0_1 + 9:  # .cu:2034-2036
-                mqk[7] = acc[7]
-            mqk_packed = T.alloc_local((4,), "uint32", align=4)  # .cu:2037
-            for _lp in T.unroll(4):  # .cu:2038-2042
-                mqk_packed[_lp] = T.cuda.float22bfloat162_rn(mqk[_lp * 2 + 0], mqk[_lp * 2 + 1 + 0])
-            for publish_pair in T.unroll(2):  # .cu:2043-2051
-                publish_row: T.int32 = pair_col_base + publish_pair * 8 + (lane & 7)  # .cu:2045
-                publish_col: T.int32 = 128 + pair_row_base + lane // 8 * 8  # .cu:2046
-                _pub_base: T.int32 = (
-                    publish_col // 64 * 4096 + publish_row * 128 + publish_col % 64 * 2
-                )
-                _pub_addr: T.int32 = (
-                    smem_final_trans_addr
-                    + T.cast(prep_stage, "int32") * 41984
-                    + (_pub_base ^ ((_pub_base >> 7 & 7) << 4))
-                )  # .cu:2047
-                # .cu:2048-2050 stmatrix.x2.trans
-                T.ptx.stmatrix.sync.aligned.m8n8.x2.trans.shared.b16(
-                    smem_raw.ptr_to([(_pub_addr) - T.cast(smem, "int32")]),
-                    mqk_packed[publish_pair * 2],
-                    mqk_packed[publish_pair * 2 + 1],
-                )
-            if prep_instance == 0:  # .cu:2052-2064
-                T.ptx.bar.sync(T.uint32(11), T.uint32(128))
-            elif prep_instance == 1:
-                T.ptx.bar.sync(T.uint32(12), T.uint32(128))
-            else:
-                if prep_instance == 2:
-                    T.ptx.bar.sync(T.uint32(13), T.uint32(128))
-                elif prep_instance == 3:
-                    T.ptx.bar.sync(T.uint32(14), T.uint32(128))
-                else:
-                    T.ptx.bar.sync(T.uint32(15), T.uint32(128))
-            if prep_tid < 128:  # .cu:2065-2069
-                total_log2_1: T.f32 = _ld_shared_f32(
-                    smem_gt_prefix_all, stage_f32 + prep_tid
-                )  # .cu:2066
-                _st_shared_f32(
-                    smem_gt_all, stage_f32 + prep_tid, _approx_exp2(total_log2_1)
-                )  # .cu:2067-2068
-            if prep_local_warp >= 2:  # .cu:2070-2187
-                stage_f32_0: T.int32 = T.cast(prep_stage, "int32") * 10496  # .cu:2071
-                restore_scale: T.f32 = _ld_shared_f32(
-                    smem_restore_factor_all, stage_f32_0 + 128
-                )  # .cu:2072
-                restore_factor: T.f32[8]  # .cu:2073
-                restore_segment: T.int32 = lane & 15  # .cu:2074
-                for restore_vec in T.unroll(2):  # .cu:2075-2079
-                    _ld_shared_v4_f32(
-                        restore_factor,
-                        restore_vec * 4,
-                        smem_restore_factor_all,
-                        stage_f32_0 + restore_segment * 8 + restore_vec * 4,
-                    )  # .cu:2078
-                for restore_pass in T.serial(
-                    0, 6, unroll=False
-                ):  # .cu:2080-2081 (#pragma unroll 1)
-                    restore_row: T.int32 = (
-                        8 + (prep_local_warp - 2) * 12 + restore_pass * 2 + (lane >> 4)
-                    )  # .cu:2082
-                    restore_qd_values: T.f32[8]  # .cu:2083
-                    restore_kd_values: T.f32[8]  # .cu:2084
-                    restore_ki_values: T.f32[8]  # .cu:2085
-                    packed_2 = T.alloc_local((4,), "uint32", align=16)  # .cu:2086
-                    _ld_shared_v4(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        packed_2,
-                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)),
-                    )  # .cu:2087-2089  # fmt: skip
-                    packed_fp32_1: T.f32[8]  # .cu:2090
-                    for _pair in T.unroll(4):  # .cu:2091-2100
-                        packed_fp32_1[_pair * 2] = T.cuda.uint_as_float(
-                            packed_2[_pair + 0] << T.uint32(16)
-                        )
-                        packed_fp32_1[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            packed_2[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    for value_idx_2 in T.unroll(8):  # .cu:2101-2104
-                        restore_qd_values[value_idx_2] = packed_fp32_1[value_idx_2]
-                    packed_0_2 = T.alloc_local((4,), "uint32", align=16)  # .cu:2105
-                    _ld_shared_v4(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        packed_0_2,
-                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)),
-                    )  # .cu:2106-2108  # fmt: skip
-                    packed_0_fp32_1: T.f32[8]  # .cu:2109
-                    for _pair in T.unroll(4):  # .cu:2110-2119
-                        packed_0_fp32_1[_pair * 2] = T.cuda.uint_as_float(
-                            packed_0_2[_pair + 0] << T.uint32(16)
-                        )
-                        packed_0_fp32_1[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            packed_0_2[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    for value_idx_3 in T.unroll(8):  # .cu:2120-2123
-                        restore_kd_values[value_idx_3] = packed_0_fp32_1[value_idx_3]
-                    packed_1_2 = T.alloc_local((4,), "uint32", align=16)  # .cu:2124
-                    _ld_shared_v4(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        packed_1_2,
-                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)),
-                    )  # .cu:2125-2127  # fmt: skip
-                    packed_1_fp32: T.f32[8]  # .cu:2128
-                    for _pair in T.unroll(4):  # .cu:2129-2138
-                        packed_1_fp32[_pair * 2] = T.cuda.uint_as_float(
-                            packed_1_2[_pair + 0] << T.uint32(16)
-                        )
-                        packed_1_fp32[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            packed_1_2[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    for value_idx_4 in T.unroll(8):  # .cu:2139-2142
-                        restore_ki_values[value_idx_4] = packed_1_fp32[value_idx_4]
-                    restore_kr_values: T.f32[8]  # .cu:2143
-                    for restore_elem_1 in T.unroll(8):  # .cu:2144-2147
-                        restore_kr_values[restore_elem_1] = (
-                            restore_ki_values[restore_elem_1] * restore_factor[restore_elem_1]
-                        )  # .cu:2146
-                    for _ls in T.unroll(4):  # .cu:2148-2151
-                        _pk = _mul_f32x2_inplace(
-                            T.cuda.make_float2(
-                                restore_qd_values[_ls * 2], restore_qd_values[_ls * 2 + 1]
-                            ),
-                            T.cuda.make_float2(restore_scale, restore_scale),
-                        )
-                        restore_qd_values[_ls * 2] = T.cuda.float2_x(_pk)
-                        restore_qd_values[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                    for _ls in T.unroll(4):  # .cu:2152-2155
-                        _pk = _mul_f32x2_inplace(
-                            T.cuda.make_float2(
-                                restore_kd_values[_ls * 2], restore_kd_values[_ls * 2 + 1]
-                            ),
-                            T.cuda.make_float2(restore_scale, restore_scale),
-                        )
-                        restore_kd_values[_ls * 2] = T.cuda.float2_x(_pk)
-                        restore_kd_values[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                    packed_2_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:2156
-                    for _lp in T.unroll(4):  # .cu:2157-2161
-                        packed_2_1[_lp] = T.cuda.float22bfloat162_rn(
-                            restore_qd_values[_lp * 2 + 0], restore_qd_values[_lp * 2 + 1 + 0]
-                        )
-                    for word_3 in T.unroll(4):  # .cu:2162-2165
-                        _st_shared_b32(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)) + word_3 * 4,
-                            packed_2_1[word_3],
-                        )  # fmt: skip
-                    packed_3 = T.alloc_local((4,), "uint32", align=4)  # .cu:2166
-                    for _lp in T.unroll(4):  # .cu:2167-2171
-                        packed_3[_lp] = T.cuda.float22bfloat162_rn(
-                            restore_kd_values[_lp * 2 + 0], restore_kd_values[_lp * 2 + 1 + 0]
-                        )
-                    for word_4 in T.unroll(4):  # .cu:2172-2175
-                        _st_shared_b32(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)) + word_4 * 4,
-                            packed_3[word_4],
-                        )  # fmt: skip
-                    packed_4 = T.alloc_local((4,), "uint32", align=4)  # .cu:2176
-                    for _lp in T.unroll(4):  # .cu:2177-2181
-                        packed_4[_lp] = T.cuda.float22bfloat162_rn(
-                            restore_kr_values[_lp * 2 + 0], restore_kr_values[_lp * 2 + 1 + 0]
-                        )
-                    for word_5 in T.unroll(4):  # .cu:2182-2185
-                        _st_shared_b32(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_kr_trans_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 ^ ((restore_segment * 8 // 64 * 4096 + restore_row * 128 + restore_segment * 8 % 64 * 2 >> 7 & 7) << 4)) + word_5 * 4,
-                            packed_4[word_5],
-                        )  # fmt: skip
-            if prep_local_warp == 0:  # .cu:2188-2250
-                inverse_row: T.int32 = lane  # .cu:2189
-                diag_block: T.int32 = inverse_row // 8  # .cu:2190
-                lane_in_diag: T.int32 = lane & 7  # .cu:2191
-                inv_row: T.f32[8]  # .cu:2192
-                packed_5 = T.alloc_local((4,), "uint32", align=16)  # .cu:2193
-                byte_off_1: T.int32 = inverse_row * 128 + diag_block * 8 * 2  # .cu:2194
-                swizzled_off_1: T.int32 = byte_off_1 ^ ((byte_off_1 >> 7 & 7) << 4)  # .cu:2195
-                _ld_shared_v4(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    packed_5,
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_1,
-                )  # .cu:2196-2198
-                packed_fp32_2: T.f32[8]  # .cu:2199
-                for _pair in T.unroll(4):  # .cu:2200-2209
-                    packed_fp32_2[_pair * 2] = T.cuda.uint_as_float(
-                        packed_5[_pair + 0] << T.uint32(16)
-                    )
-                    packed_fp32_2[_pair * 2 + 1] = T.cuda.uint_as_float(
-                        packed_5[_pair + 0] & T.uint32(0xFFFF0000)
-                    )
-                for value_idx_5 in T.unroll(8):  # .cu:2210-2213
-                    inv_row[value_idx_5] = packed_fp32_2[value_idx_5]
-                for diag_elem in T.unroll(8):  # .cu:2214-2219
-                    if lane_in_diag == diag_elem:
-                        inv_row[diag_elem] = T.float32(1.0)
-                diag_group_base: T.int32 = lane - lane_in_diag  # .cu:2220
-                row_scale: T.f32 = -inv_row[0]  # .cu:2223 (statically-expanded pivot row 0)
-                if lane_in_diag > 0:  # .cu:2234-2236
-                    inv_row[0] = row_scale
-                row_scale_1: T.f32 = -inv_row[1]  # .cu:2223 (statically-expanded pivot row 1)
-                pivot_lane_1_0: T.int32 = diag_group_base + 1  # .cu:2226
-                pivot_1_0: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[0], pivot_lane_1_0, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 1:  # .cu:2229-2232
-                    inv_row[0] = _fmaf_rn(row_scale_1, pivot_1_0, inv_row[0])  # .cu:2230-2231
-                if lane_in_diag > 1:  # .cu:2234-2236
-                    inv_row[1] = row_scale_1
-                row_scale_2: T.f32 = -inv_row[2]  # .cu:2223 (statically-expanded pivot row 2)
-                pivot_lane_2_0: T.int32 = diag_group_base + 2  # .cu:2226
-                pivot_2_0: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[0], pivot_lane_2_0, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 2:  # .cu:2229-2232
-                    inv_row[0] = _fmaf_rn(row_scale_2, pivot_2_0, inv_row[0])  # .cu:2230-2231
-                pivot_lane_2_1: T.int32 = diag_group_base + 2  # .cu:2226
-                pivot_2_1: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[1], pivot_lane_2_1, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 2:  # .cu:2229-2232
-                    inv_row[1] = _fmaf_rn(row_scale_2, pivot_2_1, inv_row[1])  # .cu:2230-2231
-                if lane_in_diag > 2:  # .cu:2234-2236
-                    inv_row[2] = row_scale_2
-                row_scale_3: T.f32 = -inv_row[3]  # .cu:2223 (statically-expanded pivot row 3)
-                pivot_lane_3_0: T.int32 = diag_group_base + 3  # .cu:2226
-                pivot_3_0: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[0], pivot_lane_3_0, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 3:  # .cu:2229-2232
-                    inv_row[0] = _fmaf_rn(row_scale_3, pivot_3_0, inv_row[0])  # .cu:2230-2231
-                pivot_lane_3_1: T.int32 = diag_group_base + 3  # .cu:2226
-                pivot_3_1: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[1], pivot_lane_3_1, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 3:  # .cu:2229-2232
-                    inv_row[1] = _fmaf_rn(row_scale_3, pivot_3_1, inv_row[1])  # .cu:2230-2231
-                pivot_lane_3_2: T.int32 = diag_group_base + 3  # .cu:2226
-                pivot_3_2: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[2], pivot_lane_3_2, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 3:  # .cu:2229-2232
-                    inv_row[2] = _fmaf_rn(row_scale_3, pivot_3_2, inv_row[2])  # .cu:2230-2231
-                if lane_in_diag > 3:  # .cu:2234-2236
-                    inv_row[3] = row_scale_3
-                row_scale_4: T.f32 = -inv_row[4]  # .cu:2223 (statically-expanded pivot row 4)
-                pivot_lane_4_0: T.int32 = diag_group_base + 4  # .cu:2226
-                pivot_4_0: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[0], pivot_lane_4_0, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 4:  # .cu:2229-2232
-                    inv_row[0] = _fmaf_rn(row_scale_4, pivot_4_0, inv_row[0])  # .cu:2230-2231
-                pivot_lane_4_1: T.int32 = diag_group_base + 4  # .cu:2226
-                pivot_4_1: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[1], pivot_lane_4_1, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 4:  # .cu:2229-2232
-                    inv_row[1] = _fmaf_rn(row_scale_4, pivot_4_1, inv_row[1])  # .cu:2230-2231
-                pivot_lane_4_2: T.int32 = diag_group_base + 4  # .cu:2226
-                pivot_4_2: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[2], pivot_lane_4_2, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 4:  # .cu:2229-2232
-                    inv_row[2] = _fmaf_rn(row_scale_4, pivot_4_2, inv_row[2])  # .cu:2230-2231
-                pivot_lane_4_3: T.int32 = diag_group_base + 4  # .cu:2226
-                pivot_4_3: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[3], pivot_lane_4_3, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 4:  # .cu:2229-2232
-                    inv_row[3] = _fmaf_rn(row_scale_4, pivot_4_3, inv_row[3])  # .cu:2230-2231
-                if lane_in_diag > 4:  # .cu:2234-2236
-                    inv_row[4] = row_scale_4
-                row_scale_5: T.f32 = -inv_row[5]  # .cu:2223 (statically-expanded pivot row 5)
-                pivot_lane_5_0: T.int32 = diag_group_base + 5  # .cu:2226
-                pivot_5_0: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[0], pivot_lane_5_0, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 5:  # .cu:2229-2232
-                    inv_row[0] = _fmaf_rn(row_scale_5, pivot_5_0, inv_row[0])  # .cu:2230-2231
-                pivot_lane_5_1: T.int32 = diag_group_base + 5  # .cu:2226
-                pivot_5_1: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[1], pivot_lane_5_1, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 5:  # .cu:2229-2232
-                    inv_row[1] = _fmaf_rn(row_scale_5, pivot_5_1, inv_row[1])  # .cu:2230-2231
-                pivot_lane_5_2: T.int32 = diag_group_base + 5  # .cu:2226
-                pivot_5_2: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[2], pivot_lane_5_2, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 5:  # .cu:2229-2232
-                    inv_row[2] = _fmaf_rn(row_scale_5, pivot_5_2, inv_row[2])  # .cu:2230-2231
-                pivot_lane_5_3: T.int32 = diag_group_base + 5  # .cu:2226
-                pivot_5_3: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[3], pivot_lane_5_3, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 5:  # .cu:2229-2232
-                    inv_row[3] = _fmaf_rn(row_scale_5, pivot_5_3, inv_row[3])  # .cu:2230-2231
-                pivot_lane_5_4: T.int32 = diag_group_base + 5  # .cu:2226
-                pivot_5_4: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[4], pivot_lane_5_4, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 5:  # .cu:2229-2232
-                    inv_row[4] = _fmaf_rn(row_scale_5, pivot_5_4, inv_row[4])  # .cu:2230-2231
-                if lane_in_diag > 5:  # .cu:2234-2236
-                    inv_row[5] = row_scale_5
-                row_scale_6: T.f32 = -inv_row[6]  # .cu:2223 (statically-expanded pivot row 6)
-                pivot_lane_6_0: T.int32 = diag_group_base + 6  # .cu:2226
-                pivot_6_0: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[0], pivot_lane_6_0, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 6:  # .cu:2229-2232
-                    inv_row[0] = _fmaf_rn(row_scale_6, pivot_6_0, inv_row[0])  # .cu:2230-2231
-                pivot_lane_6_1: T.int32 = diag_group_base + 6  # .cu:2226
-                pivot_6_1: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[1], pivot_lane_6_1, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 6:  # .cu:2229-2232
-                    inv_row[1] = _fmaf_rn(row_scale_6, pivot_6_1, inv_row[1])  # .cu:2230-2231
-                pivot_lane_6_2: T.int32 = diag_group_base + 6  # .cu:2226
-                pivot_6_2: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[2], pivot_lane_6_2, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 6:  # .cu:2229-2232
-                    inv_row[2] = _fmaf_rn(row_scale_6, pivot_6_2, inv_row[2])  # .cu:2230-2231
-                pivot_lane_6_3: T.int32 = diag_group_base + 6  # .cu:2226
-                pivot_6_3: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[3], pivot_lane_6_3, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 6:  # .cu:2229-2232
-                    inv_row[3] = _fmaf_rn(row_scale_6, pivot_6_3, inv_row[3])  # .cu:2230-2231
-                pivot_lane_6_4: T.int32 = diag_group_base + 6  # .cu:2226
-                pivot_6_4: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[4], pivot_lane_6_4, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 6:  # .cu:2229-2232
-                    inv_row[4] = _fmaf_rn(row_scale_6, pivot_6_4, inv_row[4])  # .cu:2230-2231
-                pivot_lane_6_5: T.int32 = diag_group_base + 6  # .cu:2226
-                pivot_6_5: T.f32 = T.cuda._shfl_sync(
-                    T.uint32(0xFFFFFFFF), inv_row[5], pivot_lane_6_5, 32
-                )  # .cu:2227-2228
-                if lane_in_diag > 6:  # .cu:2229-2232
-                    inv_row[5] = _fmaf_rn(row_scale_6, pivot_6_5, inv_row[5])  # .cu:2230-2231
-                if lane_in_diag > 6:  # .cu:2234-2236
-                    inv_row[6] = row_scale_6
-                packed_0_3 = T.alloc_local((4,), "uint32", align=4)  # .cu:2238
-                for _lp in T.unroll(4):  # .cu:2239-2243
-                    packed_0_3[_lp] = T.cuda.float22bfloat162_rn(
-                        inv_row[_lp * 2 + 0], inv_row[_lp * 2 + 1 + 0]
-                    )
-                byte_off_1_1: T.int32 = inverse_row * 128 + diag_block * 8 * 2  # .cu:2244
-                swizzled_off_2: T.int32 = byte_off_1_1 ^ ((byte_off_1_1 >> 7 & 7) << 4)  # .cu:2245
-                for word_6 in T.unroll(4):  # .cu:2246-2249
-                    _st_shared_b32(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_2 + word_6 * 4,
-                        packed_0_3[word_6],
-                    )  # fmt: skip
-            if prep_local_warp < 2:  # .cu:2251-2256
-                if T.cuda.elect_sync():
-                    _mbarrier_arrive(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        mbar_base + MBAR_PREP_DIAG_READY_OFF + prep_stage * 8,
-                    )
-                _mbarrier_wait(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    mbar_base + MBAR_PREP_DIAG_READY_OFF + prep_stage * 8,
-                    _phase_prep_diag_ready,
-                )
-            if prep_local_warp < 2:  # .cu:2257-2322
-                lane_row: T.int32 = lane & 7  # .cu:2258
-                byte_off_2: T.int32 = (prep_local_warp * 16 + 8 + lane_row) * 128 + (
-                    prep_local_warp * 16 + 8
-                ) * 2  # .cu:2259
-                swizzled_off_3: T.int32 = byte_off_2 ^ ((byte_off_2 >> 7 & 7) << 4)  # .cu:2260
-                d_addr: T.int32 = (
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_3
-                )  # .cu:2261
-                byte_off_0: T.int32 = (prep_local_warp * 16 + 8 + lane_row) * 128 + (
-                    prep_local_warp * 16 * 2
-                )  # .cu:2262
-                swizzled_off_1_1: T.int32 = byte_off_0 ^ ((byte_off_0 >> 7 & 7) << 4)  # .cu:2263
-                c_addr: T.int32 = (
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_1_1
-                )  # .cu:2264
-                byte_off_2_1: T.int32 = (prep_local_warp * 16 + lane_row) * 128 + (
-                    prep_local_warp * 16 * 2
-                )  # .cu:2265
-                swizzled_off_3_1: T.int32 = byte_off_2_1 ^ (
-                    (byte_off_2_1 >> 7 & 7) << 4
-                )  # .cu:2266
-                a_addr: T.int32 = (
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_3_1
-                )  # .cu:2267
-                d_frag = T.alloc_local((2,), "uint32", align=4)  # .cu:2268
-                c_frag = T.alloc_local((1,), "uint32", align=4)  # .cu:2269
-                dc_acc = T.alloc_local((4,), "float32", align=4)  # .cu:2270
-                dc_bf16 = T.alloc_local((2,), "uint32", align=4)  # .cu:2271
-                inv_a_frag = T.alloc_local((1,), "uint32", align=4)  # .cu:2272
-                o_acc = T.alloc_local((4,), "float32", align=4)  # .cu:2273
-                o_bf16 = T.alloc_local((2,), "uint32", align=4)  # .cu:2274
-                # .cu:2275-2278 ldmatrix.x1 d_frag[0]
-                T.ptx.ldmatrix.sync.aligned.m8n8.x1.shared.b16(
-                    d_frag[0], smem_raw.ptr_to([(d_addr) - T.cast(smem, "int32")])
-                )
-                # .cu:2279-2282 ldmatrix.x1 d_frag[1] (same address)
-                T.ptx.ldmatrix.sync.aligned.m8n8.x1.shared.b16(
-                    d_frag[1], smem_raw.ptr_to([(d_addr) - T.cast(smem, "int32")])
-                )
-                # .cu:2283-2286 ldmatrix.x1.trans c_frag
-                T.ptx.ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16(
-                    c_frag[0], smem_raw.ptr_to([(c_addr) - T.cast(smem, "int32")])
-                )
-                _mma_m16n8k8_bf16_zero(dc_acc, d_frag, c_frag)  # .cu:2287-2289
-                for _ls in T.unroll(2):  # .cu:2290-2293
-                    _pk = _mul_f32x2_inplace(
-                        T.cuda.make_float2(dc_acc[_ls * 2], dc_acc[_ls * 2 + 1]),
-                        T.cuda.make_float2(T.float32(-1.0), T.float32(-1.0)),
-                    )
-                    dc_acc[_ls * 2] = T.cuda.float2_x(_pk)
-                    dc_acc[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                for _lp in T.unroll(2):  # .cu:2294-2298
-                    dc_bf16[_lp] = T.cuda.float22bfloat162_rn(
-                        dc_acc[_lp * 2 + 0], dc_acc[_lp * 2 + 1 + 0]
-                    )
-                # .cu:2299-2302 ldmatrix.x1.trans inv_a_frag
-                T.ptx.ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16(
-                    inv_a_frag[0], smem_raw.ptr_to([(a_addr) - T.cast(smem, "int32")])
-                )
-                _mma_m16n8k8_bf16_zero(o_acc, dc_bf16, inv_a_frag)  # .cu:2303-2305
-                for _lp in T.unroll(2):  # .cu:2306-2310
-                    o_bf16[_lp] = T.cuda.float22bfloat162_rn(
-                        o_acc[_lp * 2 + 0], o_acc[_lp * 2 + 1 + 0]
-                    )
-                byte_off_4: T.int32 = (prep_local_warp * 16 + 8 + lane_row) * 128 + (
-                    prep_local_warp * 16 * 2
-                )  # .cu:2311
-                swizzled_off_5: T.int32 = byte_off_4 ^ ((byte_off_4 >> 7 & 7) << 4)  # .cu:2312
-                o_addr: T.int32 = (
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_5
-                )  # .cu:2313
-                # .cu:2314-2317 stmatrix.x1
-                T.ptx.stmatrix.sync.aligned.m8n8.x1.shared.b16(
-                    smem_raw.ptr_to([(o_addr) - T.cast(smem, "int32")]), o_bf16[0]
-                )
-                if T.cuda.elect_sync():  # .cu:2318-2320
-                    _mbarrier_arrive(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        mbar_base + MBAR_PREP_INV16_READY_OFF + prep_stage * 8,
-                    )
-                _mbarrier_wait(
-                    smem_raw,
-                    T.cast(smem, "int32"),
-                    mbar_base + MBAR_PREP_INV16_READY_OFF + prep_stage * 8,
-                    _phase_prep_inv16_ready,
-                )  # .cu:2321
-            if prep_local_warp == 0:  # .cu:2323-2404
-                lane_row_1: T.int32 = lane % 16  # .cu:2324
-                lane_col: T.int32 = lane // 16 * 8  # .cu:2325
-                byte_off_3: T.int32 = (16 + lane_row_1) * 128 + (16 + lane_col) * 2  # .cu:2326
-                swizzled_off_4: T.int32 = byte_off_3 ^ ((byte_off_3 >> 7 & 7) << 4)  # .cu:2327
-                d_addr_1: T.int32 = (
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_4
-                )  # .cu:2328
-                byte_off_0_1: T.int32 = (16 + lane_row_1) * 128 + lane_col * 2  # .cu:2329
-                swizzled_off_1_2: T.int32 = byte_off_0_1 ^ (
-                    (byte_off_0_1 >> 7 & 7) << 4
-                )  # .cu:2330
-                c_addr_1: T.int32 = (
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_1_2
-                )  # .cu:2331
-                byte_off_2_2: T.int32 = lane_row_1 * 128 + lane_col * 2  # .cu:2332
-                swizzled_off_3_2: T.int32 = byte_off_2_2 ^ (
-                    (byte_off_2_2 >> 7 & 7) << 4
-                )  # .cu:2333
-                a_addr_1: T.int32 = (
-                    smem_inv_work_addr + T.cast(prep_stage, "int32") * 41984 + swizzled_off_3_2
-                )  # .cu:2334
-                d32_frag = T.alloc_local((4,), "uint32", align=4)  # .cu:2335
-                c32_frag = T.alloc_local((4,), "uint32", align=4)  # .cu:2336
-                dc32_acc = T.alloc_local((8,), "float32", align=4)  # .cu:2337
-                dc32_bf16 = T.alloc_local((4,), "uint32", align=4)  # .cu:2338
-                a32_frag = T.alloc_local((4,), "uint32", align=4)  # .cu:2339
-                o32_acc = T.alloc_local((8,), "float32", align=4)  # .cu:2340
-                o32_bf16 = T.alloc_local((4,), "uint32", align=4)  # .cu:2341
-                zero32_bf16 = T.alloc_local((4,), "uint32", align=4)  # .cu:2342
-                # .cu:2343-2346 ldmatrix.x4 d32
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    d32_frag[0],
-                    d32_frag[1],
-                    d32_frag[2],
-                    d32_frag[3],
-                    smem_raw.ptr_to([(d_addr_1) - T.cast(smem, "int32")]),
-                )
-                _dpb: T.int32 = (
-                    (16 + lane_col) // 16 * 1024 + (16 + lane_row_1) * 32 + (16 + lane_col) % 16 * 2
-                )
-                d_publish_addr: T.int32 = (
-                    smem_inv_addr
-                    + T.cast(prep_stage, "int32") * 41984
-                    + (_dpb ^ ((_dpb >> 7 & 1) << 4))
-                )  # .cu:2347
-                # .cu:2348-2351 stmatrix.x4 d32 publish
-                T.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    smem_raw.ptr_to([(d_publish_addr) - T.cast(smem, "int32")]),
-                    d32_frag[0],
-                    d32_frag[1],
-                    d32_frag[2],
-                    d32_frag[3],
-                )
-                # .cu:2352-2355 ldmatrix.x4.trans c32
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                    c32_frag[0],
-                    c32_frag[1],
-                    c32_frag[2],
-                    c32_frag[3],
-                    smem_raw.ptr_to([(c_addr_1) - T.cast(smem, "int32")]),
-                )
-                _mma_m16n8k16_bf16_zero(dc32_acc, d32_frag, c32_frag)  # .cu:2356-2358
-                _mma_m16n8k16_bf16_zero_off4(dc32_acc, d32_frag, c32_frag)  # .cu:2359-2361
-                for _ls in T.unroll(4):  # .cu:2362-2365
-                    _pk = _mul_f32x2_inplace(
-                        T.cuda.make_float2(dc32_acc[_ls * 2], dc32_acc[_ls * 2 + 1]),
-                        T.cuda.make_float2(T.float32(-1.0), T.float32(-1.0)),
-                    )
-                    dc32_acc[_ls * 2] = T.cuda.float2_x(_pk)
-                    dc32_acc[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                for _lp in T.unroll(4):  # .cu:2366-2370
-                    dc32_bf16[_lp] = T.cuda.float22bfloat162_rn(
-                        dc32_acc[_lp * 2 + 0], dc32_acc[_lp * 2 + 1 + 0]
-                    )
-                # .cu:2371-2374 ldmatrix.x4.trans a32
-                T.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                    a32_frag[0],
-                    a32_frag[1],
-                    a32_frag[2],
-                    a32_frag[3],
-                    smem_raw.ptr_to([(a_addr_1) - T.cast(smem, "int32")]),
-                )
-                _apb: T.int32 = lane_col // 16 * 1024 + lane_row_1 * 32 + lane_col % 16 * 2
-                a_publish_addr: T.int32 = (
-                    smem_inv_addr
-                    + T.cast(prep_stage, "int32") * 41984
-                    + (_apb ^ ((_apb >> 7 & 1) << 4))
-                )  # .cu:2375
-                # .cu:2376-2379 stmatrix.x4.trans a32 publish
-                T.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
-                    smem_raw.ptr_to([(a_publish_addr) - T.cast(smem, "int32")]),
-                    a32_frag[0],
-                    a32_frag[1],
-                    a32_frag[2],
-                    a32_frag[3],
-                )
-                _mma_m16n8k16_bf16_zero(o32_acc, dc32_bf16, a32_frag)  # .cu:2380-2382
-                _mma_m16n8k16_bf16_zero_off4(o32_acc, dc32_bf16, a32_frag)  # .cu:2383-2385
-                for _lp in T.unroll(4):  # .cu:2386-2390
-                    o32_bf16[_lp] = T.cuda.float22bfloat162_rn(
-                        o32_acc[_lp * 2 + 0], o32_acc[_lp * 2 + 1 + 0]
-                    )
-                _opb: T.int32 = lane_col // 16 * 1024 + (16 + lane_row_1) * 32 + lane_col % 16 * 2
-                o_publish_addr: T.int32 = (
-                    smem_inv_addr
-                    + T.cast(prep_stage, "int32") * 41984
-                    + (_opb ^ ((_opb >> 7 & 1) << 4))
-                )  # .cu:2391
-                # .cu:2392-2395 stmatrix.x4 o32 publish
-                T.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    smem_raw.ptr_to([(o_publish_addr) - T.cast(smem, "int32")]),
-                    o32_bf16[0],
-                    o32_bf16[1],
-                    o32_bf16[2],
-                    o32_bf16[3],
-                )
-                for zero_word in T.unroll(4):  # .cu:2396-2399
-                    zero32_bf16[zero_word] = T.uint32(0)
-                _zpb: T.int32 = (
-                    (16 + lane_col) // 16 * 1024 + lane_row_1 * 32 + (16 + lane_col) % 16 * 2
-                )
-                zero_publish_addr: T.int32 = (
-                    smem_inv_addr
-                    + T.cast(prep_stage, "int32") * 41984
-                    + (_zpb ^ ((_zpb >> 7 & 1) << 4))
-                )  # .cu:2400
-                # .cu:2401-2404 stmatrix.x4 zero publish
-                T.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
-                    smem_raw.ptr_to([(zero_publish_addr) - T.cast(smem, "int32")]),
-                    zero32_bf16[0],
-                    zero32_bf16[1],
-                    zero32_bf16[2],
-                    zero32_bf16[3],
-                )
-            elif prep_local_warp == 1:  # .cu:2405-2522
-                stage_f32_0_1: T.int32 = T.cast(prep_stage, "int32") * 10496  # .cu:2406
-                restore_scale_1: T.f32 = _ld_shared_f32(
-                    smem_restore_factor_all, stage_f32_0_1 + 128
-                )  # .cu:2407
-                restore_factor_1: T.f32[8]  # .cu:2408
-                restore_segment_1: T.int32 = lane & 15  # .cu:2409
-                for restore_vec_1 in T.unroll(2):  # .cu:2410-2414
-                    _ld_shared_v4_f32(
-                        restore_factor_1,
-                        restore_vec_1 * 4,
-                        smem_restore_factor_all,
-                        stage_f32_0_1 + restore_segment_1 * 8 + restore_vec_1 * 4,
-                    )  # .cu:2413
-                for restore_pass_1 in T.serial(0, 4, unroll=False):  # .cu:2415-2416
-                    restore_row_1: T.int32 = restore_pass_1 * 2 + (lane >> 4)  # .cu:2417
-                    restore_qd_values_1: T.f32[8]  # .cu:2418
-                    restore_kd_values_1: T.f32[8]  # .cu:2419
-                    restore_ki_values_1: T.f32[8]  # .cu:2420
-                    packed_6 = T.alloc_local((4,), "uint32", align=16)  # .cu:2421
-                    _ld_shared_v4(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        packed_6,
-                        smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
-                    )  # .cu:2422-2424  # fmt: skip
-                    packed_fp32_3: T.f32[8]  # .cu:2425
-                    for _pair in T.unroll(4):  # .cu:2426-2435
-                        packed_fp32_3[_pair * 2] = T.cuda.uint_as_float(
-                            packed_6[_pair + 0] << T.uint32(16)
-                        )
-                        packed_fp32_3[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            packed_6[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    for value_idx_6 in T.unroll(8):  # .cu:2436-2439
-                        restore_qd_values_1[value_idx_6] = packed_fp32_3[value_idx_6]
-                    packed_0_4 = T.alloc_local((4,), "uint32", align=16)  # .cu:2440
-                    _ld_shared_v4(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        packed_0_4,
-                        smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
-                    )  # .cu:2441-2443  # fmt: skip
-                    packed_0_fp32_2: T.f32[8]  # .cu:2444
-                    for _pair in T.unroll(4):  # .cu:2445-2454
-                        packed_0_fp32_2[_pair * 2] = T.cuda.uint_as_float(
-                            packed_0_4[_pair + 0] << T.uint32(16)
-                        )
-                        packed_0_fp32_2[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            packed_0_4[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    for value_idx_7 in T.unroll(8):  # .cu:2455-2458
-                        restore_kd_values_1[value_idx_7] = packed_0_fp32_2[value_idx_7]
-                    packed_1_3 = T.alloc_local((4,), "uint32", align=16)  # .cu:2459
-                    _ld_shared_v4(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        packed_1_3,
-                        smem_ki_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)),
-                    )  # .cu:2460-2462  # fmt: skip
-                    packed_1_fp32_1: T.f32[8]  # .cu:2463
-                    for _pair in T.unroll(4):  # .cu:2464-2473
-                        packed_1_fp32_1[_pair * 2] = T.cuda.uint_as_float(
-                            packed_1_3[_pair + 0] << T.uint32(16)
-                        )
-                        packed_1_fp32_1[_pair * 2 + 1] = T.cuda.uint_as_float(
-                            packed_1_3[_pair + 0] & T.uint32(0xFFFF0000)
-                        )
-                    for value_idx_8 in T.unroll(8):  # .cu:2474-2477
-                        restore_ki_values_1[value_idx_8] = packed_1_fp32_1[value_idx_8]
-                    restore_kr_values_1: T.f32[8]  # .cu:2478
-                    for restore_elem_3 in T.unroll(8):  # .cu:2479-2482
-                        restore_kr_values_1[restore_elem_3] = (
-                            restore_ki_values_1[restore_elem_3] * restore_factor_1[restore_elem_3]
-                        )  # .cu:2481
-                    for _ls in T.unroll(4):  # .cu:2483-2486
-                        _pk = _mul_f32x2_inplace(
-                            T.cuda.make_float2(
-                                restore_qd_values_1[_ls * 2], restore_qd_values_1[_ls * 2 + 1]
-                            ),
-                            T.cuda.make_float2(restore_scale_1, restore_scale_1),
-                        )
-                        restore_qd_values_1[_ls * 2] = T.cuda.float2_x(_pk)
-                        restore_qd_values_1[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                    for _ls in T.unroll(4):  # .cu:2487-2490
-                        _pk = _mul_f32x2_inplace(
-                            T.cuda.make_float2(
-                                restore_kd_values_1[_ls * 2], restore_kd_values_1[_ls * 2 + 1]
-                            ),
-                            T.cuda.make_float2(restore_scale_1, restore_scale_1),
-                        )
-                        restore_kd_values_1[_ls * 2] = T.cuda.float2_x(_pk)
-                        restore_kd_values_1[_ls * 2 + 1] = T.cuda.float2_y(_pk)
-                    packed_2_2 = T.alloc_local((4,), "uint32", align=4)  # .cu:2491
-                    for _lp in T.unroll(4):  # .cu:2492-2496
-                        packed_2_2[_lp] = T.cuda.float22bfloat162_rn(
-                            restore_qd_values_1[_lp * 2 + 0], restore_qd_values_1[_lp * 2 + 1 + 0]
-                        )
-                    for word_7 in T.unroll(4):  # .cu:2497-2500
-                        _st_shared_b32(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_qd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_7 * 4,
-                            packed_2_2[word_7],
-                        )  # fmt: skip
-                    packed_3_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:2501
-                    for _lp in T.unroll(4):  # .cu:2502-2506
-                        packed_3_1[_lp] = T.cuda.float22bfloat162_rn(
-                            restore_kd_values_1[_lp * 2 + 0], restore_kd_values_1[_lp * 2 + 1 + 0]
-                        )
-                    for word_8 in T.unroll(4):  # .cu:2507-2510
-                        _st_shared_b32(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_kd_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_8 * 4,
-                            packed_3_1[word_8],
-                        )  # fmt: skip
-                    packed_4_1 = T.alloc_local((4,), "uint32", align=4)  # .cu:2511
-                    for _lp in T.unroll(4):  # .cu:2512-2516
-                        packed_4_1[_lp] = T.cuda.float22bfloat162_rn(
-                            restore_kr_values_1[_lp * 2 + 0], restore_kr_values_1[_lp * 2 + 1 + 0]
-                        )
-                    for word_9 in T.unroll(4):  # .cu:2517-2520
-                        _st_shared_b32(
-                            smem_raw,
-                            T.cast(smem, "int32"),
-                            smem_kr_trans_addr + T.cast(prep_stage, "int32") * 41984 + (restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 ^ ((restore_segment_1 * 8 // 64 * 4096 + restore_row_1 * 128 + restore_segment_1 * 8 % 64 * 2 >> 7 & 7) << 4)) + word_9 * 4,
-                            packed_4_1[word_9],
-                        )  # fmt: skip
-            _fence_async_shared()  # .cu:2523
-            if prep_instance == 0:  # .cu:2524-2536
-                T.ptx.bar.sync(T.uint32(11), T.uint32(128))
-            elif prep_instance == 1:
-                T.ptx.bar.sync(T.uint32(12), T.uint32(128))
-            else:
-                if prep_instance == 2:
-                    T.ptx.bar.sync(T.uint32(13), T.uint32(128))
-                elif prep_instance == 3:
-                    T.ptx.bar.sync(T.uint32(14), T.uint32(128))
-                else:
-                    T.ptx.bar.sync(T.uint32(15), T.uint32(128))
-            if prep_local_warp == 0:  # .cu:2537-2541
-                if T.cuda.elect_sync():
-                    _mbarrier_arrive(
-                        smem_raw,
-                        T.cast(smem, "int32"),
-                        mbar_base + MBAR_QK_FULL_OFF + prep_stage * 8,
-                    )
-            for _advance in T.serial(0, 5):  # .cu:2542-2545
-                prep_stage += 1
-                if prep_stage == 5:
-                    prep_stage = T.uint32(0)
-                    _phase_raw_inputs_free = _phase_raw_inputs_free ^ T.uint32(1)
-                    _phase_gate_raw_full = _phase_gate_raw_full ^ T.uint32(1)
-                    _phase_smem_free = _phase_smem_free ^ T.uint32(1)
-                    _phase_qk_raw_full = _phase_qk_raw_full ^ T.uint32(1)
-                    _phase_prep_diag_ready = _phase_prep_diag_ready ^ T.uint32(1)
-                    _phase_prep_inv16_ready = _phase_prep_inv16_ready ^ T.uint32(1)
-
-
 def bf16_fused_m128(**kwargs: Any):
     cfg = _cfg(**kwargs)
-    kernel = _kernel.specialize(
-        total_tokens=cfg.total_tokens,
-        h=cfg.num_heads,
-        num_seqs=cfg.num_seqs,
-        beta_tma_tokens=cfg.beta_tma_tokens,
-        beta_tma_heads=cfg.beta_tma_heads,
-        scale=1.0 / math.sqrt(D_HEAD),
-        lower_bound=cfg.lower_bound,
-        use_initial_state=cfg.use_initial_state,
-        store_final_state=cfg.store_final_state,
+    total_tokens = cfg.total_tokens
+    h = cfg.num_heads
+    num_seqs = cfg.num_seqs
+    beta_tma_tokens = cfg.beta_tma_tokens
+    beta_tma_heads = cfg.beta_tma_heads
+    scale = 1.0 / math.sqrt(D_HEAD)
+    lower_bound = cfg.lower_bound
+    use_initial_state = cfg.use_initial_state
+    store_final_state = cfg.store_final_state
+    compute_regs, epilogue_regs, producer_regs_target, prep_regs = (
+        (160, 40, 32, 56) if cfg.packed else (152, 40, 40, 56)
     )
+
+    @K.kernel(warps=THREADS // 32, arch="sm_100a", min_blocks_per_sm=1, grid=num_seqs * h)
+    def _kernel(
+        q: K.gptr[K.bf16],
+        k: K.gptr[K.bf16],
+        v: K.gptr[K.bf16],
+        g: K.gptr[K.bf16],
+        beta: K.gptr[K.bf16],
+        beta_tma: K.gptr[K.bf16, 2],
+        A_log: K.gptr[K.f32],
+        dt_bias: K.gptr[K.f32],
+        cu_seqlens: K.gptr[K.i64],
+        seq_order: K.gptr[K.i32],
+        initial_state: K.gptr[K.bf16],
+        out: K.gptr[K.bf16],
+        final_state: K.gptr[K.bf16],
+        descriptor_storage: K.gptr[K.u8],
+    ):
+        block_idx = K.cta_id()
+        thread_idx = K.thread_id()
+        warp = K.warp_id()
+        lane = K.lane_id()
+
+        roles = K.specialize()
+        compute = roles.role("compute", warps=range(4), regs=compute_regs)
+        epilogue = roles.role("epilogue", warps=range(4, 8), regs=epilogue_regs)
+        producer_regs = roles.register_scope(
+            "producer_regs", warps=range(8, 12), regs=producer_regs_target
+        )
+        roles.role("idle8", warps=[8], register_scope=producer_regs)
+        mma = roles.role("mma", warps=[9], register_scope=producer_regs)
+        load = roles.role("load", warps=[10], register_scope=producer_regs)
+        roles.role("idle11", warps=[11], register_scope=producer_regs)
+        prep_role_owner = roles.role("prep", warps=range(12, 32), regs=prep_regs)
+
+        smem_pool = K.smem_pool()
+        # Declaration order preserves the frozen 0..616 barrier byte map.
+        qk_full = K.MBarrier(smem_pool.pool, 5, leader=True)
+        gate_raw_full = K.TMABar(smem_pool.pool, 5, leader=True)
+        qk_raw_full = K.TMABar(smem_pool.pool, 5, leader=True)
+        v_full = K.TMABar(smem_pool.pool, 5, leader=True)
+        v_free = K.MBarrier(smem_pool.pool, 5, phase_offset=1, leader=True)
+        smem_free = K.TCGen05Bar(smem_pool.pool, 5, phase_offset=1, leader=True)
+        raw_inputs_free = K.TCGen05Bar(smem_pool.pool, 5, phase_offset=1, leader=True)
+        state_inp_ready = K.MBarrier(smem_pool.pool, 5, leader=True)
+        old_out_ready = K.TCGen05Bar(smem_pool.pool, 5, leader=True)
+        u_inp_ready = K.MBarrier(smem_pool.pool, 5, leader=True)
+        u2_acc_ready = K.TCGen05Bar(smem_pool.pool, 5, leader=True)
+        u2_inp_ready = K.MBarrier(smem_pool.pool, 5, leader=True)
+        final_ready = K.TCGen05Bar(smem_pool.pool, 5, leader=True)
+        out_empty = K.MBarrier(smem_pool.pool, 1, phase_offset=1, leader=True)
+        tmem_dealloc_ready = K.MBarrier(smem_pool.pool, 1, leader=True)
+        prep_diag_ready = K.MBarrier(smem_pool.pool, 5, leader=True)
+        prep_inv16_ready = K.MBarrier(smem_pool.pool, 5, leader=True)
+        tmem_addr_storage = smem_pool.alloc((1,), K.i32, align=4)
+        if smem_pool.bytes != 620:
+            raise AssertionError(f"unexpected mbarrier/TMEM header size: {smem_pool.bytes}")
+        smem_pool.alloc((1024 - smem_pool.bytes,), K.u8)
+        smem_stage_storage = smem_pool.alloc(SMEM_STAGE_ALLOCATION, K.bf16, align=1024)
+        smem_out_storage = smem_pool.alloc((2, 32, 128), K.bf16)
+        smem_pool.commit(SMEM_TOTAL)
+        smem_raw = K.decl_buffer(
+            (SMEM_TOTAL,), K.u8, data=qk_full.buf.data, scope="shared.dyn", align=1024
+        )
+
+        def shared_view(shape, dtype, byte_offset):
+            return K.decl_buffer(
+                shape,
+                dtype,
+                data=smem_raw.data,
+                scope="shared.dyn",
+                byte_offset=byte_offset,
+                align=1024,
+            )
+
+        smem_g_raw_all = shared_view(
+            (SMEM_SMEM_G_RAW_ALL_STAGE_BYTES // 2,), K.bf16, SMEM_SMEM_G_RAW_ALL_OFF
+        )
+        smem_v_all = shared_view((SMEM_SMEM_V_ALL_STAGE_BYTES // 2,), K.bf16, SMEM_SMEM_V_ALL_OFF)
+        smem_gate_all = shared_view(
+            (SMEM_SMEM_GATE_ALL_STAGE_BYTES // 4,), K.f32, SMEM_SMEM_GATE_ALL_OFF
+        )
+        smem_gt_all = shared_view((SMEM_SMEM_GT_ALL_STAGE_BYTES // 4,), K.f32, SMEM_SMEM_GT_ALL_OFF)
+        smem_gt_prefix_all = shared_view(
+            (SMEM_SMEM_GT_PREFIX_ALL_STAGE_BYTES // 4,), K.f32, SMEM_SMEM_GT_PREFIX_ALL_OFF
+        )
+        smem_restore_factor_all = shared_view(
+            (SMEM_SMEM_RESTORE_FACTOR_ALL_STAGE_BYTES // 4,),
+            K.f32,
+            SMEM_SMEM_RESTORE_FACTOR_ALL_OFF,
+        )
+        smem_prep_beta_all = shared_view(
+            (SMEM_SMEM_PREP_BETA_ALL_STAGE_BYTES // 4,), K.f32, SMEM_SMEM_PREP_BETA_ALL_OFF
+        )
+        smem_gate_rate_all = shared_view(
+            (SMEM_SMEM_GATE_RATE_ALL_STAGE_BYTES // 4,), K.f32, SMEM_SMEM_GATE_RATE_ALL_OFF
+        )
+
+        q_tma = descriptor_storage.ptr_to([TMA_SLOT_Q])
+        k_tma = descriptor_storage.ptr_to([TMA_SLOT_K])
+        v_tma = descriptor_storage.ptr_to([TMA_SLOT_V])
+        g_tma = descriptor_storage.ptr_to([TMA_SLOT_G])
+        beta_tma_tmap = descriptor_storage.ptr_to([TMA_SLOT_BETA])
+        out_tma = descriptor_storage.ptr_to([TMA_SLOT_OUT])
+
+        with K.If(thread_idx == 0), K.Then():
+            for _tmap in (q_tma, k_tma, v_tma, g_tma, beta_tma_tmap, out_tma):
+                _tensormap_acquire(_tmap)
+        K.cuda.cta_sync()
+
+        smem = K.local_scalar(
+            "uint32", init=K.cuda.cvta_generic_to_shared(K.address_of(smem_raw[0]))
+        )
+        bid = block_idx
+        smem_stage_addr = K.local_scalar(
+            "int32",
+            init=K.cast(
+                K.cuda.cvta_generic_to_shared(K.address_of(smem_stage_storage[0, 0])), "int32"
+            ),
+        )
+        smem_qd_addr = smem_stage_addr
+        smem_g_raw_addr = smem_stage_addr
+        smem_kd_addr = smem_stage_addr + 8192
+        smem_q_raw_prefetch_addr = smem_stage_addr + 16384
+        smem_final_trans_addr = smem_q_raw_prefetch_addr
+        smem_kr_trans_addr = smem_q_raw_prefetch_addr
+        smem_ki_addr = smem_q_raw_prefetch_addr
+        smem_gate_all_addr = K.local_scalar(
+            "int32",
+            init=K.cast(K.cuda.cvta_generic_to_shared(K.address_of(smem_gate_all[0])), "int32"),
+        )
+        smem_inv_addr = smem_gate_all_addr + 4096
+        smem_v_all_addr = K.local_scalar(
+            "int32",
+            init=K.cast(K.cuda.cvta_generic_to_shared(K.address_of(smem_v_all[0])), "int32"),
+        )
+        smem_v_addr = smem_v_all_addr
+        smem_inv_work_addr = smem_v_all_addr
+        smem_restore_factor_all_addr = K.local_scalar(
+            "int32",
+            init=K.cast(
+                K.cuda.cvta_generic_to_shared(K.address_of(smem_restore_factor_all[0])), "int32"
+            ),
+        )
+        smem_beta_raw_addr = smem_restore_factor_all_addr
+        smem_out_addr = K.local_scalar(
+            "int32",
+            init=K.cast(
+                K.cuda.cvta_generic_to_shared(K.address_of(smem_out_storage[0, 0, 0])), "int32"
+            ),
+        )
+
+        with K.If(thread_idx == 0), K.Then():
+            qk_full.init(1)
+            gate_raw_full.init(1)
+            qk_raw_full.init(1)
+            v_full.init(1)
+            v_free.init(4)
+            smem_free.init(1)
+            raw_inputs_free.init(1)
+            state_inp_ready.init(4)
+            old_out_ready.init(1)
+            u_inp_ready.init(4)
+            u2_acc_ready.init(1)
+            u2_inp_ready.init(4)
+            final_ready.init(1)
+            out_empty.init(1)
+            tmem_dealloc_ready.init(2)
+            prep_diag_ready.init(2)
+            prep_inv16_ready.init(2)
+            K.ptx.fence.mbarrier_init.release.cluster()
+        K.cuda.cta_sync()
+
+        with K.If(K.warp_id() == 0), K.Then():
+            K.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                K.address_of(tmem_addr_storage[0]), K.uint32(256)
+            )
+        K.cuda.cta_sync()
+        K.ptx.tcgen05.fence__after_thread_sync()
+        taddr_storage = K.local_scalar(K.i32)
+        K.ptx.ld.volatile.shared.s32(taddr_storage, K.address_of(tmem_addr_storage[0]))
+        taddr = K.local_scalar("int32", init=taddr_storage)
+        tmem_tmem_state_inp = taddr + TMEM_TMEM_STATE_INP_OFFSET
+        tmem_tmem_u_acc = taddr + TMEM_TMEM_U_ACC_OFFSET
+        tmem_tmem_u2_inp = taddr + TMEM_TMEM_U2_INP_OFFSET
+        tmem_tmem_u2_acc = taddr + TMEM_TMEM_U2_ACC_OFFSET
+        tmem_tmem_out = taddr + TMEM_TMEM_OUT_OFFSET
+        tmem_tmem_state_out = taddr + TMEM_TMEM_STATE_OUT_OFFSET
+
+        def _work_item():
+            # .cu:733-739 -- the identical five-value preamble every role opens with.
+            task_idx: K.int32 = bid
+            seq_idx = K.local_scalar("int32")
+            K.ptx.ld.global_.s32(seq_idx, seq_order.ptr_to([task_idx // h]))
+            head_idx: K.int32 = task_idx % h
+            bos = K.local_scalar("int64")
+            K.ptx.ld.global_.s64(bos, cu_seqlens.ptr_to([seq_idx]))
+            eos = K.local_scalar("int64")
+            K.ptx.ld.global_.s64(eos, cu_seqlens.ptr_to([seq_idx + 1]))
+            seq_len: K.int32 = K.cast(eos - bos, "int32")
+            return seq_idx, head_idx, bos, eos, seq_len, (seq_len + 32 - 1) // 32
+
+        def compute_role(compute_state):
+            # ---- Role: compute (.cu:730-963) ----
+            # .cu:732 compute_main
+            seq_idx, head_idx, bos, eos, seq_len, num_chunks = _work_item()  # .cu:733-739
+            warp_in_wg: K.int32 = warp % 4  # .cu:740
+            tmem_row_base: K.int32 = (warp_in_wg * 32) << 16  # .cu:741
+            state_row: K.int32 = warp_in_wg * 32 + lane  # .cu:742
+            warp_id_in_role: K.int32 = K.warp_id_in_role()  # .cu:743
+            compute_local_warp: K.int32 = warp_id_in_role  # .cu:744
+            state_base: K.int64 = (
+                (K.cast(seq_idx, "int64") * K.cast(h, "int64") + K.cast(head_idx, "int64")) * 128
+                + K.cast(state_row, "int64")
+            ) * 128  # .cu:745
+            initial_state_u32 = K.decl_buffer(
+                (num_seqs * h * D_HEAD * D_HEAD // 2,), "uint32", data=initial_state.data
+            )
+            final_state_u32 = K.decl_buffer(
+                (num_seqs * h * D_HEAD * D_HEAD // 2,), "uint32", data=final_state.data
+            )
+            with K.unroll(4) as state_col_block:  # .cu:746-822 (#pragma unroll)
+                state_frag = K.alloc_local((32,), "float32")
+                with K.unroll(32) as _zi:  # .cu:749-780
+                    K.ptx.mov.b32(state_frag[_zi], K.float32(0.0))
+                if use_initial_state:  # .cu:781
+                    # .cu:783-819: two halves, each 2x uint4 load + bf16->f32 shl/and unpack
+                    for _half in (0, 16):
+                        with K.unroll(2) as _blk:
+                            _vld = K.alloc_local((4,), "uint32", align=16)
+                            _base = state_base + state_col_block * 32
+                            K.ptx.ld.global_.v4.b32(
+                                _vld[0],
+                                _vld[1],
+                                _vld[2],
+                                _vld[3],
+                                initial_state_u32.ptr_to(
+                                    [
+                                        (_base + _half) // 2 + _blk * 4
+                                        if _half
+                                        else _base // 2 + _blk * 4
+                                    ]
+                                ),
+                            )
+                            with K.unroll(4) as _pair:
+                                K.ptx.mov.b32(
+                                    state_frag[_half + _blk * 8 + _pair * 2],
+                                    K.cuda.uint_as_float(_vld[_pair] << K.uint32(16)),
+                                )
+                                K.ptx.mov.b32(
+                                    state_frag[_half + _blk * 8 + _pair * 2 + 1],
+                                    K.cuda.uint_as_float(_vld[_pair] & K.uint32(0xFFFF0000)),
+                                )
+                K.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
+                    K.cast(taddr + 64 + tmem_row_base + state_col_block * 32, "uint32"),
+                    *[state_frag[_j] for _j in range(32)],
+                )  # .cu:821
+            K.ptx.tcgen05.wait__st.sync.aligned()  # .cu:823 tcgen05.wait::st.sync.aligned
+            with K.serial(
+                0, num_chunks, unroll=False
+            ) as chunk_idx:  # .cu:830-831 (#pragma unroll 1)
+                _mbarrier_wait(qk_full, compute_state.stage, compute_state.phase)  # .cu:832
+                compute_stage_byte_base = (
+                    K.cast(compute_state.stage, "int32") * SMEM_STAGE_BYTE_STRIDE
+                )
+                compute_stage_f32_base = compute_stage_byte_base // 4
+                compute_stage_bf16_base = compute_stage_byte_base // 2
+                with K.serial(
+                    0, 4, unroll=False
+                ) as state_col_block_1:  # .cu:833-834 (#pragma unroll 1)
+                    state_addr: K.int32 = (
+                        taddr + 64 + tmem_row_base + state_col_block_1 * 32
+                    )  # .cu:835
+                    _tmem_load_0 = K.alloc_local((32,), "float32")
+                    K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                        *[_tmem_load_0[_j] for _j in range(32)], K.cast(state_addr, "uint32")
+                    )  # .cu:836-837
+                    _tmem_load_0_bf16 = K.alloc_local((16,), "uint32")
+                    with K.unroll(16) as _lp:  # .cu:839-843
+                        K.ptx.mov.b32(
+                            _tmem_load_0_bf16[_lp],
+                            K.cuda.float22bfloat162_rn(
+                                _tmem_load_0[_lp * 2 + 0], _tmem_load_0[_lp * 2 + 1 + 0]
+                            ),
+                        )
+                    # .cu:844-848 (inline tcgen05.st x16 of packed bf16 pairs)
+                    K.ptx["tcgen05.st.sync.aligned.32x32b.x16.b32"](
+                        K.cast(taddr + tmem_row_base + state_col_block_1 * 16, "uint32"),
+                        *[_tmem_load_0_bf16[_j] for _j in range(16)],
+                    )
+                    state_scale = K.alloc_local((16,), "float32")
+                    with K.unroll(2) as state_half:  # .cu:850-859
+                        with K.unroll(4) as state_vec:
+                            K.ptx.ld.shared.v4.f32(
+                                state_scale[state_vec * 4],
+                                state_scale[state_vec * 4 + 1],
+                                state_scale[state_vec * 4 + 2],
+                                state_scale[state_vec * 4 + 3],
+                                smem_gt_all.ptr_to(
+                                    [
+                                        compute_stage_f32_base
+                                        + state_col_block_1 * 32
+                                        + state_half * 16
+                                        + state_vec * 4
+                                    ]
+                                ),
+                            )  # .cu:854
+                        with K.unroll(8) as _ls:  # .cu:857-858
+                            _pk = K.local_scalar("uint64")
+                            K.ptx.mul.rn.ftz.f32x2(
+                                _pk,
+                                K.cuda.make_float2(
+                                    _tmem_load_0[state_half * 16 + _ls * 2],
+                                    _tmem_load_0[state_half * 16 + _ls * 2 + 1],
+                                ),
+                                K.cuda.make_float2(state_scale[_ls * 2], state_scale[_ls * 2 + 1]),
+                            )
+                            K.ptx.mov.b32(
+                                _tmem_load_0[state_half * 16 + _ls * 2], K.cuda.float2_x(_pk)
+                            )
+                            K.ptx.mov.b32(
+                                _tmem_load_0[state_half * 16 + _ls * 2 + 1], K.cuda.float2_y(_pk)
+                            )
+                    K.ptx["tcgen05.st.sync.aligned.32x32b.x32.b32"](
+                        K.cast(state_addr, "uint32"), *[_tmem_load_0[_j] for _j in range(32)]
+                    )  # .cu:860
+                K.ptx.tcgen05.wait__st.sync.aligned()  # .cu:862
+                with K.If(K.cuda.elect_sync()), K.Then():  # .cu:863-865
+                    _mbarrier_arrive(state_inp_ready, compute_state.stage)
+                _mbarrier_wait(v_full, compute_state.stage, compute_state.phase)  # .cu:866
+                _mbarrier_wait(old_out_ready, compute_state.stage, compute_state.phase)  # .cu:867
+                _tmem_load_1 = K.alloc_local((32,), "float32")
+                K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                    *[_tmem_load_1[_j] for _j in range(32)],
+                    K.cast(taddr + 224 + tmem_row_base, "uint32"),
+                )  # .cu:868-869
+                with K.unroll(2) as residual_half:  # .cu:870-895
+                    residual_v = K.alloc_local((16,), "float32")
+                    residual_beta = K.alloc_local((16,), "float32")
+                    with K.unroll(16) as residual_col:  # .cu:874-881
+                        token_col: K.int32 = residual_half * 16 + residual_col  # .cu:876
+                        _bits = K.local_scalar("uint16")
+                        K.ptx.ld.shared.b16(
+                            _bits,
+                            smem_v_all.ptr_to(
+                                [compute_stage_bf16_base + token_col * 128 + state_row]
+                            ),
+                        )
+                        K.ptx.mov.b32(
+                            residual_v[residual_col],
+                            K.cuda.bfloat162float(K.reinterpret("bfloat16", _bits)),
+                        )  # .cu:877-879
+                        K.ptx.ld.shared.f32(
+                            residual_beta[residual_col],
+                            smem_prep_beta_all.ptr_to([compute_stage_f32_base + token_col]),
+                        )  # .cu:880
+                    with K.unroll(8) as _ls:  # .cu:882-884
+                        _pk = K.local_scalar("uint64")
+                        K.ptx.sub.rn.ftz.f32x2(
+                            _pk,
+                            K.cuda.make_float2(residual_v[_ls * 2], residual_v[_ls * 2 + 1]),
+                            K.cuda.make_float2(
+                                _tmem_load_1[residual_half * 16 + _ls * 2],
+                                _tmem_load_1[residual_half * 16 + _ls * 2 + 1],
+                            ),
+                        )
+                        K.ptx.mov.b32(residual_v[_ls * 2], K.cuda.float2_x(_pk))
+                        K.ptx.mov.b32(residual_v[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                    with K.unroll(8) as _ls:  # .cu:885-887
+                        _pk = K.local_scalar("uint64")
+                        K.ptx.mul.rn.ftz.f32x2(
+                            _pk,
+                            K.cuda.make_float2(residual_v[_ls * 2], residual_v[_ls * 2 + 1]),
+                            K.cuda.make_float2(residual_beta[_ls * 2], residual_beta[_ls * 2 + 1]),
+                        )
+                        K.ptx.mov.b32(residual_v[_ls * 2], K.cuda.float2_x(_pk))
+                        K.ptx.mov.b32(residual_v[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                    residual_v_bf16 = K.alloc_local((8,), "uint32")
+                    with K.unroll(8) as _lp:  # .cu:888-893
+                        K.ptx.mov.b32(
+                            residual_v_bf16[_lp],
+                            K.cuda.float22bfloat162_rn(
+                                residual_v[_lp * 2 + 0], residual_v[_lp * 2 + 1 + 0]
+                            ),
+                        )
+                    K.ptx["tcgen05.st.sync.aligned.32x32b.x8.b32"](
+                        K.cast(taddr + 224 + tmem_row_base + residual_half * 8, "uint32"),
+                        *[residual_v_bf16[_j] for _j in range(8)],
+                    )  # .cu:894
+                K.ptx.tcgen05.wait__st.sync.aligned()  # .cu:896
+                with K.If(K.cuda.elect_sync()), K.Then():  # .cu:897-900
+                    _mbarrier_arrive(v_free, compute_state.stage)
+                    _mbarrier_arrive(u_inp_ready, compute_state.stage)
+                _mbarrier_wait(u2_acc_ready, compute_state.stage, compute_state.phase)  # .cu:901
+                _tmem_load_2 = K.alloc_local((32,), "float32")
+                K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                    *[_tmem_load_2[_j] for _j in range(32)], K.cast(taddr + tmem_row_base, "uint32")
+                )  # .cu:902-903
+                _tmem_load_2_bf16 = K.alloc_local((16,), "uint32")
+                with K.unroll(16) as _lp:  # .cu:904-909
+                    K.ptx.mov.b32(
+                        _tmem_load_2_bf16[_lp],
+                        K.cuda.float22bfloat162_rn(
+                            _tmem_load_2[_lp * 2 + 0], _tmem_load_2[_lp * 2 + 1 + 0]
+                        ),
+                    )
+                # .cu:910-914 (inline tcgen05.st x16)
+                K.ptx["tcgen05.st.sync.aligned.32x32b.x16.b32"](
+                    K.cast(taddr + 224 + tmem_row_base, "uint32"),
+                    *[_tmem_load_2_bf16[_j] for _j in range(16)],
+                )
+                K.ptx.tcgen05.wait__st.sync.aligned()  # .cu:915
+                with K.If(K.cuda.elect_sync()), K.Then():  # .cu:916-918
+                    _mbarrier_arrive(u2_inp_ready, compute_state.stage)
+                _mbarrier_wait(final_ready, compute_state.stage, compute_state.phase)  # .cu:919
+                compute_state.advance()
+            with K.If(store_final_state), K.Then():  # .cu:923-955
+                with K.unroll(4) as state_col_block_2:
+                    _tmem_load_3 = K.alloc_local((32,), "float32")
+                    K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                        *[_tmem_load_3[_j] for _j in range(32)],
+                        K.cast(taddr + 64 + tmem_row_base + state_col_block_2 * 32, "uint32"),
+                    )  # .cu:926-927
+                    with K.unroll(2) as _half2:  # .cu:928-953 (two 16-float groups)
+                        _pk = K.alloc_local((8,), "uint32")
+                        with K.unroll(8) as _pj:
+                            K.ptx.mov.b32(
+                                _pk[_pj],
+                                K.cuda.float22bfloat162_rn(
+                                    _tmem_load_3[_half2 * 16 + _pj * 2],
+                                    _tmem_load_3[_half2 * 16 + _pj * 2 + 1],
+                                ),
+                            )
+                        K.ptx.st.global_.v4.b32(
+                            final_state_u32.ptr_to(
+                                [(state_base + state_col_block_2 * 32 + _half2 * 16) // 2]
+                            ),
+                            _pk[0],
+                            _pk[1],
+                            _pk[2],
+                            _pk[3],
+                        )  # .cu:938/951 first uint4
+                        K.ptx.st.global_.v4.b32(
+                            final_state_u32.ptr_to(
+                                [(state_base + state_col_block_2 * 32 + _half2 * 16) // 2 + 4]
+                            ),
+                            _pk[4],
+                            _pk[5],
+                            _pk[6],
+                            _pk[7],
+                        )  # .cu:939/952 second uint4
+            K.ptx.bar.sync(K.uint32(10), K.uint32(128))  # .cu:956 barrier.sync 10, 128
+            with K.If(compute_local_warp == 0), K.Then():  # .cu:957-961
+                with K.If(K.cuda.elect_sync()), K.Then():
+                    _mbarrier_arrive(tmem_dealloc_ready, 0)
+
+        def epilogue_role(epilogue_state, output_state):
+            # ---- Role: epilogue (.cu:964-1090) ----
+            # .cu:966 epilogue_main
+            seq_idx_1, head_idx_1, bos_1, eos_1, seq_len_1, num_chunks_1 = (
+                _work_item()
+            )  # .cu:967-973
+            warp_id_in_role_1: K.int32 = K.warp_id_in_role()  # .cu:974
+            epilogue_local_warp: K.int32 = warp_id_in_role_1  # .cu:975
+            warp_in_wg_1: K.int32 = warp % 4  # .cu:976
+            tmem_row_base_1: K.int32 = (warp_in_wg_1 * 32) << 16  # .cu:977
+            state_row_1: K.int32 = warp_in_wg_1 * 32 + lane  # .cu:978
+            with K.serial(0, num_chunks_1, unroll=False) as chunk_idx_1:  # .cu:982-983
+                _mbarrier_wait(final_ready, epilogue_state.stage, epilogue_state.phase)  # .cu:984
+                chunk_is_full: K.int32 = K.if_then_else(
+                    seq_len_1 >= (chunk_idx_1 + 1) * 32, 1, 0
+                )  # .cu:985
+                with K.If(chunk_is_full != 0):
+                    with K.Then():  # .cu:986
+                        # .cu:987-993 (inline tcgen05.ld.16x256b.x4, 16 uint32 regs)
+                        _tmem_load_4 = K.alloc_local((16,), "uint32")
+                        K.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
+                            *[_tmem_load_4[_j] for _j in range(16)],
+                            K.cast(taddr + 192 + tmem_row_base_1, "uint32"),
+                        )
+                        # .cu:994-1000 (same at TMEM row +16)
+                        _tmem_load_5 = K.alloc_local((16,), "uint32")
+                        K.ptx["tcgen05.ld.sync.aligned.16x256b.x4.b32"](
+                            *[_tmem_load_5[_j] for _j in range(16)],
+                            K.cast(taddr + 192 + tmem_row_base_1 + 1048576, "uint32"),
+                        )
+                        K.ptx.tcgen05.wait__ld.sync.aligned()  # .cu:1001
+                        K.ptx.bar.sync(K.uint32(9), K.uint32(128))  # .cu:1002 barrier.sync 9, 128
+                        with K.If(epilogue_local_warp == 0), K.Then():  # .cu:1003-1007
+                            with K.If(K.cuda.elect_sync()), K.Then():
+                                _mbarrier_arrive(out_empty, 0)
+                        with K.If(epilogue_local_warp == 0), K.Then():  # .cu:1008-1012
+                            with K.If(chunk_idx_1 >= 2), K.Then():
+                                K.ptx.cp.async_.bulk.wait_group.read(1)
+                        K.ptx.bar.sync(K.uint32(9), K.uint32(128))  # .cu:1013
+                        out_stage_addr: K.int32 = (
+                            smem_out_addr + K.cast(output_state.phase, "int32") * 8192
+                        )  # .cu:1014
+                        with K.unroll(2) as dim_half:  # .cu:1015-1049
+                            out_packed = K.alloc_local((8,), "uint32", align=4)  # .cu:1017
+                            with K.If(dim_half == 0):
+                                with K.Then():  # .cu:1018-1023
+                                    with K.unroll(8) as _lp:
+                                        K.ptx.mov.b32(
+                                            out_packed[_lp],
+                                            K.cuda.float22bfloat162_rn(
+                                                K.cuda.uint_as_float(_tmem_load_4[_lp * 2 + 0]),
+                                                K.cuda.uint_as_float(_tmem_load_4[_lp * 2 + 1 + 0]),
+                                            ),
+                                        )
+                                with K.Else():  # .cu:1024-1030
+                                    with K.unroll(8) as _lp:
+                                        K.ptx.mov.b32(
+                                            out_packed[_lp],
+                                            K.cuda.float22bfloat162_rn(
+                                                K.cuda.uint_as_float(_tmem_load_5[_lp * 2 + 0]),
+                                                K.cuda.uint_as_float(_tmem_load_5[_lp * 2 + 1 + 0]),
+                                            ),
+                                        )
+                            with K.unroll(2) as token_group:  # .cu:1031-1048
+                                mtx_idx: K.int32 = lane // 8  # .cu:1033
+                                row_addr: K.int32 = lane & 7  # .cu:1034
+                                dim_base: K.int32 = (
+                                    epilogue_local_warp * 32 + dim_half * 16 + (mtx_idx & 1) * 8
+                                )  # .cu:1035
+                                token_base: K.int32 = (
+                                    token_group * 16 + mtx_idx // 2 * 8
+                                )  # .cu:1036
+                                token_addr: K.int32 = token_base + row_addr  # .cu:1037
+                                token_pair: K.int32 = token_addr // 2  # .cu:1038
+                                token_parity: K.int32 = token_addr & 1  # .cu:1039
+                                raw_row: K.int32 = token_pair + dim_base // 64 * 16  # .cu:1040
+                                raw_col: K.int32 = (
+                                    dim_base & 63 ^ (token_pair & 3) << 4 ^ token_parity << 3
+                                ) + token_parity * 64  # .cu:1041
+                                stsm_offset: K.int32 = (raw_row * 128 + raw_col) * 2  # .cu:1042
+                                pack_base: K.int32 = token_group * 4  # .cu:1043
+                                # .cu:1044-1047 stmatrix.x4.trans
+                                K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                                    smem_raw.ptr_to([K.cast(out_stage_addr, "uint32") - smem + K.cast(stsm_offset, "uint32")]),
+                                    out_packed[pack_base],
+                                    out_packed[pack_base + 1],
+                                    out_packed[pack_base + 2],
+                                    out_packed[pack_base + 3],
+                                )  # fmt: skip
+                        _fence_async_shared()  # .cu:1050
+                        K.ptx.bar.sync(K.uint32(9), K.uint32(128))  # .cu:1051
+                        with K.If(epilogue_local_warp == 0), K.Then():  # .cu:1052-1057
+                            with K.If(K.cuda.elect_sync()), K.Then():
+                                _tma_store_4d(
+                                    smem_raw,
+                                    K.cast(smem, "int32"),
+                                    out_tma,
+                                    0,
+                                    K.cast(bos_1 + K.cast(chunk_idx_1 * 32, "int64"), "int32"),
+                                    head_idx_1,
+                                    0,
+                                    K.cast(
+                                        smem_out_addr + K.cast(output_state.phase, "int32") * 8192,
+                                        "uint32",
+                                    ),
+                                )  # .cu:1054
+                            K.ptx.cp.async_.bulk.commit_group()  # .cu:1056
+                        output_state.advance()  # .cu:1058
+                    with K.Else():  # .cu:1059-1077 (partial chunk: scalar out stores)
+                        _tmem_load_6 = K.alloc_local((32,), "float32")
+                        K.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
+                            *[_tmem_load_6[_j] for _j in range(32)],
+                            K.cast(taddr + 192 + tmem_row_base_1, "uint32"),
+                        )  # .cu:1060-1061
+                        K.ptx.tcgen05.wait__ld.sync.aligned()  # .cu:1062
+                        K.ptx.bar.sync(K.uint32(9), K.uint32(128))  # .cu:1063
+                        with K.If(epilogue_local_warp == 0), K.Then():  # .cu:1064-1068
+                            with K.If(K.cuda.elect_sync()), K.Then():
+                                _mbarrier_arrive(out_empty, 0)
+                        with K.unroll(32) as token_col_1:  # .cu:1069-1076
+                            out_token: K.int64 = bos_1 + K.cast(
+                                chunk_idx_1 * 32 + token_col_1, "int64"
+                            )  # .cu:1071
+                            with K.If(out_token < eos_1), K.Then():  # .cu:1072
+                                out_idx: K.int64 = (
+                                    out_token * K.cast(h, "int64") + K.cast(head_idx_1, "int64")
+                                ) * 128 + K.cast(state_row_1, "int64")  # .cu:1073
+                                K.ptx.st.global_.b16(
+                                    out.ptr_to([out_idx]),
+                                    K.reinterpret(
+                                        "uint16", K.cast(_tmem_load_6[token_col_1], "bfloat16")
+                                    ),
+                                )  # .cu:1074
+                epilogue_state.advance()
+            with K.If(epilogue_local_warp == 0), K.Then():  # .cu:1081-1083
+                K.ptx.cp.async_.bulk.wait_group(0)
+            K.ptx.bar.sync(K.uint32(9), K.uint32(128))  # .cu:1084
+            with K.If(epilogue_local_warp == 0), K.Then():  # .cu:1085-1089
+                with K.If(K.cuda.elect_sync()), K.Then():
+                    _mbarrier_arrive(tmem_dealloc_ready, 0)
+
+        def mma_role(mma_state, out_state):
+            # ---- Role: mma (.cu:1092-1247) ----
+            # .cu:1093 mma_main
+            seq_idx_2, _, bos_2, eos_2, seq_len_2, num_chunks_2 = _work_item()  # .cu:1094-1099
+            with K.serial(0, num_chunks_2, unroll=False) as _chunk_idx:  # .cu:1106-1107
+                _mbarrier_wait(qk_full, mma_state.stage, mma_state.phase)  # .cu:1108
+                _mbarrier_wait(state_inp_ready, mma_state.stage, mma_state.phase)  # .cu:1109
+                _mbarrier_wait(out_empty, 0, out_state.phase)  # .cu:1110
+                out_state.advance()  # .cu:1111
+                mma_stage_byte_base = K.cast(mma_state.stage, "int32") * SMEM_STAGE_BYTE_STRIDE
+                _mma_b_addr_0: K.int32 = smem_qd_addr + mma_stage_byte_base  # .cu:1112
+                _mma_b_lo_0 = K.uniform(K.cast((_mma_b_addr_0 >> 4) & 0x3FFF, "uint32"))  # .cu:1113
+                _mma_chain(
+                    tmem_tmem_out,
+                    K.cast(_mma_b_lo_0, "int32"),
+                    tmem_tmem_state_inp,
+                    0,
+                    **_MMA_QK_8STEP,
+                )  # .cu:1114-1150
+                _mma_b_addr_1: K.int32 = smem_kd_addr + mma_stage_byte_base  # .cu:1151
+                _mma_b_lo_1 = K.uniform(K.cast((_mma_b_addr_1 >> 4) & 0x3FFF, "uint32"))  # .cu:1152
+                _mma_chain(
+                    tmem_tmem_u_acc,
+                    K.cast(_mma_b_lo_1, "int32"),
+                    tmem_tmem_state_inp,
+                    0,
+                    **_MMA_QK_8STEP,
+                )  # .cu:1153-1189
+                _elect_commit2(old_out_ready, raw_inputs_free, mma_state.stage)  # .cu:1190
+                _mbarrier_wait(u_inp_ready, mma_state.stage, mma_state.phase)  # .cu:1191
+                _mma_b_addr_2: K.int32 = smem_inv_addr + mma_stage_byte_base  # .cu:1192
+                _mma_b_lo_2 = K.uniform(K.cast((_mma_b_addr_2 >> 4) & 0x3FFF, "uint32"))  # .cu:1193
+                _mma_chain(
+                    tmem_tmem_u2_acc,
+                    K.cast(_mma_b_lo_2, "int32"),
+                    tmem_tmem_u2_inp,
+                    0,
+                    **_MMA_INV_2STEP,
+                )  # .cu:1194-1212
+                _elect_commit(u2_acc_ready.ptr_to([mma_state.stage]))  # .cu:1213
+                _mbarrier_wait(u2_inp_ready, mma_state.stage, mma_state.phase)  # .cu:1214
+                _mma_b_addr_3: K.int32 = smem_final_trans_addr + mma_stage_byte_base  # .cu:1215
+                _mma_b_lo_3 = K.uniform(
+                    K.cast(((_mma_b_addr_3 >> 4) & 0x3FFF) | 0x1000000, "uint32")
+                )  # .cu:1216
+                _mma_chain(
+                    tmem_tmem_state_out,
+                    K.cast(_mma_b_lo_3, "int32"),
+                    tmem_tmem_u2_inp,
+                    1,
+                    **_MMA_FINAL_2STEP,
+                )  # .cu:1217-1235
+                _elect_commit2(final_ready, smem_free, mma_state.stage)  # .cu:1236
+                mma_state.advance()
+            _mbarrier_wait(tmem_dealloc_ready, 0, K.uint32(0))  # .cu:1241
+            _tmem_dealloc_addr = K.local_scalar("int32")  # .cu:1243
+            K.ptx.ld.volatile.shared.s32(_tmem_dealloc_addr, K.address_of(tmem_addr_storage[0]))
+            K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                K.cast(_tmem_dealloc_addr, "uint32"), K.uint32(256)
+            )  # .cu:1244
+            # Preserve the source's dealloc-before-relinquish order.
+            K.ptx.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()  # .cu:1245
+
+        def load_role(load_state):
+            # ---- Role: load (.cu:1248-1296) ----
+            # .cu:1249 load_main
+            seq_idx_3, head_idx_2, bos_3, eos_3, seq_len_3, num_chunks_3 = (
+                _work_item()
+            )  # .cu:1250-1256
+            with K.serial(0, num_chunks_3, unroll=False) as chunk_idx_2:  # .cu:1260-1261
+                _mbarrier_wait(v_free, load_state.stage, load_state.phase)  # .cu:1262
+                _mbarrier_wait(qk_full, load_state.stage, load_state.phase)  # .cu:1263
+                load_stage_byte_base = K.cast(load_state.stage, "int32") * SMEM_STAGE_BYTE_STRIDE
+                load_stage_bf16_base = load_stage_byte_base // 2
+                chunk_is_full_1: K.int32 = K.if_then_else(
+                    seq_len_3 >= (chunk_idx_2 + 1) * 32, 1, 0
+                )  # .cu:1264
+                with K.If(K.cuda.elect_sync()), K.Then():  # .cu:1265-1270
+                    with K.If(chunk_is_full_1 != 0), K.Then():
+                        _mbarrier_arrive_expect_tx(v_full, load_state.stage, 8192)  # .cu:1267
+                        _tma_3d_gmem2smem(
+                            smem_raw,
+                            K.cast(smem, "int32"),
+                            smem_v_addr + load_stage_byte_base,
+                            v_tma,
+                            0,
+                            head_idx_2,
+                            K.cast(bos_3 + K.cast(chunk_idx_2 * 32, "int64"), "int32"),
+                            v_full.ptr_to([load_state.stage]),
+                        )  # .cu:1268
+                with K.If(chunk_is_full_1 == 0), K.Then():  # .cu:1271-1285
+                    with K.unroll(16) as v_load_iter:  # .cu:1272-1282
+                        v_item: K.int32 = v_load_iter * 32 + lane  # .cu:1274
+                        row: K.int32 = v_item // 16  # .cu:1275
+                        segment: K.int32 = v_item % 16  # .cu:1276
+                        token: K.int64 = bos_3 + K.cast(chunk_idx_2 * 32 + row, "int64")  # .cu:1277
+                        token_valid: K.int32 = K.if_then_else(token < eos_3, 1, 0)  # .cu:1278
+                        v_src: K.int64 = (
+                            token * K.cast(h, "int64") + K.cast(head_idx_2, "int64")
+                        ) * 128 + K.cast(segment * 8, "int64")  # .cu:1279
+                        K.ptx["cp.async.cg.shared.global"](
+                            smem_v_all.ptr_to(
+                                [load_stage_bf16_base + row * 128 + segment * 8]
+                            ),
+                            v.ptr_to([v_src]),
+                            16,
+                            K.cast(K.if_then_else(token_valid != 0, 16, 0), "uint32"),
+                        )  # .cu:1280-1281  # fmt: skip
+                    K.ptx.cp.async_.commit_group()  # .cu:1283
+                    K.ptx.cp.async_.wait_group(0)  # .cu:1284
+                K.ptx.bar.sync(K.uint32(8), K.uint32(32))  # .cu:1286 barrier.sync 8, 32
+                with K.If(K.cuda.elect_sync()), K.Then():  # .cu:1287-1292
+                    with K.If(chunk_is_full_1 == 0), K.Then():
+                        _fence_async_shared()  # .cu:1289
+                        _mbarrier_arrive(v_full, load_state.stage)  # .cu:1290
+                load_state.advance()
+
+        def prep_role(prep_phase):
+            # ---- Role: prep (.cu:1298-2550) ----
+            # .cu:1300 prep_main
+            seq_idx_4, head_idx_3, bos_4, eos_4, seq_len_4, num_chunks_4 = (
+                _work_item()
+            )  # .cu:1301-1307
+            warp_id_in_role_2: K.int32 = K.warp_id_in_role()  # .cu:1310
+            prep_instance: K.int32 = warp_id_in_role_2 // 4  # .cu:1308-1309
+            prep_local_warp: K.int32 = warp_id_in_role_2 % 4  # .cu:1311
+            prep_tid: K.int32 = prep_local_warp * 32 + lane  # .cu:1312
+            num_prep_iters: K.int32 = (num_chunks_4 + 4 - prep_instance) // 5  # .cu:1313
+            prep_stage: K.uint32 = K.cast(prep_instance, "uint32")  # .cu:1314
+            gate_rate_stage_f32: K.int32 = prep_instance * SMEM_STAGE_F32_STRIDE  # .cu:1315
+
+            def _prep_bar_sync():
+                # switch(prep_instance) over the five per-instance named barriers 11..15.
+                def _arm(i):
+                    if i == 4:
+                        K.ptx.bar.sync(K.uint32(15), K.uint32(128))
+                        return
+                    with K.If(prep_instance == i):
+                        with K.Then():
+                            K.ptx.bar.sync(K.uint32(11 + i), K.uint32(128))
+                        with K.Else():
+                            _arm(i + 1)
+
+                _arm(0)
+
+            with K.If(prep_tid == 0), K.Then():  # .cu:1316-1319
+                a_log_value = K.local_scalar("float32")
+                K.ptx.ld.global_.f32(a_log_value, A_log.ptr_to([head_idx_3]))
+                _i32 = K.local_scalar("float32")
+                K.ptx.ex2.approx.ftz.f32(_i32, a_log_value * K.float32(1.4426950408889634))
+                K.ptx.st.shared.f32(smem_gate_rate_all.ptr_to([gate_rate_stage_f32]), _i32)
+            _prep_bar_sync()  # .cu:1320-1332
+            with K.serial(0, num_prep_iters, unroll=False) as prep_iter:  # .cu:1339-1340
+                chunk_idx_3: K.int32 = prep_iter * 5 + prep_instance  # .cu:1341
+                prep_stage_byte_base = (
+                    K.cast(prep_stage, "int32") * SMEM_STAGE_BYTE_STRIDE
+                )  # .cu:1342
+                stage_f32 = prep_stage_byte_base // 4
+                stage_bf16 = prep_stage_byte_base // 2  # .cu:1343
+                chunk_is_full_2: K.int32 = K.if_then_else(
+                    seq_len_4 >= (chunk_idx_3 + 1) * 32, 1, 0
+                )  # .cu:1344
+                early_beta_value = K.local_scalar("float32")  # .cu:1345
+                early_gate0 = K.local_scalar("float32")  # .cu:1346
+                K.assign(early_beta_value, K.float32(0.0))
+                K.assign(early_gate0, K.float32(0.0))
+                with K.If(chunk_is_full_2 != 0), K.Then():  # .cu:1347-1392
+                    _mbarrier_wait(raw_inputs_free, prep_stage, prep_phase.phase)  # .cu:1348
+                    with K.If(prep_local_warp == 0), K.Then():  # .cu:1349-1357
+                        with K.If(K.cuda.elect_sync()), K.Then():
+                            _mbarrier_arrive_expect_tx(gate_raw_full, prep_stage, 8704)  # .cu:1351  # fmt: skip
+                            _tma_3d_gmem2smem(
+                                smem_raw,
+                                K.cast(smem, "int32"),
+                                smem_g_raw_addr + prep_stage_byte_base,
+                                g_tma,
+                                0,
+                                head_idx_3,
+                                K.cast(bos_4 + K.cast(chunk_idx_3 * 32, "int64"), "int32"),
+                                gate_raw_full.ptr_to([prep_stage]),
+                            )  # .cu:1352
+                            _tma_2d_gmem2smem(
+                                smem_raw,
+                                K.cast(smem, "int32"),
+                                smem_beta_raw_addr + prep_stage_byte_base,
+                                beta_tma_tmap,
+                                head_idx_3 // 8 * 8,
+                                K.cast(bos_4 + K.cast(chunk_idx_3 * 32, "int64"), "int32"),
+                                gate_raw_full.ptr_to([prep_stage]),
+                            )  # .cu:1353
+                            _mbarrier_arrive_expect_tx(qk_raw_full, prep_stage, 16384)  # .cu:1354  # fmt: skip
+                            _tma_4d_gmem2smem(
+                                smem_raw,
+                                K.cast(smem, "int32"),
+                                smem_kd_addr + prep_stage_byte_base,
+                                k_tma,
+                                0,
+                                K.cast(bos_4 + K.cast(chunk_idx_3 * 32, "int64"), "int32"),
+                                head_idx_3,
+                                0,
+                                qk_raw_full.ptr_to([prep_stage]),
+                            )  # .cu:1355
+                    _mbarrier_wait(gate_raw_full, prep_stage, prep_phase.phase)  # .cu:1358
+                    with K.If(K.And(prep_local_warp == 2, lane < 32)), K.Then():  # .cu:1359-1380
+                        beta_raw_pair = K.alloc_local((1,), "uint32", align=4)  # .cu:1360
+                        beta_raw_addr = K.local_scalar("int32")
+                        K.ptx.add.s32(
+                            beta_raw_addr,
+                            smem_beta_raw_addr + prep_stage_byte_base,
+                            lane * 16 + head_idx_3 % 8 // 2 * 4,
+                        )
+                        K.ptx.ld.shared.b32(beta_raw_pair[0], smem_raw.ptr_to([beta_raw_addr - K.cast(smem, "int32")]))  # .cu:1361  # fmt: skip
+                        beta_raw_pair_fp32 = K.alloc_local((2,), "float32")  # .cu:1362
+                        with K.unroll(1) as _pair:  # .cu:1363-1372
+                            K.ptx.mov.b32(
+                                beta_raw_pair_fp32[_pair * 2],
+                                K.cuda.uint_as_float(beta_raw_pair[_pair + 0] << K.uint32(16)),
+                            )
+                            K.ptx.mov.b32(
+                                beta_raw_pair_fp32[_pair * 2 + 1],
+                                K.cuda.uint_as_float(
+                                    beta_raw_pair[_pair + 0] & K.uint32(0xFFFF0000)
+                                ),
+                            )
+                        beta_logit = K.local_scalar(
+                            "float32", init=beta_raw_pair_fp32[0]
+                        )  # .cu:1373
+                        with K.If(head_idx_3 % 2 != 0), K.Then():  # .cu:1374-1376
+                            K.assign(beta_logit, beta_raw_pair_fp32[1])
+                        _tanh = K.local_scalar("float32")
+                        K.ptx.tanh.approx.f32(_tanh, beta_logit * K.float32(0.5))
+                        K.assign(
+                            early_beta_value, _tanh * K.float32(0.5) + K.float32(0.5)
+                        )  # .cu:1377-1379
+                    with K.If(prep_tid < 128), K.Then():  # .cu:1381-1391
+                        early_gate_rate = K.local_scalar("float32")  # .cu:1382
+                        K.ptx.ld.shared.f32(early_gate_rate, smem_gate_rate_all.ptr_to([stage_f32]))
+                        early_gate_bias = K.local_scalar("float32")  # .cu:1383
+                        K.ptx.ld.global_.f32(
+                            early_gate_bias, dt_bias.ptr_to([head_idx_3 * 128 + prep_tid])
+                        )
+                        _bits = K.local_scalar("uint16")
+                        K.ptx.ld.shared.b16(_bits, smem_g_raw_all.ptr_to([stage_bf16 + prep_tid]))
+                        early_gate_raw: K.f32 = K.cuda.bfloat162float(
+                            K.reinterpret("bfloat16", _bits)
+                        )  # .cu:1384-1385
+                        early_gate_arg: K.f32 = early_gate_rate * (
+                            early_gate_raw + early_gate_bias
+                        )  # .cu:1386
+                        _tanh = K.local_scalar("float32")
+                        K.ptx.tanh.approx.f32(_tanh, early_gate_arg * K.float32(0.5))
+                        early_gate_sigmoid: K.f32 = _tanh * K.float32(0.5) + K.float32(
+                            0.5
+                        )  # .cu:1387-1389
+                        K.assign(
+                            early_gate0,
+                            K.float32(lower_bound)
+                            * K.float32(1.4426950408889634)
+                            * early_gate_sigmoid,
+                        )  # .cu:1390
+                _mbarrier_wait(smem_free, prep_stage, prep_phase.phase)  # .cu:1393
+                with K.If(chunk_is_full_2 != 0), K.Then():  # .cu:1394-1400
+                    with K.If(prep_local_warp == 0), K.Then():
+                        with K.If(K.cuda.elect_sync()), K.Then():
+                            _tma_4d_gmem2smem(
+                                smem_raw,
+                                K.cast(smem, "int32"),
+                                smem_q_raw_prefetch_addr + prep_stage_byte_base,
+                                q_tma,
+                                0,
+                                K.cast(bos_4 + K.cast(chunk_idx_3 * 32, "int64"), "int32"),
+                                head_idx_3,
+                                0,
+                                qk_raw_full.ptr_to([prep_stage]),
+                            )  # .cu:1397
+                with K.If(chunk_is_full_2 == 0), K.Then():  # .cu:1401-1412
+                    with K.unroll(4) as gate_load_pass:
+                        gate_load_item: K.int32 = gate_load_pass * 128 + prep_tid  # .cu:1404
+                        gate_load_row: K.int32 = gate_load_item // 16  # .cu:1405
+                        gate_load_segment: K.int32 = gate_load_item % 16  # .cu:1406
+                        gate_load_token: K.int64 = bos_4 + K.cast(
+                            chunk_idx_3 * 32 + gate_load_row, "int64"
+                        )  # .cu:1407
+                        gate_load_base = K.local_scalar("int64")
+                        K.ptx.mad.lo.s64(
+                            gate_load_base, gate_load_token, K.int64(h), K.cast(head_idx_3, "int64")
+                        )
+                        K.ptx.mad.lo.s64(
+                            gate_load_base,
+                            gate_load_base,
+                            K.int64(128),
+                            K.cast(gate_load_segment * 8, "int64"),
+                        )  # .cu:1408
+                        K.ptx["cp.async.cg.shared.global"](
+                            smem_g_raw_all.ptr_to(
+                                [stage_bf16 + gate_load_item * 8]
+                            ),
+                            g.ptr_to([gate_load_base]),
+                            16,
+                            K.cast(K.if_then_else(chunk_idx_3 * 32 + gate_load_row < seq_len_4, 16, 0), "uint32"),
+                        )  # .cu:1409-1410  # fmt: skip
+                with K.If(chunk_is_full_2 == 0), K.Then():  # .cu:1413-1429
+                    K.ptx.cp.async_.commit_group()  # .cu:1414
+                    K.ptx.cp.async_.wait_group(0)  # .cu:1415
+                    _prep_bar_sync()
+                with K.If(K.And(prep_local_warp == 2, lane < 32)), K.Then():  # .cu:1430-1442
+                    beta_value = K.local_scalar("float32", init=early_beta_value)  # .cu:1431
+                    with K.If(chunk_is_full_2 == 0), K.Then():  # .cu:1432-1440
+                        beta_token: K.int64 = bos_4 + K.cast(chunk_idx_3 * 32 + lane, "int64")
+                        with K.If(chunk_idx_3 * 32 + lane < seq_len_4), K.Then():
+                            _bits = K.local_scalar("uint16")
+                            K.ptx.ld.global_.b16(
+                                _bits,
+                                beta.ptr_to(
+                                    [beta_token * K.cast(h, "int64") + K.cast(head_idx_3, "int64")]
+                                ),
+                            )
+                            beta_logit_1: K.f32 = K.cuda.bfloat162float(
+                                K.reinterpret("bfloat16", _bits)
+                            )  # .cu:1435
+                            _tanh = K.local_scalar("float32")
+                            K.ptx.tanh.approx.f32(_tanh, beta_logit_1 * K.float32(0.5))
+                            K.assign(
+                                beta_value, _tanh * K.float32(0.5) + K.float32(0.5)
+                            )  # .cu:1436-1438
+                    K.ptx.st.shared.f32(
+                        smem_prep_beta_all.ptr_to([stage_f32 + lane]), beta_value
+                    )  # .cu:1441
+                with K.If(prep_tid < 128), K.Then():  # .cu:1443-1472
+                    gate_col: K.int32 = prep_tid  # .cu:1444
+                    gate_rate = K.local_scalar("float32")  # .cu:1445
+                    K.ptx.ld.shared.f32(gate_rate, smem_gate_rate_all.ptr_to([stage_f32]))
+                    gate_bias = K.local_scalar("float32")  # .cu:1446
+                    K.ptx.ld.global_.f32(gate_bias, dt_bias.ptr_to([head_idx_3 * 128 + gate_col]))
+                    prefix_log2 = K.local_scalar("float32", init=K.float32(0.0))  # .cu:1447
+                    with K.serial(0, 32) as gate_row:  # .cu:1448-1471
+                        gate_log2 = K.local_scalar("float32", init=K.float32(0.0))  # .cu:1450
+                        gate_needs_compute = K.local_scalar("int32")
+                        K.assign(gate_needs_compute, 1)  # .cu:1451
+                        with K.If(gate_row == 0), K.Then():  # .cu:1452-1457
+                            with K.If(chunk_is_full_2 != 0), K.Then():
+                                K.assign(gate_log2, early_gate0)
+                                K.assign(gate_needs_compute, 0)
+                        with K.If(gate_needs_compute != 0), K.Then():  # .cu:1458-1468
+                            with K.If(chunk_idx_3 * 32 + gate_row < seq_len_4), K.Then():
+                                _bits = K.local_scalar("uint16")
+                                K.ptx.ld.shared.b16(
+                                    _bits,
+                                    smem_g_raw_all.ptr_to([stage_bf16 + gate_row * 128 + gate_col]),
+                                )
+                                gate_raw: K.f32 = K.cuda.bfloat162float(
+                                    K.reinterpret("bfloat16", _bits)
+                                )  # .cu:1460-1461
+                                gate_arg: K.f32 = gate_rate * (gate_raw + gate_bias)  # .cu:1462
+                                _tanh = K.local_scalar("float32")
+                                K.ptx.tanh.approx.f32(_tanh, gate_arg * K.float32(0.5))
+                                gate_sigmoid: K.f32 = _tanh * K.float32(0.5) + K.float32(
+                                    0.5
+                                )  # .cu:1463-1465
+                                K.assign(
+                                    gate_log2,
+                                    K.float32(lower_bound)
+                                    * K.float32(1.4426950408889634)
+                                    * gate_sigmoid,
+                                )  # .cu:1466
+                        K.assign(prefix_log2, prefix_log2 + gate_log2)  # .cu:1469
+                        K.ptx.st.shared.f32(
+                            smem_gate_all.ptr_to([stage_f32 + gate_row * 128 + gate_col]),
+                            prefix_log2,
+                        )  # .cu:1470
+                _prep_bar_sync()  # .cu:1473-1485
+                with K.If(chunk_is_full_2 != 0), K.Then():  # .cu:1486-1488
+                    _mbarrier_wait(qk_raw_full, prep_stage, prep_phase.phase)
+                with K.If(prep_tid < 128), K.Then():  # .cu:1489-1493
+                    total_log2 = K.local_scalar("float32")  # .cu:1490
+                    K.ptx.ld.shared.f32(
+                        total_log2, smem_gt_prefix_all.ptr_to([stage_f32 + prep_tid])
+                    )
+                    _i64 = K.local_scalar("float32")
+                    K.ptx.ex2.approx.ftz.f32(
+                        _i64,
+                        total_log2
+                        - K.float32(lower_bound) * K.float32(1.4426950408889634) * K.float32(16.0),
+                    )
+                    K.ptx.st.shared.f32(
+                        smem_restore_factor_all.ptr_to([stage_f32 + prep_tid]), _i64
+                    )  # .cu:1491-1492
+                with K.If(prep_tid == 0), K.Then():  # .cu:1494-1497
+                    _i642 = K.local_scalar("float32")
+                    K.ptx.ex2.approx.ftz.f32(
+                        _i642,
+                        K.float32(lower_bound) * K.float32(1.4426950408889634) * K.float32(16.0),
+                    )
+                    K.ptx.st.shared.f32(smem_restore_factor_all.ptr_to([stage_f32 + 128]), _i642)
+                q_u32 = K.decl_buffer((total_tokens * h * D_HEAD // 2,), "uint32", data=q.data)
+                k_u32 = K.decl_buffer((total_tokens * h * D_HEAD // 2,), "uint32", data=k.data)
+                with K.serial(0, 4, unroll=False) as work_pass:  # .cu:1498-1694 (#pragma unroll 1)
+                    work_item = K.local_scalar("int32")
+                    K.assign(work_item, work_pass * 128 + prep_tid)  # .cu:1500
+                    row_1: K.int32 = work_item // 16  # .cu:1501
+                    segment_1: K.int32 = work_item % 16  # .cu:1502
+                    token_1: K.int64 = bos_4 + K.cast(chunk_idx_3 * 32 + row_1, "int64")  # .cu:1503
+                    token_valid_1: K.int32 = K.if_then_else(
+                        chunk_idx_3 * 32 + row_1 < seq_len_4, 1, 0
+                    )  # .cu:1504
+                    gmem_base: K.int64 = (
+                        token_1 * K.cast(h, "int64") + K.cast(head_idx_3, "int64")
+                    ) * 128 + K.cast(segment_1 * 8, "int64")  # .cu:1505
+                    qk_byte_off = segment_1 * 8 // 64 * 4096 + row_1 * 128 + segment_1 * 8 % 64 * 2
+                    qk_swizzled_off = qk_byte_off ^ ((qk_byte_off >> 7 & 7) << 4)
+                    q_raw_vec = K.alloc_local((8,), "float32")  # .cu:1506
+                    k_raw_vec = K.alloc_local((8,), "float32")  # .cu:1507
+                    with K.unroll(8) as _zi:  # .cu:1508-1523
+                        K.assign(q_raw_vec[_zi], K.float32(0.0))
+                        K.assign(k_raw_vec[_zi], K.float32(0.0))
+                    with K.If(chunk_is_full_2 != 0):
+                        with K.Then():  # .cu:1524-1562
+                            packed = K.alloc_local((4,), "uint32", align=16)  # .cu:1525
+                            K.ptx.ld.shared.v4.b32(packed[0], packed[1], packed[2], packed[3], smem_raw.ptr_to([smem_q_raw_prefetch_addr + prep_stage_byte_base + qk_swizzled_off - K.cast(smem, "int32")]))  # .cu:1526-1528  # fmt: skip
+                            packed_fp32 = K.alloc_local((8,), "float32")  # .cu:1529
+                            with K.unroll(4) as _pair:  # .cu:1530-1539
+                                K.assign(
+                                    packed_fp32[_pair * 2],
+                                    K.cuda.uint_as_float(packed[_pair + 0] << K.uint32(16)),
+                                )
+                                K.assign(
+                                    packed_fp32[_pair * 2 + 1],
+                                    K.cuda.uint_as_float(packed[_pair + 0] & K.uint32(0xFFFF0000)),
+                                )
+                            with K.unroll(8) as value_idx:  # .cu:1540-1543
+                                K.assign(q_raw_vec[value_idx], packed_fp32[value_idx])
+                            packed_0 = K.alloc_local((4,), "uint32", align=16)  # .cu:1544
+                            K.ptx.ld.shared.v4.b32(packed_0[0], packed_0[1], packed_0[2], packed_0[3], smem_raw.ptr_to([smem_kd_addr + prep_stage_byte_base + qk_swizzled_off - K.cast(smem, "int32")]))  # .cu:1545-1547  # fmt: skip
+                            packed_0_fp32 = K.alloc_local((8,), "float32")  # .cu:1548
+                            with K.unroll(4) as _pair:  # .cu:1549-1558
+                                K.assign(
+                                    packed_0_fp32[_pair * 2],
+                                    K.cuda.uint_as_float(packed_0[_pair + 0] << K.uint32(16)),
+                                )
+                                K.assign(
+                                    packed_0_fp32[_pair * 2 + 1],
+                                    K.cuda.uint_as_float(
+                                        packed_0[_pair + 0] & K.uint32(0xFFFF0000)
+                                    ),
+                                )
+                            with K.unroll(8) as value_idx_1:  # .cu:1559-1562
+                                K.assign(k_raw_vec[value_idx_1], packed_0_fp32[value_idx_1])
+                        with K.Else():
+                            with K.If(token_valid_1 != 0), K.Then():  # .cu:1563-1602
+                                with K.unroll(1) as _blk:  # .cu:1564-1582
+                                    _vldq = K.alloc_local((4,), "uint32", align=16)
+                                    K.ptx.ld.global_.v4.b32(
+                                        _vldq[0],
+                                        _vldq[1],
+                                        _vldq[2],
+                                        _vldq[3],
+                                        q_u32.ptr_to([gmem_base // 2 + _blk * 4]),
+                                    )
+                                    with K.unroll(4) as _pair:
+                                        K.assign(
+                                            q_raw_vec[0 + _blk * 8 + _pair * 2],
+                                            (K.cuda.uint_as_float(_vldq[_pair] << K.uint32(16))),
+                                        )
+                                        K.assign(
+                                            q_raw_vec[0 + _blk * 8 + _pair * 2 + 1],
+                                            (
+                                                K.cuda.uint_as_float(
+                                                    _vldq[_pair] & K.uint32(0xFFFF0000)
+                                                )
+                                            ),
+                                        )
+                                with K.unroll(1) as _blk:  # .cu:1583-1601
+                                    _vldk = K.alloc_local((4,), "uint32", align=16)
+                                    K.ptx.ld.global_.v4.b32(
+                                        _vldk[0],
+                                        _vldk[1],
+                                        _vldk[2],
+                                        _vldk[3],
+                                        k_u32.ptr_to([gmem_base // 2 + _blk * 4]),
+                                    )
+                                    with K.unroll(4) as _pair:
+                                        K.assign(
+                                            k_raw_vec[0 + _blk * 8 + _pair * 2],
+                                            (K.cuda.uint_as_float(_vldk[_pair] << K.uint32(16))),
+                                        )
+                                        K.assign(
+                                            k_raw_vec[0 + _blk * 8 + _pair * 2 + 1],
+                                            (
+                                                K.cuda.uint_as_float(
+                                                    _vldk[_pair] & K.uint32(0xFFFF0000)
+                                                )
+                                            ),
+                                        )
+                    q_sum = K.local_scalar("float32")  # .cu:1603
+                    k_sum = K.local_scalar("float32")  # .cu:1604
+                    K.assign(q_sum, K.float32(0.0))
+                    K.assign(k_sum, K.float32(0.0))
+                    with K.serial(0, 8) as elem_in_segment:  # .cu:1605-1612
+                        K.ptx.fma.rn.f32(
+                            q_sum, q_raw_vec[elem_in_segment], q_raw_vec[elem_in_segment], q_sum
+                        )  # .cu:1608
+                        K.ptx.fma.rn.f32(
+                            k_sum, k_raw_vec[elem_in_segment], k_raw_vec[elem_in_segment], k_sum
+                        )  # .cu:1610
+                    # .cu:1613-1628 butterfly reduction over the 16-lane segment (q then k per step).
+                    for _off in (8, 4, 2, 1):
+                        for _acc in (q_sum, k_sum):
+                            K.assign(_acc, _acc + _shfl_bfly_f32(_acc, K.int32(_off)))
+                    q_inv = K.local_scalar("float32")  # .cu:1629-1630
+                    K.ptx.rsqrt.approx.ftz.f32(q_inv, q_sum + K.float32(1e-06))
+                    k_inv = K.local_scalar("float32")  # .cu:1631-1632
+                    K.ptx.rsqrt.approx.ftz.f32(k_inv, k_sum + K.float32(1e-06))
+                    with K.unroll(4) as _ls:  # .cu:1633-1636
+                        _pk = K.local_scalar("uint64")
+                        K.ptx.mul.rn.ftz.f32x2(
+                            _pk,
+                            K.cuda.make_float2(q_raw_vec[_ls * 2], q_raw_vec[_ls * 2 + 1]),
+                            K.cuda.make_float2(q_inv, q_inv),
+                        )
+                        K.assign(q_raw_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(q_raw_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                    with K.unroll(4) as _ls:  # .cu:1637-1640
+                        _pk = K.local_scalar("uint64")
+                        K.ptx.mul.rn.ftz.f32x2(
+                            _pk,
+                            K.cuda.make_float2(k_raw_vec[_ls * 2], k_raw_vec[_ls * 2 + 1]),
+                            K.cuda.make_float2(k_inv, k_inv),
+                        )
+                        K.assign(k_raw_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(k_raw_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                    qd_vec = K.alloc_local((8,), "float32")  # .cu:1641
+                    kd_vec = K.alloc_local((8,), "float32")  # .cu:1642
+                    ki_vec = K.alloc_local((8,), "float32")  # .cu:1643
+                    prefix_vec = K.alloc_local((8,), "float32")
+                    with K.unroll(2) as prefix_vec_idx:
+                        K.ptx.ld.shared.v4.f32(
+                            prefix_vec[prefix_vec_idx * 4],
+                            prefix_vec[prefix_vec_idx * 4 + 1],
+                            prefix_vec[prefix_vec_idx * 4 + 2],
+                            prefix_vec[prefix_vec_idx * 4 + 3],
+                            smem_gate_all.ptr_to(
+                                [stage_f32 + row_1 * 128 + segment_1 * 8 + prefix_vec_idx * 4]
+                            ),
+                        )
+                    with K.serial(0, 8) as elem_in_segment_1:  # .cu:1644-1653
+                        col: K.int32 = segment_1 * 8 + elem_in_segment_1  # .cu:1645
+                        prefix: K.f32 = prefix_vec[elem_in_segment_1]  # .cu:1646
+                        common_log2: K.f32 = (
+                            K.float32(lower_bound) * K.float32(1.4426950408889634) * K.float32(16.0)
+                        )  # .cu:1647
+                        decay = K.local_scalar("float32")  # .cu:1648-1649
+                        K.ptx.ex2.approx.ftz.f32(decay, prefix - common_log2)
+                        K.assign(qd_vec[elem_in_segment_1], decay)  # .cu:1650
+                        K.assign(kd_vec[elem_in_segment_1], decay)  # .cu:1651
+                        K.assign(
+                            ki_vec[elem_in_segment_1],
+                            K.cuda.fdividef(k_raw_vec[elem_in_segment_1], decay),
+                        )  # .cu:1652 (-use_fast_math: / -> div.approx.f32)
+                    with K.unroll(4) as _ls:  # .cu:1654-1656
+                        _pk = K.local_scalar("uint64")
+                        K.ptx.mul.rn.ftz.f32x2(
+                            _pk,
+                            K.cuda.make_float2(qd_vec[_ls * 2], qd_vec[_ls * 2 + 1]),
+                            K.cuda.make_float2(q_raw_vec[_ls * 2], q_raw_vec[_ls * 2 + 1]),
+                        )
+                        K.assign(qd_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(qd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                    with K.unroll(4) as _ls:  # .cu:1657-1660
+                        _pk = K.local_scalar("uint64")
+                        K.ptx.mul.rn.ftz.f32x2(
+                            _pk,
+                            K.cuda.make_float2(qd_vec[_ls * 2], qd_vec[_ls * 2 + 1]),
+                            K.cuda.make_float2(K.float32(scale), K.float32(scale)),
+                        )
+                        K.assign(qd_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(qd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                    with K.unroll(4) as _ls:  # .cu:1661-1663
+                        _pk = K.local_scalar("uint64")
+                        K.ptx.mul.rn.ftz.f32x2(
+                            _pk,
+                            K.cuda.make_float2(kd_vec[_ls * 2], kd_vec[_ls * 2 + 1]),
+                            K.cuda.make_float2(k_raw_vec[_ls * 2], k_raw_vec[_ls * 2 + 1]),
+                        )
+                        K.assign(kd_vec[_ls * 2], K.cuda.float2_x(_pk))
+                        K.assign(kd_vec[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                    packed_1 = K.alloc_local((4,), "uint32", align=4)  # .cu:1664
+                    with K.unroll(4) as _lp:  # .cu:1665-1669
+                        K.assign(
+                            packed_1[_lp],
+                            K.cuda.float22bfloat162_rn(
+                                qd_vec[_lp * 2 + 0], qd_vec[_lp * 2 + 1 + 0]
+                            ),
+                        )
+                    with K.unroll(4) as word:  # .cu:1670-1673
+                        K.ptx.st.shared.b32(smem_raw.ptr_to([smem_qd_addr + prep_stage_byte_base + qk_swizzled_off + word * 4 - K.cast(smem, "int32")]), packed_1[word])  # fmt: skip
+                    packed_0_1 = K.alloc_local((4,), "uint32", align=4)  # .cu:1674
+                    with K.unroll(4) as _lp:  # .cu:1675-1679
+                        K.assign(
+                            packed_0_1[_lp],
+                            K.cuda.float22bfloat162_rn(
+                                kd_vec[_lp * 2 + 0], kd_vec[_lp * 2 + 1 + 0]
+                            ),
+                        )
+                    with K.unroll(4) as word_1:  # .cu:1680-1683
+                        K.ptx.st.shared.b32(smem_raw.ptr_to([smem_kd_addr + prep_stage_byte_base + qk_swizzled_off + word_1 * 4 - K.cast(smem, "int32")]), packed_0_1[word_1])  # fmt: skip
+                    packed_1_1 = K.alloc_local((4,), "uint32", align=4)  # .cu:1684
+                    with K.unroll(4) as _lp:  # .cu:1685-1689
+                        K.assign(
+                            packed_1_1[_lp],
+                            K.cuda.float22bfloat162_rn(
+                                ki_vec[_lp * 2 + 0], ki_vec[_lp * 2 + 1 + 0]
+                            ),
+                        )
+                    with K.unroll(4) as word_2:  # .cu:1690-1693
+                        K.ptx.st.shared.b32(smem_raw.ptr_to([smem_ki_addr + prep_stage_byte_base + qk_swizzled_off + word_2 * 4 - K.cast(smem, "int32")]), packed_1_1[word_2])  # fmt: skip
+                _prep_bar_sync()  # .cu:1695-1707
+                pair_row_base: K.int32 = prep_local_warp // 2 * 16  # .cu:1708
+                pair_col_base: K.int32 = prep_local_warp % 2 * 16  # .cu:1709
+                a_frag = K.alloc_local((4,), "uint32", align=4)  # .cu:1710
+                b_frag = K.alloc_local((4,), "uint32", align=4)  # .cu:1711
+                acc = K.alloc_local((8,), "float32", align=4)  # .cu:1712
+                with K.If(pair_row_base >= pair_col_base):
+                    with K.Then():  # .cu:1713-1990
+                        # .cu:1714-1990 swizzled ldmatrix cursors: one base per operand, then a
+                        # fixed XOR walk (with a +256 tile step at index 4).  Cheap pure integer
+                        # arithmetic, so plain Python values -- the expression is re-emitted at each
+                        # of the two chains and ptxas folds the duplicates.
+                        _a_cursors = [
+                            lane // 16 // 8 * 256
+                            + (pair_row_base + lane % 16) * 8
+                            + (lane // 16 % 8 * 16 ^ ((pair_row_base + lane % 16 & 7) << 4)) // 16
+                        ]
+                        _b_cursors = [
+                            lane % 16 // 8 // 8 * 256
+                            + (pair_col_base + 8 * (lane // 16) + lane % 8) * 8
+                            + (
+                                lane % 16 // 8 % 8 * 16
+                                ^ ((pair_col_base + 8 * (lane // 16) + lane % 8 & 7) << 4)
+                            )
+                            // 16
+                        ]
+                        for _x, _step in ((2, 0), (6, 0), (2, 0), (6, 256), (2, 0), (6, 0), (2, 0)):
+                            _a = _a_cursors[-1] ^ _x
+                            _b = (
+                                ((_b_cursors[-1] + 256) ^ _x) + _step - 256
+                                if _step
+                                else ((_b_cursors[-1] + 256) ^ _x) - 256
+                            )
+                            _a_cursors.append(_a + _step if _step else _a)
+                            _b_cursors.append(_b)
+
+                        def _chain8(a_base):
+                            # 8 ldmatrix.x4 pairs walking the swizzled cursors, feeding one accumulate
+                            # chain: step 0 zeroes C, steps 1-7 tie C to acc (both 16x8x16 halves).
+                            for _s in range(8):
+                                K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
+                                    a_frag[0],
+                                    a_frag[1],
+                                    a_frag[2],
+                                    a_frag[3],
+                                    smem_raw.ptr_to([(a_base + prep_stage_byte_base + (_a_cursors[_s]) * 16) - K.cast(smem, "int32")]),
+                                )  # fmt: skip
+                                K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
+                                    b_frag[0],
+                                    b_frag[1],
+                                    b_frag[2],
+                                    b_frag[3],
+                                    smem_raw.ptr_to([(smem_ki_addr + prep_stage_byte_base + (_b_cursors[_s]) * 16) - K.cast(smem, "int32")]),
+                                )  # fmt: skip
+                                if _s == 0:
+                                    _mma_m16n8k16_bf16_zero(acc, a_frag, b_frag)
+                                    _mma_m16n8k16_bf16_zero_off4(acc, a_frag, b_frag)
+                                else:
+                                    _mma_m16n8k16_bf16_acc(acc, a_frag, b_frag)
+                                    _mma_m16n8k16_bf16_acc_off4(acc, a_frag, b_frag)
+
+                        _chain8(smem_kd_addr)  # .cu:1714-1825 first chain (kd a-side, ki b-side)
+                        row0: K.int32 = pair_row_base + lane // 4  # .cu:1826
+                        row1: K.int32 = row0 + 8  # .cu:1827
+                        col0: K.int32 = pair_col_base + lane % 4 * 2  # .cu:1828
+                        beta0 = K.local_scalar("float32")  # .cu:1829
+                        K.ptx.ld.shared.f32(beta0, smem_prep_beta_all.ptr_to([stage_f32 + row0]))
+                        beta1 = K.local_scalar("float32")  # .cu:1830
+                        K.ptx.ld.shared.f32(beta1, smem_prep_beta_all.ptr_to([stage_f32 + row1]))
+                        seed = K.alloc_local((8,), "float32")  # .cu:1831
+                        with K.unroll(8) as _zi:  # .cu:1832-1839
+                            K.ptx.mov.b32(seed[_zi], K.float32(0.0))
+                        # .cu:1840-1863 strict lower-triangular mask x beta, statically expanded.
+                        for _i, (_row, _dc, _beta) in enumerate(
+                            [
+                                (row0, 0, beta0),
+                                (row0, 1, beta0),
+                                (row1, 0, beta1),
+                                (row1, 1, beta1),
+                                (row0, 8, beta0),
+                                (row0, 9, beta0),
+                                (row1, 8, beta1),
+                                (row1, 9, beta1),
+                            ]
+                        ):
+                            with K.If(_row > (col0 if _dc == 0 else col0 + _dc)), K.Then():
+                                K.assign(seed[_i], acc[_i] * _beta)
+                        seed_packed = K.alloc_local((4,), "uint32", align=4)  # .cu:1864
+                        with K.unroll(4) as _lp:  # .cu:1865-1869
+                            K.ptx.mov.b32(
+                                seed_packed[_lp],
+                                K.cuda.float22bfloat162_rn(
+                                    seed[_lp * 2 + 0], seed[_lp * 2 + 1 + 0]
+                                ),
+                            )
+                        seed_lane_row: K.int32 = lane % 16  # .cu:1870
+                        seed_lane_col: K.int32 = lane // 16 * 8  # .cu:1871
+                        byte_off: K.int32 = (pair_row_base + seed_lane_row) * 128 + (
+                            pair_col_base + seed_lane_col
+                        ) * 2  # .cu:1872
+                        swizzled_off: K.int32 = byte_off ^ ((byte_off >> 7 & 7) << 4)  # .cu:1873
+                        seed_addr: K.int32 = (
+                            smem_inv_work_addr + prep_stage_byte_base + swizzled_off
+                        )  # .cu:1874
+                        # .cu:1875-1878 stmatrix.x4 (seed into inv_work)
+                        K.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
+                            smem_raw.ptr_to([(seed_addr) - K.cast(smem, "int32")]),
+                            seed_packed[0],
+                            seed_packed[1],
+                            seed_packed[2],
+                            seed_packed[3],
+                        )
+                        _chain8(smem_qd_addr)  # .cu:1879-1990 second chain (qd a-side, ki b-side)
+                    with K.Else():  # .cu:1991-2000
+                        with K.unroll(8) as _zi:
+                            K.ptx.mov.b32(acc[_zi], K.float32(0.0))
+                row0_1: K.int32 = pair_row_base + lane // 4  # .cu:2001
+                row1_1: K.int32 = row0_1 + 8  # .cu:2002
+                col0_1: K.int32 = pair_col_base + lane % 4 * 2  # .cu:2003
+                mqk = K.alloc_local((8,), "float32")  # .cu:2004
+                with K.unroll(8) as _zi:  # .cu:2005-2012
+                    K.ptx.mov.b32(mqk[_zi], K.float32(0.0))
+                # .cu:2013-2036 lower-triangular mask, statically expanded over the 8 acc slots.
+                for _i, (_row, _dc) in enumerate(
+                    [
+                        (row0_1, 0),
+                        (row0_1, 1),
+                        (row1_1, 0),
+                        (row1_1, 1),
+                        (row0_1, 8),
+                        (row0_1, 9),
+                        (row1_1, 8),
+                        (row1_1, 9),
+                    ]
+                ):
+                    with K.If(_row >= (col0_1 if _dc == 0 else col0_1 + _dc)), K.Then():
+                        K.assign(mqk[_i], acc[_i])
+                mqk_packed = K.alloc_local((4,), "uint32", align=4)  # .cu:2037
+                with K.unroll(4) as _lp:  # .cu:2038-2042
+                    K.ptx.mov.b32(
+                        mqk_packed[_lp],
+                        K.cuda.float22bfloat162_rn(mqk[_lp * 2 + 0], mqk[_lp * 2 + 1 + 0]),
+                    )
+                with K.unroll(2) as publish_pair:  # .cu:2043-2051
+                    publish_row: K.int32 = pair_col_base + publish_pair * 8 + (lane & 7)  # .cu:2045
+                    publish_col: K.int32 = 128 + pair_row_base + lane // 8 * 8  # .cu:2046
+                    _pub_base: K.int32 = (
+                        publish_col // 64 * 4096 + publish_row * 128 + publish_col % 64 * 2
+                    )
+                    _pub_addr: K.int32 = (
+                        smem_final_trans_addr
+                        + prep_stage_byte_base
+                        + (_pub_base ^ ((_pub_base >> 7 & 7) << 4))
+                    )  # .cu:2047
+                    # .cu:2048-2050 stmatrix.x2.trans
+                    K.ptx.stmatrix.sync.aligned.m8n8.x2.trans.shared.b16(
+                        smem_raw.ptr_to([(_pub_addr) - K.cast(smem, "int32")]),
+                        mqk_packed[publish_pair * 2],
+                        mqk_packed[publish_pair * 2 + 1],
+                    )
+                _prep_bar_sync()  # .cu:2052-2064
+                with K.If(prep_tid < 128), K.Then():  # .cu:2065-2069
+                    total_log2_1 = K.local_scalar("float32")  # .cu:2066
+                    K.ptx.ld.shared.f32(
+                        total_log2_1, smem_gt_prefix_all.ptr_to([stage_f32 + prep_tid])
+                    )
+                    _pk = K.local_scalar("float32")
+                    K.ptx.ex2.approx.ftz.f32(_pk, total_log2_1)
+                    K.ptx.st.shared.f32(
+                        smem_gt_all.ptr_to([stage_f32 + prep_tid]), _pk
+                    )  # .cu:2067-2068
+
+                def _restore_block(n_passes, row_of):
+                    # .cu:2070-2187 / 2405-2522 (same body, two row maps): reload the staged
+                    # qd/kd/ki tiles, rescale by the chunk restore factor, republish.
+                    restore_scale = K.local_scalar("float32")
+                    K.ptx.ld.shared.f32(
+                        restore_scale, smem_restore_factor_all.ptr_to([stage_f32 + 128])
+                    )
+                    restore_factor = K.alloc_local((8,), "float32")
+                    restore_segment: K.int32 = lane & 15
+                    with K.unroll(2) as restore_vec:
+                        K.ptx.ld.shared.v4.f32(
+                            restore_factor[restore_vec * 4],
+                            restore_factor[restore_vec * 4 + 1],
+                            restore_factor[restore_vec * 4 + 2],
+                            restore_factor[restore_vec * 4 + 3],
+                            smem_restore_factor_all.ptr_to(
+                                [stage_f32 + restore_segment * 8 + restore_vec * 4]
+                            ),
+                        )
+                    with K.serial(0, n_passes, unroll=False) as restore_pass:  # (#pragma unroll 1)
+                        restore_row: K.int32 = row_of(restore_pass)
+                        restore_byte_off = (
+                            restore_segment * 8 // 64 * 4096
+                            + restore_row * 128
+                            + restore_segment * 8 % 64 * 2
+                        )
+                        restore_swizzled_off = restore_byte_off ^ ((restore_byte_off >> 7 & 7) << 4)
+                        restore_qd_values = K.alloc_local((8,), "float32")
+                        restore_kd_values = K.alloc_local((8,), "float32")
+                        restore_ki_values = K.alloc_local((8,), "float32")
+                        for _dst, _src_addr in (
+                            (restore_qd_values, smem_qd_addr),
+                            (restore_kd_values, smem_kd_addr),
+                            (restore_ki_values, smem_ki_addr),
+                        ):
+                            _packed = K.alloc_local((4,), "uint32", align=16)
+                            K.ptx.ld.shared.v4.b32(_packed[0], _packed[1], _packed[2], _packed[3], smem_raw.ptr_to([_src_addr + prep_stage_byte_base + restore_swizzled_off - K.cast(smem, "int32")]))  # fmt: skip
+                            _packed_fp32 = K.alloc_local((8,), "float32")
+                            with K.unroll(4) as _pair:
+                                K.ptx.mov.b32(
+                                    _packed_fp32[_pair * 2],
+                                    K.cuda.uint_as_float(_packed[_pair + 0] << K.uint32(16)),
+                                )
+                                K.ptx.mov.b32(
+                                    _packed_fp32[_pair * 2 + 1],
+                                    K.cuda.uint_as_float(_packed[_pair + 0] & K.uint32(0xFFFF0000)),
+                                )
+                            with K.unroll(8) as _value_idx:
+                                K.ptx.mov.b32(_dst[_value_idx], _packed_fp32[_value_idx])
+                        restore_kr_values = K.alloc_local((8,), "float32")
+                        with K.unroll(8) as restore_elem:
+                            K.ptx.mov.b32(
+                                restore_kr_values[restore_elem],
+                                (restore_ki_values[restore_elem] * restore_factor[restore_elem]),
+                            )
+                        for _vals in (restore_qd_values, restore_kd_values):
+                            with K.unroll(4) as _ls:
+                                _pk = K.local_scalar("uint64")
+                                K.ptx.mul.rn.ftz.f32x2(
+                                    _pk,
+                                    K.cuda.make_float2(_vals[_ls * 2], _vals[_ls * 2 + 1]),
+                                    K.cuda.make_float2(restore_scale, restore_scale),
+                                )
+                                K.ptx.mov.b32(_vals[_ls * 2], K.cuda.float2_x(_pk))
+                                K.ptx.mov.b32(_vals[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                        for _vals, _dst_addr in (
+                            (restore_qd_values, smem_qd_addr),
+                            (restore_kd_values, smem_kd_addr),
+                            (restore_kr_values, smem_kr_trans_addr),
+                        ):
+                            _packed_out = K.alloc_local((4,), "uint32", align=4)
+                            with K.unroll(4) as _lp:
+                                K.ptx.mov.b32(
+                                    _packed_out[_lp],
+                                    K.cuda.float22bfloat162_rn(
+                                        _vals[_lp * 2 + 0], _vals[_lp * 2 + 1 + 0]
+                                    ),
+                                )
+                            with K.unroll(4) as _word:
+                                K.ptx.st.shared.b32(smem_raw.ptr_to([_dst_addr + prep_stage_byte_base + restore_swizzled_off + _word * 4 - K.cast(smem, "int32")]), _packed_out[_word])  # fmt: skip
+
+                with K.If(prep_local_warp >= 2), K.Then():  # .cu:2070-2187
+                    _restore_block(
+                        6, lambda _pass: 8 + (prep_local_warp - 2) * 12 + _pass * 2 + (lane >> 4)
+                    )  # .cu:2082
+                with K.If(prep_local_warp == 0), K.Then():  # .cu:2188-2250
+                    inverse_row: K.int32 = lane  # .cu:2189
+                    diag_block: K.int32 = inverse_row // 8  # .cu:2190
+                    lane_in_diag: K.int32 = lane & 7  # .cu:2191
+                    inv_row = K.alloc_local((8,), "float32")  # .cu:2192
+                    packed_5 = K.alloc_local((4,), "uint32", align=16)  # .cu:2193
+                    byte_off_1: K.int32 = inverse_row * 128 + diag_block * 8 * 2  # .cu:2194
+                    swizzled_off_1: K.int32 = byte_off_1 ^ ((byte_off_1 >> 7 & 7) << 4)  # .cu:2195
+                    K.ptx.ld.shared.v4.b32(
+                        packed_5[0],
+                        packed_5[1],
+                        packed_5[2],
+                        packed_5[3],
+                        smem_raw.ptr_to(
+                            [
+                                smem_inv_work_addr
+                                + prep_stage_byte_base
+                                + swizzled_off_1
+                                - K.cast(smem, "int32")
+                            ]
+                        ),
+                    )  # .cu:2196-2198
+                    packed_fp32_2 = K.alloc_local((8,), "float32")  # .cu:2199
+                    with K.unroll(4) as _pair:  # .cu:2200-2209
+                        K.ptx.mov.b32(
+                            packed_fp32_2[_pair * 2],
+                            K.cuda.uint_as_float(packed_5[_pair + 0] << K.uint32(16)),
+                        )
+                        K.ptx.mov.b32(
+                            packed_fp32_2[_pair * 2 + 1],
+                            K.cuda.uint_as_float(packed_5[_pair + 0] & K.uint32(0xFFFF0000)),
+                        )
+                    with K.unroll(8) as value_idx_5:  # .cu:2210-2213
+                        K.ptx.mov.b32(inv_row[value_idx_5], packed_fp32_2[value_idx_5])
+                    with K.unroll(8) as diag_elem:  # .cu:2214-2219
+                        with K.If(lane_in_diag == diag_elem), K.Then():
+                            K.assign(inv_row[diag_elem], K.float32(1.0))
+                    diag_group_base: K.int32 = lane - lane_in_diag  # .cu:2220
+                    # .cu:2221-2237 lower-triangular Gauss elimination, statically expanded over the
+                    # 7 pivot rows (the source's #pragma unroll of a compile-time trip count).
+                    for _p in range(7):
+                        row_scale: K.f32 = -inv_row[_p]  # .cu:2223
+                        for _j in range(_p):
+                            pivot_lane: K.int32 = diag_group_base + _p  # .cu:2226
+                            pivot = K.local_scalar(
+                                "float32", init=_shfl_idx_f32(inv_row[_j], pivot_lane)
+                            )  # .cu:2227-2228
+                            with K.If(lane_in_diag > _p), K.Then():  # .cu:2229-2232
+                                K.ptx.fma.rn.f32(
+                                    inv_row[_j], row_scale, pivot, inv_row[_j]
+                                )  # .cu:2230-2231
+                        with K.If(lane_in_diag > _p), K.Then():  # .cu:2234-2236
+                            K.ptx.mov.b32(inv_row[_p], row_scale)
+                    packed_0_3 = K.alloc_local((4,), "uint32", align=4)  # .cu:2238
+                    with K.unroll(4) as _lp:  # .cu:2239-2243
+                        K.ptx.mov.b32(
+                            packed_0_3[_lp],
+                            K.cuda.float22bfloat162_rn(
+                                inv_row[_lp * 2 + 0], inv_row[_lp * 2 + 1 + 0]
+                            ),
+                        )
+                    byte_off_1_1: K.int32 = inverse_row * 128 + diag_block * 8 * 2  # .cu:2244
+                    swizzled_off_2: K.int32 = byte_off_1_1 ^ (
+                        (byte_off_1_1 >> 7 & 7) << 4
+                    )  # .cu:2245
+                    with K.unroll(4) as word_6:  # .cu:2246-2249
+                        K.ptx.st.shared.b32(smem_raw.ptr_to([smem_inv_work_addr + prep_stage_byte_base + swizzled_off_2 + word_6 * 4 - K.cast(smem, "int32")]), packed_0_3[word_6])  # fmt: skip
+                with K.If(prep_local_warp < 2), K.Then():  # .cu:2251-2256
+                    with K.If(K.cuda.elect_sync()), K.Then():
+                        _mbarrier_arrive(prep_diag_ready, prep_stage)
+                    _mbarrier_wait(prep_diag_ready, prep_stage, prep_phase.phase)
+                with K.If(prep_local_warp < 2), K.Then():  # .cu:2257-2322
+                    lane_row: K.int32 = lane & 7  # .cu:2258
+                    byte_off_2: K.int32 = (prep_local_warp * 16 + 8 + lane_row) * 128 + (
+                        prep_local_warp * 16 + 8
+                    ) * 2  # .cu:2259
+                    swizzled_off_3: K.int32 = byte_off_2 ^ ((byte_off_2 >> 7 & 7) << 4)  # .cu:2260
+                    matrix_addr = K.local_scalar("int32")
+                    K.ptx.add.s32(
+                        matrix_addr, smem_inv_work_addr + prep_stage_byte_base, swizzled_off_3
+                    )  # .cu:2261
+                    d_frag = K.alloc_local((2,), "uint32", align=4)  # .cu:2268
+                    c_frag = K.alloc_local((1,), "uint32", align=4)  # .cu:2269
+                    dc_acc = K.alloc_local((4,), "float32", align=4)  # .cu:2270
+                    dc_bf16 = K.alloc_local((2,), "uint32", align=4)  # .cu:2271
+                    inv_a_frag = K.alloc_local((1,), "uint32", align=4)  # .cu:2272
+                    o_acc = K.alloc_local((4,), "float32", align=4)  # .cu:2273
+                    o_bf16 = K.alloc_local((2,), "uint32", align=4)  # .cu:2274
+                    # .cu:2275-2278 ldmatrix.x1 d_frag[0]
+                    K.ptx.ldmatrix.sync.aligned.m8n8.x1.shared.b16(
+                        d_frag[0], smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")])
+                    )
+                    # .cu:2279-2282 ldmatrix.x1 d_frag[1] (same address)
+                    K.ptx.ldmatrix.sync.aligned.m8n8.x1.shared.b16(
+                        d_frag[1], smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")])
+                    )
+                    # .cu:2283-2286 ldmatrix.x1.trans c_frag
+                    K.ptx.xor.b32(matrix_addr, matrix_addr, K.int32(16))
+                    K.ptx.ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16(
+                        c_frag[0], smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")])
+                    )
+                    _mma_m16n8k8_bf16_zero(dc_acc, d_frag, c_frag)  # .cu:2287-2289
+                    with K.unroll(2) as _ls:  # .cu:2290-2293
+                        _pk = K.local_scalar("uint64")
+                        K.ptx.mul.rn.ftz.f32x2(
+                            _pk,
+                            K.cuda.make_float2(dc_acc[_ls * 2], dc_acc[_ls * 2 + 1]),
+                            K.cuda.make_float2(K.float32(-1.0), K.float32(-1.0)),
+                        )
+                        K.ptx.mov.b32(dc_acc[_ls * 2], K.cuda.float2_x(_pk))
+                        K.ptx.mov.b32(dc_acc[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                    with K.unroll(2) as _lp:  # .cu:2294-2298
+                        K.ptx.mov.b32(
+                            dc_bf16[_lp],
+                            K.cuda.float22bfloat162_rn(
+                                dc_acc[_lp * 2 + 0], dc_acc[_lp * 2 + 1 + 0]
+                            ),
+                        )
+                    # .cu:2299-2302 ldmatrix.x1.trans inv_a_frag
+                    K.ptx.add.s32(matrix_addr, matrix_addr, K.int32(-1024))
+                    K.ptx.ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16(
+                        inv_a_frag[0], smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")])
+                    )
+                    _mma_m16n8k8_bf16_zero(o_acc, dc_bf16, inv_a_frag)  # .cu:2303-2305
+                    with K.unroll(2) as _lp:  # .cu:2306-2310
+                        K.ptx.mov.b32(
+                            o_bf16[_lp],
+                            K.cuda.float22bfloat162_rn(o_acc[_lp * 2 + 0], o_acc[_lp * 2 + 1 + 0]),
+                        )
+                    K.ptx.add.s32(matrix_addr, matrix_addr, K.int32(1024))
+                    # .cu:2314-2317 stmatrix.x1
+                    K.ptx.stmatrix.sync.aligned.m8n8.x1.shared.b16(
+                        smem_raw.ptr_to([(matrix_addr) - K.cast(smem, "int32")]), o_bf16[0]
+                    )
+                    with K.If(K.cuda.elect_sync()), K.Then():  # .cu:2318-2320
+                        _mbarrier_arrive(prep_inv16_ready, prep_stage)
+                    _mbarrier_wait(prep_inv16_ready, prep_stage, prep_phase.phase)  # .cu:2321
+                with K.If(prep_local_warp == 0):
+                    with K.Then():  # .cu:2323-2404
+                        lane_row_1: K.int32 = lane % 16  # .cu:2324
+                        lane_col: K.int32 = lane // 16 * 8  # .cu:2325
+                        byte_off_3: K.int32 = (16 + lane_row_1) * 128 + (
+                            16 + lane_col
+                        ) * 2  # .cu:2326
+                        swizzled_off_4: K.int32 = byte_off_3 ^ (
+                            (byte_off_3 >> 7 & 7) << 4
+                        )  # .cu:2327
+                        d_addr_1: K.int32 = (
+                            smem_inv_work_addr + prep_stage_byte_base + swizzled_off_4
+                        )  # .cu:2328
+                        byte_off_0_1: K.int32 = (16 + lane_row_1) * 128 + lane_col * 2  # .cu:2329
+                        swizzled_off_1_2: K.int32 = byte_off_0_1 ^ (
+                            (byte_off_0_1 >> 7 & 7) << 4
+                        )  # .cu:2330
+                        c_addr_1: K.int32 = (
+                            smem_inv_work_addr + prep_stage_byte_base + swizzled_off_1_2
+                        )  # .cu:2331
+                        byte_off_2_2: K.int32 = lane_row_1 * 128 + lane_col * 2  # .cu:2332
+                        swizzled_off_3_2: K.int32 = byte_off_2_2 ^ (
+                            (byte_off_2_2 >> 7 & 7) << 4
+                        )  # .cu:2333
+                        a_addr_1: K.int32 = (
+                            smem_inv_work_addr + prep_stage_byte_base + swizzled_off_3_2
+                        )  # .cu:2334
+                        d32_frag = K.alloc_local((4,), "uint32", align=4)  # .cu:2335
+                        c32_frag = K.alloc_local((4,), "uint32", align=4)  # .cu:2336
+                        dc32_acc = K.alloc_local((8,), "float32", align=4)  # .cu:2337
+                        dc32_bf16 = K.alloc_local((4,), "uint32", align=4)  # .cu:2338
+                        a32_frag = K.alloc_local((4,), "uint32", align=4)  # .cu:2339
+                        o32_acc = K.alloc_local((8,), "float32", align=4)  # .cu:2340
+                        o32_bf16 = K.alloc_local((4,), "uint32", align=4)  # .cu:2341
+                        zero32_bf16 = K.alloc_local((4,), "uint32", align=4)  # .cu:2342
+                        # .cu:2343-2346 ldmatrix.x4 d32
+                        K.ptx.ldmatrix.sync.aligned.m8n8.x4.shared.b16(
+                            d32_frag[0],
+                            d32_frag[1],
+                            d32_frag[2],
+                            d32_frag[3],
+                            smem_raw.ptr_to([(d_addr_1) - K.cast(smem, "int32")]),
+                        )
+                        _dpb: K.int32 = (
+                            (16 + lane_col) // 16 * 1024
+                            + (16 + lane_row_1) * 32
+                            + (16 + lane_col) % 16 * 2
+                        )
+                        d_publish_addr: K.int32 = (
+                            smem_inv_addr + prep_stage_byte_base + (_dpb ^ ((_dpb >> 7 & 1) << 4))
+                        )  # .cu:2347
+                        # .cu:2348-2351 stmatrix.x4 d32 publish
+                        K.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
+                            smem_raw.ptr_to([(d_publish_addr) - K.cast(smem, "int32")]),
+                            d32_frag[0],
+                            d32_frag[1],
+                            d32_frag[2],
+                            d32_frag[3],
+                        )
+                        # .cu:2352-2355 ldmatrix.x4.trans c32
+                        K.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                            c32_frag[0],
+                            c32_frag[1],
+                            c32_frag[2],
+                            c32_frag[3],
+                            smem_raw.ptr_to([(c_addr_1) - K.cast(smem, "int32")]),
+                        )
+                        _mma_m16n8k16_bf16_zero(dc32_acc, d32_frag, c32_frag)  # .cu:2356-2358
+                        _mma_m16n8k16_bf16_zero_off4(dc32_acc, d32_frag, c32_frag)  # .cu:2359-2361
+                        with K.unroll(4) as _ls:  # .cu:2362-2365
+                            _pk = K.local_scalar("uint64")
+                            K.ptx.mul.rn.ftz.f32x2(
+                                _pk,
+                                K.cuda.make_float2(dc32_acc[_ls * 2], dc32_acc[_ls * 2 + 1]),
+                                K.cuda.make_float2(K.float32(-1.0), K.float32(-1.0)),
+                            )
+                            K.ptx.mov.b32(dc32_acc[_ls * 2], K.cuda.float2_x(_pk))
+                            K.ptx.mov.b32(dc32_acc[_ls * 2 + 1], K.cuda.float2_y(_pk))
+                        with K.unroll(4) as _lp:  # .cu:2366-2370
+                            K.ptx.mov.b32(
+                                dc32_bf16[_lp],
+                                K.cuda.float22bfloat162_rn(
+                                    dc32_acc[_lp * 2 + 0], dc32_acc[_lp * 2 + 1 + 0]
+                                ),
+                            )
+                        # .cu:2371-2374 ldmatrix.x4.trans a32
+                        K.ptx.ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                            a32_frag[0],
+                            a32_frag[1],
+                            a32_frag[2],
+                            a32_frag[3],
+                            smem_raw.ptr_to([(a_addr_1) - K.cast(smem, "int32")]),
+                        )
+                        _apb: K.int32 = lane_col // 16 * 1024 + lane_row_1 * 32 + lane_col % 16 * 2
+                        a_publish_addr: K.int32 = (
+                            smem_inv_addr + prep_stage_byte_base + (_apb ^ ((_apb >> 7 & 1) << 4))
+                        )  # .cu:2375
+                        # .cu:2376-2379 stmatrix.x4.trans a32 publish
+                        K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
+                            smem_raw.ptr_to([(a_publish_addr) - K.cast(smem, "int32")]),
+                            a32_frag[0],
+                            a32_frag[1],
+                            a32_frag[2],
+                            a32_frag[3],
+                        )
+                        _mma_m16n8k16_bf16_zero(o32_acc, dc32_bf16, a32_frag)  # .cu:2380-2382
+                        _mma_m16n8k16_bf16_zero_off4(o32_acc, dc32_bf16, a32_frag)  # .cu:2383-2385
+                        with K.unroll(4) as _lp:  # .cu:2386-2390
+                            K.ptx.mov.b32(
+                                o32_bf16[_lp],
+                                K.cuda.float22bfloat162_rn(
+                                    o32_acc[_lp * 2 + 0], o32_acc[_lp * 2 + 1 + 0]
+                                ),
+                            )
+                        _opb: K.int32 = (
+                            lane_col // 16 * 1024 + (16 + lane_row_1) * 32 + lane_col % 16 * 2
+                        )
+                        o_publish_addr: K.int32 = (
+                            smem_inv_addr + prep_stage_byte_base + (_opb ^ ((_opb >> 7 & 1) << 4))
+                        )  # .cu:2391
+                        # .cu:2392-2395 stmatrix.x4 o32 publish
+                        K.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
+                            smem_raw.ptr_to([(o_publish_addr) - K.cast(smem, "int32")]),
+                            o32_bf16[0],
+                            o32_bf16[1],
+                            o32_bf16[2],
+                            o32_bf16[3],
+                        )
+                        with K.unroll(4) as zero_word:  # .cu:2396-2399
+                            K.ptx.mov.b32(zero32_bf16[zero_word], K.uint32(0))
+                        _zpb: K.int32 = (
+                            (16 + lane_col) // 16 * 1024
+                            + lane_row_1 * 32
+                            + (16 + lane_col) % 16 * 2
+                        )
+                        zero_publish_addr: K.int32 = (
+                            smem_inv_addr + prep_stage_byte_base + (_zpb ^ ((_zpb >> 7 & 1) << 4))
+                        )  # .cu:2400
+                        # .cu:2401-2404 stmatrix.x4 zero publish
+                        K.ptx.stmatrix.sync.aligned.m8n8.x4.shared.b16(
+                            smem_raw.ptr_to([(zero_publish_addr) - K.cast(smem, "int32")]),
+                            zero32_bf16[0],
+                            zero32_bf16[1],
+                            zero32_bf16[2],
+                            zero32_bf16[3],
+                        )
+                    with K.Else():
+                        with K.If(prep_local_warp == 1), K.Then():  # .cu:2405-2522
+                            _restore_block(4, lambda _pass: _pass * 2 + (lane >> 4))  # .cu:2417
+                _fence_async_shared()  # .cu:2523
+                _prep_bar_sync()  # .cu:2524-2536
+                with K.If(prep_local_warp == 0), K.Then():  # .cu:2537-2541
+                    with K.If(K.cuda.elect_sync()), K.Then():
+                        _mbarrier_arrive(qk_full, prep_stage)
+                prep_phase.advance()
+
+        with K.If((warp >= 8) & (warp <= 11)), K.Then():
+            producer_regs.emit()
+        with compute:
+            compute_state = K.PipelineState(5, phase=0)
+            compute_role(compute_state)
+        with epilogue:
+            epilogue_state = K.PipelineState(5, phase=0)
+            output_state = K.PipelineState(1, phase=0)
+            epilogue_role(epilogue_state, output_state)
+        with mma:
+            mma_state = K.PipelineState(5, phase=0)
+            out_state = K.PipelineState(1, phase=0)
+            mma_role(mma_state, out_state)
+        with load:
+            load_state = K.PipelineState(5, phase=0)
+            load_role(load_state)
+        with prep_role_owner:
+            prep_phase = K.PipelineState(1, phase=0)
+            prep_role(prep_phase)
+
+    kernel = _kernel.func
     return kernel.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS)).with_attr(
         "global_symbol", "bf16_fused_m128"
     )

@@ -111,6 +111,7 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             from tirx_kernels.runner import (
                 DEFAULT_BENCH_COOLDOWN_S,
                 DEFAULT_BENCH_ROUNDS,
+                ab_current_benchmark_module,
                 bind_cuda_assignment,
                 close_prepared_kernel_bench,
                 cuda_is_initialized,
@@ -134,7 +135,7 @@ def _prepared_child_main(args, *, child_started: float) -> int:
                 raise RuntimeError("CUDA was initialized before CPU prepare")
             module = load_kernel(args.kernel, strict=True)
             module_loaded = time.time()
-            config = _find_bench_config(module, args.config)
+            config = _find_bench_config(ab_current_benchmark_module(module), args.config)
             config_resolved = time.time()
             prepared = prepare_kernel_bench(
                 args.kernel, config, module=module, require_cuda_uninitialized=True
@@ -374,12 +375,13 @@ def main():
     parser.add_argument(
         "--timer",
         type=str,
-        choices=("event", "proton", "cudagraph_proton", "kineto", "megamoe"),
+        choices=("event", "proton", "cudagraph_proton", "kineto", "megamoe", "e2e"),
         default=None,
         help="Override the kernel module's benchmark timer: 'event' = do_bench, "
         "'proton' = do_bench_proton, 'cudagraph_proton' = "
         "do_bench_cudagraph_proton [NVIDIA], 'kineto' = distributed full GPU "
-        "activity span, 'megamoe' = DeepGEMM bench_kineto protocol for MegaMoE",
+        "activity span, 'megamoe' = DeepGEMM bench_kineto protocol for MegaMoE, "
+        "'e2e' = distributed rank-max end-to-end wall protocol",
     )
     parser.add_argument(
         "--with-references",

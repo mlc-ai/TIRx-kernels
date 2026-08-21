@@ -8,8 +8,6 @@
 Upstream source: flashinfer/gdn_kernels/gdn_decode_bf16_state.py.
 """
 
-from __future__ import annotations
-
 import functools
 import math
 from typing import Any
@@ -17,8 +15,8 @@ from unittest import SkipTest
 
 import torch
 
+import tirx_kernels.kern as TK
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 
 KERNEL_META = {
     "name": "gdn_decode_bf16_wide_vec_t1",
@@ -42,226 +40,121 @@ LN_2 = 0.6931471805599453
 SCALE = 1.0 / math.sqrt(K)
 
 
-def _ptx_unary(chain: str, value, dtype: str = "float32"):
-    out = T.alloc_local((1,), dtype)
-    T.evaluate(T.ptx[chain](out[0], value))
-    return out[0]
+def _shfl_bfly_f32(value, lane_xor):
+    """``shfl.sync.bfly.b32`` at width 32: clamp/segmask 31, full member mask.
+
+    DPS: the destination pins the warp collective to the call site, so the
+    shuffle is emitted once here rather than re-emitted at every textual use
+    of the returned value.
+    """
+    shfl_bfly = TK.local_scalar("uint32")
+    TK.ptx.shfl_sync.bfly.b32(
+        shfl_bfly,
+        TK.reinterpret("uint32", value),
+        TK.cast(lane_xor, "uint32"),
+        TK.uint32(31),
+        TK.uint32(4294967295),
+    )
+    return TK.reinterpret("float32", shfl_bfly)
 
 
-def _ptx_binary(chain: str, lhs, rhs, dtype: str = "float32"):
-    out = T.alloc_local((1,), dtype)
-    T.evaluate(T.ptx[chain](out[0], lhs, rhs))
-    return out[0]
+def _local_scalar(dtype: str, value):
+    out = TK.alloc_local((1,), dtype)
+    TK.assign(out[0], value)
+    return out
 
 
-def _ptx_ternary(chain: str, lhs, rhs, acc, dtype: str = "float32"):
-    out = T.alloc_local((1,), dtype)
-    T.evaluate(T.ptx[chain](out[0], lhs, rhs, acc))
-    return out[0]
-
-
-def _add_f32(lhs, rhs):
-    return _ptx_binary("add.f32", lhs, rhs)
-
-
-def _sub_f32(lhs, rhs):
-    return _ptx_binary("sub.f32", lhs, rhs)
-
-
-def _mul_f32(lhs, rhs):
-    return _ptx_binary("mul.f32", lhs, rhs)
-
-
-def _fma_f32(lhs, rhs, acc):
-    return _ptx_ternary("fma.rn.f32", lhs, rhs, acc)
-
-
-def _exp2_f32(value):
-    return _ptx_unary("ex2.approx.ftz.f32", value)
-
-
-def _log2_f32(value):
-    return _ptx_unary("lg2.approx.ftz.f32", value)
-
-
-def _rcp_f32(value):
-    return _ptx_unary("rcp.rn.f32", value)
-
-
-def _rsqrt_f32(value):
-    return _ptx_unary("rsqrt.approx.ftz.f32", value)
-
-
-def _max_s32(lhs, rhs):
-    return _ptx_binary("max.s32", lhs, rhs, dtype="int32")
-
-
-def _global_load_u16(buffer, index):
-    out = T.alloc_local((1,), "uint16")
-    T.evaluate(T.ptx.ld.global_.b16(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _global_load_s32(buffer, index):
-    out = T.alloc_local((1,), "int32")
-    T.evaluate(T.ptx.ld.global_.s32(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _global_load_f32(buffer, index):
-    out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.ld.global_.b32(out[0], buffer.ptr_to([index])))
-    return out[0]
-
-
-def _bf16_to_f32(bits):
-    out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.cvt.f32.bf16(out[0], T.cast(bits, "uint16")))
-    return out[0]
-
-
-def _f32_to_bf16(value):
-    out = T.alloc_local((1,), "uint16")
-    T.evaluate(T.ptx.cvt.rn.bf16.f32(out[0], value))
-    return out[0]
-
-
-def _mixed_add_bf16_f32(bits, value):
-    out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.add.rn.f32.bf16(out[0], T.cast(bits, "uint16"), value))
-    return out[0]
-
-
-def _mixed_sub_bf16_f32(bits, value):
-    out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.sub.rn.f32.bf16(out[0], T.cast(bits, "uint16"), value))
-    return out[0]
-
-
-def _bf16_square_fma(bits, acc):
-    out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.fma.rn.f32.bf16(out[0], T.cast(bits, "uint16"), T.cast(bits, "uint16"), acc))
-    return out[0]
-
-
-def _shared_load_f32(buffer, index):
-    out = T.alloc_local((1,), "uint32")
-    T.evaluate(T.ptx.ld.shared.b32(out[0], buffer.ptr_to([index])))
-    return T.reinterpret("float32", out[0])
-
-
-def _shared_store_f32(buffer, index, value):
-    T.evaluate(T.ptx.st.shared.b32(buffer.ptr_to([index]), T.reinterpret("uint32", value)))
-
-
-@T.inline
 def _load_state_bf16x8(buffer, index, values, value_offset):
-    words = T.alloc_local((4,), "uint32", align=16)
-    T.evaluate(
-        T.ptx["ld.global.L1::evict_first.v4.b32"](
-            words[0], words[1], words[2], words[3], buffer.ptr_to([index])
-        )
+    words = TK.alloc_local((4,), "uint32", align=16)
+    TK.ptx["ld.global.L1::evict_first.v4.b32"](
+        words[0], words[1], words[2], words[3], buffer.ptr_to([index])
     )
-    for pair in T.unroll(4):
-        values[value_offset + pair * 2] = T.cuda.uint_as_float(
-            T.shift_left(words[pair], T.uint32(16))
+    with TK.unroll(4) as pair:
+        TK.ptx.mov.b32(
+            values[value_offset + pair * 2],
+            TK.cuda.uint_as_float(TK.shift_left(words[pair], TK.uint32(16))),
         )
-        values[value_offset + pair * 2 + 1] = T.cuda.uint_as_float(
-            T.bitwise_and(words[pair], T.uint32(0xFFFF0000))
-        )
-
-
-@T.inline
-def _load_state_bf16x8_evict_first(buffer, index, values, value_offset):
-    words = T.alloc_local((4,), "uint32", align=16)
-    T.evaluate(
-        T.ptx["ld.global.L1::evict_first.v4.b32"](
-            words[0], words[1], words[2], words[3], buffer.ptr_to([index])
-        )
-    )
-    for pair in T.unroll(4):
-        values[value_offset + pair * 2] = T.cuda.uint_as_float(
-            T.shift_left(words[pair], T.uint32(16))
-        )
-        values[value_offset + pair * 2 + 1] = T.cuda.uint_as_float(
-            T.bitwise_and(words[pair], T.uint32(0xFFFF0000))
+        TK.ptx.mov.b32(
+            values[value_offset + pair * 2 + 1],
+            TK.cuda.uint_as_float(TK.bitwise_and(words[pair], TK.uint32(0xFFFF0000))),
         )
 
 
-@T.inline
 def _load_state_bf16x8_vector_buffer(buffer, index, values, value_offset):
-    words = T.alloc_local((4,), "uint32", align=16)
-    T.evaluate(
-        T.ptx.ld.global_.v4.b32(
-            words[0], words[1], words[2], words[3], buffer.ptr_to([index // ELEMS_PER_LANE])
-        )
+    words = TK.alloc_local((4,), "uint32", align=16)
+    TK.ptx.ld.global_.v4.b32(
+        words[0], words[1], words[2], words[3], buffer.ptr_to([index // ELEMS_PER_LANE])
     )
-    for pair in T.unroll(4):
-        values[value_offset + pair * 2] = T.cuda.uint_as_float(
-            T.shift_left(words[pair], T.uint32(16))
+    with TK.unroll(4) as pair:
+        TK.ptx.mov.b32(
+            values[value_offset + pair * 2],
+            TK.cuda.uint_as_float(TK.shift_left(words[pair], TK.uint32(16))),
         )
-        values[value_offset + pair * 2 + 1] = T.cuda.uint_as_float(
-            T.bitwise_and(words[pair], T.uint32(0xFFFF0000))
+        TK.ptx.mov.b32(
+            values[value_offset + pair * 2 + 1],
+            TK.cuda.uint_as_float(TK.bitwise_and(words[pair], TK.uint32(0xFFFF0000))),
         )
 
 
-@T.inline
 def _load_bf16x8_bits(buffer, index, values):
-    words = T.alloc_local((4,), "uint32", align=16)
-    T.evaluate(
-        T.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
-    )
-    for pair in T.unroll(4):
-        values[pair * 2] = T.cast(T.bitwise_and(words[pair], T.uint32(0xFFFF)), "uint16")
-        values[pair * 2 + 1] = T.cast(T.shift_right(words[pair], T.uint32(16)), "uint16")
+    words = TK.alloc_local((4,), "uint32", align=16)
+    TK.ptx.ld.global_.v4.b32(words[0], words[1], words[2], words[3], buffer.ptr_to([index]))
+    with TK.unroll(4) as pair:
+        TK.ptx.mov.b16(
+            values[pair * 2], TK.cast(TK.bitwise_and(words[pair], TK.uint32(0xFFFF)), "uint16")
+        )
+        TK.ptx.mov.b16(
+            values[pair * 2 + 1], TK.cast(TK.shift_right(words[pair], TK.uint32(16)), "uint16")
+        )
 
 
-@T.inline
 def _load_bf16x4_bits(buffer, index, values):
-    words = T.alloc_local((2,), "uint32", align=8)
-    T.evaluate(T.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index])))
-    for pair in T.unroll(2):
-        values[pair * 2] = T.cast(T.bitwise_and(words[pair], T.uint32(0xFFFF)), "uint16")
-        values[pair * 2 + 1] = T.cast(T.shift_right(words[pair], T.uint32(16)), "uint16")
+    words = TK.alloc_local((2,), "uint32", align=8)
+    TK.ptx.ld.global_.v2.b32(words[0], words[1], buffer.ptr_to([index]))
+    with TK.unroll(2) as pair:
+        TK.ptx.mov.b16(
+            values[pair * 2], TK.cast(TK.bitwise_and(words[pair], TK.uint32(0xFFFF)), "uint16")
+        )
+        TK.ptx.mov.b16(
+            values[pair * 2 + 1], TK.cast(TK.shift_right(words[pair], TK.uint32(16)), "uint16")
+        )
 
 
-@T.inline
 def _store_state_f32x8(buffer, index, values, value_offset):
-    words = T.alloc_local((4,), "uint32", align=16)
-    for pair in T.unroll(4):
-        words[pair] = T.cuda.float22bfloat162_rn(
-            values[value_offset + pair * 2], values[value_offset + pair * 2 + 1]
+    words = TK.alloc_local((4,), "uint32", align=16)
+    with TK.unroll(4) as pair:
+        TK.ptx.mov.b32(
+            words[pair],
+            TK.cuda.float22bfloat162_rn(
+                values[value_offset + pair * 2], values[value_offset + pair * 2 + 1]
+            ),
         )
-    T.evaluate(
-        T.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
-    )
+    TK.ptx.st.global_.v4.b32(buffer.ptr_to([index]), words[0], words[1], words[2], words[3])
 
 
-@T.inline
 def _store_state_f32x8_vector_buffer(buffer, index, values, value_offset):
-    words = T.alloc_local((4,), "uint32", align=16)
-    for pair in T.unroll(4):
-        words[pair] = T.cuda.float22bfloat162_rn(
-            values[value_offset + pair * 2], values[value_offset + pair * 2 + 1]
+    words = TK.alloc_local((4,), "uint32", align=16)
+    with TK.unroll(4) as pair:
+        TK.ptx.mov.b32(
+            words[pair],
+            TK.cuda.float22bfloat162_rn(
+                values[value_offset + pair * 2], values[value_offset + pair * 2 + 1]
+            ),
         )
-    T.evaluate(
-        T.ptx["st.global.L1::evict_first.v4.b32"](
-            buffer.ptr_to([index // ELEMS_PER_LANE]), words[0], words[1], words[2], words[3]
-        )
+    TK.ptx["st.global.L1::evict_first.v4.b32"](
+        buffer.ptr_to([index // ELEMS_PER_LANE]), words[0], words[1], words[2], words[3]
     )
 
 
 def _packed_fma(lhs0, lhs1, rhs0, rhs1, acc0, acc1):
-    out = T.alloc_local((1,), "uint64")
-    T.evaluate(
-        T.ptx.fma.rn.f32x2(
-            out[0],
-            T.cuda.make_float2(lhs0, lhs1),
-            T.cuda.make_float2(rhs0, rhs1),
-            T.cuda.make_float2(acc0, acc1),
-        )
+    out = TK.local_scalar("uint64")
+    TK.ptx.fma.rn.f32x2(
+        out,
+        TK.cuda.make_float2(lhs0, lhs1),
+        TK.cuda.make_float2(rhs0, rhs1),
+        TK.cuda.make_float2(acc0, acc1),
     )
-    return out[0]
+    return out
 
 
 def _case(label: str, **kwargs: Any) -> dict[str, Any]:
@@ -327,360 +220,422 @@ CONFIGS = [dict(config) for config in BENCH_CONFIGS] + [
 ]
 
 
-@T.jit
-def _gdn_decode_bf16_wide_vec_t1(
-    state_h: T.handle,
-    intermediate_h: T.handle,
-    A_log_h: T.handle,
-    a_h: T.handle,
-    dt_bias_h: T.handle,
-    q_h: T.handle,
-    k_h: T.handle,
-    v_h: T.handle,
-    b_h: T.handle,
-    output_h: T.handle,
-    read_indices_h: T.handle,
-    write_indices_h: T.handle,
-    state_slot_stride: T.int64,
-    q_batch_stride: T.int64,
-    k_batch_stride: T.int64,
-    v_batch_stride: T.int64,
-    batch: T.int32,
+def _make_gdn_decode_bf16_wide_vec_t1(
     *,
-    NUM_HEADS: T.constexpr,
-    NUM_V_HEADS: T.constexpr,
-    TILE_V: T.constexpr,
-    NUM_V_TILES: T.constexpr,
-    ROWS_PER_GROUP: T.constexpr,
-    ITERS_PER_GROUP: T.constexpr,
-    POOL_FACTOR: T.constexpr,
-    INTERMEDIATE_BATCH_STRIDE: T.constexpr,
-    INTERMEDIATE_DUMMY_ELEMENTS: T.constexpr,
-    USE_QK_L2NORM: T.constexpr,
-    DISABLE_STATE_UPDATE: T.constexpr,
-    CACHE_INTERMEDIATE_STATES: T.constexpr,
-    SAME_POOL: T.constexpr,
+    NUM_HEADS,
+    NUM_V_HEADS,
+    TILE_V,
+    NUM_V_TILES,
+    ROWS_PER_GROUP,
+    ITERS_PER_GROUP,
+    POOL_FACTOR,
+    INTERMEDIATE_BATCH_STRIDE,
+    INTERMEDIATE_DUMMY_ELEMENTS,
+    USE_QK_L2NORM,
+    DISABLE_STATE_UPDATE,
+    CACHE_INTERMEDIATE_STATES,
+    SAME_POOL,
 ):
-    # TIRX_KERNEL_SKETCH_START
-    state = T.match_buffer(
-        state_h,
-        (state_slot_stride * T.cast(batch * POOL_FACTOR, "int64"),),
-        "bfloat16",
-        scope="global",
+    @TK.kernel(
+        warps=NUM_WARPS, arch="sm_100a", grid=lambda p: p["batch"] * NUM_V_HEADS * NUM_V_TILES
     )
-    intermediate = T.match_buffer(
-        intermediate_h,
-        (T.cast(batch * INTERMEDIATE_BATCH_STRIDE + INTERMEDIATE_DUMMY_ELEMENTS, "int64"),),
-        "bfloat16",
-        scope="global",
-    )
-    A_log = T.match_buffer(A_log_h, (NUM_V_HEADS,), "float32", scope="global")
-    a = T.match_buffer(a_h, (T.cast(batch * NUM_V_HEADS, "int64"),), "bfloat16", scope="global")
-    dt_bias = T.match_buffer(dt_bias_h, (NUM_V_HEADS,), "float32", scope="global")
-    q = T.match_buffer(
-        q_h,
-        (q_batch_stride * T.cast(batch - 1, "int64") + T.cast(NUM_HEADS * K, "int64"),),
-        "bfloat16",
-        scope="global",
-    )
-    k = T.match_buffer(
-        k_h,
-        (k_batch_stride * T.cast(batch - 1, "int64") + T.cast(NUM_HEADS * K, "int64"),),
-        "bfloat16",
-        scope="global",
-    )
-    v = T.match_buffer(
-        v_h,
-        (v_batch_stride * T.cast(batch - 1, "int64") + T.cast(NUM_V_HEADS * V, "int64"),),
-        "bfloat16",
-        scope="global",
-    )
-    b_gate = T.match_buffer(
-        b_h, (T.cast(batch * NUM_V_HEADS, "int64"),), "bfloat16", scope="global"
-    )
-    output = T.match_buffer(
-        output_h, (T.cast(batch * NUM_V_HEADS * V, "int64"),), "bfloat16", scope="global"
-    )
-    read_indices = T.match_buffer(
-        read_indices_h, (T.cast(batch, "int64"),), "int32", scope="global"
-    )
-    write_indices = T.match_buffer(
-        write_indices_h, (T.cast(batch, "int64"),), "int32", scope="global"
-    )
-    state_vector = T.decl_buffer(
-        (state_slot_stride * T.cast(batch * POOL_FACTOR, "int64") // ELEMS_PER_LANE,),
-        "uint32x4",
-        data=state.data,
-        scope="global",
-        align=32,
-    )
-    T.device_entry()
+    def gdn_decode_bf16_wide_vec_t1(
+        state: TK.gptr[TK.bf16],
+        intermediate: TK.gptr[TK.bf16],
+        A_log: TK.gptr[TK.f32],
+        a: TK.gptr[TK.bf16],
+        dt_bias: TK.gptr[TK.f32],
+        q: TK.gptr[TK.bf16],
+        k: TK.gptr[TK.bf16],
+        v: TK.gptr[TK.bf16],
+        b_gate: TK.gptr[TK.bf16],
+        output: TK.gptr[TK.bf16],
+        read_indices: TK.gptr[TK.i32],
+        write_indices: TK.gptr[TK.i32],
+        state_slot_stride: TK.i64,
+        q_batch_stride: TK.i64,
+        k_batch_stride: TK.i64,
+        v_batch_stride: TK.i64,
+        batch: TK.i32,
+    ):
+        smem = TK.smem_pool()
+        s_q = smem.alloc((K,), TK.f32, align=16)
+        s_k = smem.alloc((K,), TK.f32, align=16)
+        s_gb = smem.alloc((3,), TK.f32, align=16)
+        smem.commit(SHARED_BYTES)
+        linear_cta = TK.cta_id()
+        tid = TK.thread_id()
+        lane_in_warp = _local_scalar("int32", tid % 32)
+        warp_raw = _local_scalar("int32", tid // 32)
 
-    linear_cta = T.cta_id([batch * NUM_V_HEADS * NUM_V_TILES])
-    tid = T.thread_id([THREADS])
-    warp_raw: T.int32 = tid // 32
-    lane_in_warp: T.int32 = tid % 32
-    group: T.int32 = tid // LANES_PER_GROUP
-    lane: T.int32 = tid % LANES_PER_GROUP
-    k_start: T.int32 = lane * ELEMS_PER_LANE
-
-    v_tile: T.int32 = linear_cta % NUM_V_TILES
-    cta_head: T.int32 = linear_cta // NUM_V_TILES
-    hv: T.int32 = cta_head % NUM_V_HEADS
-    n: T.int32 = cta_head // NUM_V_HEADS
-    h: T.int32 = hv // (NUM_V_HEADS // NUM_HEADS)
-
-    read_slot_raw: T.int32 = _global_load_s32(read_indices, n)
-
-    pool = T.SMEMPool()
-    smem_raw = pool.alloc((SHARED_BYTES,), "uint8", align=16)
-    s_q = T.decl_buffer(
-        (K,), "float32", data=smem_raw.data, scope="shared.dyn", byte_offset=0, align=16
-    )
-    s_k = T.decl_buffer(
-        (K,), "float32", data=smem_raw.data, scope="shared.dyn", byte_offset=512, align=16
-    )
-    s_gb = T.decl_buffer(
-        (3,), "float32", data=smem_raw.data, scope="shared.dyn", byte_offset=1024, align=16
-    )
-    pool.commit()
-
-    read_slot: T.int32 = _max_s32(read_slot_raw, T.int32(0))
-    write_slot: T.int32 = read_slot
-    if not SAME_POOL:
-        write_slot = _max_s32(_global_load_s32(write_indices, n), T.int32(0))
-
-    read_state_base: T.int64 = T.cast(read_slot, "int64") * state_slot_stride + T.cast(
-        hv * V * K, "int64"
-    )
-    write_state_base: T.int64 = read_state_base
-    if not SAME_POOL:
-        write_state_base = T.cast(write_slot, "int64") * state_slot_stride + T.cast(
-            hv * V * K, "int64"
+        state_vector = TK.decl_buffer(
+            (state_slot_stride * TK.cast(batch * POOL_FACTOR, "int64") // ELEMS_PER_LANE,),
+            "uint32x4",
+            data=state.data,
+            scope="global",
+            align=32,
         )
-    # Phase 0: with the T=1-only kq value dead, independent warps can publish
-    # normalized Q, normalized K, and the scalar gates concurrently.
-    if warp_raw == 0:
-        member_pre: T.int32 = lane_in_warp % LANES_PER_GROUP
-        k_pre: T.int32 = member_pre * ELEMS_PER_LANE
-        q_bits = T.alloc_local((ELEMS_PER_LANE,), "uint16")
-        r_q = T.alloc_local((ELEMS_PER_LANE,), "float32")
-        q_base: T.int64 = T.cast(n, "int64") * q_batch_stride + h * K + k_pre
-        _load_bf16x8_bits(q, q_base, q_bits)
-        for i in T.unroll(ELEMS_PER_LANE):
-            r_q[i] = _bf16_to_f32(q_bits[i])
+        group = _local_scalar("int32", tid // LANES_PER_GROUP)
+        lane = _local_scalar("int32", tid % LANES_PER_GROUP)
+        k_start = _local_scalar("int32", lane[0] * ELEMS_PER_LANE)
 
-        if USE_QK_L2NORM:
-            sum_q: T.float32 = 0.0
-            for i in T.unroll(ELEMS_PER_LANE):
-                sum_q = _bf16_square_fma(q_bits[i], sum_q)
-            for delta_index in T.unroll(4):
-                delta: T.int32 = T.shift_right(T.int32(8), delta_index)
-                sum_q = _add_f32(
-                    sum_q, T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_q, delta, 32)
-                )
-            q_factor: T.float32 = _mul_f32(
-                _rsqrt_f32(_add_f32(sum_q, T.float32(1.0e-6))), T.float32(SCALE)
+        v_tile = _local_scalar("int32", linear_cta % NUM_V_TILES)
+        cta_head = _local_scalar("int32", linear_cta // NUM_V_TILES)
+        hv = _local_scalar("int32", cta_head[0] % NUM_V_HEADS)
+        n = _local_scalar("int32", cta_head[0] // NUM_V_HEADS)
+        h = _local_scalar("int32", hv[0] // (NUM_V_HEADS // NUM_HEADS))
+
+        read_slot_raw = TK.local_scalar("int32")
+        TK.ptx.ld.global_.s32(read_slot_raw, read_indices.ptr_to([n[0]]))
+
+        _max = TK.local_scalar("int32")
+        TK.ptx["max.s32"](_max, read_slot_raw, TK.int32(0))
+        read_slot = _local_scalar("int32", _max)
+        write_slot = _local_scalar("int32", read_slot[0])
+        if not SAME_POOL:
+            _ldg32 = TK.local_scalar("int32")
+            TK.ptx.ld.global_.s32(_ldg32, write_indices.ptr_to([n[0]]))
+            TK.ptx["max.s32"](write_slot[0], _ldg32, TK.int32(0))
+
+        read_state_base = _local_scalar(
+            "int64",
+            TK.cast(read_slot[0], "int64") * state_slot_stride + TK.cast(hv[0] * V * K, "int64"),
+        )
+        write_state_base = _local_scalar("int64", read_state_base[0])
+        if not SAME_POOL:
+            TK.assign(
+                write_state_base[0],
+                TK.cast(write_slot[0], "int64") * state_slot_stride
+                + TK.cast(hv[0] * V * K, "int64"),
             )
-            for i in T.unroll(ELEMS_PER_LANE):
-                r_q[i] = _mul_f32(r_q[i], q_factor)
-        else:
-            for i in T.unroll(ELEMS_PER_LANE):
-                r_q[i] = _mul_f32(r_q[i], T.float32(SCALE))
+        # Phase 0: with the T=1-only kq value dead, independent warps can publish
+        # normalized Q, normalized K, and the scalar gates concurrently.
+        with TK.If(warp_raw[0] == 0), TK.Then():
+            member_pre = _local_scalar("int32", lane_in_warp[0] % LANES_PER_GROUP)
+            k_pre = _local_scalar("int32", member_pre[0] * ELEMS_PER_LANE)
+            q_bits = TK.alloc_local((ELEMS_PER_LANE,), "uint16")
+            r_q = TK.alloc_local((ELEMS_PER_LANE,), "float32")
+            q_base = _local_scalar(
+                "int64", TK.cast(n[0], "int64") * q_batch_stride + h[0] * K + k_pre[0]
+            )
+            _load_bf16x8_bits(q, q_base[0], q_bits)
+            for i in range(ELEMS_PER_LANE):
+                TK.ptx.cvt.f32.bf16(r_q[i], TK.cast(q_bits[i], "uint16"))
 
-        for i in T.unroll(ELEMS_PER_LANE):
-            _shared_store_f32(s_q, k_pre + i, r_q[i])
-
-    if warp_raw == 1:
-        member_pre: T.int32 = lane_in_warp % LANES_PER_GROUP
-        k_pre: T.int32 = member_pre * ELEMS_PER_LANE
-        k_bits = T.alloc_local((ELEMS_PER_LANE,), "uint16")
-        r_k = T.alloc_local((ELEMS_PER_LANE,), "float32")
-        k_base: T.int64 = T.cast(n, "int64") * k_batch_stride + h * K + k_pre
-        _load_bf16x8_bits(k, k_base, k_bits)
-        for i in T.unroll(ELEMS_PER_LANE):
-            r_k[i] = _bf16_to_f32(k_bits[i])
-
-        if USE_QK_L2NORM:
-            sum_k: T.float32 = 0.0
-            for i in T.unroll(ELEMS_PER_LANE):
-                sum_k = _bf16_square_fma(k_bits[i], sum_k)
-            for delta_index in T.unroll(4):
-                delta: T.int32 = T.shift_right(T.int32(8), delta_index)
-                sum_k = _add_f32(
-                    sum_k, T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sum_k, delta, 32)
-                )
-            k_factor: T.float32 = _rsqrt_f32(_add_f32(sum_k, T.float32(1.0e-6)))
-            for i in T.unroll(ELEMS_PER_LANE):
-                r_k[i] = _mul_f32(r_k[i], k_factor)
-
-        for i in T.unroll(ELEMS_PER_LANE):
-            _shared_store_f32(s_k, k_pre + i, r_k[i])
-
-    if warp_raw == 2:
-        A_value: T.float32 = _global_load_f32(A_log, hv)
-        dt_value: T.float32 = _global_load_f32(dt_bias, hv)
-        a_bits: T.uint16 = _global_load_u16(a, n * NUM_V_HEADS + hv)
-        x_value: T.float32 = _mixed_add_bf16_f32(a_bits, dt_value)
-        softplus_exp: T.float32 = _exp2_f32(_mul_f32(x_value, T.float32(LOG2_E)))
-        softplus_log2: T.float32 = _log2_f32(_add_f32(T.float32(1.0), softplus_exp))
-        softplus_value: T.float32 = _mul_f32(softplus_log2, T.float32(LN_2))
-        use_softplus: T.float32 = T.if_then_else(
-            x_value <= T.float32(20.0), T.float32(1.0), T.float32(0.0)
-        )
-        direct_weight: T.float32 = _sub_f32(T.float32(1.0), use_softplus)
-        softplus_x: T.float32 = _fma_f32(
-            softplus_value, use_softplus, _mul_f32(x_value, direct_weight)
-        )
-        exp_A: T.float32 = _exp2_f32(_mul_f32(A_value, T.float32(LOG2_E)))
-        gate_exponent: T.float32 = _mul_f32(_sub_f32(T.float32(0.0), exp_A), softplus_x)
-
-        if lane_in_warp == 0:
-            g: T.float32 = _exp2_f32(_mul_f32(gate_exponent, T.float32(LOG2_E)))
-            _shared_store_f32(s_gb, 0, g)
-
-    if warp_raw == 3 and lane_in_warp == 0:
-        b_bits: T.uint16 = _global_load_u16(b_gate, n * NUM_V_HEADS + hv)
-        b_value: T.float32 = _bf16_to_f32(b_bits)
-        exp_neg_b: T.float32 = _exp2_f32(_mul_f32(b_value, T.float32(-LOG2_E)))
-        beta: T.float32 = _rcp_f32(_add_f32(T.float32(1.0), exp_neg_b))
-        _shared_store_f32(s_gb, 1, beta)
-
-    T.cuda.cta_sync()
-
-    # Phase 1: eight independent 16-lane groups.  Each source constexpr
-    # iteration is physically unrolled and carries four state rows in registers.
-    # The source compiler retains the same-token Q/K/g/beta shared values across
-    # every unrolled V-row body, so materialize that physical register lifetime
-    # explicitly: inline PTX shared loads are opaque to nvcc's CSE.
-    g_value: T.float32 = _shared_load_f32(s_gb, 0)
-    beta_value: T.float32 = _shared_load_f32(s_gb, 1)
-    r_k_main = T.alloc_local((ELEMS_PER_LANE,), "float32")
-    r_q_main = T.alloc_local((ELEMS_PER_LANE,), "float32")
-    for i in T.unroll(ELEMS_PER_LANE):
-        r_k_main[i] = _shared_load_f32(s_k, k_start + i)
-        r_q_main[i] = _shared_load_f32(s_q, k_start + i)
-
-    for iter_index in T.unroll(ITERS_PER_GROUP):
-        v_base: T.int32 = v_tile * TILE_V + group * ROWS_PER_GROUP + iter_index * ILP_ROWS
-        read_state_offset: T.int64 = read_state_base + T.cast(v_base * K + k_start, "int64")
-        r_h = T.alloc_local((ILP_ROWS * ELEMS_PER_LANE,), "float32")
-        state_bits = T.alloc_local((ILP_ROWS * ELEMS_PER_LANE,), "uint16", align=16)
-        for row in T.unroll(ILP_ROWS):
-            if TILE_V == 64:
-                _load_state_bf16x8_vector_buffer(
-                    state_vector, read_state_offset + row * K, r_h, row * ELEMS_PER_LANE
-                )
-            else:
-                _load_state_bf16x8(state, read_state_offset + row * K, r_h, row * ELEMS_PER_LANE)
-
-        sums = T.alloc_local((ILP_ROWS,), "float32")
-        for row in T.unroll(ILP_ROWS):
-            sums[row] = T.float32(0.0)
-
-        for pair in T.unroll(ELEMS_PER_LANE // 2):
-            for row in T.unroll(ILP_ROWS):
-                pair_value: T.uint64 = _packed_fma(
-                    r_h[row * ELEMS_PER_LANE + pair * 2],
-                    r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
-                    g_value,
-                    g_value,
-                    T.float32(0.0),
-                    T.float32(0.0),
-                )
-                r_h[row * ELEMS_PER_LANE + pair * 2] = T.cuda.float2_x(pair_value)
-                r_h[row * ELEMS_PER_LANE + pair * 2 + 1] = T.cuda.float2_y(pair_value)
-                sums[row] = _fma_f32(
-                    r_h[row * ELEMS_PER_LANE + pair * 2], r_k_main[pair * 2], sums[row]
-                )
-                sums[row] = _fma_f32(
-                    r_h[row * ELEMS_PER_LANE + pair * 2 + 1], r_k_main[pair * 2 + 1], sums[row]
-                )
-
-        for delta_index in T.unroll(4):
-            delta: T.int32 = T.shift_right(T.int32(8), delta_index)
-            for row in T.unroll(ILP_ROWS):
-                sums[row] = _add_f32(
-                    sums[row], T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sums[row], delta, 32)
-                )
-
-        values = T.alloc_local((ILP_ROWS,), "float32")
-        value_bits = T.alloc_local((ILP_ROWS,), "uint16")
-        v_input_base: T.int64 = T.cast(n, "int64") * v_batch_stride + hv * V + v_base
-        if TILE_V == 128:
-            _load_bf16x4_bits(v, v_input_base, value_bits)
-        else:
-            for row in T.unroll(ILP_ROWS):
-                value_bits[row] = _global_load_u16(v, v_input_base + row)
-        for row in T.unroll(ILP_ROWS):
-            values[row] = _mul_f32(_mixed_sub_bf16_f32(value_bits[row], sums[row]), beta_value)
-
-        for row in T.unroll(ILP_ROWS):
-            sums[row] = T.float32(0.0)
-        for pair in T.unroll(ELEMS_PER_LANE // 2):
-            q0: T.float32 = r_q_main[pair * 2]
-            q1: T.float32 = r_q_main[pair * 2 + 1]
-            for row in T.unroll(ILP_ROWS):
-                pair_value: T.uint64 = _packed_fma(
-                    r_k_main[pair * 2],
-                    r_k_main[pair * 2 + 1],
-                    values[row],
-                    values[row],
-                    r_h[row * ELEMS_PER_LANE + pair * 2],
-                    r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
-                )
-                r_h[row * ELEMS_PER_LANE + pair * 2] = T.cuda.float2_x(pair_value)
-                r_h[row * ELEMS_PER_LANE + pair * 2 + 1] = T.cuda.float2_y(pair_value)
-                sums[row] = _fma_f32(r_h[row * ELEMS_PER_LANE + pair * 2], q0, sums[row])
-                sums[row] = _fma_f32(r_h[row * ELEMS_PER_LANE + pair * 2 + 1], q1, sums[row])
-
-        for delta_index in T.unroll(4):
-            delta: T.int32 = T.shift_right(T.int32(8), delta_index)
-            for row in T.unroll(ILP_ROWS):
-                sums[row] = _add_f32(
-                    sums[row], T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), sums[row], delta, 32)
-                )
-
-        if lane == 0:
-            output_base: T.int64 = T.cast((n * NUM_V_HEADS + hv) * V + v_base, "int64")
-            for row in T.unroll(ILP_ROWS):
-                T.evaluate(
-                    T.ptx.st.global_.b16(
-                        output.ptr_to([output_base + row]), _f32_to_bf16(sums[row])
+            if USE_QK_L2NORM:
+                sum_q = _local_scalar("float32", 0.0)
+                for i in range(ELEMS_PER_LANE):
+                    TK.ptx.fma.rn.f32.bf16(
+                        sum_q[0],
+                        TK.cast(q_bits[i], "uint16"),
+                        TK.cast(q_bits[i], "uint16"),
+                        sum_q[0],
                     )
-                )
+                for delta_index in range(4):
+                    delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
+                    TK.ptx["add.f32"](sum_q[0], sum_q[0], _shfl_bfly_f32(sum_q[0], delta[0]))
+                _add = TK.local_scalar("float32")
+                TK.ptx["add.f32"](_add, sum_q[0], TK.float32(1e-06))
+                _rsqrt = TK.local_scalar("float32")
+                TK.ptx["rsqrt.approx.ftz.f32"](_rsqrt, _add)
+                _mul = TK.local_scalar("float32")
+                TK.ptx["mul.f32"](_mul, _rsqrt, TK.float32(SCALE))
+                q_factor = _local_scalar("float32", _mul)
+                for i in range(ELEMS_PER_LANE):
+                    TK.ptx["mul.f32"](r_q[i], r_q[i], q_factor[0])
+            else:
+                for i in range(ELEMS_PER_LANE):
+                    TK.ptx["mul.f32"](r_q[i], r_q[i], TK.float32(SCALE))
 
-        if CACHE_INTERMEDIATE_STATES:
-            intermediate_base: T.int64 = T.cast(
-                (n * NUM_V_HEADS + hv) * V * K + v_base * K + k_start, "int64"
-            )
-            for row in T.unroll(ILP_ROWS):
-                _store_state_f32x8(
-                    intermediate, intermediate_base + row * K, r_h, row * ELEMS_PER_LANE
-                )
+            for i in range(ELEMS_PER_LANE):
+                TK.ptx.st.shared.b32(s_q.ptr_to([k_pre[0] + i]), TK.reinterpret("uint32", r_q[i]))
 
-        if not DISABLE_STATE_UPDATE and not CACHE_INTERMEDIATE_STATES:
-            write_state_offset: T.int64 = (
-                read_state_offset
-                if SAME_POOL
-                else write_state_base + T.cast(v_base * K + k_start, "int64")
+        with TK.If(warp_raw[0] == 1), TK.Then():
+            member_pre = _local_scalar("int32", lane_in_warp[0] % LANES_PER_GROUP)
+            k_pre = _local_scalar("int32", member_pre[0] * ELEMS_PER_LANE)
+            k_bits = TK.alloc_local((ELEMS_PER_LANE,), "uint16")
+            r_k = TK.alloc_local((ELEMS_PER_LANE,), "float32")
+            k_base = _local_scalar(
+                "int64", TK.cast(n[0], "int64") * k_batch_stride + h[0] * K + k_pre[0]
             )
-            for row in T.unroll(ILP_ROWS):
+            _load_bf16x8_bits(k, k_base[0], k_bits)
+            for i in range(ELEMS_PER_LANE):
+                TK.ptx.cvt.f32.bf16(r_k[i], TK.cast(k_bits[i], "uint16"))
+
+            if USE_QK_L2NORM:
+                sum_k = _local_scalar("float32", 0.0)
+                for i in range(ELEMS_PER_LANE):
+                    TK.ptx.fma.rn.f32.bf16(
+                        sum_k[0],
+                        TK.cast(k_bits[i], "uint16"),
+                        TK.cast(k_bits[i], "uint16"),
+                        sum_k[0],
+                    )
+                for delta_index in range(4):
+                    delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
+                    TK.ptx["add.f32"](sum_k[0], sum_k[0], _shfl_bfly_f32(sum_k[0], delta[0]))
+                _add2 = TK.local_scalar("float32")
+                TK.ptx["add.f32"](_add2, sum_k[0], TK.float32(1e-06))
+                _rsqrt2 = TK.local_scalar("float32")
+                TK.ptx["rsqrt.approx.ftz.f32"](_rsqrt2, _add2)
+                k_factor = _local_scalar("float32", _rsqrt2)
+                for i in range(ELEMS_PER_LANE):
+                    TK.ptx["mul.f32"](r_k[i], r_k[i], k_factor[0])
+
+            for i in range(ELEMS_PER_LANE):
+                TK.ptx.st.shared.b32(s_k.ptr_to([k_pre[0] + i]), TK.reinterpret("uint32", r_k[i]))
+
+        with TK.If(warp_raw[0] == 2), TK.Then():
+            A_value = TK.local_scalar("float32")
+            TK.ptx.ld.global_.b32(A_value, A_log.ptr_to([hv[0]]))
+            dt_value = TK.local_scalar("float32")
+            TK.ptx.ld.global_.b32(dt_value, dt_bias.ptr_to([hv[0]]))
+            a_bits = TK.local_scalar("uint16")
+            TK.ptx.ld.global_.b16(a_bits, a.ptr_to([n[0] * NUM_V_HEADS + hv[0]]))
+            _addbf = TK.local_scalar("float32")
+            TK.ptx.add.rn.f32.bf16(_addbf, TK.cast(a_bits, "uint16"), dt_value)
+            x_value = _local_scalar("float32", _addbf)
+            _mul2 = TK.local_scalar("float32")
+            TK.ptx["mul.f32"](_mul2, x_value[0], TK.float32(LOG2_E))
+            _exp2 = TK.local_scalar("float32")
+            TK.ptx["ex2.approx.ftz.f32"](_exp2, _mul2)
+            softplus_exp = _local_scalar("float32", _exp2)
+            _add3 = TK.local_scalar("float32")
+            TK.ptx["add.f32"](_add3, TK.float32(1.0), softplus_exp[0])
+            _log2 = TK.local_scalar("float32")
+            TK.ptx["lg2.approx.ftz.f32"](_log2, _add3)
+            softplus_log2 = _local_scalar("float32", _log2)
+            _mul3 = TK.local_scalar("float32")
+            TK.ptx["mul.f32"](_mul3, softplus_log2[0], TK.float32(LN_2))
+            softplus_value = _local_scalar("float32", _mul3)
+            use_softplus = _local_scalar(
+                "float32",
+                TK.if_then_else(x_value[0] <= TK.float32(20.0), TK.float32(1.0), TK.float32(0.0)),
+            )
+            _sub = TK.local_scalar("float32")
+            TK.ptx["sub.f32"](_sub, TK.float32(1.0), use_softplus[0])
+            direct_weight = _local_scalar("float32", _sub)
+            _mul4 = TK.local_scalar("float32")
+            TK.ptx["mul.f32"](_mul4, x_value[0], direct_weight[0])
+            _fma = TK.local_scalar("float32")
+            TK.ptx["fma.rn.f32"](_fma, softplus_value[0], use_softplus[0], _mul4)
+            softplus_x = _local_scalar("float32", _fma)
+            _mul5 = TK.local_scalar("float32")
+            TK.ptx["mul.f32"](_mul5, A_value, TK.float32(LOG2_E))
+            _exp2_2 = TK.local_scalar("float32")
+            TK.ptx["ex2.approx.ftz.f32"](_exp2_2, _mul5)
+            exp_A = _local_scalar("float32", _exp2_2)
+            _sub2 = TK.local_scalar("float32")
+            TK.ptx["sub.f32"](_sub2, TK.float32(0.0), exp_A[0])
+            _mul6 = TK.local_scalar("float32")
+            TK.ptx["mul.f32"](_mul6, _sub2, softplus_x[0])
+            gate_exponent = _local_scalar("float32", _mul6)
+
+            with TK.If(lane_in_warp[0] == 0), TK.Then():
+                _mul7 = TK.local_scalar("float32")
+                TK.ptx["mul.f32"](_mul7, gate_exponent[0], TK.float32(LOG2_E))
+                _exp2_3 = TK.local_scalar("float32")
+                TK.ptx["ex2.approx.ftz.f32"](_exp2_3, _mul7)
+                g = _local_scalar("float32", _exp2_3)
+                TK.ptx.st.shared.b32(s_gb.ptr_to([0]), TK.reinterpret("uint32", g[0]))
+
+        with TK.If(warp_raw[0] == 3), TK.Then():
+            with TK.If(lane_in_warp[0] == 0), TK.Then():
+                b_bits = TK.local_scalar("uint16")
+                TK.ptx.ld.global_.b16(b_bits, b_gate.ptr_to([n[0] * NUM_V_HEADS + hv[0]]))
+                b_value = TK.local_scalar("float32")
+                TK.ptx.cvt.f32.bf16(b_value, TK.cast(b_bits, "uint16"))
+                _mul8 = TK.local_scalar("float32")
+                TK.ptx["mul.f32"](_mul8, b_value, TK.float32(-LOG2_E))
+                _exp2_4 = TK.local_scalar("float32")
+                TK.ptx["ex2.approx.ftz.f32"](_exp2_4, _mul8)
+                exp_neg_b = _local_scalar("float32", _exp2_4)
+                _add4 = TK.local_scalar("float32")
+                TK.ptx["add.f32"](_add4, TK.float32(1.0), exp_neg_b[0])
+                _rcp = TK.local_scalar("float32")
+                TK.ptx["rcp.rn.f32"](_rcp, _add4)
+                beta = _local_scalar("float32", _rcp)
+                TK.ptx.st.shared.b32(s_gb.ptr_to([1]), TK.reinterpret("uint32", beta[0]))
+
+        TK.cuda.cta_sync()
+
+        # Phase 1: eight independent 16-lane groups.  Each source constexpr
+        # iteration is physically unrolled and carries four state rows in registers.
+        # The source compiler retains the same-token Q/K/g/beta shared values across
+        # every unrolled V-row body, so materialize that physical register lifetime
+        # explicitly: inline PTX shared loads are opaque to nvcc's CSE.
+        _lds32 = TK.local_scalar("uint32")
+        TK.ptx.ld.shared.b32(_lds32, s_gb.ptr_to([0]))
+        g_value = _local_scalar("float32", TK.reinterpret("float32", _lds32))
+        _lds32_2 = TK.local_scalar("uint32")
+        TK.ptx.ld.shared.b32(_lds32_2, s_gb.ptr_to([1]))
+        beta_value = _local_scalar("float32", TK.reinterpret("float32", _lds32_2))
+        r_k_main = TK.alloc_local((ELEMS_PER_LANE,), "float32")
+        r_q_main = TK.alloc_local((ELEMS_PER_LANE,), "float32")
+        for i in range(ELEMS_PER_LANE):
+            _lds32_3 = TK.local_scalar("uint32")
+            TK.ptx.ld.shared.b32(_lds32_3, s_k.ptr_to([k_start[0] + i]))
+            TK.ptx.mov.b32(r_k_main[i], TK.reinterpret("float32", _lds32_3))
+            _lds32_4 = TK.local_scalar("uint32")
+            TK.ptx.ld.shared.b32(_lds32_4, s_q.ptr_to([k_start[0] + i]))
+            TK.ptx.mov.b32(r_q_main[i], TK.reinterpret("float32", _lds32_4))
+
+        for iter_index in range(ITERS_PER_GROUP):
+            v_base = _local_scalar(
+                "int32", v_tile[0] * TILE_V + group[0] * ROWS_PER_GROUP + iter_index * ILP_ROWS
+            )
+            read_state_offset = _local_scalar(
+                "int64", read_state_base[0] + TK.cast(v_base[0] * K + k_start[0], "int64")
+            )
+            r_h = TK.alloc_local((ILP_ROWS * ELEMS_PER_LANE,), "float32")
+            state_bits = TK.alloc_local((ILP_ROWS * ELEMS_PER_LANE,), "uint16", align=16)
+            for row in range(ILP_ROWS):
                 if TILE_V == 64:
-                    _store_state_f32x8_vector_buffer(
-                        state_vector, write_state_offset + row * K, r_h, row * ELEMS_PER_LANE
+                    _load_state_bf16x8_vector_buffer(
+                        state_vector, read_state_offset[0] + row * K, r_h, row * ELEMS_PER_LANE
                     )
                 else:
-                    _store_state_f32x8(
-                        state, write_state_offset + row * K, r_h, row * ELEMS_PER_LANE
+                    _load_state_bf16x8(
+                        state, read_state_offset[0] + row * K, r_h, row * ELEMS_PER_LANE
                     )
+
+            sums = TK.alloc_local((ILP_ROWS,), "float32")
+            for row in range(ILP_ROWS):
+                TK.ptx.mov.b32(sums[row], TK.float32(0.0))
+
+            for pair in range(ELEMS_PER_LANE // 2):
+                for row in range(ILP_ROWS):
+                    pair_value = _local_scalar(
+                        "uint64",
+                        _packed_fma(
+                            r_h[row * ELEMS_PER_LANE + pair * 2],
+                            r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
+                            g_value[0],
+                            g_value[0],
+                            TK.float32(0.0),
+                            TK.float32(0.0),
+                        ),
+                    )
+                    TK.ptx.mov.b32(
+                        r_h[row * ELEMS_PER_LANE + pair * 2], TK.cuda.float2_x(pair_value[0])
+                    )
+                    TK.ptx.mov.b32(
+                        r_h[row * ELEMS_PER_LANE + pair * 2 + 1], TK.cuda.float2_y(pair_value[0])
+                    )
+                    TK.ptx["fma.rn.f32"](
+                        sums[row],
+                        r_h[row * ELEMS_PER_LANE + pair * 2],
+                        r_k_main[pair * 2],
+                        sums[row],
+                    )
+                    TK.ptx["fma.rn.f32"](
+                        sums[row],
+                        r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
+                        r_k_main[pair * 2 + 1],
+                        sums[row],
+                    )
+
+            for delta_index in range(4):
+                delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
+                for row in range(ILP_ROWS):
+                    TK.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
+
+            values = TK.alloc_local((ILP_ROWS,), "float32")
+            value_bits = TK.alloc_local((ILP_ROWS,), "uint16")
+            v_input_base = _local_scalar(
+                "int64", TK.cast(n[0], "int64") * v_batch_stride + hv[0] * V + v_base[0]
+            )
+            if TILE_V == 128:
+                _load_bf16x4_bits(v, v_input_base[0], value_bits)
+            else:
+                for row in range(ILP_ROWS):
+                    TK.ptx.ld.global_.b16(value_bits[row], v.ptr_to([v_input_base[0] + row]))
+            for row in range(ILP_ROWS):
+                _subbf = TK.local_scalar("float32")
+                TK.ptx.sub.rn.f32.bf16(_subbf, TK.cast(value_bits[row], "uint16"), sums[row])
+                TK.ptx["mul.f32"](values[row], _subbf, beta_value[0])
+
+            for row in range(ILP_ROWS):
+                TK.ptx.mov.b32(sums[row], TK.float32(0.0))
+            for pair in range(ELEMS_PER_LANE // 2):
+                q0 = _local_scalar("float32", r_q_main[pair * 2])
+                q1 = _local_scalar("float32", r_q_main[pair * 2 + 1])
+                for row in range(ILP_ROWS):
+                    pair_value = _local_scalar(
+                        "uint64",
+                        _packed_fma(
+                            r_k_main[pair * 2],
+                            r_k_main[pair * 2 + 1],
+                            values[row],
+                            values[row],
+                            r_h[row * ELEMS_PER_LANE + pair * 2],
+                            r_h[row * ELEMS_PER_LANE + pair * 2 + 1],
+                        ),
+                    )
+                    TK.ptx.mov.b32(
+                        r_h[row * ELEMS_PER_LANE + pair * 2], TK.cuda.float2_x(pair_value[0])
+                    )
+                    TK.ptx.mov.b32(
+                        r_h[row * ELEMS_PER_LANE + pair * 2 + 1], TK.cuda.float2_y(pair_value[0])
+                    )
+                    TK.ptx["fma.rn.f32"](
+                        sums[row], r_h[row * ELEMS_PER_LANE + pair * 2], q0[0], sums[row]
+                    )
+                    TK.ptx["fma.rn.f32"](
+                        sums[row], r_h[row * ELEMS_PER_LANE + pair * 2 + 1], q1[0], sums[row]
+                    )
+
+            for delta_index in range(4):
+                delta = _local_scalar("int32", TK.shift_right(TK.int32(8), delta_index))
+                for row in range(ILP_ROWS):
+                    TK.ptx["add.f32"](sums[row], sums[row], _shfl_bfly_f32(sums[row], delta[0]))
+
+            with TK.If(lane[0] == 0), TK.Then():
+                output_base = _local_scalar(
+                    "int64", TK.cast((n[0] * NUM_V_HEADS + hv[0]) * V + v_base[0], "int64")
+                )
+                for row in range(ILP_ROWS):
+                    _bf16 = TK.local_scalar("uint16")
+                    TK.ptx.cvt.rn.bf16.f32(_bf16, sums[row])
+                    TK.ptx.st.global_.b16(output.ptr_to([output_base[0] + row]), _bf16)
+
+            if CACHE_INTERMEDIATE_STATES:
+                intermediate_base = _local_scalar(
+                    "int64",
+                    TK.cast(
+                        (n[0] * NUM_V_HEADS + hv[0]) * V * K + v_base[0] * K + k_start[0], "int64"
+                    ),
+                )
+                for row in range(ILP_ROWS):
+                    _store_state_f32x8(
+                        intermediate, intermediate_base[0] + row * K, r_h, row * ELEMS_PER_LANE
+                    )
+
+            if not DISABLE_STATE_UPDATE and not CACHE_INTERMEDIATE_STATES:
+                write_state_offset = _local_scalar(
+                    "int64",
+                    read_state_offset[0]
+                    if SAME_POOL
+                    else write_state_base[0] + TK.cast(v_base[0] * K + k_start[0], "int64"),
+                )
+                for row in range(ILP_ROWS):
+                    if TILE_V == 64:
+                        _store_state_f32x8_vector_buffer(
+                            state_vector, write_state_offset[0] + row * K, r_h, row * ELEMS_PER_LANE
+                        )
+                    else:
+                        _store_state_f32x8(
+                            state, write_state_offset[0] + row * K, r_h, row * ELEMS_PER_LANE
+                        )
+
+    return gdn_decode_bf16_wide_vec_t1.func
 
 
 def get_kernel(**kwargs: Any):
     """Return the source-specialized TIRx PrimFunc."""
     tile_v = int(kwargs["tile_v"])
     same_pool = bool(kwargs.get("same_pool", True))
-    kernel = _gdn_decode_bf16_wide_vec_t1.specialize(
+    return _make_gdn_decode_bf16_wide_vec_t1(
         NUM_HEADS=kwargs["num_heads"],
         NUM_V_HEADS=kwargs["num_v_heads"],
         TILE_V=tile_v,
@@ -698,9 +653,6 @@ def get_kernel(**kwargs: Any):
         DISABLE_STATE_UPDATE=kwargs.get("disable_state_update", False),
         CACHE_INTERMEDIATE_STATES=kwargs.get("cache_intermediate_states", False),
         SAME_POOL=same_pool,
-    )
-    return kernel.with_attr(
-        "tirx.kernel_launch_params", ["blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory"]
     )
 
 
@@ -1093,6 +1045,7 @@ def run_gpu(
     case = prepare_data(**kwargs)
     executable = prepared["executable"]
     args = _tirx_args(case)
+
     def source_builder():
         executable(*args)
         _run_reference(case)

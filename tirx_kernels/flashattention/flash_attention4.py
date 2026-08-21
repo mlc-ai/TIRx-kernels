@@ -4,18 +4,18 @@
 # SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""FlashAttention-4 TIRx kernel and direct NVIDIA IKET profiling entry point.
+"""FlashAttention-4 with K-owned launch, roles, storage, and synchronization.
 
-Run ``python -m tirx_kernels.flashattention.flash_attention4`` to profile the
-annotated kernel.  Correctness and ordinary benchmarks remain exposed through
-``run_test`` and ``run_bench``.
+The mathematical datapath and low-level PTX issue order follow the frozen
+FlashAttention-4 implementation. Tensor maps are encoded on the host because
+K.kernel is a device-only entry.
 
 Upstream source: flash_attn/cute/flash_fwd_sm100.py.
 """
 
-from __future__ import annotations
-
+# K.kernel consumes concrete annotations; postponed annotations would stringify them.
 import argparse
+import ctypes
 import math
 import os
 from functools import partial
@@ -24,18 +24,14 @@ from typing import Any
 import numpy as np
 import torch
 
+import tirx_kernels.kern as K
 import tvm
 import tvm.testing
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
-from tvm.tirx.lang.pipeline import MBarrier, Pipeline, PipelineState, TCGen05Bar
-from tvm.tirx.lang.smem_desc import SmemDescriptor
 from tvm.tirx.lang.tile_scheduler import FlashAttentionLinearScheduler, FlashAttentionLPTScheduler
 
-M_CLUSTER = 1
-N_CLUSTER = 1
 IKET_EVENT_NAMES = (
     "correction",
     "epi-ld-tmem",
@@ -56,1558 +52,1268 @@ IKET_EVENT_NAMES = (
     "softmax-phase-4",
     "softmax-phase-5",
 )
-# ex2-emulation ratio per regime (grid-searched under the bench protocol;
-# heavier and lighter both measured worse on their respective regimes):
-# emulate elements with (i*2 % 16) >= 16 - 2*PAIRS in fragments
-# [START, 3). Causal keeps fragment 0; non-causal skips it.
-EMU_PAIRS_CAUSAL = 2
-EMU_START_CAUSAL = 0
-EMU_PAIRS_NC = 2
-EMU_START_NC = 1
 
-_TMA_G2S_3D = (
-    "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
-)
-_TMA_G2S_4D = (
-    "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
-)
-_TMA_S2G_3D = "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"
-_TMA_S2G_4D = "cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group"
-_MMA_F16 = "tcgen05.mma.cta_group::1.kind::f16"
-_TMEM_LD_16 = "tcgen05.ld.sync.aligned.32x32b.x16.b32"
-_TMEM_LD_32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
-_TMEM_ST_16 = "tcgen05.st.sync.aligned.32x32b.x16.b32"
-
-
-def _smem_desc_add_16B_offset(desc_base, offset):
-    # Update the address lane with uint32 wraparound without carrying into the descriptor bits.
-    desc_halves = T.reinterpret("uint32x2", desc_base)
-    desc_lo = T.Shuffle([desc_halves], [0]) + T.cast(offset, "uint32")
-    desc_hi = T.Shuffle([desc_halves], [1])
-    return T.reinterpret("uint64", T.Shuffle([desc_lo, desc_hi], [0, 1]))
-
-
-def _cast_f32x2_f16x2(dst, src, offset):
-    dst_words = dst.view("uint32")
-    return T.ptx.cvt.rn.f16x2.f32(dst_words[offset // 2], src[offset + 1], src[offset])
-
-
-def _tmem_load(dst, dst_offset, tmem_col, width):
-    chain = _TMEM_LD_16 if width == 16 else _TMEM_LD_32
-    return T.ptx[chain](*[dst[dst_offset + i] for i in range(width)], tmem_col)
-
-
-def _tmem_store(src, src_offset, tmem_col, width=16):
-    assert width == 16
-    return T.ptx[_TMEM_ST_16](tmem_col, *[src[src_offset + i] for i in range(width)])
-
-
-def ceildiv(a, b):
-    return (a + b - 1) // b
-
-
-def shl_u32_clamp(val, shift):
-    """Left shift with PTX clamping (shift>=32 -> 0). Lets the causal mask keep
-    the fused ``max(col_limit - s*CHUNK, 0)`` (one VIADDMNMX, like cutedsl) and
-    drop the ``min(.,CHUNK)`` clamp (which adds a VIMNMX above cutedsl's count):
-    ``~shl_clamp(0xFFFFFFFF, k)`` is the low-k-bits mask for any k, no min."""
-    result = T.alloc_local((1,), "uint32")
-    T.evaluate(T.ptx.shl.b32(result[0], val, shift))
-    return result[0]
-
-
-def combine_int_frac_ex2(x_rounded, frac_ex2):
-    x_rounded_i = T.alloc_local((1,), "int32")
-    frac_ex_i = T.alloc_local((1,), "int32")
-    x_rounded_e = T.alloc_local((1,), "int32")
-    out_i = T.alloc_local((1,), "int32")
-    out = T.alloc_local((1,), "float32")
-    T.evaluate(T.ptx.mov.b32(x_rounded_i[0], x_rounded))
-    T.evaluate(T.ptx.mov.b32(frac_ex_i[0], frac_ex2))
-    T.evaluate(T.ptx.shl.b32(x_rounded_e[0], x_rounded_i[0], T.uint32(23)))
-    T.evaluate(T.ptx.add.s32(out_i[0], x_rounded_e[0], frac_ex_i[0]))
-    T.evaluate(T.ptx.mov.b32(out[0], out_i[0]))
-    return out[0]
-
-
-def get_n_block_max(m_block_idx, causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE):
-    """Maximum KV block index (exclusive) for this Q block."""
-    n_block_max = ceildiv(SEQ_LEN_KV, BLK_N)
-    if not causal:
-        return n_block_max
-    m_idx_max = (m_block_idx + 1) * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
-    n_idx = m_idx_max + SEQ_LEN_KV - SEQ_LEN_Q
-    return T.min(n_block_max, ceildiv(n_idx, BLK_N))
-
-
-def get_n_block_min_causal_mask(m_block_idx, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE):
-    """KV block index where causal masking stops being needed."""
-    m_idx_min = m_block_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
-    n_idx = m_idx_min + SEQ_LEN_KV - SEQ_LEN_Q
-    return T.max(0, n_idx // BLK_N)
-
-
-@T.inline
-def ex2_emulation_2(out, idx, x, y):
-    poly_ex2_deg3 = T.meta_var((1.0, 0.6951461434364319, 0.22756439447402954, 0.07711908966302872))
-    fp32_round_int = T.meta_var(float(2**23 + 2**22))
-    xy_clamped: T.f32[2]
-    xy_clamped[0] = T.max(x, -127.0)
-    xy_clamped[1] = T.max(y, -127.0)
-    packed: T.uint64
-    rhs: T.uint64
-    addend: T.uint64
-    xy_rounded: T.f32[2]
-    T.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1])
-    T.ptx.mov.b64(rhs, T.float32(fp32_round_int), T.float32(fp32_round_int))
-    T.ptx.add.rm.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(xy_rounded[0], xy_rounded[1], packed)
-    xy_rounded_back: T.f32[2]
-    T.ptx.mov.b64(packed, xy_rounded[0], xy_rounded[1])
-    T.ptx.mov.b64(rhs, T.float32(fp32_round_int), T.float32(fp32_round_int))
-    T.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(xy_rounded_back[0], xy_rounded_back[1], packed)
-    xy_frac: T.f32[2]
-    T.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1])
-    T.ptx.mov.b64(rhs, xy_rounded_back[0], xy_rounded_back[1])
-    T.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(xy_frac[0], xy_frac[1], packed)
-    xy_frac_ex2: T.f32[2]
-    xy_frac_ex2[0] = poly_ex2_deg3[3]
-    xy_frac_ex2[1] = poly_ex2_deg3[3]
-    T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
-    T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
-    T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[2]), T.float32(poly_ex2_deg3[2]))
-    T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
-    T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
-    T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
-    T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
-    T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[1]), T.float32(poly_ex2_deg3[1]))
-    T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
-    T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
-    T.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
-    T.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
-    T.ptx.mov.b64(addend, T.float32(poly_ex2_deg3[0]), T.float32(poly_ex2_deg3[0]))
-    T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
-    T.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
-    out[idx] = combine_int_frac_ex2(xy_rounded[0], xy_frac_ex2[0])
-    out[idx + 1] = combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1])
-
-
-@T.inline
-def fma_f32x2(values, idx, multiplier, addend_value):
-    """Apply the packed f32x2 FMA emitted by the former tile primitive."""
-    packed: T.uint64
-    rhs: T.uint64
-    addend: T.uint64
-    T.ptx.mov.b64(packed, values[idx], values[idx + 1])
-    T.ptx.mov.b64(rhs, multiplier, multiplier)
-    T.ptx.mov.b64(addend, addend_value, addend_value)
-    T.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
-    T.ptx.mov.b64(values[idx], values[idx + 1], packed)
-
-
-@T.inline
-def mul_f32x2(values, idx, multiplier):
-    """Apply the packed f32x2 multiply emitted by the former tile primitive."""
-    packed: T.uint64
-    rhs: T.uint64
-    T.ptx.mov.b64(packed, values[idx], values[idx + 1])
-    T.ptx.mov.b64(rhs, multiplier, multiplier)
-    T.ptx.mul.rz.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(values[idx], values[idx + 1], packed)
-
-
-@T.inline
-def reduce_max_128(out, values, accum=False):
-    """SM100 three-input max tree used by the former tile reduction."""
-    temp: T.f32[4]
-    for i in T.unroll(4):
-        if accum and i == 0:
-            T.ptx["max.f32"](temp[i], values[2 * i], values[2 * i + 1], out[0])
-        else:
-            temp[i] = T.max(values[2 * i], values[2 * i + 1])
-    for outer in T.serial(15):
-        for i in T.unroll(4):
-            T.ptx["max.f32"](
-                temp[i],
-                temp[i],
-                values[8 * (outer + 1) + 2 * i],
-                values[8 * (outer + 1) + 2 * i + 1],
-            )
-    out[0] = T.max(temp[0], temp[1])
-    T.ptx["max.f32"](out[0], out[0], temp[2], temp[3])
-
-
-@T.inline
-def reduce_sum_128(out, values, accum=False):
-    """Preserve the packed add tree and accumulator insertion order."""
-    local_sum: T.f32[8]
-    packed: T.uint64
-    rhs: T.uint64
-    for i in T.unroll(8):
-        if accum and i == 0:
-            local_sum[i] = values[i] + out[0]
-        else:
-            local_sum[i] = values[i]
-    for outer in T.serial(15):
-        for i in T.unroll(4):
-            T.ptx.mov.b64(packed, local_sum[2 * i], local_sum[2 * i + 1])
-            T.ptx.mov.b64(rhs, values[8 * (outer + 1) + 2 * i], values[8 * (outer + 1) + 2 * i + 1])
-            T.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
-            T.ptx.mov.b64(local_sum[2 * i], local_sum[2 * i + 1], packed)
-    T.ptx.mov.b64(packed, local_sum[0], local_sum[1])
-    T.ptx.mov.b64(rhs, local_sum[2], local_sum[3])
-    T.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(local_sum[0], local_sum[1], packed)
-    T.ptx.mov.b64(packed, local_sum[4], local_sum[5])
-    T.ptx.mov.b64(rhs, local_sum[6], local_sum[7])
-    T.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(local_sum[4], local_sum[5], packed)
-    T.ptx.mov.b64(packed, local_sum[0], local_sum[1])
-    T.ptx.mov.b64(rhs, local_sum[4], local_sum[5])
-    T.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
-    T.ptx.mov.b64(local_sum[0], local_sum[1], packed)
-    out[0] = local_sum[0] + local_sum[1]
-
-
-WG_NUMBER = 4
-WARP_NUMBER = 4
-NUM_THREADS = 32 * WARP_NUMBER * WG_NUMBER
 N_COLS_TMEM = 512
 TMEM_PIPE_DEPTH = 2
 SMEM_PIPE_DEPTH_Q = 2
 SMEM_PIPE_DEPTH_KV = 3
 BLK_M = 128
 BLK_N = 128
-BLK_K = 64
 SOFTMAX_LD_CHUNK = 32
-SOFTMAX_ST_CHUNK = 32
-EPI_TILE = 64
 TMEM_EPI_LD_SIZE = 16
 USE_S0_S1_BARRIER = False
-MMA_M = 128
 MMA_N = 128
 MMA_K = 16
 F16_BYTES = 2
-F32_BYTES = 4
-F128_BYTES = 16
-a_type_qk = tvm.DataType("float16")
-b_type_qk = tvm.DataType("float16")
-d_type_qk = tvm.DataType("float32")
-a_type_pv = tvm.DataType("float16")
-b_type_pv = tvm.DataType("float16")
-d_type_pv = tvm.DataType("float32")
+EMU_PAIRS_CAUSAL = 2
+EMU_START_CAUSAL = 0
+EMU_PAIRS_NC = 2
+EMU_START_NC = 1
+CTA_GROUP = 1
+MAX_CTAS = 148
+
+TMA_G2S_3D = (
+    "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
+)
+TMA_G2S_4D = (
+    "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::1"
+)
+TMA_S2G_3D = "cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group"
+TMA_S2G_4D = "cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group"
+MMA_F16 = "tcgen05.mma.cta_group::1.kind::f16"
+TMEM_LD_16 = "tcgen05.ld.sync.aligned.32x32b.x16.b32"
+TMEM_LD_32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
+TMEM_ST_16 = "tcgen05.st.sync.aligned.32x32b.x16.b32"
+TMEM_ALLOC = "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"
+TMEM_DEALLOC = "tcgen05.dealloc.cta_group::1.sync.aligned.b32"
+TMEM_RELINQUISH = "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"
+TCGEN05_COMMIT = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64"
+MAX3_F32 = "max.f32"
+
+ID_QK = 136314896
+ID_PV = 136380432
 
 
-@T.jit
-def _kernel(
-    Q: T.Buffer((BATCH_SIZE, SEQ_LEN_Q, NUM_QO_HEADS, HEAD_DIM), "float16"),
-    K: T.Buffer((BATCH_SIZE, SEQ_LEN_KV, NUM_KV_HEADS, HEAD_DIM), "float16"),
-    V: T.Buffer((BATCH_SIZE, SEQ_LEN_KV, NUM_KV_HEADS, HEAD_DIM), "float16"),
-    O: T.Buffer((BATCH_SIZE, SEQ_LEN_Q, NUM_QO_HEADS, HEAD_DIM), "float16"),
-    *,
-    BATCH_SIZE: T.constexpr,
-    SEQ_LEN_Q: T.constexpr,
-    SEQ_LEN_KV: T.constexpr,
-    NUM_QO_HEADS: T.constexpr,
-    NUM_KV_HEADS: T.constexpr,
-    HEAD_DIM: T.constexpr,
-    is_causal: T.constexpr = False,
-    CTA_GROUP: T.constexpr = 1,
-    TMEM_PIPE_DEPTH: T.constexpr = TMEM_PIPE_DEPTH,
-    SMEM_PIPE_DEPTH_KV: T.constexpr = SMEM_PIPE_DEPTH_KV,
+def ceildiv(a, b):
+    return (a + b - 1) // b
+
+
+def make_kernel(
+    BATCH_SIZE,
+    SEQ_LEN_Q,
+    SEQ_LEN_KV,
+    NUM_QO_HEADS,
+    NUM_KV_HEADS,
+    HEAD_DIM,
+    is_causal=False,
+    tmem_pipe_depth=TMEM_PIPE_DEPTH,
+    smem_pipe_depth_kv=SMEM_PIPE_DEPTH_KV,
 ):
-    GQA_RATIO = T.meta_var(NUM_QO_HEADS // NUM_KV_HEADS)
-    SEQ_Q_PER_TILE = T.meta_var(BLK_M // GQA_RATIO)
-    # HW named barrier for the softmax->correction stats handshake
-    # (cf. FA4 CuTeDSL sm_stats_barrier). One 256-thread barrier per stage
-    # (1 + stage): the whole softmax wg arrives, the whole correction wg
-    # syncs — collective release exactly like the 128-count mbarrier it
-    # replaces, but with HW-barrier wake instead of mbarrier
-    # try_wait+nanosleep (that wait gates p_o_rescale and thus the PV MMA).
-    # Per-warp pairing (softmax warp w <-> correction warp w) measured 12%
-    # WORSE on GQA-packed causal: uneven per-warp softmax finish times make
-    # pairwise rendezvous slower than collective release. The reverse
-    # (sScale slot reuse) direction stays on softmax_corr.empty.
-    # Stats handshake barrier WIDTH. cutedsl uses a 64-thread PAIRWISE
-    # barrier (softmax warp w <-> correction warp w, sm_stats_barrier
-    # index stage*4+warp). TIRx adopted a 256-thread COLLECTIVE barrier
-    # because per-warp pairing regressed GQA-PACKED causal 12% (uneven
-    # per-warp softmax finish times -> pairwise waits for the slow
-    # partner). But for GQA_RATIO==1 the rows within a warp are uniform,
-    # so pairwise rendezvous releases each correction warp as soon as ITS
-    # partner softmax warp finishes — no waiting for the slowest of all
-    # 128. ncu (s2048_h32kv32_c): the 256-collective shows a 3.7-cycle
-    # barrier stall (32% of 11.6 cyc/issue) that cutedsl's 64-pairwise
-    # lacks (cutedsl 10.8 cyc/issue). Gate on GQA==1.
-    STATS_BAR_PAIRWISE = T.meta_var(GQA_RATIO == 1)
-    L2_SIZE = T.meta_var(50 * 1024 * 1024)
-    SIZE_ONE_KV_HEAD = T.meta_var(SEQ_LEN_KV * HEAD_DIM * 2 * F16_BYTES)
-    L2_SWIZZLE = T.meta_var(
+    """Trace the kernel for one specialization. Every ``K.meta_var`` of the
+    original is a plain Python constant here — the host language is the macro
+    system (design doc §1)."""
+    TMEM_DEPTH = tmem_pipe_depth
+    KV_DEPTH = smem_pipe_depth_kv
+
+    GQA_RATIO = NUM_QO_HEADS // NUM_KV_HEADS
+    SEQ_Q_PER_TILE = BLK_M // GQA_RATIO
+    # Stats handshake width — orig:L340-349.
+    STATS_BAR_PAIRWISE = GQA_RATIO == 1
+    L2_SIZE = 50 * 1024 * 1024
+    SIZE_ONE_KV_HEAD = SEQ_LEN_KV * HEAD_DIM * 2 * F16_BYTES
+    L2_SWIZZLE = (
         1 if L2_SIZE < SIZE_ONE_KV_HEAD else 1 << int(math.log2(L2_SIZE // SIZE_ONE_KV_HEAD))
     )
-    SSCALE_TOTAL_SIZE = T.meta_var(2 * SMEM_PIPE_DEPTH_Q * BLK_M)
-    assert TMEM_PIPE_DEPTH * MMA_N <= N_COLS_TMEM, "TMEM columns exceeded"
-    num_q_blocks_total = T.meta_var(ceildiv(SEQ_LEN_Q, SEQ_Q_PER_TILE))
-    num_q_blocks = T.meta_var(ceildiv(num_q_blocks_total, SMEM_PIPE_DEPTH_Q))
-    num_total_tasks = T.meta_var(BATCH_SIZE * NUM_KV_HEADS * num_q_blocks)
-    Q_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    Q_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    K_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    K_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    V_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    V_tensor_map_1: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    O_tensor_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    if GQA_RATIO == 1:
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            Q_tensor_map,
-            "float16",
-            3,
-            Q.data,
-            HEAD_DIM // 2,
-            SEQ_LEN_Q,
-            BATCH_SIZE * NUM_QO_HEADS * 2,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
+    SSCALE_TOTAL_SIZE = 2 * SMEM_PIPE_DEPTH_Q * BLK_M
+    assert TMEM_DEPTH * MMA_N <= N_COLS_TMEM, "TMEM columns exceeded"
+    num_q_blocks_total = ceildiv(SEQ_LEN_Q, SEQ_Q_PER_TILE)
+    num_q_blocks = ceildiv(num_q_blocks_total, SMEM_PIPE_DEPTH_Q)
+    num_total_tasks = BATCH_SIZE * NUM_KV_HEADS * num_q_blocks
+    num_kv_blocks = ceildiv(SEQ_LEN_KV, BLK_N)
+    # orig:L601-620.
+    EPI_ON_SOFTMAX = is_causal
+    EARLY_Q_RELEASE = not is_causal
+    cta_count = num_total_tasks if is_causal else min(MAX_CTAS, num_total_tasks)
+    # PV gemm split point, regime-tuned — orig:L922-930.
+    K_SPLIT = (4 if is_causal else 6) * MMA_K
+    P_SPLIT_Q = 2 if is_causal else 3
+    ACC_SCALE_BASE = 0
+    ROW_SUM_BASE = 0
+    scale_log2 = math.log2(math.e) / math.sqrt(HEAD_DIM)
+    rescale_threshold = 8.0
+    STEADY_DESC = is_causal and GQA_RATIO > 1
+    NEG_INF = -float("inf")
+
+    # ---- trace-time helpers over the causal block bounds — orig:L138-152 ----
+
+    def n_block_max_of(m_block_idx):
+        nbm = num_kv_blocks
+        if not is_causal:
+            return nbm
+        m_idx_max = (m_block_idx + 1) * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
+        n_idx = m_idx_max + SEQ_LEN_KV - SEQ_LEN_Q
+        return K.min(nbm, ceildiv(n_idx, BLK_N))
+
+    def n_block_min_causal_of(m_block_idx):
+        m_idx_min = m_block_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
+        n_idx = m_idx_min + SEQ_LEN_KV - SEQ_LEN_Q
+        return K.max(0, n_idx // BLK_N)
+
+    @K.kernel(warps=16, arch="sm_100a", min_blocks_per_sm=1, grid=cta_count)
+    def flash_attention4(
+        Q_tensor_map: K.TensorMap,
+        Q_tensor_map_1: K.TensorMap,
+        K_tensor_map: K.TensorMap,
+        K_tensor_map_1: K.TensorMap,
+        V_tensor_map: K.TensorMap,
+        V_tensor_map_1: K.TensorMap,
+        O_tensor_map: K.TensorMap,
+    ):
+        # ---- CTA coordinates — orig:L625-628 ---------------------------------
+        # Materialize the warp-uniform ids once; TIRx expressions are trees and
+        # rebuilding these at every use expands address and mask arithmetic.
+        warp_cta = K.warp_id()
+        wg_id = warp_cta >> 2
+        warp_id = warp_cta & 3
+        tid_in_wg = K.thread_id() & 127
+
+        # ---- shared memory — orig:L629-696 -----------------------------------
+        # Declaration order reproduces the frozen kernel's byte layout exactly
+        # (audited in the notes: Q@0, K/V@65536, O, sScale, tmem mailbox, then
+        # every barrier ring at the original's offset).
+        smem = K.smem_pool()
+        # swizzle=K.SW128B is the same composed layout the original's
+        # pool.alloc_tcgen05_mma_AB(..., "float16") picks ("auto" -> 128B atom):
+        # both call mma_shared_layout(dtype, SWIZZLE_128B_ATOM, shape) with
+        # align=1024.
+        q_smem = smem.alloc((SMEM_PIPE_DEPTH_Q, BLK_M, HEAD_DIM), K.f16, swizzle=K.SW128B)
+        # K and V share one ring: the loader alternates load_k / load_v into
+        # successive stages, so the original allocates K_smem once and takes
+        # V_smem as a view of it (orig:L631-632). One allocation, two roles.
+        kv_smem = smem.alloc((KV_DEPTH, BLK_N, HEAD_DIM), K.f16, swizzle=K.SW128B)
+        o_smem = smem.alloc((TMEM_DEPTH, BLK_M, HEAD_DIM), K.f16, swizzle=K.SW128B)
+
+        # 16-byte units between two ring stages of a swizzled tile: a stage is a
+        # constant translation of the same rows x cols tile.
+        def stage16(tile):
+            return tile.rows * tile.cols * tile.bits // 8 // 16
+
+        Q_STAGE16 = stage16(q_smem)
+        KV_STAGE16 = stage16(kv_smem)
+
+        # How a descriptor is carried from its encode to the tcgen05.mma
+        # operands, by regime. SPLIT_DESC keeps the two halves in plain C
+        # scalars; the alternative is K's native uint64 descriptor plus
+        # KDesc.__add__, which spells both the split and every step as inline
+        # asm (mov.b64-unpack / add.u32 / mov.b64-pack).
+        #
+        # An asm result is an optimisation barrier, so under the native form
+        # ptxas never sees one value flowing into the operands and reschedules
+        # the descriptor chain across the whole kernel; the asm add also pins
+        # the association to `lo + (stage*STAGE16 + koff)`, costing a ULEA per
+        # k-phase because the `lo + stage*STAGE16` base can no longer be
+        # hoisted out of the eight-phase walk (ULEA in the issuer region:
+        # 15 -> 60). On the long non-causal GQA=1 stream that is worth -3.8%
+        # (771.3 -> 742.3us on s8192_h32kv32, paired same-process; the
+        # pre-rewrite kernel, which reached the halves through a C union,
+        # measures 744.8us there). The GQA-packed causal path measures the
+        # other way: with STEADY_DESC keeping eight descriptors live at once,
+        # every plain-C spelling tried (split halves; split halves with an asm
+        # pack; masking the halves out of the packed value at each use) lands
+        # at 112.8-112.9us on s4096_h32kv4_causal against 110.8us for the
+        # native form, so that regime keeps the native form. Elsewhere the
+        # split is a win or a wash: s4096_h32kv32 218.0 -> 211.2,
+        # s4096_h32kv32_causal 125.6 -> 122.9, s1024_h32kv32_causal
+        # 26.38 -> 26.06, s8192_h32kv32_causal 424.4 -> 422.9,
+        # s2048_h32kv8 60.12 -> 60.02, s1024_h32kv4 23.65 -> 23.85.
+        SPLIT_DESC = not STEADY_DESC
+
+        def lo_uniform(desc):
+            """Broadcast the descriptor's low half — orig SmemDescriptor.make_lo_uniform.
+
+            Returns whatever :func:`desc_at` wants in this regime: the split
+            ``(lo, hi)`` halves, or the ``KDesc`` itself.
+            """
+            desc_lo = K.alloc_local((1,), "uint32")
+            desc_hi = K.alloc_local((1,), "uint32")
+            if not SPLIT_DESC:
+                K.ptx.mov.b64(desc_lo[0], desc_hi[0], desc.value)
+                K.ptx.mov.b64(desc.value, K.uniform(desc_lo[0]), desc_hi[0])
+                return desc
+            K.assign(desc_lo[0], K.uniform(K.Cast("uint32", desc.value)))
+            K.assign(desc_hi[0], K.Cast("uint32", K.shift_right(desc.value, K.uint64(32))))
+            return desc_lo, desc_hi
+
+        def desc_at(desc, off16):
+            """The descriptor for a 16-byte-unit offset from ``desc``'s base.
+
+            Only the low half moves -- every offset here is a small
+            non-negative displacement inside one tile ring, so nothing carries
+            into the encoded layout fields -- and the high half is
+            loop-invariant, so a step is one 32-bit add plus the pack into the
+            operand register pair.
+            """
+            if not SPLIT_DESC:
+                return desc + off16
+            lo, hi = desc
+            packed = K.alloc_local((1,), "uint64")
+            low = (
+                lo[0] if isinstance(off16, int) and off16 == 0 else lo[0] + K.Cast("uint32", off16)
+            )
+            K.assign(
+                packed[0],
+                K.bitwise_or(
+                    K.shift_left(K.Cast("uint64", hi[0]), K.uint64(32)), K.Cast("uint64", low)
+                ),
+            )
+            return packed[0]
+
+        def encode(view, major="k"):
+            """One hoisted, lo-uniform tcgen05 matrix descriptor for a stage-0 view.
+
+            Returns ``(halves, off16)``. K derives ldo/sdo/swizzle from the tile it
+            allocated and checks them against that layout; the frozen kernel
+            hand-writes ldo=1024 sdo=64 swizzle=3 (orig:L635) and K derives
+            exactly those three numbers. ``off16(kp)`` is the trace-time 16-byte
+            offset of k-tile ``kp``, likewise derived from the layout: for these
+            128x128 f16 128B-swizzle tiles it is ``(kp%4)*2 + (kp//4)*1024``
+            K-major and ``kp*128`` MN-major -- the frozen kernel's hand-written
+            ``ki//4*1024 + ki%4*2`` and ``ki*128`` to the bit.
+
+            ``major`` does not change the emitted encode (the base address, LBO
+            and SBO are the same tile either way); it only selects which axis
+            ``off16`` walks. So all seven encodes below are the same instruction
+            the original emits.
+            """
+            desc, off16 = view.encode(major=major, mma_k=MMA_K)
+            return lo_uniform(desc), off16
+
+        # orig:L634-658. k_desc and v_desc are numerically identical (K and V
+        # alias); they are separate registers on purpose, and the five *_steady
+        # / *_tail copies exist to shorten descriptor live ranges on the causal
+        # GQA>1 path (orig's own comment at get_flash_attention4_kernel).
+        q_desc, koff = encode(q_smem[0])
+        k_desc, _ = encode(kv_smem[0])
+        v_desc, mnoff = encode(kv_smem[0], major="mn")
+        if STEADY_DESC:
+            q_desc_steady, _ = encode(q_smem[0])
+            k_desc_steady, _ = encode(kv_smem[0])
+            v_desc_steady_hi, _ = encode(kv_smem[0], major="mn")
+            v_desc_tail_lo, _ = encode(kv_smem[0], major="mn")
+            v_desc_tail_hi, _ = encode(kv_smem[0], major="mn")
+        else:
+            q_desc_steady = q_desc
+            k_desc_steady = k_desc
+            v_desc_steady_hi = v_desc
+            v_desc_tail_lo = v_desc
+            v_desc_tail_hi = v_desc
+
+        sScale = smem.alloc((SSCALE_TOTAL_SIZE,), K.f32, align=1024)
+        tmem_addr = smem.alloc((1,), K.u32)
+
+        # ---- per-thread pipeline state — orig:L663-669 ----------------------
+        # KV advances per ring slot. The other protocols unroll their two
+        # physical slots, so their state owns only the epoch phase.
+        kv_pipe = K.PipelineState(KV_DEPTH, phase=0)
+        softmax_epoch = K.PipelineState(1, phase=0)
+        score_epoch = K.PipelineState(1, phase=0)
+        tmem_epoch = K.PipelineState(1, phase=0)
+        q_epoch = K.PipelineState(1, phase=0)
+        o_epi_epoch = K.PipelineState(1, phase=0)
+
+        # ---- barrier rings — orig:L670-697 ----------------------------------
+        q_load = K.Pipeline(
+            smem, SMEM_PIPE_DEPTH_Q, full="tma", empty="tcgen05", empty_phase_offset=1
         )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            Q_tensor_map_1,
-            "float16",
-            3,
-            Q.data,
-            HEAD_DIM // 2,
-            SEQ_LEN_Q,
-            BATCH_SIZE * NUM_QO_HEADS * 2,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
+        kv_load = K.Pipeline(smem, KV_DEPTH, full="tma", empty="tcgen05", empty_phase_offset=1)
+        p_o_rescale = K.MBarrier(smem, 2)
+        p_o_rescale.init(256)
+        # s_ready / o_ready are one-way tcgen05 signals: no slot is recycled, so
+        # they are bare barriers rather than Pipelines. The producing side is
+        # the matrix engine, so its arrive IS `tcgen05.commit` -- spelled as the
+        # instruction it is (see `commit` below), the way the GDN port spells
+        # its software arrive on a tcgen05-signalled ring.
+        s_ready = K.MBarrier(smem, 2)
+        s_ready.init(1)
+        o_ready = K.MBarrier(smem, 2)
+        o_ready.init(1)
+        softmax_corr = K.Pipeline(
+            smem, 2, full="mbar", empty="mbar", init_full=128, init_empty=128, empty_phase_offset=1
         )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            O_tensor_map,
-            "float16",
-            3,
-            O.data,
-            HEAD_DIM // 2,
-            SEQ_LEN_Q,
-            BATCH_SIZE * NUM_QO_HEADS * 2,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
+        corr_epi = K.Pipeline(
+            smem,
+            TMEM_DEPTH,
+            full="mbar",
+            empty="mbar",
+            init_full=128,
+            init_empty=32,
+            empty_phase_offset=1,
         )
-    else:
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            Q_tensor_map,
-            "float16",
-            4,
-            Q.data,
-            HEAD_DIM // 2,
-            NUM_QO_HEADS,
-            SEQ_LEN_Q,
-            BATCH_SIZE * 2,
-            HEAD_DIM * F16_BYTES,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            GQA_RATIO,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            Q_tensor_map_1,
-            "float16",
-            4,
-            Q.data,
-            HEAD_DIM // 2,
-            NUM_QO_HEADS,
-            SEQ_LEN_Q,
-            BATCH_SIZE * 2,
-            HEAD_DIM * F16_BYTES,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            GQA_RATIO,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-        T.call_packed(
-            "runtime.cuTensorMapEncodeTiled",
-            O_tensor_map,
-            "float16",
-            4,
-            O.data,
-            HEAD_DIM // 2,
-            NUM_QO_HEADS,
-            SEQ_LEN_Q,
-            BATCH_SIZE * 2,
-            HEAD_DIM * F16_BYTES,
-            NUM_QO_HEADS * HEAD_DIM * F16_BYTES,
-            HEAD_DIM,
-            HEAD_DIM // 2,
-            GQA_RATIO,
-            SEQ_Q_PER_TILE,
-            2,
-            1,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        K_tensor_map,
-        "float16",
-        3,
-        K.data,
-        HEAD_DIM // 2,
-        SEQ_LEN_KV,
-        BATCH_SIZE * NUM_KV_HEADS * 2,
-        NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
-        HEAD_DIM,
-        HEAD_DIM // 2,
-        BLK_N,
-        2,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        K_tensor_map_1,
-        "float16",
-        3,
-        K.data,
-        HEAD_DIM // 2,
-        SEQ_LEN_KV,
-        BATCH_SIZE * NUM_KV_HEADS * 2,
-        NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
-        HEAD_DIM,
-        HEAD_DIM // 2,
-        BLK_N,
-        2,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        V_tensor_map,
-        "float16",
-        3,
-        V.data,
-        HEAD_DIM // 2,
-        SEQ_LEN_KV,
-        BATCH_SIZE * NUM_KV_HEADS * 2,
-        NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
-        HEAD_DIM,
-        HEAD_DIM // 2,
-        BLK_N,
-        2,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        V_tensor_map_1,
-        "float16",
-        3,
-        V.data,
-        HEAD_DIM // 2,
-        SEQ_LEN_KV,
-        BATCH_SIZE * NUM_KV_HEADS * 2,
-        NUM_KV_HEADS * HEAD_DIM * F16_BYTES,
-        HEAD_DIM,
-        HEAD_DIM // 2,
-        BLK_N,
-        2,
-        1,
-        1,
-        1,
-        0,
-        3,
-        2,
-        0,
-    )
-    # When every CTA runs exactly ONE task (causal always launches
-    # cta_count == num_total_tasks; non-causal whenever tasks <= 148), the
-    # task tail is fully exposed on the critical path — there is no next
-    # task to overlap the correction-wg epilogue with. In that regime the
-    # epilogue runs on the SOFTMAX warpgroups instead: each wg handles its
-    # own stage, so the two stages epilogue IN PARALLEL (correction did
-    # them serially), row_sum is normalized straight from the register
-    # (no sScale round-trip, no tail stats-handshake trip), and the idle
-    # 200-reg softmax budget affords 32-wide TMEM loads (4 round trips vs
-    # 16-wide x 8). Single-task locked-clock decomposition vs cutedsl
-    # (q256 kv2048 causal): tail 7.2/6.6us vs baseline 6.6/5.8 — the tail
-    # is where the small-shape ratio lives. Multi-task persistent shapes
-    # keep the correction-wg epilogue (it overlaps the next task there).
-    # Measured (ncu back-to-back, GPU 6): causal -1.9..-2.6%
-    # (s1024_h32kv32_c 22.05→21.47us, s1024_h32kv16_c 20.16→19.78);
-    # NON-causal single-wave (s1024_h32kv32) consistently +2% — restrict
-    # to causal, where the LPT longest-task tail is the kernel's critical
-    # path.
-    EPI_ON_SOFTMAX = T.meta_var(is_causal)
-    EARLY_Q_RELEASE = T.meta_var(not is_causal)
-    max_ctas: T.let = 148
-    cta_count: T.let = T.min(max_ctas, num_total_tasks) if not is_causal else num_total_tasks
-    T.device_entry()
-    T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1})
-    bx = T.cta_id([cta_count])
-    wg_id = T.warpgroup_id([4])
-    warp_id = T.warp_id_in_wg([4])
-    tid_in_wg = T.thread_id_in_wg([128])
-    pool = T.SMEMPool()
-    Q_smem = pool.alloc_tcgen05_mma_AB((SMEM_PIPE_DEPTH_Q, BLK_M, HEAD_DIM), "float16")
-    K_smem = pool.alloc_tcgen05_mma_AB((SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM), "float16")
-    V_smem = K_smem.view(SMEM_PIPE_DEPTH_KV, BLK_N, HEAD_DIM)
-    O_smem = pool.alloc_tcgen05_mma_AB((TMEM_PIPE_DEPTH, BLK_M, HEAD_DIM), "float16")
-    q_desc = SmemDescriptor()
-    q_desc.init(Q_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-    q_desc.make_lo_uniform()
-    k_desc = SmemDescriptor()
-    k_desc.init(K_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-    k_desc.make_lo_uniform()
-    v_desc = SmemDescriptor()
-    v_desc.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-    v_desc.make_lo_uniform()
-    q_desc_steady = SmemDescriptor()
-    k_desc_steady = SmemDescriptor()
-    v_desc_steady_hi = SmemDescriptor()
-    v_desc_tail_lo = SmemDescriptor()
-    v_desc_tail_hi = SmemDescriptor()
-    if is_causal and GQA_RATIO > 1:
-        q_desc_steady.init(Q_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        q_desc_steady.make_lo_uniform()
-        k_desc_steady.init(K_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        k_desc_steady.make_lo_uniform()
-        v_desc_steady_hi.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        v_desc_steady_hi.make_lo_uniform()
-        v_desc_tail_lo.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        v_desc_tail_lo.make_lo_uniform()
-        v_desc_tail_hi.init(V_smem.ptr_to([0, 0, 0]), ldo=1024, sdo=64, swizzle=3)
-        v_desc_tail_hi.make_lo_uniform()
-    sScale = pool.alloc((SSCALE_TOTAL_SIZE,), "float32", align=1024)
-    tmem_addr = pool.alloc([1], "uint32")
-    ACC_SCALE_BASE: T.let = 0
-    ROW_SUM_BASE: T.let = 0
-    kv_pipe = PipelineState(SMEM_PIPE_DEPTH_KV)
-    phase_q: T.int32
-    phase_s_full: T.int32
-    phase_tmem: T.int32
-    phase_s0_s1: T.int32
-    phase_q_load: T.int32
-    phase_oepi: T.int32
-    q_load = Pipeline(pool, SMEM_PIPE_DEPTH_Q, full="tma", empty="tcgen05", empty_phase_offset=1)
-    kv_load = Pipeline(pool, SMEM_PIPE_DEPTH_KV, full="tma", empty="tcgen05", empty_phase_offset=1)
-    p_o_rescale = MBarrier(pool, 2)
-    p_o_rescale.init(256)
-    s_ready = TCGen05Bar(pool, 2)
-    s_ready.init(1)
-    o_ready = TCGen05Bar(pool, 2)
-    o_ready.init(1)
-    softmax_corr = Pipeline(
-        pool, 2, full="mbar", empty="mbar", init_full=128, init_empty=128, empty_phase_offset=1
-    )
-    corr_epi = Pipeline(
-        pool,
-        TMEM_PIPE_DEPTH,
-        full="mbar",
-        empty="mbar",
-        init_full=128,
-        init_empty=32,
-        empty_phase_offset=1,
-    )
-    p_ready_2 = MBarrier(pool, 2)
-    p_ready_2.init(128)
-    bar_s0_s1_sequence = MBarrier(pool, 8)
-    # Init in the FIRST init group so the single prologue fence (below) covers
-    # it; lets us drop the redundant 2nd fence+cta_sync (MEMBAR/FENCE/BSSY
-    # excess vs cutedsl, which uses one prologue init barrier).
-    bar_s0_s1_sequence.init(32)
-    pool.commit()
-    iket = IketProfiler()
-    # TMEM is allocated by the MMA warp (cta-scope warp 12 = wg3/warp0) and
-    # the alloc deliberately sits AFTER the prologue cta_syncs (commit is
-    # emitted further down): every other warp's first TMEM access is
-    # transitively gated behind this warp's progress (softmax via s_ready
-    # from the first QK gemm, correction via the softmax handshake, TMA
-    # store via corr_epi), so no CTA-wide sync on the alloc is needed, and
-    # the TMA load warp issues the first Q/K copies without waiting for it.
-    # FA4 CuTeDSL structures its prologue the same way (alloc inside the
-    # MMA warp's branch; load warps never wait for it).
-    tmem_pool = T.TMEMPool(
-        pool,
-        total_cols=N_COLS_TMEM,
-        cta_group=CTA_GROUP,
-        tmem_addr=tmem_addr,
-        alloc_warp=12,
-        dealloc_warp=0,
-    )
-    _tmem_f32 = tmem_pool.alloc((128, N_COLS_TMEM), "float32")
-    tmem_pool.move_base_to(0)
-    _tmem_f16 = tmem_pool.alloc((128, N_COLS_TMEM * 2), "float16")
-    T.ptx.fence.proxy.async_.shared__cta()
-    T.ptx.fence.mbarrier_init.release.cluster()
-    T.cuda.cta_sync()
-    # Direct tcgen05 addresses preserve the same overlay: S occupies columns
-    # [0, 256), O occupies [256, 512), and packed-f16 P aliases the high half
-    # of each S stage.
-    scheduler = (
-        FlashAttentionLPTScheduler(
-            "fa_scheduler",
-            num_batches=BATCH_SIZE,
-            num_heads=NUM_KV_HEADS,
-            num_m_blocks=num_q_blocks,
-            l2_swizzle=L2_SWIZZLE,
-        )
-        if is_causal
-        else FlashAttentionLinearScheduler(
-            "fa_scheduler",
-            num_batches=BATCH_SIZE,
-            num_heads=NUM_KV_HEADS,
-            num_m_blocks=num_q_blocks,
-            num_ctas=cta_count,
-        )
-    )
-    scheduler.init(bx)
-    kv_pipe.init(0)
-    phase_q = 0
-    phase_oepi = 0
-    phase_tmem = 0
-    phase_s_full = 0
-    if USE_S0_S1_BARRIER:
-        phase_s0_s1 = T.if_then_else(wg_id == 1, 0, 1)
-    phase_q_load = 0
-    tmem_pool.commit()
-    if (wg_id == 3) & (warp_id == 0):
-        allocated_tmem_addr: T.uint32
-        T.ptx.ld.shared.u32(allocated_tmem_addr, tmem_addr.ptr_to([0]))
-        T.cuda.trap_when_assert_failed(allocated_tmem_addr == T.uint32(0))
-    if wg_id == 2:
-        for i_q in T.unroll(2):
-            p_o_rescale.arrive(i_q)
-    num_kv_blocks: T.let = ceildiv(SEQ_LEN_KV, BLK_N)
-    while scheduler.valid():
-        m_block_idx = T.meta_var(scheduler.m_block_idx)
-        batch_idx = T.meta_var(scheduler.batch_idx)
-        kv_head_idx = T.meta_var(scheduler.head_idx)
-        m_start = T.meta_var(m_block_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q)
-        if wg_id == 3:
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(48)
-            if warp_id == 1:
+        p_ready_2 = K.MBarrier(smem, 2)
+        p_ready_2.init(128)
+        # Initialized in the FIRST init group so the single prologue fence
+        # covers it, even though USE_S0_S1_BARRIER is off — orig:L692-696.
+        bar_s0_s1_sequence = K.MBarrier(smem, 8)
+        bar_s0_s1_sequence.init(32)
 
-                @T.inline
-                def load_q(i_q, tensor_map):
-                    q_load.empty.wait(i_q, phase_q_load)
-                    tma_q_token = iket.range_start("issue-tma-q")
-                    if T.cuda.elect_sync():
-                        if GQA_RATIO == 1:
-                            T.evaluate(
-                                T.ptx[_TMA_G2S_3D](
-                                    Q_smem.ptr_to([i_q, 0, 0]),
-                                    T.address_of(tensor_map),
-                                    T.int32(0),
-                                    T.cast(m_start + i_q * SEQ_Q_PER_TILE, "int32"),
-                                    T.cast((batch_idx * NUM_QO_HEADS + kv_head_idx) * 2, "int32"),
-                                    T.cuda.cvta_generic_to_shared(q_load.full.buf.ptr_to([i_q])),
-                                )
-                            )
-                        else:
-                            T.evaluate(
-                                T.ptx[_TMA_G2S_4D](
-                                    Q_smem.ptr_to([i_q, 0, 0]),
-                                    T.address_of(tensor_map),
-                                    T.int32(0),
-                                    T.cast(kv_head_idx * GQA_RATIO, "int32"),
-                                    T.cast(m_start + i_q * SEQ_Q_PER_TILE, "int32"),
-                                    T.cast(batch_idx * 2, "int32"),
-                                    T.cuda.cvta_generic_to_shared(q_load.full.buf.ptr_to([i_q])),
-                                )
-                            )
-                        q_load.full.arrive(i_q, CTA_GROUP * BLK_M * HEAD_DIM * F16_BYTES)
-                    iket.range_end(tma_q_token)
+        K.ptx.fence.proxy.async_.shared__cta()
+        K.ptx.fence.mbarrier_init.release.cluster()
+        K.cuda.cta_sync()
 
-                @T.inline
-                def load_k(i_kv, tensor_map):
-                    kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase)
-                    tma_k_token = iket.range_start("issue-tma-k")
-                    if T.cuda.elect_sync():
-                        T.evaluate(
-                            T.ptx[_TMA_G2S_3D](
-                                K_smem.ptr_to([kv_pipe.stage, 0, 0]),
-                                T.address_of(tensor_map),
-                                T.int32(0),
-                                T.cast(i_kv * BLK_N, "int32"),
-                                T.cast((batch_idx * NUM_KV_HEADS + kv_head_idx) * 2, "int32"),
-                                T.cuda.cvta_generic_to_shared(
-                                    kv_load.full.buf.ptr_to([kv_pipe.stage])
-                                ),
-                            )
-                        )
-                        kv_load.full.arrive(kv_pipe.stage, CTA_GROUP * BLK_N * HEAD_DIM * F16_BYTES)
-                    iket.range_end(tma_k_token)
-                    kv_pipe.advance()
+        # ---- shared closures -------------------------------------------------
 
-                @T.inline
-                def load_v(i_kv, tensor_map):
-                    kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase)
-                    tma_v_token = iket.range_start("issue-tma-v")
-                    if T.cuda.elect_sync():
-                        T.evaluate(
-                            T.ptx[_TMA_G2S_3D](
-                                V_smem.ptr_to([kv_pipe.stage, 0, 0]),
-                                T.address_of(tensor_map),
-                                T.int32(0),
-                                T.cast(i_kv * BLK_N, "int32"),
-                                T.cast((batch_idx * NUM_KV_HEADS + kv_head_idx) * 2, "int32"),
-                                T.cuda.cvta_generic_to_shared(
-                                    kv_load.full.buf.ptr_to([kv_pipe.stage])
-                                ),
-                            )
-                        )
-                        kv_load.full.arrive(kv_pipe.stage, CTA_GROUP * BLK_N * HEAD_DIM * F16_BYTES)
-                    iket.range_end(tma_v_token)
-                    kv_pipe.advance()
+        def elected():
+            return K.cuda.elect_sync() != K.uint32(0)
 
-                load_trip_count: T.int32
-                load_trip_count = (
-                    get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
-                    if is_causal
-                    else num_kv_blocks
-                )
-                load_q(0, Q_tensor_map)
-                load_k(load_trip_count - 1, K_tensor_map)
-                load_q(1, Q_tensor_map_1)
-                phase_q_load ^= 1
-                load_v(load_trip_count - 1, V_tensor_map)
-                for _i in T.serial(load_trip_count - 1, unroll=False):
-                    i_kv: T.let = load_trip_count - 2 - _i
-                    load_k(i_kv, K_tensor_map_1)
-                    load_v(i_kv, V_tensor_map_1)
-            if warp_id == 2:
-                corr_epi.full.wait(0, phase_tmem)
-                tma_store_token = iket.range_start("tma-store")
-                for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                    if i_q != 0:
-                        corr_epi.full.wait(i_q, phase_tmem)
-                    m_start_global = T.meta_var(m_start + i_q * SEQ_Q_PER_TILE)
-                    if T.cuda.elect_sync():
-                        if GQA_RATIO == 1:
-                            T.evaluate(
-                                T.ptx[_TMA_S2G_3D](
-                                    T.address_of(O_tensor_map),
-                                    T.int32(0),
-                                    T.cast(m_start_global, "int32"),
-                                    T.cast((batch_idx * NUM_QO_HEADS + kv_head_idx) * 2, "int32"),
-                                    O_smem.ptr_to([i_q, 0, 0]),
-                                )
-                            )
-                        else:
-                            T.evaluate(
-                                T.ptx[_TMA_S2G_4D](
-                                    T.address_of(O_tensor_map),
-                                    T.int32(0),
-                                    T.cast(kv_head_idx * GQA_RATIO, "int32"),
-                                    T.cast(m_start_global, "int32"),
-                                    T.cast(batch_idx * 2, "int32"),
-                                    O_smem.ptr_to([i_q, 0, 0]),
-                                )
-                            )
-                    T.ptx.cp.async_.bulk.commit_group()
-                # Drain the stores stage by stage. The wait count lives in the
-                # instruction text, so it has to be a literal rather than a loop
-                # variable -- written out per stage for SMEM_PIPE_DEPTH_Q == 2.
-                T.ptx.cp.async_.bulk.wait_group(1)
-                corr_epi.empty.arrive(0)
-                T.ptx.cp.async_.bulk.wait_group(0)
-                corr_epi.empty.arrive(1)
-                iket.range_end(tma_store_token)
-                phase_tmem ^= 1
-            if warp_id == 0:
-                acc: T.int32
-                acc = 0
+        def commit(bar, stage):
+            """The matrix engine's arrive on a one-way barrier — orig TCGen05Bar.arrive."""
+            K.ptx[TCGEN05_COMMIT](bar.ptr_to([stage]))
 
-                @T.inline
-                def gemm_qk(q_stage, kv_stage, q_desc_value, k_desc_value):
-                    for ki in T.unroll(HEAD_DIM // MMA_K):
-                        if T.cuda.elect_sync():
-                            T.ptx[_MMA_F16](
-                                T.cast(q_stage * MMA_N, "uint32"),
-                                _smem_desc_add_16B_offset(
-                                    q_desc_value, q_stage * 2048 + ki // 4 * 1024 + ki % 4 * 2
-                                ),
-                                _smem_desc_add_16B_offset(
-                                    k_desc_value, kv_stage * 2048 + ki // 4 * 1024 + ki % 4 * 2
-                                ),
-                                T.uint32(136314896),
-                                T.uint32(0),
-                                T.uint32(0),
-                                T.uint32(0),
-                                T.uint32(0),
-                                ki != 0,
-                            )
-                    if T.cuda.elect_sync():
-                        s_ready.arrive(q_stage)
+        def tmem(col):
+            """A tmem address. The kernel asserts its allocation base is 0 (below)
+            and then names every column absolutely — orig:L752-755."""
+            return K.cuda.get_tmem_addr(K.uint32(0), 0, col)
 
-                # PV gemm split point, regime-tuned: for causal, 64 cols
-                # (p_o_rescale waits TWO P quarter-stores instead of three,
-                # releasing the MMA warp earlier in the
-                # softmax->P->PV->QK->s_ready loop that binds the small-shape
-                # cadence; single-task phase tables vs cutedsl showed TIRx
-                # softmax idling ~26% of its cadence on s_ready vs baseline
-                # 14%). For non-causal the earlier release measured 2-3pp
-                # WORSE on s1024 shapes — keep 96.
-                K_SPLIT = T.meta_var((4 if is_causal else 6) * MMA_K)
+        def tmem_load(dst, dst_offset, tmem_col, width):
+            chain = TMEM_LD_16 if width == 16 else TMEM_LD_32
+            K.ptx[chain](*(dst[dst_offset + i] for i in range(width)), tmem_col)
 
-                @T.inline
-                def gemm_pv_part1(i_q, kv_stage, should_accumulate, v_desc_value):
-                    for ki in T.unroll(K_SPLIT // MMA_K):
-                        if T.cuda.elect_sync():
-                            T.ptx[_MMA_F16](
-                                T.cast((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "uint32"),
-                                T.cast(i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2), "uint32"),
-                                _smem_desc_add_16B_offset(v_desc_value, kv_stage * 2048 + ki * 128),
-                                T.uint32(136380432),
-                                T.uint32(0),
-                                T.uint32(0),
-                                T.uint32(0),
-                                T.uint32(0),
-                                tvm.tirx.any(ki != 0, T.cast(should_accumulate, "bool")),
-                            )
+        def tmem_store(src, src_offset, tmem_col):
+            K.ptx[TMEM_ST_16](tmem_col, *(src[src_offset + i] for i in range(16)))
 
-                @T.inline
-                def gemm_pv_part2(i_q, kv_stage, v_desc_value):
-                    p_ready_2.wait(i_q, phase_tmem)
-                    for ki in T.unroll((BLK_N - K_SPLIT) // MMA_K):
-                        if T.cuda.elect_sync():
-                            T.ptx[_MMA_F16](
-                                T.cast((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N, "uint32"),
-                                T.cast(
-                                    i_q * MMA_N + MMA_N // 2 + K_SPLIT // 2 + ki * (MMA_K // 2),
-                                    "uint32",
-                                ),
-                                _smem_desc_add_16B_offset(
-                                    v_desc_value, kv_stage * 2048 + K_SPLIT * 8 + ki * 128
-                                ),
-                                T.uint32(136380432),
-                                T.uint32(0),
-                                T.uint32(0),
-                                T.uint32(0),
-                                T.uint32(0),
-                                T.bool(True),
-                            )
+        def iket_range(name, *, leader_only=False):
+            token = K.alloc_local([1], "uint32")
+            if leader_only:
+                K.assign(token[0], K.cuda.iket.sentinel_token(name))
+                with K.If(warp_id == 0), K.Then():
+                    K.assign(token[0], K.cuda.iket.range_start(name))
+            else:
+                K.assign(token[0], K.cuda.iket.range_start(name))
+            return token
 
-                @T.inline
-                def gemm_pv(i_q, kv_stage, should_accumulate, v_desc_lo, v_desc_hi):
-                    gemm_pv_part1(i_q, kv_stage, should_accumulate, v_desc_lo)
-                    gemm_pv_part2(i_q, kv_stage, v_desc_hi)
+        def cast_f32x2_f16x2(dst_u32, src, offset):
+            """One packed f32x2 -> f16x2 conversion — orig:L95-97.
 
-                for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                    q_load.full.wait(i_q, phase_q_load)
-                    if i_q == 0:
-                        kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
-                    gemm_qk(i_q, kv_pipe.stage, q_desc.desc, k_desc.desc)
-                    if i_q == 1:
-                        if T.cuda.elect_sync():
-                            kv_load.empty.arrive(kv_pipe.stage)
-                kv_pipe.advance()
-                mma_trip_count: T.int32
-                mma_trip_count = (
-                    get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
-                    if is_causal
-                    else num_kv_blocks
-                )
-                for i_kv in T.serial(mma_trip_count - 1, unroll=False):
-                    stage_v: T.let = kv_pipe.stage
-                    phase_v: T.let = kv_pipe.phase
-                    kv_pipe.advance()
-                    stage_k = T.meta_var(kv_pipe.stage)
-                    phase_k = T.meta_var(kv_pipe.phase)
-                    for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                        if i_q == 0:
-                            kv_load.full.wait(stage_v, phase_v)
-                        p_o_rescale.wait(i_q, phase_tmem)
-                        gemm_pv(
-                            i_q,
-                            stage_v,
-                            acc,
-                            v_desc.desc,
-                            v_desc_steady_hi.desc if is_causal and GQA_RATIO > 1 else v_desc.desc,
-                        )
-                        if i_q == 1:
-                            if T.cuda.elect_sync():
-                                kv_load.empty.arrive(stage_v)
-                        if i_q == 0:
-                            kv_load.full.wait(stage_k, phase_k)
-                        gemm_qk(
-                            i_q,
-                            stage_k,
-                            q_desc_steady.desc if is_causal and GQA_RATIO > 1 else q_desc.desc,
-                            k_desc_steady.desc if is_causal and GQA_RATIO > 1 else k_desc.desc,
-                        )
-                        # Early Q release (non-causal / multi-task CTAs):
-                        # Q[i_q]'s LAST reader is this final QK — committing
-                        # here fires when it completes, ~2 tail-PV gemms
-                        # before the end-of-task commit, so the next task's
-                        # Q TMA load overlaps the PV tail + epilogue.
-                        # Causal keeps the tail commit: one task per CTA
-                        # (nothing to overlap) and packed-causal tasks can
-                        # have mma_trip_count == 1, where this steady-loop
-                        # site never executes.
-                        if EARLY_Q_RELEASE:
-                            if i_kv == mma_trip_count - 2:
-                                if T.cuda.elect_sync():
-                                    q_load.empty.arrive(i_q)
-                        if i_q == 1:
-                            if T.cuda.elect_sync():
-                                kv_load.empty.arrive(stage_k)
-                    acc = 1
-                    kv_pipe.advance()
-                    phase_tmem ^= 1
-                for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                    if i_q == 0:
-                        kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
-                    p_o_rescale.wait(i_q, phase_tmem)
-                    gemm_pv(
-                        i_q,
-                        kv_pipe.stage,
-                        acc,
-                        v_desc_tail_lo.desc if is_causal and GQA_RATIO > 1 else v_desc.desc,
-                        v_desc_tail_hi.desc if is_causal and GQA_RATIO > 1 else v_desc.desc,
+            Every consumer uses packed uint32 words, so keep that register view
+            directly."""
+            K.ptx.cvt.rn.f16x2.f32(dst_u32[offset // 2], src[offset + 1], src[offset])
+
+        def fma_f32x2(values, idx, multiplier, addend_value):
+            """A packed f32x2 operand is one 64-bit value."""
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
+            addend = K.local_scalar("uint64")
+            K.ptx.mov.b64(packed, values[idx], values[idx + 1])
+            K.ptx.mov.b64(rhs, multiplier, multiplier)
+            K.ptx.mov.b64(addend, addend_value, addend_value)
+            K.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
+            K.ptx.mov.b64(values[idx], values[idx + 1], packed)
+
+        def mul_f32x2(values, idx, multiplier):
+            """orig:L215-223."""
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
+            K.ptx.mov.b64(packed, values[idx], values[idx + 1])
+            K.ptx.mov.b64(rhs, multiplier, multiplier)
+            K.ptx.mul.rz.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(values[idx], values[idx + 1], packed)
+
+        def reduce_max_128(out, values, accum=False):
+            """SM100 three-input max tree — orig:L226-244. The outer walk stays a
+            real serial loop (the original's K.serial(15)); only the 4-wide
+            inner fan is expanded, which is what K.unroll(4) lowers to."""
+            temp = K.alloc_local([4], "float32")
+            for i in range(4):
+                if accum and i == 0:
+                    K.ptx[MAX3_F32](temp[i], values[2 * i], values[2 * i + 1], out[0])
+                else:
+                    K.ptx.mov.b32(temp[i], K.max(values[2 * i], values[2 * i + 1]))
+            with K.serial(15) as outer:
+                for i in range(4):
+                    K.ptx[MAX3_F32](
+                        temp[i],
+                        temp[i],
+                        values[8 * (outer + 1) + 2 * i],
+                        values[8 * (outer + 1) + 2 * i + 1],
                     )
-                    if i_q == 1:
-                        if T.cuda.elect_sync():
-                            kv_load.empty.arrive(kv_pipe.stage)
-                    if T.cuda.elect_sync():
-                        o_ready.arrive(i_q)
-                kv_pipe.advance()
-                phase_tmem ^= 1
-                if not EARLY_Q_RELEASE:
-                    for i_q in T.unroll(SMEM_PIPE_DEPTH_Q):
-                        if T.cuda.elect_sync():
-                            q_load.empty.arrive(i_q)
-                phase_q_load ^= 1
-        elif wg_id < 2:
-            T.ptx.setmaxnreg.inc.sync.aligned.u32(200)
-            scale_log2 = T.meta_var(math.log2(math.e) / math.sqrt(HEAD_DIM))
-            rescale_threshold = T.meta_var(8.0)
-            row_max: T.f32[1]
-            row_sum: T.f32[1]
-            if warp_id == 0:
-                iket.mark("softmax-baseline")
+            K.assign(out[0], K.max(temp[0], temp[1]))
+            K.ptx[MAX3_F32](out[0], out[0], temp[2], temp[3])
 
-            @T.inline
-            def mask_r2p(s_chunk_buf, col_limit, ncol: T.int32):
-                """Apply mask using R2P-style bit manipulation.
+        def reduce_sum_128(out, values, accum=False):
+            """Packed add tree, accumulator insertion order preserved — orig:L247-276."""
+            local_sum = K.alloc_local([8], "float32")
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
+            for i in range(8):
+                if accum and i == 0:
+                    K.ptx.mov.b32(local_sum[i], values[i] + out[0])
+                else:
+                    K.ptx.mov.b32(local_sum[i], values[i])
+            with K.serial(15) as outer:
+                for i in range(4):
+                    K.ptx.mov.b64(packed, local_sum[2 * i], local_sum[2 * i + 1])
+                    K.ptx.mov.b64(
+                        rhs, values[8 * (outer + 1) + 2 * i], values[8 * (outer + 1) + 2 * i + 1]
+                    )
+                    K.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
+                    K.ptx.mov.b64(local_sum[2 * i], local_sum[2 * i + 1], packed)
+            for lo, hi in ((0, 2), (4, 6), (0, 4)):
+                K.ptx.mov.b64(packed, local_sum[lo], local_sum[lo + 1])
+                K.ptx.mov.b64(rhs, local_sum[hi], local_sum[hi + 1])
+                K.ptx.add.rn.ftz.f32x2(packed, packed, rhs)
+                K.ptx.mov.b64(local_sum[lo], local_sum[lo + 1], packed)
+            K.assign(out[0], local_sum[0] + local_sum[1])
 
-                Optimizes: for j in range(N): buf[j] = -inf if j >= col_limit else buf[j]
-                Into: bitmask operations that compile to R2P PTX instruction.
+        def shl_u32_clamp(val, shift):
+            """Left shift with PTX clamping (shift>=32 -> 0) — orig:L114-121."""
+            result = K.local_scalar("uint32")
+            K.ptx.shl.b32(result, val, shift)
+            return result
 
-                Following flash_attn/cute/mask.py mask_r2p(): process in 32-col
-                chunks (shl_u32_clamp tolerates shift>=32, so no 24-col split).
+        def combine_int_frac_ex2(x_rounded, frac_ex2):
+            """orig:L124-135."""
+            x_rounded_i = K.local_scalar("int32")
+            frac_ex_i = K.local_scalar("int32")
+            x_rounded_e = K.local_scalar("int32")
+            out_i = K.local_scalar("int32")
+            out = K.local_scalar("float32")
+            K.ptx.mov.b32(x_rounded_i, x_rounded)
+            K.ptx.mov.b32(frac_ex_i, frac_ex2)
+            K.ptx.shl.b32(x_rounded_e, x_rounded_i, K.uint32(23))
+            K.ptx.add.s32(out_i, x_rounded_e, frac_ex_i)
+            K.ptx.mov.b32(out, out_i)
+            return out
 
-                The bit test `mask & (1 << i)` compiles to the R2P (Register to Predicate)
-                PTX instruction, which is more efficient than per-column comparisons.
-                """
-                ncol = T.meta_var(ncol)
-                # Subtract-free low-k bitmask: ~(0xFFFFFFFF<<k) gives the low-k-bits
-                # mask with NO `-1`; the ~ fuses into the per-column `& (1<<i)` test
-                # as ANDN (one LOP3), so there is no VIADD per chunk. shl clamps
-                # k>=32 -> 0 => mask_inv=0 => ~=all-ones => keep all (k>=32 correct),
-                # so no VIMNMX either. The bit test compiles to R2P.
-                CHUNK_SIZE: T.let = 32
-                num_chunks: T.let = ceildiv(ncol, CHUNK_SIZE)
-                s_chunk_local = s_chunk_buf.local(ncol)
-                for s in T.unroll(num_chunks):
-                    k_keep: T.let = T.max(col_limit - s * CHUNK_SIZE, 0)
-                    mask_inv: T.uint32
-                    mask_inv = shl_u32_clamp(T.uint32(0xFFFFFFFF), T.cast(k_keep, "uint32"))
-                    for i in T.unroll(CHUNK_SIZE):
-                        if i < ncol - s * CHUNK_SIZE:
-                            c: T.let = s * CHUNK_SIZE + i
-                            in_bound: T.let = T.bitwise_and(
-                                T.bitwise_not(mask_inv), T.shift_left(T.uint32(1), i)
+        POLY_EX2_DEG3 = (1.0, 0.6951461434364319, 0.22756439447402954, 0.07711908966302872)
+        FP32_ROUND_INT = float(2**23 + 2**22)
+
+        def ex2_emulation_2(out, idx, x, y):
+            """Two-lane polynomial ex2 on the packed f32x2 datapath — orig:L155-199."""
+            xy_clamped = K.alloc_local([2], "float32")
+            K.ptx.mov.b32(xy_clamped[0], K.max(x, -127.0))
+            K.ptx.mov.b32(xy_clamped[1], K.max(y, -127.0))
+            packed = K.local_scalar("uint64")
+            rhs = K.local_scalar("uint64")
+            addend = K.local_scalar("uint64")
+            xy_rounded = K.alloc_local([2], "float32")
+            K.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1])
+            K.ptx.mov.b64(rhs, K.float32(FP32_ROUND_INT), K.float32(FP32_ROUND_INT))
+            K.ptx.add.rm.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(xy_rounded[0], xy_rounded[1], packed)
+            xy_rounded_back = K.alloc_local([2], "float32")
+            K.ptx.mov.b64(packed, xy_rounded[0], xy_rounded[1])
+            K.ptx.mov.b64(rhs, K.float32(FP32_ROUND_INT), K.float32(FP32_ROUND_INT))
+            K.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(xy_rounded_back[0], xy_rounded_back[1], packed)
+            xy_frac = K.alloc_local([2], "float32")
+            K.ptx.mov.b64(packed, xy_clamped[0], xy_clamped[1])
+            K.ptx.mov.b64(rhs, xy_rounded_back[0], xy_rounded_back[1])
+            K.ptx.sub.rn.ftz.f32x2(packed, packed, rhs)
+            K.ptx.mov.b64(xy_frac[0], xy_frac[1], packed)
+            xy_frac_ex2 = K.alloc_local([2], "float32")
+            K.ptx.mov.b32(xy_frac_ex2[0], K.float32(POLY_EX2_DEG3[3]))
+            K.ptx.mov.b32(xy_frac_ex2[1], K.float32(POLY_EX2_DEG3[3]))
+            for coeff in (POLY_EX2_DEG3[2], POLY_EX2_DEG3[1], POLY_EX2_DEG3[0]):
+                K.ptx.mov.b64(rhs, xy_frac[0], xy_frac[1])
+                K.ptx.mov.b64(packed, xy_frac_ex2[0], xy_frac_ex2[1])
+                K.ptx.mov.b64(addend, K.float32(coeff), K.float32(coeff))
+                K.ptx.fma.rz.ftz.f32x2(packed, packed, rhs, addend)
+                K.ptx.mov.b64(xy_frac_ex2[0], xy_frac_ex2[1], packed)
+            K.ptx.mov.b32(out[idx], combine_int_frac_ex2(xy_rounded[0], xy_frac_ex2[0]))
+            K.ptx.mov.b32(out[idx + 1], combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1]))
+
+        # ---- roles — orig:L752/765/1060/1396 ---------------------------------
+        # The frozen kernel's register budget is exactly the 65536-register CTA
+        # file: 200*32*8 + 64*32*4 + 48*32*4 = 65536. K checks that, plus the
+        # exact partition of warps 0..15 and setmaxnreg warpgroup-uniformity;
+        # the original satisfies all three, verified nowhere.
+        sp = K.specialize(chain_dispatch=True)
+        r_softmax = sp.role("softmax", warps=[0, 1, 2, 3, 4, 5, 6, 7], regs=200)
+        r_correction = sp.role("correction", warps=[8, 9, 10, 11], regs=64)
+        wg3 = sp.warpgroup("wg3", warps=range(12, 16), regs=48)
+        r_mma = sp.role("mma", warps=[12], group=wg3)
+        r_load = sp.role("load", warps=[13], group=wg3)
+        r_store = sp.role("store", warps=[14], group=wg3)
+        r_idle = sp.role("idle", warps=[15], group=wg3)
+
+        # ---- scheduler and prologue — orig:L725-758 --------------------------
+        scheduler = (
+            FlashAttentionLPTScheduler(
+                "fa_scheduler",
+                num_batches=BATCH_SIZE,
+                num_heads=NUM_KV_HEADS,
+                num_m_blocks=num_q_blocks,
+                l2_swizzle=L2_SWIZZLE,
+            )
+            if is_causal
+            else FlashAttentionLinearScheduler(
+                "fa_scheduler",
+                num_batches=BATCH_SIZE,
+                num_heads=NUM_KV_HEADS,
+                num_m_blocks=num_q_blocks,
+                num_ctas=cta_count,
+            )
+        )
+        scheduler.init(K.cta_id())
+        # TMEM is allocated by the MMA warp and deliberately sits AFTER the
+        # prologue cta_sync: every other warp's first TMEM access is
+        # transitively gated behind this warp — orig:L698-751. These three
+        # guards are on the raw warp id, not roles: the original runs them
+        # once, outside the task loop, while the role blocks (and their
+        # setmaxnreg) are inside it.
+        with K.If(warp_cta == 12), K.Then():
+            K.ptx[TMEM_ALLOC](K.address_of(tmem_addr[0]), K.uint32(N_COLS_TMEM))
+            K.cuda.warp_sync()
+        with K.If(tvm.tirx.all(wg_id == 3, warp_id == 0)), K.Then():
+            allocated = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(allocated, tmem_addr.ptr_to([0]))
+            K.cuda.trap_when_assert_failed(allocated == K.uint32(0))
+        with K.If(wg_id == 2), K.Then():
+            for i_q in range(2):
+                p_o_rescale.arrive(i_q)
+
+        # =====================================================================
+        # Roles stay inside the task loop, preserving per-task setmaxnreg.
+        # =====================================================================
+        with K.While(scheduler.valid()):
+            m_block_idx = scheduler.m_block_idx
+            batch_idx = scheduler.batch_idx
+            kv_head_idx = scheduler.head_idx
+            m_start = m_block_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
+
+            # =================================================================
+            # wg3 — sibling TMA-load, TMA-store, MMA, and idle roles.
+            #                                                    orig:L765-1059
+            # =================================================================
+            # Adjacent role blocks let K specialize the mutually exclusive
+            # register lifetimes without hiding any role-local instruction.
+            # -------- warp 1: Q/K/V loader — orig:L768-856 -------------------
+            with wg3:
+                with r_load:
+
+                    def load_q(i_q, tensor_map):
+                        q_load.empty.wait(i_q, q_epoch.phase)
+                        tma_q_token = iket_range("issue-tma-q")
+                        with K.If(elected()), K.Then():
+                            if GQA_RATIO == 1:
+                                K.ptx[TMA_G2S_3D](
+                                    q_smem[i_q].ptr_to(0, 0),
+                                    K.address_of(tensor_map),
+                                    K.int32(0),
+                                    K.Cast("int32", m_start + i_q * SEQ_Q_PER_TILE),
+                                    K.Cast("int32", (batch_idx * NUM_QO_HEADS + kv_head_idx) * 2),
+                                    K.cuda.cvta_generic_to_shared(q_load.full.ptr_to([i_q])),
+                                )
+                            else:
+                                K.ptx[TMA_G2S_4D](
+                                    q_smem[i_q].ptr_to(0, 0),
+                                    K.address_of(tensor_map),
+                                    K.int32(0),
+                                    K.Cast("int32", kv_head_idx * GQA_RATIO),
+                                    K.Cast("int32", m_start + i_q * SEQ_Q_PER_TILE),
+                                    K.Cast("int32", batch_idx * 2),
+                                    K.cuda.cvta_generic_to_shared(q_load.full.ptr_to([i_q])),
+                                )
+                            q_load.full.arrive(
+                                i_q, tx_count=CTA_GROUP * BLK_M * HEAD_DIM * F16_BYTES
                             )
-                            s_chunk_local[c] = T.Select(
-                                T.cast(in_bound, "bool"), s_chunk_local[c], T.float32(-float("inf"))
+                        K.cuda.iket.range_end(tma_q_token[0])
+
+                    def load_kv(i_kv, tensor_map, event):
+                        """One K or V box into the shared KV ring — orig:L800-840.
+                        The two loads are the same instruction on the same ring;
+                        only the tensormap differs."""
+                        kv_load.empty.wait(kv_pipe.stage, kv_pipe.phase)
+                        tma_kv_token = iket_range(event)
+                        with K.If(elected()), K.Then():
+                            K.ptx[TMA_G2S_3D](
+                                kv_smem[kv_pipe.stage].ptr_to(0, 0),
+                                K.address_of(tensor_map),
+                                K.int32(0),
+                                K.Cast("int32", i_kv * BLK_N),
+                                K.Cast("int32", (batch_idx * NUM_KV_HEADS + kv_head_idx) * 2),
+                                K.cuda.cvta_generic_to_shared(kv_load.full.ptr_to([kv_pipe.stage])),
                             )
+                            kv_load.full.arrive(
+                                kv_pipe.stage, tx_count=CTA_GROUP * BLK_N * HEAD_DIM * F16_BYTES
+                            )
+                        K.cuda.iket.range_end(tma_kv_token[0])
+                        kv_pipe.advance()
 
-            @T.inline
-            def apply_causal_mask(s_chunk_buf, m_blk_idx, n_blk_idx):
-                """Apply causal mask to attention scores.
+                    load_trip_count = K.local_scalar("int32")
+                    K.assign(
+                        load_trip_count, n_block_max_of(m_block_idx) if is_causal else num_kv_blocks
+                    )
+                    load_q(0, Q_tensor_map)
+                    load_kv(load_trip_count - 1, K_tensor_map, "issue-tma-k")
+                    load_q(1, Q_tensor_map_1)
+                    q_epoch.advance()
+                    load_kv(load_trip_count - 1, V_tensor_map, "issue-tma-v")
+                    with K.serial(load_trip_count - 1, unroll=False) as _i:
+                        i_kv = load_trip_count - 2 - _i
+                        load_kv(i_kv, K_tensor_map_1, "issue-tma-k")
+                        load_kv(i_kv, V_tensor_map_1, "issue-tma-v")
 
-                Following flash_attn/cute/mask.py apply_mask_sm100() lines 384-400:
-                causal_row_offset = 1 + seqlen_k - n_block * tile_n - seqlen_q
-                row_idx = thread_row + m_block * tile_m
-                col_limit_right = row_idx + causal_row_offset
-                Mask if col >= col_limit_right
+                # -------- warp 2: O store — orig:L857-895 ------------------------
+                with r_store:
+                    corr_epi.full.wait(0, tmem_epoch.phase)
+                    tma_store_token = iket_range("tma-store")
+                    for i_q in range(SMEM_PIPE_DEPTH_Q):
+                        if i_q != 0:
+                            corr_epi.full.wait(i_q, tmem_epoch.phase)
+                        m_start_global = m_start + i_q * SEQ_Q_PER_TILE
+                        with K.If(elected()), K.Then():
+                            if GQA_RATIO == 1:
+                                K.ptx[TMA_S2G_3D](
+                                    K.address_of(O_tensor_map),
+                                    K.int32(0),
+                                    K.Cast("int32", m_start_global),
+                                    K.Cast("int32", (batch_idx * NUM_QO_HEADS + kv_head_idx) * 2),
+                                    o_smem[i_q].ptr_to(0, 0),
+                                )
+                            else:
+                                K.ptx[TMA_S2G_4D](
+                                    K.address_of(O_tensor_map),
+                                    K.int32(0),
+                                    K.Cast("int32", kv_head_idx * GQA_RATIO),
+                                    K.Cast("int32", m_start_global),
+                                    K.Cast("int32", batch_idx * 2),
+                                    o_smem[i_q].ptr_to(0, 0),
+                                )
+                        K.ptx.cp.async_.bulk.commit_group()
+                    # The wait count lives in the instruction text, so it is a
+                    # literal per stage rather than a loop variable.
+                    K.ptx.cp.async_.bulk.wait_group(1)
+                    corr_epi.empty.arrive(0)
+                    K.ptx.cp.async_.bulk.wait_group(0)
+                    corr_epi.empty.arrive(1)
+                    K.cuda.iket.range_end(tma_store_token[0])
+                    tmem_epoch.advance()
 
-                Coordinate Mapping:
-                - BLK_M = 128 packed rows per tile
-                - SEQ_Q_PER_TILE = BLK_M // GQA_RATIO (e.g., 32 for GQA_RATIO=4)
-                - Each warpgroup handles one Q stage with SEQ_Q_PER_TILE sequence positions
-                - tid_in_wg (0-127) maps to packed rows: (seq_pos, head) = (tid//GQA_RATIO, tid%GQA_RATIO)
-                """
-                seq_pos_in_wg: T.let = tid_in_wg // GQA_RATIO
-                row_idx: T.let = (
-                    m_blk_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
-                    + wg_id * SEQ_Q_PER_TILE
-                    + seq_pos_in_wg
-                )
-                causal_row_offset: T.let = 1 + SEQ_LEN_KV - n_blk_idx * BLK_N - SEQ_LEN_Q
-                col_limit_right: T.let = row_idx + causal_row_offset
-                mask_r2p(s_chunk_buf, col_limit_right, BLK_N)
+                # -------- warp 0: MMA issuer — orig:L896-1059 --------------------
+                with r_mma:
+                    acc = K.local_scalar("int32", init=0)
 
-            @T.inline
-            def softmax_step(i_kv, apply_mask=False, is_first=False):
-                s_chunk_buf: T.f32[BLK_N]
-                p_chunk_buf_f32: T.f32[BLK_N // 2]
-                p_chunk_buf = T.decl_buffer((BLK_N,), dtype="float16", data=p_chunk_buf_f32.data)
-                p_chunk_u32 = p_chunk_buf.view("uint32")
-                s_ready.wait(wg_id, phase_s_full)
-                if warp_id == 0:
-                    iket.mark("softmax-phase-0")
-                softmax_max_token = iket.sentinel_token("softmax-max")
-                if warp_id == 0:
-                    softmax_max_token = iket.range_start("softmax-max")
-                tile_max: T.f32[1]
-                for chunk_idx in T.unroll(BLK_N // SOFTMAX_LD_CHUNK):
-                    T.evaluate(
-                        _tmem_load(
-                            s_chunk_buf,
+                    def gemm_qk(q_stage, kv_stage, qd, kd):
+                        """S[q_stage] = Q[q_stage] @ K[kv_stage]^T — orig:L900-920.
+
+                        Eight k-phases of one hoisted descriptor plus a
+                        trace-time 16B offset. K derives that offset walk from
+                        the tile's own layout: for this 128x128 f16 128B-swizzle
+                        tile it is (ki%4)*2 + (ki//4)*1024, which is the frozen
+                        kernel's hand-written constant to the bit."""
+                        for ki in range(HEAD_DIM // MMA_K):
+                            with K.If(elected()), K.Then():
+                                K.ptx[MMA_F16](
+                                    K.Cast("uint32", q_stage * MMA_N),
+                                    desc_at(qd, q_stage * Q_STAGE16 + koff(ki)),
+                                    desc_at(kd, kv_stage * KV_STAGE16 + koff(ki)),
+                                    K.uint32(ID_QK),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    ki != 0,
+                                )
+                        with K.If(elected()), K.Then():
+                            commit(s_ready, q_stage)
+
+                    def gemm_pv_part1(i_q, kv_stage, should_accumulate, vd):
+                        """orig:L932-946. A is a tmem address (ts form); B is V,
+                        MN-major (ID_PV sets trans_b), so the k walk steps whole
+                        rows: 16 rows = 128 16B units."""
+                        for ki in range(K_SPLIT // MMA_K):
+                            with K.If(elected()), K.Then():
+                                K.ptx[MMA_F16](
+                                    K.Cast("uint32", (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N),
+                                    K.Cast("uint32", i_q * MMA_N + MMA_N // 2 + ki * (MMA_K // 2)),
+                                    desc_at(vd, kv_stage * KV_STAGE16 + mnoff(ki)),
+                                    K.uint32(ID_PV),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    # any(ki != 0, should_accumulate), folded at
+                                    # trace time: ki is a Python int here.
+                                    True if ki != 0 else K.Cast("bool", should_accumulate),
+                                )
+
+                    def gemm_pv_part2(i_q, kv_stage, vd):
+                        """orig:L948-968."""
+                        p_ready_2.wait(i_q, tmem_epoch.phase)
+                        for ki in range((BLK_N - K_SPLIT) // MMA_K):
+                            with K.If(elected()), K.Then():
+                                K.ptx[MMA_F16](
+                                    K.Cast("uint32", (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N),
+                                    K.Cast(
+                                        "uint32",
+                                        i_q * MMA_N + MMA_N // 2 + K_SPLIT // 2 + ki * (MMA_K // 2),
+                                    ),
+                                    desc_at(
+                                        vd, kv_stage * KV_STAGE16 + mnoff(K_SPLIT // MMA_K + ki)
+                                    ),
+                                    K.uint32(ID_PV),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    K.uint32(0),
+                                    True,
+                                )
+
+                    def gemm_pv(i_q, kv_stage, should_accumulate, v_lo, v_hi):
+                        gemm_pv_part1(i_q, kv_stage, should_accumulate, v_lo)
+                        gemm_pv_part2(i_q, kv_stage, v_hi)
+
+                    # prologue: both Q stages against the first K — orig:L975-983
+                    for i_q in range(SMEM_PIPE_DEPTH_Q):
+                        q_load.full.wait(i_q, q_epoch.phase)
+                        if i_q == 0:
+                            kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
+                        gemm_qk(i_q, kv_pipe.stage, q_desc, k_desc)
+                        if i_q == 1:
+                            with K.If(elected()), K.Then():
+                                kv_load.empty.arrive(kv_pipe.stage)
+                    kv_pipe.advance()
+
+                    mma_trip_count = K.local_scalar("int32")
+                    K.assign(
+                        mma_trip_count, n_block_max_of(m_block_idx) if is_causal else num_kv_blocks
+                    )
+                    with K.serial(mma_trip_count - 1, unroll=False) as i_kv:
+                        # stage_v / phase_v are snapshots: kv_pipe.stage is a
+                        # mutable Var and advance() rewrites it, so holding the
+                        # expression across the advance would name the wrong
+                        # stage (the KTileView lifetime rule, in int form).
+                        # `K.local_scalar` is the snapshot: it must copy the
+                        # cursor now, because a plain value would re-read the
+                        # advanced one below.
+                        # stage_k below is deliberately the LIVE expression --
+                        # the original's K.meta_var -- and no advance intervenes
+                        # before its last use.
+                        stage_v = K.local_scalar("int32", init=kv_pipe.stage)
+                        phase_v = K.local_scalar("int32", init=kv_pipe.phase)
+                        kv_pipe.advance()
+                        for i_q in range(SMEM_PIPE_DEPTH_Q):
+                            if i_q == 0:
+                                kv_load.full.wait(stage_v, phase_v)
+                            p_o_rescale.wait(i_q, tmem_epoch.phase)
+                            gemm_pv(i_q, stage_v, acc, v_desc, v_desc_steady_hi)
+                            if i_q == 1:
+                                with K.If(elected()), K.Then():
+                                    kv_load.empty.arrive(stage_v)
+                            if i_q == 0:
+                                kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
+                            gemm_qk(i_q, kv_pipe.stage, q_desc_steady, k_desc_steady)
+                            # Early Q release — orig:L1018-1030.
+                            if EARLY_Q_RELEASE:
+                                with K.If(i_kv == mma_trip_count - 2), K.Then():
+                                    with K.If(elected()), K.Then():
+                                        q_load.empty.arrive(i_q)
+                            if i_q == 1:
+                                with K.If(elected()), K.Then():
+                                    kv_load.empty.arrive(kv_pipe.stage)
+                        K.assign(acc, 1)
+                        kv_pipe.advance()
+                        tmem_epoch.advance()
+                    # tail PV — orig:L1037-1053
+                    for i_q in range(SMEM_PIPE_DEPTH_Q):
+                        if i_q == 0:
+                            kv_load.full.wait(kv_pipe.stage, kv_pipe.phase)
+                        p_o_rescale.wait(i_q, tmem_epoch.phase)
+                        gemm_pv(i_q, kv_pipe.stage, acc, v_desc_tail_lo, v_desc_tail_hi)
+                        if i_q == 1:
+                            with K.If(elected()), K.Then():
+                                kv_load.empty.arrive(kv_pipe.stage)
+                        with K.If(elected()), K.Then():
+                            commit(o_ready, i_q)
+                    kv_pipe.advance()
+                    tmem_epoch.advance()
+                    if not EARLY_Q_RELEASE:
+                        for i_q in range(SMEM_PIPE_DEPTH_Q):
+                            with K.If(elected()), K.Then():
+                                q_load.empty.arrive(i_q)
+                    q_epoch.advance()
+
+                with r_idle:
+                    pass
+
+            # =================================================================
+            # softmax warpgroups 0 and 1 — orig:L1060-1395
+            # =================================================================
+            with r_softmax:
+                row_max = K.local_scalar("float32")
+                row_sum = K.alloc_local([1], "float32")
+                with K.If(warp_id == 0), K.Then():
+                    K.cuda.iket.mark("softmax-baseline")
+
+                def mask_r2p(s_chunk, col_limit, ncol):
+                    """R2P-style column mask — orig:L1069-1103.
+
+                    ~(0xFFFFFFFF << k) is the low-k-bits mask with no `-1`; the
+                    ~ fuses into the per-column `& (1<<i)` test as ANDN, and shl
+                    clamping (k>=32 -> 0) removes the min. The bit test compiles
+                    to R2P."""
+                    CHUNK_SIZE = 32
+                    for s in range(ceildiv(ncol, CHUNK_SIZE)):
+                        k_keep = K.max(col_limit - s * CHUNK_SIZE, 0)
+                        mask_inv = K.local_scalar("uint32")
+                        K.assign(
+                            mask_inv, shl_u32_clamp(K.uint32(0xFFFFFFFF), K.Cast("uint32", k_keep))
+                        )
+                        for i in range(CHUNK_SIZE):
+                            if i < ncol - s * CHUNK_SIZE:
+                                c = s * CHUNK_SIZE + i
+                                in_bound = K.bitwise_and(
+                                    K.bitwise_not(mask_inv), K.shift_left(K.uint32(1), K.uint32(i))
+                                )
+                                K.ptx.mov.b32(
+                                    s_chunk[c],
+                                    K.Select(
+                                        K.Cast("bool", in_bound), s_chunk[c], K.float32(NEG_INF)
+                                    ),
+                                )
+
+                def apply_causal_mask(s_chunk, m_blk_idx, n_blk_idx):
+                    """orig:L1105-1129. `col_limit_right` is read four times
+                    (once per 32-column mask chunk); the intermediates are plain
+                    values, so ptxas sees the row/offset arithmetic directly."""
+                    seq_pos_in_wg = tid_in_wg // GQA_RATIO
+                    row_idx = (
+                        m_blk_idx * SEQ_Q_PER_TILE * SMEM_PIPE_DEPTH_Q
+                        + wg_id * SEQ_Q_PER_TILE
+                        + seq_pos_in_wg
+                    )
+                    causal_row_offset = 1 + SEQ_LEN_KV - n_blk_idx * BLK_N - SEQ_LEN_Q
+                    col_limit_right = row_idx + causal_row_offset
+                    mask_r2p(s_chunk, col_limit_right, BLK_N)
+
+                def softmax_step(i_kv, apply_mask=False, is_first=False):
+                    """One KV block of the online softmax — orig:L1131-1294."""
+                    s_chunk = K.alloc_local([BLK_N], "float32")
+                    # Only the uint32 view of the packed-f16 P fragment is ever
+                    # read (tcgen05.st operands), so allocate that directly.
+                    p_chunk = K.alloc_local([BLK_N // 2], "uint32")
+                    s_ready.wait(wg_id, score_epoch.phase)
+                    with K.If(warp_id == 0), K.Then():
+                        K.cuda.iket.mark("softmax-phase-0")
+                    softmax_max_token = iket_range("softmax-max", leader_only=True)
+                    tile_max = K.alloc_local([1], "float32")
+                    for chunk_idx in range(BLK_N // SOFTMAX_LD_CHUNK):
+                        tmem_load(
+                            s_chunk,
                             chunk_idx * SOFTMAX_LD_CHUNK,
-                            T.cuda.get_tmem_addr(
-                                T.uint32(0), 0, wg_id * MMA_N + chunk_idx * SOFTMAX_LD_CHUNK
-                            ),
+                            tmem(wg_id * MMA_N + chunk_idx * SOFTMAX_LD_CHUNK),
                             SOFTMAX_LD_CHUNK,
                         )
-                    )
-                if apply_mask:
-                    apply_causal_mask(s_chunk_buf, m_block_idx, i_kv)
-                row_max_old: T.f32
-                if is_first:
-                    reduce_max_128(tile_max, s_chunk_buf)
-                else:
-                    # row_max is initialized by the first softmax step.  Keep
-                    # its load inside the non-first specialization so the
-                    # first step does not read an uninitialized local value
-                    # whose result is dead on that path.
-                    row_max_old = row_max[0]
-                    tile_max[0] = row_max_old
-                    reduce_max_128(tile_max, s_chunk_buf, accum=True)
-                row_max_new: T.f32
-                acc_scale: T.f32
-                acc_scale_: T.f32
-                row_max_safe: T.f32
-                row_max_new = tile_max[0]
-                row_max_safe = T.if_then_else(tile_max[0] == -float("inf"), 0.0, tile_max[0])
-                if is_first:
-                    acc_scale = T.float32(1.0)
-                else:
-                    acc_scale_ = (row_max_old - row_max_safe) * scale_log2
-                    if acc_scale_ >= -rescale_threshold:
-                        row_max_new = row_max_old
-                        row_max_safe = row_max_old
-                        acc_scale = T.float32(1.0)
+                    if apply_mask:
+                        apply_causal_mask(s_chunk, m_block_idx, i_kv)
+                    row_max_old = K.local_scalar("float32")
+                    if is_first:
+                        reduce_max_128(tile_max, s_chunk)
                     else:
-                        T.ptx.ex2.approx.ftz.f32(acc_scale, acc_scale_)
-                row_max[0] = row_max_new
-                row_max_scaled: T.let = row_max_safe * scale_log2
-                if warp_id == 0:
-                    iket.mark("softmax-phase-1")
-                iket.range_end(softmax_max_token)
-                if tid_in_wg < BLK_M and (not is_first):
-                    sScale_idx: T.let = ACC_SCALE_BASE + tid_in_wg + wg_id * BLK_M
-                    T.ptx.st.shared.f32(sScale.ptr_to([sScale_idx]), acc_scale)
-                # Stats-ready handshake to the correction wg via HW named
-                # barrier (FA4 CuTeDSL sm_stats_barrier): softmax warp w of
-                # stage wg_id pairs with correction warp w on barrier
-                # 1 + wg_id*4 + w (64 threads). bar.arrive is non-blocking and
-                # the correction side's bar.sync wakes without the mbarrier
-                # try_wait + nanosleep latency — this wait gates p_o_rescale
-                # and therefore the PV MMA. The reverse (sScale slot reuse)
-                # direction stays on softmax_corr.empty.
-                if STATS_BAR_PAIRWISE:
-                    T.ptx.bar.arrive(T.uint32(1 + wg_id * 4 + warp_id), 64)
-                else:
-                    T.ptx.bar.arrive(T.uint32(1 + wg_id), 256)
-                softmax_fma_token = iket.sentinel_token("softmax-fma")
-                if warp_id == 0:
-                    softmax_fma_token = iket.range_start("softmax-fma")
-                for i in T.unroll(BLK_N // 2):
-                    fma_f32x2(s_chunk_buf, 2 * i, T.float32(scale_log2), -row_max_scaled)
-                iket.range_end(softmax_fma_token)
-                if USE_S0_S1_BARRIER:
-                    bar_s0_s1_sequence.wait(wg_id * 4 + warp_id, phase_s0_s1)
-                softmax_exp2_token = iket.sentinel_token("softmax-exp2")
-                if warp_id == 0:
-                    softmax_exp2_token = iket.range_start("softmax-exp2")
-                for frag_idx in T.unroll(4):
-                    s_chunk_local = s_chunk_buf.local(BLK_N)
-                    for i in T.unroll(BLK_N // 4 // 2):
-                        idx = T.meta_var(frag_idx * BLK_N // 4 + 2 * i)
-                        # ex2 emulation ratio is shape-tuned (cf. FA4 CuTeDSL
-                        # _TUNING_CONFIG keyed on is_causal); see module-level
-                        # EMU_* knobs.
-                        emu_pairs = T.meta_var(EMU_PAIRS_CAUSAL if is_causal else EMU_PAIRS_NC)
-                        emu_start = T.meta_var(EMU_START_CAUSAL if is_causal else EMU_START_NC)
-                        if (
-                            i * 2 % 16 < 16 - 2 * emu_pairs
-                            or frag_idx >= 4 - 1
-                            or frag_idx < emu_start
-                            or apply_mask
-                        ):
-                            T.ptx.ex2.approx.ftz.f32(s_chunk_local[idx], s_chunk_local[idx])
-                            T.ptx.ex2.approx.ftz.f32(s_chunk_local[idx + 1], s_chunk_local[idx + 1])
-                        else:
-                            ex2_emulation_2(
-                                s_chunk_local, idx, s_chunk_local[idx], s_chunk_local[idx + 1]
-                            )
-                    for i in T.unroll(BLK_N // 4 // 2):
-                        idx = T.meta_var(frag_idx * BLK_N // 4 + 2 * i)
-                        T.evaluate(_cast_f32x2_f16x2(p_chunk_buf, s_chunk_buf, idx))
-                if USE_S0_S1_BARRIER:
-                    bar_s0_s1_sequence.arrive((1 - wg_id) * 4 + warp_id)
-                iket.range_end(softmax_exp2_token)
-                softmax_tmem_st_token = iket.sentinel_token("softmax-tmem-st")
-                if warp_id == 0:
-                    softmax_tmem_st_token = iket.range_start("softmax-tmem-st")
-                P_SPLIT_Q = T.meta_var(2 if is_causal else 3)
-                for i in T.unroll(P_SPLIT_Q):
-                    T.evaluate(
-                        _tmem_store(
-                            p_chunk_u32,
+                        # row_max is initialized by the first step; its load
+                        # stays inside the non-first specialization.
+                        K.assign(row_max_old, row_max)
+                        K.assign(tile_max[0], row_max_old)
+                        reduce_max_128(tile_max, s_chunk, accum=True)
+                    row_max_new = K.local_scalar("float32")
+                    acc_scale = K.local_scalar("float32")
+                    acc_scale_ = K.local_scalar("float32")
+                    row_max_safe = K.local_scalar("float32")
+                    K.assign(row_max_new, tile_max[0])
+                    K.assign(
+                        row_max_safe,
+                        K.if_then_else(
+                            tile_max[0] == K.float32(NEG_INF), K.float32(0.0), tile_max[0]
+                        ),
+                    )
+                    if is_first:
+                        K.assign(acc_scale, K.float32(1.0))
+                    else:
+                        K.assign(acc_scale_, (row_max_old - row_max_safe) * scale_log2)
+                        with K.If(acc_scale_ >= -rescale_threshold):
+                            with K.Then():
+                                K.assign(row_max_new, row_max_old)
+                                K.assign(row_max_safe, row_max_old)
+                                K.assign(acc_scale, K.float32(1.0))
+                            with K.Else():
+                                K.ptx.ex2.approx.ftz.f32(acc_scale, acc_scale_)
+                    K.assign(row_max, row_max_new)
+                    row_max_scaled = row_max_safe * scale_log2
+                    with K.If(warp_id == 0), K.Then():
+                        K.cuda.iket.mark("softmax-phase-1")
+                    K.cuda.iket.range_end(softmax_max_token[0])
+                    if not is_first:
+                        with K.If(tid_in_wg < BLK_M), K.Then():
+                            sScale_idx = ACC_SCALE_BASE + tid_in_wg + wg_id * BLK_M
+                            K.ptx.st.shared.f32(sScale.ptr_to([sScale_idx]), acc_scale)
+                    # Stats-ready handshake to the correction wg over a HW named
+                    # barrier — orig:L1192-1203.
+                    if STATS_BAR_PAIRWISE:
+                        K.ptx.bar.arrive(K.Cast("uint32", 1 + wg_id * 4 + warp_id), 64)
+                    else:
+                        K.ptx.bar.arrive(K.Cast("uint32", 1 + wg_id), 256)
+                    softmax_fma_token = iket_range("softmax-fma", leader_only=True)
+                    for i in range(BLK_N // 2):
+                        fma_f32x2(s_chunk, 2 * i, K.float32(scale_log2), -row_max_scaled)
+                    K.cuda.iket.range_end(softmax_fma_token[0])
+                    softmax_exp2_token = iket_range("softmax-exp2", leader_only=True)
+                    emu_pairs = EMU_PAIRS_CAUSAL if is_causal else EMU_PAIRS_NC
+                    emu_start = EMU_START_CAUSAL if is_causal else EMU_START_NC
+                    for frag_idx in range(4):
+                        for i in range(BLK_N // 4 // 2):
+                            idx = frag_idx * BLK_N // 4 + 2 * i
+                            if (
+                                i * 2 % 16 < 16 - 2 * emu_pairs
+                                or frag_idx >= 4 - 1
+                                or frag_idx < emu_start
+                                or apply_mask
+                            ):
+                                K.ptx.ex2.approx.ftz.f32(s_chunk[idx], s_chunk[idx])
+                                K.ptx.ex2.approx.ftz.f32(s_chunk[idx + 1], s_chunk[idx + 1])
+                            else:
+                                ex2_emulation_2(s_chunk, idx, s_chunk[idx], s_chunk[idx + 1])
+                        for i in range(BLK_N // 4 // 2):
+                            idx = frag_idx * BLK_N // 4 + 2 * i
+                            cast_f32x2_f16x2(p_chunk, s_chunk, idx)
+                    K.cuda.iket.range_end(softmax_exp2_token[0])
+                    softmax_tmem_st_token = iket_range("softmax-tmem-st", leader_only=True)
+                    for i in range(P_SPLIT_Q):
+                        tmem_store(
+                            p_chunk,
                             i * BLK_N // 4 // 2,
-                            T.cuda.get_tmem_addr(
-                                T.uint32(0), 0, (wg_id * 2 * MMA_N + MMA_N + i * BLK_N // 4) // 2
-                            ),
+                            tmem((wg_id * 2 * MMA_N + MMA_N + i * BLK_N // 4) // 2),
                         )
-                    )
-                T.ptx.tcgen05.wait__st.sync.aligned()
-                p_o_rescale.arrive(wg_id)
-                for i in T.unroll(4 - P_SPLIT_Q):
-                    T.evaluate(
-                        _tmem_store(
-                            p_chunk_u32,
+                    K.ptx.tcgen05.wait__st.sync.aligned()
+                    p_o_rescale.arrive(wg_id)
+                    for i in range(4 - P_SPLIT_Q):
+                        tmem_store(
+                            p_chunk,
                             (P_SPLIT_Q + i) * BLK_N // 4 // 2,
-                            T.cuda.get_tmem_addr(
-                                T.uint32(0),
-                                0,
-                                (wg_id * 2 * MMA_N + MMA_N + (P_SPLIT_Q + i) * BLK_N // 4) // 2,
-                            ),
+                            tmem((wg_id * 2 * MMA_N + MMA_N + (P_SPLIT_Q + i) * BLK_N // 4) // 2),
                         )
-                    )
-                if warp_id == 0:
-                    iket.mark("softmax-phase-2")
-                T.ptx.tcgen05.wait__st.sync.aligned()
-                p_ready_2.arrive(wg_id)
-                if warp_id == 0:
-                    iket.mark("softmax-phase-3")
-                iket.range_end(softmax_tmem_st_token)
-                softmax_corr.empty.wait(wg_id, phase_q)
-                if warp_id == 0:
-                    iket.mark("softmax-phase-4")
-                softmax_sum_token = iket.sentinel_token("softmax-sum")
-                if warp_id == 0:
-                    softmax_sum_token = iket.range_start("softmax-sum")
-                phase_s_full ^= 1
-                phase_q ^= 1
-                if is_first:
-                    reduce_sum_128(row_sum, s_chunk_buf)
-                else:
-                    row_sum[0] = row_sum[0] * acc_scale
-                    reduce_sum_128(row_sum, s_chunk_buf, accum=True)
-                if warp_id == 0:
-                    iket.mark("softmax-phase-5")
-                iket.range_end(softmax_sum_token)
-                if USE_S0_S1_BARRIER:
-                    phase_s0_s1 ^= 1
+                    with K.If(warp_id == 0), K.Then():
+                        K.cuda.iket.mark("softmax-phase-2")
+                    K.ptx.tcgen05.wait__st.sync.aligned()
+                    p_ready_2.arrive(wg_id)
+                    with K.If(warp_id == 0), K.Then():
+                        K.cuda.iket.mark("softmax-phase-3")
+                    K.cuda.iket.range_end(softmax_tmem_st_token[0])
+                    softmax_corr.empty.wait(wg_id, softmax_epoch.phase)
+                    with K.If(warp_id == 0), K.Then():
+                        K.cuda.iket.mark("softmax-phase-4")
+                    softmax_sum_token = iket_range("softmax-sum", leader_only=True)
+                    score_epoch.advance()
+                    softmax_epoch.advance()
+                    if is_first:
+                        reduce_sum_128(row_sum, s_chunk)
+                    else:
+                        K.assign(row_sum[0], row_sum[0] * acc_scale)
+                        reduce_sum_128(row_sum, s_chunk, accum=True)
+                    with K.If(warp_id == 0), K.Then():
+                        K.cuda.iket.mark("softmax-phase-5")
+                    K.cuda.iket.range_end(softmax_sum_token[0])
 
-            # Pre-loop empty.wait guards this task's first sScale write
-            # against the PREVIOUS task's tail row_sum read. Under
-            # EPI_ON_SOFTMAX there is no tail row_sum slot use and no
-            # previous task (one task per CTA), and correction's tail
-            # empty credits are gone too — the wait must go with them
-            # (credit/wait audit: n arrives vs n in-step waits per slot).
-            if not EPI_ON_SOFTMAX:
-                softmax_corr.empty.wait(wg_id, phase_q)
-            # Keep the phase flip even when the wait is gone: parities are
-            # absolute, and correction's prologue empty.arrive can land
-            # BEFORE this wg reaches its step-1 wait — starting the in-step
-            # waits at phase 1 makes step-1 consume that prologue credit
-            # exactly like the original protocol (synccheck-verified; the
-            # phase-0 "free pass" is NOT sticky and deadlocks if the flip
-            # outruns the waiter).
-            phase_q ^= 1
-            n_block_max: T.let = get_n_block_max(
-                m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE
-            )
-            n_block_min_causal: T.let = (
-                get_n_block_min_causal_mask(m_block_idx, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
-                if is_causal
-                else n_block_max
-            )
-            softmax_step(n_block_max - 1, apply_mask=is_causal, is_first=True)
-            n_block_max_after_p1: T.let = n_block_max - 1
-            num_phase2_blocks: T.let = T.max(n_block_max_after_p1 - n_block_min_causal, 0)
-            for i in T.serial(num_phase2_blocks, unroll=False):
-                n_block: T.let = n_block_max_after_p1 - 1 - i
-                softmax_step(n_block, apply_mask=True)
-            n_block_max_after_p2: T.let = T.min(n_block_max_after_p1, n_block_min_causal)
-            for i in T.serial(n_block_max_after_p2, unroll=False):
-                n_block: T.let = n_block_max_after_p2 - 1 - i
-                softmax_step(n_block, apply_mask=False)
-            if EPI_ON_SOFTMAX:
-                # Stage-parallel epilogue on this wg: row_sum is already in
-                # a register (no sScale round-trip / tail stats trip), and
-                # the post-loop softmax register file is idle — 32-wide
-                # TMEM loads are free (4 round trips, vs 8x16 under the
-                # correction wg's 64-reg budget).
-                EPI_LD_SM = T.meta_var(32)
-                o_ready.wait(wg_id, phase_oepi)
-                corr_epi.empty.wait(wg_id, phase_oepi)
-                epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
-                if warp_id == 0:
-                    epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
-                acc_O_row_is_zero_or_nan: T.let = tvm.tirx.any(
-                    row_sum[0] == T.float32(0.0), row_sum[0] != row_sum[0]
+                # Pre-loop empty.wait guards this task's first sScale write
+                # against the PREVIOUS task's tail row_sum read — orig:L1296-1311.
+                if not EPI_ON_SOFTMAX:
+                    softmax_corr.empty.wait(wg_id, softmax_epoch.phase)
+                softmax_epoch.advance()
+
+                # These were `K.Bind` (one emitted binding, handed back as a Var)
+                # because re-emitting the expression at every use once cost 1.3%
+                # at the median and 7.3% on s1024_h32kv4_causal: `n_block_max`
+                # reaches the innermost mask chunk, so the mask shift amount
+                # recomputed `min(n_kv, m_block*2+2)` per masked step.
+                # As plain values the block bounds now fold at trace time for
+                # every specialization measured, and the SASS instruction count
+                # is unchanged on s1024_h32kv4, s1024_h32kv4_causal,
+                # s4096_h32kv4_causal and s8192_h32kv32 (schedule differs).
+                n_block_max = n_block_max_of(m_block_idx)
+                n_block_min_causal = (
+                    n_block_min_causal_of(m_block_idx) if is_causal else n_block_max
                 )
-                norm_scale_sm: T.float32
-                T.ptx.rcp.approx.ftz.f32(
-                    norm_scale_sm, T.Select(acc_O_row_is_zero_or_nan, T.float32(1.0), row_sum[0])
-                )
-                o_row_f32_sm: T.f32[EPI_LD_SM]
-                o_row_f16_sm: T.f16[EPI_LD_SM]
-                o_row_f16_sm_u32 = T.decl_buffer(
-                    (EPI_LD_SM // 2,), "uint32", data=o_row_f16_sm.data
-                )
-                for epi_q in T.unroll(2):
-                    if wg_id == epi_q:
-                        for d_tile in T.unroll(ceildiv(HEAD_DIM, EPI_LD_SM)):
-                            d_start: T.let = d_tile * EPI_LD_SM
-                            T.evaluate(
-                                _tmem_load(
+                softmax_step(n_block_max - 1, apply_mask=is_causal, is_first=True)
+                n_block_max_after_p1 = n_block_max - 1
+                num_phase2_blocks = K.max(n_block_max_after_p1 - n_block_min_causal, 0)
+                with K.serial(num_phase2_blocks, unroll=False) as i:
+                    softmax_step(n_block_max_after_p1 - 1 - i, apply_mask=True)
+                n_block_max_after_p2 = K.min(n_block_max_after_p1, n_block_min_causal)
+                with K.serial(n_block_max_after_p2, unroll=False) as i:
+                    softmax_step(n_block_max_after_p2 - 1 - i, apply_mask=False)
+
+                if EPI_ON_SOFTMAX:
+                    # Stage-parallel epilogue on this wg — orig:L1330-1386.
+                    EPI_LD_SM = 32
+                    o_ready.wait(wg_id, o_epi_epoch.phase)
+                    corr_epi.empty.wait(wg_id, o_epi_epoch.phase)
+                    epi_ld_tmem_token = iket_range("epi-ld-tmem", leader_only=True)
+                    acc_O_row_is_zero_or_nan = tvm.tirx.any(
+                        row_sum[0] == K.float32(0.0), row_sum[0] != row_sum[0]
+                    )
+                    norm_scale_sm = K.local_scalar("float32")
+                    K.ptx.rcp.approx.ftz.f32(
+                        norm_scale_sm,
+                        K.Select(acc_O_row_is_zero_or_nan, K.float32(1.0), row_sum[0]),
+                    )
+                    o_row_f32_sm = K.alloc_local([EPI_LD_SM], "float32")
+                    o_row_f16_sm = K.alloc_local([EPI_LD_SM // 2], "uint32")
+                    for epi_q in range(2):
+                        with K.If(wg_id == epi_q), K.Then():
+                            for d_tile in range(ceildiv(HEAD_DIM, EPI_LD_SM)):
+                                d_start = d_tile * EPI_LD_SM
+                                tmem_load(
                                     o_row_f32_sm,
                                     0,
-                                    T.cuda.get_tmem_addr(
-                                        T.uint32(0),
-                                        0,
-                                        (SMEM_PIPE_DEPTH_Q + epi_q) * MMA_N + d_start,
-                                    ),
+                                    tmem((SMEM_PIPE_DEPTH_Q + epi_q) * MMA_N + d_start),
                                     EPI_LD_SM,
                                 )
-                            )
-                            for i in T.unroll(EPI_LD_SM // 2):
-                                mul_f32x2(o_row_f32_sm, 2 * i, norm_scale_sm)
-                            for i in T.unroll(EPI_LD_SM // 2):
-                                T.evaluate(_cast_f32x2_f16x2(o_row_f16_sm, o_row_f32_sm, 2 * i))
-                            for i in T.unroll(EPI_LD_SM // 8):
-                                T.ptx.st.shared.v4.u32(
-                                    O_smem.ptr_to([epi_q, tid_in_wg, d_start + i * 8]),
-                                    o_row_f16_sm_u32[i * 4],
-                                    o_row_f16_sm_u32[i * 4 + 1],
-                                    o_row_f16_sm_u32[i * 4 + 2],
-                                    o_row_f16_sm_u32[i * 4 + 3],
-                                )
-                iket.range_end(epi_ld_tmem_token)
-                T.ptx.fence.proxy.async_.shared__cta()
-                corr_epi.full.arrive(wg_id)
-                p_o_rescale.arrive(wg_id)
-                phase_oepi ^= 1
-            else:
-                if tid_in_wg < BLK_M:
-                    T.ptx.st.shared.f32(
-                        sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + wg_id * BLK_M]), row_sum[0]
-                    )
-                if STATS_BAR_PAIRWISE:
-                    T.ptx.bar.arrive(T.uint32(1 + wg_id * 4 + warp_id), 64)
+                                for i in range(EPI_LD_SM // 2):
+                                    mul_f32x2(o_row_f32_sm, 2 * i, norm_scale_sm)
+                                for i in range(EPI_LD_SM // 2):
+                                    cast_f32x2_f16x2(o_row_f16_sm, o_row_f32_sm, 2 * i)
+                                for i in range(EPI_LD_SM // 8):
+                                    K.ptx.st.shared.v4.u32(
+                                        o_smem[epi_q].ptr_to(tid_in_wg, d_start + i * 8),
+                                        o_row_f16_sm[i * 4],
+                                        o_row_f16_sm[i * 4 + 1],
+                                        o_row_f16_sm[i * 4 + 2],
+                                        o_row_f16_sm[i * 4 + 3],
+                                    )
+                    K.cuda.iket.range_end(epi_ld_tmem_token[0])
+                    K.ptx.fence.proxy.async_.shared__cta()
+                    corr_epi.full.arrive(wg_id)
+                    p_o_rescale.arrive(wg_id)
+                    o_epi_epoch.advance()
                 else:
-                    T.ptx.bar.arrive(T.uint32(1 + wg_id), 256)
-        if wg_id == 2:
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(64)
-            if STATS_BAR_PAIRWISE:
-                T.ptx.bar.sync(T.uint32(1 + 0 * 4 + warp_id), 64)
-            else:
-                T.ptx.bar.sync(T.uint32(1 + 0), 256)
-            softmax_corr.empty.arrive(0)
-            if STATS_BAR_PAIRWISE:
-                T.ptx.bar.sync(T.uint32(1 + 1 * 4 + warp_id), 64)
-            else:
-                T.ptx.bar.sync(T.uint32(1 + 1), 256)
-            phase_q ^= 1
-            corr_trip_count: T.let = (
-                get_n_block_max(m_block_idx, is_causal, SEQ_LEN_KV, SEQ_LEN_Q, SEQ_Q_PER_TILE)
-                if is_causal
-                else num_kv_blocks
-            )
-            for i_kv in T.serial(corr_trip_count - 1, unroll=False):
-                for i_q in T.unroll(2):
-                    if STATS_BAR_PAIRWISE:
-                        T.ptx.bar.sync(T.uint32(1 + i_q * 4 + warp_id), 64)
-                    else:
-                        T.ptx.bar.sync(T.uint32(1 + i_q), 256)
-                    correction_token = iket.sentinel_token("correction")
-                    if warp_id == 0:
-                        correction_token = iket.range_start("correction")
-                    acc_scale: T.f32
-                    should_rescale: T.i32
-                    if tid_in_wg < BLK_M:
-                        T.ptx.ld.shared.f32(
-                            acc_scale, sScale.ptr_to([ACC_SCALE_BASE + tid_in_wg + i_q * BLK_M])
+                    with K.If(tid_in_wg < BLK_M), K.Then():
+                        K.ptx.st.shared.f32(
+                            sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + wg_id * BLK_M]), row_sum[0]
                         )
-                        should_rescale = T.Select(acc_scale < T.float32(1.0), 1, 0)
-                    else:
-                        should_rescale = 0
-                    any_needs_rescale: T.let = T.cuda.any_sync(4294967295, should_rescale)
-                    if any_needs_rescale != 0:
-                        if tid_in_wg < BLK_M:
-                            RESCALE_TILE = T.meta_var(16)
-                            o_row: T.f32[RESCALE_TILE]
-                            for d_tile in T.unroll(ceildiv(HEAD_DIM, RESCALE_TILE)):
-                                d_start: T.let = d_tile * RESCALE_TILE
-                                if d_start < HEAD_DIM:
-                                    T.evaluate(
-                                        _tmem_load(
-                                            o_row,
-                                            0,
-                                            T.cuda.get_tmem_addr(
-                                                T.uint32(0),
-                                                0,
-                                                (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start,
-                                            ),
-                                            RESCALE_TILE,
-                                        )
-                                    )
-                                    for i in T.unroll(RESCALE_TILE // 2):
-                                        mul_f32x2(o_row, 2 * i, acc_scale)
-                                    T.evaluate(
-                                        _tmem_store(
-                                            o_row,
-                                            0,
-                                            T.cuda.get_tmem_addr(
-                                                T.uint32(0),
-                                                0,
-                                                (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start,
-                                            ),
-                                        )
-                                    )
-                            T.ptx.tcgen05.wait__st.sync.aligned()
-                    p_o_rescale.arrive(i_q)
-                    softmax_corr.empty.arrive(1 - i_q)
-                    iket.range_end(correction_token)
-                phase_q ^= 1
-            softmax_corr.empty.arrive(1)
-            if not EPI_ON_SOFTMAX:
-                for i_q in T.unroll(2):
                     if STATS_BAR_PAIRWISE:
-                        T.ptx.bar.sync(T.uint32(1 + i_q * 4 + warp_id), 64)
+                        K.ptx.bar.arrive(K.Cast("uint32", 1 + wg_id * 4 + warp_id), 64)
                     else:
-                        T.ptx.bar.sync(T.uint32(1 + i_q), 256)
-                    row_sum: T.f32
-                    T.ptx.ld.shared.f32(
-                        row_sum, sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + i_q * BLK_M])
-                    )
-                    softmax_corr.empty.arrive(i_q)
-                    o_ready.wait(i_q, phase_tmem)
-                    corr_epi.empty.wait(i_q, phase_tmem)
-                    epi_ld_tmem_token = iket.sentinel_token("epi-ld-tmem")
-                    if warp_id == 0:
-                        epi_ld_tmem_token = iket.range_start("epi-ld-tmem")
-                    acc_O_mn_row_is_zero_or_nan: T.let = tvm.tirx.any(
-                        row_sum == T.float32(0.0), row_sum != row_sum
-                    )
-                    norm_scale: T.float32
-                    T.ptx.rcp.approx.ftz.f32(
-                        norm_scale, T.Select(acc_O_mn_row_is_zero_or_nan, T.float32(1.0), row_sum)
-                    )
-                    o_row_f32: T.f32[TMEM_EPI_LD_SIZE]
-                    o_row_f16: T.f16[TMEM_EPI_LD_SIZE]
-                    o_row_f16_u32 = T.decl_buffer(
-                        (TMEM_EPI_LD_SIZE // 2,), "uint32", data=o_row_f16.data
-                    )
-                    for d_tile in T.unroll(ceildiv(HEAD_DIM, TMEM_EPI_LD_SIZE)):
-                        d_start: T.let = d_tile * TMEM_EPI_LD_SIZE
-                        if d_start < HEAD_DIM:
-                            T.evaluate(
-                                _tmem_load(
+                        K.ptx.bar.arrive(K.Cast("uint32", 1 + wg_id), 256)
+
+            # =================================================================
+            # correction warpgroup 2 — orig:L1396-1528
+            # =================================================================
+            with r_correction:
+
+                def stats_sync(i_q):
+                    if STATS_BAR_PAIRWISE:
+                        K.ptx.bar.sync(K.Cast("uint32", 1 + i_q * 4 + warp_id), 64)
+                    else:
+                        K.ptx.bar.sync(K.uint32(1 + i_q), 256)
+
+                stats_sync(0)
+                softmax_corr.empty.arrive(0)
+                stats_sync(1)
+                softmax_epoch.advance()
+                corr_trip_count = n_block_max_of(m_block_idx) if is_causal else num_kv_blocks
+                with K.serial(corr_trip_count - 1, unroll=False) as _i_kv:
+                    for i_q in range(2):
+                        stats_sync(i_q)
+                        correction_token = iket_range("correction", leader_only=True)
+                        acc_scale = K.local_scalar("float32")
+                        should_rescale = K.local_scalar("int32")
+                        with K.If(tid_in_wg < BLK_M):
+                            with K.Then():
+                                K.ptx.ld.shared.f32(
+                                    acc_scale,
+                                    sScale.ptr_to([ACC_SCALE_BASE + tid_in_wg + i_q * BLK_M]),
+                                )
+                                K.assign(should_rescale, K.Select(acc_scale < K.float32(1.0), 1, 0))
+                            with K.Else():
+                                K.assign(should_rescale, 0)
+                        # Materialize the collective before divergence.
+                        any_needs_rescale = K.local_scalar("uint32")
+                        K.ptx.vote_sync.any.pred(
+                            any_needs_rescale, K.ptx.pred(should_rescale), K.uint32(0xFFFFFFFF)
+                        )
+                        with K.If(any_needs_rescale != 0), K.Then():
+                            with K.If(tid_in_wg < BLK_M), K.Then():
+                                RESCALE_TILE = 16
+                                o_row = K.alloc_local([RESCALE_TILE], "float32")
+                                for d_tile in range(ceildiv(HEAD_DIM, RESCALE_TILE)):
+                                    d_start = d_tile * RESCALE_TILE
+                                    if d_start < HEAD_DIM:
+                                        addr = tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start)
+                                        tmem_load(o_row, 0, addr, RESCALE_TILE)
+                                        for i in range(RESCALE_TILE // 2):
+                                            mul_f32x2(o_row, 2 * i, acc_scale)
+                                        tmem_store(o_row, 0, addr)
+                                K.ptx.tcgen05.wait__st.sync.aligned()
+                        p_o_rescale.arrive(i_q)
+                        softmax_corr.empty.arrive(1 - i_q)
+                        K.cuda.iket.range_end(correction_token[0])
+                    softmax_epoch.advance()
+                softmax_corr.empty.arrive(1)
+                if not EPI_ON_SOFTMAX:
+                    for i_q in range(2):
+                        stats_sync(i_q)
+                        row_sum_c = K.local_scalar("float32")
+                        K.ptx.ld.shared.f32(
+                            row_sum_c, sScale.ptr_to([ROW_SUM_BASE + tid_in_wg + i_q * BLK_M])
+                        )
+                        softmax_corr.empty.arrive(i_q)
+                        o_ready.wait(i_q, tmem_epoch.phase)
+                        corr_epi.empty.wait(i_q, tmem_epoch.phase)
+                        epi_ld_tmem_token = iket_range("epi-ld-tmem", leader_only=True)
+                        zero_or_nan = tvm.tirx.any(
+                            row_sum_c == K.float32(0.0), row_sum_c != row_sum_c
+                        )
+                        norm_scale = K.local_scalar("float32")
+                        K.ptx.rcp.approx.ftz.f32(
+                            norm_scale, K.Select(zero_or_nan, K.float32(1.0), row_sum_c)
+                        )
+                        o_row_f32 = K.alloc_local([TMEM_EPI_LD_SIZE], "float32")
+                        o_row_f16 = K.alloc_local([TMEM_EPI_LD_SIZE // 2], "uint32")
+                        for d_tile in range(ceildiv(HEAD_DIM, TMEM_EPI_LD_SIZE)):
+                            d_start = d_tile * TMEM_EPI_LD_SIZE
+                            if d_start < HEAD_DIM:
+                                tmem_load(
                                     o_row_f32,
                                     0,
-                                    T.cuda.get_tmem_addr(
-                                        T.uint32(0), 0, (SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start
-                                    ),
+                                    tmem((SMEM_PIPE_DEPTH_Q + i_q) * MMA_N + d_start),
                                     TMEM_EPI_LD_SIZE,
                                 )
-                            )
-                            for i in T.unroll(TMEM_EPI_LD_SIZE // 2):
-                                mul_f32x2(o_row_f32, 2 * i, norm_scale)
-                            for i in T.unroll(TMEM_EPI_LD_SIZE // 2):
-                                T.evaluate(_cast_f32x2_f16x2(o_row_f16, o_row_f32, 2 * i))
-                            for i in T.unroll(TMEM_EPI_LD_SIZE // 8):
-                                T.ptx.st.shared.v4.u32(
-                                    O_smem.ptr_to([i_q, tid_in_wg, d_start + i * 8]),
-                                    o_row_f16_u32[i * 4],
-                                    o_row_f16_u32[i * 4 + 1],
-                                    o_row_f16_u32[i * 4 + 2],
-                                    o_row_f16_u32[i * 4 + 3],
-                                )
-                    iket.range_end(epi_ld_tmem_token)
-                    T.ptx.fence.proxy.async_.shared__cta()
-                    corr_epi.full.arrive(i_q)
-                    p_o_rescale.arrive(i_q)
-                phase_tmem ^= 1
-            phase_q ^= 1
-        scheduler.next_tile()
-    T.cuda.cta_sync()
-    if (wg_id == 0) & (warp_id == 0):
-        dealloc_tmem_addr: T.uint32
-        T.ptx.ld.shared.u32(dealloc_tmem_addr, tmem_addr.ptr_to([0]))
-        T.ptx[f"tcgen05.relinquish_alloc_permit.cta_group::{CTA_GROUP}.sync.aligned"]()
-        T.ptx[f"tcgen05.dealloc.cta_group::{CTA_GROUP}.sync.aligned.b32"](
-            dealloc_tmem_addr, T.uint32(N_COLS_TMEM)
+                                for i in range(TMEM_EPI_LD_SIZE // 2):
+                                    mul_f32x2(o_row_f32, 2 * i, norm_scale)
+                                for i in range(TMEM_EPI_LD_SIZE // 2):
+                                    cast_f32x2_f16x2(o_row_f16, o_row_f32, 2 * i)
+                                for i in range(TMEM_EPI_LD_SIZE // 8):
+                                    K.ptx.st.shared.v4.u32(
+                                        o_smem[i_q].ptr_to(tid_in_wg, d_start + i * 8),
+                                        o_row_f16[i * 4],
+                                        o_row_f16[i * 4 + 1],
+                                        o_row_f16[i * 4 + 2],
+                                        o_row_f16[i * 4 + 3],
+                                    )
+                        K.cuda.iket.range_end(epi_ld_tmem_token[0])
+                        K.ptx.fence.proxy.async_.shared__cta()
+                        corr_epi.full.arrive(i_q)
+                        p_o_rescale.arrive(i_q)
+                    tmem_epoch.advance()
+                softmax_epoch.advance()
+
+            scheduler.next_tile()
+
+        # Match the current canonical CTA rendezvous before TMEM teardown.
+        K.cuda.cta_sync()
+        with K.If(tvm.tirx.all(wg_id == 0, warp_id == 0)), K.Then():
+            dealloc = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(dealloc, tmem_addr.ptr_to([0]))
+            K.ptx[TMEM_RELINQUISH]()
+            K.ptx[TMEM_DEALLOC](dealloc, K.uint32(N_COLS_TMEM))
+
+    return flash_attention4
+
+
+class _AlignedTensorMap:
+    """Host storage for one 64-byte-aligned, 128-byte TensorMap payload."""
+
+    def __init__(self):
+        self._storage = ctypes.create_string_buffer(128 + 64)
+        base = ctypes.addressof(self._storage)
+        self.ptr = ctypes.c_void_p((base + 63) & ~63)
+
+
+def _encode(tensor, dims, strides, box):
+    desc = _AlignedTensorMap()
+    rank = len(dims)
+    assert len(strides) == rank - 1 and len(box) == rank
+    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+        desc.ptr,
+        "float16",
+        rank,
+        ctypes.c_void_p(int(tensor.data_ptr())),
+        *dims,
+        *strides,
+        *box,
+        *((1,) * rank),
+        0,  # CU_TENSOR_MAP_INTERLEAVE_NONE
+        3,  # CU_TENSOR_MAP_SWIZZLE_128B
+        2,  # CU_TENSOR_MAP_L2_PROMOTION_L2_128B
+        0,  # CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    )
+    return desc
+
+
+def build_tensor_maps(
+    Q, Kt, V, O, *, batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim
+):
+    """The seven maps, in the order ``make_kernel``'s parameters declare them."""
+    gqa = num_qo_heads // num_kv_heads
+    seq_q_per_tile = BLK_M // gqa
+
+    def qo_map(t):
+        if gqa == 1:
+            return _encode(
+                t,
+                (head_dim // 2, seq_len_q, batch_size * num_qo_heads * 2),
+                (num_qo_heads * head_dim * F16_BYTES, head_dim),
+                (head_dim // 2, seq_q_per_tile, 2),
+            )
+        return _encode(
+            t,
+            (head_dim // 2, num_qo_heads, seq_len_q, batch_size * 2),
+            (head_dim * F16_BYTES, num_qo_heads * head_dim * F16_BYTES, head_dim),
+            (head_dim // 2, gqa, seq_q_per_tile, 2),
         )
-    # No final cta_sync: warps exit independently after the dealloc. On the
-    # single-task causal shapes the kernel-end barrier is fully exposed (~11%
-    # of stall samples on the tail); dropping it is safe (50x reused-module
-    # GPU verify PASS — tcgen05 dealloc/relinquish by warp 0 needs no CTA-wide
-    # rendezvous, and there is no post-exit SMEM/TMEM reuse) and lifts the warm
-    # ratio ~+0.5pp. Validated first via tvm_callback_cuda_postproc injection,
-    # then moved here.
+
+    def kv_map(t):
+        return _encode(
+            t,
+            (head_dim // 2, seq_len_kv, batch_size * num_kv_heads * 2),
+            (num_kv_heads * head_dim * F16_BYTES, head_dim),
+            (head_dim // 2, BLK_N, 2),
+        )
+
+    return (qo_map(Q), qo_map(Q), kv_map(Kt), kv_map(Kt), kv_map(V), kv_map(V), qo_map(O))
+
+
+def _select_reg_level(
+    batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim, is_causal
+):
+    """Select the measured non-spilling ptxas regime for this K body."""
+    override = os.environ.get("FA4_REG_LEVEL", "")
+    if override:
+        return override
+    if is_causal and num_qo_heads == num_kv_heads:
+        return "2"
+    if is_causal:  # GQA-packed causal
+        return "5" if seq_len_q <= 1024 else "6"
+    return "10"
 
 
 def get_flash_attention4_kernel(
     batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim, is_causal=False
 ):
-    # ptxas --register-usage-level: the default 10 over-allocates under the
-    # setmaxnreg caps and SPILLS (35K LDL/STL; cutedsl has 0). On the latency-
-    # bound causal GQA=1 (kv32) shapes those spills sit on the critical path.
-    # Clean isolated run_bench A/B (warm-L2) picks the best NON-spilling level
-    # per regime (swept 3..8; >=6 re-spills): multi-wave s2048/s4096_h32kv32_c
-    # want 5 (0.967->0.992, 0.974->0.993); the single-wave s1024_h32kv32_c
-    # wants 4 (0.954->0.962, won all 3 rounds, s2048/s4096 unaffected ~tie).
-    # After shortening the descriptor live ranges, the two benchmarked short
-    # causal GQA paths (kv4/kv8) are spill-free again at level 10. A paired
-    # same-process A/B selected level 10 for both; the other short causal
-    # regimes keep their previously validated level. Throughput-bound
-    # non-causal variants retain level 10. Read by tir support/nvcc.py via the
-    # env var; set per-shape here because each bench config compiles in its own
-    # process.
-    # FA4_REG_LEVEL overrides (tuning).
-    _reg_override = os.environ.get("FA4_REG_LEVEL", "")
-    if _reg_override:
-        _reg_level = _reg_override
-    elif (
-        is_causal
-        and batch_size == 1
-        and seq_len_q == 1024
-        and seq_len_kv == 1024
-        and num_qo_heads == 32
-        and num_kv_heads in (4, 8)
-        and head_dim == 128
-    ):
-        _reg_level = "10"
-    elif is_causal and num_qo_heads == num_kv_heads:
-        _reg_level = "4" if seq_len_q <= 1024 else "5"
-    elif is_causal and seq_len_q <= 1024:
-        _reg_level = "5"
-    else:
-        _reg_level = "10"
-    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _reg_level
-    # Pipeline-depth split by wave count. Single-wave causal shapes (s1024) are
-    # warpgroup-handshake-bound (stall-PC: ~40% mbarrier sync); a DEEPER
-    # O-accumulator TMEM pipeline (TMEM_PIPE_DEPTH 3, funded by SMEM_PIPE_DEPTH_KV
-    # 2 — SMEM-neutral) hides the correction-wg handshake bubble. Clean A/B
-    # (warmup=100): s1024_h32kv32_c 0.953->0.998, s1024_h32kv16_c 0.985->1.002.
-    # Multi-wave shapes (s2048+) instead need KV depth 3 for the long KV stream:
-    # 3/2 REGRESSES s2048 (0.991->0.951) and s4096 (0.992->0.968), so they keep
-    # the default 2/3. KV depth 1 deadlocks (pipeline needs >=2 stages).
-    _deep_o = is_causal and seq_len_q <= 1024
-    _tmem_depth = 3 if _deep_o else TMEM_PIPE_DEPTH
-    _kv_depth = 2 if _deep_o else SMEM_PIPE_DEPTH_KV
-    return _kernel.specialize(
-        BATCH_SIZE=batch_size,
-        SEQ_LEN_Q=seq_len_q,
-        SEQ_LEN_KV=seq_len_kv,
-        NUM_QO_HEADS=num_qo_heads,
-        NUM_KV_HEADS=num_kv_heads,
-        HEAD_DIM=head_dim,
-        is_causal=is_causal,
-        TMEM_PIPE_DEPTH=_tmem_depth,
-        SMEM_PIPE_DEPTH_KV=_kv_depth,
+    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_reg_level(
+        batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim, is_causal
     )
+    deep_o = is_causal and seq_len_q <= 1024
+    return make_kernel(
+        batch_size,
+        seq_len_q,
+        seq_len_kv,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        is_causal=is_causal,
+        tmem_pipe_depth=3 if deep_o else TMEM_PIPE_DEPTH,
+        smem_pipe_depth_kv=2 if deep_o else SMEM_PIPE_DEPTH_KV,
+    ).func
 
 
 def prepare_data(batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, head_dim):
     torch.manual_seed(0)
-    Q = torch.randn((batch_size, seq_len_q, num_qo_heads, head_dim), dtype=torch.float16)
-    K = torch.randn((batch_size, seq_len_kv, num_kv_heads, head_dim), dtype=torch.float16)
-    V = torch.randn((batch_size, seq_len_kv, num_kv_heads, head_dim), dtype=torch.float16)
-    O = torch.zeros((batch_size, seq_len_q, num_qo_heads, head_dim), dtype=torch.float16)
-    return (Q, K, V, O)
+    q = torch.randn((batch_size, seq_len_q, num_qo_heads, head_dim), dtype=torch.float16)
+    k = torch.randn((batch_size, seq_len_kv, num_kv_heads, head_dim), dtype=torch.float16)
+    v = torch.randn((batch_size, seq_len_kv, num_kv_heads, head_dim), dtype=torch.float16)
+    out = torch.zeros((batch_size, seq_len_q, num_qo_heads, head_dim), dtype=torch.float16)
+    return q, k, v, out
 
 
 KERNEL_META = {"name": "flash_attention4", "category": "flashattention", "compute_capability": 10}
@@ -1635,6 +1341,41 @@ def get_kernel(
     )
 
 
+def _build_launch(
+    executable,
+    q,
+    k,
+    v,
+    out,
+    *,
+    batch_size,
+    seq_len_q,
+    seq_len_kv,
+    num_qo_heads,
+    num_kv_heads,
+    head_dim,
+):
+    tensor_maps = build_tensor_maps(
+        q,
+        k,
+        v,
+        out,
+        batch_size=batch_size,
+        seq_len_q=seq_len_q,
+        seq_len_kv=seq_len_kv,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    argv = tuple(desc.ptr for desc in tensor_maps)
+
+    def launch():
+        executable(*argv)
+
+    launch._fa4_keep_alive = (q, k, v, out, tensor_maps, argv)
+    return launch
+
+
 def prepare_bench(**kwargs: Any):
     """Specialize and compile before the workload receives a GPU."""
     from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
@@ -1644,37 +1385,48 @@ def prepare_bench(**kwargs: Any):
 
 
 def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=False, **kwargs):
-    """Compile, run, and verify flash attention 4 kernel."""
+    """Compile, run, and verify FlashAttention-4."""
     from tirx_kernels.runner import compile_kernel
 
-    Q, K, V, _ = prepare_data(batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim)
-    prim_func = get_flash_attention4_kernel(
-        batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=is_causal
-    )
-    ex = compile_kernel(prim_func)
-    Q_tir = Q.cuda()
-    K_tir = K.cuda()
-    V_tir = V.cuda()
-    O_tir = torch.empty(
+    q, k, v, _ = prepare_data(batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim)
+    q_dev, k_dev, v_dev = q.cuda(), k.cuda(), v.cuda()
+    out = torch.empty(
         (batch_size, seq_len, num_qo_heads, head_dim), dtype=torch.float16, device="cuda"
     )
-    ex(Q_tir, K_tir, V_tir, O_tir)
+    executable = compile_kernel(
+        get_flash_attention4_kernel(
+            batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causal=is_causal
+        )
+    )
+    launch = _build_launch(
+        executable,
+        q_dev,
+        k_dev,
+        v_dev,
+        out,
+        batch_size=batch_size,
+        seq_len_q=seq_len,
+        seq_len_kv=seq_len,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    launch()
     torch.cuda.synchronize()
-    Q_t = Q.float().transpose(1, 2)
-    K_t = K.float().transpose(1, 2)
-    V_t = V.float().transpose(1, 2)
+
+    q_ref = q.float().transpose(1, 2)
+    k_ref = k.float().transpose(1, 2)
+    v_ref = v.float().transpose(1, 2)
     if num_qo_heads != num_kv_heads:
         repeat_factor = num_qo_heads // num_kv_heads
-        K_t = K_t.repeat_interleave(repeat_factor, dim=1)
-        V_t = V_t.repeat_interleave(repeat_factor, dim=1)
-    scale = 1.0 / math.sqrt(head_dim)
-    scores = torch.matmul(Q_t, K_t.transpose(-2, -1)) * scale
+        k_ref = k_ref.repeat_interleave(repeat_factor, dim=1)
+        v_ref = v_ref.repeat_interleave(repeat_factor, dim=1)
+    scores = torch.matmul(q_ref, k_ref.transpose(-2, -1)) * (1.0 / math.sqrt(head_dim))
     if is_causal:
         mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
         scores.masked_fill_(mask, float("-inf"))
-    attn = torch.softmax(scores, dim=-1)
-    ref = torch.matmul(attn, V_t).transpose(1, 2).to(torch.float16)
-    np.testing.assert_allclose(O_tir.cpu().numpy(), ref.cpu().numpy(), rtol=0.01, atol=0.01)
+    ref = torch.matmul(torch.softmax(scores, dim=-1), v_ref).transpose(1, 2).to(torch.float16)
+    np.testing.assert_allclose(out.cpu().numpy(), ref.cpu().numpy(), rtol=0.01, atol=0.01)
 
 
 def run_gpu(
@@ -1709,7 +1461,20 @@ def run_gpu(
     O_tir = torch.empty(
         (batch_size, seq_len, num_qo_heads, head_dim), dtype=torch.float16, device="cuda"
     )
-    funcs = {"tir": lambda: ex(Q_cuda, K_cuda, V_cuda, O_tir)}
+    launch = _build_launch(
+        ex,
+        Q_cuda,
+        K_cuda,
+        V_cuda,
+        O_tir,
+        batch_size=batch_size,
+        seq_len_q=seq_len,
+        seq_len_kv=seq_len,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    funcs = {"tir": launch}
 
     def _flashattn_sm100():
         # Flash-Attention SM100 (CuTeDSL FA4) baseline.
@@ -1907,8 +1672,21 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
         device="cuda",
     )
 
+    launch = _build_launch(
+        executable,
+        q,
+        k,
+        v,
+        out,
+        batch_size=args.batch_size,
+        seq_len_q=args.seq_len,
+        seq_len_kv=args.seq_len,
+        num_qo_heads=args.num_qo_heads,
+        num_kv_heads=args.num_kv_heads,
+        head_dim=args.head_dim,
+    )
     for _ in range(args.repeat):
-        executable(q, k, v, out)
+        launch()
     torch.cuda.synchronize()
 
 

@@ -116,7 +116,10 @@ def _mapa_u32(pointer, peer):
 
 @T.inline
 def _cluster_mbarrier_wait(pointer):
-    T.cuda.mbarrier_wait_relaxed(pointer)
+    # The pinned TVM has no mbarrier_wait_relaxed; the phase-0 wait is the
+    # spelling the older norm ports use for this same one-shot cluster
+    # rendezvous (see _parser_helpers._cluster_mbarrier_wait).
+    T.cuda.mbarrier_wait(pointer, T.int32(0))
 
 
 def _mul_input2(lhs, rhs, input_dtype: str):

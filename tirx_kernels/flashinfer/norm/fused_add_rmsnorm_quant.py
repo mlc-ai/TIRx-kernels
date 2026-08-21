@@ -22,7 +22,7 @@ from tirx_kernels.runner import bench
 from tvm.script import tirx as T
 
 from .fused_add_rmsnorm import _source_config as _fused_source_config
-from .rmsnorm import (
+from ._parser_helpers import (
     _add_f32,
     _butterfly_sum_f32,
     _ceil_div,

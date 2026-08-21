@@ -53,8 +53,10 @@ SM100 cluster kernel, which the ``FLASHINFER_TOPK_ALGO=filtered`` pin keeps out 
 the reference path.
 """
 
+from contextlib import nullcontext
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.topk.radix_topk_single_cta import (
     DTYPES,
     MODES,
@@ -93,7 +95,6 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
     st_global_u32,
 )
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 
 # Patterns whose whole purpose is to overflow the candidate arena; prepare_data
 # asserts on the host that they still do.
@@ -322,33 +323,23 @@ def get_kernel(
         radix=RADIX,
     )
 
-    @T.prim_func
+    @K.kernel(warps=FILTERED_TOPK_BLOCK_THREADS // 32, arch="sm_100a", grid=grid)
     def filtered_topk(
-        input_h: T.handle,
-        output_indices_h: T.handle,
-        output_values_h: T.handle,
-        aux_data_h: T.handle,
-        lengths_h: T.handle,
-        row_starts_h: T.handle,
-        page_table_row_starts_h: T.handle,
-        row_to_batch_h: T.handle,
-        aux_stride: T.int64,
+        inp: K.gptr[dtype, (num_rows * length,)],
+        out_idx: K.gptr[K.i32, (num_rows * k,)],
+        out_val: K.gptr[dtype, (num_rows * k,)],
+        aux: K.gptr[K.i32, (aux_elems,)],
+        lengths_g: K.gptr[K.i32, (num_rows,)],
+        row_starts_g: K.gptr[K.i32, (num_rows,)],
+        pt_starts_g: K.gptr[K.i32, (num_rows,)],
+        row_to_batch_g: K.gptr[K.i32, (num_rows,)],
+        aux_stride: K.i64,
     ):
-        T.func_attr({"global_symbol": "filtered_topk"})
-        inp = T.match_buffer(input_h, (num_rows * length,), dtype, scope="global")
-        out_idx = T.match_buffer(output_indices_h, (num_rows * k,), "int32", scope="global")
-        out_val = T.match_buffer(output_values_h, (num_rows * k,), dtype, scope="global")
-        aux = T.match_buffer(aux_data_h, (aux_elems,), "int32", scope="global")
-        lengths_g = T.match_buffer(lengths_h, (num_rows,), "int32", scope="global")
-        row_starts_g = T.match_buffer(row_starts_h, (num_rows,), "int32", scope="global")
-        pt_starts_g = T.match_buffer(page_table_row_starts_h, (num_rows,), "int32", scope="global")
-        row_to_batch_g = T.match_buffer(row_to_batch_h, (num_rows,), "int32", scope="global")
-        T.device_entry()
-        row = T.cta_id([grid])
-        tx = T.thread_id([FILTERED_TOPK_BLOCK_THREADS])
+        row = K.cta_id()
+        tx = K.thread_id()
 
         # --- shared layout (:2431-2446) --------------------------------------
-        pool = T.SMEMPool()
+        pool = K.smem_pool()
         s_hist2 = pool.alloc((2 * hist_stride,), "uint32", align=128)
         s_indices = pool.alloc((FILTERED_TOPK_MAX_K,), "uint32", align=128)
         s_scal = pool.alloc((NUM_SCALARS,), "uint32")
@@ -358,119 +349,141 @@ def get_kernel(
         # (:2343-2344); that constant is exactly what CanImplementFilteredTopK
         # gates on (:3285-3294).
         s_input = pool.alloc((2 * smem_input,), "uint32", align=128)
-        pool.commit()
 
         # --- per-row header (:2384-2406) --------------------------------------
-        # Basic's row length is the static kernel stride, so it stays a Python
-        # constant and `aligned_length` folds to a literal exactly as in the
-        # source.  Binding it to a name inside the traced body would make it a TIR
-        # variable and turn the row-scan bound into a runtime read.
-        row_len_rt: T.int32 = T.int32(0)
-        row_start: T.int32 = T.int32(0)
-        page_start: T.int32 = T.int32(0)
+        # Basic's row length is the static kernel stride, so `row_len` stays a
+        # Python constant there and `aligned_length` folds to a literal exactly
+        # as in the source; on the transform modes it is a runtime read.
+        row_start = K.int32(0)
+        page_start = K.int32(0)
+        row_len = length
         if not basic:
-            row_len_rt = T.reinterpret("int32", ld_global_nc_u32(lengths_g, row))
+            # Snapshotted: it is the bound of every full-row loop below, and a
+            # loop condition re-evaluates its expression each trip.
+            row_len = K.local_scalar(
+                "int32", init=K.reinterpret("int32", ld_global_nc_u32(lengths_g, row))
+            )
             if row_starts:
-                row_start = T.reinterpret("int32", ld_global_nc_u32(row_starts_g, row))
+                row_start = K.reinterpret("int32", ld_global_nc_u32(row_starts_g, row))
             if page_table:
                 if page_table_row_starts:
-                    page_start = T.reinterpret("int32", ld_global_nc_u32(pt_starts_g, row))
+                    page_start = K.reinterpret("int32", ld_global_nc_u32(pt_starts_g, row))
                 else:
                     page_start = row_start
-        row_in: T.int64 = T.cast(row, "int64") * T.int64(length) + T.cast(row_start, "int64")
-        row_out: T.int64 = T.cast(row, "int64") * T.int64(k)
+        # The two row base addresses are materialized, not re-emitted per use.
+        # Left lazy, the simplifier proves each element index fits in 32 bits and
+        # narrows every address, which trades one reused 64-bit base for a
+        # sign-extend on every access -- 32 `(int64_t)` casts in the source
+        # become 74.
+        row_in = K.local_scalar(
+            "int64", init=K.cast(row, "int64") * K.int64(length) + K.cast(row_start, "int64")
+        )
+        row_out = K.local_scalar("int64", init=K.cast(row, "int64") * K.int64(k))
 
-        batch_idx: T.int32 = row
-        offset_val: T.int32 = T.int32(0)
+        batch_idx = row
+        offset_val = K.int32(0)
         if page_table:
             if row_to_batch:
-                batch_idx = T.reinterpret("int32", ld_global_nc_u32(row_to_batch_g, row))
+                batch_idx = K.reinterpret("int32", ld_global_nc_u32(row_to_batch_g, row))
         if ragged:
-            offset_val = T.reinterpret("int32", ld_global_nc_u32(aux, T.cast(row, "int64")))
+            offset_val = K.reinterpret("int32", ld_global_nc_u32(aux, K.cast(row, "int64")))
 
-        # --- trivial early-out, length <= top_k (:2409-2429) ------------------
-        take_main: T.int32 = T.int32(1)
-        if trivial_path:
-            if (length if basic else row_len_rt) <= k:
-                take_main = T.int32(0)
-                for i0 in T.serial(tx, k, step=FILTERED_TOPK_BLOCK_THREADS):
-                    slot0: T.int64 = row_out + T.cast(i0, "int64")
-                    if basic:
-                        if i0 < (length if basic else row_len_rt):
-                            st_global_u32(out_idx, slot0, T.reinterpret("uint32", i0))
+        def emit_trivial():
+            """The ``length <= top_k`` early-out (:2409-2429)."""
+            with K.serial(tx, k, step=FILTERED_TOPK_BLOCK_THREADS) as i0:
+                slot0 = K.local_scalar("int64", init=row_out + K.cast(i0, "int64"))
+                if basic:
+                    with K.If(i0 < row_len):
+                        with K.Then():
+                            st_global_u32(out_idx, slot0, K.reinterpret("uint32", i0))
                             st_global_bits(
                                 out_val,
                                 slot0,
-                                ld_global_nc_bits(inp, row_in + T.cast(i0, "int64"), is32),
+                                ld_global_nc_bits(inp, row_in + K.cast(i0, "int64"), is32),
                                 is32,
                             )
-                        else:
-                            # A literal -1 is written as its bit pattern: reinterpreting
-                            # an immediate lowers to an address-of-literal, which is
-                            # not an lvalue.
-                            st_global_u32(out_idx, slot0, T.uint32(0xFFFFFFFF))
+                        with K.Else():
+                            # A literal -1 is written as its bit pattern:
+                            # reinterpreting an immediate lowers to an
+                            # address-of-literal, which is not an lvalue.
+                            st_global_u32(out_idx, slot0, K.uint32(0xFFFFFFFF))
                             st_global_bits(
-                                out_val, slot0, T.uint32(0) if is32 else T.uint16(0), is32
+                                out_val, slot0, K.uint32(0) if is32 else K.uint16(0), is32
                             )
-                    elif det:
-                        # Local index; the transform is deferred to the finalizer.
-                        st_global_u32(
-                            out_idx,
-                            slot0,
-                            T.reinterpret(
-                                "uint32",
-                                T.Select(i0 < (length if basic else row_len_rt), i0, T.int32(-1)),
-                            ),
-                        )
-                    elif page_table:
-                        page0: T.int32 = T.int32(-1)
-                        if i0 < (length if basic else row_len_rt):
-                            page0 = T.reinterpret(
+                elif det:
+                    # Local index; the transform is deferred to the finalizer.
+                    st_global_u32(
+                        out_idx,
+                        slot0,
+                        K.reinterpret("uint32", K.Select(i0 < row_len, i0, K.int32(-1))),
+                    )
+                elif page_table:
+                    page0 = K.local_scalar("int32", init=K.int32(-1))
+                    with K.If(i0 < row_len), K.Then():
+                        K.assign(
+                            page0,
+                            K.reinterpret(
                                 "int32",
                                 ld_global_nc_u32(
                                     aux,
-                                    T.cast(batch_idx, "int64") * aux_stride
-                                    + T.cast(page_start + i0, "int64"),
-                                ),
-                            )
-                        st_global_u32(out_idx, slot0, T.reinterpret("uint32", page0))
-                    else:
-                        st_global_u32(
-                            out_idx,
-                            slot0,
-                            T.reinterpret(
-                                "uint32",
-                                T.Select(
-                                    i0 < (length if basic else row_len_rt),
-                                    i0 + offset_val,
-                                    T.int32(-1),
+                                    K.cast(batch_idx, "int64") * aux_stride
+                                    + K.cast(page_start + i0, "int64"),
                                 ),
                             ),
                         )
+                    st_global_u32(out_idx, slot0, K.reinterpret("uint32", page0))
+                else:
+                    st_global_u32(
+                        out_idx,
+                        slot0,
+                        K.reinterpret(
+                            "uint32", K.Select(i0 < row_len, i0 + offset_val, K.int32(-1))
+                        ),
+                    )
 
-        if take_main == 1:
-            emit_filtered_topk_main(
-                inp,
-                out_idx,
-                out_val,
-                aux,
-                s_hist2,
-                s_indices,
-                s_scal,
-                s_input,
-                s_scan if det else s_scal,
-                tx,
-                row_in,
-                row_out,
-                length if basic else row_len_rt,
-                batch_idx,
-                page_start,
-                offset_val,
-                aux_stride,
-                cfg,
-            )
+        # --- trivial early-out, length <= top_k (:2409-2429) ------------------
+        # Plain decides it at trace time; the transform modes read the row length
+        # at run time, so there the choice is a real branch and `take_main` the
+        # mutable flag the source keeps in a register.
+        take_main = None
+        run_main = True
+        if trivial_path:
+            if basic:
+                emit_trivial()
+                run_main = False
+            else:
+                take_main = K.local_scalar("int32", init=K.int32(1))
+                with K.If(row_len <= k), K.Then():
+                    K.assign(take_main, K.int32(0))
+                    emit_trivial()
 
-    return filtered_topk.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+        if run_main:
+            with (
+                nullcontext() if take_main is None else K.If(take_main == 1),
+                nullcontext() if take_main is None else K.Then(),
+            ):
+                emit_filtered_topk_main(
+                    inp,
+                    out_idx,
+                    out_val,
+                    aux,
+                    s_hist2,
+                    s_indices,
+                    s_scal,
+                    s_input,
+                    s_scan if det else s_scal,
+                    tx,
+                    row_in,
+                    row_out,
+                    row_len,
+                    batch_idx,
+                    page_start,
+                    offset_val,
+                    aux_stride,
+                    cfg,
+                )
+
+    return filtered_topk.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 
 
 def get_finalize_kernel(
@@ -511,57 +524,51 @@ def get_finalize_kernel(
     val_bytes = dtype_bytes(dtype)
     aux_elems = aux_elements(mode, num_rows, length, row_to_batch)
 
-    @T.prim_func
+    @K.kernel(warps=block_threads // 32, arch="sm_100a", grid=num_rows)
     def filtered_topk_finalize(
-        output_indices_h: T.handle,
-        output_values_h: T.handle,
-        aux_data_h: T.handle,
-        page_table_row_starts_h: T.handle,
-        row_to_batch_h: T.handle,
-        aux_stride: T.int64,
+        out_idx: K.gptr[K.i32, (num_rows * k,)],
+        out_val: K.gptr[dtype, (num_rows * k,)],
+        aux: K.gptr[K.i32, (aux_elems,)],
+        pt_starts_g: K.gptr[K.i32, (num_rows,)],
+        row_to_batch_g: K.gptr[K.i32, (num_rows,)],
+        aux_stride: K.i64,
     ):
-        T.func_attr({"global_symbol": "filtered_topk_finalize"})
-        out_idx = T.match_buffer(output_indices_h, (num_rows * k,), "int32", scope="global")
-        out_val = T.match_buffer(output_values_h, (num_rows * k,), dtype, scope="global")
-        aux = T.match_buffer(aux_data_h, (aux_elems,), "int32", scope="global")
-        pt_starts_g = T.match_buffer(page_table_row_starts_h, (num_rows,), "int32", scope="global")
-        row_to_batch_g = T.match_buffer(row_to_batch_h, (num_rows,), "int32", scope="global")
-        T.device_entry()
+        row = K.cta_id()
+        tx = K.thread_id()
 
-        row = T.cta_id([num_rows])
-        tx = T.thread_id([block_threads])
-
-        pool = T.SMEMPool()
+        smem = K.smem_pool()
         if do_sort:
+            # The sort's shared union is laid out by absolute offset, so the
+            # emitters take the in-tree pool the kern wrapper carries.
             c32, c16, xk, xv, sscan = alloc_sort_smem(
-                pool, block_threads, items_per_thread, dtype, val_bytes
+                smem.pool, block_threads, items_per_thread, dtype, val_bytes
             )
-        pool.commit()
 
-        row_out: T.int64 = T.cast(row, "int64") * T.int64(k)
-        keys = T.alloc_local((items_per_thread,), "uint32")
-        values = T.alloc_local((items_per_thread,), "uint32")
+        # Materialized for the same reason as the unified kernel's bases.
+        row_out = K.local_scalar("int64", init=K.cast(row, "int64") * K.int64(k))
+        keys = K.alloc_local([items_per_thread], "uint32")
+        values = K.alloc_local([items_per_thread], "uint32")
 
         # --- blocked load with ~0u padding (:2976-2991) --------------------
-        for i in T.unroll(items_per_thread):
-            pos: T.int32 = tx * items_per_thread + i
-            keys[i] = T.uint32(0xFFFFFFFF)
-            values[i] = T.uint32(0)
-            if pos < k:
-                slot: T.int64 = row_out + T.cast(pos, "int64")
-                idx: T.int32 = T.reinterpret("int32", ld_global_u32(out_idx, slot))
+        with K.unroll(items_per_thread) as i:
+            pos = tx * items_per_thread + i
+            K.assign(keys[i], K.uint32(0xFFFFFFFF))
+            K.assign(values[i], K.uint32(0))
+            with K.If(pos < k), K.Then():
+                slot = K.local_scalar("int64", init=row_out + K.cast(pos, "int64"))
+                idx = K.reinterpret("int32", ld_global_u32(out_idx, slot))
                 # `(idx >= 0) ? idx : ~0u` -- nvcc folds the clamp to a single
                 # max.s32 against immediate -1 (:2981).
-                keys[i] = T.reinterpret("uint32", T.max(idx, T.int32(-1)))
+                K.assign(keys[i], K.reinterpret("uint32", K.max(idx, K.int32(-1))))
                 if sort_values:
-                    values[i] = ld_global_bits(out_val, slot, is32)
+                    K.assign(values[i], ld_global_bits(out_val, slot, is32))
 
         # --- ascending block radix sort over [0, end_bit) (:2993-2999) -----
         # `~0u` truncated to end_bit bits is 2**end_bit - 1 while every real
         # index is <= max_len - 1 < 2**end_bit - 1, so padding is strictly
         # maximal in every digit pass and lands at the tail.
         if do_sort:
-            ranks = T.alloc_local((items_per_thread,), "int32")
+            ranks = K.alloc_local([items_per_thread], "int32")
             emit_block_radix_sort(
                 c32,
                 c16,
@@ -580,24 +587,24 @@ def get_finalize_kernel(
             )
 
         # --- deferred transform + writeback (:3002-3029) -------------------
-        batch_idx: T.int32 = row
-        page_start: T.int32 = T.int32(0)
-        offset: T.int32 = T.int32(0)
+        batch_idx = row
+        page_start = K.int32(0)
+        offset = K.int32(0)
         if page_table:
             if row_to_batch:
-                batch_idx = T.reinterpret("int32", ld_global_u32(row_to_batch_g, row))
+                batch_idx = K.reinterpret("int32", ld_global_u32(row_to_batch_g, row))
             # `:3008` falls back to 0, but the dispatcher already substituted
             # row_starts for a null pointer at `:3379-3380`.
             if effective_page_table_row_starts(mode, page_table_row_starts, row_starts):
-                page_start = T.reinterpret("int32", ld_global_u32(pt_starts_g, row))
+                page_start = K.reinterpret("int32", ld_global_u32(pt_starts_g, row))
         if ragged:
-            offset = T.reinterpret("int32", ld_global_u32(aux, T.cast(row, "int64")))
+            offset = K.reinterpret("int32", ld_global_u32(aux, K.cast(row, "int64")))
 
-        for i in T.unroll(items_per_thread):
-            pos2: T.int32 = tx * items_per_thread + i
-            if pos2 < k:
-                slot2: T.int64 = row_out + T.cast(pos2, "int64")
-                key: T.uint32 = keys[i]
+        with K.unroll(items_per_thread) as i2:
+            pos2 = tx * items_per_thread + i2
+            with K.If(pos2 < k), K.Then():
+                slot2 = K.local_scalar("int64", init=row_out + K.cast(pos2, "int64"))
+                key = keys[i2]
                 if basic:
                     # `~0u` reinterprets to -1 for free, so both stores are
                     # unguarded (:3010-3014).
@@ -606,27 +613,33 @@ def get_finalize_kernel(
                         # The exchange keeps values in uint32 registers; narrow
                         # them back on the way out for the 16-bit dtypes.
                         if is32:
-                            st_global_u32(out_val, slot2, values[i])
+                            st_global_u32(out_val, slot2, values[i2])
                         else:
-                            st_global_u16(out_val, slot2, T.cast(values[i], "uint16"))
+                            st_global_u16(out_val, slot2, K.cast(values[i2], "uint16"))
                 elif page_table:
-                    page_id: T.int32 = T.int32(-1)
-                    if key != T.uint32(0xFFFFFFFF):
-                        src: T.int64 = T.cast(batch_idx, "int64") * aux_stride
-                        page_id = T.reinterpret(
-                            "int32",
-                            ld_global_u32(
-                                aux, src + T.cast(page_start + T.reinterpret("int32", key), "int64")
+                    page_id = K.local_scalar("int32", init=K.int32(-1))
+                    with K.If(key != K.uint32(0xFFFFFFFF)), K.Then():
+                        src = K.local_scalar("int64", init=K.cast(batch_idx, "int64") * aux_stride)
+                        K.assign(
+                            page_id,
+                            K.reinterpret(
+                                "int32",
+                                ld_global_u32(
+                                    aux,
+                                    src + K.cast(page_start + K.reinterpret("int32", key), "int64"),
+                                ),
                             ),
                         )
-                    st_global_u32(out_idx, slot2, T.reinterpret("uint32", page_id))
+                    st_global_u32(out_idx, slot2, K.reinterpret("uint32", page_id))
                 else:
-                    val2: T.int32 = T.int32(-1)
-                    if key != T.uint32(0xFFFFFFFF):
-                        val2 = T.reinterpret("int32", key) + offset
-                    st_global_u32(out_idx, slot2, T.reinterpret("uint32", val2))
+                    val2 = K.local_scalar("int32", init=K.int32(-1))
+                    with K.If(key != K.uint32(0xFFFFFFFF)), K.Then():
+                        K.assign(val2, K.reinterpret("int32", key) + offset)
+                    st_global_u32(out_idx, slot2, K.reinterpret("uint32", val2))
 
-    return filtered_topk_finalize.with_attr("tirx.kernel_launch_params", list(FINALIZE_LAUNCH_TAGS))
+    return filtered_topk_finalize.func.with_attr(
+        "tirx.kernel_launch_params", list(FINALIZE_LAUNCH_TAGS)
+    )
 
 
 _ = (

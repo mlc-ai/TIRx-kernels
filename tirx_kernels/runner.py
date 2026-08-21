@@ -13,6 +13,7 @@ kernel modules to use.
 
 from __future__ import annotations
 
+import importlib
 import os
 import shlex
 import sys
@@ -21,6 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol, runtime_checkable
 
@@ -37,16 +39,15 @@ PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
 TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
 TVM_COMPILE_FORCE_FALLBACK_ENV = "TVM_COMPILE_FORCE_FALLBACK"
 _EXTERNAL_REFERENCES_ENV = "TIRX_INTERNAL_BENCH_REFERENCES"
+AB_CURRENT_BENCHMARK_ROOT_ENV = "TIRX_INTERNAL_AB_CURRENT_BENCHMARK_ROOT"
+_AB_CURRENT_MODULES: dict[tuple[Path, str], ModuleType] = {}
 
 
 def set_external_references_enabled(enabled: bool) -> None:
     """Select explicit diagnostic reference timing for the current process."""
     if not isinstance(enabled, bool):
         raise TypeError("external reference mode must be a bool")
-    if enabled:
-        os.environ[_EXTERNAL_REFERENCES_ENV] = "1"
-    else:
-        os.environ[_EXTERNAL_REFERENCES_ENV] = "0"
+    os.environ[_EXTERNAL_REFERENCES_ENV] = "1" if enabled else "0"
 
 
 def external_references_enabled() -> bool:
@@ -112,6 +113,98 @@ def prepared_gpu_benchmark(
     return ExplicitPreparedBenchmark(run_gpu, state, required_num_gpus, close)
 
 
+# Modules the A/B before tree shares byte-for-byte with the current checkout
+# (see bench_suite.ab._SHARED_HARNESS_PATHS). Their already-imported instances
+# are reused while the current benchmark module loads, so process-global side
+# effects (tvm registrations, compile hooks) never run twice.
+AB_SHARED_MODULE_PREFIXES = (
+    "tirx_kernels.bench",
+    "tirx_kernels.bench_suite",
+    "tirx_kernels.runner",
+    "tirx_kernels.low_level_ir",
+    "tirx_kernels.kern",
+    "tirx_kernels.basic.utils._runtime",
+)
+
+
+def _is_ab_shared_module(name: str) -> bool:
+    return any(
+        name == prefix or name.startswith(prefix + ".") for prefix in AB_SHARED_MODULE_PREFIXES
+    )
+
+
+def ab_current_benchmark_module(module: ModuleType) -> ModuleType:
+    """Load the current benchmark contract while an A/B child imports old kernel code.
+
+    The current module is imported under its canonical name inside a temporary
+    ``sys.modules`` context whose ``tirx_kernels`` package resolves from the
+    current checkout, so any kernel-to-kernel imports it performs load current
+    code instead of the before tree's. The before child's module state is
+    restored afterwards.
+    """
+    configured_root = os.environ.get(AB_CURRENT_BENCHMARK_ROOT_ENV)
+    if configured_root is None:
+        return module
+    if not module.__name__.startswith("tirx_kernels."):
+        raise ValueError(f"A/B kernel module has non-canonical name {module.__name__!r}")
+
+    current_root = Path(configured_root).resolve()
+    key = (current_root, module.__name__)
+    cached = _AB_CURRENT_MODULES.get(key)
+    if cached is not None:
+        return cached
+
+    package_root = current_root / "tirx_kernels"
+    if not package_root.is_dir():
+        raise FileNotFoundError(f"current A/B checkout has no tirx_kernels package: {current_root}")
+
+    saved = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name == "tirx_kernels" or name.startswith("tirx_kernels.")
+    }
+    for name in saved:
+        del sys.modules[name]
+    # A bare namespace package avoids re-running tirx_kernels/__init__ side
+    # effects; submodules resolve through __path__ into the current checkout.
+    package = ModuleType("tirx_kernels")
+    package.__path__ = [str(package_root)]
+    package.__package__ = "tirx_kernels"
+    sys.modules["tirx_kernels"] = package
+    for name, mod in saved.items():
+        if _is_ab_shared_module(name):
+            sys.modules[name] = mod
+    try:
+        current_module = importlib.import_module(module.__name__)
+    finally:
+        for name in [
+            n for n in sys.modules if n == "tirx_kernels" or n.startswith("tirx_kernels.")
+        ]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+    _AB_CURRENT_MODULES[key] = current_module
+    return current_module
+
+
+def _apply_ab_benchmark_contract(
+    module: ModuleType, benchmark: PreparedBenchmark
+) -> PreparedBenchmark:
+    current_module = ab_current_benchmark_module(module)
+    if current_module is module:
+        return benchmark
+    if not isinstance(benchmark, ExplicitPreparedBenchmark):
+        raise TypeError(
+            f"kernel {module.__name__!r} must return ExplicitPreparedBenchmark for paired A/B"
+        )
+    # The current module is the sole authority for the benchmark *config*
+    # (resolved via ab_current_benchmark_module before prepare), but the old
+    # module keeps its own run_gpu: launch argument packing must match the old
+    # executables' ABI, and every supported before revision already follows the
+    # pinned wrapper contract (validation outside the timed region, references
+    # opt-in through the shared bench()).
+    return benchmark
+
+
 @dataclass(frozen=True)
 class PreparedKernelBenchmark:
     """Runner-owned identity wrapped around a kernel-owned prepared object."""
@@ -158,7 +251,16 @@ _ORIGINAL_TVM_COMPILE = tvm.compile
 _CUDA_ASSIGNMENT: _CudaAssignment | None = None
 
 
-def _current_process_cuda_gpu_uuids(*, required: bool = False) -> tuple[str, ...]:
+def _canonical_cuda_uuid(value: str | bytes) -> str:
+    if isinstance(value, bytes):
+        value = value.decode()
+    prefix, separator, suffix = value.partition("-")
+    if separator and prefix.lower() == "gpu":
+        return f"GPU-{suffix.lower()}"
+    return value
+
+
+def _current_process_cuda_uuids(*, required: bool = False) -> tuple[str, ...]:
     """Return physical GPU UUIDs on which this PID owns a CUDA compute context."""
     global _NVML_MODULE, _NVML_UNAVAILABLE
     if _NVML_UNAVAILABLE:
@@ -197,8 +299,7 @@ def _current_process_cuda_gpu_uuids(*, required: bool = False) -> tuple[str, ...
         for index in range(count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(index)
             if any(int(process.pid) == pid for process in process_query(handle)):
-                uuid = pynvml.nvmlDeviceGetUUID(handle)
-                owned.append(uuid.decode() if isinstance(uuid, bytes) else str(uuid))
+                owned.append(_canonical_cuda_uuid(pynvml.nvmlDeviceGetUUID(handle)))
     except Exception as error:
         # Torch remains an independent oracle. NVML sampling failures must not
         # make ordinary standalone CPU tooling unusable.
@@ -212,7 +313,7 @@ def cuda_is_initialized() -> bool:
     """Report framework or driver-level CUDA initialization without creating it."""
     torch = sys.modules.get("torch")
     torch_initialized = bool(torch is not None and torch.cuda.is_initialized())
-    return torch_initialized or bool(_current_process_cuda_gpu_uuids())
+    return torch_initialized or bool(_current_process_cuda_uuids())
 
 
 def hardware_num_sms(default: int = 148) -> int:
@@ -333,7 +434,7 @@ def validate_current_cuda_assignment(stage: str, *, restore: bool = False) -> tu
         raise RuntimeError(
             f"{stage}: assigned CUDA UUIDs changed from {_CUDA_ASSIGNMENT.uuids!r} to {actual!r}"
         )
-    unexpected = set(_current_process_cuda_gpu_uuids(required=True)) - (
+    unexpected = set(_current_process_cuda_uuids(required=True)) - (
         _CUDA_ASSIGNMENT.previously_assigned_uuids
     )
     if unexpected:
@@ -568,11 +669,31 @@ def cuda_initialization_guard(*, require_uninitialized: bool = False):
         )
 
 
-def compile_kernel(func):
-    """Compile a single TIR PrimFunc via the tirx pipeline."""
-    target = cuda_target()
-    mod = tvm.IRModule({"main": func})
-    return tvm.compile(mod, target=target, tir_pipeline="tirx")
+@contextmanager
+def _cuda_compile_mode(mode: str | None):
+    """Select one synchronous CUDA backend without leaking process state."""
+    if mode is None:
+        yield
+        return
+    mode = mode.lower()
+    if mode not in {"nvcc", "nvrtc"}:
+        raise ValueError(f"cuda_compile_mode must be 'nvcc' or 'nvrtc', got {mode!r}")
+    with _PREPARE_COMPILE_LOCK:
+        previous = os.environ.get("TVM_CUDA_COMPILE_MODE")
+        os.environ["TVM_CUDA_COMPILE_MODE"] = mode
+        try:
+            yield
+        finally:
+            _restore_environment("TVM_CUDA_COMPILE_MODE", previous)
+
+
+def compile_kernel(func, *, arch: str | None = None, cuda_compile_mode: str | None = None):
+    """Compile one TIR PrimFunc with an optional target/backend contract."""
+    with _cuda_compile_mode(cuda_compile_mode):
+        target = cuda_target(arch=arch)
+        mod = tvm.IRModule({"main": func})
+        with target:
+            return tvm.compile(mod, target=target, tir_pipeline="tirx")
 
 
 def run_kernel_test(kernel_name: str, config: dict[str, Any], *, registry=None):
@@ -661,6 +782,7 @@ def prepare_kernel_bench(
         raise TypeError(
             f"kernel {kernel_name!r} prepare_bench() must return an object with run_gpu()"
         )
+    benchmark = _apply_ab_benchmark_contract(module, benchmark)
     return PreparedKernelBenchmark(kernel=kernel_name, label=label, benchmark=benchmark)
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tvm.script import tirx as T
+import tirx_kernels.kern as K
 
 
 def pack_valid_mask8(
@@ -28,7 +28,7 @@ def pack_valid_mask8(
             & (lane_indices[i] < s_kv)
             & (abs_pos_start + lane_idx * 8 + i < topk_len)
         )
-        terms.append(T.Select(valid, T.int32(1 << i), T.int32(0)))
+        terms.append(K.Select(valid, K.int32(1 << i), K.int32(0)))
     while len(terms) > 1:
-        terms = [T.bitwise_or(terms[i], terms[i + 1]) for i in range(0, len(terms), 2)]
-    return T.cast(terms[0], "int8")
+        terms = [K.bitwise_or(terms[i], terms[i + 1]) for i in range(0, len(terms), 2)]
+    return K.cast(terms[0], "int8")

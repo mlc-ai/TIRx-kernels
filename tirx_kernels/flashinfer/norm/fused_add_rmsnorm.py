@@ -18,7 +18,7 @@ from typing import Any
 from tirx_kernels.runner import bench
 from tvm.script import tirx as T
 
-from .rmsnorm import (
+from ._parser_helpers import (
     _add_f32,
     _butterfly_sum_f32,
     _ceil_div,

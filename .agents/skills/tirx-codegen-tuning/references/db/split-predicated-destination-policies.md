@@ -46,6 +46,18 @@ baseline/final times were 54.307/54.317 us, 119.646/119.631 us, and
 This sequence is valid only when the undefined values are dominated by the
 merge.
 
+The spelling depends on an API the current engine no longer offers. As of
+2026-08-18 the typed PTX engine rejects `pred=` on every instruction that has a
+destination and no longer accepts `preserve_dst`, so the write-only/read-write
+split above cannot be expressed through it. Where both candidate shared
+addresses are independently proven in bounds, the IR-valid branch-free fallback
+is an unconditional load, subtract, and exponentiation followed by `selp` to
+zero the inactive result. That ordering is essential: selecting zero before an
+unconditional `ex2` would turn inactive lanes into one. The complete ten-config
+GDN CP IR matrix passed the low-level contract with this spelling, but GPU
+correctness was not completed before the available GPUs became occupied; do not
+promote the fallback on IR evidence alone.
+
 ## Verification
 
 Verify predicate polarity, inactive-lane consumption, final SASS, and every

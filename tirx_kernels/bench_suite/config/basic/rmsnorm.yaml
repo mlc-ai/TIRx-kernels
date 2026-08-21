@@ -1,11 +1,14 @@
 kernel: rmsnorm
+selection_rationale: >-
+  Small, medium, and large element counts cover the short-vector, common hidden-size,
+  and large-batch regimes without duplicating adjacent RMSNorm shapes.
 configs:
   - {config: hs128_bs1, default: false}
   - {config: hs128_bs2, default: false}
   - {config: hs128_bs4, default: false}
   - {config: hs128_bs8, default: false}
   - {config: hs128_bs16, default: false}
-  - {config: hs128_bs32, default: false}
+  - {config: hs128_bs32, default: true, selection_role: small}
   - {config: hs128_bs64, default: false}
   - {config: hs128_bs128, default: false}
   - {config: hs128_bs4113, default: false}
@@ -16,7 +19,7 @@ configs:
   - {config: hs4096_bs16, default: false}
   - {config: hs4096_bs32, default: false}
   - {config: hs4096_bs64, default: false}
-  - {config: hs4096_bs128, default: false}
+  - {config: hs4096_bs128, default: true, selection_role: medium}
   - {config: hs4096_bs4113, default: false}
   - {config: hs5120_bs1, default: false}
   - {config: hs5120_bs2, default: false}
@@ -35,4 +38,4 @@ configs:
   - {config: hs8192_bs32, default: false}
   - {config: hs8192_bs64, default: false}
   - {config: hs8192_bs128, default: false}
-  - {config: hs8192_bs4113, default: false}
+  - {config: hs8192_bs4113, default: true, selection_role: large}

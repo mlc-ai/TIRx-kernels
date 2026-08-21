@@ -56,6 +56,15 @@ to 656 instructions, and introduced no spill. Two non-protocol paths reached
 Treat a large allocation shift as a separate shape A/B even when neither variant
 spills: ptxas can trade registers for recomputation and address instructions.
 
+The inverse case matters too: a shorter instruction stream does not pay for a
+lost resident CTA. One 128-thread decode rewrite cut static SASS from 1992/1984
+to 1608 instructions yet raised allocation from 124 to 130 registers, reducing
+the realizable CTA count from four to three. Pinning four blocks per SM produced
+128 registers, zero spills, and 1568/1560 instructions; all 19 correctness
+shapes passed, and a clean 45-round A/B measured 0.96957 and 0.96002
+after/before on the two previously failing production rows. Use this only where
+the reference allocation already sits below the exact occupancy boundary.
+
 Lower allocation is not the objective. In the same family, a minimum-block
 count of six later realized 80 registers with zero stack and local traffic, yet
 regressed the gate from 0.981x to 0.976x. Match an occupancy mechanism, not the

@@ -1,4 +1,5 @@
 kernel: allgather_gemm
+default_suite: false
 defaults:
   num_gpus: 1
   timer: kineto

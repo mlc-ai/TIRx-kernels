@@ -16,7 +16,7 @@ from unittest import SkipTest
 
 import torch
 
-from tvm.ir.type import PointerType, PrimType
+import tirx_kernels.kern as K
 
 _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 _SM100_SMEM_CAPACITY = 232448
@@ -544,10 +544,8 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
 
 def get_kernel(**kwargs: Any):
-    from tvm.script import tirx as T
-    from tvm.tirx.layout import S, TCol, TileLayout, TLane
-
     config = _make_config(**kwargs)
+
     num_heads = config.num_heads
     head_dim = config.head_dim
     page_size = config.page_size
@@ -555,17 +553,12 @@ def get_kernel(**kwargs: Any):
     next_n_atom = 2 if (config.varlen or config.next_n >= 2) else 1
     num_next_n_atoms = _align_up(config.next_n, next_n_atom) // next_n_atom
     num_q_stages = 3
-    # UMMA (TMEM) pipeline depth per group: 2 stages let the next task's MMA
-    # overlap the current task's epilogue TMEM read (beyond-CuTeDSL default 1).
     num_umma_stages = 1
     split_kv = config.split_kv
     umma_m = 128
     umma_k = 32
     umma_n = next_n_atom * num_heads
     num_math_warpgroups = split_kv // umma_m
-    # One scheduler task covers split_kv tokens = num_tiles_per_split compute
-    # tiles (one per math warpgroup); each compute tile spans num_pages_per_tile
-    # physical pages (CuTeDSL NUM_BLOCKS_PER_MMA).
     num_tiles_per_split = split_kv // umma_m
     num_pages_per_tile = umma_m // page_size
     num_specialized_threads = 128
@@ -585,887 +578,560 @@ def get_kernel(**kwargs: Any):
     smem_kv_size_per_stage = umma_m * head_dim
     smem_kv_scale_size_per_stage = umma_m * 4
     smem_weight_size_per_stage = next_n_atom * num_heads * 4
-    # Per-group KV pipeline depth (matches the CuTeDSL baseline: 3 stages/group).
     num_kv_stages = 3
-    smem_q_offset = 0
-    smem_kv_offset = smem_q_offset + smem_q_size_per_stage * num_q_stages
-    smem_kv_scales_offset = (
-        smem_kv_offset + smem_kv_size_per_stage * num_kv_stages * num_math_warpgroups
-    )
-    smem_weights_offset = (
-        smem_kv_scales_offset + smem_kv_scale_size_per_stage * num_kv_stages * num_math_warpgroups
-    )
-    smem_barrier_offset = smem_weights_offset + smem_weight_size_per_stage * num_q_stages
     num_umma_barriers = num_math_warpgroups * num_umma_stages
-    num_total_barriers = (
-        num_q_stages * 2 + num_kv_stages * 2 * num_math_warpgroups + (num_umma_barriers * 2)
-    )
-    full_q_barrier_base = 0
-    empty_q_barrier_base = full_q_barrier_base + num_q_stages
-    full_kv_barrier_base = empty_q_barrier_base + num_q_stages
-    empty_kv_barrier_base = full_kv_barrier_base + num_kv_stages * num_math_warpgroups
-    full_umma_barrier_base = empty_kv_barrier_base + num_kv_stages * num_math_warpgroups
-    empty_umma_barrier_base = full_umma_barrier_base + num_umma_barriers
-    smem_tmem_ptr_offset = smem_barrier_offset + num_total_barriers * 8
-    smem_total_bytes = smem_tmem_ptr_offset + 4
-    if smem_total_bytes > _SM100_SMEM_CAPACITY:
-        raise ValueError(f"dynamic shared memory {smem_total_bytes} exceeds SM100 capacity")
     num_tmem_cols = next_n_atom * num_heads * num_math_warpgroups * num_umma_stages
     if num_tmem_cols > 512:
         raise ValueError("tensor memory columns exceed SM100 single-CTA limit")
-    tmem_layout = TileLayout(S[(128, num_tmem_cols) : (1 @ TLane, 1 @ TCol)])
     logits_tir_dtype = "float32" if config.logits_dtype == "float32" else "bfloat16"
-    cache_hint_sm90_evict_normal = "evict_normal"
-    cache_hint_sm100_evict_normal = "evict_normal"
-    cache_policy_evict_normal = T.uint64(1152921504606846976)
-    # One ptx spelling per rank: unicast (no .multicast::cluster), no
-    # .cta_group modifier (the legacy raw form passed -1 to suppress it), with
-    # the evict-normal L2 cache policy as a real operand.
-    tma_g2s_2d = (
+
+    # Block-table L2 warm-up coverage (trace-time ints): the whole table, capped
+    # at 512 lines (64 KB).
+    num_block_table_bytes = config.batch_size * config.max_num_pages * 4
+    num_prefetch_lines = min((num_block_table_bytes + 127) // 128, 512)
+
+    TMA_G2S_2D = (
         "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
     )
-    tma_g2s_3d = (
+    TMA_G2S_3D = (
         "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
     )
-    q_tma_block_inner = head_dim
-    q_tma_swizzle_mode = head_dim
-    q_tma_dtype_size = 1
-    q_tma_block_inner_atom = (
-        q_tma_block_inner if q_tma_swizzle_mode == 0 else q_tma_swizzle_mode // q_tma_dtype_size
-    )
-    q_tma_num_inner_atoms = q_tma_block_inner // q_tma_block_inner_atom
-    weights_tma_block_inner = next_n_atom * num_heads
-    weights_tma_swizzle_mode = 0
-    weights_tma_dtype_size = 4
-    weights_tma_block_inner_atom = (
-        weights_tma_block_inner
-        if weights_tma_swizzle_mode == 0
-        else weights_tma_swizzle_mode // weights_tma_dtype_size
-    )
-    weights_tma_num_inner_atoms = weights_tma_block_inner // weights_tma_block_inner_atom
-    kv_tma_block_inner = head_dim
-    kv_tma_swizzle_mode = 0
-    kv_tma_dtype_size = 1
-    kv_tma_block_inner_atom = (
-        kv_tma_block_inner if kv_tma_swizzle_mode == 0 else kv_tma_swizzle_mode // kv_tma_dtype_size
-    )
-    kv_tma_num_inner_atoms = kv_tma_block_inner // kv_tma_block_inner_atom
-    kv_scales_tma_block_inner = page_size
-    kv_scales_tma_swizzle_mode = 0
-    kv_scales_tma_dtype_size = 4
-    kv_scales_tma_block_inner_atom = (
-        kv_scales_tma_block_inner
-        if kv_scales_tma_swizzle_mode == 0
-        else kv_scales_tma_swizzle_mode // kv_scales_tma_dtype_size
-    )
-    kv_scales_tma_num_inner_atoms = kv_scales_tma_block_inner // kv_scales_tma_block_inner_atom
+    MMA = "tcgen05.mma.cta_group::1.kind::f8f6f4"
+    TC_LD = f"tcgen05.ld.sync.aligned.32x32b.x{num_heads}.b32"
 
-    def atom_to_token_idx_expr(q_atom_idx):
-        if config.varlen:
-            return q_atom_idx
-        if k_pad_odd_n:
-            return q_atom_idx // T.uint32(num_next_n_atoms) * T.uint32(
-                config.next_n
-            ) + q_atom_idx % T.uint32(num_next_n_atoms) * T.uint32(next_n_atom)
-        return q_atom_idx * T.uint32(next_n_atom)
-
-    def atom_to_block_table_row_expr(q_atom_idx):
-        if config.varlen:
-            return q_atom_idx
-        return q_atom_idx // T.uint32(num_next_n_atoms)
-
-    def should_refresh_num_kv_expr(q_atom_idx):
-        if config.varlen:
-            return T.bool(True)
-        return q_atom_idx % T.uint32(num_next_n_atoms) == T.uint32(0)
-
-    def exist_q_atom_idx_expr(q_atom_idx, end_q_atom_idx, end_kv_idx):
-        return T.Or(
-            q_atom_idx < end_q_atom_idx,
-            T.And(q_atom_idx == end_q_atom_idx, T.uint32(0) < end_kv_idx),
-        )
-
-    def lane_id_u32():
-        return T.cast(T.cuda.mov_sreg(32, "laneid"), "uint32")
-
-    def relu2_fma_f32x2(a, w, c):
-        a_lo = T.alloc_local((1,), "float32")
-        a_hi = T.alloc_local((1,), "float32")
-        abs_lo = T.alloc_local((1,), "float32")
-        abs_hi = T.alloc_local((1,), "float32")
-        abs_pair = T.alloc_local((1,), "uint64")
-        relu_pair = T.alloc_local((1,), "uint64")
-        out = T.alloc_local((1,), "uint64")
-        T.evaluate(T.ptx.mov.b64(a_lo[0], a_hi[0], a))
-        T.evaluate(T.ptx.abs.f32(abs_lo[0], a_lo[0]))
-        T.evaluate(T.ptx.abs.f32(abs_hi[0], a_hi[0]))
-        T.evaluate(T.ptx.mov.b64(abs_pair[0], abs_lo[0], abs_hi[0]))
-        T.evaluate(T.ptx.add.rn.f32x2(relu_pair[0], a, abs_pair[0]))
-        T.evaluate(T.ptx.fma.rn.f32x2(out[0], relu_pair[0], w, c))
-        return out[0]
-
-    def fadd2_rn_noftz(a, b):
-        out = T.alloc_local((1,), "uint64")
-        T.evaluate(T.ptx.add.rn.f32x2(out[0], a, b))
-        return out[0]
-
-    def fadd_rn_noftz(a, b):
-        out = T.alloc_local((1,), "float32")
-        T.evaluate(T.ptx.add.rn.f32(out[0], a, b))
-        return out[0]
-
-    def fmul_rn_noftz(a, b):
-        out = T.alloc_local((1,), "float32")
-        T.evaluate(T.ptx.mul.rn.f32(out[0], a, b))
-        return out[0]
-
-    def cuda_grid_dependency_synchronize():
-        T.evaluate(T.ptx.griddepcontrol.wait())
-
-    # Block-table L2 warm-up coverage (plain Python ints, evaluated at trace
-    # time): prefetch the whole table, capped at 512 lines (64 KB).
-    num_block_table_bytes = config.batch_size * config.max_num_pages * 4
-    num_prefetch_lines = (num_block_table_bytes + 127) // 128
-    if num_prefetch_lines > 512:
-        num_prefetch_lines = 512
-
-    def mbarrier_init_cta(barrier_ptr, arrive_count):
-        T.evaluate(T.ptx.mbarrier.init.shared.b64(barrier_ptr, T.uint32(arrive_count)))
-
-    def mbarrier_wait_cta(barrier_ptr, phase):
-        T.evaluate(T.cuda.mbarrier_wait(barrier_ptr, phase))
-
-    def mbarrier_arrive_cta(barrier_ptr):
-        T.evaluate(T.ptx.mbarrier.arrive.shared.b64(barrier_ptr, T.uint32(1)))
-
-    def mbarrier_arrive_expect_tx_cta(barrier_ptr, transaction_bytes):
-        T.evaluate(
-            T.ptx.mbarrier.arrive.expect_tx.shared.b64(barrier_ptr, T.uint32(transaction_bytes))
-        )
-
-    @T.prim_func
+    @K.kernel(warps=num_warps, arch="sm_100f", min_blocks_per_sm=1, grid=config.num_sms)
     def sm100_fp8_paged_mqa_logits(
-        batch_size: T.uint32,
-        logits_stride: T.uint32,
-        block_table_stride: T.uint32,
-        context_lens: T.Buffer((config.batch_size, config.next_n), "int32"),
-        logits: T.Buffer(
-            (config.batch_size * config.next_n, config.logits_stride), logits_tir_dtype
-        ),
-        block_table: T.Buffer((config.batch_size, config.max_num_pages), "int32"),
-        indices: T.Buffer((config.batch_size,), "int32"),
-        schedule_meta: T.Buffer((config.num_sms + 1, 2), "int32"),
-        tensor_map_q: T.TensorMap(),
-        tensor_map_kv: T.TensorMap(),
-        tensor_map_kv_scales: T.TensorMap(),
-        tensor_map_weights: T.TensorMap(),
+        batch_size: K.u32,
+        logits_stride: K.u32,
+        block_table_stride: K.u32,
+        context_lens_flat: K.gptr[K.i32],
+        logits_flat: K.gptr[logits_tir_dtype],
+        block_table_flat: K.gptr[K.i32],
+        indices: K.gptr[K.i32],
+        schedule_meta_flat: K.gptr[K.i32],
+        tensor_map_q: K.TensorMap,
+        tensor_map_kv: K.TensorMap,
+        tensor_map_kv_scales: K.TensorMap,
+        tensor_map_weights: K.TensorMap,
     ):
-        T.device_entry()
-        # TIRX_TRANSCRIBE_START sm100_fp8_paged_mqa_logits
-        T.attr({"tirx.launch_bounds_min_blocks_per_sm": 1})
-        logits_flat = T.decl_buffer(
-            (config.batch_size * config.next_n * config.logits_stride,),
-            logits_tir_dtype,
-            data=logits.data,
-            scope="global",
-        )
-        context_lens_flat = T.decl_buffer(
-            (config.batch_size * config.next_n,), "int32", data=context_lens.data, scope="global"
-        )
-        block_table_flat = T.decl_buffer(
-            (config.batch_size * config.max_num_pages,),
-            "int32",
-            data=block_table.data,
-            scope="global",
-        )
-        schedule_meta_flat = T.decl_buffer(
-            ((config.num_sms + 1) * 2,), "int32", data=schedule_meta.data, scope="global"
-        )
-        sm_idx = T.cta_id([config.num_sms])
-        sm_idx_u32: T.let = T.cast(sm_idx, "uint32")
-        warp_idx = T.warp_id([num_warps])
-        warp_idx_u32: T.let = T.cast(warp_idx, "uint32")
-        warpgroup_idx = T.warpgroup_id([num_warps // 4])
-        lane_idx = T.lane_id([32])
-        lane_idx_u32: T.let = lane_id_u32()
+        cache_policy_evict_normal = K.uint64(1152921504606846976)
+        sm_idx_u32 = K.Cast("uint32", K.cta_id())
+        warp_idx = K.warp_id()
+        warp_idx_u32 = K.Cast("uint32", warp_idx)
+        warpgroup_idx = K.warpgroup_id([num_warps // 4])
+        lane_idx = K.lane_id()
+        # The original reads laneid through mov_sreg for its u32 uses and keeps
+        # K.lane_id() for the `lane_idx == 0` guards. Two spellings, both kept.
+        # A plain binding re-emits the sreg read at every use site (16 laneid
+        # reads in the CUDA where the original has 5), but ptxas CSEs them back:
+        # measured SASS byte-identical to the retired K.Bind on 5 specializations,
+        # while materializing into a local scalar cost +16 instructions. So the
+        # duplication is a source-level artefact only -- do not "fix" it.
+        lane_idx_u32 = K.Cast("uint32", K.cuda.mov_sreg(32, "laneid"))
 
-        if warp_idx == spec_warp_start:
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_q)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_kv)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_kv_scales)))
-            T.evaluate(T.ptx.prefetch.tensormap(T.address_of(tensor_map_weights)))
+        with K.If(warp_idx == spec_warp_start), K.Then():
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_q))
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_kv))
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_kv_scales))
+            K.ptx.prefetch.tensormap(K.address_of(tensor_map_weights))
 
-        T.static_assert(smem_q_size_per_stage % smem_alignment == 0, "Unaligned TMA swizzling")
-        T.static_assert(smem_kv_size_per_stage % smem_alignment == 0, "Unaligned TMA swizzling")
-
-        smem = T.alloc_buffer([smem_total_bytes], "uint8", scope="shared.dyn", align=smem_alignment)
-        T.attr({"tirx.dyn_smem_bytes": smem_total_bytes})
-        smem_q_data: T.let = T.reinterpret(
-            PointerType(PrimType("float8_e4m3fn")), smem.ptr_to([smem_q_offset])
+        # ---------------- SMEM ------------------------------------------
+        # Every buffer is a RAW alloc (swizzle=None). The original declares all
+        # of these without a layout: the 128 B swizzle lives in the TMA
+        # descriptor (host side) and in the MMA descriptor's swizzle field, not
+        # in the SMEM buffer's index map. Asking K for a swizzled tile here
+        # would impose an index map the original does not have -- and would also
+        # hit the 2-D/3-D-only restriction on smem_kv's 4-D shape.
+        smem = K.smem_pool()
+        smem_q = smem.alloc(
+            (num_q_stages, next_n_atom * num_heads, head_dim), "float8_e4m3fn", align=smem_alignment
         )
-        smem_kv_data: T.let = T.reinterpret(
-            PointerType(PrimType("float8_e4m3fn")), smem.ptr_to([smem_kv_offset])
-        )
-        smem_kv_scales_data: T.let = T.reinterpret(
-            PointerType(PrimType("float32")), smem.ptr_to([smem_kv_scales_offset])
-        )
-        smem_weights_data: T.let = T.reinterpret(
-            PointerType(PrimType("float32")), smem.ptr_to([smem_weights_offset])
-        )
-        smem_barrier_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint64")), smem.ptr_to([smem_barrier_offset])
-        )
-        smem_tmem_ptr_data: T.let = T.reinterpret(
-            PointerType(PrimType("uint32")), smem.ptr_to([smem_tmem_ptr_offset])
-        )
-        smem_q = T.decl_buffer(
-            (num_q_stages, next_n_atom * num_heads, head_dim),
-            "float8_e4m3fn",
-            data=smem_q_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=smem_alignment,
-        )
-        smem_kv = T.decl_buffer(
+        smem_kv = smem.alloc(
             (num_math_warpgroups, num_kv_stages, umma_m, head_dim),
             "float8_e4m3fn",
-            data=smem_kv_data,
-            scope="shared.dyn",
-            elem_offset=0,
             align=smem_alignment,
         )
-        smem_kv_scales = T.decl_buffer(
-            (num_math_warpgroups, num_kv_stages, umma_m),
-            "float32",
-            data=smem_kv_scales_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=16,
-        )
-        smem_weights = T.decl_buffer(
-            (num_q_stages, next_n_atom, num_heads),
-            "float32",
-            data=smem_weights_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=16,
-        )
-        smem_barriers = T.decl_buffer(
-            (num_total_barriers,),
-            "uint64",
-            data=smem_barrier_data,
-            scope="shared.dyn",
-            elem_offset=0,
-            align=8,
-        )
-        tmem_ptr_in_smem = T.decl_buffer(
-            (1,), "uint32", data=smem_tmem_ptr_data, scope="shared.dyn", elem_offset=0, align=4
-        )
-        tmem = T.decl_buffer(
-            (128, num_tmem_cols),
-            "float32",
-            scope="tmem",
-            allocated_addr=tmem_ptr_in_smem[0],
-            layout=tmem_layout,
-        )
-        fetch_result = T.alloc_local((4,), "uint32")
-        scheduler_result = T.alloc_local((7,), "uint32")
-        num_kv_result = T.alloc_local((1,), "uint32")
-        atom_advance_result = T.alloc_local((1,), "uint32")
+        smem_kv_scales = smem.alloc((num_math_warpgroups, num_kv_stages, umma_m), K.f32, align=16)
+        smem_weights = smem.alloc((num_q_stages, next_n_atom, num_heads), K.f32, align=16)
+        # Six typed families preserve the original allocation order.  Init is
+        # still issued explicitly below because its per-warp interleaving is a
+        # kernel-specific ordering boundary.
+        full_q_barriers = K.TMABar(smem, num_q_stages)
+        empty_q_barriers = K.MBarrier(smem, num_q_stages)
+        full_kv_barriers = K.TMABar(smem, num_kv_stages * num_math_warpgroups)
+        empty_kv_barriers = K.MBarrier(smem, num_kv_stages * num_math_warpgroups)
+        full_umma_barriers = K.TCGen05Bar(smem, num_umma_barriers)
+        empty_umma_barriers = K.MBarrier(smem, num_umma_barriers)
+        tmem_ptr_in_smem = smem.alloc((1,), K.u32, align=4)
+        tmem = K.decl_buffer((128, num_tmem_cols), "float32", scope="tmem", allocated_addr=0)
 
-        @T.inline
-        def mbarrier_wait_phase(barrier_ptr, phase):
-            mbarrier_wait_cta(barrier_ptr, phase)
+        scheduler_result = K.alloc_local([7], "uint32")
+        num_kv_result = K.local_scalar("uint32")
+        atom_advance_result = K.local_scalar("uint32")
 
-        @T.inline
-        def mbarrier_arrive(barrier_ptr):
-            mbarrier_arrive_cta(barrier_ptr)
+        # ---------------- trace-time helpers ----------------------------
 
-        @T.inline
-        def mbarrier_arrive_and_expect_tx(barrier_ptr, num_bytes):
-            mbarrier_arrive_expect_tx_cta(barrier_ptr, num_bytes)
+        def atom_to_token_idx_expr(q_atom_idx):
+            if config.varlen:
+                return q_atom_idx
+            if k_pad_odd_n:
+                return q_atom_idx // K.uint32(num_next_n_atoms) * K.uint32(
+                    config.next_n
+                ) + q_atom_idx % K.uint32(num_next_n_atoms) * K.uint32(next_n_atom)
+            return q_atom_idx * K.uint32(next_n_atom)
 
-        @T.inline
-        def get_q_pipeline(q_iter_idx):
-            fetch_result[0] = q_iter_idx % T.uint32(num_q_stages)
-            fetch_result[1] = (q_iter_idx // T.uint32(num_q_stages)) & T.uint32(1)
+        def atom_to_block_table_row_expr(q_atom_idx):
+            if config.varlen:
+                return q_atom_idx
+            return q_atom_idx // K.uint32(num_next_n_atoms)
 
-        @T.inline
-        def get_kv_pipeline(kv_iter_idx):
-            fetch_result[2] = kv_iter_idx % T.uint32(num_kv_stages)
-            fetch_result[3] = (kv_iter_idx // T.uint32(num_kv_stages)) & T.uint32(1)
+        def should_refresh_num_kv_expr(q_atom_idx):
+            if config.varlen:
+                return K.bool(True)
+            return q_atom_idx % K.uint32(num_next_n_atoms) == K.uint32(0)
 
-        @T.inline
+        def exist_q_atom_idx_expr(q_atom_idx, end_q_atom_idx, end_kv_idx):
+            return K.Or(
+                q_atom_idx < end_q_atom_idx,
+                K.And(q_atom_idx == end_q_atom_idx, K.uint32(0) < end_kv_idx),
+            )
+
         def load_num_kv(q_atom_idx_arg, runtime_batch_size_arg):
+            context_len = K.local_scalar("uint32")
             if config.varlen:
-                context_idx: T.uint32 = q_atom_idx_arg
-                if q_atom_idx_arg + T.uint32(1) < runtime_batch_size_arg:
-                    index_0 = T.local_scalar("int32")
-                    index_1 = T.local_scalar("int32")
-                    T.ptx.ld.global_.s32(index_0, indices.ptr_to([T.cast(q_atom_idx_arg, "int32")]))
-                    T.ptx.ld.global_.s32(
-                        index_1, indices.ptr_to([T.cast(q_atom_idx_arg + T.uint32(1), "int32")])
+                context_idx = K.local_scalar("uint32", init=q_atom_idx_arg)
+                with K.If(q_atom_idx_arg + K.uint32(1) < runtime_batch_size_arg), K.Then():
+                    index_pair = K.alloc_local([2], "int32")
+                    K.ptx.ld.global_.s32(
+                        index_pair[0], indices.ptr_to([K.Cast("int32", q_atom_idx_arg)])
                     )
-                    if index_0 == index_1:
-                        context_idx = q_atom_idx_arg + T.uint32(1)
-                context_len = T.local_scalar("uint32")
-                T.ptx.ld.global_.u32(
-                    context_len, context_lens_flat.ptr_to([T.cast(context_idx, "int32")])
+                    K.ptx.ld.global_.s32(
+                        index_pair[1],
+                        indices.ptr_to([K.Cast("int32", q_atom_idx_arg + K.uint32(1))]),
+                    )
+                    with K.If(index_pair[0] == index_pair[1]), K.Then():
+                        K.assign(context_idx, q_atom_idx_arg + K.uint32(1))
+                K.ptx.ld.global_.u32(
+                    context_len, context_lens_flat.ptr_to([K.Cast("int32", context_idx)])
                 )
             else:
-                q_idx: T.uint32 = q_atom_idx_arg // T.uint32(num_next_n_atoms)
-                lens_idx: T.uint32 = q_idx * T.uint32(config.next_n) + T.uint32(config.next_n - 1)
-                context_len = T.local_scalar("uint32")
-                T.ptx.ld.global_.u32(
-                    context_len, context_lens_flat.ptr_to([T.cast(lens_idx, "int32")])
+                q_idx = q_atom_idx_arg // K.uint32(num_next_n_atoms)
+                lens_idx = q_idx * K.uint32(config.next_n) + K.uint32(config.next_n - 1)
+                K.ptx.ld.global_.u32(
+                    context_len, context_lens_flat.ptr_to([K.Cast("int32", lens_idx)])
                 )
-            num_kv_result[0] = (context_len + T.uint32(umma_m - 1)) // T.uint32(umma_m)
+            K.assign(num_kv_result, (context_len + K.uint32(umma_m - 1)) // K.uint32(umma_m))
 
-        @T.inline
         def load_atom_advance(q_atom_idx_arg, bound_arg):
-            atom_advance_result[0] = T.uint32(1)
+            K.assign(atom_advance_result, K.uint32(1))
             if config.varlen:
-                if q_atom_idx_arg + T.uint32(1) < bound_arg:
-                    index_0 = T.local_scalar("int32")
-                    index_1 = T.local_scalar("int32")
-                    T.ptx.ld.global_.s32(index_0, indices.ptr_to([T.cast(q_atom_idx_arg, "int32")]))
-                    T.ptx.ld.global_.s32(
-                        index_1, indices.ptr_to([T.cast(q_atom_idx_arg + T.uint32(1), "int32")])
+                with K.If(q_atom_idx_arg + K.uint32(1) < bound_arg), K.Then():
+                    index_pair = K.alloc_local([2], "int32")
+                    K.ptx.ld.global_.s32(
+                        index_pair[0], indices.ptr_to([K.Cast("int32", q_atom_idx_arg)])
                     )
-                    if index_0 == index_1:
-                        atom_advance_result[0] = T.uint32(2)
+                    K.ptx.ld.global_.s32(
+                        index_pair[1],
+                        indices.ptr_to([K.Cast("int32", q_atom_idx_arg + K.uint32(1))]),
+                    )
+                    with K.If(index_pair[0] == index_pair[1]), K.Then():
+                        K.assign(atom_advance_result, K.uint32(2))
 
-        @T.inline
-        def tma_load_2d_q(dst, barrier_ptr, tensor_map, coord0, coord1):
-            T.static_assert(
-                cache_hint_sm90_evict_normal == cache_hint_sm100_evict_normal, "Invalid cache hint"
-            )
-            T.static_assert(q_tma_num_inner_atoms == 1, "Unsupported split TMA atom")
-            T.evaluate(
-                T.ptx[tma_g2s_2d](
-                    dst,
-                    T.address_of(tensor_map),
-                    T.cast(coord0, "int32"),
-                    T.cast(coord1, "int32"),
-                    barrier_ptr,
-                    cache_policy_evict_normal,
-                )
-            )
+        # Epilogue arithmetic, transcribed from the PAGED original's own
+        # helpers (relu2_fma_f32x2 / fadd2 / fadd / fmul). The non-paged
+        # sibling spells the same maths as one flat `wrelu_reduce` over
+        # ptx.mov.b64 pack/unpack pairs; copying that here produced a
+        # structurally different instruction stream (98 packs where the
+        # original has 32, and zero make_float2 where it has 98), which is
+        # exactly the normalise-one-kernel-to-the-other error the bit-identity
+        # standard exists to catch.
+        def relu2_fma_f32x2(a, w, c):
+            a_lo = K.local_scalar("float32")
+            a_hi = K.local_scalar("float32")
+            abs_lo = K.local_scalar("float32")
+            abs_hi = K.local_scalar("float32")
+            abs_pair = K.local_scalar("uint64")
+            relu_pair = K.local_scalar("uint64")
+            out = K.local_scalar("uint64")
+            K.ptx.mov.b64(a_lo, a_hi, a)
+            K.ptx.abs.f32(abs_lo, a_lo)
+            K.ptx.abs.f32(abs_hi, a_hi)
+            K.ptx.mov.b64(abs_pair, abs_lo, abs_hi)
+            K.ptx.add.rn.f32x2(relu_pair, a, abs_pair)
+            K.ptx.fma.rn.f32x2(out, relu_pair, w, c)
+            return out
 
-        @T.inline
-        def tma_load_2d_weights(dst, barrier_ptr, tensor_map, coord0, coord1):
-            T.static_assert(
-                cache_hint_sm90_evict_normal == cache_hint_sm100_evict_normal, "Invalid cache hint"
-            )
-            T.static_assert(weights_tma_num_inner_atoms == 1, "Unsupported split TMA atom")
-            T.evaluate(
-                T.ptx[tma_g2s_2d](
-                    dst,
-                    T.address_of(tensor_map),
-                    T.cast(coord0, "int32"),
-                    T.cast(coord1, "int32"),
-                    barrier_ptr,
-                    cache_policy_evict_normal,
-                )
-            )
-
-        @T.inline
-        def tma_load_3d_kv(dst, barrier_ptr, tensor_map, coord0, coord1, coord2):
-            T.static_assert(
-                cache_hint_sm90_evict_normal == cache_hint_sm100_evict_normal, "Invalid cache hint"
-            )
-            T.static_assert(kv_tma_num_inner_atoms == 1, "Unsupported split TMA atom")
-            T.evaluate(
-                T.ptx[tma_g2s_3d](
-                    dst,
-                    T.address_of(tensor_map),
-                    T.cast(coord0, "int32"),
-                    T.cast(coord1, "int32"),
-                    T.cast(coord2, "int32"),
-                    barrier_ptr,
-                    cache_policy_evict_normal,
-                )
-            )
-
-        @T.inline
-        def tma_load_2d_kv_scales(dst, barrier_ptr, tensor_map, coord0, coord1):
-            T.static_assert(
-                cache_hint_sm90_evict_normal == cache_hint_sm100_evict_normal, "Invalid cache hint"
-            )
-            T.static_assert(kv_scales_tma_num_inner_atoms == 1, "Unsupported split TMA atom")
-            T.evaluate(
-                T.ptx[tma_g2s_2d](
-                    dst,
-                    T.address_of(tensor_map),
-                    T.cast(coord0, "int32"),
-                    T.cast(coord1, "int32"),
-                    barrier_ptr,
-                    cache_policy_evict_normal,
-                )
-            )
-
-        @T.inline
         def make_smem_desc(desc, smem_ptr):
-            T.cuda.tcgen05.encode_matrix_descriptor(
-                T.address_of(desc), smem_ptr, ldo=0, sdo=desc_sdo, swizzle=desc_swizzle
+            K.cuda.tcgen05.encode_matrix_descriptor(
+                K.address_of(desc), smem_ptr, ldo=0, sdo=desc_sdo, swizzle=desc_swizzle
             )
 
-        @T.inline
         def issue_tma_q(stage_idx, tma_q_atom_idx):
-            if T.cuda.elect_sync():
-                q_token_idx: T.uint32 = atom_to_token_idx_expr(tma_q_atom_idx)
-                tma_load_2d_q(
+            with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+                q_token_idx = atom_to_token_idx_expr(tma_q_atom_idx)
+                K.ptx[TMA_G2S_2D](
                     smem_q.ptr_to([stage_idx, 0, 0]),
-                    smem_barriers.ptr_to([full_q_barrier_base + stage_idx]),
-                    tensor_map_q,
-                    T.uint32(0),
-                    q_token_idx * T.uint32(num_heads),
+                    K.address_of(tensor_map_q),
+                    K.int32(0),
+                    K.Cast("int32", q_token_idx * K.uint32(num_heads)),
+                    full_q_barriers.ptr_to([stage_idx]),
+                    cache_policy_evict_normal,
                 )
-                tma_load_2d_weights(
+                K.ptx[TMA_G2S_2D](
                     smem_weights.ptr_to([stage_idx, 0, 0]),
-                    smem_barriers.ptr_to([full_q_barrier_base + stage_idx]),
-                    tensor_map_weights,
-                    T.uint32(0),
-                    q_token_idx,
+                    K.address_of(tensor_map_weights),
+                    K.int32(0),
+                    K.Cast("int32", q_token_idx),
+                    full_q_barriers.ptr_to([stage_idx]),
+                    cache_policy_evict_normal,
                 )
-                mbarrier_arrive_and_expect_tx(
-                    smem_barriers.ptr_to([full_q_barrier_base + stage_idx]),
-                    smem_q_size_per_stage + smem_weight_size_per_stage,
+                full_q_barriers.arrive(
+                    stage_idx, tx_count=smem_q_size_per_stage + smem_weight_size_per_stage
                 )
 
-        @T.inline
-        def fetch_next_task(
-            current_q_atom_idx_arg,
-            current_kv_idx_arg,
-            current_num_kv_arg,
-            end_q_atom_idx_arg,
-            end_kv_idx_arg,
-        ):
-            scheduler_result[0] = current_q_atom_idx_arg
-            scheduler_result[1] = current_kv_idx_arg
-            scheduler_result[2] = current_num_kv_arg
-            scheduler_result[4] = current_q_atom_idx_arg
-            scheduler_result[5] = current_kv_idx_arg
-            scheduler_result[6] = current_num_kv_arg
-            if T.And(
-                current_q_atom_idx_arg == end_q_atom_idx_arg, current_kv_idx_arg == end_kv_idx_arg
-            ):
-                scheduler_result[3] = T.uint32(0)
-            else:
-                scheduler_result[5] = current_kv_idx_arg + T.uint32(num_tiles_per_split)
-                if scheduler_result[5] >= current_num_kv_arg:
-                    scheduler_result[5] = T.uint32(0)
-                    load_atom_advance(current_q_atom_idx_arg, end_q_atom_idx_arg)
-                    scheduler_result[4] = current_q_atom_idx_arg + atom_advance_result[0]
-                    if T.And(
-                        should_refresh_num_kv_expr(scheduler_result[4]),
-                        exist_q_atom_idx_expr(
-                            scheduler_result[4], end_q_atom_idx_arg, end_kv_idx_arg
-                        ),
-                    ):
-                        load_num_kv(scheduler_result[4], batch_size)
-                        scheduler_result[6] = num_kv_result[0]
-                scheduler_result[3] = T.uint32(1)
+        def fetch_next_task(cur_q_atom, cur_kv_idx, cur_num_kv, end_q_atom, end_kv):
+            K.ptx.mov.b32(scheduler_result[0], cur_q_atom)
+            K.ptx.mov.b32(scheduler_result[1], cur_kv_idx)
+            K.ptx.mov.b32(scheduler_result[2], cur_num_kv)
+            K.ptx.mov.b32(scheduler_result[4], cur_q_atom)
+            K.ptx.mov.b32(scheduler_result[5], cur_kv_idx)
+            K.ptx.mov.b32(scheduler_result[6], cur_num_kv)
+            with K.If(K.And(cur_q_atom == end_q_atom, cur_kv_idx == end_kv)):
+                with K.Then():
+                    K.ptx.mov.b32(scheduler_result[3], K.uint32(0))
+                with K.Else():
+                    K.ptx.mov.b32(scheduler_result[5], cur_kv_idx + K.uint32(num_tiles_per_split))
+                    with K.If(scheduler_result[5] >= cur_num_kv), K.Then():
+                        K.ptx.mov.b32(scheduler_result[5], K.uint32(0))
+                        load_atom_advance(cur_q_atom, end_q_atom)
+                        K.ptx.mov.b32(scheduler_result[4], cur_q_atom + atom_advance_result)
+                        with (
+                            K.If(
+                                K.And(
+                                    should_refresh_num_kv_expr(scheduler_result[4]),
+                                    exist_q_atom_idx_expr(scheduler_result[4], end_q_atom, end_kv),
+                                )
+                            ),
+                            K.Then(),
+                        ):
+                            load_num_kv(scheduler_result[4], batch_size)
+                            K.ptx.mov.b32(scheduler_result[6], num_kv_result)
+                    K.ptx.mov.b32(scheduler_result[3], K.uint32(1))
 
+        # ---------------- CTA-scope prologue ----------------------------
         # Early schedule-metadata load: issue the global loads before the
-        # pipeline/barrier prologue so the ~200-cycle L2 latency overlaps with
-        # the setup below (matches the CuTeDSL baseline).
-        start_q_atom_idx = T.local_scalar("uint32")
-        start_kv_tile_idx = T.local_scalar("uint32")
-        end_q_atom_idx = T.local_scalar("uint32")
-        end_kv_tile_idx = T.local_scalar("uint32")
-        T.ptx.ld.global_.u32(
-            start_q_atom_idx, schedule_meta_flat.ptr_to([T.cast(sm_idx_u32 * T.uint32(2), "int32")])
+        # pipeline/barrier prologue so the ~200-cycle L2 latency overlaps setup.
+        start_q_atom_idx = K.local_scalar("uint32")
+        start_kv_tile_idx = K.local_scalar("uint32")
+        end_q_atom_idx = K.local_scalar("uint32")
+        end_kv_tile_idx = K.local_scalar("uint32")
+        K.ptx.ld.global_.u32(
+            start_q_atom_idx, schedule_meta_flat.ptr_to([K.Cast("int32", sm_idx_u32 * K.uint32(2))])
         )
-        T.ptx.ld.global_.u32(
+        K.ptx.ld.global_.u32(
             start_kv_tile_idx,
-            schedule_meta_flat.ptr_to([T.cast(sm_idx_u32 * T.uint32(2) + T.uint32(1), "int32")]),
+            schedule_meta_flat.ptr_to([K.Cast("int32", sm_idx_u32 * K.uint32(2) + K.uint32(1))]),
         )
-        T.ptx.ld.global_.u32(
+        K.ptx.ld.global_.u32(
             end_q_atom_idx,
-            schedule_meta_flat.ptr_to([T.cast((sm_idx_u32 + T.uint32(1)) * T.uint32(2), "int32")]),
+            schedule_meta_flat.ptr_to([K.Cast("int32", (sm_idx_u32 + K.uint32(1)) * K.uint32(2))]),
         )
-        T.ptx.ld.global_.u32(
+        K.ptx.ld.global_.u32(
             end_kv_tile_idx,
             schedule_meta_flat.ptr_to(
-                [T.cast((sm_idx_u32 + T.uint32(1)) * T.uint32(2) + T.uint32(1), "int32")]
+                [K.Cast("int32", (sm_idx_u32 + K.uint32(1)) * K.uint32(2) + K.uint32(1))]
             ),
         )
-        start_kv_idx: T.let = start_kv_tile_idx * T.uint32(num_tiles_per_split)
-        end_kv_idx: T.let = end_kv_tile_idx * T.uint32(num_tiles_per_split)
-        # Clamp the context-length read for zero-work CTAs (start == total q
-        # atoms); the value is stale but never used because has_work is false
-        # (same clamp as the CuTeDSL baseline).
+        start_kv_idx = K.local_scalar("uint32")
+        end_kv_idx = K.local_scalar("uint32")
+        K.assign(start_kv_idx, start_kv_tile_idx * K.uint32(num_tiles_per_split))
+        K.assign(end_kv_idx, end_kv_tile_idx * K.uint32(num_tiles_per_split))
+        # Clamp for zero-work CTAs (start == total q atoms); the value is stale
+        # but never used, because has_work is false.
         load_num_kv(
-            T.min(start_q_atom_idx, batch_size * T.uint32(num_next_n_atoms) - T.uint32(1)),
+            K.min(start_q_atom_idx, batch_size * K.uint32(num_next_n_atoms) - K.uint32(1)),
             batch_size,
         )
-        start_num_kv: T.let = num_kv_result[0]
+        start_num_kv = K.local_scalar("uint32", init=num_kv_result)
 
         # Warm the block table into L2 as early as possible. Race-safe: a stale
-        # prefetched line is invalidated by any later producer write, so the
-        # PDL contract is unaffected. The first task's block-table read then
-        # hits L2 instead of paying a full DRAM round trip (the benchmark
-        # flushes L2 before every timed call, so the first read is always cold).
-        if T.Or(warp_idx == tma_warp_0, warp_idx == tma_warp_1):
-            for pf_i in T.unroll(0, (num_prefetch_lines + 63) // 64):
-                line_idx: T.uint32 = (
-                    (warp_idx_u32 - T.uint32(tma_warp_0)) * T.uint32(32)
+        # prefetched line is invalidated by any later producer write.
+        with K.If(K.Or(warp_idx == tma_warp_0, warp_idx == tma_warp_1)), K.Then():
+            for pf_i in range((num_prefetch_lines + 63) // 64):
+                # A local, not a Python expression: the original declares this
+                # `K.uint32` and the generated CUDA shows `line_idx_ptr[0]`.
+                # Left as an expression it is re-substituted at every use, which
+                # re-reads laneid each time (17 sreg reads vs the original's 5).
+                line_idx = K.local_scalar(
+                    "uint32",
+                    init=(warp_idx_u32 - K.uint32(tma_warp_0)) * K.uint32(32)
                     + lane_idx_u32
-                    + T.uint32(pf_i * 64)
+                    + K.uint32(pf_i * 64),
                 )
-                if line_idx < T.uint32(num_prefetch_lines):
-                    T.ptx.prefetch.global_.L2(
-                        block_table_flat.ptr_to([T.cast(line_idx * T.uint32(32), "int64")])
+                with K.If(line_idx < K.uint32(num_prefetch_lines)), K.Then():
+                    K.ptx.prefetch.global_.L2(
+                        block_table_flat.ptr_to([K.Cast("int64", line_idx * K.uint32(32))])
                     )
 
-        if warp_idx == tma_warp_0:
-            if T.cuda.elect_sync():
-                for init_i in T.unroll(0, num_q_stages):
-                    mbarrier_init_cta(
-                        smem_barriers.ptr_to([full_q_barrier_base + init_i]), T.uint32(1)
+        with K.If(warp_idx == tma_warp_0), K.Then():
+            with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+                for init_i in range(num_q_stages):
+                    K.ptx.mbarrier.init.shared.b64(full_q_barriers.ptr_to([init_i]), K.uint32(1))
+                    K.ptx.mbarrier.init.shared.b64(empty_q_barriers.ptr_to([init_i]), K.uint32(8))
+                K.ptx.fence.mbarrier_init.release.cluster()
+        with K.If(warp_idx == tma_warp_1), K.Then():
+            with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+                for init_i in range(num_kv_stages):
+                    K.ptx.mbarrier.init.shared.b64(full_kv_barriers.ptr_to([init_i]), K.uint32(1))
+                    K.ptx.mbarrier.init.shared.b64(empty_kv_barriers.ptr_to([init_i]), K.uint32(4))
+                K.ptx.fence.mbarrier_init.release.cluster()
+        with K.If(warp_idx == umma_warp_0), K.Then():
+            with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+                for init_i in range(num_kv_stages):
+                    K.ptx.mbarrier.init.shared.b64(
+                        full_kv_barriers.ptr_to([num_kv_stages + init_i]), K.uint32(1)
                     )
-                    mbarrier_init_cta(
-                        smem_barriers.ptr_to([empty_q_barrier_base + init_i]), T.uint32(8)
+                    K.ptx.mbarrier.init.shared.b64(
+                        empty_kv_barriers.ptr_to([num_kv_stages + init_i]), K.uint32(4)
                     )
-                T.ptx.fence.mbarrier_init.release.cluster()
-        if warp_idx == tma_warp_1:
-            if T.cuda.elect_sync():
-                for init_i in T.unroll(0, num_kv_stages):
-                    mbarrier_init_cta(
-                        smem_barriers.ptr_to([full_kv_barrier_base + init_i]), T.uint32(1)
+                K.ptx.fence.mbarrier_init.release.cluster()
+        with K.If(warp_idx == umma_warp_0 + 1), K.Then():
+            with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+                for init_i in range(num_umma_barriers):
+                    K.ptx.mbarrier.init.shared.b64(full_umma_barriers.ptr_to([init_i]), K.uint32(1))
+                    K.ptx.mbarrier.init.shared.b64(
+                        empty_umma_barriers.ptr_to([init_i]), K.uint32(4)
                     )
-                    mbarrier_init_cta(
-                        smem_barriers.ptr_to([empty_kv_barrier_base + init_i]), T.uint32(4)
-                    )
-                T.ptx.fence.mbarrier_init.release.cluster()
-        if warp_idx == umma_warp_0:
-            if T.cuda.elect_sync():
-                for init_i in T.unroll(0, num_kv_stages):
-                    mbarrier_init_cta(
-                        smem_barriers.ptr_to(
-                            [full_kv_barrier_base + T.uint32(num_kv_stages) + init_i]
-                        ),
-                        T.uint32(1),
-                    )
-                    mbarrier_init_cta(
-                        smem_barriers.ptr_to(
-                            [empty_kv_barrier_base + T.uint32(num_kv_stages) + init_i]
-                        ),
-                        T.uint32(4),
-                    )
-                T.ptx.fence.mbarrier_init.release.cluster()
-        if warp_idx == umma_warp_0 + 1:
-            if T.cuda.elect_sync():
-                for init_i in T.unroll(0, num_umma_barriers):
-                    mbarrier_init_cta(
-                        smem_barriers.ptr_to([full_umma_barrier_base + init_i]), T.uint32(1)
-                    )
-                    mbarrier_init_cta(
-                        smem_barriers.ptr_to([empty_umma_barrier_base + init_i]), T.uint32(4)
-                    )
-                T.ptx.fence.mbarrier_init.release.cluster()
-        T.cuda.cta_sync()
+                K.ptx.fence.mbarrier_init.release.cluster()
+        K.cuda.cta_sync()
+        K.ptx.griddepcontrol.wait()
 
-        cuda_grid_dependency_synchronize()
+        # ---------------- roles -----------------------------------------
+        # The original writes this partition as a genuine if/elif chain, so
+        sp = K.specialize()
+        tma0 = sp.role("tma0", warps=[tma_warp_0], regs=num_specialized_registers)
+        tma1 = sp.role("tma1", warps=[tma_warp_1], regs=num_specialized_registers)
+        umma = sp.role("umma", warps=[umma_warp_0, umma_warp_0 + 1], regs=num_specialized_registers)
+        math = sp.role("math", warps=list(range(spec_warp_start)), regs=num_math_registers)
 
-        if warp_idx == tma_warp_0:
-            # TMA warp 0: loads Q + weights (shared) and KV/scales for group 0.
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(num_specialized_registers)
-            current_q_atom_idx: T.uint32 = start_q_atom_idx
-            current_kv_idx: T.uint32 = start_kv_idx
-            current_num_kv: T.uint32 = start_num_kv
-            q_iter_idx: T.uint32 = T.uint32(0)
-            kv_iter_idx: T.uint32 = T.uint32(0)
-            q_stage_idx: T.uint32 = T.uint32(0)
-            q_phase: T.uint32 = T.uint32(0)
-            q_atom_idx: T.uint32 = batch_size * T.uint32(num_next_n_atoms)
-            kv_idx: T.uint32 = T.uint32(0)
-            num_kv: T.uint32 = T.uint32(0)
-            next_q_atom_idx: T.uint32 = current_q_atom_idx
-            next_kv_idx: T.uint32 = current_kv_idx
-            next_num_kv: T.uint32 = current_num_kv
+        def scheduler_state():
+            """Task scheduling state; pipeline cursors stay role-local."""
+            state = {
+                name: K.alloc_local([1], "uint32")
+                for name in (
+                    "cur_q",
+                    "cur_kv",
+                    "cur_num_kv",
+                    "next_q",
+                    "next_kv",
+                    "next_num_kv",
+                    "q_atom",
+                    "kv_idx",
+                    "num_kv",
+                )
+            }
+            state["fetched"] = K.alloc_local([1], "uint32")
+            K.assign(state["cur_q"][0], start_q_atom_idx)
+            K.assign(state["cur_kv"][0], start_kv_idx)
+            K.assign(state["cur_num_kv"][0], start_num_kv)
+            for name in ("kv_idx", "num_kv"):
+                K.assign(state[name][0], K.uint32(0))
+            K.assign(state["q_atom"][0], batch_size * K.uint32(num_next_n_atoms))
+            K.assign(state["next_q"][0], state["cur_q"][0])
+            K.assign(state["next_kv"][0], state["cur_kv"][0])
+            K.assign(state["next_num_kv"][0], state["cur_num_kv"][0])
+            return state
+
+        def pump(state):
+            """One `fetch_next_task` + write-back, exactly as the original does."""
+            K.assign(state["next_q"][0], state["cur_q"][0])
+            K.assign(state["next_kv"][0], state["cur_kv"][0])
+            K.assign(state["next_num_kv"][0], state["cur_num_kv"][0])
             fetch_next_task(
-                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, end_kv_idx
+                state["cur_q"][0],
+                state["cur_kv"][0],
+                state["cur_num_kv"][0],
+                end_q_atom_idx,
+                end_kv_idx,
             )
-            next_q_atom_idx = scheduler_result[0]
-            next_kv_idx = scheduler_result[1]
-            next_num_kv = scheduler_result[2]
-            fetched_next_task: T.bool = scheduler_result[3] != T.uint32(0)
-            current_q_atom_idx = scheduler_result[4]
-            current_kv_idx = scheduler_result[5]
-            current_num_kv = scheduler_result[6]
-            if fetched_next_task:
-                issue_tma_q(T.uint32(0), next_q_atom_idx)
-                q_iter_idx = T.uint32(1)
+            K.assign(state["next_q"][0], scheduler_result[0])
+            K.assign(state["next_kv"][0], scheduler_result[1])
+            K.assign(state["next_num_kv"][0], scheduler_result[2])
+            K.assign(state["fetched"][0], scheduler_result[3])
+            K.assign(state["cur_q"][0], scheduler_result[4])
+            K.assign(state["cur_kv"][0], scheduler_result[5])
+            K.assign(state["cur_num_kv"][0], scheduler_result[6])
 
-            kv_block_idx_ptr: T.uint32 = T.uint32(32)
-            cached_kv_blocks = T.alloc_local((num_pages_per_tile,), "uint32")
-
-            while fetched_next_task:
-                load_atom_advance(next_q_atom_idx, batch_size)
-                next_advance: T.uint32 = atom_advance_result[0]
-                prefetch_q: T.bool = T.And(
-                    q_atom_idx != next_q_atom_idx,
-                    exist_q_atom_idx_expr(
-                        next_q_atom_idx + next_advance, end_q_atom_idx, end_kv_idx
-                    ),
+        def load_block_table(state, kv_ptr, cached, lane_offset_tiles):
+            """Block-table gather + the warp broadcast, at the original's
+            position inside the task loop. The __shfl_sync is a value-returning
+            warp collective in a loop: G3 forbids moving it."""
+            with K.If(kv_ptr[0] == K.uint32(32)), K.Then():
+                K.assign(kv_ptr[0], K.uint32(0))
+                block_table_offset = K.local_scalar(
+                    "uint64",
+                    init=K.Cast("uint64", atom_to_block_table_row_expr(state["q_atom"][0]))
+                    * K.Cast("uint64", block_table_stride),
                 )
-                if q_atom_idx != next_q_atom_idx:
-                    kv_block_idx_ptr = T.uint32(32)
-                q_atom_idx = next_q_atom_idx
-                kv_idx = next_kv_idx
-                num_kv = next_num_kv
-
-                # Prefetch the next Q atom as soon as the batch changes so the
-                # Q TMA overlaps the block-table load below (CuTeDSL order).
-                if prefetch_q:
-                    get_q_pipeline(q_iter_idx)
-                    q_stage_idx = fetch_result[0]
-                    q_phase = fetch_result[1]
-                    q_iter_idx = q_iter_idx + T.uint32(1)
-                    mbarrier_wait_phase(
-                        smem_barriers.ptr_to([empty_q_barrier_base + q_stage_idx]),
-                        q_phase ^ T.uint32(1),
-                    )
-                    issue_tma_q(q_stage_idx, q_atom_idx + next_advance)
-
-                if kv_block_idx_ptr == T.uint32(32):
-                    kv_block_idx_ptr = T.uint32(0)
-                    block_table_offset: T.uint64 = T.cast(
-                        atom_to_block_table_row_expr(q_atom_idx), "uint64"
-                    ) * T.cast(block_table_stride, "uint64")
-                    prefetch_tile_idx: T.uint32 = kv_idx + lane_idx_u32 * T.uint32(
-                        num_tiles_per_split
-                    )
-                    block_table_index: T.uint64 = block_table_offset + T.cast(
-                        prefetch_tile_idx * T.uint32(num_pages_per_tile), "uint64"
-                    )
-                    for block_i in T.unroll(0, num_pages_per_tile):
-                        # Guard the trailing partial tile: a valid compute tile
-                        # may still exceed the block table's row length, and an
-                        # out-of-range garbage page id would send TMA out of
-                        # bounds (page 0 is used as the masked-dumpster tile).
-                        if T.And(
-                            prefetch_tile_idx < num_kv,
-                            prefetch_tile_idx * T.uint32(num_pages_per_tile) + T.uint32(block_i)
-                            < T.uint32(config.max_num_pages),
-                        ):
-                            T.ptx.ld.global_.u32(
-                                cached_kv_blocks[block_i],
+                prefetch_tile_idx = K.local_scalar(
+                    "uint32",
+                    init=state["kv_idx"][0]
+                    + K.uint32(lane_offset_tiles)
+                    + lane_idx_u32 * K.uint32(num_tiles_per_split),
+                )
+                block_table_index = K.local_scalar(
+                    "uint64",
+                    init=block_table_offset
+                    + K.Cast("uint64", prefetch_tile_idx * K.uint32(num_pages_per_tile)),
+                )
+                for block_i in range(num_pages_per_tile):
+                    # Guard the trailing partial tile: a valid compute tile may
+                    # still exceed the block table's row length, and a garbage
+                    # page id would send TMA out of bounds (page 0 is the
+                    # masked-dumpster tile).
+                    with K.If(
+                        K.And(
+                            prefetch_tile_idx < state["num_kv"][0],
+                            prefetch_tile_idx * K.uint32(num_pages_per_tile) + K.uint32(block_i)
+                            < K.uint32(config.max_num_pages),
+                        )
+                    ):
+                        with K.Then():
+                            K.ptx.ld.global_.u32(
+                                cached[block_i],
                                 block_table_flat.ptr_to(
-                                    [T.cast(block_table_index + T.cast(block_i, "uint64"), "int64")]
+                                    [K.Cast("int64", block_table_index + K.uint64(block_i))]
                                 ),
                             )
-                        else:
-                            cached_kv_blocks[block_i] = T.uint32(0)
-                T.cuda.warp_sync()
-
-                kv_block_idx = T.alloc_local((num_pages_per_tile,), "uint32")
-                for block_i in T.unroll(0, num_pages_per_tile):
-                    kv_block_idx[block_i] = T.cuda.__shfl_sync(
-                        T.uint32(0xFFFFFFFF), cached_kv_blocks[block_i], kv_block_idx_ptr, 32
-                    )
-                kv_block_idx_ptr = kv_block_idx_ptr + T.uint32(1)
-
-                get_kv_pipeline(kv_iter_idx)
-                kv_stage_idx: T.uint32 = fetch_result[2]
-                kv_phase: T.uint32 = fetch_result[3]
-                kv_iter_idx = kv_iter_idx + T.uint32(1)
-                mbarrier_wait_phase(
-                    smem_barriers.ptr_to([empty_kv_barrier_base + kv_stage_idx]),
-                    kv_phase ^ T.uint32(1),
+                        with K.Else():
+                            K.ptx.mov.b32(cached[block_i], K.uint32(0))
+            K.cuda.warp_sync()
+            kv_block_idx = K.alloc_local([num_pages_per_tile], "uint32")
+            for block_i in range(num_pages_per_tile):
+                K.ptx.shfl_sync.idx.b32(
+                    kv_block_idx[block_i],
+                    cached[block_i],
+                    kv_ptr[0],
+                    K.uint32(0x1F),
+                    K.uint32(0xFFFFFFFF),
                 )
+            K.assign(kv_ptr[0], kv_ptr[0] + K.uint32(1))
+            return kv_block_idx
 
-                if T.cuda.elect_sync():
-                    for block_i in T.unroll(0, num_pages_per_tile):
-                        tma_load_3d_kv(
-                            smem_kv.ptr_to([0, kv_stage_idx, block_i * page_size, 0]),
-                            smem_barriers.ptr_to([full_kv_barrier_base + kv_stage_idx]),
-                            tensor_map_kv,
-                            T.uint32(0),
-                            T.uint32(0),
-                            kv_block_idx[block_i],
-                        )
-                        tma_load_2d_kv_scales(
-                            smem_kv_scales.ptr_to([0, kv_stage_idx, block_i * page_size]),
-                            smem_barriers.ptr_to([full_kv_barrier_base + kv_stage_idx]),
-                            tensor_map_kv_scales,
-                            T.uint32(0),
-                            kv_block_idx[block_i],
-                        )
-                    mbarrier_arrive_and_expect_tx(
-                        smem_barriers.ptr_to([full_kv_barrier_base + kv_stage_idx]),
-                        smem_kv_size_per_stage + smem_kv_scale_size_per_stage,
+        def issue_kv_tma(group, kv_state, kv_block_idx):
+            base = group * num_kv_stages
+            empty_kv_barriers.wait(K.uint32(base) + kv_state.stage, kv_state.phase ^ K.uint32(1))
+            with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+                for block_i in range(num_pages_per_tile):
+                    K.ptx[TMA_G2S_3D](
+                        smem_kv.ptr_to([group, kv_state.stage, block_i * page_size, 0]),
+                        K.address_of(tensor_map_kv),
+                        K.int32(0),
+                        K.int32(0),
+                        K.Cast("int32", kv_block_idx[block_i]),
+                        full_kv_barriers.ptr_to([K.uint32(base) + kv_state.stage]),
+                        cache_policy_evict_normal,
                     )
-
-                next_q_atom_idx = current_q_atom_idx
-                next_kv_idx = current_kv_idx
-                next_num_kv = current_num_kv
-                fetch_next_task(
-                    current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, end_kv_idx
+                    K.ptx[TMA_G2S_2D](
+                        smem_kv_scales.ptr_to([group, kv_state.stage, block_i * page_size]),
+                        K.address_of(tensor_map_kv_scales),
+                        K.int32(0),
+                        K.Cast("int32", kv_block_idx[block_i]),
+                        full_kv_barriers.ptr_to([K.uint32(base) + kv_state.stage]),
+                        cache_policy_evict_normal,
+                    )
+                full_kv_barriers.arrive(
+                    K.uint32(base) + kv_state.stage,
+                    tx_count=smem_kv_size_per_stage + smem_kv_scale_size_per_stage,
                 )
-                next_q_atom_idx = scheduler_result[0]
-                next_kv_idx = scheduler_result[1]
-                next_num_kv = scheduler_result[2]
-                fetched_next_task = scheduler_result[3] != T.uint32(0)
-                current_q_atom_idx = scheduler_result[4]
-                current_kv_idx = scheduler_result[5]
-                current_num_kv = scheduler_result[6]
-        elif warp_idx == tma_warp_1:
-            # TMA warp 1: loads KV/scales for group 1 only.
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(num_specialized_registers)
-            current_q_atom_idx: T.uint32 = start_q_atom_idx
-            current_kv_idx: T.uint32 = start_kv_idx
-            current_num_kv: T.uint32 = start_num_kv
-            kv_iter_idx: T.uint32 = T.uint32(0)
-            q_atom_idx: T.uint32 = batch_size * T.uint32(num_next_n_atoms)
-            kv_idx: T.uint32 = T.uint32(0)
-            num_kv: T.uint32 = T.uint32(0)
-            next_q_atom_idx: T.uint32 = current_q_atom_idx
-            next_kv_idx: T.uint32 = current_kv_idx
-            next_num_kv: T.uint32 = current_num_kv
-            fetch_next_task(
-                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, end_kv_idx
-            )
-            next_q_atom_idx = scheduler_result[0]
-            next_kv_idx = scheduler_result[1]
-            next_num_kv = scheduler_result[2]
-            fetched_next_task: T.bool = scheduler_result[3] != T.uint32(0)
-            current_q_atom_idx = scheduler_result[4]
-            current_kv_idx = scheduler_result[5]
-            current_num_kv = scheduler_result[6]
+            kv_state.advance()
 
-            kv_block_idx_ptr: T.uint32 = T.uint32(32)
-            cached_kv_blocks = T.alloc_local((num_pages_per_tile,), "uint32")
-
-            while fetched_next_task:
-                if q_atom_idx != next_q_atom_idx:
-                    kv_block_idx_ptr = T.uint32(32)
-                q_atom_idx = next_q_atom_idx
-                kv_idx = next_kv_idx
-                num_kv = next_num_kv
-
-                if kv_block_idx_ptr == T.uint32(32):
-                    kv_block_idx_ptr = T.uint32(0)
-                    block_table_offset: T.uint64 = T.cast(
-                        atom_to_block_table_row_expr(q_atom_idx), "uint64"
-                    ) * T.cast(block_table_stride, "uint64")
-                    prefetch_tile_idx: T.uint32 = (
-                        kv_idx + T.uint32(1) + lane_idx_u32 * T.uint32(num_tiles_per_split)
-                    )
-                    block_table_index: T.uint64 = block_table_offset + T.cast(
-                        prefetch_tile_idx * T.uint32(num_pages_per_tile), "uint64"
-                    )
-                    for block_i in T.unroll(0, num_pages_per_tile):
-                        # Guard the trailing partial tile: a valid compute tile
-                        # may still exceed the block table's row length, and an
-                        # out-of-range garbage page id would send TMA out of
-                        # bounds (page 0 is used as the masked-dumpster tile).
-                        if T.And(
-                            prefetch_tile_idx < num_kv,
-                            prefetch_tile_idx * T.uint32(num_pages_per_tile) + T.uint32(block_i)
-                            < T.uint32(config.max_num_pages),
-                        ):
-                            T.ptx.ld.global_.u32(
-                                cached_kv_blocks[block_i],
-                                block_table_flat.ptr_to(
-                                    [T.cast(block_table_index + T.cast(block_i, "uint64"), "int64")]
-                                ),
-                            )
-                        else:
-                            cached_kv_blocks[block_i] = T.uint32(0)
-                T.cuda.warp_sync()
-
-                kv_block_idx = T.alloc_local((num_pages_per_tile,), "uint32")
-                for block_i in T.unroll(0, num_pages_per_tile):
-                    kv_block_idx[block_i] = T.cuda.__shfl_sync(
-                        T.uint32(0xFFFFFFFF), cached_kv_blocks[block_i], kv_block_idx_ptr, 32
-                    )
-                kv_block_idx_ptr = kv_block_idx_ptr + T.uint32(1)
-
-                get_kv_pipeline(kv_iter_idx)
-                kv_stage_idx: T.uint32 = fetch_result[2]
-                kv_phase: T.uint32 = fetch_result[3]
-                kv_iter_idx = kv_iter_idx + T.uint32(1)
-                mbarrier_wait_phase(
-                    smem_barriers.ptr_to(
-                        [empty_kv_barrier_base + T.uint32(num_kv_stages) + kv_stage_idx]
+        # ---------------- warp 8: Q + weights, and KV for group 0 --------
+        with tma0:
+            state = scheduler_state()
+            # Stage 0 is issued unconditionally before the steady-state ring;
+            # start the owned cursor at its exact successor instead of emitting
+            # a runtime advance solely for that prologue issue.
+            q_state = K.RingState(num_q_stages, stage=1)
+            kv_state = K.RingState(num_kv_stages)
+            pump(state)
+            with K.If(state["fetched"][0] != K.uint32(0)), K.Then():
+                issue_tma_q(K.uint32(0), state["next_q"][0])
+            kv_ptr = K.alloc_local([1], "uint32")
+            cached = K.alloc_local([num_pages_per_tile], "uint32")
+            K.assign(kv_ptr[0], K.uint32(32))
+            with K.While(state["fetched"][0] != K.uint32(0)):
+                load_atom_advance(state["next_q"][0], batch_size)
+                next_advance = K.local_scalar("uint32", init=atom_advance_result)
+                prefetch_q = K.local_scalar("uint32", init=K.uint32(0))
+                with (
+                    K.If(
+                        K.And(
+                            state["q_atom"][0] != state["next_q"][0],
+                            exist_q_atom_idx_expr(
+                                state["next_q"][0] + next_advance, end_q_atom_idx, end_kv_idx
+                            ),
+                        )
                     ),
-                    kv_phase ^ T.uint32(1),
-                )
+                    K.Then(),
+                ):
+                    K.assign(prefetch_q, K.uint32(1))
+                with K.If(state["q_atom"][0] != state["next_q"][0]), K.Then():
+                    K.assign(kv_ptr[0], K.uint32(32))
+                K.assign(state["q_atom"][0], state["next_q"][0])
+                K.assign(state["kv_idx"][0], state["next_kv"][0])
+                K.assign(state["num_kv"][0], state["next_num_kv"][0])
 
-                if T.cuda.elect_sync():
-                    for block_i in T.unroll(0, num_pages_per_tile):
-                        tma_load_3d_kv(
-                            smem_kv.ptr_to([1, kv_stage_idx, block_i * page_size, 0]),
-                            smem_barriers.ptr_to(
-                                [full_kv_barrier_base + T.uint32(num_kv_stages) + kv_stage_idx]
-                            ),
-                            tensor_map_kv,
-                            T.uint32(0),
-                            T.uint32(0),
-                            kv_block_idx[block_i],
-                        )
-                        tma_load_2d_kv_scales(
-                            smem_kv_scales.ptr_to([1, kv_stage_idx, block_i * page_size]),
-                            smem_barriers.ptr_to(
-                                [full_kv_barrier_base + T.uint32(num_kv_stages) + kv_stage_idx]
-                            ),
-                            tensor_map_kv_scales,
-                            T.uint32(0),
-                            kv_block_idx[block_i],
-                        )
-                    mbarrier_arrive_and_expect_tx(
-                        smem_barriers.ptr_to(
-                            [full_kv_barrier_base + T.uint32(num_kv_stages) + kv_stage_idx]
-                        ),
-                        smem_kv_size_per_stage + smem_kv_scale_size_per_stage,
-                    )
+                # Prefetch the next Q atom as soon as the batch changes so the Q
+                # TMA overlaps the block-table load below (the original's order).
+                with K.If(prefetch_q != K.uint32(0)), K.Then():
+                    empty_q_barriers.wait(q_state.stage, q_state.phase ^ K.uint32(1))
+                    issue_tma_q(q_state.stage, state["q_atom"][0] + next_advance)
+                    q_state.advance()
 
-                next_q_atom_idx = current_q_atom_idx
-                next_kv_idx = current_kv_idx
-                next_num_kv = current_num_kv
-                fetch_next_task(
-                    current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, end_kv_idx
-                )
-                next_q_atom_idx = scheduler_result[0]
-                next_kv_idx = scheduler_result[1]
-                next_num_kv = scheduler_result[2]
-                fetched_next_task = scheduler_result[3] != T.uint32(0)
-                current_q_atom_idx = scheduler_result[4]
-                current_kv_idx = scheduler_result[5]
-                current_num_kv = scheduler_result[6]
-        elif T.Or(warp_idx == umma_warp_0, warp_idx == umma_warp_0 + 1):
-            # One UMMA warp per math warpgroup: waits for its group's KV stage,
-            # then issues the 4 tcgen05 MMAs (K=32 each) for its group.
-            T.ptx.setmaxnreg.dec.sync.aligned.u32(num_specialized_registers)
-            umma_group_idx: T.let = warp_idx_u32 - T.uint32(umma_warp_0)
+                kv_block_idx = load_block_table(state, kv_ptr, cached, 0)
+                issue_kv_tma(0, kv_state, kv_block_idx)
+                pump(state)
+
+        # ---------------- warp 9: KV for group 1 -------------------------
+        with tma1:
+            state = scheduler_state()
+            kv_state = K.RingState(num_kv_stages)
+            pump(state)
+            kv_ptr = K.alloc_local([1], "uint32")
+            cached = K.alloc_local([num_pages_per_tile], "uint32")
+            K.assign(kv_ptr[0], K.uint32(32))
+            with K.While(state["fetched"][0] != K.uint32(0)):
+                with K.If(state["q_atom"][0] != state["next_q"][0]), K.Then():
+                    K.assign(kv_ptr[0], K.uint32(32))
+                K.assign(state["q_atom"][0], state["next_q"][0])
+                K.assign(state["kv_idx"][0], state["next_kv"][0])
+                K.assign(state["num_kv"][0], state["next_num_kv"][0])
+                kv_block_idx = load_block_table(state, kv_ptr, cached, 1)
+                issue_kv_tma(1, kv_state, kv_block_idx)
+                pump(state)
+
+        # ---------------- warps 10-11: UMMA issuers ----------------------
+        with umma:
+            umma_group_idx = K.Cast("uint32", K.warp_id_in_role())
             # TMEM allocation happens off the full-CTA sync path (the ~300-cycle
-            # tcgen05.alloc would otherwise hold back the TMA warps' first issue).
-            # Only the UMMA and Math warps wait for it on named barrier 9 (the
-            # TMA warps do not touch TMEM). Matches the CuTeDSL TmemAllocator
-            # split: math warp allocs, consumers sync on a sub-CTA barrier.
-            if warp_idx == umma_warp_0 + 1:
-                T.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
-                    T.address_of(tmem_ptr_in_smem[0]), T.uint32(num_tmem_cols)
+            # tcgen05.alloc would otherwise hold back the TMA warps' first
+            # issue). Only UMMA and Math wait for it, on named barrier 9.
+            # Keep the raw collective here so allocation stays on this
+            # kernel-specific issue boundary.
+            with K.If(umma_group_idx == K.uint32(1)), K.Then():
+                K.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                    K.address_of(tmem_ptr_in_smem[0]), K.uint32(num_tmem_cols)
                 )
-            T.ptx.barrier.sync(9, T.uint32(num_math_threads + 2 * 32))
-            current_q_atom_idx: T.uint32 = start_q_atom_idx
-            current_kv_idx: T.uint32 = start_kv_idx
-            current_num_kv: T.uint32 = start_num_kv
-            q_iter_idx: T.uint32 = T.uint32(0)
-            kv_iter_idx: T.uint32 = T.uint32(0)
-            q_stage_idx: T.uint32 = T.uint32(0)
-            q_phase: T.uint32 = T.uint32(0)
-            tmem_allocated: T.uint32
-            T.ptx.ld.shared.u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
-            T.cuda.trap_when_assert_failed(tmem_allocated == T.uint32(0))
-            desc_i: T.uint32
-            desc_a: T.uint64
-            desc_b: T.uint64
-            T.cuda.tcgen05.encode_instr_descriptor(
-                T.address_of(desc_i),
+            K.ptx.bar.sync(9, K.uint32(num_math_threads + 2 * 32))
+            tmem_allocated = K.local_scalar("uint32")
+            K.ptx.ld.shared.u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
+            K.cuda.trap_when_assert_failed(tmem_allocated == K.uint32(0))
+            desc_i = K.local_scalar("uint32")
+            desc_a = K.local_scalar("uint64")
+            desc_b = K.local_scalar("uint64")
+            K.cuda.tcgen05.encode_instr_descriptor(
+                K.address_of(desc_i),
                 d_dtype="float32",
                 a_dtype="float8_e4m3fn",
                 b_dtype="float8_e4m3fn",
@@ -1476,436 +1142,237 @@ def get_kernel(**kwargs: Any):
                 trans_b=False,
                 n_cta_groups=1,
             )
-            runtime_instr_desc: T.uint64 = T.shift_left(T.cast(desc_i, "uint64"), T.uint64(32))
-            runtime_instr_desc_hi: T.uint32 = T.cast(
-                T.shift_right(runtime_instr_desc, T.uint64(32)), "uint32"
+            # The dead shift round trip is the original's; ptxas folds the whole
+            # thing to one UMOV immediate, so it costs nothing and removing it
+            # would be a deviation with nothing to win.
+            runtime_instr_desc = K.local_scalar("uint64")
+            runtime_instr_desc_hi = K.local_scalar("uint32")
+            K.assign(runtime_instr_desc, K.shift_left(K.Cast("uint64", desc_i), K.uint64(32)))
+            K.assign(
+                runtime_instr_desc_hi,
+                K.Cast("uint32", K.shift_right(runtime_instr_desc, K.uint64(32))),
             )
-            q_atom_idx: T.uint32 = batch_size * T.uint32(num_next_n_atoms)
-            kv_idx: T.uint32 = T.uint32(0)
-            next_q_atom_idx: T.uint32 = current_q_atom_idx
-            next_kv_idx: T.uint32 = current_kv_idx
-            next_num_kv: T.uint32 = current_num_kv
-            fetch_next_task(
-                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, end_kv_idx
-            )
-            next_q_atom_idx = scheduler_result[0]
-            next_kv_idx = scheduler_result[1]
-            next_num_kv = scheduler_result[2]
-            fetched_next_task: T.bool = scheduler_result[3] != T.uint32(0)
-            current_q_atom_idx = scheduler_result[4]
-            current_kv_idx = scheduler_result[5]
-            current_num_kv = scheduler_result[6]
-            umma_iter_idx: T.uint32 = T.uint32(0)
-            while fetched_next_task:
-                if q_atom_idx != next_q_atom_idx:
-                    # Wait for the new Q stage (wait only; Math releases it).
-                    get_q_pipeline(q_iter_idx)
-                    q_stage_idx = fetch_result[0]
-                    q_phase = fetch_result[1]
-                    q_iter_idx = q_iter_idx + T.uint32(1)
-                    mbarrier_wait_phase(
-                        smem_barriers.ptr_to([full_q_barrier_base + q_stage_idx]), q_phase
-                    )
-                q_atom_idx = next_q_atom_idx
-                kv_idx = next_kv_idx
+            state = scheduler_state()
+            q_state = K.RingState(num_q_stages)
+            kv_state = K.RingState(num_kv_stages)
+            umma_state = K.RingState(num_umma_stages)
+            q_stage = K.local_scalar("uint32", init=K.uint32(0))
+            pump(state)
+            with K.While(state["fetched"][0] != K.uint32(0)):
+                with K.If(state["q_atom"][0] != state["next_q"][0]), K.Then():
+                    K.assign(q_stage, q_state.stage)
+                    full_q_barriers.wait(q_stage, q_state.phase)
+                    q_state.advance()
+                K.assign(state["q_atom"][0], state["next_q"][0])
+                K.assign(state["kv_idx"][0], state["next_kv"][0])
 
-                get_kv_pipeline(kv_iter_idx)
-                kv_stage_idx: T.uint32 = fetch_result[2]
-                kv_phase: T.uint32 = fetch_result[3]
-                kv_iter_idx = kv_iter_idx + T.uint32(1)
-                mbarrier_wait_phase(
-                    smem_barriers.ptr_to(
-                        [
-                            full_kv_barrier_base
-                            + umma_group_idx * T.uint32(num_kv_stages)
-                            + kv_stage_idx
-                        ]
-                    ),
-                    kv_phase,
+                kv_stage = kv_state.stage
+                kv_phase = kv_state.phase
+                full_kv_barriers.wait(umma_group_idx * K.uint32(num_kv_stages) + kv_stage, kv_phase)
+                umma_stage = umma_state.stage
+                umma_phase = umma_state.phase
+                empty_umma_barriers.wait(
+                    umma_group_idx * K.uint32(num_umma_stages) + umma_stage,
+                    umma_phase ^ K.uint32(1),
                 )
-                umma_stage_idx: T.uint32 = umma_iter_idx % T.uint32(num_umma_stages)
-                umma_phase: T.uint32 = (umma_iter_idx // T.uint32(num_umma_stages)) & T.uint32(1)
-                umma_iter_idx = umma_iter_idx + T.uint32(1)
-                mbarrier_wait_phase(
-                    smem_barriers.ptr_to(
-                        [
-                            empty_umma_barrier_base
-                            + umma_group_idx * T.uint32(num_umma_stages)
-                            + umma_stage_idx
-                        ]
-                    ),
-                    umma_phase ^ T.uint32(1),
-                )
-                T.ptx.tcgen05.fence__after_thread_sync()
-                T.static_assert(head_dim % umma_k == 0, "Invalid head dim")
-                for k in T.unroll(0, head_dim // umma_k):
+                K.ptx.tcgen05.fence__after_thread_sync()
+                # G3, LAW: elect_sync wraps EACH MMA individually, inside the
+                # unrolled k loop, with the descriptor recompute OUTSIDE the
+                # elect. This is the original's placement and it is preserved
+                # verbatim -- never normalised to the non-paged kernel's
+                # whole-loop elect form. Hoisting a collective out of a loop
+                # produced a deterministic launch failure elsewhere.
+                for k_phase in range(head_dim // umma_k):
                     make_smem_desc(
-                        desc_a, smem_kv.ptr_to([umma_group_idx, kv_stage_idx, 0, k * umma_k])
+                        desc_a, smem_kv.ptr_to([umma_group_idx, kv_stage, 0, k_phase * umma_k])
                     )
-                    make_smem_desc(desc_b, smem_q.ptr_to([q_stage_idx, 0, k * umma_k]))
-                    if T.cuda.elect_sync():
-                        T.ptx["tcgen05.mma.cta_group::1.kind::f8f6f4"](
-                            umma_group_idx * T.uint32(umma_n * num_umma_stages)
-                            + umma_stage_idx * T.uint32(umma_n),
+                    make_smem_desc(desc_b, smem_q.ptr_to([q_stage, 0, k_phase * umma_k]))
+                    with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+                        K.ptx[MMA](
+                            K.Cast("uint32", tmem.allocated_addr[0])
+                            + umma_group_idx * K.uint32(umma_n * num_umma_stages)
+                            + umma_stage * K.uint32(umma_n),
                             desc_a,
                             desc_b,
                             runtime_instr_desc_hi,
-                            T.uint32(0),
-                            T.uint32(0),
-                            T.uint32(0),
-                            T.uint32(0),
-                            T.ptx.pred(T.uint32(k)),
+                            K.uint32(0),
+                            K.uint32(0),
+                            K.uint32(0),
+                            K.uint32(0),
+                            K.ptx.pred(K.uint32(k_phase)),
                         )
-                if T.cuda.elect_sync():
-                    T.ptx.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
-                        smem_barriers.ptr_to(
-                            [
-                                full_umma_barrier_base
-                                + umma_group_idx * T.uint32(num_umma_stages)
-                                + umma_stage_idx
-                            ]
-                        )
+                with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
+                    full_umma_barriers.arrive(
+                        umma_group_idx * K.uint32(num_umma_stages) + umma_stage, cta_group=1
                     )
-                next_q_atom_idx = current_q_atom_idx
-                next_kv_idx = current_kv_idx
-                next_num_kv = current_num_kv
-                fetch_next_task(
-                    current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, end_kv_idx
-                )
-                next_q_atom_idx = scheduler_result[0]
-                next_kv_idx = scheduler_result[1]
-                next_num_kv = scheduler_result[2]
-                fetched_next_task = scheduler_result[3] != T.uint32(0)
-                current_q_atom_idx = scheduler_result[4]
-                current_kv_idx = scheduler_result[5]
-                current_num_kv = scheduler_result[6]
-        elif warp_idx < spec_warp_start:
-            T.ptx.setmaxnreg.inc.sync.aligned.u32(num_math_registers)
-            # Math warps consume TMEM: wait on named barrier 9 for the UMMA
-            # warp's tcgen05.alloc (see the UMMA branch).
-            T.ptx.barrier.sync(9, T.uint32(num_math_threads + 2 * 32))
-            current_q_atom_idx: T.uint32 = start_q_atom_idx
-            current_kv_idx: T.uint32 = start_kv_idx
-            current_num_kv: T.uint32 = start_num_kv
-            q_iter_idx: T.uint32 = T.uint32(0)
-            kv_iter_idx: T.uint32 = T.uint32(0)
-            q_stage_idx: T.uint32 = T.uint32(0)
-            q_phase: T.uint32 = T.uint32(0)
-            math_warpgroup_idx: T.int32 = warpgroup_idx
-            math_wg_u32: T.let = T.cast(math_warpgroup_idx, "uint32")
-            tmem_start_base: T.let = math_wg_u32 * T.uint32(umma_n * num_umma_stages)
-            math_thread_idx: T.uint32 = (warp_idx_u32 % T.uint32(4)) * T.uint32(32) + lane_idx_u32
-            cached_weights = T.alloc_local((next_n_atom, num_heads), "float32")
-            q_atom_idx: T.uint32 = batch_size * T.uint32(num_next_n_atoms)
-            next_q_atom_idx: T.uint32 = current_q_atom_idx
-            next_kv_idx: T.uint32 = current_kv_idx
-            next_num_kv: T.uint32 = current_num_kv
-            fetch_next_task(
-                current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, end_kv_idx
-            )
-            next_q_atom_idx = scheduler_result[0]
-            next_kv_idx = scheduler_result[1]
-            next_num_kv = scheduler_result[2]
-            fetched_next_task: T.bool = scheduler_result[3] != T.uint32(0)
-            current_q_atom_idx = scheduler_result[4]
-            current_kv_idx = scheduler_result[5]
-            current_num_kv = scheduler_result[6]
-            umma_iter_idx: T.uint32 = T.uint32(0)
-            is_paired_atom: T.bool = T.bool(False)
-            T.static_assert(num_heads % 8 == 0, "Invalid head")
+                kv_state.advance()
+                umma_state.advance()
+                pump(state)
 
-            @T.inline
-            def reduce_and_store(num_iters_c, kv_offset_arg, scale_kv_arg, umma_stage_idx_arg):
-                accum = T.alloc_local((num_heads,), "float32")
-                T.static_assert(num_heads == 32 or num_heads == 64, "Unsupported TMEM load size")
+        # ---------------- warps 0-7: math + epilogue ---------------------
+        with math:
+            # Math warps consume TMEM: wait on named barrier 9 for the UMMA
+            # warp's tcgen05.alloc (see the UMMA role).
+            K.ptx.bar.sync(9, K.uint32(num_math_threads + 2 * 32))
+            math_wg_u32 = K.Cast("uint32", warpgroup_idx)
+            tmem_start_base = K.Cast("uint32", tmem.allocated_addr[0]) + math_wg_u32 * K.uint32(
+                umma_n * num_umma_stages
+            )
+            math_thread_idx = K.local_scalar(
+                "uint32",
+                init=(K.Cast("uint32", K.warp_id_in_role()) % K.uint32(4)) * K.uint32(32)
+                + lane_idx_u32,
+            )
+            cached_weights = K.alloc_local([next_n_atom, num_heads], "float32")
+            is_paired_atom = K.local_scalar("uint32", init=K.uint32(0))
+            state = scheduler_state()
+            q_state = K.RingState(num_q_stages)
+            kv_state = K.RingState(num_kv_stages)
+            umma_state = K.RingState(num_umma_stages)
+            q_stage = K.local_scalar("uint32", init=K.uint32(0))
+            has_q_stage = K.local_scalar("uint32", init=K.uint32(0))
+            pump(state)
+
+            def reduce_and_store(num_iters_c, kv_offset, scale_kv, umma_stage_idx_arg):
+                accum = K.alloc_local([num_heads], "float32")
                 # relu(x) = (x + |x|) * 0.5; the epilogue accumulates 2*relu and
                 # folds the 0.5 into the output scale so the ReLU runs on the
                 # FMA pipe through the packed f32x2 add with abs source
-                # modifiers instead of scalar FMNMX on the ALU pipe (the SM100
-                # bottleneck for this kernel, per the CuTeDSL baseline).
-                scale_kv_half: T.let = fmul_rn_noftz(scale_kv_arg, T.float32(0.5))
-                for q_inner_i in T.unroll(0, num_iters_c):
-                    tmem_addr: T.uint32 = (
+                # modifiers, instead of scalar FMNMX on the ALU pipe.
+                scale_kv_half = K.local_scalar("float32")
+                K.ptx.mul.rn.f32(scale_kv_half, scale_kv, K.float32(0.5))
+                for q_inner_i in range(num_iters_c):
+                    tmem_addr = (
                         tmem_start_base
-                        + umma_stage_idx_arg * T.uint32(umma_n)
-                        + T.uint32(q_inner_i * num_heads)
+                        + umma_stage_idx_arg * K.uint32(umma_n)
+                        + K.uint32(q_inner_i * num_heads)
                     )
-                    if num_heads == 32:
-                        T.ptx["tcgen05.ld.sync.aligned.32x32b.x32.b32"](
-                            accum[0],
-                            accum[1],
-                            accum[2],
-                            accum[3],
-                            accum[4],
-                            accum[5],
-                            accum[6],
-                            accum[7],
-                            accum[8],
-                            accum[9],
-                            accum[10],
-                            accum[11],
-                            accum[12],
-                            accum[13],
-                            accum[14],
-                            accum[15],
-                            accum[16],
-                            accum[17],
-                            accum[18],
-                            accum[19],
-                            accum[20],
-                            accum[21],
-                            accum[22],
-                            accum[23],
-                            accum[24],
-                            accum[25],
-                            accum[26],
-                            accum[27],
-                            accum[28],
-                            accum[29],
-                            accum[30],
-                            accum[31],
-                            T.uint32(tmem_addr),
-                        )
-                    if num_heads == 64:
-                        T.ptx["tcgen05.ld.sync.aligned.32x32b.x64.b32"](
-                            accum[0],
-                            accum[1],
-                            accum[2],
-                            accum[3],
-                            accum[4],
-                            accum[5],
-                            accum[6],
-                            accum[7],
-                            accum[8],
-                            accum[9],
-                            accum[10],
-                            accum[11],
-                            accum[12],
-                            accum[13],
-                            accum[14],
-                            accum[15],
-                            accum[16],
-                            accum[17],
-                            accum[18],
-                            accum[19],
-                            accum[20],
-                            accum[21],
-                            accum[22],
-                            accum[23],
-                            accum[24],
-                            accum[25],
-                            accum[26],
-                            accum[27],
-                            accum[28],
-                            accum[29],
-                            accum[30],
-                            accum[31],
-                            accum[32],
-                            accum[33],
-                            accum[34],
-                            accum[35],
-                            accum[36],
-                            accum[37],
-                            accum[38],
-                            accum[39],
-                            accum[40],
-                            accum[41],
-                            accum[42],
-                            accum[43],
-                            accum[44],
-                            accum[45],
-                            accum[46],
-                            accum[47],
-                            accum[48],
-                            accum[49],
-                            accum[50],
-                            accum[51],
-                            accum[52],
-                            accum[53],
-                            accum[54],
-                            accum[55],
-                            accum[56],
-                            accum[57],
-                            accum[58],
-                            accum[59],
-                            accum[60],
-                            accum[61],
-                            accum[62],
-                            accum[63],
-                            T.uint32(tmem_addr),
-                        )
-                    T.ptx.tcgen05.wait__ld.sync.aligned()
+                    K.ptx[TC_LD](*[accum[h] for h in range(num_heads)], tmem_addr)
+                    K.ptx.tcgen05.wait__ld.sync.aligned()
                     if q_inner_i == num_iters_c - 1:
                         # Release the UMMA stage right after the last TMEM load
                         # so the next MMA can start while the FMA chain and the
-                        # store are still running (CuTeDSL order).
-                        T.ptx.tcgen05.fence__before_thread_sync()
-                        # One arrive per math warp in the group (lane 0): the
-                        # tcgen05.ld above is warp-collective, so all lanes' TMEM
-                        # reads are complete once lane 0's wait.ld returns.
-                        if lane_idx == 0:
-                            mbarrier_arrive(
-                                smem_barriers.ptr_to(
-                                    [
-                                        empty_umma_barrier_base
-                                        + math_wg_u32 * T.uint32(num_umma_stages)
-                                        + umma_stage_idx_arg
-                                    ]
-                                )
+                        # store are still running (the original's order).
+                        K.ptx.tcgen05.fence__before_thread_sync()
+                        with K.If(lane_idx == 0), K.Then():
+                            empty_umma_barriers.arrive(
+                                math_wg_u32 * K.uint32(num_umma_stages) + umma_stage_idx_arg
                             )
-                    sum_0: T.uint64 = T.cuda.make_float2(T.float32(0), T.float32(0))
-                    sum_1: T.uint64 = T.cuda.make_float2(T.float32(0), T.float32(0))
-                    for head_j_group in T.unroll(0, num_heads // 4):
+                    sum_0 = K.cuda.make_float2(K.float32(0), K.float32(0))
+                    sum_1 = K.cuda.make_float2(K.float32(0), K.float32(0))
+                    for head_j_group in range(num_heads // 4):
                         head_j = head_j_group * 4
                         sum_0 = relu2_fma_f32x2(
-                            T.cuda.make_float2(accum[head_j], accum[head_j + 1]),
-                            T.cuda.make_float2(
+                            K.cuda.make_float2(accum[head_j], accum[head_j + 1]),
+                            K.cuda.make_float2(
                                 cached_weights[q_inner_i, head_j],
                                 cached_weights[q_inner_i, head_j + 1],
                             ),
                             sum_0,
                         )
                         sum_1 = relu2_fma_f32x2(
-                            T.cuda.make_float2(accum[head_j + 2], accum[head_j + 3]),
-                            T.cuda.make_float2(
+                            K.cuda.make_float2(accum[head_j + 2], accum[head_j + 3]),
+                            K.cuda.make_float2(
                                 cached_weights[q_inner_i, head_j + 2],
                                 cached_weights[q_inner_i, head_j + 3],
                             ),
                             sum_1,
                         )
-                    sum_v: T.let = fadd2_rn_noftz(sum_0, sum_1)
-                    result_f32: T.let = fmul_rn_noftz(
-                        scale_kv_half, fadd_rn_noftz(T.cuda.float2_x(sum_v), T.cuda.float2_y(sum_v))
-                    )
-                    result = T.cast(result_f32, logits_tir_dtype)
-                    logits_offset: T.uint64 = (
-                        T.cast(kv_offset_arg, "uint64")
-                        + T.cast(q_inner_i, "uint64") * T.cast(logits_stride, "uint64")
-                        + T.cast(math_thread_idx, "uint64")
+                    sum_v = K.local_scalar("uint64")
+                    K.ptx.add.rn.f32x2(sum_v, sum_0, sum_1)
+                    _add = K.local_scalar("float32")
+                    K.ptx.add.rn.f32(_add, K.cuda.float2_x(sum_v), K.cuda.float2_y(sum_v))
+                    result_f32 = K.local_scalar("float32")
+                    K.ptx.mul.rn.f32(result_f32, scale_kv_half, _add)
+                    result = K.Cast(logits_tir_dtype, result_f32)
+                    logits_offset = (
+                        K.Cast("uint64", kv_offset)
+                        + K.Cast("uint64", K.uint32(q_inner_i)) * K.Cast("uint64", logits_stride)
+                        + K.Cast("uint64", math_thread_idx)
                     )
                     if config.logits_dtype == "float32":
-                        T.ptx.st.global_.f32(logits_flat.ptr_to([logits_offset]), result)
+                        K.ptx.st.global_.f32(logits_flat.ptr_to([logits_offset]), result)
                     else:
-                        T.ptx.st.global_.b16(logits_flat.ptr_to([logits_offset]), result)
+                        K.ptx.st.global_.b16(logits_flat.ptr_to([logits_offset]), result)
 
-            while fetched_next_task:
-                if q_atom_idx != next_q_atom_idx:
-                    if q_iter_idx > T.uint32(0):
-                        # One arrive per math warp (lane 0); by the next Q change
-                        # every lane's weight reads are long since consumed.
-                        if lane_idx == 0:
-                            mbarrier_arrive(
-                                smem_barriers.ptr_to(
-                                    [
-                                        empty_q_barrier_base
-                                        + (q_iter_idx - T.uint32(1)) % T.uint32(num_q_stages)
-                                    ]
-                                )
-                            )
-                    get_q_pipeline(q_iter_idx)
-                    q_stage_idx = fetch_result[0]
-                    q_phase = fetch_result[1]
-                    q_iter_idx = q_iter_idx + T.uint32(1)
-                    mbarrier_wait_phase(
-                        smem_barriers.ptr_to([full_q_barrier_base + q_stage_idx]), q_phase
-                    )
-                    for weight_i in T.unroll(0, next_n_atom):
-                        for weight_j in T.unroll(0, num_heads // 4):
-                            weight_col = weight_j * 4
-                            T.ptx.ld.shared.v4.f32(
-                                cached_weights[weight_i, weight_col],
-                                cached_weights[weight_i, weight_col + 1],
-                                cached_weights[weight_i, weight_col + 2],
-                                cached_weights[weight_i, weight_col + 3],
-                                smem_weights.ptr_to([q_stage_idx, weight_i, weight_col]),
+            with K.While(state["fetched"][0] != K.uint32(0)):
+                with K.If(state["q_atom"][0] != state["next_q"][0]), K.Then():
+                    with K.If(has_q_stage != K.uint32(0)), K.Then():
+                        with K.If(lane_idx == 0), K.Then():
+                            empty_q_barriers.arrive(q_stage)
+                    K.assign(q_stage, q_state.stage)
+                    full_q_barriers.wait(q_stage, q_state.phase)
+                    q_state.advance()
+                    K.assign(has_q_stage, K.uint32(1))
+                    for weight_i in range(next_n_atom):
+                        for weight_j in range(num_heads // 4):
+                            wc = weight_j * 4
+                            K.ptx.ld.shared.v4.f32(
+                                cached_weights[weight_i, wc],
+                                cached_weights[weight_i, wc + 1],
+                                cached_weights[weight_i, wc + 2],
+                                cached_weights[weight_i, wc + 3],
+                                smem_weights.ptr_to([q_stage, weight_i, wc]),
                             )
                     if config.varlen:
-                        load_atom_advance(next_q_atom_idx, batch_size)
-                        is_paired_atom = atom_advance_result[0] == T.uint32(2)
-                q_atom_idx = next_q_atom_idx
-                kv_idx: T.uint32 = next_kv_idx
-                kv_offset: T.uint64 = T.cast(atom_to_token_idx_expr(q_atom_idx), "uint64") * T.cast(
-                    logits_stride, "uint64"
-                ) + T.cast((kv_idx + math_wg_u32) * T.uint32(umma_m), "uint64")
-                get_kv_pipeline(kv_iter_idx)
-                kv_stage_idx: T.uint32 = fetch_result[2]
-                kv_phase: T.uint32 = fetch_result[3]
-                kv_iter_idx = kv_iter_idx + T.uint32(1)
-                mbarrier_wait_phase(
-                    smem_barriers.ptr_to(
-                        [
-                            full_kv_barrier_base
-                            + math_wg_u32 * T.uint32(num_kv_stages)
-                            + kv_stage_idx
-                        ]
-                    ),
-                    kv_phase,
-                )
-                scale_kv: T.float32
-                T.ptx.ld.shared.f32(
-                    scale_kv,
-                    smem_kv_scales.ptr_to([math_warpgroup_idx, kv_stage_idx, math_thread_idx]),
-                )
-                umma_stage_idx: T.uint32 = umma_iter_idx % T.uint32(num_umma_stages)
-                umma_phase: T.uint32 = (umma_iter_idx // T.uint32(num_umma_stages)) & T.uint32(1)
-                umma_iter_idx = umma_iter_idx + T.uint32(1)
-                mbarrier_wait_phase(
-                    smem_barriers.ptr_to(
-                        [
-                            full_umma_barrier_base
-                            + math_wg_u32 * T.uint32(num_umma_stages)
-                            + umma_stage_idx
-                        ]
-                    ),
-                    umma_phase,
-                )
-                T.ptx.tcgen05.fence__after_thread_sync()
-                # One arrive per math warp in the group (lane 0); all lanes read
-                # their scales before the UMMA wait above, so the SMEM reads are
-                # complete by the time lane 0 arrives.
-                if lane_idx == 0:
-                    mbarrier_arrive(
-                        smem_barriers.ptr_to(
-                            [
-                                empty_kv_barrier_base
-                                + math_wg_u32 * T.uint32(num_kv_stages)
-                                + kv_stage_idx
-                            ]
+                        load_atom_advance(state["next_q"][0], batch_size)
+                        K.assign(
+                            is_paired_atom, K.Cast("uint32", atom_advance_result == K.uint32(2))
                         )
-                    )
-                if config.varlen:
-                    if is_paired_atom:
-                        reduce_and_store(next_n_atom, kv_offset, scale_kv, umma_stage_idx)
-                    else:
-                        reduce_and_store(1, kv_offset, scale_kv, umma_stage_idx)
-                elif k_pad_odd_n:
-                    if q_atom_idx % T.uint32(num_next_n_atoms) == T.uint32(num_next_n_atoms - 1):
-                        reduce_and_store(1, kv_offset, scale_kv, umma_stage_idx)
-                    else:
-                        reduce_and_store(next_n_atom, kv_offset, scale_kv, umma_stage_idx)
-                else:
-                    reduce_and_store(next_n_atom, kv_offset, scale_kv, umma_stage_idx)
-                next_q_atom_idx = current_q_atom_idx
-                next_kv_idx = current_kv_idx
-                next_num_kv = current_num_kv
-                fetch_next_task(
-                    current_q_atom_idx, current_kv_idx, current_num_kv, end_q_atom_idx, end_kv_idx
+                K.assign(state["q_atom"][0], state["next_q"][0])
+                K.assign(state["kv_idx"][0], state["next_kv"][0])
+                kv_offset = K.local_scalar(
+                    "uint64",
+                    init=K.Cast("uint64", atom_to_token_idx_expr(state["q_atom"][0]))
+                    * K.Cast("uint64", logits_stride)
+                    + K.Cast("uint64", (state["kv_idx"][0] + math_wg_u32) * K.uint32(umma_m)),
                 )
-                next_q_atom_idx = scheduler_result[0]
-                next_kv_idx = scheduler_result[1]
-                next_num_kv = scheduler_result[2]
-                fetched_next_task = scheduler_result[3] != T.uint32(0)
-                current_q_atom_idx = scheduler_result[4]
-                current_kv_idx = scheduler_result[5]
-                current_num_kv = scheduler_result[6]
-            T.ptx.griddepcontrol.launch_dependents()
-            T.ptx.bar.sync(8, T.uint32(num_math_threads))
-            if warp_idx == 0:
-                T.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    T.uint32(0), T.uint32(num_tmem_cols)
+                kv_stage = kv_state.stage
+                kv_phase = kv_state.phase
+                full_kv_barriers.wait(math_wg_u32 * K.uint32(num_kv_stages) + kv_stage, kv_phase)
+                scale_kv = K.local_scalar("float32")
+                K.ptx.ld.shared.f32(
+                    scale_kv, smem_kv_scales.ptr_to([math_wg_u32, kv_stage, math_thread_idx])
+                )
+                umma_stage = umma_state.stage
+                umma_phase = umma_state.phase
+                full_umma_barriers.wait(
+                    math_wg_u32 * K.uint32(num_umma_stages) + umma_stage, umma_phase
+                )
+                K.ptx.tcgen05.fence__after_thread_sync()
+                with K.If(lane_idx == 0), K.Then():
+                    empty_kv_barriers.arrive(math_wg_u32 * K.uint32(num_kv_stages) + kv_stage)
+                if config.varlen:
+                    with K.If(is_paired_atom != K.uint32(0)):
+                        with K.Then():
+                            reduce_and_store(next_n_atom, kv_offset, scale_kv, umma_stage)
+                        with K.Else():
+                            reduce_and_store(1, kv_offset, scale_kv, umma_stage)
+                elif k_pad_odd_n:
+                    with K.If(
+                        state["q_atom"][0] % K.uint32(num_next_n_atoms)
+                        == K.uint32(num_next_n_atoms - 1)
+                    ):
+                        with K.Then():
+                            reduce_and_store(1, kv_offset, scale_kv, umma_stage)
+                        with K.Else():
+                            reduce_and_store(next_n_atom, kv_offset, scale_kv, umma_stage)
+                else:
+                    reduce_and_store(next_n_atom, kv_offset, scale_kv, umma_stage)
+                kv_state.advance()
+                umma_state.advance()
+                pump(state)
+            K.ptx.griddepcontrol.launch_dependents()
+            K.ptx.bar.sync(8, K.uint32(num_math_threads))
+            with K.If(K.warp_id_in_role() == 0), K.Then():
+                K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                    K.Cast("uint32", tmem.allocated_addr[0]), K.uint32(num_tmem_cols)
                 )
 
-    return sm100_fp8_paged_mqa_logits.with_attr(
+    # `@K.kernel` has no `attrs=`. NOTE the paged original sets ONLY
+    # kernel_launch_params -- no tirx.persistent_kernel, unlike the non-paged
+    # sibling.
+    sm100_fp8_paged_mqa_logits.func = sm100_fp8_paged_mqa_logits.func.with_attr(
         "tirx.kernel_launch_params",
         [
             "blockIdx.x",
@@ -1914,6 +1381,7 @@ def get_kernel(**kwargs: Any):
             "tirx.use_dyn_shared_memory",
         ],
     )
+    return sm100_fp8_paged_mqa_logits.func
 
 
 def _compile_tirx_paged_mqa_for_config(
@@ -2023,15 +1491,18 @@ def _load_sglang_cutedsl_reference() -> tuple[Any, Any]:
         package = types.ModuleType(name)
         package.__package__ = name
         package.__path__ = [str(path)]
+        # A spec-less module in sys.modules makes every later find_spec("sglang")
+        # raise ValueError, failing the availability probe of subsequent configs.
+        package.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
+        package.__spec__.submodule_search_locations = [str(path)]
         sys.modules[name] = package
 
     utils = types.ModuleType("sglang.srt.utils")
     utils.is_sm100_supported = lambda: torch.cuda.get_device_capability()[0] == 10
+    utils.__spec__ = importlib.machinery.ModuleSpec(utils.__name__, loader=None)
     sys.modules[utils.__name__] = utils
 
-    module = importlib.import_module(
-        "sglang.kernels.ops.attention.dsa.cutedsl_paged_mqa_logits"
-    )
+    module = importlib.import_module("sglang.kernels.ops.attention.dsa.cutedsl_paged_mqa_logits")
     return module.CuteDSLPagedMQALogitsRunner, module.pick_dsl_expand
 
 
@@ -2243,11 +1714,11 @@ def _run_tirx_invocation(data: dict[str, Any], invocation: dict[str, Any]) -> to
         config.batch_size,
         config.logits_stride,
         data["block_table"].stride(0),
-        data["context_lens"],
-        logits,
-        data["block_table"],
-        indices,
-        data["tirx_schedule_meta"],
+        data["context_lens"].view(-1),
+        logits.view(-1),
+        data["block_table"].view(-1),
+        indices.view(-1),
+        data["tirx_schedule_meta"].view(-1),
         tensor_maps["tensor_map_q"].ptr,
         tensor_maps["tensor_map_kv"].ptr,
         tensor_maps["tensor_map_kv_scales"].ptr,
