@@ -310,6 +310,64 @@ def _ex2_approx_ftz(value):
     return result
 
 
+def _shfl_clamp(width: int) -> int:
+    """CUDA's ``width`` as the packed segmask/clamp operand of ``shfl.sync``.
+
+    ``__shfl_sync``/``__shfl_down_sync``/``__shfl_xor_sync`` build
+    ``((32 - width) << 8) | 0x1f``; ``__shfl_up_sync`` leaves the low bits
+    zero, so ``_shfl_up_f32`` spells its own clamp instead.
+    """
+    return ((32 - width) << 8) | 0x1F
+
+
+def _shfl_idx_f32(value, source_lane, *, width: int = 32):
+    """``shfl.sync.idx.b32`` -- broadcast from ``source_lane`` in each segment.
+
+    DPS: the destination pins the warp collective to the call site, so the
+    shuffle is emitted once here rather than re-emitted at every textual use
+    of the returned value.
+    """
+    shfl_idx = K.local_scalar("uint32")
+    K.ptx.shfl_sync.idx.b32(
+        shfl_idx,
+        K.reinterpret("uint32", value),
+        K.cast(source_lane, "uint32"),
+        K.uint32(_shfl_clamp(width)),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.reinterpret("float32", shfl_idx)
+
+
+def _shfl_up_f32(value, delta, *, width: int = 32):
+    """``shfl.sync.up.b32`` -- ``__shfl_up_sync``'s clamp is ``(32 - width) << 8``."""
+    shfl_up = K.local_scalar("uint32")
+    K.ptx.shfl_sync.up.b32(
+        shfl_up,
+        K.reinterpret("uint32", value),
+        K.cast(delta, "uint32"),
+        K.uint32((32 - width) << 8),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.reinterpret("float32", shfl_up)
+
+
+def _warp_uniform_i32(value):
+    """Broadcast lane 0's ``value`` to the warp -- ``shfl.sync.idx.b32``, width 32.
+
+    Materialized by construction: a lazy value-returning intrinsic bound to a
+    Python name re-emits the warp collective at every textual use.
+    """
+    uniform = K.local_scalar("uint32")
+    K.ptx.shfl_sync.idx.b32(
+        uniform,
+        K.cast(value, "uint32"),
+        K.uint32(0),
+        K.uint32(_shfl_clamp(32)),
+        K.uint32(0xFFFFFFFF),
+    )
+    return K.Cast("int32", uniform)
+
+
 def _prefill_predicated_gamma(s_addr, t_addr, pred):
     s_log = K.local_scalar("float32")
     t_log = K.local_scalar("float32")
@@ -1635,10 +1693,7 @@ def _make_t_precompute(spec):
                             with K.If(inverse_col < src_row), K.Then():
                                 pivot = K.local_scalar("float32")
                                 K.assign(
-                                    pivot,
-                                    K.cuda._shfl_sync(
-                                        K.uint32(0xFFFFFFFF), inverse_row[inverse_col], src_row, 8
-                                    ),
+                                    pivot, _shfl_idx_f32(inverse_row[inverse_col], src_row, width=8)
                                 )
                                 with K.If(row8 > src_row), K.Then():
                                     K.ptx.mov.b32(
@@ -1954,12 +2009,7 @@ def _make_fixup_utcmma(spec, rows, m_stages, compute_regs):
 
         with K.If(num_chunks == 0):
             with K.Then():
-                warp = K.Cast(
-                    "int32",
-                    K.cuda._shfl_sync(
-                        K.uint32(0xFFFFFFFF), K.Cast("uint32", K.thread_id() >> 5), 0, 32
-                    ),
-                )
+                warp = _warp_uniform_i32(K.thread_id() >> 5)
                 empty_sequence_regs.emit()
                 with K.If(warp == 0), K.Then():
                     K.ptx.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
@@ -2220,9 +2270,7 @@ def _make_mn_precompute(spec):
 
         tid = K.thread_id()
         lane = K.lane_id()
-        warp = K.Cast(
-            "int32", K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), K.Cast("uint32", tid >> 5), 0, 32)
-        )
+        warp = _warp_uniform_i32(tid >> 5)
         state_head = bx % state_heads
         chunk_in_seq = bx // state_heads
         k_head = state_head * k_heads // state_heads
@@ -2641,27 +2689,14 @@ def _make_mn_precompute(spec):
                         with K.unroll(5) as scan_step:
                             scan_offset = 1 << scan_step
                             prior = K.alloc_local((2,), "float32")
-                            K.ptx.mov.b32(
-                                prior[0],
-                                K.cuda._shfl_up_sync(
-                                    K.uint32(0xFFFFFFFF), logs[0], scan_offset, 32
-                                ),
-                            )
-                            K.ptx.mov.b32(
-                                prior[1],
-                                K.cuda._shfl_up_sync(
-                                    K.uint32(0xFFFFFFFF), logs[1], scan_offset, 32
-                                ),
-                            )
+                            K.ptx.mov.b32(prior[0], _shfl_up_f32(logs[0], scan_offset))
+                            K.ptx.mov.b32(prior[1], _shfl_up_f32(logs[1], scan_offset))
                             with K.If(lane >= scan_offset), K.Then():
                                 K.ptx.mov.b32(logs[0], logs[0] + prior[0])
                                 K.ptx.mov.b32(logs[1], logs[1] + prior[1])
-                        K.ptx.mov.b32(
-                            logs[1],
-                            logs[1] + K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), logs[0], 31, 32),
-                        )
+                        K.ptx.mov.b32(logs[1], logs[1] + _shfl_idx_f32(logs[0], K.int32(31)))
                         end_log = K.local_scalar("float32")
-                        K.assign(end_log, K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), logs[1], 31, 32))
+                        K.assign(end_log, _shfl_idx_f32(logs[1], K.int32(31)))
                         cumprod0 = _ex2_approx_ftz(logs[0])
                         cumprod1 = _ex2_approx_ftz(logs[1])
                         neg = K.alloc_local((2,), "float32")
@@ -3645,9 +3680,7 @@ def _make_prefill(spec):
                     with K.If(lane >= scan_offset), K.Then():
                         K.ptx.mov.b32(gate[0], gate[0] + prior[0])
                         K.ptx.mov.b32(gate[1], gate[1] + prior[1])
-                K.ptx.mov.b32(
-                    gate[1], gate[1] + K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), gate[0], 31, 32)
-                )
+                K.ptx.mov.b32(gate[1], gate[1] + _shfl_idx_f32(gate[0], K.int32(31)))
                 cumprod = K.alloc_local((2,), "float32")
                 K.ptx.ex2.approx.ftz.f32(cumprod[0], gate[0])
                 K.ptx.ex2.approx.ftz.f32(cumprod[1], gate[1])

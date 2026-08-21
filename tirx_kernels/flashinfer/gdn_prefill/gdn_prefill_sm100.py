@@ -536,23 +536,30 @@ def make_kernel(HQ: int, HV: int):
                     with K.If((lane & 7) == i), K.Then():
                         K.assign(row[i], K.float32(1.0))
                 rs = K.local_scalar("float32")
-                pv = K.local_scalar("float32")
+                pv = K.local_scalar("uint32")
                 for src in range(7):
                     # CuTe emits exact neg.f32 here; neg.ftz.f32 cannot be
                     # folded into its select/conversion consumers by ptxas.
                     K.ptx.neg.f32(rs, row[src])
                     for i in range(7):
                         if i < src:  # Python-const compare
-                            # The shuffle MUST be materialized into a local
-                            # here, before the guard. A traced body has no
-                            # statement to pin a value-returning intrinsic to,
-                            # so binding it to a Python name emits it at its
-                            # USE site -- inside `(lane & 7) > src`, where the
-                            # excluded lanes never reach the warp-collective
-                            # __shfl_sync and the whole CTA deadlocks.
-                            K.assign(pv, K.cuda._shfl_sync(K.uint32(0xFFFFFFFF), row[i], src, 8))
+                            # The DPS destination pins this warp collective
+                            # here, before the guard. A lazy value-returning
+                            # intrinsic has no statement to sit on in a traced
+                            # body and would be emitted at its USE site --
+                            # inside `(lane & 7) > src`, where the excluded
+                            # lanes never reach the shuffle and the whole CTA
+                            # deadlocks.  Width 8 maps to segmask/clamp
+                            # ``((32 - 8) << 8) | 0x1f`` == 0x181f.
+                            K.ptx.shfl_sync.idx.b32(
+                                pv,
+                                K.reinterpret("uint32", row[i]),
+                                K.uint32(src),
+                                K.uint32(0x181F),
+                                K.uint32(0xFFFFFFFF),
+                            )
                             with K.If((lane & 7) > src), K.Then():
-                                K.assign(row[i], row[i] + rs * pv)
+                                K.assign(row[i], row[i] + rs * K.reinterpret("float32", pv))
                     with K.If((lane & 7) > src), K.Then():
                         K.assign(row[src], rs)
                 for p in range(4):
