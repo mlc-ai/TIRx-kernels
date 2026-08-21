@@ -18,6 +18,7 @@ from typing import Any
 
 from tirx_kernels.flashinfer.utils.fp_quant import (
     absmax_8,
+    cvt_e2m1x8,
     hmax2,
     pack_u32x2_to_u64,
     sf_offset_128x4,
@@ -247,12 +248,8 @@ def _quantize_and_pack_16(values, output_scale):
     scaled = T.alloc_local((16,), "float32")
     for value in range(16):
         T.evaluate(T.ptx.mul.f32(scaled[value], values[value], output_scale))
-    low = T.cuda.cvt_e2m1x8_f32(
-        scaled[0], scaled[1], scaled[2], scaled[3], scaled[4], scaled[5], scaled[6], scaled[7]
-    )
-    high = T.cuda.cvt_e2m1x8_f32(
-        scaled[8], scaled[9], scaled[10], scaled[11], scaled[12], scaled[13], scaled[14], scaled[15]
-    )
+    low = cvt_e2m1x8([scaled[index] for index in range(8)])
+    high = cvt_e2m1x8([scaled[index] for index in range(8, 16)])
     return pack_u32x2_to_u64(low, high)
 
 
@@ -300,7 +297,9 @@ def _process_scale_block(
             scale_word = _cvt_f32_to_e4m3(scale_value)
             output_scale = _mul_f32(_e4m3_to_f32_rcp(scale_word), global_scale_value)
             scale_offset = _scale_offset(actual_row, sf_index, H, block_size, swizzled)
-            T.ptx.st.global_.b8(T.address_of(scales[scale_offset]), scale_word)
+            T.ptx.st.global_.b8(
+                T.address_of(scales[scale_offset]), T.cast(scale_word, "uint8")
+            )
             packed0 = _quantize_and_pack_16(values0, output_scale)
             y_offset = T.cast(actual_row, "int64") * (H // 2) + block_start // 2
             _store_global_u64(T.address_of(y[y_offset]), packed0)
@@ -325,7 +324,9 @@ def _process_scale_block(
                 scale_word = _cvt_f32_to_e4m3(scale_value)
                 output_scale = _mul_f32(_e4m3_to_f32_rcp(scale_word), global_scale_value)
             scale_offset = _scale_offset(actual_row, sf_index, H, block_size, swizzled)
-            T.ptx.st.global_.b8(T.address_of(scales[scale_offset]), scale_word)
+            T.ptx.st.global_.b8(
+                T.address_of(scales[scale_offset]), T.cast(scale_word, "uint8")
+            )
             packed0 = _quantize_and_pack_16(values0, output_scale)
             packed1 = _quantize_and_pack_16(values1, output_scale)
             y_offset = T.cast(actual_row, "int64") * (H // 2) + block_start // 2
