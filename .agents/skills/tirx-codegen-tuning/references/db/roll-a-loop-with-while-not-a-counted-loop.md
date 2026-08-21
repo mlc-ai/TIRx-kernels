@@ -130,6 +130,18 @@ six-shape performance matrix. Those timings do not isolate the large-trip loop,
 so the reusable result is the measured structural boundary, not a claimed
 speedup at eight groups.
 
+A second source-exact quantization port showed why that threshold cannot be
+transferred even to a closely related loop. After residual addition enlarged
+the kernel, its single-CTA E4M3-scale epilogue without an extra normalized
+output expanded one or two scale groups but rolled three or more with a
+one-group body; the corresponding UE8M0-scale epilogue expanded one and rolled
+two or more. The earlier async-copy and fragment phase remained fully expanded,
+so one blanket loop policy would have mismatched one phase or the other.
+Adjacent source profiles established the boundaries, 1,245 correctness
+configurations covered both sides, and the source-shaped implementation kept
+all ten measured reference/port ratios at 1.0097-1.0257. The measurements again
+confirm the complete structure rather than isolating a speedup from rolling.
+
 ## Boundary
 
 Only where the reference's loop is genuinely rolled -- whether it says so with a
@@ -141,7 +153,10 @@ body is small relative to its trip count can prefer the unrolled form.
 A source threshold is specific to its compiler version and the derived trip
 count, not to a convenient tensor dimension. Re-export adjacent profiles when
 the source compiler changes, and do not extrapolate the seven-to-eight boundary
-to a different loop body.
+to a different loop body. Do not share a threshold across sibling kernels,
+scale encodings, phases, or compile-time output modes: each changes the body
+size that drives the source compiler's decision. Keep independent selectors
+when one phase stays statically expanded while a later phase rolls.
 
 ## Verification
 
@@ -151,4 +166,6 @@ generated CUDA proves nothing, because the unrolling happens in nvcc -- this
 change was first made, measured, and written up as a win while the loop was
 still being fully unrolled. Matching totals do not prove it either: read the
 loop body, since a port can hit the reference's exact static counts and still
-carry a fatter body.
+carry a fatter body. For specialization-dependent policies, export adjacent
+profiles for every distinct body, record the backedge and static body width,
+and verify each phase independently before running the affected matrix.
