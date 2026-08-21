@@ -2,8 +2,8 @@
 
 - Timestamp: `14`
 - Label:     `post-refactor`
-- Git:       `{'tir': '3df3e86a', 'tirx-kernels': '521f16bf-dirty', 'tirx-bench-ci': None}`
-- Workloads: 422 ok, 0 failed
+- Git:       `{'tir': '135a054f', 'tirx-kernels': 'b405c5cb', 'tirx-bench-ci': None}`
+- Workloads: 428 ok, 0 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -297,6 +297,17 @@ Grouped workloads show one row per config and one timing column per implementati
 | `rms_bf16_m32_h4096_xc_yc_pdl0` | tirx | 3.3644 | flashinfer_cutedsl | 3.4527 | 1.026 | — |
 | `rms_bf16_m32_h4096_xc_yc_pdl1` | tirx | 3.3516 | flashinfer_cutedsl | 3.3558 | 1.001 | — |
 | `rms_bf16_m64_h8192_xc_yc_pdl0` | tirx | 3.4584 | flashinfer_cutedsl | 3.4412 | 0.995 | — |
+
+## flashinfer_rmsnorm_fp4quant
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bench_mx_bf16_m32_h4096_b32_ue8m0_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.0015 | flashinfer_cutedsl | 4.0733 | 1.018 | — |
+| `bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 2.6489 | flashinfer_cutedsl | 2.7371 | 1.033 | — |
+| `bench_nv_bf16_m32_h4096_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.5685 | flashinfer_cutedsl | 4.7516 | 1.040 | — |
+| `bench_nv_global_bf16_m32_h4096_b16_e4m3_sw0_pdl0_eps1e6_gsone_preallocated_random` | tirx | 4.6477 | flashinfer_cutedsl | 4.8623 | 1.046 | — |
+| `bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.8342 | flashinfer_cutedsl | 5.0347 | 1.041 | — |
+| `bench_nv_swizzled_bf16_m32_h4096_b16_e4m3_sw1_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.6718 | flashinfer_cutedsl | 4.7575 | 1.018 | — |
 
 ## flashkda_bf16_fused_m128
 
