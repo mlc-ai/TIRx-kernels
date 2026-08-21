@@ -259,16 +259,23 @@ def tma_load_1d_symm(dst_ptr, peer_base, byte_offset, barrier_ptr, num_bytes):
     )
 
 
-def ballot_sync(mask, pred):
-    return K.cuda.ballot_sync(mask, pred)
+def ballot_sync(dst, mask, pred):
+    """``vote.sync.ballot.b32 dst, pred, mask`` -- one result bit per member lane."""
+    K.ptx.vote_sync.ballot.b32(dst, pred, mask)
 
 
 def ffs_u32(value):
     return K.cuda.ffs_u32(value)
 
 
-def reduce_add_sync_u32(mask, value):
-    return K.cuda.reduce_add_sync_u32(mask, value)
+def reduce_add_sync_u32(dst, mask, value):
+    """``redux.sync.add.u32 dst, value, mask`` -- the hardware warp add-reduction."""
+    K.ptx.redux_sync.add.u32(dst, value, mask)
+
+
+def reduce_min_sync_u32(dst, mask, value):
+    """``redux.sync.min.u32 dst, value, mask`` -- the hardware warp min-reduction."""
+    K.ptx.redux_sync.min.u32(dst, value, mask)
 
 
 def red_add_gpu_u32(address, value):
@@ -673,15 +680,13 @@ def get_kernel(
                     K.int32(0),
                 ),
             )
-        K.assign(
-            pool_block_offset_sum[0],
-            K.cast(
-                reduce_add_sync_u32(
-                    K.uint32(0xFFFFFFFF), K.cast(pool_block_offset_sum[0], "uint32")
-                ),
-                "int32",
-            ),
+        pool_block_offset_total = K.local_scalar("uint32")
+        reduce_add_sync_u32(
+            pool_block_offset_total,
+            K.uint32(0xFFFFFFFF),
+            K.cast(pool_block_offset_sum[0], "uint32"),
         )
+        K.assign(pool_block_offset_sum[0], K.cast(pool_block_offset_total, "int32"))
 
     def symm_rank_offset_arg_expr(symm_rank_offsets, mapped_rank_idx):
         if num_processes == 1:
@@ -1849,19 +1854,16 @@ def get_kernel(
                     sched_lane_pool_block_offset,
                     (sched_block_offset + sched_inclusive_vals - sched_expert_num_m_blocks),
                 )
-                K.assign(
+                ballot_sync(
                     sched_owner_mask,
-                    ballot_sync(
-                        K.uint32(0xFFFFFFFF),
-                        (
-                            K.cast(expert_lane_idx * 32 + lane_idx, "uint32")
-                            < K.uint32(num_experts_per_rank)
-                        )
-                        & (task_info_regs[4] >= sched_lane_pool_block_offset)
-                        & (
-                            task_info_regs[4]
-                            < sched_lane_pool_block_offset + sched_expert_num_m_blocks
-                        ),
+                    K.uint32(0xFFFFFFFF),
+                    (
+                        K.cast(expert_lane_idx * 32 + lane_idx, "uint32")
+                        < K.uint32(num_experts_per_rank)
+                    )
+                    & (task_info_regs[4] >= sched_lane_pool_block_offset)
+                    & (
+                        task_info_regs[4] < sched_lane_pool_block_offset + sched_expert_num_m_blocks
                     ),
                 )
                 with K.If(sched_owner_mask != K.uint32(0)), K.Then():
@@ -2489,12 +2491,15 @@ def get_kernel(
                                     "int32",
                                 ),
                             )
-                            K.assign(
-                                dispatch_dst_slot_idx,
-                                K.cuda.atomic_add(
-                                    smem_expert_count.ptr_to([dispatch_expert_idx]), 1
-                                ),
+                            # `atomicAdd(int*, 1)` lowers to the .u32 line; the
+                            # signed spelling would assemble as ATOMS.ADD.S32.
+                            dispatch_slot_u32 = K.local_scalar("uint32")
+                            K.ptx.atom.shared.add.u32(
+                                dispatch_slot_u32,
+                                smem_expert_count.ptr_to([dispatch_expert_idx]),
+                                K.uint32(1),
                             )
+                            K.assign(dispatch_dst_slot_idx, K.cast(dispatch_slot_u32, "int32"))
                             K.assign(
                                 symm_rank_base,
                                 sym_buffer_base + K.cast(symm_rank_offsets[0], "uint64"),
@@ -2665,21 +2670,16 @@ def get_kernel(
                                 min_in_lane,
                                 K.min(min_in_lane, remaining_rank_counts[rank_lane_idx]),
                             )
-                    K.assign(
-                        num_active_ranks,
-                        K.cast(
-                            reduce_add_sync_u32(
-                                K.uint32(0xFFFFFFFF), K.cast(num_actives_in_lane, "uint32")
-                            ),
-                            "int32",
-                        ),
+                    num_active_ranks_red = K.local_scalar("uint32")
+                    reduce_add_sync_u32(
+                        num_active_ranks_red,
+                        K.uint32(0xFFFFFFFF),
+                        K.cast(num_actives_in_lane, "uint32"),
                     )
-                    K.assign(
-                        min_active_count,
-                        K.cast(
-                            K.cuda.reduce_min_sync_u32(K.uint32(0xFFFFFFFF), min_in_lane), "int32"
-                        ),
-                    )
+                    K.assign(num_active_ranks, K.cast(num_active_ranks_red, "int32"))
+                    min_active_count_red = K.local_scalar("uint32")
+                    reduce_min_sync_u32(min_active_count_red, K.uint32(0xFFFFFFFF), min_in_lane)
+                    K.assign(min_active_count, K.cast(min_active_count_red, "int32"))
                     K.assign(round_token_count, min_active_count * num_active_ranks)
                     with (
                         K.If(
@@ -2697,12 +2697,10 @@ def get_kernel(
                         num_seen_ranks = K.int32(0)
                         K.assign(current_rank_in_expert_idx, K.int32(0))
                         with K.unroll(0, num_ranks_per_lane) as rank_lane_idx:
-                            K.assign(
+                            ballot_sync(
                                 rank_count_mask,
-                                ballot_sync(
-                                    K.uint32(0xFFFFFFFF),
-                                    remaining_rank_counts[rank_lane_idx] > K.uint32(0),
-                                ),
+                                K.uint32(0xFFFFFFFF),
+                                remaining_rank_counts[rank_lane_idx] > K.uint32(0),
                             )
                             K.assign(
                                 active_lane_count, K.cast(K.popcount(rank_count_mask), "int32")
@@ -4160,9 +4158,10 @@ def get_kernel(
                     # routing metadata (impls .cuh:1370).
                     with K.If(lane_idx == num_topk), K.Then():
                         K.assign(combine_stored_topk_slot_idx, K.int32(num_topk))
-                K.assign(
+                ballot_sync(
                     combine_total_mask,
-                    ballot_sync(K.uint32(0xFFFFFFFF), combine_stored_topk_slot_idx >= K.int32(0)),
+                    K.uint32(0xFFFFFFFF),
+                    combine_stored_topk_slot_idx >= K.int32(0),
                 )
                 with K.unroll(0, num_chunks) as chunk:
                     K.assign(combine_slot_mask, combine_total_mask)

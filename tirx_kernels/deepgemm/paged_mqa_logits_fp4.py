@@ -1043,9 +1043,12 @@ def get_kernel(**kwargs: Any):
             K.cuda.warp_sync()
             kv_block_idx = K.alloc_local([num_pages_per_tile], "uint32")
             for block_i in range(num_pages_per_tile):
-                K.ptx.mov.b32(
+                K.ptx.shfl_sync.idx.b32(
                     kv_block_idx[block_i],
-                    K.cuda.__shfl_sync(K.uint32(0xFFFFFFFF), cached[block_i], kv_ptr[0], 32),
+                    cached[block_i],
+                    kv_ptr[0],
+                    K.uint32(0x1F),
+                    K.uint32(0xFFFFFFFF),
                 )
             K.assign(kv_ptr[0], kv_ptr[0] + K.uint32(1))
             return kv_block_idx
