@@ -283,13 +283,19 @@ def _process_add_scale_block(
         primary_offset = _scale_offset(
             actual_row, sf_index, H, block_size, swizzled or output_both_sf_layouts
         )
-        T.evaluate(T.ptx.st.global_.b8(T.address_of(scales[primary_offset]), scale_word))
+        T.evaluate(
+            T.ptx.st.global_.b8(
+                T.address_of(scales[primary_offset]), T.cast(scale_word, "uint8")
+            )
+        )
         if output_both_sf_layouts:
             linear_offset: T.int64 = T.cast(actual_row, "int64") * T.int64(
                 num_scale_blocks
             ) + T.cast(sf_index, "int64")
             T.evaluate(
-                T.ptx.st.global_.b8(T.address_of(scales_unswizzled[linear_offset]), scale_word)
+                T.ptx.st.global_.b8(
+                    T.address_of(scales_unswizzled[linear_offset]), T.cast(scale_word, "uint8")
+                )
             )
 
         packed0: T.uint64 = _quantize_and_pack_16(values0, output_scale)
