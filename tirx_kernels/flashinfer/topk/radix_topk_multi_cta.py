@@ -551,6 +551,9 @@ def get_kernel(
                         with K.If(cta_in_group == 0), K.Then():
                             with K.serial(tx, RADIX, step=BLOCK_THREADS) as bc:
                                 st_global_u32(state, next_hist + bc, K.uint32(0))
+                        # The fold writes group-visible histogram state, so every
+                        # CTA thread must finish before thread 0 publishes arrival.
+                        bar_sync()
                         advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
                         with K.serial(tx, RADIX, step=BLOCK_THREADS) as bs:
                             st_shared_u32(s_suffix, bs, ld_global_u32(state, cur_hist + bs))
@@ -676,6 +679,9 @@ def get_kernel(
                                     is32,
                                     dtype,
                                 )
+                        # Complete all greater-than-pivot output writes before
+                        # another CTA allocates the equal-pivot output slots.
+                        bar_sync()
                         advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
                         with K.serial(tx, actual, step=BLOCK_THREADS, unroll=2) as i:
                             key4 = K.cast(ld_key(s_ordered, i), "uint32")
@@ -882,6 +888,11 @@ def get_kernel(
 
                     # === Stage 5: PageTable gather, split (:1359-1371) =====
                     if page_table:
+                        if not deterministic:
+                            # Non-deterministic collect has no trailing CTA barrier
+                            # after its final output writes; deterministic collect
+                            # already synchronizes at the end of its output loop.
+                            bar_sync()
                         advance_group_barrier(phase, state, arrival_word, ctas_per_group, tx)
                         elems = K.truncdiv(
                             K.int32(k) + K.int32(ctas_per_group) - 1, K.int32(ctas_per_group)

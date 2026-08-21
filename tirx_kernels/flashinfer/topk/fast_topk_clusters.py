@@ -509,11 +509,6 @@ def get_kernel(
             R.st_shared_u32(scal, NCACHED + phase, K.uint32(0))
         _threshold(hist, scal, tid, warp, lane, rank, phase, k_rem, True)
         bin_t = K.local_scalar("int32", init=K.cast(R.ld_shared_u32(scal, THR), "int32"))
-        if nc > 1 and t < rounds - 1:
-            # Skipped on the final round: no further threshold() means no
-            # further peer read of this bank (:260-263).
-            K.ptx.barrier.cluster.arrive()
-
         raw = K.local_scalar(
             "int32", init=K.cast(R.ld_shared_u32(scal, NCACHED + (phase ^ 1)), "int32")
         )
@@ -566,6 +561,15 @@ def get_kernel(
                 exceeded,
                 ring_base,
             )
+
+        if nc > 1 and t < rounds - 1:
+            # Skipped on the final round: no further threshold() means no
+            # further peer read of this bank (:260-263).  Publish only after
+            # every thread has consumed the previous ping-pong bank: arriving
+            # immediately after threshold selection lets the next round
+            # overwrite that bank while another warp is still reading its
+            # cached candidates.
+            K.ptx.barrier.cluster.arrive()
 
     def _emit(logits, out_idx, out_val, seq_lens_g, aux, ovf):
         cta = K.cta_id()
