@@ -536,3 +536,158 @@ def compiled_flat_schedule(case: dict):
         case["head_kv"],
         case["blk_kv"],
     )
+
+
+_COMBINE_CACHE: dict = {}
+
+
+def compiled_sparse_atten_combine(case: dict):
+    """Compile (or fetch) ``SparseAttentionForwardCombine`` and return the launchable.
+
+    Mirrors the compile step of ``combine()`` (combine.py:1327-1480, varlen
+    branch) instead of calling that host entry, so the timed closure covers the
+    kernel launch alone rather than the host wrapper's shape and dtype
+    validation, its ``.contiguous()`` copies, and its tile selection.
+
+    ``num_splits_dynamic_ptr``, ``varlen_batch_idx`` and ``semaphore_to_reset``
+    are pinned to ``None`` here because the host entry pins them too
+    (combine.py:1465-1473, :1492-1494); the semaphore-reset block at
+    combine.py:518-526 is therefore compiled out of every specialization the
+    production path can reach.
+    """
+    ensure_msa_importable()
+
+    import cutlass
+    import cutlass.cute as cute
+    import torch
+    from cutlass import Float32, Int32
+    from quack.compile_utils import make_fake_tensor
+    from src.sm100.fwd.combine import SparseAttentionForwardCombine
+
+    o_partial = case["o_partial"]
+    lse_partial = case["lse_partial"]
+    o_out = case["o_out"]
+    lse_out = case["lse_out"]
+    lse_temperature_partial = case.get("lse_temperature_partial")
+    lse_temperature_out = case.get("lse_temperature_out")
+    seqused = case.get("seqused")
+    output_scale = case.get("output_scale")
+    head_dim = case["head_dim"]
+    topk = case["topk"]
+    # Host tile selection, combine.py:1327-1337.
+    k_block_size = 128 if head_dim > 64 else 64
+    tile_m = 64
+    min_blocks_per_mp = 3 if output_scale is not None else 0
+
+    cutlass_dtype = {
+        torch.bfloat16: cutlass.BFloat16,
+        torch.float16: cutlass.Float16,
+        torch.float32: cutlass.Float32,
+        torch.float8_e4m3fn: cutlass.Float8E4M3FN,
+    }
+    partial_dtype = cutlass_dtype[o_partial.dtype]
+    out_dtype = cutlass_dtype[o_out.dtype]
+
+    key = (
+        "combine",
+        head_dim,
+        k_block_size,
+        tile_m,
+        topk,
+        o_partial.dtype,
+        o_out.dtype,
+        True,  # has_cu_seqlens: the production path is varlen only
+        seqused is not None,
+        True,  # has_lse
+        lse_temperature_partial is not None,
+        True,  # has_split_counts
+        output_scale is not None,
+        True,  # use_pdl
+        min_blocks_per_mp,
+    )
+    if key not in _COMBINE_CACHE:
+        kernel = SparseAttentionForwardCombine(
+            dtype=out_dtype,
+            dtype_partial=partial_dtype,
+            head_dim=head_dim,
+            tile_m=tile_m,
+            k_block_size=k_block_size,
+            topk=topk,
+            use_pdl=True,
+            min_blocks_per_mp=min_blocks_per_mp,
+            stages=2,
+        )
+        div = 128 // partial_dtype.width
+        total_q, nheads = (cute.sym_int64() for _ in range(2))
+        m_o_partial = make_fake_tensor(
+            partial_dtype, (topk, total_q, nheads, head_dim), divisibility=div
+        )
+        m_lse_partial = make_fake_tensor(
+            Float32, (topk, total_q, nheads), divisibility=1, leading_dim=2
+        )
+        m_o = make_fake_tensor(
+            out_dtype, (total_q, nheads, head_dim), divisibility=128 // out_dtype.width
+        )
+        m_lse = make_fake_tensor(Float32, (total_q, nheads), divisibility=1, leading_dim=1)
+        m_lse_temperature_partial = (
+            make_fake_tensor(Float32, (topk, total_q, nheads), divisibility=1, leading_dim=2)
+            if lse_temperature_partial is not None
+            else None
+        )
+        m_lse_temperature = (
+            make_fake_tensor(Float32, (total_q, nheads), divisibility=1, leading_dim=1)
+            if lse_temperature_out is not None
+            else None
+        )
+        total_q_ctr, nheads_kv = (cute.sym_int64() for _ in range(2))
+        m_split_counts = make_fake_tensor(
+            Int32, (total_q_ctr, nheads_kv), divisibility=1, leading_dim=1
+        )
+        m_output_scale = (
+            make_fake_tensor(Float32, (cute.sym_int64(),), divisibility=1, leading_dim=0)
+            if output_scale is not None
+            else None
+        )
+        _COMBINE_CACHE[key] = cute.compile(
+            kernel,
+            m_o_partial,
+            m_lse_partial,
+            m_o,
+            m_lse,
+            m_lse_temperature_partial,
+            m_lse_temperature,
+            make_fake_tensor(Int32, (cute.sym_int64(),), divisibility=1, leading_dim=0),
+            None
+            if seqused is None
+            else make_fake_tensor(Int32, (cute.sym_int64(),), divisibility=1, leading_dim=0),
+            None,
+            None,
+            None,
+            m_split_counts,
+            m_output_scale,
+            Int32(case["qhead_per_kv"]),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+
+    compiled = _COMBINE_CACHE[key]
+
+    def launch() -> None:
+        compiled(
+            o_partial,
+            lse_partial,
+            o_out,
+            lse_out,
+            lse_temperature_partial,
+            lse_temperature_out,
+            case["cu_seqlens_q"],
+            seqused,
+            None,
+            None,
+            None,
+            case["split_counts"],
+            output_scale,
+            case["qhead_per_kv"],
+        )
+
+    return launch
