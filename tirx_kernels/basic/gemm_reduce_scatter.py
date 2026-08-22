@@ -16,7 +16,6 @@ import tirx_kernels.kern as Kern
 import tvm
 from tirx_kernels.low_level_ir import NVSHMEM_RUNTIME_FUNC_CALLS
 from tvm.ir.type import PointerType, PrimType
-from tvm.tirx.script.builder import ir as I
 
 from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
@@ -568,7 +567,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         rs_tail = rs_tail.view(1)
         exit_barrier = exit_barrier.view(2)
 
-        cbx_expr, _ = I.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
+        cbx_expr, _ = Kern.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
         cbx = cbx_expr
         bx = Kern.cta_id()
         warp_id_in_cta = Kern.warp_id()

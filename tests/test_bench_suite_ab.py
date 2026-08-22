@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import sys
 import threading
 from pathlib import Path
 from types import ModuleType
@@ -192,3 +193,27 @@ def test_only_before_side_receives_current_benchmark_root(monkeypatch, tmp_path)
 
     assert before[AB_CURRENT_BENCHMARK_ROOT_ENV] == str(tmp_path)
     assert AB_CURRENT_BENCHMARK_ROOT_ENV not in after
+
+
+def test_current_contract_uses_after_kern_without_rebinding_before_kern(monkeypatch, tmp_path):
+    monkeypatch.setenv(AB_CURRENT_BENCHMARK_ROOT_ENV, str(tmp_path))
+    package_root = tmp_path / "tirx_kernels"
+    kern_root = package_root / "kern"
+    kern_root.mkdir(parents=True)
+    (kern_root / "__init__.py").write_text("MARKER = 'after'\n")
+    (package_root / "ab_kern_isolation.py").write_text(
+        "import tirx_kernels.kern as K\n"
+        "KERN_MARKER = K.MARKER\n"
+        "CONFIGS = [{'label': 'same'}]\n"
+    )
+
+    before_kern = ModuleType("tirx_kernels.kern")
+    before_kern.MARKER = "before"
+    monkeypatch.setitem(sys.modules, "tirx_kernels.kern", before_kern)
+    old_module = ModuleType("tirx_kernels.ab_kern_isolation")
+    old_module.__package__ = "tirx_kernels"
+
+    current_module = ab_current_benchmark_module(old_module)
+
+    assert current_module.KERN_MARKER == "after"
+    assert sys.modules["tirx_kernels.kern"] is before_kern

@@ -20,7 +20,7 @@ Structurally this is the T=5 body at TOKENS=6 with four deltas:
 
 * **The arena is dynamic shared memory.** split1 needs 50560 B, past the
   49152 B static ceiling every earlier cake port used, so all four splits
-  allocate through ``K.SMEMPool`` -- which is also what the source does
+  allocate through Kern's shared-memory pool -- which is also what the source does
   (``extern __shared__ __align__(1024)`` plus ``cudaFuncSetAttribute``).
 * **Token 5's quad broadcast is elided.** The ``(quad_base + t//2, acc[t%2])``
   map holds for all six tokens, but token 5's source lane is ``quad_base + 2``
@@ -460,7 +460,7 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
     OFF_SGRAMA0 = spec["OFF_SGRAMA0"]
     OFF_SGRAMA1 = spec["OFF_SGRAMA1"]
 
-    @K.kernel(warps=THREADS // 32, arch="sm_100a", grid=False, thread_layout=False)
+    @K.kernel(warps=THREADS // 32, arch="sm_100a", grid=False)
     def _flashkda_decode_t6_gram(
         q: K.gptr[K.bf16, (Q_ELEMENTS,)],
         k: K.gptr[K.bf16, (Q_ELEMENTS,)],
@@ -480,7 +480,7 @@ def _make_flashkda_decode_t6_gram(spec: dict[str, Any]):
 
         # --- work decomposition and lane roles (:142-178) ----------------------
         work, n = K.cta_id([NUM_VALUE_HEADS * VALUE_SPLIT, NUM_SEQS])
-        tid = K.thread_id([THREADS])
+        tid = K.thread_id()
         warp = _make_warp_uniform(tid // 32)  # == token index in A and C'
         lane = tid % 32
         value_tile = K.local_scalar(K.i32)

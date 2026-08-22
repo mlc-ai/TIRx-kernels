@@ -12,6 +12,7 @@ from __future__ import annotations
 import inspect
 import threading
 from functools import partial
+from types import MappingProxyType
 
 import tvm
 from tvm.script.ir_builder import IRBuilder
@@ -66,11 +67,21 @@ class gptr:  # pylint: disable=invalid-name
     ``K.gptr[dtype]`` and ``K.gptr[dtype, ndim]`` give every dimension a fresh
     symbolic ``int64`` extent. ``K.gptr[dtype, shape]`` owns the exact fixed
     extents when they are part of the specialized kernel contract.
+    ``K.gptr(dtype, shape=lambda p: (...))`` derives dynamic extents from the
+    entry's scalar parameters, preserving one shape fact instead of inventing
+    unrelated symbols.
     """
 
-    def __init__(self, dtype: str, ndim: int | tuple[int, ...] = 1):
+    def __init__(self, dtype: str, ndim: int | tuple[int, ...] = 1, *, shape=None):
+        if shape is not None and ndim != 1:
+            raise TypeError("gptr shape= cannot be combined with an ndim or fixed-shape argument")
+        if shape is not None and not callable(shape):
+            raise TypeError(f"gptr shape= must be callable, got {shape!r}")
+        self.shape_factory = shape
         self.shape = None
-        if isinstance(ndim, tuple):
+        if shape is not None:
+            ndim = None
+        elif isinstance(ndim, tuple):
             if not ndim or any(
                 not isinstance(extent, int) or isinstance(extent, bool) or extent <= 0
                 for extent in ndim
@@ -93,6 +104,8 @@ class gptr:  # pylint: disable=invalid-name
         return cls(dtype)
 
     def __repr__(self):
+        if self.shape_factory is not None:
+            return f"K.gptr({self.dtype!r}, shape=<entry-shape>)"
         if self.shape is not None:
             return f"K.gptr[{self.dtype!r}, {self.shape!r}]"
         if self.ndim != 1:
@@ -200,28 +213,66 @@ class Kernel:
         return f"<K.kernel {self.name} warps={self.warps} arch={self.arch}>"
 
 
-def _declare_param(name, ann):
+def _scalar_param(name, ann):
+    """Create an unbound scalar entry variable from a dtype annotation."""
+    ctor = getattr(I, ann, None)
+    if ctor is None:
+        if any(ch in ann for ch in (".", "[", "(")):
+            raise TypeError(
+                f"parameter {name!r}: annotation arrived as the string {ann!r} — "
+                "`from __future__ import annotations` (PEP 563) stringifies "
+                "annotations before @K.kernel can read them. Remove that import "
+                "from the kernel's module: kern kernels trace at decoration time "
+                "and need live annotation objects."
+            )
+        raise TypeError(f"parameter {name!r}: unknown dtype token {ann!r}")
+    return ctor()
+
+
+def _derived_gptr_shape(name, ann, scalar_params):
+    """Resolve a non-empty integer shape from the entry's scalar parameters."""
+    try:
+        shape = ann.shape_factory(MappingProxyType(scalar_params))
+    except KeyError as error:
+        missing = error.args[0]
+        raise ValueError(
+            f"gptr parameter {name!r} shape refers to unknown scalar parameter {missing!r}"
+        ) from error
+    if not isinstance(shape, (tuple, list)) or not shape:
+        raise TypeError(f"gptr parameter {name!r} shape must return a non-empty tuple or list")
+    for index, extent in enumerate(shape):
+        if isinstance(extent, bool):
+            raise TypeError(f"gptr parameter {name!r} shape extent {index} is boolean")
+        if isinstance(extent, int):
+            if extent <= 0:
+                raise ValueError(f"gptr parameter {name!r} shape extent {index} must be positive")
+            continue
+        if not isinstance(extent, tvm.ir.Expr) or not isinstance(extent.ty, tvm.ir.PrimType):
+            raise TypeError(
+                f"gptr parameter {name!r} shape extent {index} must be an integer expression"
+            )
+        if not tvm.DataType(str(extent.ty.dtype)).is_integer:
+            raise TypeError(
+                f"gptr parameter {name!r} shape extent {index} must be integer, "
+                f"got {extent.ty.dtype}"
+            )
+    return shape
+
+
+def _declare_param(name, ann, scalar_params):
     """Turn one annotation into a PrimFunc parameter."""
     if isinstance(ann, gptr):
-        # Symbolic dimensions stay parameter-local: sharing would impose shape
-        # equalities that are not part of the raw-pointer contract.
-        shape = ann.shape or [tvm.tirx.Var(f"{name}_dim{i}", "int64") for i in range(ann.ndim)]
+        if ann.shape_factory is not None:
+            shape = _derived_gptr_shape(name, ann, scalar_params)
+        else:
+            # Symbolic dimensions stay parameter-local unless the annotation
+            # explicitly owns a scalar-derived shape contract.
+            shape = ann.shape or [tvm.tirx.Var(f"{name}_dim{i}", "int64") for i in range(ann.ndim)]
         return I.arg(name, I.buffer(shape, ann.dtype))
     if ann is TensorMap or isinstance(ann, TensorMap):
         return I.arg(name, I.TensorMap())
     if isinstance(ann, str):
-        ctor = getattr(I, ann, None)
-        if ctor is None:
-            if any(ch in ann for ch in ".[("):
-                raise TypeError(
-                    f"parameter {name!r}: annotation arrived as the string {ann!r} — "
-                    "`from __future__ import annotations` (PEP 563) stringifies "
-                    "annotations before @K.kernel can read them. Remove that import "
-                    "from the kernel's module: kern kernels trace at decoration time "
-                    "and need live annotation objects."
-                )
-            raise TypeError(f"parameter {name!r}: unknown dtype token {ann!r}")
-        return I.arg(name, ctor())
+        return I.arg(name, scalar_params[name])
     raise TypeError(
         f"parameter {name!r} has annotation {ann!r}; expected K.gptr[dtype], "
         "K.gptr[dtype, ndim], K.gptr[dtype, shape], "
@@ -314,7 +365,6 @@ def kernel(
     arch: str = "sm_100a",
     min_blocks_per_sm: int | None = None,
     grid=None,
-    thread_layout: str | bool = "flat",
     host_prelude=None,
     allowed_func_calls: tuple[str, ...] = (),
     check_ir: bool = True,
@@ -324,8 +374,8 @@ def kernel(
     Parameters
     ----------
     warps : int
-        CTA width in warps. ``flat`` uses ``blockDim.x = warps * 32``;
-        ``lane_warp`` uses ``blockDim = (32, warps, 1)``.
+        CTA width in warps. Kern owns one flat ``blockDim.x = warps * 32``
+        thread axis; thread layout is not an entry option.
     arch : str
         CUDA arch for the default compile target.
     min_blocks_per_sm : int, optional
@@ -357,14 +407,8 @@ def kernel(
         parameters may return either form. Defaults to the parameter named
         ``num_sms`` when the kernel has one, else 1. Pass ``False`` to leave
         the kernel-to-CTA scope to the body, which can then declare the
-        original kernel's dimensions directly with the TIRx IRBuilder. This
-        is an ownership opt-out, not a second grid representation in K.
-    thread_layout : {"flat", "lane_warp", False}
-        ``flat`` binds a single ``warps * 32`` ``threadIdx.x`` axis.
-        ``lane_warp`` binds ``threadIdx.x`` to the lane and ``threadIdx.y``
-        to the warp while preserving the same flattened ``K.thread_id()``.
-        Pass ``False`` to leave the thread scope to the body, matching
-        ``grid=False`` for kernels whose original contract owns its axes.
+        original kernel's dimensions directly with ``K.cta_id(extents)``.
+        This is an ownership opt-out, not a second grid representation in K.
     host_prelude : callable, optional
         Emit host-only setup in the same traced PrimFunc before its device
         entry.  The callable receives the ABI parameter mapping and returns
@@ -375,8 +419,6 @@ def kernel(
     """
 
     def decorator(fn):
-        if thread_layout not in ("flat", "lane_warp", False):
-            raise ValueError(f"unsupported thread_layout={thread_layout!r}")
         sig = inspect.signature(fn)
         host_param = sig.parameters.get("host")
         if host_prelude is None:
@@ -391,12 +433,17 @@ def kernel(
                 I.func_name(fn.__name__)
                 I.func_attr({"global_symbol": fn.__name__})
                 args = []
+                scalar_params = {
+                    pname: _scalar_param(pname, param.annotation)
+                    for pname, param in sig.parameters.items()
+                    if pname != "host" and isinstance(param.annotation, str)
+                }
                 for pname, param in sig.parameters.items():
                     if pname == "host" and host_prelude is not None:
                         continue
                     if param.annotation is inspect.Parameter.empty:
                         raise TypeError(f"kernel parameter {pname!r} needs an annotation")
-                    value = _declare_param(pname, param.annotation)
+                    value = _declare_param(pname, param.annotation, scalar_params)
                     session.params[pname] = value
                     args.append(value)
                 host = host_prelude(session.params) if host_prelude is not None else None
@@ -411,13 +458,13 @@ def kernel(
                 # user closures.
                 if grid is not False:
                     session.cta_id = I.cta_id(_resolve_grid_dimensions(grid, session.params))
-                if thread_layout == "flat":
-                    session.warp_scope_id = I.warp_id([warps])
-                    session.lane_id = I.lane_id([32])
-                    session.thread_id = I.thread_id([session.nthreads])
-                elif thread_layout == "lane_warp":
-                    session.lane_id, session.warp_scope_id = I.thread_id([32, warps])
-                    session.thread_id = session.warp_scope_id * 32 + session.lane_id
+                # Kern owns one flat CTA-local thread axis. A per-entry layout
+                # switch would let kernels silently change the launch ABI (or
+                # leave thread scope to a second builder owner), so it is not
+                # part of the kernel DSL contract.
+                session.warp_scope_id = I.warp_id([warps])
+                session.lane_id = I.lane_id([32])
+                session.thread_id = I.thread_id([session.nthreads])
                 _TLS.session = session
                 prev_parser = globals().get(_PARSER_GLOBAL)
                 globals()[_PARSER_GLOBAL] = _make_host_parser()
@@ -468,42 +515,21 @@ def cta_id(extents=None, preferred=None, dtype="int32"):
     if value is None:
         raise RuntimeError(
             "K.cta_id() is unavailable because @K.kernel set grid=False. "
-            "Declare the kernel-to-CTA scope directly with the TIRx IRBuilder "
-            "and use the returned scope id(s)."
+            "Declare it with K.cta_id(extents) inside the kernel body."
         )
     return value
 
 
-def thread_id(extents=None, dtype="int32"):
-    """Flattened CTA-local thread id, or an explicitly declared thread scope."""
-    if extents is not None:
-        return I.thread_id(extents, dtype=dtype)
-    value = current().thread_id
-    if value is None:
-        raise RuntimeError(
-            "K.thread_id() is unavailable because @K.kernel set thread_layout=False. "
-            "Declare the thread scope directly with the TIRx IRBuilder and use its id."
-        )
-    return value
+def thread_id():
+    """Flattened CTA-local thread id owned by the current kernel entry."""
+    return current().thread_id
 
 
 def warp_id():
     """Warp-uniform CTA-local id owned by the current kernel entry."""
-    value = current().warp_id()
-    if value is None:
-        raise RuntimeError(
-            "K.warp_id() is unavailable because @K.kernel set thread_layout=False. "
-            "Declare the thread scope directly with the TIRx IRBuilder and derive its warp id."
-        )
-    return value
+    return current().warp_id()
 
 
 def lane_id():
     """Warp-local lane id owned by the current kernel entry."""
-    value = current().lane_id
-    if value is None:
-        raise RuntimeError(
-            "K.lane_id() is unavailable because @K.kernel set thread_layout=False. "
-            "Declare the thread scope directly with the TIRx IRBuilder and derive its lane id."
-        )
-    return value
+    return current().lane_id

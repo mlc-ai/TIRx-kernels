@@ -557,19 +557,11 @@ def get_kernel(**kwargs: Any):
         sf_ready.init(1)
         tmem_ptr_in_smem = pool.alloc((1,), K.u32, align=4)
         pool.commit()
-        tmem = K.decl_buffer((128, num_tmem_cols), "float32", scope="tmem", allocated_addr=0)
-        sfq_tmem = K.decl_buffer(
-            (128, num_sfq // 32),
-            "float8_e8m0fnu",
-            scope="tmem",
-            allocated_addr=tmem_start_col_of_sfq,
-        )
-        sfkv_tmem = K.decl_buffer(
-            (128, num_sfkv // 32),
-            "float8_e8m0fnu",
-            scope="tmem",
-            allocated_addr=tmem_start_col_of_sfkv,
-        )
+        # TMEM operands are raw column addresses.  The fixed map is accumulator
+        # columns first, then SFQ and SFKV; no TIR TMEM buffer view.
+        tmem_col = 0
+        sfq_tmem_col = tmem_start_col_of_sfq
+        sfkv_tmem_col = tmem_start_col_of_sfkv
         seq_k_start = K.alloc_local([block_q], "uint32")
         seq_k_end = K.alloc_local([block_q], "uint32")
         schedule_result = K.alloc_local([2], "uint32")
@@ -742,8 +734,8 @@ def get_kernel(**kwargs: Any):
                 b_dtype="float4_e2m1fn",
                 sfa_dtype="float8_e8m0fnu",
                 sfb_dtype="float8_e8m0fnu",
-                sfa_tmem_addr=sfkv_tmem.elem_offset,
-                sfb_tmem_addr=sfq_tmem.elem_offset,
+                sfa_tmem_addr=sfkv_tmem_col,
+                sfb_tmem_addr=sfq_tmem_col,
                 M=umma_m,
                 N=umma_n,
                 K=umma_k,
@@ -791,7 +783,7 @@ def get_kernel(**kwargs: Any):
                     tmem_pipe.full.wait(previous_stage, previous_phase)
                 with K.If(K.cuda.elect_sync()), K.Then():
                     K.ptx[TCGEN05_CP](
-                        K.uint32(sfq_tmem.elem_offset),
+                        K.uint32(sfq_tmem_col),
                         replace_smem_desc_addr(desc_sf, smem_sf_q_t.ptr_to([q_state.stage, 0])),
                     )
                 K.cuda.warp_sync()
@@ -806,7 +798,7 @@ def get_kernel(**kwargs: Any):
                     with K.If(K.cuda.elect_sync()), K.Then():
                         for sfkv_i in range(num_sfkv // num_utccp_aligned_elems):
                             K.ptx[TCGEN05_CP](
-                                K.uint32(sfkv_tmem.elem_offset + sfkv_i * 4),
+                                K.uint32(sfkv_tmem_col + sfkv_i * 4),
                                 replace_smem_desc_addr(
                                     desc_sf,
                                     smem_sf_kv_t.ptr_to(
@@ -817,7 +809,7 @@ def get_kernel(**kwargs: Any):
                         for math_wg_i in range(num_math_warpgroups):
                             tmem_addr = K.local_scalar(
                                 "uint32",
-                                init=K.uint32(tmem.elem_offset)
+                                init=K.uint32(tmem_col)
                                 + tmem_state.stage * K.uint32(umma_n),
                             )
                             tmem_pipe.empty.wait(tmem_state.stage, tmem_state.phase ^ K.uint32(1))
@@ -844,12 +836,12 @@ def get_kernel(**kwargs: Any):
                                     ),
                                     desc_i_local,
                                     K.cuda.get_tmem_addr(
-                                        sfkv_tmem.elem_offset + math_wg_i * 4,
+                                        sfkv_tmem_col + math_wg_i * 4,
                                         sf_linear % 128 // 4,
                                         sf_linear // 128,
                                     ),
                                     K.cuda.get_tmem_addr(
-                                        sfq_tmem.elem_offset, sf_linear % 128 // 4, sf_linear // 128
+                                        sfq_tmem_col, sf_linear % 128 // 4, sf_linear // 128
                                     ),
                                     K.ptx.pred(tvm.tirx.const(ki != 0, "bool")),
                                 )
@@ -941,7 +933,7 @@ def get_kernel(**kwargs: Any):
                         for q_inner_i in range(block_q):
                             tmem_addr = K.local_scalar(
                                 "uint32",
-                                init=K.uint32(tmem.elem_offset)
+                                init=K.uint32(tmem_col)
                                 + tmem_state.stage * K.uint32(umma_n)
                                 + K.uint32(q_inner_i * num_heads),
                             )
@@ -949,7 +941,7 @@ def get_kernel(**kwargs: Any):
                             # (DeepGEMM's 64-head shape); accum stays flat for the reduce.
                             K.ptx[TCGEN05_LD_X32](
                                 *[accum[head_i] for head_i in range(num_heads // 2)],
-                                K.cuda.get_tmem_addr(K.uint32(tmem.elem_offset), 0, tmem_addr),
+                                K.cuda.get_tmem_addr(K.uint32(tmem_col), 0, tmem_addr),
                             )
                             K.ptx.tcgen05.wait__ld.sync.aligned()
                             tmem_addr_hi = K.local_scalar(
@@ -960,7 +952,7 @@ def get_kernel(**kwargs: Any):
                                     accum[num_heads // 2 + head_i]
                                     for head_i in range(num_heads // 2)
                                 ],
-                                K.cuda.get_tmem_addr(K.uint32(tmem.elem_offset), 0, tmem_addr_hi),
+                                K.cuda.get_tmem_addr(K.uint32(tmem_col), 0, tmem_addr_hi),
                             )
                             K.ptx.tcgen05.wait__ld.sync.aligned()
                             if q_inner_i == block_q - 1:
@@ -1023,7 +1015,7 @@ def get_kernel(**kwargs: Any):
             K.ptx.bar.sync(8, K.uint32(num_math_threads))
             with K.If(warp_idx == 0), K.Then():
                 K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    K.uint32(tmem.elem_offset), K.uint32(num_tmem_cols)
+                    K.uint32(tmem_col), K.uint32(num_tmem_cols)
                 )
 
     # `@K.kernel` has no `attrs=`, so the launch metadata the original sets on

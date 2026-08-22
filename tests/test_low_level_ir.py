@@ -3,21 +3,21 @@
 
 import pytest
 
+import tirx_kernels.kern as K
 from tirx_kernels.low_level_ir import (
     LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL,
     NVSHMEM_RUNTIME_FUNC_CALLS,
     LowLevelIRContractError,
     check_low_level_ir,
 )
-from tvm.script import tirx as T
 
 
 def _kernel_with_func_call(callee: str):
-    @T.prim_func
+    @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
     def main():
-        T.evaluate(T.cuda.func_call(callee, source_code="__device__ void ignored() {}"))
+        K.cuda.func_call(callee, source_code="__device__ void ignored() {}")
 
-    return main
+    return main.func
 
 
 def test_func_call_is_rejected_by_default_and_reports_callee():
@@ -53,3 +53,16 @@ def test_only_exact_nvshmem_runtime_calls_are_exempt_for_gemm_reduce_scatter():
             _kernel_with_func_call("another_runtime_helper"),
             allowed_func_calls=NVSHMEM_RUNTIME_FUNC_CALLS,
         )
+
+
+def test_kern_smem_descriptor_uniformity_stays_in_low_level_contract():
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe():
+        descriptor = K.SmemDescriptor()
+        descriptor.make_lo_uniform()
+        descriptor.add_16B_offset(K.int32(1))
+
+    report = check_low_level_ir(probe.func)
+
+    assert report.ok
+    assert report.func_calls == ()

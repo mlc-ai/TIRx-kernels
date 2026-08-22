@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 import sys
-from importlib.metadata import PackageNotFoundError, distribution, version
+from importlib.metadata import PackageNotFoundError, distribution, distributions, version
 from pathlib import Path
 from typing import Any
 
@@ -129,12 +129,38 @@ def import_uses_checkout(source: dict[str, str], checkout: Path) -> bool:
     )
 
 
+def requirement_pin(requirement: str) -> tuple[str, str]:
+    package, expected = requirement.split("==", 1)
+    return package.split("[", 1)[0], expected
+
+
+def target_versions(target: Path) -> dict[str, str]:
+    return {
+        str(item.metadata["Name"]).lower().replace("_", "-"): item.version
+        for item in distributions(path=[str(target)])
+        if item.metadata["Name"]
+    }
+
+
 def install(lock: dict[str, Any], source_root: Path) -> None:
     requirements = lock["python_requirements"]
     run(sys.executable, "-m", "pip", "install", "--upgrade", *lock["test_requirements"])
     run(sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps", *requirements)
     build_env = source_build_environment()
     source_root.mkdir(parents=True, exist_ok=True)
+    for name, isolated in lock.get("isolated_python_requirements", {}).items():
+        target = source_root / name
+        run(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--no-deps",
+            "--target",
+            str(target),
+            *isolated,
+        )
     for source in lock["sources"]:
         checkout = checkout_source(source, source_root)
         materialize_source_links(source, checkout)
@@ -158,8 +184,7 @@ def install(lock: dict[str, Any], source_root: Path) -> None:
 def check(lock: dict[str, Any], source_root: Path) -> None:
     failures: list[str] = []
     for requirement in [*lock["python_requirements"], *lock["test_requirements"]]:
-        package, expected = requirement.split("==", 1)
-        package = package.split("[", 1)[0]
+        package, expected = requirement_pin(requirement)
         try:
             actual = version(package)
         except PackageNotFoundError:
@@ -167,6 +192,20 @@ def check(lock: dict[str, Any], source_root: Path) -> None:
             continue
         if actual != expected:
             failures.append(f"{package}=={actual}, expected {expected}")
+
+    for name, requirements in lock.get("isolated_python_requirements", {}).items():
+        target = source_root / name
+        if not target.is_dir():
+            failures.append(f"missing isolated dependency directory: {target}")
+            continue
+        installed = target_versions(target)
+        for requirement in requirements:
+            package, expected = requirement_pin(requirement)
+            actual = installed.get(package.lower().replace("_", "-"))
+            if actual is None:
+                failures.append(f"{package} is not installed under {target}")
+            elif actual != expected:
+                failures.append(f"{package}=={actual} under {target}, expected {expected}")
 
     for source in lock["sources"]:
         checkout = source_root / source["name"]

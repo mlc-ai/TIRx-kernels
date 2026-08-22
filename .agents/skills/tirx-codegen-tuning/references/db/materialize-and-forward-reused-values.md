@@ -36,6 +36,18 @@ def _ptx_binary(chain: str, lhs, rhs, dtype: str = "float32"):
     return out[0]  # a materialized value, not an expression tree
 ```
 
+When translating a parser kernel to a tracing DSL, preserve every typed scalar
+binding that defined a single-evaluation boundary. A plain Python assignment in
+the traced function only names an expression tree.
+
+```python
+# before: parser syntax materializes this typed scalar once.
+q_begin: T.int32 = chunk_idx * target
+
+# after: native tracing spells the same register and evaluation boundary.
+q_begin = K.local_scalar(K.i32, init=chunk_idx * target, name="q_begin")
+```
+
 Where the reference's own compiler CSEd two accesses to the same element across
 opaque inline asm, reuse the earlier value explicitly; two excess loads and a
 redundant integer max disappeared that way.
@@ -73,6 +85,14 @@ In one recurrent state update, the scalar-forwarding rewrite changed no PTX line
 count but reduced the realized register allocation from 60 to 48 and static SASS
 from 1080 to 1000 instructions; `IMAD.MOV.U32` fell from 84 to 31 and `MOV` from
 45 to 20, with no spill. The resulting build then cleared all 43 gate workloads.
+
+In one parser-to-tracing scheduler port, leaving typed parser scalars as Python
+aliases preserved global-load and branch counts but lowered issue-active from
+79.21% to 74.75% and raised average active cycles from 594.1k to 632.6k. Two
+15-round paired cases regressed by 6.14% and 7.84%. Explicitly materializing the
+parser's scalar bindings, including stable source names, restored byte-identical
+SASS; all 12 correctness cases passed and the same paired cases measured
+0.999951 and 1.000013 after/before.
 
 ## Boundary
 

@@ -17,7 +17,6 @@ import tvm
 from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
 from tvm.backend.cuda.lang import MBarrier, Pipeline, PipelineState, TMABar
 from tvm.tirx.lang.tile_scheduler import ClusterPersistentScheduler2D
-from tvm.tirx.script.builder import ir as I
 
 
 class WarpRole(IntEnum):
@@ -382,7 +381,7 @@ def make_kernel(M, N, KDIM):
     ):
         # The cluster-local rank remains a low-level scope; K owns the global
         # persistent-CTA grid.
-        cluster_rank = I.cta_id_in_cluster([CLUSTER_SIZE], preferred=[CLUSTER_SIZE])
+        cluster_rank = K.cta_id_in_cluster([CLUSTER_SIZE], preferred=[CLUSTER_SIZE])
         cta_idx = K.cta_id()
         tid_in_cta = K.thread_id()
         lane_id = K.lane_id()
@@ -459,20 +458,16 @@ def make_kernel(M, N, KDIM):
         with K.If(mbar_leader), K.Then():
             K.ptx.fence.mbarrier_init.release.cluster()
 
-        tmem = K.decl_buffer((CTA_M, 512), "float32", scope="tmem", allocated_addr=0)
         A_smem = A_smem_packed.buf.view("float4_e2m1fn")
         B_smem = B_smem_packed.buf.view("float4_e2m1fn")
         sf_mma_k = 4
         SFB_n_chunks = SFB_N // 128
-        SFA_tmem = K.decl_buffer(
-            (128, sf_mma_k * MMA_K_BLOCKS), "float8_e4m3fn", scope="tmem", allocated_addr=448
-        )
-        SFB_tmem = K.decl_buffer(
-            (128 * SFB_n_chunks, sf_mma_k * MMA_K_BLOCKS),
-            "float8_e4m3fn",
-            scope="tmem",
-            allocated_addr=464,
-        )
+        # TMEM is addressed by physical columns, not represented as a TIR
+        # buffer.  These offsets are the fixed map used by the tcgen05
+        # allocation: D at [0, 448), SFA at 448, SFB at 464.
+        tmem_col = 0
+        sfa_tmem_col = 448
+        sfb_tmem_col = 464
         sf_desc = K.SmemDescriptor()
         desc_a = K.SmemDescriptor()
         desc_b = K.SmemDescriptor()
@@ -638,7 +633,7 @@ def make_kernel(M, N, KDIM):
                             ),
                         )
                         K.ptx[_TCGEN05_CP_2SM](
-                            K.Cast("uint32", SFA_tmem.allocated_addr[0] + flat % 4 * 4), sfa_cp_desc
+                            K.Cast("uint32", sfa_tmem_col + flat % 4 * 4), sfa_cp_desc
                         )
                     for flat in range(SFB_N // 32):
                         sfb_row = flat % 4 * 32 + flat // 4 * 128
@@ -668,7 +663,7 @@ def make_kernel(M, N, KDIM):
                         K.ptx[_TCGEN05_CP_2SM](
                             K.Cast(
                                 "uint32",
-                                SFB_tmem.allocated_addr[0]
+                                sfb_tmem_col
                                 + flat % 4 * SFB_n_chunks * 4
                                 + flat // 4 * 4,
                             ),
@@ -682,8 +677,8 @@ def make_kernel(M, N, KDIM):
                         b_dtype="float4_e2m1fn",
                         sfa_dtype="float8_e4m3fn",
                         sfb_dtype="float8_e4m3fn",
-                        sfa_tmem_addr=SFA_tmem.allocated_addr[0],
-                        sfb_tmem_addr=SFB_tmem.allocated_addr[0],
+                        sfa_tmem_addr=sfa_tmem_col,
+                        sfb_tmem_addr=sfb_tmem_col,
                         M=CTA_M * CTA_GROUP,
                         N=MMA_N,
                         K=MMA_K,
@@ -700,17 +695,17 @@ def make_kernel(M, N, KDIM):
                         )
                         sf_linear = ki * sf_mma_k
                         K.ptx[_MMA_NVFP4_2SM](
-                            K.Cast("uint32", tmem.allocated_addr[0]),
+                            K.Cast("uint32", tmem_col),
                             desc_a_ki,
                             desc_b_ki,
                             desc_i,
                             K.cuda.get_tmem_addr(
-                                SFA_tmem.allocated_addr[0],
+                                K.uint32(sfa_tmem_col),
                                 sf_linear % 512 // 16,
                                 sf_linear % 16 // sf_mma_k * sf_mma_k + sf_linear // 512,
                             ),
                             K.cuda.get_tmem_addr(
-                                SFB_tmem.allocated_addr[0],
+                                K.uint32(sfb_tmem_col),
                                 sf_linear % 512 // 16,
                                 sf_linear % 16 // sf_mma_k * sf_mma_k * SFB_n_chunks
                                 + sf_linear // 512,
@@ -784,7 +779,7 @@ def make_kernel(M, N, KDIM):
                             reg_base = slab * (EPI_TILE // 2)
                             K.ptx[TMEM_LD](
                                 *[reg_f32[reg_base + j] for j in range(EPI_TILE // 2)],
-                                K.cuda.get_tmem_addr(tmem.allocated_addr[0], slab * 16, linear_n),
+                                K.cuda.get_tmem_addr(K.uint32(tmem_col), slab * 16, linear_n),
                             )
                         if no == MMA_N // EPI_TILE - 1:
                             K.ptx.tcgen05.wait__ld.sync.aligned()
@@ -809,7 +804,7 @@ def make_kernel(M, N, KDIM):
                             reg_base = no * (EPI_TILE // 2) + slab * (MMA_N // 2)
                             K.ptx[TMEM_LD](
                                 *[reg_all_f32[reg_base + j] for j in range(EPI_TILE // 2)],
-                                K.cuda.get_tmem_addr(tmem.allocated_addr[0], slab * 16, linear_n),
+                                K.cuda.get_tmem_addr(K.uint32(tmem_col), slab * 16, linear_n),
                             )
                     K.ptx.tcgen05.wait__ld.sync.aligned()
                     for pair in range(MMA_N // 2):

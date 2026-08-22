@@ -18,7 +18,6 @@ import tirx_kernels.kern as K
 import tvm
 from tvm.ir import PointerType, PrimType
 from tvm.tirx.lang.pipeline import PipelineState
-from tvm.tirx.script.builder import ir as I
 
 B_H = 64
 B_TOPK = 64
@@ -1955,7 +1954,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
 
 
 def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
-    @K.kernel(warps=8, arch="sm_100a", grid=False, thread_layout=False)
+    @K.kernel(warps=8, arch="sm_100a", grid=False)
     def sparse_decode_head64_combine(
         lse: K.gptr[K.f32],
         out: K.gptr[K.bf16],
@@ -1983,8 +1982,8 @@ def make_combine_kernel(max_splits, have_attn_sink, use_pdl=False):
         lse_scales = smem.alloc((8, max_splits), "float32")
 
         # combine.cu:18-43. One warp per head, eight heads per CTA.
-        batch_s_q_idx, _, h_block_idx = I.cta_id([b * s_q, 1, (h_q + 7) // 8])
-        thread_idx = I.thread_id([8 * 32])
+        batch_s_q_idx, _, h_block_idx = K.cta_id([b * s_q, 1, (h_q + 7) // 8])
+        thread_idx = K.thread_id()
         warp_idx = K.local_scalar("int32", init=thread_idx // 32)
         lane_idx = K.local_scalar("int32", init=thread_idx % 32)
         batch_idx = K.local_scalar("int32", init=batch_s_q_idx // s_q)
