@@ -1,0 +1,71 @@
+# Complete deterministic performance-path covering matrix for the single
+# parameterized cuDNN Frontend persistent block-scaled GEMM+amax port.
+kernel: cudnn_sm100_dense_blockscaled_gemm_persistent_amax
+selection_rationale: The selected defaults span small/medium/large GEMMs while the complete 66-row matrix covers every input, scale, output, major, tile, cluster, stage, TMA, MMA, store, and L=1/2 path required by the port gate.
+configs:
+  - {config: perf00_m1024_n1024_k1024_e4_e8v32_bf16_kk_m_t128x128_c1x1_l1, default: true, selection_role: small}
+  - {config: perf00_m1024_n1024_k1024_e4_e8v32_bf16_kk_m_t128x128_c1x1_l2, default: false}
+  - {config: perf00_m4096_n4096_k1024_e4_e8v32_bf16_kk_m_t128x128_c1x1_l1, default: false}
+  - {config: perf00_m4096_n4096_k1024_e4_e8v32_bf16_kk_m_t128x128_c1x1_l2, default: false}
+  - {config: perf00_m8192_n8192_k1024_e4_e8v32_bf16_kk_m_t128x128_c1x1_l1, default: false}
+  - {config: perf00_m8192_n8192_k1024_e4_e8v32_bf16_kk_m_t128x128_c1x1_l2, default: false}
+  - {config: perf01_m1024_n1024_k1024_f4_e4v16_e4_kk_m_t128x256_c1x2_l1, default: false}
+  - {config: perf01_m1024_n1024_k1024_f4_e4v16_e4_kk_m_t128x256_c1x2_l2, default: false}
+  - {config: perf01_m4096_n4096_k1024_f4_e4v16_e4_kk_m_t128x256_c1x2_l1, default: false}
+  - {config: perf01_m4096_n4096_k1024_f4_e4v16_e4_kk_m_t128x256_c1x2_l2, default: false}
+  - {config: perf01_m8192_n8192_k1024_f4_e4v16_e4_kk_m_t128x256_c1x2_l1, default: false}
+  - {config: perf01_m8192_n8192_k1024_f4_e4v16_e4_kk_m_t128x256_c1x2_l2, default: false}
+  - {config: perf02_m1024_n1024_k1024_e5_e8v32_f32_kk_m_t128x256_c1x4_l1, default: false}
+  - {config: perf02_m1024_n1024_k1024_e5_e8v32_f32_kk_m_t128x256_c1x4_l2, default: false}
+  - {config: perf02_m4096_n4096_k1024_e5_e8v32_f32_kk_m_t128x256_c1x4_l1, default: false}
+  - {config: perf02_m4096_n4096_k1024_e5_e8v32_f32_kk_m_t128x256_c1x4_l2, default: false}
+  - {config: perf02_m8192_n8192_k1024_e5_e8v32_f32_kk_m_t128x256_c1x4_l1, default: false}
+  - {config: perf02_m8192_n8192_k1024_e5_e8v32_f32_kk_m_t128x256_c1x4_l2, default: false}
+  - {config: perf03_m1024_n1024_k1024_f4_e8v16_f16_kk_m_t128x128_c2x1_l1, default: false}
+  - {config: perf03_m1024_n1024_k1024_f4_e8v16_f16_kk_m_t128x128_c2x1_l2, default: false}
+  - {config: perf03_m4096_n4096_k1024_f4_e8v16_f16_kk_m_t128x128_c2x1_l1, default: true, selection_role: medium}
+  - {config: perf03_m4096_n4096_k1024_f4_e8v16_f16_kk_m_t128x128_c2x1_l2, default: false}
+  - {config: perf03_m8192_n8192_k1024_f4_e8v16_f16_kk_m_t128x128_c2x1_l1, default: false}
+  - {config: perf03_m8192_n8192_k1024_f4_e8v16_f16_kk_m_t128x128_c2x1_l2, default: false}
+  - {config: perf04_m1024_n1024_k1024_e4_e8v32_bf16_mn_n_t128x128_c2x2_l1, default: false}
+  - {config: perf04_m1024_n1024_k1024_e4_e8v32_bf16_mn_n_t128x128_c2x2_l2, default: false}
+  - {config: perf04_m4096_n4096_k1024_e4_e8v32_bf16_mn_n_t128x128_c2x2_l1, default: false}
+  - {config: perf04_m4096_n4096_k1024_e4_e8v32_bf16_mn_n_t128x128_c2x2_l2, default: false}
+  - {config: perf04_m8192_n8192_k1024_e4_e8v32_bf16_mn_n_t128x128_c2x2_l1, default: false}
+  - {config: perf04_m8192_n8192_k1024_e4_e8v32_bf16_mn_n_t128x128_c2x2_l2, default: false}
+  - {config: perf05_m1024_n1024_k1024_e5_e8v32_f16_mn_n_t128x128_c2x4_l1, default: false}
+  - {config: perf05_m1024_n1024_k1024_e5_e8v32_f16_mn_n_t128x128_c2x4_l2, default: false}
+  - {config: perf05_m4096_n4096_k1024_e5_e8v32_f16_mn_n_t128x128_c2x4_l1, default: false}
+  - {config: perf05_m4096_n4096_k1024_e5_e8v32_f16_mn_n_t128x128_c2x4_l2, default: false}
+  - {config: perf05_m8192_n8192_k1024_e5_e8v32_f16_mn_n_t128x128_c2x4_l1, default: false}
+  - {config: perf05_m8192_n8192_k1024_e5_e8v32_f16_mn_n_t128x128_c2x4_l2, default: false}
+  - {config: perf06_m1024_n1024_k1024_f4_e8v32_e5_kk_m_t128x128_c4x1_l1, default: false}
+  - {config: perf06_m1024_n1024_k1024_f4_e8v32_e5_kk_m_t128x128_c4x1_l2, default: false}
+  - {config: perf06_m4096_n4096_k1024_f4_e8v32_e5_kk_m_t128x128_c4x1_l1, default: false}
+  - {config: perf06_m4096_n4096_k1024_f4_e8v32_e5_kk_m_t128x128_c4x1_l2, default: false}
+  - {config: perf06_m8192_n8192_k1024_f4_e8v32_e5_kk_m_t128x128_c4x1_l1, default: false}
+  - {config: perf06_m8192_n8192_k1024_f4_e8v32_e5_kk_m_t128x128_c4x1_l2, default: false}
+  - {config: perf07_m1024_n1024_k1024_f4_e4v16_f4_kk_n_t128x128_c4x2_l1, default: false}
+  - {config: perf07_m1024_n1024_k1024_f4_e4v16_f4_kk_n_t128x128_c4x2_l2, default: false}
+  - {config: perf07_m4096_n4096_k1024_f4_e4v16_f4_kk_n_t128x128_c4x2_l1, default: false}
+  - {config: perf07_m4096_n4096_k1024_f4_e4v16_f4_kk_n_t128x128_c4x2_l2, default: false}
+  - {config: perf07_m8192_n8192_k1024_f4_e4v16_f4_kk_n_t128x128_c4x2_l1, default: false}
+  - {config: perf07_m8192_n8192_k1024_f4_e4v16_f4_kk_n_t128x128_c4x2_l2, default: true, selection_role: large}
+  - {config: perf08_m1024_n1024_k1024_e4_e8v32_f32_kk_n_t128x128_c4x4_l1, default: false}
+  - {config: perf08_m1024_n1024_k1024_e4_e8v32_f32_kk_n_t128x128_c4x4_l2, default: false}
+  - {config: perf08_m4096_n4096_k1024_e4_e8v32_f32_kk_n_t128x128_c4x4_l1, default: false}
+  - {config: perf08_m4096_n4096_k1024_e4_e8v32_f32_kk_n_t128x128_c4x4_l2, default: false}
+  - {config: perf08_m8192_n8192_k1024_e4_e8v32_f32_kk_n_t128x128_c4x4_l1, default: false}
+  - {config: perf08_m8192_n8192_k1024_e4_e8v32_f32_kk_n_t128x128_c4x4_l2, default: false}
+  - {config: perf09_m1024_n1024_k1024_f4_e4v16_e4_kk_n_t128x128_c1x1_l1, default: false}
+  - {config: perf09_m1024_n1024_k1024_f4_e4v16_e4_kk_n_t128x128_c1x1_l2, default: false}
+  - {config: perf09_m4096_n4096_k1024_f4_e4v16_e4_kk_n_t128x128_c1x1_l1, default: false}
+  - {config: perf09_m4096_n4096_k1024_f4_e4v16_e4_kk_n_t128x128_c1x1_l2, default: false}
+  - {config: perf09_m8192_n8192_k1024_f4_e4v16_e4_kk_n_t128x128_c1x1_l1, default: false}
+  - {config: perf09_m8192_n8192_k1024_f4_e4v16_e4_kk_n_t128x128_c1x1_l2, default: false}
+  - {config: perf10_m1024_n1024_k1024_f4_e4v16_e5_kk_n_t128x128_c1x1_l1, default: false}
+  - {config: perf10_m1024_n1024_k1024_f4_e4v16_e5_kk_n_t128x128_c1x1_l2, default: false}
+  - {config: perf10_m4096_n4096_k1024_f4_e4v16_e5_kk_n_t128x128_c1x1_l1, default: false}
+  - {config: perf10_m4096_n4096_k1024_f4_e4v16_e5_kk_n_t128x128_c1x1_l2, default: false}
+  - {config: perf10_m8192_n8192_k1024_f4_e4v16_e5_kk_n_t128x128_c1x1_l1, default: false}
+  - {config: perf10_m8192_n8192_k1024_f4_e4v16_e5_kk_n_t128x128_c1x1_l2, default: false}

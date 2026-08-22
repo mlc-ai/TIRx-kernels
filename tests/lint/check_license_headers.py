@@ -59,6 +59,11 @@ CITATION_RE = re.compile(r"\((https://\S+) @ [0-9a-f]{7,40}\)")
 # Path-bound expectations: project name, upstream URL, and the SPDX expression
 # a port under this bucket must carry.
 PORT_BUCKETS = {
+    "tirx_kernels/cudnn/": (
+        "cuDNN Frontend",
+        "https://github.com/NVIDIA/cudnn-frontend",
+        "Apache-2.0",
+    ),
     "tirx_kernels/deepgemm/": (
         "DeepGEMM",
         "https://github.com/deepseek-ai/DeepGEMM",
@@ -219,6 +224,7 @@ def self_test() -> int:
         "# ({url} @ 559d79fb), Copyright (c) 2025 Upstream\n" + pair + "\n\nx = 1\n"
     )
     dg = dict(project="DeepGEMM", url="https://github.com/deepseek-ai/DeepGEMM")
+    cudnn = dict(project="cuDNN Frontend", url="https://github.com/NVIDIA/cudnn-frontend")
     fi = dict(project="FlashInfer", url="https://github.com/flashinfer-ai/flashinfer")
     msa = dict(project="MSA", url="https://github.com/MiniMax-AI/MSA")
     gdn = "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py"
@@ -235,6 +241,34 @@ def self_test() -> int:
             "tirx_kernels/deepgemm/x.py",
             port.format(spdx="Apache-2.0 AND MIT", **dg),
             False,
+        ),
+        (
+            "valid cudnn-frontend port",
+            "tirx_kernels/cudnn/amax/x.py",
+            port.format(spdx="Apache-2.0", **cudnn),
+            False,
+        ),
+        (
+            "cudnn-frontend port tagged MIT",
+            "tirx_kernels/cudnn/amax/x.py",
+            port.format(spdx="Apache-2.0 AND MIT", **cudnn),
+            True,
+        ),
+        (
+            "cudnn-frontend port citing another URL",
+            "tirx_kernels/cudnn/amax/x.py",
+            port.format(
+                spdx="Apache-2.0",
+                project="cuDNN Frontend",
+                url="https://github.com/deepseek-ai/DeepGEMM",
+            ),
+            True,
+        ),
+        (
+            "cudnn-frontend port with no upstream copyright",
+            "tirx_kernels/cudnn/amax/x.py",
+            port.format(spdx="Apache-2.0", **cudnn).replace(", Copyright (c) 2025 Upstream", ""),
+            True,
         ),
         ("valid native", "tirx_kernels/x.py", f"{TIRX_HEADER}\n\nx = 1\n", False),
         (

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -38,7 +39,7 @@ def load_lock() -> dict[str, Any]:
     return lock
 
 
-def checkout_source(source: dict[str, str], source_root: Path) -> Path:
+def checkout_source(source: dict[str, Any], source_root: Path) -> Path:
     checkout = source_root / source["name"]
     revision = source["revision"]
     if not checkout.exists():
@@ -52,13 +53,17 @@ def checkout_source(source: dict[str, str], source_root: Path) -> Path:
     except subprocess.CalledProcessError:
         has_head = False
     materialized = any(path.name != ".git" for path in checkout.iterdir())
-    if has_head and materialized and output(
-        "git",
-        "status",
-        "--porcelain",
-        "--untracked-files=no",
-        "--ignore-submodules=untracked",
-        cwd=checkout,
+    if (
+        has_head
+        and materialized
+        and output(
+            "git",
+            "status",
+            "--porcelain",
+            f"--untracked-files={'all' if source.get('source_only', False) else 'no'}",
+            "--ignore-submodules=untracked",
+            cwd=checkout,
+        )
     ):
         raise RuntimeError(f"reference source checkout has local changes: {checkout}")
     origin = output("git", "remote", "get-url", "origin", cwd=checkout)
@@ -70,7 +75,8 @@ def checkout_source(source: dict[str, str], source_root: Path) -> Path:
     except subprocess.CalledProcessError:
         run("git", "fetch", "--filter=blob:none", "origin", revision, cwd=checkout)
     run("git", "checkout", "--detach", revision, cwd=checkout)
-    run("git", "submodule", "update", "--init", "--recursive", cwd=checkout)
+    if not source.get("source_only", False):
+        run("git", "submodule", "update", "--init", "--recursive", cwd=checkout)
     actual = output("git", "rev-parse", "HEAD", cwd=checkout)
     if actual != revision:
         raise RuntimeError(f"{source['name']} resolved to {actual}, expected {revision}")
@@ -124,9 +130,7 @@ def import_paths(import_name: str) -> list[Path]:
 
 def import_uses_checkout(source: dict[str, str], checkout: Path) -> bool:
     install_path = (checkout / source["install_subdirectory"]).resolve()
-    return any(
-        path.is_relative_to(install_path) for path in import_paths(source["import_name"])
-    )
+    return any(path.is_relative_to(install_path) for path in import_paths(source["import_name"]))
 
 
 def install(lock: dict[str, Any], source_root: Path) -> None:
@@ -138,6 +142,9 @@ def install(lock: dict[str, Any], source_root: Path) -> None:
     for source in lock["sources"]:
         checkout = checkout_source(source, source_root)
         materialize_source_links(source, checkout)
+        if source.get("source_only", False):
+            print(f"{source['name']} is source-only; skipping package installation", flush=True)
+            continue
         if import_uses_checkout(source, checkout):
             print(f"{source['name']} already imports from its pinned checkout", flush=True)
             continue
@@ -169,6 +176,10 @@ def check(lock: dict[str, Any], source_root: Path) -> None:
             failures.append(f"{package}=={actual}, expected {expected}")
 
     for source in lock["sources"]:
+        source_only = source.get("source_only", False)
+        if not isinstance(source_only, bool):
+            failures.append(f"{source['name']} source_only must be a bool")
+            continue
         checkout = source_root / source["name"]
         if not (checkout / ".git").exists():
             failures.append(f"missing checkout: {checkout}")
@@ -176,10 +187,38 @@ def check(lock: dict[str, Any], source_root: Path) -> None:
         actual = output("git", "rev-parse", "HEAD", cwd=checkout)
         if actual != source["revision"]:
             failures.append(f"{source['name']} checkout is {actual}, expected {source['revision']}")
+        origin = output("git", "remote", "get-url", "origin", cwd=checkout)
+        if origin.rstrip("/").removesuffix(".git") != source["url"].rstrip("/").removesuffix(
+            ".git"
+        ):
+            failures.append(f"unexpected origin for {checkout}: {origin}")
+        dirty = output(
+            "git",
+            "status",
+            "--porcelain",
+            f"--untracked-files={'all' if source_only else 'no'}",
+            "--ignore-submodules=untracked",
+            cwd=checkout,
+        )
+        if dirty:
+            failures.append(f"reference source checkout has local changes: {checkout}")
+        for locked_file in source.get("files", []):
+            path = checkout / locked_file["path"]
+            if not path.is_file():
+                failures.append(f"missing locked source file: {path}")
+                continue
+            actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual_sha256 != locked_file["sha256"]:
+                failures.append(
+                    f"{source['name']} {locked_file['path']} sha256 is {actual_sha256}, "
+                    f"expected {locked_file['sha256']}"
+                )
         try:
             materialize_source_links(source, checkout)
         except (FileNotFoundError, RuntimeError) as error:
             failures.append(str(error))
+        if source_only:
+            continue
         resolved_import_paths = import_paths(source["import_name"])
         if not resolved_import_paths:
             failures.append(f"cannot find import {source['import_name']!r}")
