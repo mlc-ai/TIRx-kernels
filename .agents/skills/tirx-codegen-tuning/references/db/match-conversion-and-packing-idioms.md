@@ -65,6 +65,25 @@ The store keeps its own width independent of both:
 T.evaluate(T.ptx.st.global_.v4.b32(buf.ptr_to([index]), w[0], w[1], w[2], w[3]))
 ```
 
+If a paired conversion already produces final 16-bit carriers in memory byte
+order, do not repack them into 32-bit words only to reach a wide shared store.
+Store the halves directly at the same byte addresses:
+
+```python
+# before: eight pair carriers are repacked into four words.
+for pair in T.unroll(4):
+    T.ptx.mov.b32(words[pair], halves[2 * pair], halves[2 * pair + 1])
+T.ptx.st.shared.v4.b32(dst, words[0], words[1], words[2], words[3])
+
+# after: the pair carriers already are the final bytes.
+T.ptx["st.shared.v4.b16"](
+    dst, halves[0], halves[1], halves[2], halves[3]
+)
+T.ptx["st.shared.v4.b16"](
+    dst + 8, halves[4], halves[5], halves[6], halves[7]
+)
+```
+
 Keep the conversion selector independent from the store selector. A fragment
 may require scalar narrowing and still use a packed transaction after an
 explicit register pack:
@@ -129,6 +148,15 @@ Where the state update is naturally in place, the missing primitive is a native
 tied read-write operand; a kernel-local asm wrapper is not an
 instruction-selection fix.
 
+In a measured FP8 epilogue, sixteen paired conversions already produced the
+final halfword sequence. Four direct `st.shared.v4.b16` operations removed
+eight PRMT-equivalent repacks while preserving the shared bytes. All five
+focused rows passed at a 0.9909x minimum, the direct stores survived the full
+correctness matrix, and the retained implementation passed the final 66-row
+suite. A broader candidate initially failed elsewhere because of an unrelated
+global register policy; separating store width from register selection kept the
+packing result usable.
+
 ## Boundary
 
 The exact packed/scalar selector is a property of the source fragment layout
@@ -141,6 +169,11 @@ operand class. A byte store consuming the low byte of a uint32 register does not
 justify weakening every b8 operation's dtype contract. Likewise, use a compound
 intrinsic for a native multi-output packing idiom, not as a container for an
 arbitrary workload-specific instruction sequence.
+
+Direct halfword stores require exact byte-order and alignment equivalence.
+Confirm that no later consumer expects the temporary 32-bit packed words, and
+do not infer the rewrite from output dtype alone; it applies only when the
+conversion result is already the final memory representation.
 
 ## Verification
 
