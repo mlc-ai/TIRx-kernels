@@ -56,6 +56,7 @@ def _payload(label: str, revision: str, rows: list[dict]) -> dict:
             "tir:python/tvm/tirx": "shared-tir-tree",
             "tirx-kernels:tirx_kernels": f"{revision}-tree",
         },
+        "references_enabled": True,
         "baselines": {"torch": {"version": "test"}},
         "selection": {"mode": "targeted", "keys": keys},
         "pipeline": {
@@ -91,6 +92,24 @@ def test_paired_report_allows_different_gpus_across_workloads() -> None:
 
     assert failures == 0
     assert "2/2 expected rows evaluated; 2 direct passes" in report
+
+
+def test_paired_report_allows_empty_baselines_when_references_are_disabled() -> None:
+    before = _payload(
+        "before", "before-rev", [_row("kernel", "config", "GPU-a", [10.0, 10.0])]
+    )
+    after = copy.deepcopy(before)
+    after["label"] = "after"
+    after["git"]["tirx-kernels"] = "after-rev"
+    after["kernel_tree"]["tirx-kernels:tirx_kernels"] = "after-tree"
+    for payload in (before, after):
+        payload["references_enabled"] = False
+        payload["baselines"] = {}
+
+    report, failures = build_report(before, after, paired=True)
+
+    assert failures == 0
+    assert "1/1 expected rows evaluated; 1 direct passes" in report
 
 
 def test_paired_report_rejects_a_cross_gpu_pair() -> None:
