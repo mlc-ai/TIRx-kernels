@@ -1,0 +1,19 @@
+kernel: msa_sparse_atten_fwd_combine_sm100
+selection_rationale: >-
+  The partial dtype selects one of three STG.128 fake-column maps, and each is
+  separate device code down to the staging copy width and the epilogue store,
+  so the defaults take one shape from each rather than three shapes of one map.
+  The large row is the standard-path ring-attention marquee over fp32 partials,
+  the medium row is the NVFP4 production combine (bf16 partials, temperature
+  LSE, output scale, and the only configuration that raises min_blocks_per_mp),
+  and the small row is the fp8 map.
+configs:
+  - {config: ring48k_fp32p_qh16_t16, default: true, selection_role: large}
+  - {config: ulysses384k_fp32p_qh2_t4, default: false}
+  - {config: long96k_fp32p_qh2_t16, default: false}
+  - {config: varlen_b3_s8192_fp32p_qh4_t16, default: false}
+  - {config: ring48k_bf16p_temp_qh16_t16, default: false}
+  - {config: fp8p_s16384_qh8_t8, default: true, selection_role: small}
+  - {config: scale_bf16p_temp_s16384_qh4_t16, default: true, selection_role: medium}
+  - {config: scale_fp32p_s8192_qh8_t8, default: false}
+  - {config: edge_b1_s1024_fp32p_qh2_t4, default: false}
