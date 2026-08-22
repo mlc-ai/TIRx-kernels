@@ -809,12 +809,13 @@ def _make_kernel(
                     _wait_plain_if_needed(
                         ab_pipe.empty.ptr_to([tma_state.stage]), tma_state.phase, speculative
                     )
-                    with K.If(_elected()):
+                    tma_elected = _elected()
+                    with K.If(tma_elected):
                         with K.Then():
                             K.ptx.mbarrier.arrive.expect_tx.shared.b64(
                                 ab_pipe.full.ptr_to([tma_state.stage]), K.uint32(ab_stage_bytes)
                             )
-                    with K.If(_elected()):
+                    with K.If(tma_elected):
                         with K.Then():
                             a_coord_m = tile_m_idx * m_tile
                             a_coord_k = count * k_tile
@@ -855,7 +856,7 @@ def _make_kernel(
                                     K.cast(a_mcast_mask, "uint16"),
                                     K.uint64(tma_cache_hint),
                                 )
-                    with K.If(_elected()):
+                    with K.If(tma_elected):
                         with K.Then():
                             for b_copy in range(b_tma_copies):
                                 b_coord_n = tile_n_idx * n_tile
@@ -903,7 +904,7 @@ def _make_kernel(
                                         K.cast(b_mcast_mask, "uint16"),
                                         K.uint64(tma_cache_hint),
                                     )
-                    with K.If(_elected()):
+                    with K.If(tma_elected):
                         with K.Then():
                             sfa_linear = cluster_y * sfa_piece_values
                             sfa_coord_0 = sfa_linear % 256
@@ -941,7 +942,7 @@ def _make_kernel(
                                     K.cast(a_mcast_mask, "uint16"),
                                     K.uint64(tma_cache_hint),
                                 )
-                    with K.If(_elected()):
+                    with K.If(tma_elected):
                         with K.Then():
                             sfb_linear = cluster_x * sfb_piece_values
                             sfb_coord_0 = sfb_linear % 256
