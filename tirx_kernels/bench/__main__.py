@@ -116,6 +116,7 @@ def _prepared_child_main(args, *, child_started: float) -> int:
                 close_prepared_kernel_bench,
                 cuda_is_initialized,
                 current_process_cuda_memory_bytes,
+                gpu_interrupt_should_defer,
                 prepare_kernel_bench,
                 run_prepared_kernel_bench,
             )
@@ -176,6 +177,12 @@ def _prepared_child_main(args, *, child_started: float) -> int:
             pass
 
         def interrupt_gpu_attempt(_signum, _frame):
+            # Inside an uninterruptible region (a reference builder's import or
+            # JIT), record the interrupt and let the region finish; it is
+            # redelivered at the region's exit. Raising mid-import leaves
+            # partially initialized modules that poison retry-in-place.
+            if gpu_interrupt_should_defer():
+                return
             raise _GpuAttemptInterrupted()
 
         gpu_attempt = 1
