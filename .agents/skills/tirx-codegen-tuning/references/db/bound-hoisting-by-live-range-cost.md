@@ -36,6 +36,14 @@ for no in T.unroll(MMA_N // EPI_TILE):
 One measured FP32 bias hoist regressed 6.6%; by contrast, staging a larger load
 set won when it created enough outstanding DRAM misses.
 
+The same tradeoff applies to persistent reductions. Moving a nonnegative amax
+from a per-work shared reduction and atomic into a per-lane value carried across
+the persistent loop reduced the number of global atomics, but the loop-carried
+dependency stayed live across every epilogue. After repairing collective
+deallocation ordering, the once-per-CTA form was still about 0.1 us slower on
+the FP8 guards and only 2/5 targeted rows passed. Reducing a tail operation
+count did not repay the longer recurrent live range.
+
 ## Boundary
 
 Do not shorten a fragment lifetime across an ordering that belongs to the
@@ -44,6 +52,11 @@ to 94 and moved a ratio from 0.979x to 0.981x, but it also stored each vector
 before the remaining fragment had completed its multiply, bias, and narrowing
 phases. The measured gain was rejected and the full-fragment phase order was
 restored.
+
+State hoisted across persistent work also creates a dependency between work
+items that were previously independent. Measure both one-work CTAs, where the
+hoist can only add lifetime, and high-trip-count CTAs, where removing repeated
+tail operations has a chance to repay it.
 
 ## Verification
 

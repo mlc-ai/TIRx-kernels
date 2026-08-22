@@ -485,10 +485,16 @@ class KTileView:
 class SmemPool:
     """Session-bound wrapper over the in-tree :class:`SMEMPool`."""
 
-    def __init__(self, session):
+    def __init__(self, session, base=None):
         self.session = session
-        self.pool = SMEMPool()
+        self.pool = SMEMPool() if base is None else SMEMPool(base.data)
+        self._max_offset = 0
         self._committed = False
+
+    def _alloc(self, *args, **kwargs):
+        result = self.pool.alloc(*args, **kwargs)
+        self._max_offset = max(self._max_offset, self.pool.offset)
+        return result
 
     def alloc(self, shape, dtype="float32", swizzle=None, align=0):
         """Allocate a tile.
@@ -501,14 +507,14 @@ class SmemPool:
         for a 3-D shape, or a :class:`KTileView` directly for a 2-D one.
         """
         if swizzle is None or swizzle == SwizzleMode.SWIZZLE_NONE:
-            return self.pool.alloc(tuple(shape), dtype, align=align)
+            return self._alloc(tuple(shape), dtype, align=align)
         if isinstance(swizzle, int):
             swizzle = SwizzleMode(swizzle)
         if len(shape) < 2:
             raise ValueError(f"swizzled alloc shape={tuple(shape)} must have at least two dims")
         _validate_mma_alloc_shape(list(shape), dtype, swizzle)
         layout = mma_shared_layout(dtype, swizzle, list(shape))
-        buf = self.pool.alloc(tuple(shape), dtype, align=align or 1024, layout=layout)
+        buf = self._alloc(tuple(shape), dtype, align=align or 1024, layout=layout)
         if len(shape) > 3:
             return buf
         tile = KTile(buf, shape, dtype, swizzle)
@@ -526,13 +532,18 @@ class SmemPool:
     @property
     def bytes(self):
         """High-water mark of the pool so far."""
-        return self.pool.max_offset
+        return max(self.pool.max_offset, self._max_offset)
 
 
-def smem_pool():
-    """The kernel's shared-memory pool. One per kernel; committed at trace end."""
+def smem_pool(base=None):
+    """The kernel's shared-memory pool, optionally over a caller-owned backing buffer.
+
+    ``base=None`` creates and sizes the dynamic-SMEM allocation automatically.
+    Passing a buffer uses its data pointer and leaves allocation and sizing to
+    the caller.
+    """
     session = _entry.current()
     if session.pool is not None:
         raise RuntimeError("K.smem_pool() was already called for this kernel")
-    session.pool = SmemPool(session)
+    session.pool = SmemPool(session, base)
     return session.pool

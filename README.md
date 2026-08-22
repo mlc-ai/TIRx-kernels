@@ -211,7 +211,7 @@ License 2.0; see [LICENSE](LICENSE). Required Apache attribution notices are
 collected in [NOTICE](NOTICE).
 
 Every Python source file carries SPDX tags. Kernel ports derived from third-party projects
-(DeepGEMM, FlashMLA, flash-attention, FlashInfer, MSA) additionally cite the upstream
+(cuDNN Frontend, DeepGEMM, FlashMLA, flash-attention, FlashInfer, MSA) additionally cite the upstream
 project and the exact commit ported, retain the upstream copyright notice, and
 declare the combined terms — for example `Apache-2.0 AND MIT`. Where an upstream
 license requires its conditions text to travel with the source, that text is kept
