@@ -57,36 +57,6 @@ def _align_up(value, alignment):
     return _ceil_div(value, alignment) * alignment
 
 
-class _LinearSmemPool:
-    """Integer-cursor adapter for protocol objects over one linear SMEM buffer.
-
-    Allocations become ordinary default buffers with explicit byte offsets into
-    ``base``. No device value representing an arrangement is ever constructed
-    or passed.
-    """
-
-    def __init__(self, base):
-        self.base = base
-        self.cursor = 0
-
-    def alloc(self, shape, dtype, align=1):
-        self.cursor = _align_up(self.cursor, align)
-        offset = self.cursor
-        count = 1
-        for extent in shape:
-            count *= int(extent)
-        bits = {"uint8": 8, "uint32": 32, "uint64": 64}[str(dtype)]
-        self.cursor += count * bits // 8
-        return K.decl_buffer(
-            shape,
-            str(dtype),
-            data=self.base.data,
-            byte_offset=offset,
-            scope="shared.dyn",
-            align=align,
-        )
-
-
 def _descriptor_base(ldo, sdo, swizzle):
     """Fold the SM100 shared descriptor fields except its 14-bit address."""
     arrangement_type = {0: 0, 1: 6, 2: 4, 3: 2, 4: 1}[swizzle]
@@ -382,7 +352,7 @@ def _performance_representatives():
 
 
 def _benchmark_configs():
-    shapes = ((1024, 1024, 1024), (4096, 4096, 1024), (8192, 8192, 1024))
+    shapes = tuple((size, size, size) for size in (1024, 2048, 4096, 8192))
     configs = []
     for representative_index, base_mode in enumerate(_performance_representatives()):
         for M, N, K_dim in shapes:
@@ -692,7 +662,7 @@ def _make_kernel(
         tma_role = roles.role("tma", warps=[5])
 
         smem = K.alloc_buffer((shared_bytes,), K.u8, scope="shared.dyn", align=1024)
-        protocol_pool = _LinearSmemPool(smem)
+        protocol_pool = K.smem_pool(base=smem)
         ab_pipe = K.Pipeline(
             protocol_pool, ab_stages, full="tma", empty="tcgen05", leader=K.bool(False)
         )
@@ -704,11 +674,11 @@ def _make_kernel(
             init_empty=4,
             leader=K.bool(False),
         )
-        if protocol_pool.cursor != tmem_dealloc_offset:
+        if protocol_pool.bytes != tmem_dealloc_offset:
             raise AssertionError("protocol storage offsets changed")
         tmem_dealloc = protocol_pool.alloc((1,), K.u64, align=8)
         tmem_slot = protocol_pool.alloc((1,), K.u32, align=4)
-        if protocol_pool.cursor != tmem_ptr_offset + 4:
+        if protocol_pool.bytes != tmem_ptr_offset + 4:
             raise AssertionError("protocol storage header changed")
         del tmem_dealloc
 
