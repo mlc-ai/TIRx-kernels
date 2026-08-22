@@ -365,10 +365,12 @@ void stable_sort_ref(at::Tensor indices, at::Tensor values, int64_t num_rows, in
 
 
 def load_reference_ext():
-    """Build and load the shape-independent reference before READY.
+    """Build and load the shape-independent reference extension.
 
-    Runs in the CPU prepare stage, so it must not touch CUDA: the arch comes from
-    the prepare-stage env, never from the device.
+    JIT-compiling the extension initializes CUDA, so this must only run in the
+    GPU stage (the lazy `references` builder) or in `run_test`, never in the
+    CPU prepare stage. The arch still comes from the prepare-stage env rather
+    than the device so the build matches the suite's compile profile.
     """
     global _REFERENCE_EXT
     if _REFERENCE_EXT is not None:
@@ -617,18 +619,20 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 # Benchmark entry points.
 # ---------------------------------------------------------------------------
 def prepare_bench(**kwargs: Any):
-    """Specialize, compile, and build the reference before the workload owns a GPU."""
-    from tirx_kernels.runner import (
-        compile_kernel,
-        external_references_enabled,
-        prepared_gpu_benchmark,
-    )
+    """Specialize and compile before the workload receives a GPU.
+
+    The reference is NOT built here. `load_reference_ext()` JITs a CUDA
+    extension, which initializes CUDA, and the suite fails any workload whose
+    CPU prepare does that ("CPU prepare changed CUDA initialization state from
+    False to True"). It is built by the lazy `references` builder in `run_gpu`
+    instead, which is what the bench API expects and what the sibling ports do.
+    """
+    from tirx_kernels.runner import compile_kernel, prepared_gpu_benchmark
 
     cfg = _normalize_config(kwargs)
-    state = {"config": cfg, "executable": compile_kernel(get_kernel(**cfg))}
-    if external_references_enabled():
-        state["reference_ext"] = load_reference_ext()
-    return prepared_gpu_benchmark(run_gpu, state)
+    return prepared_gpu_benchmark(
+        run_gpu, {"config": cfg, "executable": compile_kernel(get_kernel(**cfg))}
+    )
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **kwargs):
@@ -680,7 +684,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         ex(*tirx_args[step & 1])
 
     def build_reference():
-        ext = prepared["reference_ext"]
+        ext = load_reference_ext()
         flat = tuple(
             (buffers["indices"].reshape(-1), buffers["values"].reshape(-1)) for buffers in clones
         )

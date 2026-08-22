@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib
 import os
 import shlex
+import signal
 import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -445,6 +446,49 @@ def validate_current_cuda_assignment(stage: str, *, restore: bool = False) -> tu
     return actual
 
 
+_GPU_INTERRUPT_DEFER_DEPTH = 0
+_GPU_INTERRUPT_DEFERRED = False
+
+
+def gpu_interrupt_should_defer() -> bool:
+    """Record a GPU-attempt interrupt when inside an uninterruptible region.
+
+    Called from the bench child's SIGUSR1 handler. Returns True when the
+    interrupt was recorded for redelivery at the region's exit; the handler
+    must then return instead of raising, so an in-flight import or JIT
+    completes atomically. Signal handlers run only in the main thread, so the
+    module-level flags need no locking.
+    """
+    global _GPU_INTERRUPT_DEFERRED
+    if _GPU_INTERRUPT_DEFER_DEPTH > 0:
+        _GPU_INTERRUPT_DEFERRED = True
+        return True
+    return False
+
+
+@contextmanager
+def defer_gpu_interrupts():
+    """Delay SIGUSR1 attempt interrupts until this region completes.
+
+    Reference builders import large packages (torch._dynamo, CuTeDSL's MLIR
+    toolkit) and JIT-compile extensions. An asynchronous interrupt landing
+    mid-import unwinds through the module body and leaves sys.modules holding
+    partially initialized modules, which kills the child or poisons every
+    later retry in the same process. Imports and host-side JIT do not occupy
+    the GPU, so delaying the discard of an already-doomed sample is harmless;
+    a deferred interrupt is redelivered at this safe point instead.
+    """
+    global _GPU_INTERRUPT_DEFER_DEPTH, _GPU_INTERRUPT_DEFERRED
+    _GPU_INTERRUPT_DEFER_DEPTH += 1
+    try:
+        yield
+    finally:
+        _GPU_INTERRUPT_DEFER_DEPTH -= 1
+        if _GPU_INTERRUPT_DEFER_DEPTH == 0 and _GPU_INTERRUPT_DEFERRED:
+            _GPU_INTERRUPT_DEFERRED = False
+            os.kill(os.getpid(), signal.SIGUSR1)
+
+
 def bench(*args: Any, references: Mapping[str, Any] | None = None, **kwargs: Any):
     """Run the canonical timer, admitting references only in explicit diagnostic mode."""
     from tvm.tirx.bench import bench as canonical_bench
@@ -459,7 +503,8 @@ def bench(*args: Any, references: Mapping[str, Any] | None = None, **kwargs: Any
 
             def checked_builder(builder=builder, name=name):
                 try:
-                    return builder()
+                    with defer_gpu_interrupts():
+                        return builder()
                 finally:
                     if _CUDA_ASSIGNMENT is not None:
                         validate_current_cuda_assignment(

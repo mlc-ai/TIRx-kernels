@@ -1,9 +1,9 @@
 # bench-suite baseline view: `baseline.json`
 
-- Timestamp: `14`
-- Label:     `post-refactor`
-- Git:       `{'tir': '135a054f', 'tirx-kernels': 'f2210e41-dirty', 'tirx-bench-ci': None}`
-- Workloads: 453 ok, 0 failed
+- Timestamp: `4`
+- Label:     `f727de3d-dirty`
+- Git:       `{'tir': '73e38d3f', 'tirx-kernels': 'f727de3d-dirty', 'tirx-bench-ci': None}`
+- Workloads: 182 ok, 9 failed
 
 Grouped workloads show one row per config and one timing column per implementation. Single-TIR workloads show ref/ours against the fastest reference implementation.
 
@@ -11,756 +11,512 @@ Grouped workloads show one row per config and one timing column per implementati
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `gelu_fp16_d11008_t8192` | tirx | 154.2156 | flashinfer | 253.8506 | 1.646 | — |
-| `gelu_tanh_fp16_d11008_t8192` | tirx | 97.4212 | flashinfer | 109.3614 | 1.123 | — |
-| `silu_bf16_d16384_t32768` | tirx | 615.7810 | flashinfer | 686.5466 | 1.115 | — |
-| `silu_bf16_d4096_t8192` | tirx | 33.2499 | flashinfer | 36.5619 | 1.100 | — |
-| `silu_fp16_d11008_t8192` | tirx | 97.6846 | flashinfer | 107.9017 | 1.105 | — |
-| `silu_fp16_d16384_t32768` | tirx | 453.6279 | flashinfer | 470.2372 | 1.037 | — |
-| `silu_fp16_d4096_t1` | tirx | 2.5687 | flashinfer | 2.7795 | 1.082 | — |
-| `silu_fp16_d4096_t8192` | tirx | 41.3473 | flashinfer | 46.5259 | 1.125 | — |
-
-## allgather_gemm
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `tp1_m8192_n106496_k16384_fp16_dynamic` | tirx | 21469.3738 | cublas_nccl_cudagraph | 21463.2041 | 1.000 | cublasmp_split_p2p=21790.5044 |
-| `tp1_m8192_n24576_k4096_fp16_dynamic` | tirx | 1066.3879 | cublas_nccl_cudagraph | 1034.9734 | 0.971 | cublasmp_split_p2p=1079.9175 |
-| `tp1_m8192_n51200_k5120_fp16_dynamic` | tirx | 2876.2938 | cublas_nccl_cudagraph | 2717.1455 | 0.945 | cublasmp_split_p2p=2772.5312 |
-| `tp1_m8192_n57344_k8192_fp16_dynamic` | tirx | 6103.6119 | cublas_nccl_cudagraph | 5984.3328 | 0.980 | cublasmp_split_p2p=6148.8383 |
-
-## deepep_combine
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `t4096_h7168_e256_k6` | tirx | 1098.7105 | deepep | 989.9300 | 0.901 | — |
-
-## deepep_dispatch
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `t4096_h7168_e256_k6` | tirx | 638.0497 | deepep | 616.1592 | 0.966 | — |
+| `gelu_tanh_fp16_d11008_t8192` | tirx | 97.6374 | flashinfer | 109.4522 | 1.121 | — |
+| `silu_bf16_d16384_t32768` | tirx | 617.3432 | flashinfer | 1296.4386 | 2.100 | — |
+| `silu_fp16_d4096_t1` | tirx | 2.0772 | flashinfer | 2.2879 | 1.101 | — |
 
 ## deepgemm_sm100_fp4_mqa_logits
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `s2048_skv4096_h64_d128_f32_dense_cp` | tirx | 61.4546 | deepgemm | 63.9326 | 1.040 | — |
-| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 184.3678 | deepgemm | 182.3390 | 0.989 | — |
+| `s2048_skv4096_h64_d128_f32_dense_cp` | tirx | 37.5576 | deepgemm | 39.7304 | 1.058 | — |
+| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 183.7198 | deepgemm | 187.3286 | 1.020 | — |
 
 ## deepgemm_sm100_fp4_paged_mqa_logits
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b16_n1_mp128_ps64_h64_d128_bf16_fixed` | tirx | 6.2063 | deepgemm | 6.5250 | 1.051 | — |
-| `b1_n1_mp1_ps32_h64_d128_f32_fixed` | tirx | 6.2833 | deepgemm | 7.2835 | 1.159 | — |
+| `b16_n1_mp128_ps64_h64_d128_bf16_fixed` | tirx | 6.3495 | deepgemm | 6.5476 | 1.031 | — |
+| `b1_n1_mp1_ps32_h64_d128_f32_fixed` | tirx | 4.0313 | deepgemm | 4.7520 | 1.179 | — |
 
 ## deepgemm_sm100_fp8_bmm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bhd_bhr_hdr_b4096_h8_r4096_d1024` | tirx | 176.1994 | deepgemm | 188.5498 | 1.070 | — |
-| `bhd_hdr_bhr_b8192_h8_r4096_d1024` | tirx | 227.1852 | deepgemm | 253.6922 | 1.117 | — |
-| `bhr_hdr_bhd_b4096_h8_r4096_d1024` | tirx | 138.1472 | deepgemm | 139.6637 | 1.011 | — |
-| `bhr_hdr_bhd_b8192_h8_r4096_d1024` | tirx | 197.2879 | deepgemm | 196.8100 | 0.998 | — |
+| `bhd_bhr_hdr_b4096_h8_r4096_d1024` | tirx | 136.5538 | deepgemm | 139.1567 | 1.019 | — |
+| `bhd_hdr_bhr_b8192_h8_r4096_d1024` | tirx | 222.8038 | deepgemm | 244.7085 | 1.098 | — |
+| `bhr_hdr_bhd_b4096_h8_r4096_d1024` | tirx | 99.4255 | deepgemm | 99.3295 | 0.999 | — |
 
 ## deepgemm_sm100_fp8_gemm_1d1d
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `m4096_n2112_k7168` | tirx | 49.7282 | deepgemm | 49.7913 | 1.001 | — |
-| `m4096_n24576_k1536` | tirx | 148.6603 | deepgemm | 148.3340 | 0.998 | — |
-| `m4096_n24576_k1536_bfp4` | tirx | 150.7022 | deepgemm | 149.7895 | 0.994 | — |
-| `m4096_n32768_k512` | tirx | 70.6411 | deepgemm | 72.2801 | 1.023 | — |
-| `m4096_n4096_k7168` | tirx | 123.2633 | deepgemm | 124.5363 | 1.010 | — |
-| `m4096_n4096_k7168_bfp4` | tirx | 81.0394 | deepgemm | 77.0748 | 0.951 | — |
-| `m4096_n576_k7168` | tirx | 18.6026 | deepgemm | 18.9120 | 1.017 | — |
-| `m4096_n7168_k16384` | tirx | 325.3169 | deepgemm | 323.9807 | 0.996 | — |
-| `m4096_n7168_k16384_bfp4` | tirx | 300.5845 | deepgemm | 297.4391 | 0.990 | — |
-| `m4096_n7168_k2048` | tirx | 42.2952 | deepgemm | 42.3046 | 1.000 | — |
+| `m4096_n4096_k7168_bfp4` | tirx | 130.6360 | deepgemm | 91.0264 | 0.697 | — |
+| `m4096_n576_k7168` | tirx | 18.8025 | deepgemm | 19.0987 | 1.016 | — |
+| `m4096_n7168_k16384` | tirx | 336.4438 | deepgemm | 325.5337 | 0.968 | — |
 
 ## deepgemm_sm100_fp8_mqa_logits
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `s2048_skv4096_h64_d128_f32_dense_cp` | tirx | 66.4714 | deepgemm | 68.1229 | 1.025 | — |
-| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 181.8032 | deepgemm | 191.9038 | 1.056 | — |
+| `s2048_skv4096_h64_d128_f32_dense_cp` | tirx | 47.2485 | deepgemm | 54.2831 | 1.149 | — |
+| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | tirx | 176.4521 | deepgemm | 186.8705 | 1.059 | — |
 
 ## deepgemm_sm100_fp8_paged_mqa_logits
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b16_n1_mp128_ps64_h64_d128_bf16_fixed` | tirx | 6.7193 | deepgemm | 6.9450 | 1.034 | sglang_cutedsl=7.0011 |
-| `b1_n1_mp1_ps64_h64_d128_f32_fixed` | tirx | 4.5840 | sglang_cutedsl | 4.7747 | 1.042 | deepgemm=5.3156 |
+| `b16_n1_mp128_ps64_h64_d128_bf16_fixed` | tirx | 6.7530 | deepgemm | 6.8781 | 1.019 | sglang_cutedsl=6.9006 |
+| `b1_n1_mp1_ps64_h64_d128_f32_fixed` | tirx | 4.2384 | sglang_cutedsl | 4.7356 | 1.117 | deepgemm=5.0161 |
 
 ## deepgemm_sm100_k_grouped_fp8_gemm_contiguous
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `g16_m7168_n2048_k2048_gran128_al128` | tirx | 579.1164 | deepgemm | 581.8843 | 1.005 | — |
-| `g4_m4096_n7168_k8192_gran128_al128` | tirx | 1013.3178 | deepgemm | 1009.7449 | 0.996 | — |
-| `g4_m4096_n7168_k8192_gran128_al128_psum` | tirx | 859.9106 | deepgemm | 876.6517 | 1.019 | — |
-| `g4_m4096_n7168_k8192_gran32_al32` | tirx | 834.9966 | deepgemm | 868.6466 | 1.040 | — |
-| `g8_m4096_n7168_k4096_gran128_al128` | tirx | 876.7165 | deepgemm | 872.7994 | 0.996 | — |
-| `g8_m4096_n7168_k4096_gran32_al160` | tirx | 1126.3837 | deepgemm | 1181.2470 | 1.049 | — |
+| `g16_m7168_n2048_k2048_gran128_al128` | tirx | 912.2861 | deepgemm | 918.9562 | 1.007 | — |
+| `g4_m4096_n7168_k8192_gran128_al128_psum` | tirx | 857.4816 | deepgemm | 860.4166 | 1.003 | — |
+| `g8_m4096_n7168_k4096_gran32_al160` | tirx | 907.9104 | deepgemm | 930.4703 | 1.025 | — |
 
 ## deepgemm_sm100_m_grouped_fp8_gemm_contiguous
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `g4_m8192_n4096_k2048` | tirx | 205.5935 | deepgemm | 207.5108 | 1.009 | — |
-| `g4_m8192_n4096_k4096` | tirx | 363.9075 | deepgemm | 367.8614 | 1.011 | — |
-| `g4_m8192_n4096_k4096_psum` | tirx | 452.7249 | deepgemm | 452.4756 | 0.999 | — |
-| `g4_m8192_n6144_k7168` | tirx | 1001.1147 | deepgemm | 983.4413 | 0.982 | — |
-| `g4_m8192_n6144_k7168_bfp4` | tirx | 977.0830 | deepgemm | 963.9919 | 0.987 | — |
-| `g4_m8192_n7168_k3072` | tirx | 580.0537 | deepgemm | 582.0827 | 1.003 | — |
-| `g8_m4096_n4096_k2048` | tirx | 194.3954 | deepgemm | 197.0576 | 1.014 | — |
-| `g8_m4096_n4096_k2048_bfp4` | tirx | 232.1981 | deepgemm | 234.1759 | 1.009 | — |
-| `g8_m4096_n4096_k4096` | tirx | 361.9380 | deepgemm | 369.1489 | 1.020 | — |
-| `g8_m4096_n6144_k7168` | tirx | 1109.6160 | deepgemm | 1105.3470 | 0.996 | — |
-| `g8_m4096_n7168_k3072` | tirx | 594.7954 | deepgemm | 594.0340 | 0.999 | — |
-| `g8_m4096_n7168_k3072_psum_zp` | tirx | 601.4369 | deepgemm | 603.6703 | 1.004 | — |
+| `g4_m8192_n6144_k7168` | tirx | 1000.2049 | deepgemm | 1029.7921 | 1.030 | — |
+| `g8_m4096_n4096_k2048_bfp4` | tirx | 186.0463 | deepgemm | 187.4825 | 1.008 | — |
+| `g8_m4096_n7168_k3072_psum_zp` | tirx | 511.4467 | deepgemm | 507.7964 | 0.993 | — |
 
 ## deepgemm_sm100_m_grouped_fp8_gemm_masked
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `g32_m192_n4096_k2048` | tirx | 72.7861 | deepgemm | 72.9036 | 1.002 | — |
-| `g32_m192_n4096_k4096_bfp4` | tirx | 114.2318 | deepgemm | 113.9582 | 0.998 | — |
-| `g32_m192_n6144_k7168` | tirx | 336.2360 | deepgemm | 329.7036 | 0.981 | — |
-| `g6_m1024_n4096_k2048` | tirx | 60.6740 | deepgemm | 60.5707 | 0.998 | — |
-| `g6_m1024_n6144_k7168` | tirx | 200.7467 | deepgemm | 200.6686 | 1.000 | — |
+| `g32_m192_n4096_k4096_bfp4` | tirx | 115.2601 | deepgemm | 114.5373 | 0.994 | — |
+| `g32_m192_n6144_k7168` | tirx | 338.7765 | deepgemm | 326.7344 | 0.964 | — |
+| `g6_m1024_n4096_k2048` | tirx | 39.1687 | deepgemm | 39.2882 | 1.003 | — |
 
 ## deepgemm_sm100_tf32_hc_prenorm_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `m128_n24_k16384_s64` | tirx | 5.3073 | deepgemm | 5.2196 | 0.983 | — |
-| `m137_n24_k7680_s16` | tirx | 5.3061 | deepgemm | 5.3535 | 1.009 | — |
-| `m13_n24_k7168_s1` | tirx | 33.8115 | deepgemm | 33.4763 | 0.990 | — |
-| `m4096_n24_k28672_s16` | tirx | 57.8921 | deepgemm | 62.8364 | 1.085 | — |
-| `m4096_n24_k7168_s1` | tirx | 36.0125 | deepgemm | 35.7021 | 0.991 | — |
-| `m64_n24_k28672_s112` | tirx | 7.2039 | deepgemm | 7.2959 | 1.013 | — |
-| `m8192_n24_k16384_s1` | tirx | 50.5342 | deepgemm | 60.5773 | 1.199 | — |
-| `m8192_n24_k28672_s1` | tirx | 83.9610 | deepgemm | 91.6330 | 1.091 | — |
+| `m128_n24_k16384_s64` | tirx | 5.2401 | deepgemm | 5.2343 | 0.999 | — |
+| `m4096_n24_k7168_s1` | tirx | 23.1650 | deepgemm | 23.8279 | 1.029 | — |
+| `m8192_n24_k28672_s1` | tirx | 84.4301 | deepgemm | 92.6280 | 1.097 | — |
 
 ## fast_topk_clusters
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_plain_b16_l16384_k256` | tirx | 9.3154 | flashinfer | 10.6364 | 1.142 | — |
-| `bf16_plain_b64_l16384_k1024_tie_heavy` | tirx | 11.8087 | flashinfer | 12.8890 | 1.091 | — |
-| `bf16_plain_b64_l65536_k1024` | tirx | 15.9838 | flashinfer | 17.3796 | 1.087 | — |
-| `bf16_pt_b16_l16384_k256` | tirx | 10.1353 | flashinfer | 11.3160 | 1.116 | — |
-| `bf16_rag_b16_l16384_k256` | tirx | 9.1481 | flashinfer | 10.1417 | 1.109 | — |
-| `bf16_rag_b300_l16384_k256` | tirx | 17.7368 | flashinfer | 18.8113 | 1.061 | — |
-| `f16_plain_b16_l16384_k256` | tirx | 9.3304 | flashinfer | 10.3677 | 1.111 | — |
-| `f16_plain_b16_l4096_k256` | tirx | 4.7626 | flashinfer | 5.7208 | 1.201 | — |
-| `f16_plain_b64_l16384_k1024_tie_heavy` | tirx | 10.3107 | flashinfer | 10.8340 | 1.051 | — |
-| `f16_plain_b64_l65536_k2048_i64` | tirx | 17.8662 | flashinfer | 18.9118 | 1.059 | — |
-| `f16_pt_b16_l16384_k256` | tirx | 9.9901 | flashinfer | 10.8917 | 1.090 | — |
-| `f16_rag_b16_l16384_k256` | tirx | 9.0958 | flashinfer | 9.9043 | 1.089 | — |
-| `f32_plain_b16_l16384_k2048_all_equal` | tirx | 17.0291 | flashinfer | 18.8449 | 1.107 | — |
-| `f32_plain_b16_l16384_k256` | tirx | 13.4667 | flashinfer | 14.4000 | 1.069 | — |
-| `f32_plain_b16_l16384_k256_all_equal` | tirx | 16.6239 | flashinfer | 18.1541 | 1.092 | — |
-| `f32_plain_b16_l16384_k256_i64` | tirx | 13.4207 | flashinfer | 14.4828 | 1.079 | — |
-| `f32_plain_b16_l16384_k256_neg` | tirx | 13.5699 | flashinfer | 15.4026 | 1.135 | — |
-| `f32_plain_b16_l16384_k256_tie_heavy` | tirx | 15.3688 | flashinfer | 16.3504 | 1.064 | — |
-| `f32_plain_b16_l4096_k256` | tirx | 6.7054 | flashinfer | 7.2985 | 1.088 | — |
-| `f32_plain_b200_l16384_k256` | tirx | 24.8602 | flashinfer | 25.4059 | 1.022 | — |
-| `f32_plain_b200_l65536_k1024` | tirx | 45.5855 | flashinfer | 46.1854 | 1.013 | — |
-| `f32_plain_b300_l16384_k256` | tirx | 20.9741 | flashinfer | 22.0863 | 1.053 | — |
-| `f32_plain_b64_l16384_k1024` | tirx | 14.8711 | flashinfer | 15.6528 | 1.053 | — |
-| `f32_plain_b64_l16384_k2048` | tirx | 15.0511 | flashinfer | 15.8014 | 1.050 | — |
-| `f32_plain_b64_l16384_k256` | tirx | 13.6511 | flashinfer | 14.2689 | 1.045 | — |
-| `f32_plain_b64_l65536_k1024` | tirx | 20.9928 | flashinfer | 21.4147 | 1.020 | — |
-| `f32_plain_b8_l4096_k4096` | tirx | 2.6726 | flashinfer | 2.7113 | 1.014 | — |
-| `f32_pt_b16_l16384_k256` | tirx | 14.1769 | flashinfer | 15.3828 | 1.085 | — |
-| `f32_pt_b16_l16384_k256_rowvar` | tirx | 12.4331 | flashinfer | 12.9034 | 1.038 | — |
-| `f32_pt_b200_l16384_k256` | tirx | 26.7335 | flashinfer | 26.7933 | 1.002 | — |
-| `f32_pt_b8_l4096_k4096` | tirx | 2.9397 | flashinfer | 2.9337 | 0.998 | — |
-| `f32_rag_b16_l16384_k256` | tirx | 13.3519 | flashinfer | 13.9303 | 1.043 | — |
-| `f32_rag_b16_l16384_k256_rowvar` | tirx | 11.5922 | flashinfer | 11.9020 | 1.027 | — |
-| `f32_rag_b8_l4096_k4096` | tirx | 2.1011 | flashinfer | 2.2161 | 1.055 | — |
+| `f32_plain_b16_l4096_k256` | tirx | 6.6451 | flashinfer | 7.2568 | 1.092 | — |
+| `f32_plain_b64_l16384_k256` | tirx | 13.7256 | flashinfer | 14.2128 | 1.035 | — |
+| `f32_plain_b64_l65536_k1024` | tirx | 20.8370 | flashinfer | 21.3537 | 1.025 | — |
 
 ## filtered_topk
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `f32_plain_det_r2_l524288_k256_endbit` | tirx | 116.8841 | flashinfer | 128.4734 | 1.099 | — |
-| `f32_plain_r4_l8192_k256` | tirx | 8.2415 | flashinfer | 9.5639 | 1.160 | — |
-| `f32_plain_r64_l8192_k256` | tirx | 8.4794 | flashinfer | 9.7908 | 1.155 | — |
+| `f32_plain_det_r2_l524288_k256_endbit` | tirx | 114.9716 | flashinfer | 125.9324 | 1.095 | — |
+| `f32_plain_r4_l8192_k256` | tirx | 7.7729 | flashinfer | 9.0389 | 1.163 | — |
+| `f32_plain_r64_l8192_k256` | tirx | 8.4706 | flashinfer | 9.7603 | 1.152 | — |
 
 ## flash_attention4
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `s1024_h32kv16` | tir | 19.6227 | flashattn_sm100 | 20.1902 | 1.029 | — |
-| `s1024_h32kv16_causal` | tir | 20.1335 | flashattn_sm100 | 20.3510 | 1.011 | — |
-| `s1024_h32kv32` | tir | 32.1967 | flashattn_sm100 | 33.0879 | 1.028 | — |
-| `s1024_h32kv32_causal` | tir | 21.1454 | flashattn_sm100 | 21.5064 | 1.017 | — |
-| `s1024_h32kv4` | tir | 19.1192 | flashattn_sm100 | 19.9600 | 1.044 | — |
-| `s1024_h32kv4_causal` | tir | 18.7431 | flashattn_sm100 | 19.7290 | 1.053 | — |
-| `s1024_h32kv8` | tir | 19.5072 | flashattn_sm100 | 20.0500 | 1.028 | — |
-| `s1024_h32kv8_causal` | tir | 19.1711 | flashattn_sm100 | 19.7744 | 1.031 | — |
-| `s2048_h32kv16` | tir | 57.6003 | flashattn_sm100 | 57.7701 | 1.003 | — |
-| `s2048_h32kv16_causal` | tir | 36.3420 | flashattn_sm100 | 38.5848 | 1.062 | — |
-| `s2048_h32kv32` | tir | 59.8262 | flashattn_sm100 | 60.0877 | 1.004 | — |
-| `s2048_h32kv32_causal` | tir | 64.4690 | flashattn_sm100 | 64.6407 | 1.003 | — |
-| `s2048_h32kv4` | tir | 94.3612 | flashattn_sm100 | 94.9303 | 1.006 | — |
-| `s2048_h32kv4_causal` | tir | 35.2785 | flashattn_sm100 | 37.7566 | 1.070 | — |
-| `s2048_h32kv8` | tir | 56.1241 | flashattn_sm100 | 56.6827 | 1.010 | — |
-| `s2048_h32kv8_causal` | tir | 35.4594 | flashattn_sm100 | 37.8575 | 1.068 | — |
-| `s4096_h32kv16` | tir | 211.9596 | flashattn_sm100 | 213.8201 | 1.009 | — |
-| `s4096_h32kv16_causal` | tir | 113.2938 | flashattn_sm100 | 118.4429 | 1.045 | — |
-| `s4096_h32kv32` | tir | 218.1091 | flashattn_sm100 | 220.0999 | 1.009 | — |
-| `s4096_h32kv32_causal` | tir | 121.4913 | flashattn_sm100 | 120.1097 | 0.989 | — |
-| `s4096_h32kv4` | tir | 208.2616 | flashattn_sm100 | 210.2081 | 1.009 | — |
-| `s4096_h32kv4_causal` | tir | 174.5619 | flashattn_sm100 | 182.6275 | 1.046 | — |
-| `s4096_h32kv8` | tir | 207.4134 | flashattn_sm100 | 209.5260 | 1.010 | — |
-| `s4096_h32kv8_causal` | tir | 112.0452 | flashattn_sm100 | 117.5551 | 1.049 | — |
-| `s8192_h32kv16` | tir | 780.7842 | flashattn_sm100 | 779.7321 | 0.999 | — |
-| `s8192_h32kv16_causal` | tir | 422.0594 | flashattn_sm100 | 428.6703 | 1.016 | — |
-| `s8192_h32kv32` | tir | 796.6754 | flashattn_sm100 | 800.0535 | 1.004 | — |
-| `s8192_h32kv32_causal` | tir | 440.1180 | flashattn_sm100 | 436.9789 | 0.993 | — |
-| `s8192_h32kv4` | tir | 984.6224 | flashattn_sm100 | 989.6464 | 1.005 | — |
-| `s8192_h32kv4_causal` | tir | 564.6177 | flashattn_sm100 | 582.7476 | 1.032 | — |
-| `s8192_h32kv8` | tir | 766.1723 | flashattn_sm100 | 773.2631 | 1.009 | — |
-| `s8192_h32kv8_causal` | tir | 415.7060 | flashattn_sm100 | 425.8563 | 1.024 | — |
+| `s1024_h32kv4` | tir | 19.3743 | flashattn_sm100 | 20.0717 | 1.036 | — |
+| `s4096_h32kv4_causal` | tir | 112.4341 | flashattn_sm100 | 115.8063 | 1.030 | — |
+| `s8192_h32kv32` | tir | 778.7393 | flashattn_sm100 | 785.1523 | 1.008 | — |
 
 ## flash_attention_backward_sm100
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b1_s2048_h16_causal` | tir | 81.8951 | flashattn_sm100 | 81.9815 | 1.001 | — |
-| `b1_s4096_h16_causal` | tir | 323.1004 | flashattn_sm100 | 328.2527 | 1.016 | — |
-| `b1_s8192_h16_causal` | tir | 931.6856 | flashattn_sm100 | 935.9016 | 1.005 | — |
-| `b1_s8192_h16_noncausal` | tir | 1100.8997 | flashattn_sm100 | 1117.1258 | 1.015 | — |
-| `b2_s4096_h16_causal` | tir | 388.0339 | flashattn_sm100 | 390.3185 | 1.006 | — |
-| `b4_s8192_h16_causal` | tir | 2473.1056 | flashattn_sm100 | 2496.3857 | 1.009 | — |
-| `b4_s8192_h16_noncausal` | tir | 5549.1120 | flashattn_sm100 | 5662.1554 | 1.020 | — |
+| `b1_s2048_h16_causal` | tir | 82.1407 | flashattn_sm100 | 82.1089 | 1.000 | — |
+| `b1_s8192_h16_noncausal` | tir | 1081.8105 | flashattn_sm100 | 1092.8711 | 1.010 | — |
+| `b4_s8192_h16_noncausal` | tir | 4370.6380 | flashattn_sm100 | 4471.5627 | 1.023 | — |
 
 ## flashinfer_add_rmsnorm_fp4quant
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bench_mx_bf16_m32_h4096_b32_ue8m0_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 7.7207 | flashinfer_cutedsl | 7.8867 | 1.021 | — |
-| `bench_mx_both_bf16_m32_h4096_b32_ue8m0_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 7.6994 | flashinfer_cutedsl | 7.8751 | 1.023 | — |
-| `bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 2.9511 | flashinfer_cutedsl | 2.9984 | 1.016 | — |
-| `bench_nv_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.6376 | flashinfer_cutedsl | 5.7757 | 1.024 | — |
-| `bench_nv_both_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.7419 | flashinfer_cutedsl | 5.8897 | 1.026 | — |
-| `bench_nv_both_global_bf16_m32_h4096_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsone_preallocated_random` | tirx | 5.6859 | flashinfer_cutedsl | 5.8198 | 1.024 | — |
-| `bench_nv_both_large_bf16_m64_h8192_b16_e4m3_sw0_both1_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 6.0994 | flashinfer_cutedsl | 6.1585 | 1.010 | — |
-| `bench_nv_global_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsone_preallocated_random` | tirx | 5.6352 | flashinfer_cutedsl | 5.7696 | 1.024 | — |
-| `bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.9640 | flashinfer_cutedsl | 6.0530 | 1.015 | — |
-| `bench_nv_swizzled_bf16_m32_h4096_b16_e4m3_sw1_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.6895 | flashinfer_cutedsl | 5.8211 | 1.023 | — |
-
-## flashinfer_fused_add_rmsnorm
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `fused_bf16_m32_h4096_xc_rc_pdl0` | tirx | 3.6033 | flashinfer_cutedsl | 3.6118 | 1.002 | — |
-| `fused_bf16_m32_h4096_xc_rc_pdl1` | tirx | 3.7216 | flashinfer_cutedsl | 3.7030 | 0.995 | — |
-| `fused_bf16_m64_h8192_xc_rc_pdl0` | tirx | 3.7880 | flashinfer_cutedsl | 3.7899 | 1.000 | — |
-| `gemma_bf16_m32_h4096_xc_rc_pdl0` | tirx | 3.5710 | flashinfer_cutedsl | 3.5449 | 0.993 | — |
-| `gemma_bf16_m32_h4096_xc_rc_pdl1` | tirx | 3.7241 | flashinfer_cutedsl | 3.7073 | 0.995 | — |
-| `gemma_bf16_m64_h8192_xc_rc_pdl0` | tirx | 3.8722 | flashinfer_cutedsl | 3.8765 | 1.001 | — |
+| `bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 2.9600 | flashinfer_cutedsl | 2.8960 | 0.978 | — |
+| `bench_nv_bf16_m32_h4096_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 5.8104 | flashinfer_cutedsl | 5.8124 | 1.000 | — |
+| `bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_both0_yn0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 6.0163 | flashinfer_cutedsl | 6.0226 | 1.001 | — |
 
 ## flashinfer_fused_add_rmsnorm_quant
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_e4m3_m32_h4096_xc_rc_yc_pdl0_s1` | tirx | 3.3662 | flashinfer_cutedsl | 3.4006 | 1.010 | — |
-| `bf16_e4m3_m32_h4096_xc_rc_yc_pdl1_s1` | tirx | 3.7142 | flashinfer_cutedsl | 3.7284 | 1.004 | — |
-| `bf16_e4m3_m64_h8192_xc_rc_yc_pdl0_s1` | tirx | 3.8163 | flashinfer_cutedsl | 3.8988 | 1.022 | — |
+| `bf16_e4m3_m32_h4096_xc_rc_yc_pdl0_s1` | tirx | 3.5368 | flashinfer_cutedsl | 3.5666 | 1.008 | — |
+| `bf16_e4m3_m32_h4096_xc_rc_yc_pdl1_s1` | tirx | 3.5717 | flashinfer_cutedsl | 3.6109 | 1.011 | — |
+| `bf16_e4m3_m64_h8192_xc_rc_yc_pdl0_s1` | tirx | 3.7283 | flashinfer_cutedsl | 3.7940 | 1.018 | — |
 
 ## flashinfer_fused_dit_layernorm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `grgb_bf16_b1_r1920` | tirx | 16.5549 | flashinfer_cuda | 16.9264 | 1.022 | — |
-| `grgb_bf16_b1_r768` | tirx | 8.4855 | flashinfer_cuda | 8.6850 | 1.024 | — |
-| `grgb_bf16_b2_r1920` | tirx | 28.9023 | flashinfer_cuda | 29.4032 | 1.017 | — |
-| `grgb_bf16_b2_r768` | tirx | 13.5105 | flashinfer_cuda | 13.9487 | 1.032 | — |
-| `grgb_bf16_b4_r1920` | tirx | 52.1808 | flashinfer_cuda | 53.3738 | 1.023 | — |
-| `grss_bf16_b1_r1920` | tirx | 23.0819 | flashinfer_cuda | 23.0937 | 1.001 | — |
-| `grss_bf16_b1_r768` | tirx | 10.9591 | flashinfer_cuda | 11.0709 | 1.010 | — |
-| `grss_bf16_b2_r1920` | tirx | 40.8214 | flashinfer_cuda | 40.9645 | 1.004 | — |
-| `grss_bf16_b2_r768` | tirx | 18.5933 | flashinfer_cuda | 18.6946 | 1.005 | — |
-| `grss_bf16_b4_r1920` | tirx | 73.0063 | flashinfer_cuda | 73.5404 | 1.007 | — |
-| `rss_bf16_b1_r1920` | tirx | 17.4164 | flashinfer_cuda | 17.5859 | 1.010 | — |
-| `rss_bf16_b1_r768` | tirx | 8.5374 | flashinfer_cuda | 8.6840 | 1.017 | — |
-| `rss_bf16_b2_r1920` | tirx | 31.5483 | flashinfer_cuda | 31.7315 | 1.006 | — |
-| `rss_bf16_b2_r768` | tirx | 14.4482 | flashinfer_cuda | 14.6750 | 1.016 | — |
-| `rss_bf16_b4_r1920` | tirx | 57.3485 | flashinfer_cuda | 57.7074 | 1.006 | — |
+| `grgb_bf16_b1_r1920` | tirx | 16.6008 | flashinfer_cuda | 16.8442 | 1.015 | — |
+| `grss_bf16_b4_r1920` | tirx | 72.9835 | flashinfer_cuda | 73.4669 | 1.007 | — |
+| `rss_bf16_b1_r768` | tirx | 8.7467 | flashinfer_cuda | 8.6655 | 0.991 | — |
 
 ## flashinfer_layernorm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_m128_h1024_xc_yc_pdl0_eps1e6` | tirx | 3.0780 | flashinfer_cutedsl | 3.0617 | 0.995 | — |
-| `bf16_m128_h128_xc_yc_pdl0_eps1e6` | tirx | 2.4435 | flashinfer_cutedsl | 2.4455 | 1.001 | — |
-| `bf16_m128_h129_xc_yc_pdl0_eps1e6` | tirx | 2.8535 | flashinfer_cutedsl | 2.8579 | 1.002 | — |
-| `bf16_m128_h16384_xc_yc_pdl0_eps1e6` | tirx | 8.9484 | flashinfer_cutedsl | 8.9428 | 0.999 | — |
-| `bf16_m1_h1024_xc_yc_pdl0_eps1e6` | tirx | 2.9720 | flashinfer_cutedsl | 2.9680 | 0.999 | — |
-| `bf16_m1_h128_xc_yc_pdl0_eps1e6` | tirx | 2.0493 | flashinfer_cutedsl | 2.0524 | 1.002 | — |
-| `bf16_m1_h129_xc_yc_pdl0_eps1e6` | tirx | 2.7931 | flashinfer_cutedsl | 2.7960 | 1.001 | — |
-| `bf16_m1_h16384_xc_yc_pdl0_eps1e6` | tirx | 8.2575 | flashinfer_cutedsl | 8.2507 | 0.999 | — |
-| `bf16_m2_h1024_xc_yc_pdl0_eps1e6` | tirx | 2.7966 | flashinfer_cutedsl | 2.8083 | 1.004 | — |
-| `bf16_m2_h128_xc_yc_pdl0_eps1e6` | tirx | 2.0360 | flashinfer_cutedsl | 2.0560 | 1.010 | — |
-| `bf16_m2_h129_xc_yc_pdl0_eps1e6` | tirx | 3.0462 | flashinfer_cutedsl | 3.0447 | 1.000 | — |
-| `bf16_m2_h16384_xc_yc_pdl0_eps1e6` | tirx | 7.6095 | flashinfer_cutedsl | 7.6246 | 1.002 | — |
-| `bf16_m3_h1024_xc_yc_pdl0_eps1e6` | tirx | 3.1947 | flashinfer_cutedsl | 3.1884 | 0.998 | — |
-| `bf16_m3_h128_xc_yc_pdl0_eps1e6` | tirx | 2.2445 | flashinfer_cutedsl | 2.2463 | 1.001 | — |
-| `bf16_m3_h129_xc_yc_pdl0_eps1e6` | tirx | 2.8113 | flashinfer_cutedsl | 2.8115 | 1.000 | — |
-| `bf16_m3_h16384_xc_yc_pdl0_eps1e6` | tirx | 8.0211 | flashinfer_cutedsl | 8.0604 | 1.005 | — |
+| `bf16_m128_h1024_xc_yc_pdl0_eps1e6` | tirx | 3.1305 | flashinfer_cutedsl | 3.1160 | 0.995 | — |
+| `bf16_m128_h16384_xc_yc_pdl0_eps1e6` | tirx | 8.9714 | flashinfer_cutedsl | 8.9680 | 1.000 | — |
+| `bf16_m1_h128_xc_yc_pdl0_eps1e6` | tirx | 2.2494 | flashinfer_cutedsl | 2.2566 | 1.003 | — |
 
 ## flashinfer_qk_rmsnorm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `gemma_bf16_b32_n32_h128_xc_yc_pdl0` | tirx | 2.7996 | flashinfer_cutedsl | 2.8285 | 1.010 | — |
-| `rms_bf16_b32_n32_h128_xc_yc_pdl0` | tirx | 2.8140 | flashinfer_cutedsl | 2.8320 | 1.006 | — |
-| `rms_f16_b16_n64_h128_xc_yc_pdl0` | tirx | 2.8184 | flashinfer_cutedsl | 2.8270 | 1.003 | — |
+| `gemma_bf16_b32_n32_h128_xc_yc_pdl0` | tirx | 2.7697 | flashinfer_cutedsl | 2.8056 | 1.013 | — |
+| `rms_bf16_b32_n32_h128_xc_yc_pdl0` | tirx | 2.6324 | flashinfer_cutedsl | 2.6516 | 1.007 | — |
+| `rms_f16_b16_n64_h128_xc_yc_pdl0` | tirx | 2.5852 | flashinfer_cutedsl | 2.5963 | 1.004 | — |
 
 ## flashinfer_rmsnorm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `gemma_bf16_m32_h4096_xc_yc_pdl0` | tirx | 3.3630 | flashinfer_cutedsl | 3.4510 | 1.026 | — |
-| `gemma_bf16_m64_h8192_xc_yc_pdl0` | tirx | 3.4773 | flashinfer_cutedsl | 3.4530 | 0.993 | — |
-| `rms_bf16_m32_h4096_xc_yc_pdl0` | tirx | 3.3644 | flashinfer_cutedsl | 3.4527 | 1.026 | — |
-| `rms_bf16_m32_h4096_xc_yc_pdl1` | tirx | 3.3516 | flashinfer_cutedsl | 3.3558 | 1.001 | — |
-| `rms_bf16_m64_h8192_xc_yc_pdl0` | tirx | 3.4584 | flashinfer_cutedsl | 3.4412 | 0.995 | — |
+| `gemma_bf16_m64_h8192_xc_yc_pdl0` | tirx | 3.4718 | flashinfer_cutedsl | 3.5704 | 1.028 | — |
+| `rms_bf16_m32_h4096_xc_yc_pdl0` | tirx | 3.2981 | flashinfer_cutedsl | 3.4361 | 1.042 | — |
+| `rms_bf16_m32_h4096_xc_yc_pdl1` | tirx | 3.3285 | flashinfer_cutedsl | 3.3229 | 0.998 | — |
 
 ## flashinfer_rmsnorm_fp4quant
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bench_mx_bf16_m32_h4096_b32_ue8m0_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.0015 | flashinfer_cutedsl | 4.0733 | 1.018 | — |
-| `bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 2.6489 | flashinfer_cutedsl | 2.7371 | 1.033 | — |
-| `bench_nv_bf16_m32_h4096_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.5685 | flashinfer_cutedsl | 4.7516 | 1.040 | — |
-| `bench_nv_global_bf16_m32_h4096_b16_e4m3_sw0_pdl0_eps1e6_gsone_preallocated_random` | tirx | 4.6477 | flashinfer_cutedsl | 4.8623 | 1.046 | — |
-| `bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.8342 | flashinfer_cutedsl | 5.0347 | 1.041 | — |
-| `bench_nv_swizzled_bf16_m32_h4096_b16_e4m3_sw1_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.6718 | flashinfer_cutedsl | 4.7575 | 1.018 | — |
+| `bench_nv_3d_bf16_b32_s32_h128_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 2.7762 | flashinfer_cutedsl | 2.7551 | 0.992 | — |
+| `bench_nv_bf16_m32_h4096_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.8426 | flashinfer_cutedsl | 4.8704 | 1.006 | — |
+| `bench_nv_large_bf16_m64_h8192_b16_e4m3_sw0_pdl0_eps1e6_gsnone_preallocated_random` | tirx | 4.9428 | flashinfer_cutedsl | 4.9394 | 0.999 | — |
+
+## flashinfer_rmsnorm_quant
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `bf16_e4m3_m32_h4096_xc_yc_pdl0_s1` | tirx | 3.2766 | flashinfer_cutedsl | 3.2204 | 0.983 | — |
+| `bf16_e4m3_m64_h8192_xc_yc_pdl0_s1` | tirx | 3.4049 | flashinfer_cutedsl | 3.3867 | 0.995 | — |
+| `bf16_e5m2_m3_h1048576_xc_yc_pdl1_s1_cluster16_sync` | tirx | 16.6427 | flashinfer_cutedsl | 16.5748 | 0.996 | — |
 
 ## flashkda_bf16_fused_m128
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `h64_mixed` | tirx | 268.2399 | flashinfer_m128 | 271.9395 | 1.014 | flashkda_raw=667.1473 |
-| `h64_uniform` | tirx | 465.6187 | flashinfer_m128 | 473.5961 | 1.017 | flashkda_raw=764.6676 |
-| `h96_fixed8192` | tirx | 500.8359 | flashinfer_m128 | 508.1553 | 1.015 | flashkda_raw=1075.1109 |
-| `h96_mixed` | tirx | 609.2198 | flashinfer_m128 | 622.6901 | 1.022 | flashkda_raw=1403.8307 |
-| `h96_uniform` | tirx | 432.0196 | flashinfer_m128 | 436.5378 | 1.010 | flashkda_raw=708.6740 |
+| `h64_mixed` | tirx | 267.8367 | flashinfer_m128 | 272.7128 | 1.018 | flashkda_raw=665.3760 |
+| `h96_fixed8192` | tirx | 500.9243 | flashinfer_m128 | 506.0955 | 1.010 | flashkda_raw=1073.3854 |
+| `h96_uniform` | tirx | 434.0923 | flashinfer_m128 | 436.1191 | 1.005 | flashkda_raw=705.6305 |
 
 ## flashkda_decode_t1_precomputed
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv12h12_b64_s8` | tirx | 14.3395 | flashinfer_cake | 15.7034 | 1.095 | — |
-| `hv12h12_b8_s16` | tirx | 4.7702 | flashinfer_cake | 6.4468 | 1.351 | — |
-| `hv16h16_b128_s8` | tirx | 28.7487 | flashinfer_cake | 31.4956 | 1.096 | — |
-| `hv16h16_b16_s16` | tirx | 6.3019 | flashinfer_cake | 7.8545 | 1.246 | — |
-| `hv16h16_b1_s16` | tirx | 4.0110 | flashinfer_cake | 5.6094 | 1.398 | — |
-| `hv16h16_b32_s8` | tirx | 9.9658 | flashinfer_cake | 13.3446 | 1.339 | — |
-| `hv16h16_b4_s16` | tirx | 4.4257 | flashinfer_cake | 6.0140 | 1.359 | — |
-| `hv16h16_b64_s8` | tirx | 16.4855 | flashinfer_cake | 19.3742 | 1.175 | — |
-| `hv16h16_b8_s16` | tirx | 4.9470 | flashinfer_cake | 6.8255 | 1.380 | — |
-| `hv32h16_b32_s8` | tirx | 16.8039 | flashinfer_cake | 19.1705 | 1.141 | — |
-| `hv32h16_b8_s16` | tirx | 6.2091 | flashinfer_cake | 8.3277 | 1.341 | — |
+| `hv16h16_b128_s8` | tirx | 26.6199 | flashinfer_cake | 31.5408 | 1.185 | — |
+| `hv16h16_b1_s16` | tirx | 4.1159 | flashinfer_cake | 5.8536 | 1.422 | — |
+| `hv32h16_b32_s8` | tirx | 15.2390 | flashinfer_cake | 19.4038 | 1.273 | — |
 
 ## flashkda_decode_t2_precomputed
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv12h12_b64_t2` | tirx | 20.8492 | flashinfer_cake | 24.2890 | 1.165 | — |
-| `hv12h12_b8_t2` | tirx | 6.3742 | flashinfer_cake | 8.3778 | 1.314 | — |
-| `hv16h16_b64_t2` | tirx | 25.4150 | flashinfer_cake | 29.9882 | 1.180 | — |
-| `hv16h16_b8_t2` | tirx | 7.0329 | flashinfer_cake | 9.3116 | 1.324 | — |
-| `hv32h16_b128_t2` | tirx | 83.1122 | flashinfer_cake | 95.1880 | 1.145 | — |
-| `hv32h16_b16_t2` | tirx | 15.6699 | flashinfer_cake | 18.2420 | 1.164 | — |
-| `hv32h16_b32_t2` | tirx | 25.6408 | flashinfer_cake | 30.0217 | 1.171 | — |
-| `hv32h16_b64_t2` | tirx | 44.9137 | flashinfer_cake | 51.7398 | 1.152 | — |
-| `hv32h16_b8_t2` | tirx | 9.0071 | flashinfer_cake | 11.3129 | 1.256 | — |
+| `hv12h12_b8_t2` | tirx | 6.3762 | flashinfer_cake | 8.7845 | 1.378 | — |
+| `hv16h16_b64_t2` | tirx | 25.1064 | flashinfer_cake | 30.2963 | 1.207 | — |
+| `hv32h16_b128_t2` | tirx | 81.6001 | flashinfer_cake | 95.2481 | 1.167 | — |
 
 ## flashkda_decode_t3_lower_bound
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv16h16_b16_t3` | tirx | 13.5810 | flashinfer_cake | 14.0161 | 1.032 | — |
-| `hv16h16_b1_t3` | tirx | 5.9240 | flashinfer_cake | 6.0771 | 1.026 | — |
-| `hv16h16_b2_t3` | tirx | 6.0873 | flashinfer_cake | 6.2932 | 1.034 | — |
-| `hv16h16_b4_t3` | tirx | 6.7617 | flashinfer_cake | 6.9744 | 1.031 | — |
-| `hv16h16_b8_t3` | tirx | 7.8870 | flashinfer_cake | 7.9694 | 1.010 | — |
+| `hv16h16_b16_t3` | tirx | 13.4194 | flashinfer_cake | 14.0665 | 1.048 | — |
+| `hv16h16_b1_t3` | tirx | 5.5565 | flashinfer_cake | 6.0026 | 1.080 | — |
+| `hv16h16_b4_t3` | tirx | 6.6822 | flashinfer_cake | 6.9711 | 1.043 | — |
 
 ## flashkda_decode_t4_precomputed
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv12h12_b64_t4` | tirx | 32.1851 | flashinfer_cake | 33.9351 | 1.054 | — |
-| `hv12h12_b8_t4` | tirx | 8.8183 | flashinfer_cake | 10.4810 | 1.189 | — |
-| `hv16h16_b64_t4` | tirx | 40.8246 | flashinfer_cake | 42.5370 | 1.042 | — |
-| `hv16h16_b8_t4` | tirx | 9.1515 | flashinfer_cake | 10.8211 | 1.182 | — |
-| `hv32h16_b128_t4` | tirx | 136.0434 | flashinfer_cake | 138.2981 | 1.017 | — |
-| `hv32h16_b16_t4` | tirx | 22.3698 | flashinfer_cake | 24.6335 | 1.101 | — |
-| `hv32h16_b32_t4` | tirx | 40.4661 | flashinfer_cake | 41.8081 | 1.033 | — |
-| `hv32h16_b64_t4` | tirx | 71.7158 | flashinfer_cake | 73.7345 | 1.028 | — |
-| `hv32h16_b8_t4` | tirx | 12.7664 | flashinfer_cake | 14.7454 | 1.155 | — |
+| `hv12h12_b8_t4` | tirx | 8.7613 | flashinfer_cake | 11.0596 | 1.262 | — |
+| `hv16h16_b64_t4` | tirx | 39.3332 | flashinfer_cake | 42.0130 | 1.068 | — |
+| `hv32h16_b128_t4` | tirx | 132.0186 | flashinfer_cake | 137.9693 | 1.045 | — |
 
 ## flashkda_decode_t5_gram
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv12h12_b64_s1` | tirx | 36.1510 | flashinfer_cake | 38.3283 | 1.060 | — |
-| `hv12h12_b8_s4` | tirx | 8.6697 | flashinfer_cake | 10.1894 | 1.175 | — |
-| `hv16h16_b2_s8` | tirx | 7.6744 | flashinfer_cake | 9.6093 | 1.252 | — |
-| `hv16h16_b5_s4` | tirx | 8.6012 | flashinfer_cake | 10.0656 | 1.170 | — |
-| `hv16h16_b64_s1` | tirx | 45.3557 | flashinfer_cake | 46.9329 | 1.035 | — |
-| `hv16h16_b8_s2` | tirx | 9.7195 | flashinfer_cake | 11.4582 | 1.179 | — |
-| `hv32h16_b128_s1` | tirx | 157.7329 | flashinfer_cake | 160.0614 | 1.015 | — |
-| `hv32h16_b16_s1` | tirx | 24.7991 | flashinfer_cake | 26.7087 | 1.077 | — |
-| `hv32h16_b1_s8` | tirx | 7.6115 | flashinfer_cake | 9.3285 | 1.226 | — |
-| `hv32h16_b2_s2` | tirx | 7.8626 | flashinfer_cake | 9.3504 | 1.189 | — |
-| `hv32h16_b32_s1` | tirx | 45.4139 | flashinfer_cake | 46.6065 | 1.026 | — |
-| `hv32h16_b3_s4` | tirx | 8.7830 | flashinfer_cake | 10.1928 | 1.161 | — |
-| `hv32h16_b64_s1` | tirx | 81.5038 | flashinfer_cake | 83.4040 | 1.023 | — |
-| `hv32h16_b8_s1` | tirx | 14.1634 | flashinfer_cake | 16.0528 | 1.133 | — |
+| `hv32h16_b128_s1` | tirx | 158.9776 | flashinfer_cake | 160.0385 | 1.007 | — |
+| `hv32h16_b1_s8` | tirx | 7.0295 | flashinfer_cake | 9.3121 | 1.325 | — |
+| `hv32h16_b3_s4` | tirx | 8.5994 | flashinfer_cake | 10.2351 | 1.190 | — |
 
 ## flashkda_decode_t6_gram
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv12h12_b64_s1` | tirx | 40.5521 | flashinfer_cake | 42.6733 | 1.052 | — |
-| `hv12h12_b8_s4` | tirx | 14.6156 | flashinfer_cake | 16.3846 | 1.121 | — |
-| `hv16h16_b2_s8` | tirx | 7.2648 | flashinfer_cake | 8.8093 | 1.213 | — |
-| `hv16h16_b5_s4` | tirx | 14.0451 | flashinfer_cake | 15.5771 | 1.109 | — |
-| `hv16h16_b64_s1` | tirx | 50.3282 | flashinfer_cake | 53.0568 | 1.054 | — |
-| `hv16h16_b8_s2` | tirx | 10.6076 | flashinfer_cake | 12.1318 | 1.144 | — |
-| `hv32h16_b128_s1` | tirx | 176.9601 | flashinfer_cake | 179.9378 | 1.017 | — |
-| `hv32h16_b16_s1` | tirx | 27.7680 | flashinfer_cake | 29.5093 | 1.063 | — |
-| `hv32h16_b1_s8` | tirx | 7.4356 | flashinfer_cake | 9.3149 | 1.253 | — |
-| `hv32h16_b2_s2` | tirx | 8.6672 | flashinfer_cake | 9.6263 | 1.111 | — |
-| `hv32h16_b32_s1` | tirx | 48.9775 | flashinfer_cake | 52.2079 | 1.066 | — |
-| `hv32h16_b3_s4` | tirx | 14.5367 | flashinfer_cake | 16.3726 | 1.126 | — |
-| `hv32h16_b64_s1` | tirx | 91.6520 | flashinfer_cake | 92.8344 | 1.013 | — |
-| `hv32h16_b8_s1` | tirx | 15.2837 | flashinfer_cake | 17.0185 | 1.114 | — |
+| `hv32h16_b128_s1` | tirx | 181.6806 | flashinfer_cake | 195.8678 | 1.078 | — |
+| `hv32h16_b1_s8` | tirx | 7.2978 | flashinfer_cake | 8.7352 | 1.197 | — |
+| `hv32h16_b3_s4` | tirx | 14.0607 | flashinfer_cake | 16.2512 | 1.156 | — |
 
 ## fp16_bf16_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_1024x1024x1024` | tir | 6.8719 | torch-cublas | 5.9959 | 0.873 | deepgemm-bf16=6.8735, deepgemm-cublaslt=6.0038 |
-| `bf16_16384x16384x16384` | tir | 5423.8178 | torch-cublas | 5486.0778 | 1.011 | deepgemm-bf16=5934.2415, deepgemm-cublaslt=5488.1450 |
-| `bf16_2048x2048x2048` | tir | 27.4191 | torch-cublas | 26.4829 | 0.966 | deepgemm-bf16=29.1607, deepgemm-cublaslt=26.4901 |
-| `bf16_4096x4096x4096` | tir | 90.7458 | deepgemm-bf16 | 87.5186 | 0.964 | deepgemm-cublaslt=88.1432, torch-cublas=88.7432 |
-| `bf16_8192x8192x8192` | tir | 694.8820 | deepgemm-cublaslt | 708.0456 | 1.019 | deepgemm-bf16=732.9954, torch-cublas=712.9988 |
-| `fp16_1024x1024x1024` | tir | 10.3797 | torch-cublas | 8.7730 | 0.845 | — |
-| `fp16_16384x16384x16384` | tir | 5957.4736 | torch-cublas | 5888.4751 | 0.988 | — |
-| `fp16_2048x2048x2048` | tir | 16.4784 | torch-cublas | 15.8591 | 0.962 | — |
-| `fp16_4096x4096x4096` | tir | 148.5279 | torch-cublas | 140.2774 | 0.944 | — |
-| `fp16_8192x8192x8192` | tir | 738.8704 | torch-cublas | 762.3584 | 1.032 | — |
+| `bf16_4096x4096x4096` | tir | 92.4952 | deepgemm-bf16 | 89.9498 | 0.972 | deepgemm-cublaslt=90.7190, torch-cublas=90.3239 |
+| `fp16_1024x1024x1024` | tir | 6.6257 | torch-cublas | 5.8395 | 0.881 | — |
+| `fp16_16384x16384x16384` | tir | 5702.0394 | torch-cublas | 5612.5350 | 0.984 | — |
+
+## gdn_cp_prefill_sm100
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `fp16_q16_k16_v16_s4096+4096_init_f16_i64` | tirx | 117.7848 | flashinfer_cutedsl | 128.4645 | 1.091 | — |
+| `fp16_q16_k16_v64_s192+64_initfinal_f16_i64` | tirx | 82.5471 | flashinfer_cutedsl | 83.7373 | 1.014 | — |
+| `fp16_q1_k1_v1_s2048_none_i32` | tirx | 53.7819 | flashinfer_cutedsl | 67.5602 | 1.256 | — |
+
+## gdn_decode_bf16_ilp4
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `t1_b1_h2_hv4_tv16` | tirx | 3.0704 | flashinfer_cutedsl | 3.2716 | 1.066 | — |
+| `t4_b8_h4_hv8_tv16` | tirx | 6.6630 | flashinfer_cutedsl | 7.1216 | 1.069 | — |
+| `t8_b4_h8_hv16_tv16` | tirx | 10.3861 | flashinfer_cutedsl | 11.7190 | 1.128 | — |
+
+## gdn_decode_bf16_wide_vec_mtp
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `t2_b4_h16_hv32_tv32` | tirx | 6.3312 | flashinfer_cutedsl | 6.8442 | 1.081 | — |
+| `t4_b64_h8_hv16_tv128` | tirx | 33.8103 | flashinfer_cutedsl | 46.7374 | 1.382 | — |
+| `t8_b512_h16_hv32_tv128` | tirx | 1163.7200 | flashinfer_cutedsl | 1330.0720 | 1.143 | — |
+
+## gdn_decode_bf16_wide_vec_t1
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `b128_h8_hv16_tv128` | tirx | 24.8936 | flashinfer_cutedsl | 25.6358 | 1.030 | — |
+| `b16_h16_hv32_tv64` | tirx | 11.2524 | flashinfer_cutedsl | 20.2887 | 1.803 | — |
+| `b512_h4_hv8_tv128` | tirx | 46.1512 | flashinfer_cutedsl | 47.0845 | 1.020 | — |
+
+## gdn_decode_fp32_mtp_warp
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `t2_b4_h16_hv64_tv16_ilp2_sv0` | tirx | 14.3412 | flashinfer_cutedsl | 15.8320 | 1.104 | — |
+| `t8_b256_h16_hv64_tv64_ilp4_sv1` | tirx | 1773.3917 | flashinfer_cutedsl | 1778.8057 | 1.003 | — |
 
 ## gdn_prefill_sm100
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hq16_hv16_s4096+4096` | tirx | 127.3157 | flashinfer_cutedsl | 133.4357 | 1.048 | — |
-| `hq16_hv64_s1x8192` | tirx | 385.7228 | flashinfer_cutedsl | 402.0258 | 1.042 | — |
-| `hq2_hv8_s1x65536` | tirx | 1758.8466 | flashinfer_cutedsl | 1781.1827 | 1.013 | — |
-| `hq32_hv32_s8192x16` | tirx | 1558.5000 | flashinfer_cutedsl | 1622.4510 | 1.041 | — |
-| `hq8_hv32_s1024x8` | tirx | 92.2448 | flashinfer_cutedsl | 95.8803 | 1.039 | — |
+| `hq16_hv64_s1x8192` | tirx | 240.6253 | flashinfer_cutedsl | 250.7749 | 1.042 | — |
+| `hq32_hv32_s8192x16` | tirx | 1084.1739 | flashinfer_cutedsl | 1109.6317 | 1.023 | — |
+| `hq8_hv32_s1024x8` | tirx | 159.0958 | flashinfer_cutedsl | 187.6231 | 1.179 | — |
 
-## gemm_reduce_scatter
+## msa_sparse_atten_fwd_nvfp4_kv_sm100
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `tp1_m8192_n16384_k53248_fp16_dynamic` | tirx | 11267.0222 | cublas_nccl_cudagraph | 10951.6801 | 0.972 | cublasmp_split_p2p=12201.0029 |
-| `tp1_m8192_n4096_k12288_fp16_dynamic` | tirx | 1000.4833 | cublas_nccl_cudagraph | 943.5559 | 0.943 | cublasmp_split_p2p=1243.5105 |
-| `tp1_m8192_n5120_k25600_fp16_dynamic` | tirx | 1493.2130 | cublas_nccl_cudagraph | 1436.5057 | 0.962 | cublasmp_split_p2p=1840.6237 |
-| `tp1_m8192_n8192_k28672_fp16_dynamic` | tirx | 2402.0207 | cublas_nccl_cudagraph | 2383.3390 | 0.992 | cublasmp_split_p2p=2819.7509 |
+| `ring48k_bf16q_qh16_t16` | tirx | 1029.3983 | msa | 1387.7469 | 1.348 | — |
+
+## msa_sparse_atten_fwd_sm100
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `ring48k_bf16_qh16_t16` | tirx | 1361.0732 | msa | 1832.0996 | 1.346 | — |
+| `ring48k_fp8_qh16_t16` | tirx | 1334.7881 | msa | 1526.8879 | 1.144 | — |
 
 ## msa_sparse_prepare_flat_schedule_sm100
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `decode_b128_k65536_h4` | tirx | 8696.1643 | msa | 12215.6348 | 1.405 | — |
-| `decode_b32_k8192_h4` | tirx | 64.8933 | msa | 88.7769 | 1.368 | — |
-| `decode_b64_k16384_h4_varlen` | tirx | 313.4035 | msa | 433.9132 | 1.385 | — |
-| `edge_b1_k512_h1` | tirx | 3.4553 | msa | 4.0778 | 1.180 | — |
-| `prefill_b1_k131072_h1` | tirx | 5.0327 | msa | 5.4474 | 1.082 | — |
-| `prefill_b1_k32768_h2` | tirx | 4.4183 | msa | 4.7939 | 1.085 | — |
-| `prefill_b1_k8192_h2` | tirx | 3.9548 | msa | 4.2960 | 1.086 | — |
-| `prefill_b3_k8192_h2_varlen` | tirx | 5.1043 | msa | 5.9817 | 1.172 | — |
+| `decode_b128_k65536_h4` | tirx | 8694.0625 | msa | 12213.3396 | 1.405 | — |
+| `prefill_b1_k8192_h2` | tirx | 3.8856 | msa | 4.2417 | 1.092 | — |
 
 ## msa_sparse_prepare_fwd_split_atomic_sm100
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `decode_b128_k65536_h4` | tirx | 217.2807 | msa | 219.6823 | 1.011 | — |
-| `decode_b32_k8192_h4` | tirx | 15.1111 | msa | 15.4112 | 1.020 | — |
-| `decode_b64_k16384_h4_varlen` | tirx | 29.6478 | msa | 30.2542 | 1.020 | — |
-| `edge_b1_k512_h1` | tirx | 4.3427 | msa | 4.3987 | 1.013 | — |
-| `prefill_b1_k131072_h1` | tirx | 33.2527 | msa | 33.4343 | 1.005 | — |
-| `prefill_b1_k32768_h2` | tirx | 16.5568 | msa | 16.8409 | 1.017 | — |
-| `prefill_b1_k8192_h2` | tirx | 7.1463 | msa | 7.3067 | 1.022 | — |
-| `prefill_b3_k8192_h2_varlen` | tirx | 10.7839 | msa | 10.9987 | 1.020 | — |
+| `decode_b128_k65536_h4` | tirx | 216.8929 | msa | 219.2295 | 1.011 | — |
+| `prefill_b1_k131072_h1` | tirx | 33.1634 | msa | 33.3473 | 1.006 | — |
+| `prefill_b1_k8192_h2` | tirx | 7.1920 | msa | 7.3364 | 1.020 | — |
 
 ## mxfp4_quantize
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_128x4_m4096_k4096` | tirx | 10.7420 | flashinfer | 10.7219 | 0.998 | — |
-| `bf16_linear_m4096_k4096` | tirx | 10.3308 | flashinfer | 10.6924 | 1.035 | — |
-| `fp16_128x4_m1024_k2048` | tirx | 3.7288 | flashinfer | 3.7532 | 1.007 | — |
-| `fp16_128x4_m128_k1024` | tirx | 2.8414 | flashinfer | 2.8668 | 1.009 | — |
-| `fp16_128x4_m16384_k7168` | tirx | 66.8505 | flashinfer | 68.2974 | 1.022 | — |
-| `fp16_128x4_m4096_k4096` | tirx | 10.7370 | flashinfer | 10.6849 | 0.995 | — |
-| `fp16_linear_m1024_k2048` | tirx | 3.5864 | flashinfer | 3.6517 | 1.018 | — |
-| `fp16_linear_m128_k1024` | tirx | 2.3680 | flashinfer | 2.4079 | 1.017 | — |
-| `fp16_linear_m16384_k7168` | tirx | 50.5177 | flashinfer | 50.6019 | 1.002 | — |
-| `fp16_linear_m4096_k4096` | tirx | 13.9417 | flashinfer | 14.0012 | 1.004 | — |
+| `fp16_128x4_m128_k1024` | tirx | 2.4907 | flashinfer | 2.5397 | 1.020 | — |
+| `fp16_128x4_m16384_k7168` | tirx | 52.5001 | flashinfer | 52.8837 | 1.007 | — |
+| `fp16_linear_m4096_k4096` | tirx | 10.2822 | flashinfer | 10.6286 | 1.034 | — |
 
 ## mxfp8_quantize
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_128x4_m4096_k4096` | tirx | 11.7643 | flashinfer | 11.8278 | 1.005 | — |
-| `bf16_linear_m4096_k4096` | tirx | 11.2872 | flashinfer | 11.1933 | 0.992 | — |
-| `fp16_128x4_m1024_k2048` | tirx | 3.8630 | flashinfer | 3.9447 | 1.021 | — |
-| `fp16_128x4_m128_k1024` | tirx | 3.6176 | flashinfer | 3.7711 | 1.042 | — |
-| `fp16_128x4_m16384_k7168` | tirx | 71.5604 | flashinfer | 76.6297 | 1.071 | — |
-| `fp16_128x4_m4096_k4096` | tirx | 11.7617 | flashinfer | 11.8319 | 1.006 | — |
-| `fp16_linear_m1024_k2048` | tirx | 3.7724 | flashinfer | 3.8231 | 1.013 | — |
-| `fp16_linear_m128_k1024` | tirx | 2.6200 | flashinfer | 2.6025 | 0.993 | — |
-| `fp16_linear_m16384_k7168` | tirx | 62.3071 | flashinfer | 63.2526 | 1.015 | — |
-| `fp16_linear_m4096_k4096` | tirx | 13.8346 | flashinfer | 13.5341 | 0.978 | — |
+| `fp16_128x4_m128_k1024` | tirx | 2.6790 | flashinfer | 2.7309 | 1.019 | — |
+| `fp16_128x4_m16384_k7168` | tirx | 60.6338 | flashinfer | 60.5192 | 0.998 | — |
+| `fp16_linear_m4096_k4096` | tirx | 11.3160 | flashinfer | 11.2650 | 0.995 | — |
 
 ## nvfp4_gemm
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `1024x1024x1024` | tir | 5.4514 | cublaslt_nvfp4 | 4.5272 | 0.830 | flashinfer=4.5366 |
-| `16384x16384x16384` | tir | 1516.7496 | cublaslt_nvfp4 | 1431.0615 | 0.944 | flashinfer=1445.1355 |
-| `2048x2048x2048` | tir | 8.8312 | flashinfer | 7.7123 | 0.873 | cublaslt_nvfp4=8.5846 |
-| `4096x4096x4096` | tir | 29.8666 | cublaslt_nvfp4 | 27.7979 | 0.931 | flashinfer=28.9586 |
-| `8192x8192x8192` | tir | 253.0963 | cublaslt_nvfp4 | 238.7013 | 0.943 | flashinfer=240.3198 |
+| `1024x1024x1024` | tir | 5.2106 | cublaslt_nvfp4 | 4.3806 | 0.841 | flashinfer=4.4708 |
+| `16384x16384x16384` | tir | 1528.9627 | flashinfer | 1443.7832 | 0.944 | cublaslt_nvfp4=1445.3852 |
+| `4096x4096x4096` | tir | 29.3046 | cublaslt_nvfp4 | 27.3885 | 0.935 | flashinfer=28.5923 |
 
 ## nvfp4_quantize
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_128x4_m4096_k3584_silu` | tirx | 20.6098 | flashinfer | 22.3594 | 1.085 | — |
-| `bf16_128x4_m4096_k4096` | tirx | 10.7824 | flashinfer | 11.1453 | 1.034 | — |
-| `bf16_linear_m4096_k4096` | tirx | 10.0129 | flashinfer | 10.2862 | 1.027 | — |
-| `fp16_128x4_m1024_k2048` | tirx | 3.6911 | flashinfer | 3.6802 | 0.997 | — |
-| `fp16_128x4_m128_k1024` | tirx | 3.4540 | flashinfer | 3.4875 | 1.010 | — |
-| `fp16_128x4_m16384_k7168` | tirx | 54.6462 | flashinfer | 55.1040 | 1.008 | — |
-| `fp16_128x4_m4096_k3584_silu` | tirx | 20.3774 | flashinfer | 21.8474 | 1.072 | — |
-| `fp16_128x4_m4096_k4096` | tirx | 11.0861 | flashinfer | 10.8557 | 0.979 | — |
-| `fp16_linear_m1024_k2048` | tirx | 3.6253 | flashinfer | 3.5903 | 0.990 | — |
-| `fp16_linear_m128_k1024` | tirx | 2.4949 | flashinfer | 2.4904 | 0.998 | — |
-| `fp16_linear_m16384_k7168` | tirx | 50.5884 | flashinfer | 51.1227 | 1.011 | — |
-| `fp16_linear_m4096_k4096` | tirx | 10.3428 | flashinfer | 10.4800 | 1.013 | — |
+| `fp16_128x4_m128_k1024` | tirx | 2.4972 | flashinfer | 2.5140 | 1.007 | — |
+| `fp16_128x4_m16384_k7168` | tirx | 55.2725 | flashinfer | 54.8886 | 0.993 | — |
+| `fp16_linear_m4096_k4096` | tirx | 10.2527 | flashinfer | 10.3761 | 1.012 | — |
 
 ## nvfp4_quantize_per_token
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_128x4_m4096_k4096` | tirx | 12.7112 | flashinfer | 13.7694 | 1.083 | — |
-| `bf16_linear_m4096_k4096` | tirx | 12.1999 | flashinfer | 13.2294 | 1.084 | — |
-| `fp16_128x4_m1024_k2048` | tirx | 3.9813 | flashinfer | 4.1212 | 1.035 | — |
-| `fp16_128x4_m128_k1024` | tirx | 2.8930 | flashinfer | 3.0564 | 1.056 | — |
-| `fp16_128x4_m16384_k7168` | tirx | 57.8227 | flashinfer | 59.3197 | 1.026 | — |
-| `fp16_128x4_m4096_k4096` | tirx | 12.6939 | flashinfer | 13.5944 | 1.071 | — |
-| `fp16_linear_m1024_k2048` | tirx | 3.8549 | flashinfer | 3.9801 | 1.032 | — |
-| `fp16_linear_m128_k1024` | tirx | 2.9066 | flashinfer | 3.0670 | 1.055 | — |
-| `fp16_linear_m16384_k7168` | tirx | 55.8258 | flashinfer | 57.4695 | 1.029 | — |
-| `fp16_linear_m4096_k4096` | tirx | 17.3447 | flashinfer | 19.5163 | 1.125 | — |
+| `fp16_128x4_m128_k1024` | tirx | 2.6892 | flashinfer | 2.8470 | 1.059 | — |
+| `fp16_128x4_m16384_k7168` | tirx | 57.7658 | flashinfer | 59.1917 | 1.025 | — |
+| `fp16_linear_m4096_k4096` | tirx | 12.1103 | flashinfer | 12.9942 | 1.073 | — |
 
 ## radix_topk_multi_cta
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `f32_basic_r2_l524288_k256_large` | tirx | 41.3643 | flashinfer | 42.8836 | 1.037 | — |
-| `f32_basic_r4_l115188_k256_ctas3` | tirx | 34.6564 | flashinfer | 35.5113 | 1.025 | — |
-| `f32_basic_r4_l57596_k256_vec4` | tirx | 29.8717 | flashinfer | 31.9794 | 1.071 | — |
+| `f32_basic_r2_l524288_k256_large` | tirx | 40.0140 | flashinfer | 42.4567 | 1.061 | — |
+| `f32_basic_r4_l115188_k256_ctas3` | tirx | 35.3704 | flashinfer | 35.9263 | 1.016 | — |
+| `f32_basic_r4_l57596_k256_vec4` | tirx | 30.1728 | flashinfer | 31.8387 | 1.055 | — |
 
 ## radix_topk_single_cta
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `f32_basic_r256_l57592_k1024_maxchunk` | tirx | 80.3449 | flashinfer | 80.6849 | 1.004 | — |
-| `f32_basic_r64_l32768_k512` | tirx | 22.8811 | flashinfer | 25.4869 | 1.114 | — |
-| `f32_basic_r8_l8192_k256` | tirx | 11.1072 | flashinfer | 12.5152 | 1.127 | — |
+| `f32_basic_r256_l57592_k1024_maxchunk` | tirx | 80.2137 | flashinfer | 80.4478 | 1.003 | — |
+| `f32_basic_r64_l32768_k512` | tirx | 23.1822 | flashinfer | 25.7455 | 1.111 | — |
+| `f32_basic_r8_l8192_k256` | tirx | 11.1426 | flashinfer | 12.5080 | 1.123 | — |
 
 ## recurrent_kda_decode_grouped
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `dec_hv12_b4` | tirx | 3.6504 | flashinfer_cutedsl | 3.9219 | 1.074 | — |
-| `dec_hv12_b8` | tirx | 4.2584 | flashinfer_cutedsl | 4.6137 | 1.083 | — |
-| `dec_hv16_b1` | tirx | 3.2388 | flashinfer_cutedsl | 3.5628 | 1.100 | — |
-| `dec_hv16_b4` | tirx | 3.7759 | flashinfer_cutedsl | 4.0781 | 1.080 | — |
-| `ver_t2_hv16_b8` | tirx | 6.8376 | flashinfer_cutedsl | 7.3421 | 1.074 | — |
-| `ver_t4_hv16_b32` | tirx | 24.7130 | flashinfer_cutedsl | 33.8884 | 1.371 | — |
-| `ver_t8_hv12_b16` | tirx | 22.0309 | flashinfer_cutedsl | 31.3530 | 1.423 | — |
-| `ver_t8_hv12_b64` | tirx | 65.9184 | flashinfer_cutedsl | 92.4159 | 1.402 | — |
-| `ver_t8_hv16_b1` | tirx | 9.0308 | flashinfer_cutedsl | 14.8158 | 1.641 | — |
-| `ver_t8_hv16_b128` | tirx | 161.9329 | flashinfer_cutedsl | 219.3316 | 1.354 | — |
-| `ver_t8_hv16_b16` | tirx | 26.0173 | flashinfer_cutedsl | 34.9513 | 1.343 | — |
-| `ver_t8_hv16_b32` | tirx | 44.5975 | flashinfer_cutedsl | 63.6727 | 1.428 | — |
-| `ver_t8_hv16_b4` | tirx | 10.2479 | flashinfer_cutedsl | 16.9288 | 1.652 | — |
-| `ver_t8_hv16_b64` | tirx | 83.1184 | flashinfer_cutedsl | 112.7169 | 1.356 | — |
+| `dec_hv16_b1` | tirx | 3.3088 | flashinfer_cutedsl | 3.5166 | 1.063 | — |
+| `ver_t8_hv12_b16` | tirx | 22.1145 | flashinfer_cutedsl | 31.1857 | 1.410 | — |
+| `ver_t8_hv16_b128` | tirx | 161.2211 | flashinfer_cutedsl | 222.8499 | 1.382 | — |
 
 ## recurrent_kda_decode_one_warp
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `hv12_b16_tr16_lb` | tirx | 5.6951 | flashinfer_cutedsl | 5.9730 | 1.049 | — |
-| `hv12_b64_tr16_lb` | tirx | 12.8366 | flashinfer_cutedsl | 13.8690 | 1.080 | — |
-| `hv16_b128_tr16_lb` | tirx | 26.6851 | flashinfer_cutedsl | 29.1858 | 1.094 | — |
-| `hv16_b16_tr16_lb` | tirx | 6.3473 | flashinfer_cutedsl | 6.4838 | 1.022 | — |
-| `hv16_b32_tr16_lb` | tirx | 9.6974 | flashinfer_cutedsl | 10.2393 | 1.056 | — |
-| `hv16_b64_tr16_lb` | tirx | 15.2689 | flashinfer_cutedsl | 16.9040 | 1.107 | — |
-| `hv16_b8_tr8_lb` | tirx | 5.2472 | flashinfer_cutedsl | 5.3377 | 1.017 | — |
+| `hv12_b64_tr16_lb` | tirx | 12.6430 | flashinfer_cutedsl | 13.8379 | 1.095 | — |
+| `hv16_b128_tr16_lb` | tirx | 26.6607 | flashinfer_cutedsl | 29.8146 | 1.118 | — |
+| `hv16_b8_tr8_lb` | tirx | 5.2474 | flashinfer_cutedsl | 5.4464 | 1.038 | — |
+
+## rmsnorm
+
+| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
+|---|---|---:|---|---:|---:|---|
+| `hs128_bs32` | tir | 2.3129 | flashinfer | 2.0438 | 0.884 | — |
+| `hs4096_bs128` | tir | 3.5200 | flashinfer | 3.4994 | 0.994 | — |
+| `hs8192_bs4113` | tir | 71.7585 | flashinfer | 23.9442 | 0.334 | — |
 
 ## selective_state_update_mtp_horizontal
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b1_h64_d64_s128_t6_r8_statebf16_official` | tirx | 7.0351 | flashinfer_cuda | 7.5239 | 1.069 | — |
-| `b2048_h64_d64_s128_t6_r8_statebf16_official` | tirx | 1388.3803 | flashinfer_cuda | 1509.4559 | 1.087 | — |
-| `b512_h64_d64_s128_t6_r8_statebf16_official` | tirx | 352.2852 | flashinfer_cuda | 382.5711 | 1.086 | — |
-| `b64_h64_d64_s128_t6_r8_statebf16_official` | tirx | 82.9846 | flashinfer_cuda | 89.3754 | 1.077 | — |
+| `b1_h64_d64_s128_t6_r8_statebf16_official` | tirx | 6.9503 | flashinfer_cuda | 7.4360 | 1.070 | — |
+| `b2048_h64_d64_s128_t6_r8_statebf16_official` | tirx | 1658.4259 | flashinfer_cuda | 1814.7010 | 1.094 | — |
+| `b512_h64_d64_s128_t6_r8_statebf16_official` | tirx | 347.0377 | flashinfer_cuda | 382.4105 | 1.102 | — |
 
 ## selective_state_update_mtp_simple
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b1_h64_d64_s128_t6_r8_statebf16_official` | tirx | 6.5280 | flashinfer_cuda | 7.8631 | 1.205 | — |
-| `b2048_h64_d64_s128_t6_r8_statebf16_official` | tirx | 1520.4572 | flashinfer_cuda | 1584.4758 | 1.042 | — |
-| `b512_h64_d64_s128_t6_r8_statebf16_official` | tirx | 384.8073 | flashinfer_cuda | 400.9095 | 1.042 | — |
-| `b64_h64_d64_s128_t6_r8_statebf16_official` | tirx | 89.6541 | flashinfer_cuda | 93.7083 | 1.045 | — |
+| `b1_h64_d64_s128_t6_r8_statebf16_official` | tirx | 4.3164 | flashinfer_cuda | 5.1695 | 1.198 | — |
+| `b2048_h64_d64_s128_t6_r8_statebf16_official` | tirx | 1494.9751 | flashinfer_cuda | 1584.5818 | 1.060 | — |
+| `b512_h64_d64_s128_t6_r8_statebf16_official` | tirx | 378.0140 | flashinfer_cuda | 400.7631 | 1.060 | — |
 
 ## selective_state_update_mtp_vertical
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b1_h64_d64_s128_t6_r8_statebf16_official` | tirx | 28.4328 | flashinfer_cuda | 29.8231 | 1.049 | — |
-| `b2048_h64_d64_s128_t6_r8_statebf16_official` | tirx | 2826.8122 | flashinfer_cuda | 2905.6069 | 1.028 | — |
-| `b512_h64_d64_s128_t6_r8_statebf16_official` | tirx | 1208.4806 | flashinfer_cuda | 1242.4536 | 1.028 | — |
-| `b64_h64_d64_s128_t6_r8_statebf16_official` | tirx | 98.6174 | flashinfer_cuda | 101.2316 | 1.027 | — |
+| `b1_h64_d64_s128_t6_r8_statebf16_official` | tirx | 17.2645 | flashinfer_cuda | 18.1947 | 1.054 | — |
+| `b2048_h64_d64_s128_t6_r8_statebf16_official` | tirx | 2689.2282 | flashinfer_cuda | 2903.4872 | 1.080 | — |
 
 ## selective_state_update_stp_horizontal
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b64_h64_d128_s128_r8` | tirx | 48.8682 | flashinfer_cuda | 49.7236 | 1.018 | — |
-| `b64_h64_d64_s128_r64` | tirx | 40.5516 | flashinfer_cuda | 42.5661 | 1.050 | — |
-| `b64_h64_d64_s128_r8_base` | tirx | 41.8943 | flashinfer_cuda | 43.2139 | 1.031 | — |
-| `b64_h64_d64_s256_r8` | tirx | 67.7627 | flashinfer_cuda | 68.3421 | 1.009 | — |
+| `b64_h64_d128_s128_r8` | tirx | 47.8065 | flashinfer_cuda | 49.7971 | 1.042 | — |
+| `b64_h64_d64_s128_r8_base` | tirx | 26.5000 | flashinfer_cuda | 30.0204 | 1.133 | — |
+| `b64_h64_d64_s256_r8` | tirx | 47.4491 | flashinfer_cuda | 47.3090 | 0.997 | — |
 
 ## selective_state_update_stp_simple
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b64_h64_d128_s128_r8` | tirx | 65.4906 | flashinfer_cuda | 67.4403 | 1.030 | — |
-| `b64_h64_d64_s128_r64` | tirx | 54.2322 | flashinfer_cuda | 58.5379 | 1.079 | — |
-| `b64_h64_d64_s128_r8_base` | tirx | 37.4572 | flashinfer_cuda | 38.1160 | 1.018 | — |
-| `b64_h64_d64_s256_r8` | tirx | 74.9952 | flashinfer_cuda | 83.5618 | 1.114 | — |
+| `b64_h64_d128_s128_r8` | tirx | 65.2790 | flashinfer_cuda | 67.5019 | 1.034 | — |
+| `b64_h64_d64_s128_r8_base` | tirx | 37.3374 | flashinfer_cuda | 38.1243 | 1.021 | — |
+| `b64_h64_d64_s256_r8` | tirx | 54.0660 | flashinfer_cuda | 61.2385 | 1.133 | — |
 
 ## selective_state_update_stp_vertical
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b64_h64_d128_s128_r8` | tirx | 47.5355 | flashinfer_cuda | 54.3434 | 1.143 | — |
-| `b64_h64_d64_s128_r64` | tirx | 27.5996 | flashinfer_cuda | 31.3183 | 1.135 | — |
-| `b64_h64_d64_s128_r8_base` | tirx | 27.6318 | flashinfer_cuda | 31.3378 | 1.134 | — |
-| `b64_h64_d64_s256_r8` | tirx | 67.9484 | flashinfer_cuda | 79.1539 | 1.165 | — |
+| `b64_h64_d128_s128_r8` | tirx | 47.3534 | flashinfer_cuda | 54.2497 | 1.146 | — |
+| `b64_h64_d64_s128_r8_base` | tirx | 27.0785 | flashinfer_cuda | 31.3608 | 1.158 | — |
+| `b64_h64_d64_s256_r8` | tirx | 46.2417 | flashinfer_cuda | 48.7500 | 1.054 | — |
 
 ## silu_and_mul_nvfp4_experts_quantize
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bf16_b128_m2048_k2048` | tirx | 285.1640 | flashinfer | 319.4270 | 1.120 | — |
-| `bf16_b8_m512_k2048` | tirx | 13.5666 | flashinfer | 16.0305 | 1.182 | — |
-| `fp16_b128_m2048_k2048` | tirx | 421.6170 | flashinfer | 503.8167 | 1.195 | — |
-| `fp16_b4_m128_k4096` | tirx | 5.5833 | flashinfer | 5.7942 | 1.038 | — |
-| `fp16_b8_m16_k2048` | tirx | 4.8038 | flashinfer | 6.0456 | 1.259 | — |
-| `fp16_b8_m512_k2048` | tirx | 8.8492 | flashinfer | 10.2845 | 1.162 | — |
+| `bf16_b8_m512_k2048` | tirx | 9.0482 | flashinfer | 10.8425 | 1.198 | — |
+| `fp16_b128_m2048_k2048` | tirx | 273.8417 | flashinfer | 301.9139 | 1.103 | — |
+| `fp16_b8_m16_k2048` | tirx | 3.3409 | flashinfer | 4.1893 | 1.254 | — |
 
 ## sm100_fp8_fp4_mega_moe
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `t64_m64_h7168_i3072_e384_k6_g1` | tirx | 1298.4000 | deepgemm | 1288.0000 | 0.992 | — |
-| `t64_m64_h7168_i3072_e384_k6_g1_s1` | tirx | 1280.0000 | deepgemm | 1270.8000 | 0.993 | — |
-| `t8192_m8192_h7168_i3072_e384_k6_g1` | tirx | 3406.2000 | deepgemm | 3406.2000 | 1.000 | — |
-| `t8192_m8192_h7168_i3072_e384_k6_g1_s1` | tirx | 3842.8000 | deepgemm | 3845.4000 | 1.001 | — |
-| `t8192_m8192_h7168_i3072_e384_k6_g2_s1` | tirx | 3577.0000 | deepgemm | 3557.2000 | 0.994 | — |
-| `t8192_m8192_h7168_i3072_e384_k6_g4_s1` | tirx | 3132.4000 | deepgemm | 3116.0000 | 0.995 | — |
-| `t8192_m8192_h7168_i3072_e384_k6_g6_s1` | tirx | 3096.6000 | deepgemm | 3075.2000 | 0.993 | — |
+| `t64_m64_h7168_i3072_e384_k6_g1` | tirx | 1326.6000 | deepgemm | 1308.0000 | 0.986 | — |
+| `t8192_m8192_h7168_i3072_e384_k6_g1` | tirx | 3359.2000 | deepgemm | 3363.4000 | 1.001 | — |
+| `t8192_m8192_h7168_i3072_e384_k6_g1_s1` | tirx | 3742.4000 | deepgemm | 3746.0000 | 1.001 | — |
 
 ## sparse_flashmla_decode_head64
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `deepseek_v4_v32_b128_sq2_sk32768_topk2048_p64` | tirx | 136.8763 | flashmla | 144.2464 | 1.054 | — |
-| `model1_b148_sq2_sk16384_topk128_p256_xsk16384_xtopk1024_xp2_xtopklen` | tirx | 74.9601 | flashmla | 78.1596 | 1.043 | — |
-| `model1_b256_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64` | tirx | 153.6155 | flashmla | 163.3648 | 1.063 | — |
-| `model1_b2_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64` | tirx | 28.5783 | flashmla | 34.1026 | 1.193 | — |
-| `v32_b148_sq2_sk32768_topk16384_p64` | tirx | 910.6713 | flashmla | 953.2395 | 1.047 | — |
+| `deepseek_v4_v32_b128_sq2_sk32768_topk2048_p64` | tirx | 136.7393 | flashmla | 144.7348 | 1.058 | — |
+| `model1_b2_sq2_sk16384_topk128_p256_xsk16384_xtopk512_xp64` | tirx | 16.7063 | flashmla | 21.1248 | 1.264 | — |
+| `v32_b148_sq2_sk32768_topk16384_p64` | tirx | 1526.2413 | flashmla | 1817.5149 | 1.191 | — |
 
 ## sparse_flashmla_prefill_head128_phase1
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bench_regular_dqk512_hq128_s4096_kv32768_topk2048` | tirx | 1728.4820 | flashmla | 1761.2495 | 1.019 | — |
-| `bench_regular_dqk512_hq128_s4096_kv65536_topk2048` | tirx | 2489.6685 | flashmla | 2492.2068 | 1.001 | — |
-| `bench_regular_dqk512_hq128_s4096_kv8192_topk2048` | tirx | 1729.9883 | flashmla | 1768.0810 | 1.022 | — |
-| `bench_regular_dqk576_hq128_s4096_kv32768_topk2048` | tirx | 1859.8779 | flashmla | 1867.4771 | 1.004 | trtllm_gen=2090.3868 |
-| `bench_regular_dqk576_hq128_s4096_kv65536_topk2048` | tirx | 1990.8174 | flashmla | 1991.3282 | 1.000 | trtllm_gen=2192.8898 |
-| `bench_regular_dqk576_hq128_s4096_kv8192_topk2048` | tirx | 2421.3491 | flashmla | 2408.3092 | 0.995 | trtllm_gen=2839.9839 |
+| `bench_regular_dqk512_hq128_s4096_kv65536_topk2048` | tirx | 1813.1113 | flashmla | 1871.2985 | 1.032 | — |
+| `bench_regular_dqk512_hq128_s4096_kv8192_topk2048` | tirx | 1676.5177 | flashmla | 1732.7519 | 1.034 | — |
+| `bench_regular_dqk576_hq128_s4096_kv32768_topk2048` | tirx | 1775.0254 | flashmla | 1816.8810 | 1.024 | trtllm_gen=2033.6984 |
 
 ## sparse_flashmla_prefill_head128_small_topk_phase1
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bench_smalltopk_dqk512_hq128_s4096_kv32768_topk1280` | tirx | 1152.0658 | flashmla | 1171.3121 | 1.017 | — |
-| `bench_smalltopk_dqk512_hq128_s4096_kv65536_topk1280` | tirx | 1668.5951 | flashmla | 1677.7430 | 1.005 | — |
-| `bench_smalltopk_dqk512_hq128_s4096_kv8192_topk1280` | tirx | 1149.5010 | flashmla | 1161.5816 | 1.011 | — |
+| `bench_smalltopk_dqk512_hq128_s4096_kv32768_topk1280` | tirx | 1126.8128 | flashmla | 1152.5680 | 1.023 | — |
+| `bench_smalltopk_dqk512_hq128_s4096_kv65536_topk1280` | tirx | 1196.7294 | flashmla | 1216.7862 | 1.017 | — |
+| `bench_smalltopk_dqk512_hq128_s4096_kv8192_topk1280` | tirx | 1191.6612 | flashmla | 1205.0408 | 1.011 | — |
 
 ## sparse_flashmla_prefill_head64_phase1
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `bench_dqk512_hq64_s4096_kv32768_topk512` | tirx | 370.0398 | flashmla | 378.4910 | 1.023 | — |
-| `bench_dqk512_hq64_s4096_kv49152_topk512` | tirx | 377.4105 | flashmla | 383.6426 | 1.017 | — |
-| `bench_dqk512_hq64_s4096_kv65536_topk512` | tirx | 582.4460 | flashmla | 595.1229 | 1.022 | — |
-| `bench_dqk512_hq64_s4096_kv8192_topk512` | tirx | 572.5333 | flashmla | 585.4490 | 1.023 | — |
-| `bench_dqk576_hq64_s4096_kv32768_topk512` | tirx | 388.0184 | flashmla | 401.0920 | 1.034 | trtllm_gen=464.0309 |
-| `bench_dqk576_hq64_s4096_kv49152_topk512` | tirx | 584.6850 | flashmla | 605.9564 | 1.036 | trtllm_gen=719.6944 |
-| `bench_dqk576_hq64_s4096_kv65536_topk512` | tirx | 405.1609 | flashmla | 418.7721 | 1.034 | trtllm_gen=488.0644 |
-| `bench_dqk576_hq64_s4096_kv8192_topk512` | tirx | 372.2002 | flashmla | 381.5993 | 1.025 | trtllm_gen=447.2225 |
-
-## stable_sort_topk_by_value
-
-| config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
-|---|---|---:|---|---:|---:|---|
-| `f32_r4_k128` | tirx | 5.2716 | flashinfer | 5.3166 | 1.009 | — |
-| `f32_r64_k2048` | tirx | 11.8269 | flashinfer | 11.9164 | 1.008 | — |
-| `f32_r64_k256` | tirx | 6.3832 | flashinfer | 6.8481 | 1.073 | — |
+| `bench_dqk512_hq64_s4096_kv65536_topk512` | tirx | 381.8447 | flashmla | 390.1592 | 1.022 | — |
+| `bench_dqk512_hq64_s4096_kv8192_topk512` | tirx | 366.5173 | flashmla | 372.7173 | 1.017 | — |
+| `bench_dqk576_hq64_s4096_kv32768_topk512` | tirx | 861.8450 | flashmla | 763.2616 | 0.886 | trtllm_gen=775.0955 |
 
 ## tinygemm2_sm100
 
 | config | ours impl | ours (µs) | ref impl | ref (µs) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
-| `b13_o1024_k2048` | tirx | 4.2666 | flashinfer_sm100 | 4.2510 | 0.996 | — |
-| `b16_o2880_k2880` | tirx | 7.9593 | flashinfer_sm100 | 8.0375 | 1.010 | — |
-| `b1_o128_k720` | tirx | 2.9497 | flashinfer_sm100 | 2.9316 | 0.994 | — |
-| `b2_o16_k256` | tirx | 2.7903 | flashinfer_sm100 | 2.8247 | 1.012 | — |
-| `b4_o2880_k2880` | tirx | 9.6865 | flashinfer_sm100 | 9.7997 | 1.012 | — |
-| `b64_o4096_k3072` | tirx | 35.2649 | flashinfer_sm100 | 35.4422 | 1.005 | — |
-| `b7_o128_k4096` | tirx | 4.9619 | flashinfer_sm100 | 4.9197 | 0.991 | — |
-| `b8_o1024_k1024` | tirx | 4.8111 | flashinfer_sm100 | 4.8135 | 1.001 | — |
+| `b16_o2880_k2880` | tirx | 7.9359 | flashinfer_sm100 | 8.0420 | 1.013 | — |
+| `b1_o128_k720` | tirx | 2.9564 | flashinfer_sm100 | 2.9851 | 1.010 | — |
+| `b64_o4096_k3072` | tirx | 21.9170 | flashinfer_sm100 | 22.0918 | 1.008 | — |
+
+## Failed (9)
+
+- `gdn_decode_fp32_mtp_warp/t4_b64_h8_hv32_tv64_ilp4_sv1`: prepared child exited None without a terminal message
+- `msa_sparse_atten_fwd_nvfp4_kv_sm100/ring48k_fp8q_qh16_t16`: baseline error(s): msa: DSLRuntimeError: 🧊🧊🧊 ICE 🧊🧊🧊
+- `msa_sparse_atten_fwd_nvfp4_kv_sm100/varlen_b3_s8192_bf16q_qh4_t16`: baseline error(s): msa: DSLRuntimeError: 🧊🧊🧊 ICE 🧊🧊🧊
+- `msa_sparse_atten_fwd_sm100/varlen_b3_s8192_qh4_t16`: baseline error(s): msa: DSLRuntimeError: 🧊🧊🧊 ICE 🧊🧊🧊
+- `msa_sparse_prepare_flat_schedule_sm100/decode_b64_k16384_h4_varlen`: baseline error(s): msa: partially initialized module 'torch._dynamo' has no attribute 'decorators' (most likely due to a circular import)
+- `selective_state_update_mtp_vertical/b512_h64_d64_s128_t6_r8_statebf16_official`: prepared child exited None without a terminal message
+- `stable_sort_topk_by_value/f32_r4_k128`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True
+- `stable_sort_topk_by_value/f32_r64_k2048`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True
+- `stable_sort_topk_by_value/f32_r64_k256`: prepare: RuntimeError: CPU prepare changed CUDA initialization state from False to True

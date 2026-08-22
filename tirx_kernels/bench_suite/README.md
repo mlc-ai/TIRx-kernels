@@ -2,9 +2,12 @@
 
 The bench suite measures registered kernels against one pinned before-run
 baseline. Its acceptance verdict is direct before/after wall time from
-`ratio_diff.py`. The suite runs only the TIRx implementation; external
-references are explicit diagnostics through `python -m tirx_kernels.bench
---with-references` and never replace the direct verdict.
+`ratio_diff.py`. By default the suite runs only the TIRx implementation;
+passing `--with-references` also runs every declared external reference
+(baseline) implementation, which enables the reference-ratio regression
+report against `baseline.json`. References remain diagnostics — they never
+replace the direct verdict. The same flag exists on
+`python -m tirx_kernels.bench` for single-workload diagnostics.
 
 ## Workloads
 
@@ -124,7 +127,9 @@ gate remains strict `after/before < 1.01`.
 - Terminal workload failures are collected without cancelling unrelated work;
   the complete sweep exits nonzero after reporting every failure.
 - External references are excluded from the suite's direct before/after
-  acceptance denominator.
+  acceptance denominator. They run only under `--with-references`; a
+  missing or failing enabled reference (`BASELINE_ERROR`) fails its
+  workload.
 
 Useful options:
 
@@ -139,6 +144,7 @@ Useful options:
 | `--out-dir PATH` | Artifact root |
 | `--check-imports` | Resolve selected imports and exit |
 | `--no-report` | Skip report generation |
+| `--with-references` | Also run external references and the ratio report (not with `--ab-before`) |
 
 ## Artifacts
 
