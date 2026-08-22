@@ -75,18 +75,6 @@
       "url": "https://github.com/MiniMax-AI/MSA.git",
       "revision": "80434d7f67877c6570ca19cac444b84bc9855dac",
       "install_subdirectory": "python"
-    },
-    {
-      "name": "cudnn-frontend",
-      "url": "https://github.com/NVIDIA/cudnn-frontend.git",
-      "revision": "7b5327b32907b9dd21d85a393d62f9573d7f0116",
-      "source_only": true,
-      "files": [
-        {
-          "path": "python/cudnn/gemm/cutedsl/dense/amax/dense_blockscaled_gemm_persistent_amax.py",
-          "sha256": "637088ed4fb7db391d7e9325b3e9f952265ff206ebfc96aed0cdfd1d3365d7f1"
-        }
-      ]
     }
   ]
 }

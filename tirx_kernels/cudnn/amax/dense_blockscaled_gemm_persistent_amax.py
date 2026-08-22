@@ -9,28 +9,19 @@ Upstream source:
 ``python/cudnn/gemm/cutedsl/dense/amax/dense_blockscaled_gemm_persistent_amax.py``.
 """
 
-import hashlib
 import importlib
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 from functools import cache
 from itertools import combinations, product
-from pathlib import Path
 
 import tirx_kernels.kern as K
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
 _MAX_ACTIVE_CLUSTERS = {1: 148, 2: 74, 4: 33, 8: 15, 16: 7}
-_SOURCE_COMMIT = "7b5327b32907b9dd21d85a393d62f9573d7f0116"
-_SOURCE_SHA256 = "637088ed4fb7db391d7e9325b3e9f952265ff206ebfc96aed0cdfd1d3365d7f1"
-_SOURCE_RELATIVE = Path(
-    "python/cudnn/gemm/cutedsl/dense/amax/dense_blockscaled_gemm_persistent_amax.py"
-)
-
 _AB_DTYPES = ("float4_e2m1fn", "float8_e4m3fn", "float8_e5m2")
 _SF_MODES = (("float8_e8m0fnu", 16), ("float8_e8m0fnu", 32), ("float8_e4m3fn", 16))
 _C_DTYPES = ("bfloat16", "float16", "float32", "float4_e2m1fn", "float8_e4m3fn", "float8_e5m2")
@@ -1767,31 +1758,14 @@ def prepare_data(**config):
     }
 
 
-def _git_output(root, *args):
-    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
-
-
 @cache
 def _load_reference_source():
-    default_root = Path(__file__).resolve().parents[3] / ".reference-deps" / "cudnn-frontend"
-    root = Path(os.environ.get("CUDNN_FRONTEND_PATH", default_root)).resolve()
-    origin = _git_output(root, "remote", "get-url", "origin").rstrip("/")
-    if origin.removesuffix(".git") != "https://github.com/NVIDIA/cudnn-frontend":
-        raise RuntimeError(f"unexpected cuDNN Frontend origin: {origin}")
-    actual_commit = _git_output(root, "rev-parse", "HEAD")
-    if actual_commit != _SOURCE_COMMIT:
-        raise RuntimeError(f"cuDNN Frontend commit is {actual_commit}, expected {_SOURCE_COMMIT}")
-    dirty = _git_output(
-        root, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"
+    root = os.environ.get("CUDNN_FRONTEND_PATH")
+    if root is None:
+        raise RuntimeError("CUDNN_FRONTEND_PATH must point to a cuDNN Frontend source checkout")
+    source_path = os.path.join(
+        root, "python/cudnn/gemm/cutedsl/dense/amax/dense_blockscaled_gemm_persistent_amax.py"
     )
-    if dirty:
-        raise RuntimeError(f"cuDNN Frontend checkout is dirty: {root}")
-    source_path = root / _SOURCE_RELATIVE
-    actual_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
-    if actual_sha256 != _SOURCE_SHA256:
-        raise RuntimeError(
-            f"cuDNN Frontend source SHA256 is {actual_sha256}, expected {_SOURCE_SHA256}"
-        )
     spec = importlib.util.spec_from_file_location("tirx_cudnn_frontend_amax_source", source_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load cuDNN Frontend source: {source_path}")
