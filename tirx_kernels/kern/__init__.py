@@ -4,7 +4,7 @@
 
 The base language is tirx script plus the in-tree ``T.ptx`` instruction table,
 used as-is: one call is one instruction, spelled the way the ISA spells it.
-The protocol layer re-exports the in-tree ``lang`` classes (``Pipeline``,
+The protocol layer implements native traced classes (``Pipeline``,
 ``PipelineState``, ``MBarrier``, and the one-way barriers ``TMABar`` /
 ``TCGen05Bar``) so a kernel's source is ``K``-only. On top of that ``K`` adds
 three primitive families — the things neither PTX nor ``lang`` has a word for:
@@ -26,7 +26,9 @@ ring
     ``(stage, phase)`` cursor when generic signed/unit-stride
     ``PipelineState`` would change lowering or semantics.
 
-Everything else resolves through to ``tvm.script.tirx``.
+The remaining instruction and expression surface resolves through to
+``tvm.script.tirx``. Parser entry points and raw builder forwarding are not
+part of the kernel-author API.
 
 ``K.idioms`` is a *library*, not a fourth primitive family: plain functions over
 bare ``K.ptx`` / ``K.cuda`` calls, each documenting the exact instruction
@@ -38,14 +40,12 @@ instruction or a shape.
 from __future__ import annotations
 
 import tvm
-from tvm.backend.cuda.lang import MBarrier, Pipeline, PipelineState, TCGen05Bar, TMABar
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as _T
 from tvm.tirx.script.builder import ir as _I
 
 from . import idioms
 from .entry import Kernel, TensorMap, cta_id, gptr, kernel, lane_id, thread_id, warp_id
-from .ring import RingState
 from .smem import (
     KDesc,
     KStep,
@@ -285,7 +285,18 @@ def alloc_buffer(
     allocated_addr=None,
     annotations=None,
 ):
-    """Allocate an ordinary tensor using TIRx's default layout."""
+    """Allocate an ordinary tensor using TIRx's default layout.
+
+    Tensor memory is not a regular TIR buffer in Kern.  Its column allocation,
+    row mapping, and ``tcgen05`` load/store address form are instruction-level
+    contracts, so callers must spell them with raw columns and
+    ``K.cuda.get_tmem_addr`` rather than creating a ``scope="tmem"`` buffer.
+    """
+    if scope == "tmem":
+        raise ValueError(
+            'Kern does not support scope="tmem" buffers; use raw tcgen05 column '
+            "operands and K.cuda.get_tmem_addr(...)"
+        )
     return _I.alloc_buffer(
         shape,
         dtype,
@@ -314,6 +325,11 @@ def decl_buffer(
     allocated_addr=None,
 ):
     """Declare an ordinary tensor using TIRx's default layout."""
+    if scope == "tmem":
+        raise ValueError(
+            'Kern does not support scope="tmem" buffers; use raw tcgen05 column '
+            "operands and K.cuda.get_tmem_addr(...)"
+        )
     return _I.decl_buffer(
         shape,
         dtype,
@@ -333,13 +349,20 @@ def alloc_local(shape, dtype="float32", *, align=-1, annotations=None):
     return alloc_buffer(shape, dtype, scope="local", align=align, annotations=annotations)
 
 
-def local_scalar(dtype="float32", init=None):
+def local_scalar(dtype="float32", init=None, *, name=None):
     """Allocate one default-layout local scalar and return its writable element.
 
     ``init`` performs one immediate ``K.assign`` into the fresh element; the
     emitted TIR is identical to the two-statement declare-then-assign form.
+    ``name`` supplies the source name that a parser would infer from the
+    assignment target; tracing cannot recover that name on its own.
     """
-    element = alloc_local([1], dtype)[0]
+    if name is None:
+        element = alloc_local([1], dtype)[0]
+    else:
+        buffer = tvm.tirx.decl_buffer([1], dtype, name=name, scope="local")
+        _I.add_to_parent(tvm.tirx.AllocBuffer(buffer))
+        element = buffer[0]
     if init is not None:
         assign(element, init)
     return element
@@ -420,14 +443,20 @@ _FORBIDDEN_TIRX_NAMES = {
     "alloc_cast_frag",
     "alloc_shared",
     "alloc_tcgen05_ldst_frag",
+    "device_entry",
     "inline",
+    "jit",
+    "match_buffer",
     "meta_class",
     "meta_var",
+    "prim_func",
     "smem",
     "tile",
     "tmem",
     "wg_reg_tile",
 }
+
+_FORBIDDEN_ESCAPE_NAMES = {"ir", "parser"}
 
 # Binding forms retired by measurement: every kernel migrated to the two direct
 # spellings, and the mis-read-prone middle forms are rejected at the API.
@@ -454,6 +483,11 @@ _EVALUATE_HELP = (
 
 
 def __getattr__(name):
+    if name in _FORBIDDEN_ESCAPE_NAMES:
+        raise AttributeError(
+            f"Kern does not expose {name!r}: kernel and helper code must use the native "
+            "K.kernel tracing API instead of forwarding TVM parser/IR-builder objects"
+        )
     if name == "evaluate":
         raise AttributeError(_EVALUATE_HELP)
     if name in _FORBIDDEN_BINDING_NAMES:
@@ -472,11 +506,28 @@ def __getattr__(name):
     return value
 
 
+# Protocol helpers import only after Kern's public primitives exist, so their
+# native overrides can express themselves through K rather than a second,
+# private IRBuilder surface.
+from .pipeline import MBarrier, Pipeline, PipelineState, TCGen05Bar, TMABar
+from .ring import RingState
+from .scheduler import (
+    ClusterLaunchControlScheduler,
+    ClusterPersistentScheduler2D,
+    FlashAttentionLinearScheduler,
+    FlashAttentionLPTScheduler,
+    query_cancel_first_ctaid_x,
+)
+
 __all__ = [
     "SW32B",
     "SW64B",
     "SW128B",
     "SWNONE",
+    "ClusterLaunchControlScheduler",
+    "ClusterPersistentScheduler2D",
+    "FlashAttentionLPTScheduler",
+    "FlashAttentionLinearScheduler",
     "KDesc",
     "KStep",
     "KTile",
@@ -506,6 +557,7 @@ __all__ = [
     "kernel",
     "lane_id",
     "ptx",
+    "query_cancel_first_ctaid_x",
     "smem_desc_add_16B_offset",
     "smem_pool",
     "specialize",

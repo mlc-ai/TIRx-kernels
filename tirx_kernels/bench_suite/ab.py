@@ -33,10 +33,6 @@ _SHARED_HARNESS_PATHS = (
     Path("tirx_kernels/runner.py"),
     Path("tirx_kernels/low_level_ir.py"),
     Path("tirx_kernels/basic/utils/_runtime.py"),
-    # The before child execs the *current* kernel module for the benchmark
-    # contract; that module needs the current kern substrate, which old
-    # revisions may lack (and old kernels never import it themselves).
-    Path("tirx_kernels/kern"),
 )
 
 

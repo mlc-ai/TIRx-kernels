@@ -28,10 +28,9 @@ combine kernel reduces exactly that many.
 Upstream source: python/fmha_sm100/cute/src/sm100/prepare_scheduler.py:348.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.msa.sparse_prepare_flat_schedule import (
     _seqlens_k,
     _seqlens_q,
@@ -47,7 +46,6 @@ from tirx_kernels.msa.utils._scalar_ops import (
     st_global_i32,
     st_shared_i32,
 )
-from tvm.script import tirx as T
 
 KERNEL_META = {
     "name": "msa_sparse_prepare_fwd_split_atomic_sm100",
@@ -72,81 +70,60 @@ Q_IDX_MASK = (1 << SLOT_SHIFT) - 1
 # The source's `@cute.struct SharedStorage` reads static, but `SmemAllocator`
 # takes it from the dynamic pool -- the export carries
 # `.extern .shared .align 1024 .b8 __dynamic_shmem__0[]` -- so the matching TIRx
-# form is a pool allocation plus this launch tag, not `T.alloc_shared`.
+# form is a pool allocation plus this launch tag, not a parser allocation.
 LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-@T.jit
+@K.kernel(warps=NUM_THREADS // 32, arch="sm_100a", grid=lambda p: p["work_capacity"])
 def _kernel(
-    k2q_row_ptr_h: T.handle,
-    k2q_q_indices_h: T.handle,
-    scheduler_metadata_h: T.handle,
-    work_count_h: T.handle,
-    k2q_qsplit_indices_h: T.handle,
-    split_counts_h: T.handle,
-    cu_seqlens_q_h: T.handle,
-    total_rows: T.int32,
-    num_batches: T.int32,
-    work_capacity: T.int32,
-    nnz_capacity: T.int32,
-    total_q: T.int32,
-    num_heads_kv: T.int32,
-    max_seqlen_q: T.int32,
-    topk: T.int32,
+    k2q_row_ptr: K.gptr[K.i32],
+    k2q_q_indices: K.gptr[K.i32],
+    scheduler_metadata: K.gptr[K.i32],
+    work_count: K.gptr[K.i32],
+    k2q_qsplit_indices: K.gptr[K.i32],
+    split_counts: K.gptr[K.i32],
+    cu_seqlens_q: K.gptr[K.i32],
+    total_rows: K.i32,
+    num_batches: K.i32,
+    work_capacity: K.i32,
+    nnz_capacity: K.i32,
+    total_q: K.i32,
+    num_heads_kv: K.i32,
+    max_seqlen_q: K.i32,
+    topk: K.i32,
 ):
-    k2q_row_ptr = T.match_buffer(
-        k2q_row_ptr_h, (num_heads_kv * (total_rows + 1),), "int32", scope="global"
-    )
-    k2q_q_indices = T.match_buffer(
-        k2q_q_indices_h, (num_heads_kv * nnz_capacity,), "int32", scope="global"
-    )
-    scheduler_metadata = T.match_buffer(
-        scheduler_metadata_h, (work_capacity * WORK_FIELDS,), "int32", scope="global"
-    )
-    work_count = T.match_buffer(work_count_h, (1,), "int32", scope="global")
-    k2q_qsplit_indices = T.match_buffer(
-        k2q_qsplit_indices_h, (num_heads_kv * nnz_capacity,), "int32", scope="global"
-    )
-    split_counts = T.match_buffer(
-        split_counts_h, (total_q * num_heads_kv,), "int32", scope="global"
-    )
-    cu_seqlens_q = T.match_buffer(cu_seqlens_q_h, (num_batches + 1,), "int32", scope="global")
-
-    T.device_entry()
-
     # CUDA TRANSCRIPTION START
     # sketch: static ABI/launch, one CTA per work item -> :445-446.
-    block = T.cta_id([work_capacity])
-    tidx = T.thread_id([NUM_THREADS])
+    block = K.cta_id()
+    tidx = K.thread_id()
 
     # sketch: the row published through shared memory -> :360-364, :448-450.
     # The source's struct is allocated from the dynamic pool, not a static
     # `__shared__` array; the export shows `.extern .shared __dynamic_shmem__0`.
-    pool = T.SMEMPool()
-    srow = pool.alloc((SROW_FIELDS,), "int32", align=16)
-    pool.commit()
+    pool = K.smem_pool()
+    srow = pool.alloc((SROW_FIELDS,), K.i32, align=16)
 
     # sketch: the oversized-grid early-out -> :447.  The grid is sized by the
     # work list's capacity because `work_count` is device-resident, so the tail
     # CTAs retire here.  It precedes every shared access, so the barrier below
     # is never reached by a partial CTA.
-    if block < ld_global_i32(work_count, 0):
+    with K.If(block < ld_global_i32(work_count, 0)), K.Then():
         # sketch: the one metadata field every thread needs -> :451.
-        work_base: T.int32 = block * WORK_FIELDS
-        head_kv_idx: T.int32 = ld_global_i32(scheduler_metadata, work_base)
+        work_base = block * WORK_FIELDS
+        head_kv_idx = ld_global_i32(scheduler_metadata, work_base)
 
         # sketch: thread 0 publishes the row -> :457-461.  The compiler sinks
         # the other four metadata loads into this block, which is what makes
         # all three shared slots load-bearing rather than redundant.
-        if tidx == 0:
-            batch_idx_t0: T.int32 = ld_global_i32(scheduler_metadata, work_base + 4)
-            q_count_t0: T.int32 = ld_global_i32(scheduler_metadata, work_base + 3)
-            q_begin_t0: T.int32 = ld_global_i32(scheduler_metadata, work_base + 2)
-            row_linear_t0: T.int32 = ld_global_i32(scheduler_metadata, work_base + 1)
-            row_base_t0: T.int32 = ld_global_i32(
+        with K.If(tidx == 0), K.Then():
+            batch_idx_t0 = ld_global_i32(scheduler_metadata, work_base + 4)
+            q_count_t0 = ld_global_i32(scheduler_metadata, work_base + 3)
+            q_begin_t0 = ld_global_i32(scheduler_metadata, work_base + 2)
+            row_linear_t0 = ld_global_i32(scheduler_metadata, work_base + 1)
+            row_base_t0 = ld_global_i32(
                 k2q_row_ptr, head_kv_idx * (total_rows + 1) + row_linear_t0
             )
             st_shared_i32(srow, 0, row_base_t0 + q_begin_t0)
@@ -158,40 +135,39 @@ def _kernel(
 
         # sketch: everyone reads the row back -> :463-465.  `q_count` first: it
         # is the loop guard, and the export reads it first for that reason.
-        row_count: T.int32 = ld_shared_i32(srow, 1)
-        row_start: T.int32 = ld_shared_i32(srow, 0)
-        batch_idx: T.int32 = ld_shared_i32(srow, 2)
+        row_count = ld_shared_i32(srow, 1)
+        row_start = ld_shared_i32(srow, 0)
+        batch_idx = ld_shared_i32(srow, 2)
 
         # sketch: lane-strided edge emission -> :466-481.
-        qi = T.alloc_local((1,), "int32")
-        qi[0] = tidx
-        while qi[0] < row_count:
-            edge: T.int32 = row_start + qi[0]
-            q_idx: T.int32 = ld_global_i32(k2q_q_indices, head_kv_idx * nnz_capacity + edge)
+        qi = K.local_scalar(K.i32, init=tidx)
+        with K.While(qi < row_count):
+            edge = row_start + qi
+            q_idx = ld_global_i32(k2q_q_indices, head_kv_idx * nnz_capacity + edge)
             # sketch: the validity guard -> :470.  Well-formed input never takes
             # it -- a CSR row covers only filled entries -- but the guard exists
             # because the GPU index builder leaves its tail uninitialized and the
             # reference builder fills it with -1.
-            if q_idx >= 0 and q_idx < max_seqlen_q:
+            with K.If(K.And(q_idx >= 0, q_idx < max_seqlen_q)), K.Then():
                 # The address of `cu_seqlens_q[batch_idx]` is loop-invariant, but
                 # the export re-loads the value every edge: the atomic's memory
                 # clobber prevents hoisting it. The port leaves it in the body.
-                q_abs: T.int32 = ld_global_i32(cu_seqlens_q, batch_idx) + q_idx
-                split_slot: T.int32 = atom_add_global_i32(
-                    split_counts, q_abs * num_heads_kv + head_kv_idx, T.uint32(1)
+                q_abs = ld_global_i32(cu_seqlens_q, batch_idx) + q_idx
+                split_slot = atom_add_global_i32(
+                    split_counts, q_abs * num_heads_kv + head_kv_idx, K.uint32(1)
                 )
                 # sketch: the capacity guard -> :477.  Signed compare against the
                 # value the atomic returned; also unreachable on well-formed
                 # input, where a (q_abs, head) group holds at most `topk` edges.
-                if split_slot < topk:
+                with K.If(split_slot < topk), K.Then():
                     st_global_i32(
                         k2q_qsplit_indices,
                         head_kv_idx * nnz_capacity + edge,
-                        T.bitwise_or(
-                            q_idx, T.shift_left(T.bitwise_and(split_slot, SLOT_MASK), SLOT_SHIFT)
+                        K.bitwise_or(
+                            q_idx, K.shift_left(K.bitwise_and(split_slot, SLOT_MASK), SLOT_SHIFT)
                         ),
                     )
-            qi[0] = qi[0] + NUM_THREADS
+            K.assign(qi, qi + NUM_THREADS)
 
 
 def get_kernel(**config):
@@ -202,7 +178,7 @@ def get_kernel(**config):
     serves every shape and all extents and scalars stay runtime arguments.
     """
     config.pop("label", None)
-    return _kernel.specialize().with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return _kernel.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 
 
 # ---------------------------------------------------------------------------

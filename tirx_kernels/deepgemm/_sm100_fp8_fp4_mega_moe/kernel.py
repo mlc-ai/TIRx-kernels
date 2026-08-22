@@ -1394,21 +1394,11 @@ def get_kernel(
             elem_offset=0,
             align=16,
         )
-        tmem = K.decl_buffer(
-            (128, num_tmem_cols), "float32", scope="tmem", allocated_addr=tmem_ptr_in_smem[0]
-        )
-        sfa_tmem = K.decl_buffer(
-            (128, sf_block_m // 32),
-            "float8_e8m0fnu",
-            scope="tmem",
-            allocated_addr=num_accum_tmem_cols,
-        )
-        sfb_tmem = K.decl_buffer(
-            (128, kernel_config.block_n // 32),
-            "float8_e8m0fnu",
-            scope="tmem",
-            allocated_addr=num_accum_tmem_cols + num_sfa_tmem_cols,
-        )
+        # TMEM is addressed by the fixed column map.  The allocator below
+        # asserts base zero; scale factors occupy the columns after D.
+        tmem_col = 0
+        sfa_tmem_col = num_accum_tmem_cols
+        sfb_tmem_col = num_accum_tmem_cols + num_sfa_tmem_cols
 
         roles = K.specialize(chain_dispatch=True)
         dispatch_role = roles.role(
@@ -3377,7 +3367,7 @@ def get_kernel(
                                         ),
                                     )
                                     utccp_copy(
-                                        sfa_tmem.allocated_addr[0] + sfa_chunk_idx * 4, desc_sf
+                                        sfa_tmem_col + sfa_chunk_idx * 4, desc_sf
                                     )
                                 with K.unroll(0, num_sfb_utccp_chunks) as sfb_chunk_idx:
                                     K.assign(
@@ -3394,7 +3384,7 @@ def get_kernel(
                                         ),
                                     )
                                     utccp_copy(
-                                        sfb_tmem.allocated_addr[0] + sfb_chunk_idx * 4, desc_sf
+                                        sfb_tmem_col + sfb_chunk_idx * 4, desc_sf
                                     )
                                 with K.unroll(0, umma_block_k // umma_k) as k_idx:
                                     K.assign(
@@ -3439,8 +3429,8 @@ def get_kernel(
                                         desc_b,
                                         desc_a,
                                         runtime_desc_i,
-                                        K.cast(sfb_tmem.allocated_addr[0], "uint32"),
-                                        K.cast(sfa_tmem.allocated_addr[0], "uint32"),
+                                        K.cast(sfb_tmem_col, "uint32"),
+                                        K.cast(sfa_tmem_col, "uint32"),
                                         K.Or(
                                             k_block_idx > K.int32(0),
                                             K.Or(umma_k_block_idx > 0, k_idx > 0),

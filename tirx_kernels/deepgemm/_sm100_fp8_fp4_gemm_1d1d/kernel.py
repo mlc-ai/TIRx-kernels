@@ -701,21 +701,12 @@ def build_kernel(spec: GemmSpec):
         )
 
         # ---- tensor memory --------------------------------------------------
-        tmem = K.decl_buffer(
-            (128, spec.num_tmem_cols), "float32", scope="tmem", allocated_addr=tmem_slot[0]
-        )
-        sfa_tmem = K.decl_buffer(
-            (128, sf_block_m // 32),
-            "float8_e8m0fnu",
-            scope="tmem",
-            allocated_addr=spec.tmem_start_col_of_sfa,
-        )
-        sfb_tmem = K.decl_buffer(
-            (128, sf_block_n // 32),
-            "float8_e8m0fnu",
-            scope="tmem",
-            allocated_addr=spec.tmem_start_col_of_sfb,
-        )
+        # TMEM has no ordinary buffer view in Kern.  D's base is the runtime
+        # allocation mailbox; the scale-factor operands use fixed columns from
+        # the specialization.
+        tmem_col = tmem_slot[0]
+        sfa_tmem_col = spec.tmem_start_col_of_sfa
+        sfb_tmem_col = spec.tmem_start_col_of_sfb
 
         # ---- cluster rendezvous before the 2-CTA TMEM allocation -------------
         if cta_group > 1:
@@ -1201,7 +1192,7 @@ def build_kernel(spec: GemmSpec):
                                                     )
                                                     K.ptx[utccp_chain](
                                                         K.cast(
-                                                            sfa_tmem.allocated_addr[0] + c * 4,
+                                                            sfa_tmem_col + c * 4,
                                                             "uint32",
                                                         ),
                                                         desc_sf,
@@ -1226,7 +1217,7 @@ def build_kernel(spec: GemmSpec):
                                                     )
                                                     K.ptx[utccp_chain](
                                                         K.cast(
-                                                            sfb_tmem.allocated_addr[0] + c * 4,
+                                                            sfb_tmem_col + c * 4,
                                                             "uint32",
                                                         ),
                                                         desc_sf,
@@ -1303,15 +1294,11 @@ def build_kernel(spec: GemmSpec):
                                                     (adv_a if swap_ab else adv_b),
                                                     rt_desc,
                                                     K.cast(
-                                                        (
-                                                            sfb_tmem if swap_ab else sfa_tmem
-                                                        ).allocated_addr[0],
+                                                        sfb_tmem_col if swap_ab else sfa_tmem_col,
                                                         "uint32",
                                                     ),
                                                     K.cast(
-                                                        (
-                                                            sfa_tmem if swap_ab else sfb_tmem
-                                                        ).allocated_addr[0],
+                                                        sfa_tmem_col if swap_ab else sfb_tmem_col,
                                                         "uint32",
                                                     ),
                                                     K.Or(ki > 0, mma_k > 0),

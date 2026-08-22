@@ -10,7 +10,6 @@ import torch
 import tirx_kernels.kern as K
 import tvm
 from tirx_kernels.runner import bench
-from tvm.tirx.lang.tile_scheduler import ClusterLaunchControlScheduler
 
 
 def prepare_data(dtype, M, N, K):
@@ -227,7 +226,7 @@ def _make_device_kernel(dtype: str, M: int, N: int, Kdim: int):
         # Accumulator tmem pipeline (full=tcgen05 commit, empty=mbar consumed).
         tmem_pipe = K.Pipeline(smem, TMEM_SLOTS, full="tcgen05", empty="mbar", init_empty=2 * 128)
         # CLC tile scheduler: owns the work-stealing handshake + scheduling barriers.
-        clc = ClusterLaunchControlScheduler(
+        clc = K.ClusterLaunchControlScheduler(
             smem.pool,
             num_m_tiles=NUM_M_TILES,
             num_n_tiles=NUM_N_TILES,

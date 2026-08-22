@@ -54,6 +54,7 @@ def smem_desc_add_16B_offset(desc_val, offset):
     return result[0]
 
 
+@T.meta_class
 class SmemDescriptor:
     """Raw tcgen05 shared-memory descriptor with native offset arithmetic."""
 
@@ -70,6 +71,24 @@ class SmemDescriptor:
                 T.address_of(self._buf[0]), smem_ptr, ldo, sdo, swizzle
             )
         )
+
+    def make_lo_uniform(self):
+        """Broadcast the descriptor's low half without a device helper call.
+
+        The TVM ``lang.smem_desc`` helper emits a ``tirx.cuda.func_call`` for
+        this operation.  Kern descriptors stay inside the low-level IR
+        contract by spelling the same operation as the two descriptor moves
+        and one warp shuffle directly.
+        """
+        desc_lo = T.alloc_local((1,), "uint32")
+        desc_hi = T.alloc_local((1,), "uint32")
+        T.evaluate(T.ptx.mov.b64(desc_lo[0], desc_hi[0], self._buf[0]))
+        _I.buffer_store(
+            desc_lo,
+            T.cuda._shfl_sync(T.uint32(0xFFFFFFFF), desc_lo[0], T.uint32(0), T.uint32(32)),
+            [0],
+        )
+        T.evaluate(T.ptx.mov.b64(self._buf[0], desc_lo[0], desc_hi[0]))
 
     def add_16B_offset(self, offset):
         return smem_desc_add_16B_offset(self._buf[0], offset)

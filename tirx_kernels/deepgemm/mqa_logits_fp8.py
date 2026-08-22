@@ -443,7 +443,9 @@ def get_kernel(**kwargs: Any):
             smem, num_tmem_stages, full="tcgen05", empty="mbar", init_full=1, init_empty=128
         )
         tmem_ptr_in_smem = smem.alloc((1,), K.u32, align=4)
-        tmem = K.decl_buffer((128, num_tmem_cols), "float32", scope="tmem", allocated_addr=0)
+        # TMEM D is addressed by its fixed column base.  The allocator is
+        # asserted to return base zero below, so no TIR tmem buffer is needed.
+        tmem_col = 0
 
         seq_k_start = K.alloc_local([block_q], "uint32")
         seq_k_end = K.alloc_local([block_q], "uint32")
@@ -657,7 +659,7 @@ def get_kernel(**kwargs: Any):
                             for ki in range(head_dim // umma_k):
                                 offset = ki * umma_k // 16
                                 K.ptx[MMA](
-                                    K.Cast("uint32", tmem.elem_offset)
+                                    K.uint32(tmem_col)
                                     + K.Cast("uint32", tmem_state.stage) * K.uint32(umma_n),
                                     K.smem_desc_add_16B_offset(desc_a, offset),
                                     K.smem_desc_add_16B_offset(desc_b, offset),
@@ -728,7 +730,7 @@ def get_kernel(**kwargs: Any):
                         tmem_pipe.full.wait(tmem_state.stage, tmem_state.phase)
                         K.ptx.fence.proxy.async_.shared__cta()
                         kv_pipe.empty.arrive(kv_state.stage)
-                        tmem_stage_base = K.Cast("uint32", tmem.elem_offset) + K.Cast(
+                        tmem_stage_base = K.uint32(tmem_col) + K.Cast(
                             "uint32", tmem_state.stage
                         ) * K.uint32(umma_n)
                         for q_inner_i in range(block_q):
@@ -774,7 +776,7 @@ def get_kernel(**kwargs: Any):
             K.ptx.bar.sync(8, K.uint32(num_math_threads))
             with K.If(warp_idx == 0), K.Then():
                 K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    K.Cast("uint32", tmem.elem_offset), K.uint32(num_tmem_cols)
+                    K.uint32(tmem_col), K.uint32(num_tmem_cols)
                 )
 
     # `@K.kernel` has no `attrs=`, so the launch metadata the original sets on

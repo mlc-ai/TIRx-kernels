@@ -11,6 +11,7 @@ MSA's own benchmarks add (``benchmarks/bench_sparse_attention_ops.py``).
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -24,10 +25,26 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CANDIDATE_ROOTS = (_REPO_ROOT / ".reference-deps" / "msa", Path.home() / "kernel-libs" / "msa")
 
 
+def _installed_msa_root() -> Path | None:
+    """Recover the checkout root from the editable ``fmha_sm100`` install."""
+    spec = importlib.util.find_spec("fmha_sm100")
+    locations = spec.submodule_search_locations if spec is not None else ()
+    for package_root in locations or ():
+        root = Path(package_root).resolve().parents[1]
+        if (root / "python" / "fmha_sm100").is_dir():
+            return root
+    return None
+
+
 def msa_root() -> Path:
     """Return the MSA checkout root, or raise with the paths that were tried."""
     override = os.environ.get("MSA_PATH")
-    candidates = (Path(override),) if override else _CANDIDATE_ROOTS
+    installed = _installed_msa_root()
+    candidates = (
+        (Path(override),)
+        if override
+        else (*_CANDIDATE_ROOTS, *((installed,) if installed is not None else ()))
+    )
     for root in candidates:
         if (root / "python" / "fmha_sm100").is_dir():
             return root
@@ -57,7 +74,11 @@ def cutedsl_paths() -> list[str]:
     the default prefix exists, the ambient install is used unchanged.
     """
     override = os.environ.get("MSA_CUTEDSL_PATH")
-    prefix = Path(override) if override else _REPO_ROOT / ".reference-deps" / "msa-cutedsl"
+    if override:
+        prefix = Path(override)
+    else:
+        local = _REPO_ROOT / ".reference-deps" / "msa-cutedsl"
+        prefix = local if local.is_dir() else msa_root().parent / "msa-cutedsl"
     packages = prefix / "nvidia_cutlass_dsl" / "python_packages"
     if not packages.is_dir():
         return []

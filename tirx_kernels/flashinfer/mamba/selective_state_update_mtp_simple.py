@@ -469,7 +469,6 @@ def get_kernel(**kwargs: Any):
         warps=4,
         arch="sm_100a",
         grid=(spec["BATCH"], spec["NHEADS"], spec["CTAS_PER_HEAD"]),
-        thread_layout="lane_warp",
     )
     def selective_state_update_mtp_simple(
         state: K.gptr[spec["STATE_DTYPE"]],

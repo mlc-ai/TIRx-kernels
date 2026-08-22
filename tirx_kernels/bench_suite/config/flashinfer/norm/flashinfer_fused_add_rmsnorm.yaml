@@ -1,4 +1,4 @@
-# Parser-DSL port kept as the unfused correctness/reference peer of
+# Kept as the unfused correctness/reference peer of
 # flashinfer_fused_add_rmsnorm_quant; upstream keeps it out of the default
 # measured sweep, so every row stays explicitly runnable but non-default.
 kernel: flashinfer_fused_add_rmsnorm
