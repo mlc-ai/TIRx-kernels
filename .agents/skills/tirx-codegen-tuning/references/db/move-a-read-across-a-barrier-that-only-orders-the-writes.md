@@ -74,28 +74,14 @@ rewrite that wins on one operand dtype can lose on the one with less headroom.
 
 ## Verification
 
-Judge this one on measured time. The instruction count moves the wrong way by
-design, so an instruction-count check will read as a regression, and a
-per-opcode stall comparison against the reference will not motivate it either --
-on the kernel this was measured on the two sides' shared-store stall shares were
-2.40% and 2.47%, indistinguishable. What identified the site was its own stall
-count, not a gap against anything.
+Judge this one on time. The instruction count moves the wrong way by design, so
+an instruction-count check reads as a regression and a per-opcode comparison
+against the reference will not motivate it either.
 
-Three ways to misread the machine code here, all of them hit while measuring
-this.
+The stall breakdown is what shows the trade landed: samples should leave memory
+latency and arrive in issue. Measured, long_scoreboard 25.3% to 24.7% and
+no_instructions 10.8% to 10.3%, against selected 12.6% to 13.0% and not_selected
+4.7% to 5.2%.
 
-A SASS listing keyed on the first token of each line silently drops every
-`@P0`-guarded instruction, and guarded loads and stores are exactly what a
-publish inside two range checks compiles to. That one filter produced three
-different false conclusions in a row: a load-volume gap against the reference
-that did not exist, a set of sites the port supposedly had and the reference did
-not, and a shared-store stall share off by more than twentyfold. Take the opcode
-from the second token when the first begins with `@`.
-
-Shared-memory offsets are assigned per binary, so the same numeric offset can
-name different buffers before and after a change. A store that looks like it
-moved or vanished at a given offset proves nothing across two builds.
-
-An apparent removal of work deserves a test rather than an explanation:
-deliberately corrupt the value being published and confirm the bitwise gate
-fails. If it still passes, what was removed was dead work.
+Confirm the region still does its work rather than having become dead: corrupt
+the published value and check the bitwise gate fails.
