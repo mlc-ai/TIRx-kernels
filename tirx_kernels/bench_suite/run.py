@@ -310,8 +310,9 @@ class GpuPool:
     orchestrator GPU stage owns a card at a time, including multi-GPU jobs.
 
     A card is ineligible when internally owned or when the background external
-    occupancy snapshot exceeds the utilization/memory gates. Startup probing
-    filters broken cards into `allowed` before the pool is created.
+    occupancy snapshot exceeds the utilization gate or the foreign-process
+    memory gate. Startup probing filters broken cards into `allowed` before the
+    pool is created.
     """
 
     def __init__(
@@ -331,6 +332,8 @@ class GpuPool:
         self._change_generation = 0
         self.util_threshold = util_threshold
         self.mem_threshold = mem_threshold
+        self._mem_total_mib: dict[str, float] | None = None
+        self._index_by_uuid: dict[str, str] | None = None
 
     @staticmethod
     def _nvidia_smi(args: list[str]) -> list[str]:
@@ -390,10 +393,60 @@ class GpuPool:
                     pass
         return out
 
+    def _foreign_mem_pct(self) -> dict[str, float]:
+        """Map GPU index -> foreign compute-app VRAM above the idle floor (percent).
+
+        Only processes outside this orchestrator's tree count toward the memory
+        gate. An interference-parked bench child keeps a residual CUDA context
+        on its affinity card until it reacquires it; counting that residency as
+        external occupancy would permanently starve the exact card the child is
+        waiting for.
+        """
+        if self._mem_total_mib is None:
+            totals: dict[str, float] = {}
+            for line in self._nvidia_smi(["--query-gpu=index,memory.total"]):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 2:
+                    try:
+                        totals[parts[0]] = float(parts[1])
+                    except ValueError:
+                        pass
+            if not totals:
+                return {}
+            self._mem_total_mib = totals
+        if self._index_by_uuid is None:
+            rows = self._all_gpus()
+            if not rows:
+                return {}
+            self._index_by_uuid = {uuid: index for index, uuid in rows}
+        foreign_mib = dict.fromkeys(self._mem_total_mib, 0.0)
+        ours = _our_pids()
+        for line in self._nvidia_smi(["--query-compute-apps=pid,gpu_uuid,used_memory"]):
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            try:
+                pid = int(parts[0])
+                used = float(parts[2])
+            except ValueError:
+                continue
+            index = self._index_by_uuid.get(parts[1])
+            if index is None or pid in ours:
+                continue
+            foreign_mib[index] = foreign_mib.get(index, 0.0) + used
+        return {
+            index: (
+                100.0 * max(0.0, foreign_mib.get(index, 0.0) - IDLE_GPU_MEMORY_FLOOR_MIB) / total
+                if total > 0
+                else 0.0
+            )
+            for index, total in self._mem_total_mib.items()
+        }
+
     def _occupied_indices(self) -> set[str]:
-        """GPU indices over the configured SM or memory threshold."""
+        """GPU indices over the configured SM or foreign-process memory threshold."""
         util_busy = {idx for idx, u in self._utils().items() if u > self.util_threshold}
-        mem_busy = {idx for idx, m in self._mem_used_pct().items() if m > self.mem_threshold}
+        mem_busy = {idx for idx, m in self._foreign_mem_pct().items() if m > self.mem_threshold}
         return util_busy | mem_busy
 
     def total_visible(self) -> int:
@@ -449,9 +502,10 @@ class GpuPool:
             if self._allowed is None:
                 self._known_indices = tuple(sorted((idx for idx, _uuid in rows), key=int))
             previous = self._external_occupied or set()
-            # Aggregate utilization/memory includes our RUNNING children. Keep
-            # each internally-owned card's pre-claim external state; the per-PID
-            # monitor below detects new foreign activity on owned cards.
+            # Aggregate utilization includes our RUNNING children (memory is
+            # already foreign-only per PID). Keep each internally-owned card's
+            # pre-claim external state; the per-PID monitor below detects new
+            # foreign activity on owned cards.
             occupied = {
                 idx
                 for idx in self._known_indices
