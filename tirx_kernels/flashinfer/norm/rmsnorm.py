@@ -501,7 +501,7 @@ def get_kernel(
             block_x_raw = K.cta_id([K.cast(K.ceildiv(runtime_M, K.int64(rows)), "int32")])
             block_y = 0
             cta_rank = 0
-        tid = K.thread_id([threads])
+        tid = K.thread_id()
 
         if enable_pdl:
             K.ptx.griddepcontrol.wait()
@@ -763,7 +763,6 @@ def get_kernel(
         "warps": threads // 32,
         "arch": "sm_100a",
         "grid": False,
-        "thread_layout": False,
         "min_blocks_per_sm": None if threads == 128 else 1,
     }
 

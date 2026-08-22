@@ -16,8 +16,6 @@ import torch.distributed as dist
 import tirx_kernels.kern as Kern
 import tvm
 from tvm.ir.type import PointerType, PrimType
-from tvm.script.ir_builder import IRBuilder
-from tvm.tirx.script.builder import ir as I
 
 from .utils._baselines import create_baseline_suite
 from .utils._baselines import ratios as baseline_ratios
@@ -347,7 +345,6 @@ class SingleDynamicTileScheduler:
         self.sem = sem
         self.rs_rem = int_var("rs_rem")
         self.packed_value = packed_value
-        IRBuilder.current().name("packed_value", self.packed_value)
 
     # fmt: off
     def publish(
@@ -526,7 +523,7 @@ def _make_device_kernel():
         gemm_task_types = gemm_task_types.view(CAPACITY)
         gemm_task_idxs = gemm_task_idxs.view(CAPACITY, 2)
         gemm_head = gemm_head.view(1)
-        cbx_expr, cby_expr = I.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
+        cbx_expr, cby_expr = Kern.cta_id_in_cluster([M_CLUSTER, N_CLUSTER])
         cbx = cbx_expr
         cby = cby_expr
         bx = Kern.cta_id()
@@ -681,8 +678,6 @@ def _make_device_kernel():
 
         Kern.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
         Kern.cuda.trap_when_assert_failed(tmem_addr_local[0] == 0)
-        tmem = Kern.decl_buffer((128, N_COLS), "float32", scope="tmem", allocated_addr=0)
-
         def partitioned_loop(pipe_state, main_loop, epilogue1, epilogue2):
             with Kern.serial(PIPE_CYCLE) as ko:
                 with Kern.unroll(PIPELINE_DEPTH) as ks:

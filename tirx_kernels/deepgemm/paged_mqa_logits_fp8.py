@@ -663,7 +663,9 @@ def get_kernel(**kwargs: Any):
         full_umma_barriers = K.TCGen05Bar(smem, num_umma_barriers)
         empty_umma_barriers = K.MBarrier(smem, num_umma_barriers)
         tmem_ptr_in_smem = smem.alloc((1,), K.u32, align=4)
-        tmem = K.decl_buffer((128, num_tmem_cols), "float32", scope="tmem", allocated_addr=0)
+        # TMEM D is a fixed column map rooted at allocation base zero; keep it
+        # as raw columns and addresses rather than a TIR tmem buffer.
+        tmem_col = 0
 
         scheduler_result = K.alloc_local([7], "uint32")
         num_kv_result = K.local_scalar("uint32")
@@ -1189,7 +1191,7 @@ def get_kernel(**kwargs: Any):
                     make_smem_desc(desc_b, smem_q.ptr_to([q_stage, 0, k_phase * umma_k]))
                     with K.If(K.cuda.elect_sync() != K.uint32(0)), K.Then():
                         K.ptx[MMA](
-                            K.Cast("uint32", tmem.allocated_addr[0])
+                            K.uint32(tmem_col)
                             + umma_group_idx * K.uint32(umma_n * num_umma_stages)
                             + umma_stage * K.uint32(umma_n),
                             desc_a,
@@ -1215,7 +1217,7 @@ def get_kernel(**kwargs: Any):
             # warp's tcgen05.alloc (see the UMMA role).
             K.ptx.bar.sync(9, K.uint32(num_math_threads + 2 * 32))
             math_wg_u32 = K.Cast("uint32", warpgroup_idx)
-            tmem_start_base = K.Cast("uint32", tmem.allocated_addr[0]) + math_wg_u32 * K.uint32(
+            tmem_start_base = K.uint32(tmem_col) + math_wg_u32 * K.uint32(
                 umma_n * num_umma_stages
             )
             math_thread_idx = K.local_scalar(
@@ -1366,7 +1368,7 @@ def get_kernel(**kwargs: Any):
             K.ptx.bar.sync(8, K.uint32(num_math_threads))
             with K.If(K.warp_id_in_role() == 0), K.Then():
                 K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    K.Cast("uint32", tmem.allocated_addr[0]), K.uint32(num_tmem_cols)
+                    K.uint32(tmem_col), K.uint32(num_tmem_cols)
                 )
 
     # `@K.kernel` has no `attrs=`. NOTE the paged original sets ONLY

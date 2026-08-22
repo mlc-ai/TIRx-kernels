@@ -330,7 +330,7 @@ def _make_gdn_decode_bf16_ilp4(
     PER_TOKEN_POOL_SCATTER_FLAT,
 ):
     @TK.kernel(
-        warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=8, grid=False, thread_layout=False
+        warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=8, grid=False
     )
     def gdn_decode_bf16_ilp4(
         state: TK.gptr[TK.bf16],
@@ -363,7 +363,7 @@ def _make_gdn_decode_bf16_ilp4(
             s_q = s_k = s_gb = scratch
         smem.commit(SHARED_BYTES)
         linear_cta = TK.cta_id([batch * NUM_V_HEADS * NUM_V_TILES])
-        tid = TK.thread_id([THREADS])
+        tid = TK.thread_id()
         warp = _local_scalar("int32", tid // LANES_PER_GROUP)
         lane = _local_scalar("int32", tid % LANES_PER_GROUP)
         k_start = _local_scalar("int32", lane[0] * ELEMS_PER_LANE)

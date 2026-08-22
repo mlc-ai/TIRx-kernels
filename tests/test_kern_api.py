@@ -7,10 +7,11 @@
 # decoration time and need live annotation objects (PEP 563 breaks them).
 
 import tirx_kernels.kern as K
+from tvm.tirx.stmt_functor import StmtExprVisitor
 
 
 def _tir(build_body):
-    @K.kernel(warps=1, arch="sm_100a", grid=False, thread_layout=False)
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: K.gptr("float32")):
         build_body(out)
 
@@ -30,35 +31,59 @@ def test_local_scalar_init_matches_declare_then_assign():
     assert _tir(two_statement) == _tir(init_form)
 
 
-def test_stack_alloca_matches_bound_tvm_stack_alloca():
-    from tvm.tirx.script.builder import ir as _I
+def test_local_scalar_accepts_explicit_trace_name():
+    seen = []
 
-    def bind_form(out):
-        handle = _I.Bind(K.tvm_stack_alloca("tensormap", 1))
-        K.keep_alive(handle)
-        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+    def build(out):
+        counter = K.local_scalar("int32", init=K.int32(3), name="counter")
+        seen.append(counter.buffer.name)
+        K.ptx.st.global_.b32(out.ptr_to([0]), counter)
 
-    def sanctioned_form(out):
+    _tir(build)
+    assert seen == ["counter"]
+
+
+def test_stack_alloca_is_bound_exactly_once():
+    class Scanner(StmtExprVisitor):
+        def __init__(self):
+            super().__init__()
+            self.stack_binds = []
+
+        def visit_bind_(self, op):
+            if getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_stack_alloca":
+                self.stack_binds.append(op)
+            super().visit_bind_(op)
+
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr("float32")):
         handle = K.stack_alloca("tensormap", 1)
         K.keep_alive(handle)
         K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
-    assert _tir(bind_form) == _tir(sanctioned_form)
+    scanner = Scanner()
+    scanner(probe.func.body)
+    assert len(scanner.stack_binds) == 1
 
 
 def test_call_packed_has_statement_semantics():
-    from tvm.script import tirx as _T
-    from tvm.tirx.script.builder import ir as _I
+    class Scanner(StmtExprVisitor):
+        def __init__(self):
+            super().__init__()
+            self.packed_evaluates = []
 
-    def sanctioned_form(out):
+        def visit_evaluate_(self, op):
+            if getattr(getattr(op.value, "op", None), "name", None) == "tirx.tvm_call_packed":
+                self.packed_evaluates.append(op)
+            super().visit_evaluate_(op)
+
+    @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
+    def probe(out: K.gptr("float32")):
         K.call_packed("runtime.probe", K.int32(1))
         K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
-    def reference_form(out):
-        _I.evaluate(_T.call_packed("runtime.probe", K.int32(1)))
-        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
-
-    assert _tir(sanctioned_form) == _tir(reference_form)
+    scanner = Scanner()
+    scanner(probe.func.body)
+    assert len(scanner.packed_evaluates) == 1
 
 
 def test_retired_binding_forms_are_rejected_with_guidance():
@@ -77,7 +102,7 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
     from tirx_kernels.low_level_ir import LowLevelIRContractError
 
     def build(**kw):
-        @K.kernel(warps=1, arch="sm_100a", grid=False, thread_layout=False, **kw)
+        @K.kernel(warps=1, arch="sm_100a", grid=False, **kw)
         def probe(out: K.gptr("float32")):
             # a direct shared-memory buffer store is a contract violation
             smem = K.alloc_buffer([4], "float32", scope="shared")
@@ -89,6 +114,62 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
     with pytest.raises(LowLevelIRContractError):
         build()
     build(check_ir=False)  # explicit opt-out still traces
+
+
+def test_unsupported_tmem_buffer_scope_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match='scope="tmem"'):
+        K.alloc_buffer((1,), K.u32, scope="tmem")
+    with pytest.raises(ValueError, match='scope="tmem"'):
+        K.decl_buffer((1,), K.u32, scope="tmem")
+
+    with pytest.raises(AttributeError, match="deliberately does not expose"):
+        K.TMEMPool
+
+
+def test_parser_and_raw_builder_entry_points_are_rejected():
+    import pytest
+
+    for name in ("parser", "ir"):
+        with pytest.raises(AttributeError, match=r"native K\.kernel"):
+            getattr(K, name)
+    for name in ("jit", "prim_func", "match_buffer", "device_entry"):
+        with pytest.raises(AttributeError, match="deliberately does not expose"):
+            getattr(K, name)
+
+
+def test_thread_layout_is_not_a_kernel_entry_option():
+    import pytest
+
+    with pytest.raises(TypeError, match="thread_layout"):
+
+        @K.kernel(warps=1, arch="sm_100a", thread_layout=False)
+        def probe(out: K.gptr(K.f32)):
+            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    with pytest.raises(TypeError):
+        K.thread_id([32])
+
+
+def test_gptr_shape_reuses_entry_scalar_parameters():
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr(K.f32, shape=lambda p: (p["rows"], p["cols"])), rows: K.i32, cols: K.i32):
+        K.ptx.st.global_.f32(out.ptr_to([0, 0]), K.float32(0))
+
+    out = probe.func.params[0]
+    assert out.shape[0].same_as(probe.func.params[1])
+    assert out.shape[1].same_as(probe.func.params[2])
+
+
+def test_gptr_shape_rejects_unknown_scalar_parameters():
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown scalar parameter 'missing'"):
+
+        @K.kernel(warps=1, arch="sm_100a", grid=False)
+        def probe(out: K.gptr(K.f32, shape=lambda p: (p["missing"],))):
+            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
 
 
 def test_retired_cuda_value_members_are_rejected_with_guidance():

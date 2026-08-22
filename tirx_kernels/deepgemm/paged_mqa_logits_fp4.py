@@ -556,18 +556,11 @@ def get_kernel(**kwargs: Any):
         if smem.bytes > _SM100_SMEM_CAPACITY:
             raise ValueError(f"dynamic shared memory {smem.bytes} exceeds SM100 capacity")
 
-        accum_tmem = K.decl_buffer(
-            (128, num_accum_tmem_cols), K.f32, scope="tmem", allocated_addr=0
-        )
-        sfq_tmem = K.decl_buffer(
-            (128, num_sfa_tmem_cols), K.u32, scope="tmem", allocated_addr=num_accum_tmem_cols
-        )
-        sfkv_tmem = K.decl_buffer(
-            (128, num_sfb_tmem_cols),
-            K.u32,
-            scope="tmem",
-            allocated_addr=num_accum_tmem_cols + num_sfa_tmem_cols,
-        )
+        # TMEM is a fixed column map: accumulator first, then SFQ and SFKV.
+        # Keep these as raw columns; Kern deliberately has no tmem buffers.
+        accum_tmem_col = 0
+        sfq_tmem_col = num_accum_tmem_cols
+        sfkv_tmem_col = num_accum_tmem_cols + num_sfa_tmem_cols
 
         scheduler_result = K.alloc_local([7], "uint32")
         num_kv_result = K.local_scalar("uint32")
@@ -1145,7 +1138,7 @@ def get_kernel(**kwargs: Any):
             umma_group_idx = warp_idx_u32 - K.uint32(umma_warp_0)
             tmem_allocated = K.local_scalar("uint32")
             K.ptx.ld.shared.u32(tmem_allocated, tmem_ptr_in_smem.ptr_to([0]))
-            K.cuda.trap_when_assert_failed(tmem_allocated == K.uint32(accum_tmem.elem_offset))
+            K.cuda.trap_when_assert_failed(tmem_allocated == K.uint32(accum_tmem_col))
             desc_i = K.local_scalar("uint32")
             desc_sf = K.local_scalar("uint64")
             desc_a = K.local_scalar("uint64")
@@ -1199,7 +1192,7 @@ def get_kernel(**kwargs: Any):
                             K.ptx[TCGEN05_CP](
                                 K.Cast(
                                     "uint32",
-                                    K.uint32(sfq_tmem.elem_offset)
+                                    K.uint32(sfq_tmem_col)
                                     + umma_group_idx * K.uint32(num_sfq_atom // 32)
                                     + sfq_i * 4,
                                 ),
@@ -1234,7 +1227,7 @@ def get_kernel(**kwargs: Any):
                         K.ptx[TCGEN05_CP](
                             K.Cast(
                                 "uint32",
-                                K.uint32(sfkv_tmem.elem_offset)
+                                K.uint32(sfkv_tmem_col)
                                 + umma_group_idx * K.uint32(num_sfkv // 32)
                                 + sfkv_i * 4,
                             ),
@@ -1251,7 +1244,7 @@ def get_kernel(**kwargs: Any):
                 K.ptx.tcgen05.fence__after_thread_sync()
                 tmem_addr = local(
                     "uint32",
-                    K.uint32(accum_tmem.elem_offset)
+                    K.uint32(accum_tmem_col)
                     + umma_group_idx * K.uint32(umma_n * num_tmem_stages)
                     + tmem_stage_idx * K.uint32(umma_n),
                 )
@@ -1275,9 +1268,9 @@ def get_kernel(**kwargs: Any):
                             tmem_addr[0],
                             K.uint32(k),
                             runtime_desc_i[0],
-                            K.uint32(sfkv_tmem.elem_offset)
+                            K.uint32(sfkv_tmem_col)
                             + umma_group_idx * K.uint32(num_sfkv // 32),
-                            K.uint32(sfq_tmem.elem_offset)
+                            K.uint32(sfq_tmem_col)
                             + umma_group_idx * K.uint32(num_sfq_atom // 32),
                         )
                 with K.If(K.cuda.elect_sync()), K.Then():
@@ -1313,7 +1306,7 @@ def get_kernel(**kwargs: Any):
                 for q_inner_i in range(num_iters_c):
                     tmem_addr = local(
                         "uint32",
-                        K.uint32(accum_tmem.elem_offset)
+                        K.uint32(accum_tmem_col)
                         + math_wg_u32 * K.uint32(umma_n * num_tmem_stages)
                         + tmem_stage_idx_arg * K.uint32(umma_n)
                         + K.uint32(q_inner_i * num_heads),
@@ -1437,7 +1430,7 @@ def get_kernel(**kwargs: Any):
             K.ptx.bar.sync(8, K.uint32(num_math_threads))
             with K.If(warp_idx == 0), K.Then():
                 K.ptx.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
-                    K.uint32(accum_tmem.elem_offset), K.uint32(num_tmem_cols)
+                    K.uint32(accum_tmem_col), K.uint32(num_tmem_cols)
                 )
 
     # `@K.kernel` has no `attrs=`. The paged original sets ONLY

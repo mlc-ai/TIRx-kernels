@@ -12,17 +12,14 @@ helpers from ``flashinfer/norm/kernels/rmsnorm.py`` and
 ``flashinfer.norm.fused_add_rmsnorm_quant``.
 """
 
-from __future__ import annotations
-
 import functools
 import math
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.runner import bench
-from tvm.script import tirx as T
 
-from .fused_add_rmsnorm import _source_config as _fused_source_config
-from ._parser_helpers import (
+from ._kern_helpers import (
     _add_f32,
     _butterfly_sum_f32,
     _ceil_div,
@@ -39,6 +36,7 @@ from ._parser_helpers import (
     _store_global_fragment,
     _threads_per_row,
 )
+from .fused_add_rmsnorm import _source_config as _fused_source_config
 from .rmsnorm_quant import (
     _cvt_fp8_pair,
     _maximum_f32,
@@ -486,8 +484,8 @@ def get_kernel(
 
     def fragment_range(extent: int):
         if roll_large_fragments:
-            return T.serial(extent, unroll=False)
-        return T.unroll(extent)
+            return K.serial(extent, unroll=False)
+        return K.unroll(extent)
 
     x_row_stride_hint = int(kwargs.get("x_row_stride", H))
     residual_row_stride_hint = int(kwargs.get("residual_row_stride", H))
@@ -500,7 +498,6 @@ def get_kernel(
         if stride_hint % vec != 0:
             raise ValueError(f"{name}_row_stride={stride_hint} must be divisible by vec={vec}")
 
-    @T.inline
     def kernel_body(
         out,
         input_buffer,
@@ -515,98 +512,97 @@ def get_kernel(
     ):
         # TIRX_TRANSCRIBE_START flashinfer_fused_add_rmsnorm_quant
         if cluster_n > 1:
-            block_x_raw, block_y_raw = T.cta_id(
-                [T.cast(T.ceildiv(runtime_M, T.int64(rows)), "int32"), cluster_n]
+            block_x_raw, block_y_raw = K.cta_id(
+                [K.cast(K.ceildiv(runtime_M, K.int64(rows)), "int32"), cluster_n]
             )
-            _, cta_rank_raw = T.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
-            block_y: T.int32 = T.cast(block_y_raw, "int32")
-            cta_rank: T.int32 = T.cast(cta_rank_raw, "int32")
+            _, cta_rank_raw = K.cta_id_in_cluster([1, cluster_n], preferred=[1, cluster_n])
+            block_y: K.int32 = K.cast(block_y_raw, "int32")
+            cta_rank: K.int32 = K.cast(cta_rank_raw, "int32")
         else:
-            block_x_raw = T.cta_id([T.cast(T.ceildiv(runtime_M, T.int64(rows)), "int32")])
-            block_y = T.int32(0)
-            cta_rank = T.int32(0)
-        tid = T.thread_id([threads])
+            block_x_raw = K.cta_id([K.cast(K.ceildiv(runtime_M, K.int64(rows)), "int32")])
+            block_y = K.int32(0)
+            cta_rank = K.int32(0)
+        tid = K.thread_id()
 
         if enable_pdl:
-            T.ptx.griddepcontrol.wait()
+            K.ptx.griddepcontrol.wait()
 
-        scale_bits = T.alloc_local((1,), "uint32")
-        T.ptx.ld.global_.b32(scale_bits[0], scale_buffer.ptr_to([0]))
-        scale_value: T.float32 = T.reinterpret("float32", scale_bits[0])
-        inv_scale: T.float32 = _rcp_approx_ftz(scale_value)
-        block_x: T.int32 = T.cast(block_x_raw, "int32")
-        row_in_cta: T.int32 = tid // tpr
-        thread_in_row: T.int32 = tid % tpr
-        compact_row_i32: T.int32 = block_x * rows + row_in_cta
-        actual_row: T.int64 = T.cast(block_x, "int64") * T.int64(rows) + T.cast(row_in_cta, "int64")
-        row_valid: T.bool = actual_row < runtime_M
-        warp: T.int32 = tid // 32
-        lane: T.int32 = tid % 32
-        row_warp: T.int32 = warp // warps_per_row
-        warp_in_row: T.int32 = warp % warps_per_row
+        scale_bits = K.alloc_local((1,), "uint32")
+        K.ptx.ld.global_.b32(scale_bits[0], scale_buffer.ptr_to([0]))
+        scale_value: K.float32 = K.reinterpret("float32", scale_bits[0])
+        inv_scale: K.float32 = _rcp_approx_ftz(scale_value)
+        block_x: K.int32 = K.cast(block_x_raw, "int32")
+        row_in_cta: K.int32 = tid // tpr
+        thread_in_row: K.int32 = tid % tpr
+        compact_row_i32: K.int32 = block_x * rows + row_in_cta
+        actual_row: K.int64 = K.cast(block_x, "int64") * K.int64(rows) + K.cast(row_in_cta, "int64")
+        row_valid: K.bool = actual_row < runtime_M
+        warp: K.int32 = tid // 32
+        lane: K.int32 = tid % 32
+        row_warp: K.int32 = warp // warps_per_row
+        warp_in_row: K.int32 = warp % warps_per_row
 
-        shared_raw = T.alloc_buffer((smem_bytes,), "uint8", scope="shared.dyn")
-        T.attr({"tirx.dyn_smem_bytes": smem_bytes})
+        shared_raw = K.smem_pool().alloc((smem_bytes,), "uint8")
 
         if cluster_n > 1:
-            if tid == 0:
-                T.ptx.mbarrier.init.shared.b64(shared_raw.ptr_to([mbar_offset]), T.uint32(1))
-            T.ptx.fence.mbarrier_init.release.cluster()
-            T.ptx.barrier.cluster.arrive.relaxed()
-            T.ptx.barrier.cluster.wait()
+            with K.If(tid == 0), K.Then():
+                K.ptx.mbarrier.init.shared.b64(shared_raw.ptr_to([mbar_offset]), K.uint32(1))
+            K.ptx.fence.mbarrier_init.release.cluster()
+            K.ptx.barrier.cluster.arrive.relaxed()
+            K.ptx.barrier.cluster.wait()
 
-        x_bits = T.alloc_local((pair_values,), "uint16")
-        r_bits = T.alloc_local((pair_values,), "uint16")
-        w_bits = T.alloc_local((pair_values,), "uint16")
-        x_f32 = T.alloc_local((pair_values,), "float32")
-        r_f32 = T.alloc_local((pair_values,), "float32")
-        w_f32 = T.alloc_local((pair_values,), "float32")
-        h_f32 = T.alloc_local((pair_values,), "float32")
-        h_sq = T.alloc_local((pair_values,), "float32")
-        undefined_f32 = T.alloc_local((1,), "float32")
+        x_bits = K.alloc_local((pair_values,), "uint16")
+        r_bits = K.alloc_local((pair_values,), "uint16")
+        w_bits = K.alloc_local((pair_values,), "uint16")
+        x_f32 = K.alloc_local((pair_values,), "float32")
+        r_f32 = K.alloc_local((pair_values,), "float32")
+        w_f32 = K.alloc_local((pair_values,), "float32")
+        h_f32 = K.alloc_local((pair_values,), "float32")
+        h_sq = K.alloc_local((pair_values,), "float32")
+        undefined_f32 = K.alloc_local((1,), "float32")
 
         if not use_async:
-            for value in fragment_range(total_values):
-                x_bits[value] = T.uint16(0)
-                r_bits[value] = T.uint16(0)
+            with fragment_range(total_values) as value:
+                K.assign(x_bits[value], K.uint16(0))
+                K.assign(r_bits[value], K.uint16(0))
 
-        for vb in fragment_range(vec_blocks):
-            local_col: T.int32 = (thread_in_row + vb * tpr) * vec
-            absolute_col: T.int32 = block_y * cols + local_col
-            col_valid: T.bool = absolute_col < H
+        with fragment_range(vec_blocks) as vb:
+            local_col: K.int32 = (thread_in_row + vb * tpr) * vec
+            absolute_col: K.int32 = block_y * cols + local_col
+            col_valid: K.bool = absolute_col < H
             if compact:
                 x_offset = compact_row_i32 * H + absolute_col
             else:
-                x_offset = actual_row * x_row_stride + T.cast(absolute_col, "int64")
+                x_offset = actual_row * x_row_stride + K.cast(absolute_col, "int64")
             if use_async:
-                if row_valid:
-                    source_bytes: T.uint32 = T.cast(
-                        T.if_then_else(col_valid, copy_bytes, 0), "uint32"
+                with K.If(row_valid), K.Then():
+                    source_bytes: K.uint32 = K.cast(
+                        K.if_then_else(col_valid, copy_bytes, 0), "uint32"
                     )
-                    T.ptx.cp.async_.ca.shared.global_(
+                    K.ptx.cp.async_.ca.shared.global_(
                         shared_raw.ptr_to([(row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES]),
                         input_buffer.ptr_to([x_offset]),
                         copy_bytes,
                         source_bytes,
                     )
             else:
-                if row_valid and col_valid:
+                with K.If(K.And(row_valid, col_valid)), K.Then():
                     _load_global_bits(input_buffer, x_offset, x_bits, vb * vec, VEC=vec)
 
-        for vb in fragment_range(vec_blocks):
-            local_col: T.int32 = (thread_in_row + vb * tpr) * vec
-            absolute_col: T.int32 = block_y * cols + local_col
-            col_valid: T.bool = absolute_col < H
+        with fragment_range(vec_blocks) as vb:
+            local_col: K.int32 = (thread_in_row + vb * tpr) * vec
+            absolute_col: K.int32 = block_y * cols + local_col
+            col_valid: K.bool = absolute_col < H
             if compact:
                 residual_offset = compact_row_i32 * H + absolute_col
             else:
-                residual_offset = actual_row * residual_row_stride + T.cast(absolute_col, "int64")
+                residual_offset = actual_row * residual_row_stride + K.cast(absolute_col, "int64")
             if use_async:
-                if row_valid:
-                    source_bytes: T.uint32 = T.cast(
-                        T.if_then_else(col_valid, copy_bytes, 0), "uint32"
+                with K.If(row_valid), K.Then():
+                    source_bytes: K.uint32 = K.cast(
+                        K.if_then_else(col_valid, copy_bytes, 0), "uint32"
                     )
-                    T.ptx.cp.async_.ca.shared.global_(
+                    K.ptx.cp.async_.ca.shared.global_(
                         shared_raw.ptr_to(
                             [tile_bytes + (row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES]
                         ),
@@ -615,22 +611,22 @@ def get_kernel(
                         source_bytes,
                     )
             else:
-                if row_valid and col_valid:
+                with K.If(K.And(row_valid, col_valid)), K.Then():
                     _load_global_bits(residual, residual_offset, r_bits, vb * vec, VEC=vec)
 
         if use_async:
-            T.ptx.cp.async_.commit_group()
+            K.ptx.cp.async_.commit_group()
 
-        for vb in fragment_range(vec_blocks):
-            local_col: T.int32 = (thread_in_row + vb * tpr) * vec
-            absolute_col: T.int32 = block_y * cols + local_col
-            if absolute_col < H:
+        with fragment_range(vec_blocks) as vb:
+            local_col: K.int32 = (thread_in_row + vb * tpr) * vec
+            absolute_col: K.int32 = block_y * cols + local_col
+            with K.If(absolute_col < H), K.Then():
                 _load_global_bits(weight, absolute_col, w_bits, vb * vec, VEC=vec)
 
         if use_async:
-            T.ptx.cp.async_.wait_group(0)
-            for vb in fragment_range(vec_blocks):
-                local_col: T.int32 = (thread_in_row + vb * tpr) * vec
+            K.ptx.cp.async_.wait_group(0)
+            with fragment_range(vec_blocks) as vb:
+                local_col: K.int32 = (thread_in_row + vb * tpr) * vec
                 _load_shared_bits(
                     shared_raw,
                     (row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES,
@@ -638,8 +634,8 @@ def get_kernel(
                     vb * vec,
                     VEC=vec,
                 )
-            for vb in fragment_range(vec_blocks):
-                local_col: T.int32 = (thread_in_row + vb * tpr) * vec
+            with fragment_range(vec_blocks) as vb:
+                local_col: K.int32 = (thread_in_row + vb * tpr) * vec
                 _load_shared_bits(
                     shared_raw,
                     tile_bytes + (row_in_cta * cols + local_col) * _INPUT_ELEM_BYTES,
@@ -648,258 +644,265 @@ def get_kernel(
                     VEC=vec,
                 )
 
-        for value in fragment_range(total_values):
-            x_f32[value] = _cvt_to_f32(x_bits[value], input_dtype)
-        for value in fragment_range(total_values):
-            r_f32[value] = _cvt_to_f32(r_bits[value], input_dtype)
+        with fragment_range(total_values) as value:
+            K.assign(x_f32[value], _cvt_to_f32(x_bits[value], input_dtype))
+        with fragment_range(total_values) as value:
+            K.assign(r_f32[value], _cvt_to_f32(r_bits[value], input_dtype))
 
-        for pair in fragment_range(packed_pairs):
-            x_high: T.float32 = x_f32[pair * 2 + 1]
-            r_high: T.float32 = r_f32[pair * 2 + 1]
-            if pair * 2 + 1 >= total_values:
-                x_high = undefined_f32[0]
-                r_high = undefined_f32[0]
-            packed = T.alloc_local((1,), "uint64")
-            T.ptx.add.f32x2(
+        with fragment_range(packed_pairs) as pair:
+            x_high = K.local_scalar(K.f32, init=x_f32[pair * 2 + 1])
+            r_high = K.local_scalar(K.f32, init=r_f32[pair * 2 + 1])
+            with K.If(pair * 2 + 1 >= total_values), K.Then():
+                K.assign(x_high, undefined_f32[0])
+                K.assign(r_high, undefined_f32[0])
+            packed = K.alloc_local((1,), "uint64")
+            K.ptx.add.f32x2(
                 packed[0],
-                T.cuda.make_float2(x_f32[pair * 2], x_high),
-                T.cuda.make_float2(r_f32[pair * 2], r_high),
+                K.cuda.make_float2(x_f32[pair * 2], x_high),
+                K.cuda.make_float2(r_f32[pair * 2], r_high),
             )
-            T.ptx.mov.b64(h_f32[pair * 2], h_f32[pair * 2 + 1], packed[0])
+            K.ptx.mov.b64(h_f32[pair * 2], h_f32[pair * 2 + 1], packed[0])
 
-        residual_bits = T.alloc_local((pair_values,), "uint16")
-        residual_words = T.alloc_local((packed_pairs,), "uint32")
+        residual_bits = K.alloc_local((pair_values,), "uint16")
+        residual_words = K.alloc_local((packed_pairs,), "uint32")
         if packed_narrow:
-            for pair in fragment_range(packed_pairs):
-                residual_words[pair] = _cvt_pair_from_f32(
-                    h_f32[pair * 2 + 1], h_f32[pair * 2], input_dtype
+            with fragment_range(packed_pairs) as pair:
+                K.assign(
+                    residual_words[pair],
+                    _cvt_pair_from_f32(h_f32[pair * 2 + 1], h_f32[pair * 2], input_dtype),
                 )
         else:
-            for value in fragment_range(total_values):
-                residual_bits[value] = _cvt_from_f32(h_f32[value], input_dtype)
+            with fragment_range(total_values) as value:
+                K.assign(residual_bits[value], _cvt_from_f32(h_f32[value], input_dtype))
 
-        for vb in fragment_range(vec_blocks):
-            local_col: T.int32 = (thread_in_row + vb * tpr) * vec
-            absolute_col: T.int32 = block_y * cols + local_col
-            col_valid: T.bool = absolute_col < H
+        with fragment_range(vec_blocks) as vb:
+            local_col: K.int32 = (thread_in_row + vb * tpr) * vec
+            absolute_col: K.int32 = block_y * cols + local_col
+            col_valid: K.bool = absolute_col < H
             if compact:
                 residual_offset = compact_row_i32 * H + absolute_col
             else:
-                residual_offset = actual_row * residual_row_stride + T.cast(absolute_col, "int64")
+                residual_offset = actual_row * residual_row_stride + K.cast(absolute_col, "int64")
             _store_global_fragment(
                 residual,
                 residual_offset,
                 residual_bits,
                 residual_words,
-                row_valid and col_valid,
+                K.And(row_valid, col_valid),
                 vb * vec,
                 vb * vec // 2,
                 VEC=vec,
                 PACKED_NARROW=packed_narrow,
             )
 
-        for pair in fragment_range(packed_pairs):
-            packed = T.alloc_local((1,), "uint64")
-            T.ptx.mul.f32x2(
+        with fragment_range(packed_pairs) as pair:
+            packed = K.alloc_local((1,), "uint64")
+            K.ptx.mul.f32x2(
                 packed[0],
-                T.cuda.make_float2(h_f32[pair * 2], h_f32[pair * 2 + 1]),
-                T.cuda.make_float2(h_f32[pair * 2], h_f32[pair * 2 + 1]),
+                K.cuda.make_float2(h_f32[pair * 2], h_f32[pair * 2 + 1]),
+                K.cuda.make_float2(h_f32[pair * 2], h_f32[pair * 2 + 1]),
             )
-            T.ptx.mov.b64(h_sq[pair * 2], h_sq[pair * 2 + 1], packed[0])
+            K.ptx.mov.b64(h_sq[pair * 2], h_sq[pair * 2 + 1], packed[0])
 
-        local_sum: T.float32 = T.float32(0.0)
-        for value in fragment_range(total_values):
-            local_sum = _add_f32(local_sum, h_sq[value])
-        local_sum = _butterfly_sum_f32(local_sum, row_lane_xors)
-        warp_sum: T.float32 = local_sum
+        local_sum = K.local_scalar(K.f32, init=K.float32(0.0))
+        with fragment_range(total_values) as value:
+            K.assign(local_sum, _add_f32(local_sum, h_sq[value]))
+        K.assign(local_sum, _butterfly_sum_f32(local_sum, row_lane_xors))
+        warp_sum: K.float32 = local_sum
 
         if warps_per_row > 1 and cluster_n == 1:
-            if lane == 0:
-                reduce_index: T.int32 = row_warp + warp_in_row * rows
-                T.ptx.st.shared.b32(
+            with K.If(lane == 0), K.Then():
+                reduce_index: K.int32 = row_warp + warp_in_row * rows
+                K.ptx.st.shared.b32(
                     shared_raw.ptr_to([reduce_base + reduce_index * 4]),
-                    T.reinterpret("uint32", warp_sum),
+                    K.reinterpret("uint32", warp_sum),
                 )
-            T.ptx.bar.sync(T.uint32(0))
-            final_sum: T.float32 = T.float32(0.0)
-            if lane < warps_per_row:
-                reduce_word = T.alloc_local((1,), "uint32")
-                reduce_index: T.int32 = row_warp + lane * rows
-                T.ptx.ld.shared.b32(
+            K.ptx.bar.sync(K.uint32(0))
+            final_sum = K.local_scalar(K.f32, init=K.float32(0.0))
+            with K.If(lane < warps_per_row), K.Then():
+                reduce_word = K.alloc_local((1,), "uint32")
+                reduce_index: K.int32 = row_warp + lane * rows
+                K.ptx.ld.shared.b32(
                     reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                 )
-                final_sum = T.reinterpret("float32", reduce_word[0])
-            final_sum = _butterfly_sum_f32(final_sum, full_lane_xors)
-            sum_sq: T.float32 = final_sum
+                K.assign(final_sum, K.reinterpret("float32", reduce_word[0]))
+            K.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
+            sum_sq: K.float32 = final_sum
         elif cluster_n > 1:
-            if warp == 0:
-                if T.cuda.elect_sync():
-                    T.ptx.mbarrier.arrive.expect_tx.shared.b64(
-                        shared_raw.ptr_to([mbar_offset]), T.uint32(expected_bytes)
+            with K.If(warp == 0), K.Then():
+                with K.If(K.cuda.elect_sync()), K.Then():
+                    K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+                        shared_raw.ptr_to([mbar_offset]), K.uint32(expected_bytes)
                     )
-            if lane < cluster_n:
-                reduce_index: T.int32 = (
+            with K.If(lane < cluster_n), K.Then():
+                reduce_index: K.int32 = (
                     row_warp + warp_in_row * rows + cta_rank * rows * warps_per_row
                 )
-                peer_reduce: T.uint32 = _mapa_u32(
+                peer_reduce: K.uint32 = _mapa_u32(
                     shared_raw.ptr_to([reduce_base + reduce_index * 4]), lane
                 )
-                peer_mbar: T.uint32 = _mapa_u32(shared_raw.ptr_to([mbar_offset]), lane)
-                T.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.f32(
+                peer_mbar: K.uint32 = _mapa_u32(shared_raw.ptr_to([mbar_offset]), lane)
+                K.ptx.st_async.shared__cluster.mbarrier__complete_tx__bytes.f32(
                     peer_reduce, warp_sum, peer_mbar
                 )
-            T.evaluate(_cluster_mbarrier_wait(shared_raw.ptr_to([mbar_offset])))
-            final_sum = T.float32(0.0)
-            for iteration in T.unroll(_ceil_div(total_partials_per_row, 32)):
-                partial: T.int32 = lane + iteration * 32
-                if partial < total_partials_per_row:
-                    partial_warp: T.int32 = partial % warps_per_row
-                    partial_cta: T.int32 = partial // warps_per_row
-                    reduce_index: T.int32 = (
+            _cluster_mbarrier_wait(shared_raw.ptr_to([mbar_offset]))
+            final_sum = K.local_scalar(K.f32, init=K.float32(0.0))
+            for iteration in range(_ceil_div(total_partials_per_row, 32)):
+                partial: K.int32 = lane + iteration * 32
+                with K.If(partial < total_partials_per_row), K.Then():
+                    partial_warp: K.int32 = partial % warps_per_row
+                    partial_cta: K.int32 = partial // warps_per_row
+                    reduce_index: K.int32 = (
                         row_warp + partial_warp * rows + partial_cta * rows * warps_per_row
                     )
-                    reduce_word = T.alloc_local((1,), "uint32")
-                    T.ptx.ld.shared.b32(
+                    reduce_word = K.alloc_local((1,), "uint32")
+                    K.ptx.ld.shared.b32(
                         reduce_word[0], shared_raw.ptr_to([reduce_base + reduce_index * 4])
                     )
-                    final_sum = _add_f32(final_sum, T.reinterpret("float32", reduce_word[0]))
-            final_sum = _butterfly_sum_f32(final_sum, full_lane_xors)
+                    K.assign(
+                        final_sum, _add_f32(final_sum, K.reinterpret("float32", reduce_word[0]))
+                    )
+            K.assign(final_sum, _butterfly_sum_f32(final_sum, full_lane_xors))
             sum_sq = final_sum
         else:
             sum_sq = warp_sum
 
         if H & (H - 1) == 0:
-            shifted: T.float32 = _fma_rn_f32(sum_sq, T.float32(1.0 / H), runtime_eps)
+            shifted: K.float32 = _fma_rn_f32(sum_sq, K.float32(1.0 / H), runtime_eps)
         else:
-            mean_sq: T.float32 = _div_rn_f32(sum_sq, T.float32(H))
+            mean_sq: K.float32 = _div_rn_f32(sum_sq, K.float32(H))
             shifted = _add_f32(mean_sq, runtime_eps)
-        rstd: T.float32 = _rsqrt_approx_ftz(shifted)
+        rstd: K.float32 = _rsqrt_approx_ftz(shifted)
 
         if cluster_n > 1:
-            T.ptx.barrier.cluster.arrive.relaxed()
-            T.ptx.barrier.cluster.wait()
+            K.ptx.barrier.cluster.arrive.relaxed()
+            K.ptx.barrier.cluster.wait()
         else:
-            T.ptx.bar.sync(T.uint32(0))
+            K.ptx.bar.sync(K.uint32(0))
 
-        for value in fragment_range(total_values):
-            w_f32[value] = _cvt_to_f32(w_bits[value], input_dtype)
+        with fragment_range(total_values) as value:
+            K.assign(w_f32[value], _cvt_to_f32(w_bits[value], input_dtype))
 
-        normalized = T.alloc_local((pair_values,), "float32")
-        biased_weight = T.alloc_local((pair_values,), "float32")
-        weighted = T.alloc_local((pair_values,), "float32")
-        y_f32 = T.alloc_local((pair_values,), "float32")
+        normalized = K.alloc_local((pair_values,), "float32")
+        biased_weight = K.alloc_local((pair_values,), "float32")
+        weighted = K.alloc_local((pair_values,), "float32")
+        y_f32 = K.alloc_local((pair_values,), "float32")
 
-        for pair in fragment_range(packed_pairs):
-            high_scale: T.float32 = rstd
-            if pair * 2 + 1 >= total_values:
-                high_scale = undefined_f32[0]
-            packed = T.alloc_local((1,), "uint64")
-            T.ptx.mul.f32x2(
+        with fragment_range(packed_pairs) as pair:
+            high_scale = K.local_scalar(K.f32, init=rstd)
+            with K.If(pair * 2 + 1 >= total_values), K.Then():
+                K.assign(high_scale, undefined_f32[0])
+            packed = K.alloc_local((1,), "uint64")
+            K.ptx.mul.f32x2(
                 packed[0],
-                T.cuda.make_float2(h_f32[pair * 2], h_f32[pair * 2 + 1]),
-                T.cuda.make_float2(rstd, high_scale),
+                K.cuda.make_float2(h_f32[pair * 2], h_f32[pair * 2 + 1]),
+                K.cuda.make_float2(rstd, high_scale),
             )
-            T.ptx.mov.b64(normalized[pair * 2], normalized[pair * 2 + 1], packed[0])
+            K.ptx.mov.b64(normalized[pair * 2], normalized[pair * 2 + 1], packed[0])
 
-        for pair in fragment_range(packed_pairs):
-            high_bias: T.float32 = T.float32(0.0)
-            if pair * 2 + 1 >= total_values:
-                high_bias = undefined_f32[0]
-            packed = T.alloc_local((1,), "uint64")
-            T.ptx.add.f32x2(
+        with fragment_range(packed_pairs) as pair:
+            high_bias = K.local_scalar(K.f32, init=K.float32(0.0))
+            with K.If(pair * 2 + 1 >= total_values), K.Then():
+                K.assign(high_bias, undefined_f32[0])
+            packed = K.alloc_local((1,), "uint64")
+            K.ptx.add.f32x2(
                 packed[0],
-                T.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),
-                T.cuda.make_float2(T.float32(0.0), high_bias),
+                K.cuda.make_float2(w_f32[pair * 2], w_f32[pair * 2 + 1]),
+                K.cuda.make_float2(K.float32(0.0), high_bias),
             )
-            T.ptx.mov.b64(biased_weight[pair * 2], biased_weight[pair * 2 + 1], packed[0])
+            K.ptx.mov.b64(biased_weight[pair * 2], biased_weight[pair * 2 + 1], packed[0])
 
-        for pair in fragment_range(packed_pairs):
-            packed = T.alloc_local((1,), "uint64")
-            T.ptx.mul.f32x2(
+        with fragment_range(packed_pairs) as pair:
+            packed = K.alloc_local((1,), "uint64")
+            K.ptx.mul.f32x2(
                 packed[0],
-                T.cuda.make_float2(normalized[pair * 2], normalized[pair * 2 + 1]),
-                T.cuda.make_float2(biased_weight[pair * 2], biased_weight[pair * 2 + 1]),
+                K.cuda.make_float2(normalized[pair * 2], normalized[pair * 2 + 1]),
+                K.cuda.make_float2(biased_weight[pair * 2], biased_weight[pair * 2 + 1]),
             )
-            T.ptx.mov.b64(weighted[pair * 2], weighted[pair * 2 + 1], packed[0])
+            K.ptx.mov.b64(weighted[pair * 2], weighted[pair * 2 + 1], packed[0])
 
-        for pair in fragment_range(packed_pairs):
-            high_inv_scale: T.float32 = inv_scale
-            if pair * 2 + 1 >= total_values:
-                high_inv_scale = undefined_f32[0]
-            packed = T.alloc_local((1,), "uint64")
-            T.ptx.mul.f32x2(
+        with fragment_range(packed_pairs) as pair:
+            high_inv_scale = K.local_scalar(K.f32, init=inv_scale)
+            with K.If(pair * 2 + 1 >= total_values), K.Then():
+                K.assign(high_inv_scale, undefined_f32[0])
+            packed = K.alloc_local((1,), "uint64")
+            K.ptx.mul.f32x2(
                 packed[0],
-                T.cuda.make_float2(weighted[pair * 2], weighted[pair * 2 + 1]),
-                T.cuda.make_float2(inv_scale, high_inv_scale),
+                K.cuda.make_float2(weighted[pair * 2], weighted[pair * 2 + 1]),
+                K.cuda.make_float2(inv_scale, high_inv_scale),
             )
-            T.ptx.mov.b64(y_f32[pair * 2], y_f32[pair * 2 + 1], packed[0])
+            K.ptx.mov.b64(y_f32[pair * 2], y_f32[pair * 2 + 1], packed[0])
 
-        for vb in fragment_range(vec_blocks):
-            local_col: T.int32 = (thread_in_row + vb * tpr) * vec
-            absolute_col: T.int32 = block_y * cols + local_col
+        with fragment_range(vec_blocks) as vb:
+            local_col: K.int32 = (thread_in_row + vb * tpr) * vec
+            absolute_col: K.int32 = block_y * cols + local_col
             if compact:
-                y_offset = actual_row * T.int64(H) + T.cast(absolute_col, "int64")
+                y_offset = actual_row * K.int64(H) + K.cast(absolute_col, "int64")
             else:
-                y_offset = actual_row * y_row_stride + T.cast(absolute_col, "int64")
+                y_offset = actual_row * y_row_stride + K.cast(absolute_col, "int64")
 
-            if vec == 8 and absolute_col + 8 <= H and row_valid:
-                p01: T.uint16 = _cvt_fp8_pair(y_f32[vb * 8], y_f32[vb * 8 + 1], output_dtype)
-                p23: T.uint16 = _cvt_fp8_pair(y_f32[vb * 8 + 2], y_f32[vb * 8 + 3], output_dtype)
-                p45: T.uint16 = _cvt_fp8_pair(y_f32[vb * 8 + 4], y_f32[vb * 8 + 5], output_dtype)
-                p67: T.uint16 = _cvt_fp8_pair(y_f32[vb * 8 + 6], y_f32[vb * 8 + 7], output_dtype)
-                lo_word: T.uint32 = _pack_b16_pair(p01, p23)
-                hi_word: T.uint32 = _pack_b16_pair(p45, p67)
-                T.ptx.st.global_.v2.b32(out.ptr_to([y_offset]), lo_word, hi_word)
-            elif vec == 4 and absolute_col + 4 <= H and row_valid:
-                p01 = _cvt_fp8_pair(y_f32[vb * 4], y_f32[vb * 4 + 1], output_dtype)
-                p23 = _cvt_fp8_pair(y_f32[vb * 4 + 2], y_f32[vb * 4 + 3], output_dtype)
-                packed_word: T.uint32 = _pack_b16_pair(p01, p23)
-                T.ptx.st.global_.b32(out.ptr_to([y_offset]), packed_word)
-            elif vec == 2 and absolute_col + 2 <= H and row_valid:
-                p01 = _cvt_fp8_pair(y_f32[vb * 2], y_f32[vb * 2 + 1], output_dtype)
-                T.ptx.st.global_.b16(out.ptr_to([y_offset]), p01)
-            else:
-                for element in T.unroll(vec):
-                    scalar_col: T.int32 = absolute_col + element
-                    if scalar_col < H and row_valid:
-                        clamped_low: T.float32 = _maximum_f32(
-                            y_f32[vb * vec + element], T.float32(-fp8_max)
+            def store_scalars():
+                for element in range(vec):
+                    scalar_col: K.int32 = absolute_col + element
+                    with K.If(K.And(scalar_col < H, row_valid)), K.Then():
+                        clamped_low: K.float32 = _maximum_f32(
+                            y_f32[vb * vec + element], K.float32(-fp8_max)
                         )
-                        clamped: T.float32 = _minimum_f32(clamped_low, T.float32(fp8_max))
-                        pair: T.uint16 = _cvt_fp8_pair(clamped, T.float32(0.0), output_dtype)
+                        clamped: K.float32 = _minimum_f32(clamped_low, K.float32(fp8_max))
+                        pair: K.uint16 = _cvt_fp8_pair(clamped, K.float32(0.0), output_dtype)
                         if compact:
-                            scalar_offset = actual_row * T.int64(H) + T.cast(scalar_col, "int64")
+                            scalar_offset = actual_row * K.int64(H) + K.cast(scalar_col, "int64")
                         else:
-                            scalar_offset = actual_row * y_row_stride + T.cast(scalar_col, "int64")
-                        T.ptx.st.global_.b8(out.ptr_to([scalar_offset]), T.cast(pair, "uint8"))
+                            scalar_offset = actual_row * y_row_stride + K.cast(scalar_col, "int64")
+                        K.ptx.st.global_.b8(out.ptr_to([scalar_offset]), K.cast(pair, "uint8"))
+
+            vector_guard = K.And(absolute_col + vec <= H, row_valid)
+            with K.If(vector_guard):
+                with K.Then():
+                    if vec == 8:
+                        p01: K.uint16 = _cvt_fp8_pair(
+                            y_f32[vb * 8], y_f32[vb * 8 + 1], output_dtype
+                        )
+                        p23: K.uint16 = _cvt_fp8_pair(
+                            y_f32[vb * 8 + 2], y_f32[vb * 8 + 3], output_dtype
+                        )
+                        p45: K.uint16 = _cvt_fp8_pair(
+                            y_f32[vb * 8 + 4], y_f32[vb * 8 + 5], output_dtype
+                        )
+                        p67: K.uint16 = _cvt_fp8_pair(
+                            y_f32[vb * 8 + 6], y_f32[vb * 8 + 7], output_dtype
+                        )
+                        lo_word: K.uint32 = _pack_b16_pair(p01, p23)
+                        hi_word: K.uint32 = _pack_b16_pair(p45, p67)
+                        K.ptx.st.global_.v2.b32(out.ptr_to([y_offset]), lo_word, hi_word)
+                    elif vec == 4:
+                        p01 = _cvt_fp8_pair(y_f32[vb * 4], y_f32[vb * 4 + 1], output_dtype)
+                        p23 = _cvt_fp8_pair(y_f32[vb * 4 + 2], y_f32[vb * 4 + 3], output_dtype)
+                        packed_word: K.uint32 = _pack_b16_pair(p01, p23)
+                        K.ptx.st.global_.b32(out.ptr_to([y_offset]), packed_word)
+                    elif vec == 2:
+                        p01 = _cvt_fp8_pair(y_f32[vb * 2], y_f32[vb * 2 + 1], output_dtype)
+                        K.ptx.st.global_.b16(out.ptr_to([y_offset]), p01)
+                    else:
+                        store_scalars()
+                with K.Else():
+                    store_scalars()
 
         if enable_pdl:
-            T.ptx.griddepcontrol.launch_dependents()
+            K.ptx.griddepcontrol.launch_dependents()
 
     if compact:
 
-        @T.prim_func
+        @K.kernel(warps=threads // 32, arch="sm_100a", grid=False)
         def flashinfer_fused_add_rmsnorm_quant_compact(
-            output_handle: T.handle,
-            input_handle: T.handle,
-            residual_handle: T.handle,
-            weight_handle: T.handle,
-            runtime_M: T.int64,
-            scale_handle: T.handle,
-            runtime_eps: T.float32,
+            output: K.gptr[output_dtype],
+            input_buffer: K.gptr[input_dtype],
+            residual: K.gptr[input_dtype],
+            weight: K.gptr[input_dtype, (H,)],
+            runtime_M: K.i64,
+            scale_buffer: K.gptr[K.f32, (1,)],
+            runtime_eps: K.f32,
         ):
-            output = T.match_buffer(
-                output_handle, shape=(runtime_M * T.int64(H),), dtype=output_dtype, scope="global"
-            )
-            input_buffer = T.match_buffer(
-                input_handle, shape=(runtime_M * T.int64(H),), dtype=input_dtype, scope="global"
-            )
-            residual = T.match_buffer(
-                residual_handle, shape=(runtime_M * T.int64(H),), dtype=input_dtype, scope="global"
-            )
-            weight = T.match_buffer(weight_handle, shape=(H,), dtype=input_dtype, scope="global")
-            scale_buffer = T.match_buffer(scale_handle, shape=(1,), dtype="float32", scope="global")
-            T.device_entry()
             kernel_body(
                 output,
                 input_buffer,
@@ -908,48 +911,27 @@ def get_kernel(
                 runtime_M,
                 scale_buffer,
                 runtime_eps,
-                T.int64(H),
-                T.int64(H),
-                T.int64(H),
+                K.int64(H),
+                K.int64(H),
+                K.int64(H),
             )
 
-        kernel = flashinfer_fused_add_rmsnorm_quant_compact
+        kernel = flashinfer_fused_add_rmsnorm_quant_compact.func
     else:
 
-        @T.prim_func
+        @K.kernel(warps=threads // 32, arch="sm_100a", grid=False)
         def flashinfer_fused_add_rmsnorm_quant_strided(
-            output_handle: T.handle,
-            input_handle: T.handle,
-            residual_handle: T.handle,
-            weight_handle: T.handle,
-            runtime_M: T.int64,
-            scale_handle: T.handle,
-            runtime_eps: T.float32,
-            y_row_stride: T.int64,
-            x_row_stride: T.int64,
-            residual_row_stride: T.int64,
+            output: K.gptr[output_dtype],
+            input_buffer: K.gptr[input_dtype],
+            residual: K.gptr[input_dtype],
+            weight: K.gptr[input_dtype, (H,)],
+            runtime_M: K.i64,
+            scale_buffer: K.gptr[K.f32, (1,)],
+            runtime_eps: K.f32,
+            y_row_stride: K.i64,
+            x_row_stride: K.i64,
+            residual_row_stride: K.i64,
         ):
-            output = T.match_buffer(
-                output_handle,
-                shape=((runtime_M - T.int64(1)) * y_row_stride + T.int64(H),),
-                dtype=output_dtype,
-                scope="global",
-            )
-            input_buffer = T.match_buffer(
-                input_handle,
-                shape=((runtime_M - T.int64(1)) * x_row_stride + T.int64(H),),
-                dtype=input_dtype,
-                scope="global",
-            )
-            residual = T.match_buffer(
-                residual_handle,
-                shape=((runtime_M - T.int64(1)) * residual_row_stride + T.int64(H),),
-                dtype=input_dtype,
-                scope="global",
-            )
-            weight = T.match_buffer(weight_handle, shape=(H,), dtype=input_dtype, scope="global")
-            scale_buffer = T.match_buffer(scale_handle, shape=(1,), dtype="float32", scope="global")
-            T.device_entry()
             kernel_body(
                 output,
                 input_buffer,
@@ -963,7 +945,7 @@ def get_kernel(
                 residual_row_stride,
             )
 
-        kernel = flashinfer_fused_add_rmsnorm_quant_strided
+        kernel = flashinfer_fused_add_rmsnorm_quant_strided.func
 
     launch_params = ["blockIdx.x"]
     if cluster_n > 1:

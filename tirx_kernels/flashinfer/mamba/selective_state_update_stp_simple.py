@@ -370,7 +370,6 @@ def get_kernel(**kwargs: Any):
         warps=4,
         arch="sm_100a",
         grid=(spec["BATCH"], spec["NHEADS"], "dim_tiles_runtime"),
-        thread_layout="lane_warp",
     )
     def selective_state_update_stp_simple(
         state: K.gptr[spec["STATE_DTYPE"]],

@@ -434,7 +434,7 @@ def get_kernel(
             return False
         return vb != vec_blocks - 1
 
-    @K.kernel(warps=threads // 32, arch="sm_100a", grid=False, thread_layout=False)
+    @K.kernel(warps=threads // 32, arch="sm_100a", grid=False)
     def flashinfer_qk_rmsnorm(
         x: K.gptr[dtype],
         weight: K.gptr[dtype, (H,)],
@@ -449,7 +449,7 @@ def get_kernel(
     ):
         # QK_RMSNORM_KERNEL_START
         block_raw = K.cta_id([K.cast(K.ceildiv(runtime_B * runtime_N, K.int64(rows)), "int32")])
-        tid = K.thread_id([threads])
+        tid = K.thread_id()
 
         if enable_pdl:
             K.ptx.griddepcontrol.wait()

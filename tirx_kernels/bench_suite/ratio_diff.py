@@ -343,17 +343,22 @@ def _validate_git(
 
 
 def _compare_mapping(
-    before: dict, after: dict, field: str, *, ignored_keys: set[str] = frozenset()
+    before: dict,
+    after: dict,
+    field: str,
+    *,
+    ignored_keys: set[str] = frozenset(),
+    allow_empty: bool = False,
 ) -> list[str]:
     before_value = before.get(field)
     after_value = after.get(field)
     if (
         not isinstance(before_value, dict)
-        or not before_value
         or not isinstance(after_value, dict)
-        or not after_value
+        or (not allow_empty and (not before_value or not after_value))
     ):
-        return [f"provenance: {field} must be a non-empty mapping in both runs"]
+        qualifier = "a mapping" if allow_empty else "a non-empty mapping"
+        return [f"provenance: {field} must be {qualifier} in both runs"]
     if field == "kernel_tree" and any(
         not isinstance(key, str) or not key or not isinstance(value, str) or not value.strip()
         for mapping in (before_value, after_value)
@@ -382,7 +387,22 @@ def _compare_run_provenance(
             before, after, "kernel_tree", ignored_keys=_INTENTIONALLY_CHANGED_TREE_KEYS
         )
     )
-    errors.extend(_compare_mapping(before, after, "baselines"))
+
+    before_references = before.get("references_enabled")
+    after_references = after.get("references_enabled")
+    if type(before_references) is not bool or type(after_references) is not bool:
+        errors.append("provenance: references_enabled must be a bool in both runs")
+    elif before_references != after_references:
+        errors.append("provenance: references_enabled differs between before and after")
+    else:
+        errors.extend(
+            _compare_mapping(
+                before,
+                after,
+                "baselines",
+                allow_empty=not before_references,
+            )
+        )
 
     before_pipeline = before.get("pipeline")
     after_pipeline = after.get("pipeline")

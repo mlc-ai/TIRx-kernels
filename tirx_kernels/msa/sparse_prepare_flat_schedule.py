@@ -23,10 +23,9 @@ of rows plus the final ``work_count``, not as a fixed row order.
 Upstream source: python/fmha_sm100/cute/src/sm100/prepare_scheduler.py:124.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
+import tirx_kernels.kern as K
 from tirx_kernels.msa.utils._scalar_ops import (
     atom_add_global_i32,
     ld_global_i32,
@@ -35,7 +34,6 @@ from tirx_kernels.msa.utils._scalar_ops import (
     uceil_div_i32,
     udiv_i32,
 )
-from tvm.script import tirx as T
 
 KERNEL_META = {
     "name": "msa_sparse_prepare_flat_schedule_sm100",
@@ -108,7 +106,7 @@ def flat_schedule_capacity(
 #
 # Shared with the other MSA prepare kernel; see `utils/_scalar_ops.py` for the
 # instruction each one emits and why global memory is reached only through
-# `T.ptx.*` on `ptr_to`.
+# `K.ptx.*` on `ptr_to`.
 #
 # Call-site map for this kernel: the scalar loads are the CSR bounds (:307-308)
 # and the `cu_seqlens_k` scans (:165); the store is one work-item field
@@ -127,177 +125,190 @@ _shfl_idx_i32 = shfl_idx_i32
 # ---------------------------------------------------------------------------
 # Target entry.
 # ---------------------------------------------------------------------------
-@T.jit
+@K.kernel(
+    warps=WARPS_PER_CTA,
+    arch="sm_100a",
+    grid=lambda p: K.ceildiv(p["total_rows"] * p["num_heads_kv"], WARPS_PER_CTA),
+)
 def _kernel(
-    k2q_row_ptr_h: T.handle,
-    cu_seqlens_k_h: T.handle,
-    scheduler_metadata_h: T.handle,
-    work_count_h: T.handle,
-    total_rows: T.int32,
-    num_batches: T.int32,
-    target: T.int32,
-    work_capacity: T.int32,
-    num_heads_kv: T.int32,
-    blk_kv: T.int32,
+    k2q_row_ptr: K.gptr(K.i32, shape=lambda p: (p["num_heads_kv"] * (p["total_rows"] + 1),)),
+    cu_seqlens_k: K.gptr(K.i32, shape=lambda p: (p["num_batches"] + 1,)),
+    scheduler_metadata: K.gptr(K.i32, shape=lambda p: (p["work_capacity"] * WORK_FIELDS,)),
+    work_count: K.gptr[K.i32, (1,)],
+    total_rows: K.i32,
+    num_batches: K.i32,
+    target: K.i32,
+    work_capacity: K.i32,
+    num_heads_kv: K.i32,
+    blk_kv: K.i32,
 ):
-    # CSR row offsets, `[head_kv, total_rows + 1]` flattened (mK2qCounts).
-    k2q_row_ptr = T.match_buffer(
-        k2q_row_ptr_h, (num_heads_kv * (total_rows + 1),), "int32", scope="global"
-    )
-    cu_seqlens_k = T.match_buffer(cu_seqlens_k_h, (num_batches + 1,), "int32", scope="global")
-    scheduler_metadata = T.match_buffer(
-        scheduler_metadata_h, (work_capacity * WORK_FIELDS,), "int32", scope="global"
-    )
-    work_count = T.match_buffer(work_count_h, (1,), "int32", scope="global")
-
-    T.device_entry()
-
     # CUDA TRANSCRIPTION START
     # sketch: static ABI/launch, one warp per (row, head) -> :290-295.
-    block = T.cta_id([T.ceildiv(total_rows * num_heads_kv, WARPS_PER_CTA)])
-    tidx = T.thread_id([NUM_THREADS])
-    lane: T.int32 = tidx % 32
-    warp: T.int32 = tidx // 32
-    row_head_idx: T.int32 = block * WARPS_PER_CTA + warp
-    total_row_heads: T.int32 = total_rows * num_heads_kv
+    block = K.cta_id()
+    tidx = K.thread_id()
+    lane = K.local_scalar(K.i32, init=tidx % 32, name="lane")
+    warp = K.local_scalar(K.i32, init=tidx // 32, name="warp")
+    row_head_idx = K.local_scalar(K.i32, init=block * WARPS_PER_CTA + warp, name="row_head_idx")
+    total_row_heads = K.local_scalar(K.i32, init=total_rows * num_heads_kv, name="total_row_heads")
 
     # sketch: the six scalars the warp publishes, zeroed BEFORE the grid-tail
     # guard so an empty tail warp still broadcasts defined values -> :297-302.
-    row_count = T.alloc_local((1,), "int32")
-    num_chunks = T.alloc_local((1,), "int32")
-    batch_idx = T.alloc_local((1,), "int32")
-    kv_block_idx = T.alloc_local((1,), "int32")
-    head_kv_idx = T.alloc_local((1,), "int32")
-    row_linear = T.alloc_local((1,), "int32")
-    row_count[0] = 0
-    num_chunks[0] = 0
-    batch_idx[0] = 0
-    kv_block_idx[0] = 0
-    head_kv_idx[0] = 0
-    row_linear[0] = 0
+    row_count = K.local_scalar(K.i32, name="row_count")
+    num_chunks = K.local_scalar(K.i32, name="num_chunks")
+    batch_idx = K.local_scalar(K.i32, name="batch_idx")
+    kv_block_idx = K.local_scalar(K.i32, name="kv_block_idx")
+    head_kv_idx = K.local_scalar(K.i32, name="head_kv_idx")
+    row_linear = K.local_scalar(K.i32, name="row_linear")
+    K.assign(row_count, K.int32(0))
+    K.assign(num_chunks, K.int32(0))
+    K.assign(batch_idx, K.int32(0))
+    K.assign(kv_block_idx, K.int32(0))
+    K.assign(head_kv_idx, K.int32(0))
+    K.assign(row_linear, K.int32(0))
 
     # sketch: grid tail, then the row/head split -> :303-305.
-    if row_head_idx < total_row_heads:
-        row_linear[0] = _udiv_i32(row_head_idx, num_heads_kv)
-        head_kv_idx[0] = row_head_idx - row_linear[0] * num_heads_kv
+    with K.If(row_head_idx < total_row_heads), K.Then():
+        K.assign(row_linear, _udiv_i32(row_head_idx, num_heads_kv))
+        K.assign(head_kv_idx, row_head_idx - row_linear * num_heads_kv)
 
         # sketch: lane 0 owns the whole decode -> :306-318.
-        if lane == 0:
-            row_base: T.int32 = head_kv_idx[0] * (total_rows + 1) + row_linear[0]
-            row_start: T.int32 = _ld_global_i32(k2q_row_ptr, row_base)
-            row_end: T.int32 = _ld_global_i32(k2q_row_ptr, row_base + 1)
-            row_count[0] = row_end - row_start
+        with K.If(lane == 0), K.Then():
+            row_base = K.local_scalar(
+                K.i32, init=head_kv_idx * (total_rows + 1) + row_linear, name="row_base"
+            )
+            row_start = K.local_scalar(
+                K.i32, init=_ld_global_i32(k2q_row_ptr, row_base), name="row_start"
+            )
+            row_end = K.local_scalar(
+                K.i32, init=_ld_global_i32(k2q_row_ptr, row_base + 1), name="row_end"
+            )
+            K.assign(row_count, row_end - row_start)
 
-            prev = T.alloc_local((1,), "int32")
+            prev = K.local_scalar(K.i32, name="prev")
             # The source pins `unroll=1` on every batch scan (:177, :190, :222)
             # and its export carries `.pragma "nounroll"` on each.  A TIRx `For`
             # emits no unroll pragma, so nvcc unrolls these scans fourfold and
             # triples the decode's load and divide traffic; a `While` lowers with
             # `#pragma unroll 1`, which is the shape the source has.  Hence the
             # explicit counters.
-            batch_cursor = T.alloc_local((1,), "int32")
+            batch_cursor = K.local_scalar(K.i32, name="batch_cursor")
 
             # sketch 2a: _max_rows_per_batch -> :183-193.  The base element is
             # hoisted and rotated forward, so the body holds one load.
-            max_rows = T.alloc_local((1,), "int32")
-            max_rows[0] = 0
-            prev[0] = _ld_global_i32(cu_seqlens_k, 0)
-            batch_cursor[0] = 0
-            while batch_cursor[0] < num_batches:
-                next_seq: T.int32 = _ld_global_i32(cu_seqlens_k, batch_cursor[0] + 1)
-                max_rows[0] = T.max(max_rows[0], _uceil_div_i32(next_seq - prev[0], blk_kv))
-                prev[0] = next_seq
-                batch_cursor[0] = batch_cursor[0] + 1
+            max_rows = K.local_scalar(K.i32, init=K.int32(0), name="max_rows")
+            K.assign(prev, _ld_global_i32(cu_seqlens_k, 0))
+            K.assign(batch_cursor, K.int32(0))
+            with K.While(batch_cursor < num_batches):
+                next_seq = K.local_scalar(
+                    K.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="next_seq"
+                )
+                K.assign(max_rows, K.max(max_rows, _uceil_div_i32(next_seq - prev, blk_kv)))
+                K.assign(prev, next_seq)
+                K.assign(batch_cursor, batch_cursor + 1)
 
             # sketch 2b: binary search over levels -> :202-215.  `probe_base` is
             # hoisted above the search, and each probe re-seeds `prev` from it.
-            lo = T.alloc_local((1,), "int32")
-            hi = T.alloc_local((1,), "int32")
-            lo[0] = 0
-            hi[0] = max_rows[0]
-            probe_base: T.int32 = _ld_global_i32(cu_seqlens_k, 0)
-            rows_before_next = T.alloc_local((1,), "int32")
-            while lo[0] < hi[0]:
-                mid: T.int32 = _udiv_i32(lo[0] + hi[0], 2)
-                rows_before_next[0] = 0
-                prev[0] = probe_base
-                batch_cursor[0] = 0
-                while batch_cursor[0] < num_batches:
-                    probe_seq: T.int32 = _ld_global_i32(cu_seqlens_k, batch_cursor[0] + 1)
-                    rows_before_next[0] = rows_before_next[0] + T.min(
-                        _uceil_div_i32(probe_seq - prev[0], blk_kv), mid + 1
+            lo = K.local_scalar(K.i32, name="lo")
+            hi = K.local_scalar(K.i32, name="hi")
+            K.assign(lo, K.int32(0))
+            K.assign(hi, max_rows)
+            probe_base = K.local_scalar(
+                K.i32, init=_ld_global_i32(cu_seqlens_k, 0), name="probe_base"
+            )
+            rows_before_next = K.local_scalar(K.i32, name="rows_before_next")
+            with K.While(lo < hi):
+                mid = K.local_scalar(K.i32, init=_udiv_i32(lo + hi, 2), name="mid")
+                K.assign(rows_before_next, K.int32(0))
+                K.assign(prev, probe_base)
+                K.assign(batch_cursor, K.int32(0))
+                with K.While(batch_cursor < num_batches):
+                    probe_seq = K.local_scalar(
+                        K.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="probe_seq"
                     )
-                    prev[0] = probe_seq
-                    batch_cursor[0] = batch_cursor[0] + 1
-                if rows_before_next[0] <= row_linear[0]:
-                    lo[0] = mid + 1
-                else:
-                    hi[0] = mid
-            level = T.alloc_local((1,), "int32")
-            level[0] = lo[0]
+                    K.assign(
+                        rows_before_next,
+                        rows_before_next + K.min(_uceil_div_i32(probe_seq - prev, blk_kv), mid + 1),
+                    )
+                    K.assign(prev, probe_seq)
+                    K.assign(batch_cursor, batch_cursor + 1)
+                with K.If(rows_before_next <= row_linear):
+                    with K.Then():
+                        K.assign(lo, mid + 1)
+                    with K.Else():
+                        K.assign(hi, mid)
+            level = K.local_scalar(K.i32, init=lo, name="level")
 
             # sketch 2c: offset inside the level band -> :217.
-            rows_before = T.alloc_local((1,), "int32")
-            rows_before[0] = 0
-            prev[0] = _ld_global_i32(cu_seqlens_k, 0)
-            batch_cursor[0] = 0
-            while batch_cursor[0] < num_batches:
-                before_seq: T.int32 = _ld_global_i32(cu_seqlens_k, batch_cursor[0] + 1)
-                rows_before[0] = rows_before[0] + T.min(
-                    _uceil_div_i32(before_seq - prev[0], blk_kv), level[0]
+            rows_before = K.local_scalar(K.i32, init=K.int32(0), name="rows_before")
+            K.assign(prev, _ld_global_i32(cu_seqlens_k, 0))
+            K.assign(batch_cursor, K.int32(0))
+            with K.While(batch_cursor < num_batches):
+                before_seq = K.local_scalar(
+                    K.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="before_seq"
                 )
-                prev[0] = before_seq
-                batch_cursor[0] = batch_cursor[0] + 1
-            offset: T.int32 = row_linear[0] - rows_before[0]
+                K.assign(
+                    rows_before,
+                    rows_before + K.min(_uceil_div_i32(before_seq - prev, blk_kv), level),
+                )
+                K.assign(prev, before_seq)
+                K.assign(batch_cursor, batch_cursor + 1)
+            offset = K.local_scalar(K.i32, init=row_linear - rows_before, name="offset")
 
             # sketch 2d: the offset-th batch above `level` -> :218-229.  The scan
             # runs to `num_batches` even after the batch is found, and its two
             # loads stay in the body because the predicate breaks the rotation.
-            active_idx = T.alloc_local((1,), "int32")
-            found = T.alloc_local((1,), "int32")
-            active_idx[0] = 0
-            found[0] = 0
-            batch_cursor[0] = 0
-            while batch_cursor[0] < num_batches:
-                if found[0] == 0:
-                    scan_next: T.int32 = _ld_global_i32(cu_seqlens_k, batch_cursor[0] + 1)
-                    scan_prev: T.int32 = _ld_global_i32(cu_seqlens_k, batch_cursor[0])
-                    scan_rows: T.int32 = _uceil_div_i32(scan_next - scan_prev, blk_kv)
-                    if scan_rows > level[0]:
-                        if active_idx[0] == offset:
-                            batch_idx[0] = batch_cursor[0]
-                            found[0] = 1
-                        active_idx[0] = active_idx[0] + 1
-                batch_cursor[0] = batch_cursor[0] + 1
-            kv_block_idx[0] = level[0]
+            active_idx = K.local_scalar(K.i32, name="active_idx")
+            found = K.local_scalar(K.i32, name="found")
+            K.assign(active_idx, K.int32(0))
+            K.assign(found, K.int32(0))
+            K.assign(batch_cursor, K.int32(0))
+            with K.While(batch_cursor < num_batches):
+                with K.If(found == 0), K.Then():
+                    scan_next = K.local_scalar(
+                        K.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor + 1), name="scan_next"
+                    )
+                    scan_prev = K.local_scalar(
+                        K.i32, init=_ld_global_i32(cu_seqlens_k, batch_cursor), name="scan_prev"
+                    )
+                    scan_rows = K.local_scalar(
+                        K.i32, init=_uceil_div_i32(scan_next - scan_prev, blk_kv), name="scan_rows"
+                    )
+                    with K.If(scan_rows > level), K.Then():
+                        with K.If(active_idx == offset), K.Then():
+                            K.assign(batch_idx, batch_cursor)
+                            K.assign(found, K.int32(1))
+                        K.assign(active_idx, active_idx + 1)
+                K.assign(batch_cursor, batch_cursor + 1)
+            K.assign(kv_block_idx, level)
 
             # sketch 2e: a row with no references emits nothing -> :315-318.
-            if row_count[0] > 0:
-                num_chunks[0] = _uceil_div_i32(row_count[0], target)
+            with K.If(row_count > 0), K.Then():
+                K.assign(num_chunks, _uceil_div_i32(row_count, target))
 
     # sketch: publish lane 0's four scalars to the warp -> :319-322.  Executed by
     # every warp, including the ones the grid-tail guard emptied.
-    row_count[0] = _shfl_idx_i32(row_count[0], 0)
-    num_chunks[0] = _shfl_idx_i32(num_chunks[0], 0)
-    batch_idx[0] = _shfl_idx_i32(batch_idx[0], 0)
-    kv_block_idx[0] = _shfl_idx_i32(kv_block_idx[0], 0)
+    K.assign(row_count, _shfl_idx_i32(row_count, 0))
+    K.assign(num_chunks, _shfl_idx_i32(num_chunks, 0))
+    K.assign(batch_idx, _shfl_idx_i32(batch_idx, 0))
+    K.assign(kv_block_idx, _shfl_idx_i32(kv_block_idx, 0))
 
     # sketch: lane-strided chunk emission -> :324-345.
-    chunk_idx = T.alloc_local((1,), "int32")
-    chunk_idx[0] = lane
-    while chunk_idx[0] < num_chunks[0]:
-        work_idx: T.int32 = _atom_add_global_i32(work_count, 0, T.uint32(1))
-        q_begin: T.int32 = chunk_idx[0] * target
-        q_count: T.int32 = T.min(target, row_count[0] - q_begin)
-        if work_idx < work_capacity:
-            work_base: T.int32 = work_idx * WORK_FIELDS
-            _st_global_i32(scheduler_metadata, work_base, head_kv_idx[0])
-            _st_global_i32(scheduler_metadata, work_base + 1, row_linear[0])
+    chunk_idx = K.local_scalar(K.i32, init=lane, name="chunk_idx")
+    with K.While(chunk_idx < num_chunks):
+        work_idx = K.local_scalar(
+            K.i32, init=_atom_add_global_i32(work_count, 0, K.uint32(1)), name="work_idx"
+        )
+        q_begin = K.local_scalar(K.i32, init=chunk_idx * target, name="q_begin")
+        q_count = K.local_scalar(K.i32, init=K.min(target, row_count - q_begin), name="q_count")
+        with K.If(work_idx < work_capacity), K.Then():
+            work_base = K.local_scalar(K.i32, init=work_idx * WORK_FIELDS, name="work_base")
+            _st_global_i32(scheduler_metadata, work_base, head_kv_idx)
+            _st_global_i32(scheduler_metadata, work_base + 1, row_linear)
             _st_global_i32(scheduler_metadata, work_base + 2, q_begin)
             _st_global_i32(scheduler_metadata, work_base + 3, q_count)
-            _st_global_i32(scheduler_metadata, work_base + 4, batch_idx[0])
-            _st_global_i32(scheduler_metadata, work_base + 5, kv_block_idx[0])
-        chunk_idx[0] = chunk_idx[0] + 32
+            _st_global_i32(scheduler_metadata, work_base + 4, batch_idx)
+            _st_global_i32(scheduler_metadata, work_base + 5, kv_block_idx)
+        K.assign(chunk_idx, chunk_idx + 32)
 
 
 def get_kernel(**config):
@@ -308,7 +319,7 @@ def get_kernel(**config):
     schedule scalars stay runtime arguments here too.
     """
     config.pop("label", None)
-    return _kernel.specialize().with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
+    return _kernel.func.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 
 
 # ---------------------------------------------------------------------------

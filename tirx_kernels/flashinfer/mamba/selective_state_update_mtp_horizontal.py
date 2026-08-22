@@ -314,7 +314,6 @@ def get_kernel(**kwargs: Any):
         arch="sm_100a",
         min_blocks_per_sm=7,
         grid=(spec["BATCH"], spec["NHEADS"]),
-        thread_layout="lane_warp",
     )
     def selective_state_update_mtp_horizontal(
         tensor_state: K.TensorMap,
