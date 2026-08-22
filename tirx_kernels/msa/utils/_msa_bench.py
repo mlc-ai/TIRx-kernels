@@ -85,6 +85,17 @@ def cutedsl_paths() -> list[str]:
 # and torch owns live CUDA state this recovery must not disturb.
 _REFERENCE_ROOTS = ("cutlass", "quack", "sympy", "src", "fmha_sm100", "torch._dynamo")
 
+# The subset of the roots above that is safe to drop and import again inside a
+# live process: pure Python, no native extension module underneath. `cutlass` is
+# NOT here -- its `_mlir_libs` extension registers nanobind types on first init,
+# and a second init aborts the process with "refusing to add duplicate key". Nor
+# is `torch._dynamo`, which holds compiled-code caches other live objects point
+# at.
+_RETRY_DROP_ROOTS = ("quack", "sympy", "src", "fmha_sm100")
+
+# Reference-builder entries so far in this process; >1 means a retry.
+_ensure_calls = 0
+
 
 def _drop_interrupted_imports() -> None:
     """Forget modules whose import was cut off partway through.
@@ -106,7 +117,26 @@ def _drop_interrupted_imports() -> None:
     break are probed for an attribute their own ``__init__`` defines, and their
     whole subtree is dropped when the probe fails. Re-importing costs seconds,
     but only on a retry, and it happens outside the timed region.
+
+    Neither sweep is sufficient on its own. Both need evidence left behind in
+    ``sys.modules``: the flag needs the module to still be marked initializing,
+    the invariant needs a submodule that made it into ``sys.modules`` without
+    being bound on its parent. An import cut *before* the submodule is
+    registered at all leaves neither trace, and the parent then simply lacks the
+    attribute -- which is how one matrix lost two of fourteen rows to ``quack``
+    with no ``copy_utils`` and ``sympy`` with no ``printing``.
+
+    So from the second call onward -- that is, on a retry -- the pure-Python
+    reference roots are dropped outright rather than inspected. Only those:
+    re-importing ``cutlass`` in a live process aborts it, because its MLIR
+    extension registers nanobind types that may be registered exactly once. The
+    first call must not drop anything either, because it is the only chance to
+    observe a ``cutlass`` that some earlier import already bound outside the
+    pin, which is what the caller checks for next; the pinned build and the
+    ambient one are not interchangeable.
     """
+    global _ensure_calls
+    _ensure_calls += 1
     for name, module in list(sys.modules.items()):
         if name.startswith(("tirx_kernels", "tvm")):
             continue
@@ -135,6 +165,14 @@ def _drop_interrupted_imports() -> None:
                 n for n in sys.modules if n == parent_name or n.startswith(parent_name + ".")
             ]:
                 del sys.modules[stale]
+
+    if _ensure_calls > 1:
+        for name in [
+            n
+            for n in sys.modules
+            if any(n == r or n.startswith(r + ".") for r in _RETRY_DROP_ROOTS)
+        ]:
+            del sys.modules[name]
 
 
 def ensure_msa_importable() -> None:
@@ -227,6 +265,13 @@ def compiled_sparse_atten_fwd(case: dict):
     q_flat = case["q_flat"]
     o_partial_flat = case["o_partial_flat"]
     lse_temperature = case.get("lse_temperature_partial")
+    # Paging is `page_table is not None` at the host entry (interface.py:1670),
+    # and `seqused_k` is accepted only alongside it (interface.py:251-253).
+    page_table = case.get("page_table")
+    seqused_k = case.get("seqused_k")
+    paged = page_table is not None
+    if seqused_k is not None and not paged:
+        raise ValueError("seqused_k is only supported together with page_table")
     gather4_desc = (
         create_q_gather4_tma_desc(q_flat, box_x=128 if q_flat.dtype == torch.float8_e4m3fn else 64)
         if qhead_per_kv in (1, 2, 4)
@@ -245,10 +290,10 @@ def compiled_sparse_atten_fwd(case: dict):
         case["pv_dtype"],
         o_partial_flat.dtype,
         bool(case["causal"]),
-        False,  # paged_kv
+        paged,
         True,  # use_prepare_scheduler
-        None,  # page_size
-        False,  # seqused_k
+        case["blk_kv"] if paged else None,  # page_size: upstream forces == blk_kv
+        seqused_k is not None,
         lse_temperature is not None,
     )
     if key not in _FWD_CACHE:
@@ -261,9 +306,9 @@ def compiled_sparse_atten_fwd(case: dict):
             head_dim=case["head_dim"],
             qheadperkv=qhead_per_kv,
             n_block_size=case["blk_kv"],
-            paged_kv=False,
-            page_size=None,
-            has_seqused_k=False,
+            paged_kv=paged,
+            page_size=case["blk_kv"] if paged else None,
+            has_seqused_k=seqused_k is not None,
             causal=bool(case["causal"]),
             use_prepare_scheduler=True,
             qk_dtype=cutlass_dtype[case["qk_dtype"]],
@@ -283,8 +328,8 @@ def compiled_sparse_atten_fwd(case: dict):
             None if lse_temperature is None else to_cute_tensor(lse_temperature),
             to_cute_tensor(q_flat),
             None if gather4_desc is None else to_cute_tensor(gather4_desc),
-            None,  # page_table
-            None,  # seqused_k
+            None if page_table is None else to_cute_tensor(page_table),
+            None if seqused_k is None else to_cute_tensor(seqused_k),
             to_cute_tensor(case["cu_seqlens_q"]),
             to_cute_tensor(case["cu_seqlens_k"]),
             Float32(case["softmax_scale"]),
@@ -313,8 +358,8 @@ def compiled_sparse_atten_fwd(case: dict):
             lse_temperature,
             q_flat,
             gather4_desc,
-            None,
-            None,
+            page_table,
+            seqused_k,
             case["cu_seqlens_q"],
             case["cu_seqlens_k"],
             case["softmax_scale"],
@@ -364,6 +409,11 @@ def compiled_sparse_atten_nvfp4_kv(case: dict):
     o_partial_flat = case["o_partial_flat"]
     lse_temperature = case.get("lse_temperature_partial")
     k_global_scale = case.get("k_global_scale")
+    page_table = case.get("page_table")
+    seqused_k = case.get("seqused_k")
+    paged = page_table is not None
+    if seqused_k is not None and not paged:
+        raise ValueError("seqused_k is only supported together with page_table")
     gather4_desc = (
         create_q_gather4_tma_desc(q_flat, box_x=128 if q_flat.dtype == torch.float8_e4m3fn else 64)
         if qhead_per_kv in (1, 2, 4)
@@ -378,10 +428,10 @@ def compiled_sparse_atten_nvfp4_kv(case: dict):
         q_flat.dtype,
         o_partial_flat.dtype,
         bool(case["causal"]),
-        False,  # paged_kv
+        paged,
         True,  # use_prepare_scheduler
-        None,  # page_size
-        False,  # seqused_k
+        case["blk_kv"] if paged else None,  # page_size: upstream forces == blk_kv
+        seqused_k is not None,
         lse_temperature is not None,
         True,  # fp8_pair_dequant: pinned, never read from the environment
         k_global_scale is not None,
@@ -392,9 +442,9 @@ def compiled_sparse_atten_nvfp4_kv(case: dict):
             head_dim=case["head_dim"],
             qheadperkv=qhead_per_kv,
             n_block_size=case["blk_kv"],
-            paged_kv=False,
-            page_size=None,
-            has_seqused_k=False,
+            paged_kv=paged,
+            page_size=case["blk_kv"] if paged else None,
+            has_seqused_k=seqused_k is not None,
             causal=bool(case["causal"]),
             use_prepare_scheduler=True,
             fp8_pair_dequant=True,
@@ -419,8 +469,8 @@ def compiled_sparse_atten_nvfp4_kv(case: dict):
             None if lse_temperature is None else to_cute_tensor(lse_temperature),
             to_cute_tensor(q_flat),
             None if gather4_desc is None else to_cute_tensor(gather4_desc),
-            None,  # page_table
-            None,  # seqused_k
+            None if page_table is None else to_cute_tensor(page_table),
+            None if seqused_k is None else to_cute_tensor(seqused_k),
             to_cute_tensor(case["cu_seqlens_q"]),
             to_cute_tensor(case["cu_seqlens_k"]),
             Float32(case["softmax_scale"]),
@@ -453,8 +503,8 @@ def compiled_sparse_atten_nvfp4_kv(case: dict):
             lse_temperature,
             q_flat,
             gather4_desc,
-            None,
-            None,
+            page_table,
+            seqused_k,
             case["cu_seqlens_q"],
             case["cu_seqlens_k"],
             case["softmax_scale"],

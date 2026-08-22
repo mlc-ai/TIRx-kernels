@@ -108,8 +108,8 @@ point each port backs (`activation`, `quantization`, `norm` — CuTe-DSL backend
 | ------------------------------------------ | ----------------------------------- | ---------- |
 | `msa_sparse_prepare_flat_schedule_sm100`   | `sparse_prepare_flat_schedule.py`   | Flat work-list preparation for sparse attention |
 | `msa_sparse_prepare_fwd_split_atomic_sm100` | `sparse_prepare_fwd_split_atomic.py` | Forward split-slot preparation (packed `q_idx`/slot metadata) |
-| `msa_sparse_atten_fwd_sm100`               | `sparse_atten_fwd.py`               | CSR block-sparse attention forward, split-partial output |
-| `msa_sparse_atten_fwd_nvfp4_kv_sm100`      | `sparse_atten_fwd_nvfp4_kv.py`      | CSR block-sparse attention forward over NVFP4 K/V |
+| `msa_sparse_atten_fwd_sm100`               | `sparse_atten_fwd.py`               | CSR block-sparse attention forward, split-partial output, flat or paged KV |
+| `msa_sparse_atten_fwd_nvfp4_kv_sm100`      | `sparse_atten_fwd_nvfp4_kv.py`      | CSR block-sparse attention forward over NVFP4 K/V, flat or paged |
 
 ## Performance
 

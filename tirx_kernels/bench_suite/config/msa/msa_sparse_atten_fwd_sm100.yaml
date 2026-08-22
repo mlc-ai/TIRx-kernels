@@ -11,3 +11,7 @@ configs:
   - {config: fp8kv_s16384_qh4_t16, default: false}
   - {config: fp8_pvbf16_s8192_qh8_t8, default: false}
   - {config: edge_b1_s1024_bf16_t4, default: false}
+  - {config: paged_ring48k_bf16_qh16_t16, default: false}
+  - {config: paged_seqused_bf16_s16384_qh4_t16, default: false}
+  - {config: paged_fp8_s16384_qh16_t16, default: false}
+  - {config: paged_edge_b1_s2048_bf16_t4, default: false}

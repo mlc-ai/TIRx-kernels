@@ -46,8 +46,6 @@ every specialization in this port:
 | `head_dim` | 128 | `__init__` raises otherwise (`:75-79`) |
 | `n_block_size` | 128 | the KV block width the schedule is built around |
 | `m_block_size` | 128 | 128 packed Q heads per MMA tile |
-| `causal` | `True` | every upstream test and benchmark sets it; it is a real codegen axis (`:173-181`) |
-| `paged_kv` | `False` | out of scope, see below |
 | `use_prepare_scheduler` | `True` | `__init__` raises otherwise (`:96-98`) |
 
 In scope, i.e. the specializations this module compiles:
@@ -56,21 +54,17 @@ In scope, i.e. the specializations this module compiles:
 | --- | --- | --- |
 | `qheadperkv` | 1, 2, 4 / 8, 16 | selects **the whole Q-load warpgroup program**: `use_q_gather4` (`:81`) picks a raw gather4 descriptor path for 1/2/4 and a CUTE-managed TMA path for 8/16. Also sets `q_tokens_per_group = 128 // qheadperkv` (`:108`) and `tokens_per_gather4 = 4 // qheadperkv` (`:87`). |
 | dtype combination | `bf16`, `fp8`, `bf16q_fp8kv`, `fp8_pvbf16` | resolved at trace time (`:318-364`) into `qk_dtype`/`pv_dtype`, the two `mma_kind` strings, and `k_fp8_to_bf16`/`v_fp8_to_bf16`, which add a shared-memory dequantization pass to the softmax warpgroups |
-| `partial_dtype` | fp32, bf16, fp8 e4m3 | three distinct epilogue store paths: 4-lane, 8-lane, 16-lane 128-bit stores with three different swizzle-inverse column remaps (`:2772-2984`) |
+| `partial_dtype` | fp32, bf16, **fp16**, fp8 e4m3 | three store WIDTHS -- 4-lane, 8-lane, 16-lane 128-bit stores with three different swizzle-inverse column remaps (`:2772-2984`) -- but FOUR programs: bf16 and fp16 share the 8-lane width and the remap yet take different converters, `cvt.rn.bf16.f32` against `cvt.rn.f16.f32`, dispatched by `const_expr` at `:2868-2884`. Measured on this kernel's own exports: `cvt.rn.f16.f32` 0 -> 128, `st.global.cs.v4.f32` 32 -> 0, `st.global.cs.v4.b32` 0 -> 16, `rcp.approx` 32 -> 16. |
 | temperature LSE | on / off | `mLSE_temperature_partial is not None` adds one scaled row-sum reduction, one `sScaleTemperature` publish and one extra LSE store |
+| `paged_kv` | `False` / `True` | `page_table is not None` at the host entry (`interface.py:1670`). Requires `page_size == blk_kv` (`:99-107`), so a CTA's KV block is exactly one page. K/V become `[num_pages, head_kv, page_size, 128]`, permuted in-trace by `layout_t = [2, 3, 1, 0]` (`:380-397`); the KV descriptors become rank 4, `k_batch_offset` becomes 0, and thread 0 resolves `mPageTable[batch, kv_block]` into `sPagedKvIdx` (`:903-906`). Nothing else moves: the MMA warp, both softmax warpgroups and the whole epilogue carry no paged branch. |
+| `has_seqused_k` | `False` / `True` | paged-only at the host entry (`interface.py:251-253`). The plumbing change is one expression -- `_logical_seqlen_k` returns `mSeqUsedK[batch]` ahead of the paged-capacity and `cu_seqlens_k` fallbacks (`:204-212`) -- and everything downstream already reads the derived value. But it also opens a **numeric regime the other two arms cannot reach**: with a supplied length shorter than `seqlen_q`, `causal_q_offset` goes negative and the leading `seqlen_q - mSeqUsedK[b]` queries are fully masked by design, storing `O = 0` and `LSE = -inf`. See the correctness contract; a port that clamps that row to a finite value diverges. |
+| `causal` | `False` / `True` | `num_regs_softmax` 176 -> 192, `num_regs_store` 112 -> 80, `ex2_emu_freq` 16 -> 0 (`:173-184`); the diagonal binary search is skipped and `causal_q_offset` is pinned to `Int32(0)` rather than computed (`:893-901`); the mask keeps only its column limit. |
 
 Out of scope, with the predicate that excludes each:
 
-- **paged KV** -- `page_table is not None` at the host entry; requires
-  `page_size == blk_kv` (`:99-105`) and swaps in a rank-4 descriptor plus
-  `PagedKVManager` block indirection.
-- **`seqused_k`** -- `seqused_k is not None`; replaces `_logical_seqlen_k`'s
-  `cu_seqlens_k` difference with a per-batch lookup (`:208-212`).
-- **`causal=False`** -- never exercised upstream; it would change
-  `num_regs_softmax` 176 -> 192, `num_regs_store` 112 -> 80, and
-  `ex2_emu_freq` 16 -> 0, i.e. remove the polynomial exp2 mixing entirely.
-- **fp16 partials** -- accepted by the dtype check at `:372-377` but never
-  exercised upstream; it shares the bf16 8-lane store path.
+- **`page_size != blk_kv`** -- rejected at `:99-107`; the equality is what makes
+  a CTA's KV block exactly one page, and the whole paged path assumes it.
+- **`head_dim != 128`** -- `__init__` raises (`:75-79`).
 - **the NVFP4-KV sibling** `SparseAttentionForwardNvfp4KvSm100`
   (`atten_fwd_nvfp4_kv.py`) -- a separate class with its own compile key.
 - **the combine kernel** `fwd/combine.py` -- a downstream consumer.
@@ -79,7 +73,7 @@ Out of scope, with the predicate that excludes each:
 ## The line-info export this sketch is annotated from
 
 Every `instruction_selection` annotation below is read out of a line-info PTX
-export, not out of the source text. Six exports, one per structurally distinct
+export, not out of the source text. Ten exports, one per structurally distinct
 in-scope compile key, are preserved under
 `.porting/sparse_atten_fwd/ptx_lineinfo/<name>/` together with the
 `analysis.txt` each was summarized into; `.porting/sparse_atten_fwd/export_findings.md`
@@ -210,18 +204,23 @@ primitives named `attention`, `softmax`, `mask`, `online_update`, `TMA`,
     Q_TOKENS_PER_GROUP=128 // QHEADPERKV,           # :108
     TOKENS_PER_GATHER4=(4 // QHEADPERKV) if USE_Q_GATHER4 else 0,   # :87
     DTYPE_MODE=("bf16", "fp8", "bf16q_fp8kv", "fp8_pvbf16"),
-    PARTIAL_DTYPE=("f32", "bf16", "fp8e4m3"),
+    PARTIAL_DTYPE=("f32", "bf16", "fp16", "fp8e4m3"),
     RETURN_TEMPERATURE_LSE=(False, True),
-    CAUSAL=True,
-    PAGED_KV=False,
-    HAS_SEQUSED_K=False,
+    CAUSAL=(False, True),
+    PAGED_KV=(False, True),
+    HAS_SEQUSED_K=(False, True),   # paged-only at the host entry
     Q_STAGE=2, S_STAGE=2, O_STAGE=2, KV_STAGE=1,    # :116-119
     K_STAGES=2,                                     # Q k-subtiles, :125
     QIDX_META_STAGES=16,                            # :123
     SPLIT_P_ARRIVE=96,                              # 128//4*3, floored to 32, :165-167
-    EX2_EMU_FREQ=16,                                # causal only, :180
+    EX2_EMU_FREQ=16 if CAUSAL else 0,               # :180-184
     EX2_EMU_START_FRG=1,                            # :181
-    NUM_REGS_SOFTMAX=176, NUM_REGS_STORE=112, NUM_REGS_OTHER=48,   # :173-178
+    # The register split is a causal axis, not a constant (:173-178). Softmax
+    # gains what store gives up, so the two must move together or the launch
+    # exceeds its budget.
+    NUM_REGS_SOFTMAX=176 if CAUSAL else 192,
+    NUM_REGS_STORE=112 if CAUSAL else 80,
+    NUM_REGS_OTHER=48,
     CTA_GROUP=1, CLUSTER=(1, 1, 1),                 # :184-188
     target="sm_100a",
 )
@@ -255,6 +254,14 @@ def msa_sparse_atten_fwd_sm100(
     lse_partial,          # f32 [topk, total_q, head_q], OUTPUT, uninitialized
     lse_temperature_partial,   # f32 [topk, total_q, head_q], OUTPUT, optional
     q_flat,               # bf16|fp8 [total_q*head_q, 128], input
+    page_table,           # i32 [num_batches, pages_per_seq], input, PAGED_KV only
+                          #   -- present exactly like lse_temperature_partial is:
+                          #   the handle is added with the axis and removed
+                          #   without it, so a flat specialization's signature is
+                          #   unchanged (:306-307, :653-654)
+    seqused_k,            # i32 [num_batches], input, HAS_SEQUSED_K only
+                          #   -- accepted only alongside page_table
+                          #   (interface.py:251-253)
     cu_seqlens_q,         # i32 [num_batches + 1], input
     cu_seqlens_k,         # i32 [num_batches + 1], input
     softmax_scale,        # f32; the kernel forms softmax_scale_log2 at trace time (:514)
@@ -319,8 +326,18 @@ def msa_sparse_atten_fwd_sm100(
     # The K/V descriptors see permuted views, built at trace time (:378-387):
     #   K: [total_k, h, d] -> [total_k, d, h]      (K-major B operand)
     #   V: [total_k, h, d] -> [d, total_k, h]      (MN-major B operand)
-    K_desc_view = view(K, KV_DTYPE, [total_k, 128, num_heads_kv])
-    V_desc_view = view(V, KV_DTYPE, [128, total_k, num_heads_kv])
+    if PAGED_KV:
+        # Rank is a property of the tensor, so the paged forms are declared, not
+        # implied: the four-index subscripts in the paged KV-load arms bind here.
+        K = tile("gmem", k, KV_DTYPE, [num_pages, num_heads_kv, 128, 128], alignment=16)
+        V = tile("gmem", v, KV_DTYPE, [num_pages, num_heads_kv, 128, 128], alignment=16)
+        #   K: [page, h, tok, d] -> [tok, d, h, page]   (:388-395, layout_t=[2,3,1,0])
+        #   V: same, then [1,0,2,3]  -> [d, tok, h, page]
+        K_desc_view = view(K, KV_DTYPE, [128, 128, num_heads_kv, num_pages])
+        V_desc_view = view(V, KV_DTYPE, [128, 128, num_heads_kv, num_pages])
+    else:
+        K_desc_view = view(K, KV_DTYPE, [total_k, 128, num_heads_kv])
+        V_desc_view = view(V, KV_DTYPE, [128, total_k, num_heads_kv])
 
     Idx   = tile("gmem", k2q_q_indices,      "i32", [num_heads_kv, nnz])
     QSpl  = tile("gmem", k2q_qsplit_indices, "i32", [num_heads_kv, nnz])
@@ -330,6 +347,10 @@ def msa_sparse_atten_fwd_sm100(
     LpT   = tile("gmem", lse_temperature_partial, "f32", [topk, total_q, head_q])
     CuQ   = tile("gmem", cu_seqlens_q, "i32", [num_batches + 1])
     CuK   = tile("gmem", cu_seqlens_k, "i32", [num_batches + 1])
+    # Present only in their specializations; absent from the signature otherwise.
+    PageTable = tile("gmem", page_table, "i32", [num_batches, pages_per_seq])  # PAGED_KV
+    SeqUsedK  = tile("gmem", seqused_k,  "i32", [num_batches])                 # HAS_SEQUSED_K
+    pages_per_seq = PageTable.shape[1]   # upstream reads it off the tensor (:211)
 
     # =======================================================================
     # Shared memory: one dynamic pool.  Sizes for BF16 / QHEADPERKV=16.
@@ -379,7 +400,9 @@ def msa_sparse_atten_fwd_sm100(
     sRowMeta     = view(smem, "i32", [8])
     #   0 batch, 1 kv_block, 2 row_start, 3 count_raw, 4 kv_valid_cols,
     #   5 q_batch_off, 6 k_batch_off, 7 causal_q_offset
-    sPagedKvIdx  = view(smem, "i32", [1])                    # unused, PAGED_KV=False
+    sPagedKvIdx  = view(smem, "i32", [1])   # allocated unconditionally (:581);
+                                            # written by thread 0 and read by
+                                            # both KV-load arms under PAGED_KV
     sQLoadMIdx   = view(smem, "i32", [Q_STAGE, Q_TOKENS_PER_GROUP])
     #   Allocated unconditionally (:582-583) even though only the TMA-Q body
     #   reads it; its bytes are part of every footprint above.
@@ -516,16 +539,34 @@ def msa_sparse_atten_fwd_sm100(
         row_start = base_row_start + work_q_begin
         count_raw = work_q_count
 
-        # kv_valid_cols = clamp(seqlen_k - kv_block*128, 0, 128)   (:215-229)
-        seqlen_k = load_global(CuK, batch_idx + 1) - load_global(CuK, batch_idx)
-        # instruction_selection: ld.global.u32 x2 (:212, 2 static); extent: scalar.
+        # The logical K length, in the source's own priority order (:204-212).
+        # Only one arm survives per specialization.
+        if HAS_SEQUSED_K:
+            seqlen_k = load_global(SeqUsedK, batch_idx)
+            # instruction_selection: ld.global.u32 (1 static); extent: scalar.
+            #   Wins over both fallbacks: an implementation that checked PAGED
+            #   first would silently take the paged capacity instead.
+        elif PAGED_KV:
+            seqlen_k = pages_per_seq * 128
+            # instruction_selection: integer multiply only, no load; extent:
+            #   scalar.  `pages_per_seq` is `mPageTable.shape[1]` upstream. This
+            #   is the FULL paged capacity, zero-padded tail pages included,
+            #   which is why the host may omit `seqused_k` only when every
+            #   effective length already equals its capacity.
+        else:
+            seqlen_k = load_global(CuK, batch_idx + 1) - load_global(CuK, batch_idx)
+            # instruction_selection: ld.global.u32 x2 (:212, 2 static); extent: scalar.
         kv_valid_cols = min(max(seqlen_k - kv_block_idx * 128, 0), 128)
         q_batch_offset = load_global(CuQ, batch_idx)
         # instruction_selection: ld.global.u32 (:198, 1 static); extent: scalar.
-        k_batch_offset = load_global(CuK, batch_idx)
-        # instruction_selection: none -- CSE'd into the :212 pair above, which
-        #   already loads CuK[batch_idx].  The module's ld.global count is
-        #   exactly 14 with no instruction for :883.
+        k_batch_offset = 0 if PAGED_KV else load_global(CuK, batch_idx)
+        # instruction_selection: flat -- none; CSE'd into the :212 pair above,
+        #   which already loads CuK[batch_idx].  The flat module's ld.global
+        #   count is exactly 14 with no instruction for :883.  Paged -- the
+        #   value is the immediate 0 (:880-884), and there is no CuK load left
+        #   to fold into on EITHER paged sub-case: `_logical_seqlen_k` takes the
+        #   seqused arm or the capacity multiply, so `.loc 1 212` is absent from
+        #   both paged exports (ld.global.u32 12 paged vs 13 flat).
 
         store_shared(sRowMeta, 0..6,
                      [batch_idx, kv_block_idx, row_start, count_raw,
@@ -534,10 +575,16 @@ def msa_sparse_atten_fwd_sm100(
         #   4-word vector store.  The source writes seven separate scalar
         #   `sRowMeta[i] = ...` statements (:885-891); the backend merges them.
 
-        # causal_q_offset = seqlen_k - seqlen_q, needed by the mask (:892-901)
-        seqlen_q = load_global(CuQ, batch_idx + 1) - q_batch_offset
-        # instruction_selection: ld.global.u32 (:894, 1 static); extent: scalar.
-        causal_q_offset = seqlen_k - seqlen_q
+        # causal_q_offset = seqlen_k - seqlen_q, needed by the mask (:892-901).
+        # The source computes it ONLY under `const_expr(self.causal)` and leaves
+        # it Int32(0) otherwise -- the whole block, the CuQ load included, is
+        # gone from a non-causal specialization.
+        if CAUSAL:
+            seqlen_q = load_global(CuQ, batch_idx + 1) - q_batch_offset
+            # instruction_selection: ld.global.u32 (:894, 1 static); extent: scalar.
+            causal_q_offset = seqlen_k - seqlen_q
+        else:
+            causal_q_offset = 0
 
         store_shared(sRowMeta, 7, causal_q_offset)
         # instruction_selection: st.shared.v4.u32 (:902, 1 static); extent: a
@@ -545,6 +592,19 @@ def msa_sparse_atten_fwd_sm100(
         #   the two v4 stores are separated by it, so a port that merges all
         #   eight fields into one store would have to sink the seqlen_q load
         #   above them and change the dependence order.
+
+        if PAGED_KV:
+            page_idx = load_global(PageTable, batch_idx * pages_per_seq + kv_block_idx)
+            # instruction_selection: ld.global.u32 (1 static); extent: scalar.
+            #   `PagedKVManager.physical_block_index` is exactly this indexed
+            #   read (paged_kv.py:60-65); its other two methods are dead, each
+            #   kernel reimplementing them.
+            store_shared(sPagedKvIdx, 0, page_idx)
+            # instruction_selection: st.shared.u32 (1 static); extent: scalar.
+            #   A single scalar store, NOT folded into either sRowMeta vector
+            #   store: it targets a different array.  It rides the same
+            #   thread-0 region and the same publish fence below, so paging
+            #   adds no barrier of its own.
 
         init_pipe(mbar_k[0], arrivals=1)
         # instruction_selection: mbarrier.init.shared.b64 (:907, 1 static); extent: scalar.
@@ -569,9 +629,12 @@ def msa_sparse_atten_fwd_sm100(
 
         # The causal diagonal split point: how many of this row's tokens still
         # need per-column causal masking.  A 32-step binary search over the CSR
-        # row, which is sorted by q_idx (:259-285).
+        # row, which is sorted by q_idx (:259-285).  The whole region sits
+        # inside `const_expr(self.causal)` AND, within it, behind the runtime
+        # guard below; under `causal=False` it is compiled out entirely and the
+        # `sDiagQCount` store below writes the constant 0.
         diag_q_count = 0
-        if count_raw > 0 and kv_valid_cols > 0:
+        if CAUSAL and count_raw > 0 and kv_valid_cols > 0:
             q_threshold = (kv_block_idx * 128 + kv_valid_cols) - causal_q_offset
             left, right = 0, count_raw
             for _ in range(32):                    # `unroll=1`, and it stays rolled
@@ -614,10 +677,13 @@ def msa_sparse_atten_fwd_sm100(
     # ROLE: Q-load warpgroup, warps 8..11.  Independent `if` on a THREAD range.
     # =======================================================================
     if 8 * 32 <= tid < 12 * 32 and cta_valid_work:
-        set_register_budget("decrease", NUM_REGS_STORE)     # 112 on the causal path
-        # instruction_selection: setmaxnreg.dec.sync.aligned.u32 (:1001, 1 static);
-        #   extent: warpgroup.  `store_reg_decrease` is True whenever
-        #   NUM_REGS_STORE <= 128 (:179), which the causal specialization is.
+        set_register_budget("decrease", NUM_REGS_STORE)     # 112 causal / 80 not
+        # instruction_selection: setmaxnreg.**dec**.sync.aligned.u32, 1 static;
+        #   extent: warpgroup.  Operand follows CAUSAL: 112 causal, 80
+        #   non-causal (:174), both measured.  `store_reg_decrease` is
+        #   `num_regs_store <= 128` (:179), which holds on BOTH arms -- so the
+        #   `setmaxregister_increase` alternative at :1003 is unreachable across
+        #   the entire in-scope domain, not merely on the causal path.
 
         row_start, count_raw = load_shared(sRowMeta, 2..3)
         # instruction_selection: ld.shared.v2.u32 (:1004, 1 static); extent: two
@@ -855,55 +921,120 @@ def msa_sparse_atten_fwd_sm100(
         set_register_budget("decrease", NUM_REGS_OTHER)     # 48
         # instruction_selection: setmaxnreg.dec.sync.aligned.u32 (:1054, 1 static);
         #   extent: warp-wide.
-        kv_block = load_shared(sRowMeta, 1)
-        # instruction_selection: ld.shared.u32 (:1055, 1 static); extent: scalar.
-        k_batch_offset = load_shared(sRowMeta, 6)
-        # instruction_selection: ld.shared.u32 (:1056, 1 static); extent: scalar.
+        if not PAGED_KV:
+            kv_block = load_shared(sRowMeta, 1)
+            # instruction_selection: ld.shared.u32 (.loc 1 1055, 1 static);
+            #   extent: scalar.  FLAT ONLY.
+            k_batch_offset = load_shared(sRowMeta, 6)
+            # instruction_selection: ld.shared.u32 (.loc 1 1056, 1 static);
+            #   extent: scalar.  FLAT ONLY.
         has_work = load_shared(sRowMeta, 3) > 0
-        # instruction_selection: ld.shared.u32 (:1057, 1 static); extent: scalar.
-        #   These three stay three separate scalar loads -- unlike the Q-load
-        #   warpgroup's sRowMeta[2..3], which the backend merged into a v2.
-
+        # instruction_selection: ld.shared.u32 (.loc 1 1057, 1 static); extent:
+        #   scalar.
+        #   A FLAT build emits three separate scalar loads here -- they stay
+        #   separate, unlike the Q-load warpgroup's sRowMeta[2..3], which the
+        #   backend merged into a v2.  A PAGED build emits exactly ONE: the
+        #   paged copy takes its block from `sPagedKvIdx` and its batch offset
+        #   is the immediate 0, so both values become dead and the loads are
+        #   deleted outright, not merely unused.  Measured: `.loc 1 1055` and
+        #   `.loc 1 1056` are absent from the paged export and from the
+        #   non-causal paged one, while `.loc 1 1054` and `.loc 1 1057` survive.
         if not has_work:
             return
         warp_in_role = warp - 13
         if warp_in_role == 0:
-            if K_FP8_TO_BF16:
-                copy_g2s(K_desc_view[kv_block, :, head_kv_idx], sKFp8,
-                         bar=mbar_k_tma[0])
-                with elect():
-                    commit(mbar_k_tma[0])
-            else:
-                copy_g2s(K_desc_view[kv_block, :, head_kv_idx], sK, bar=mbar_k[0])
-                # instruction_selection: cp.async.bulk.tensor.**3d**
+            page_idx = load_shared(sPagedKvIdx, 0) if PAGED_KV else None
+            # instruction_selection: ld.shared.u32 (.loc 1 1569, 1 static in
+            #   THIS arm); extent: scalar.  Each KV-load warp reads the cell in
+            #   its own arm -- the module carries TWO such loads, :1569 here and
+            #   :1610 in the V arm -- and both sit after the `has_work`
+            #   early-out, so a no-work CTA performs no shared read at all.
+            #   Within an arm the value is read once and reused by both subtile
+            #   issues.  On the FP8-staging path the same cell is read at
+            #   :1336 (K) / :1412 (V) instead.
+
+            # PAGED_KV and K_FP8_TO_BF16 are ORTHOGONAL in the source
+            # (:1332-1340): the paged test is nested INSIDE the fp8 test, so
+            # all four combinations exist and `paged x fp8` is a required
+            # perf-gate config. Selecting the descriptor rank with an `elif`
+            # against the staging test would send `paged + fp8` down the rank-3
+            # arm and encode a rank-3 descriptor against a rank-4 tensor.
+            dst, bar = (sKFp8, mbar_k_tma[0]) if K_FP8_TO_BF16 else (sK, mbar_k[0])
+            if PAGED_KV:
+                copy_g2s(K_desc_view[0, :, head_kv_idx, page_idx], dst, bar=bar)
+                # instruction_selection: cp.async.bulk.tensor.**4d**
                 #   .shared::cluster.global.tile.mbarrier::complete_tx::bytes
-                #   .L2::cache_hint under elect.sync (:1571, 2 static each);
-                #   extent: the CTA's single 128x128 K tile, issued as TWO
-                #   instructions.  Rank 3, not 2: the KV-head axis stays in the
-                #   descriptor rather than being folded into the base address.
-                with elect():
-                    commit(mbar_k[0])
-                    # instruction_selection: mbarrier.arrive.release.cta
-                    #   .shared::cta.b64 (:1580, 1 static); extent: scalar, one
-                    #   lane.  The transaction-byte count was already promised
-                    #   by thread 0's prologue expect_tx, so this is a plain
-                    #   arrive, not an arrive-and-expect.
-        if warp_in_role == 1:
-            if V_FP8_TO_BF16:
-                copy_g2s(V_desc_view[:, kv_block, head_kv_idx], sVFp8,
-                         bar=mbar_v_tma[0])
-                with elect():
-                    commit(mbar_v_tma[0])
+                #   .L2::cache_hint under elect.sync.  PAGED_KV selects ONLY the
+                #   rank and the coordinate tuple:
+                #   `(head_dim_offset, token_in_page, head_kv, page)` with the
+                #   token coordinate pinned to 0; the export's second subtile
+                #   `{64, 0, head, page}` is what fixes that order.
+                #   The SITE, the ISSUE COUNT and the TRANSACTION BYTES follow
+                #   `dst`, not the rank -- see the shared note below.
             else:
-                copy_g2s(V_desc_view[:, kv_block, head_kv_idx], sV, bar=mbar_v[0])
+                copy_g2s(K_desc_view[kv_block, :, head_kv_idx], dst, bar=bar)
+                # instruction_selection: cp.async.bulk.tensor.**3d**, same
+                #   modifiers.  Rank 3, not 2: the KV-head axis stays in the
+                #   descriptor rather than being folded into the base address.
+            # instruction_selection, shared by both arms above -- THREE of the
+            #   four properties follow `dst`, not `PAGED_KV`:
+            #     not K_FP8_TO_BF16 -> sK, the 128B-SWIZZLED MMA operand.
+            #       .loc 1 1571 (K) / .loc 1 1612 (V); **2 static**, because a
+            #       128-wide swizzled tile is two 64-column sub-tiles;
+            #       **32768** transaction bytes, promised at .loc 1 913 / :918.
+            #     K_FP8_TO_BF16     -> sKFp8, the PLAIN un-swizzled staging tile
+            #       `(n_block_size, head_dim)`.  .loc 1 1361 (K) / .loc 1 1437
+            #       (V); **1 static**, one whole-tile box, no sub-tile split;
+            #       **16384** transaction bytes, promised at .loc 1 911 / :916.
+            #   `.loc 1 1571` is absent from a staging export and `.loc 1 1361`
+            #   from every non-staging one.  Issuing two 64-column sub-tile
+            #   TMAs into the plain staging layout writes the WRONG BYTES -- and
+            #   `fp8kv_s16384_qh4_t16` and `paged_fp8_s16384_qh16_t16` are both
+            #   required perf-gate rows, so neither combination is hypothetical.
+            with elect():
+                commit(bar)
+                # instruction_selection: mbarrier.arrive.release.cta
+                #   .shared::cta.b64, 1 static; extent: scalar, one lane.
+                #   The SOURCE SITE follows `bar`, because this one line now
+                #   stands for all four PAGED_KV x staging combinations:
+                #     not K_FP8_TO_BF16 -> `mbar_k[0]`,     .loc 1 1580
+                #     K_FP8_TO_BF16     -> `mbar_k_tma[0]`, .loc 1 1367
+                #   `.loc 1 1580` is ABSENT from a staging export and `.loc 1
+                #   1367` from a non-staging one, so checking for the wrong one
+                #   makes the arrive look missing -- which is how it came to be
+                #   dropped from the paged arm in the first place.
+                #   OUTSIDE the paged/flat conditional in the source: it runs on
+                #   every path. An arm that omitted it would never signal the
+                #   barrier, and the MMA warp's wait would hang.
+                #   The transaction-byte count was already promised by thread
+                #   0's prologue expect_tx, so this is a plain arrive.
+        if warp_in_role == 1:
+            page_idx = load_shared(sPagedKvIdx, 0) if PAGED_KV else None
+            # instruction_selection: ld.shared.u32 (.loc 1 1610, 1 static in
+            #   THIS arm); extent: scalar.  The V warp's own read -- see the K
+            #   arm for why there are two and not one.
+            dst, bar = (sVFp8, mbar_v_tma[0]) if V_FP8_TO_BF16 else (sV, mbar_v[0])
+            if PAGED_KV:
+                copy_g2s(V_desc_view[:, 0, head_kv_idx, page_idx], dst, bar=bar)
+                # instruction_selection: cp.async.bulk.tensor.4d, same
+                #   modifiers; MN-major.  Mirror image of the paged K issue:
+                #   PAGED_KV selects only the rank and the coordinate tuple.
+                #   Site, issue count and transaction bytes follow `dst` --
+                #   .loc 1 1612 / 2 static / 32768 for `sV`, .loc 1 1437 /
+                #   1 static / 16384 for `sVFp8`, exactly as on the K side.
+            else:
+                copy_g2s(V_desc_view[:, kv_block, head_kv_idx], dst, bar=bar)
                 # instruction_selection: cp.async.bulk.tensor.3d
                 #   .shared::cluster.global.tile.mbarrier::complete_tx::bytes
-                #   .L2::cache_hint under elect.sync (:1612, 2 static each);
+                #   .L2::cache_hint under elect.sync (.loc 1 1612, 2 static);
                 #   extent: the CTA's single 128x128 V tile, MN-major.
-                with elect():
-                    commit(mbar_v[0])
-                    # instruction_selection: mbarrier.arrive.release.cta
-                    #   .shared::cta.b64 (:1621, 1 static); extent: scalar.
+            with elect():
+                commit(bar)
+                # instruction_selection: mbarrier.arrive.release.cta
+                #   .shared::cta.b64, 1 static; extent: scalar.  Source site
+                #   follows `bar`, as on the K side: `.loc 1 1621` when
+                #   `mbar_v[0]`, `.loc 1 1443` when `mbar_v_tma[0]`.
+                #   Outside the paged/flat conditional.
         if K_FP8_TO_BF16 or V_FP8_TO_BF16:
             named_barrier_arrive_and_wait(kv_load_bar)
             # instruction_selection: bar.sync, named, 64 threads (:1485);
@@ -1134,10 +1265,22 @@ def msa_sparse_atten_fwd_sm100(
         #   reads sRowMeta[1] and sRowMeta[3] as separate statements.
         kv_valid_cols     = load_shared(sRowMeta, 4)
         # instruction_selection: ld.shared.u32 (:1121 / :1183, 1 static); extent: scalar.
-        causal_q_offset   = load_shared(sRowMeta, 7)
-        # instruction_selection: ld.shared.u32 (:1122 / :1184, 1 static); extent: scalar.
-        diag_q_count      = load_shared(sDiagQCount, 0)
-        # instruction_selection: ld.shared.u32 (:1127 / :1189, 1 static); extent: scalar.
+        if CAUSAL:
+            causal_q_offset   = load_shared(sRowMeta, 7)
+            # instruction_selection: ld.shared.u32 (.loc 1 1122 / :1184, 1
+            #   static each); extent: scalar.  CAUSAL ONLY.
+            diag_q_count      = load_shared(sDiagQCount, 0)
+            # instruction_selection: ld.shared.u32 (.loc 1 1127 / :1189, 1
+            #   static each); extent: scalar.  CAUSAL ONLY.
+            #   Both are consumed only by the `const_expr(self.causal)` arm at
+            #   :2478-2519, so a non-causal build emits NEITHER -- measured 0
+            #   static for all four `.loc`s, and whole-module `ld.shared.u32`
+            #   92 -> 88.  Note the asymmetry: the PRODUCER side survives.
+            #   `st.shared.v4.u32` at :902 (sRowMeta[7]) and `st.shared.u32` at
+            #   :935 (sDiagQCount) are still emitted in a non-causal build,
+            #   storing the constant 0; only the reads die.
+        else:
+            causal_q_offset, diag_q_count = 0, 0
         q_batch_offset    = load_shared(sRowMeta, 5)
         # instruction_selection: ld.shared.u32 (:1170 / :1232, 1 static); extent: scalar.
         has_work = count_raw > 0
@@ -1220,7 +1363,9 @@ def msa_sparse_atten_fwd_sm100(
     # -----------------------------------------------------------------------
     def softmax_wg_loop(stage):
         group_tidx = tid - stage * 128              # 0..127; this thread's M row
-        kv_block_col_start = kv_block_idx * 128     # causal only
+        kv_block_col_start = (kv_block_idx * 128) if CAUSAL else 0
+        # Computed only on the causal arm; the source const_expr-splits the
+        # `_softmax_step` call site and passes literal Int32(0) otherwise.
         num_stage_groups = (num_q_groups + (1 - stage)) // 2
         # WG0 takes Q groups 0, 2, 4, ...; WG1 takes 1, 3, 5, ...
 
@@ -1233,9 +1378,25 @@ def msa_sparse_atten_fwd_sm100(
             softmax_reset()                         # row_max = -inf, row_sum = 0
 
             # How many of this group's tokens still sit on the causal diagonal.
-            qi_group_start = qi_group * Q_TOKENS_PER_GROUP
-            masked_tok_count = clamp(diag_q_count - qi_group_start,
-                                     0, Q_TOKENS_PER_GROUP)
+            # The source const_expr-SPLITS this call site (:2478 causal vs
+            # :2521 non-causal) and the non-causal arm passes literal `Int32(0)`
+            # for BOTH `masked_tok_count` (:2543) and `causal_q_offset` (:2547),
+            # with `apply_causal_mask=False` (:2551).
+            # What removes the causal-mask arm inside `_softmax_step` is the
+            # COMPILE-TIME predicate `const_expr(self.causal and
+            # apply_causal_mask)` at :2246 -- not the value of `diag_q_count`.
+            # Under `causal=True` that arm is emitted no matter what
+            # `masked_tok_count` happens to be, and `need_causal_mask =
+            # masked_tok_count > 0` is a genuine runtime branch inside it.
+            # The literal `Int32(0)` for `causal_q_offset` is separately what
+            # kills the `sRowMeta[7]` read and folds `seq_len_q +
+            # causal_q_offset` at :2235 down to `seq_len_q`.
+            if CAUSAL:
+                qi_group_start = qi_group * Q_TOKENS_PER_GROUP
+                masked_tok_count = clamp(diag_q_count - qi_group_start,
+                                         0, Q_TOKENS_PER_GROUP)
+            else:
+                masked_tok_count = 0
 
             softmax_step(stage, phase, producer_phase, masked_tok_count, ...)
 
@@ -1271,10 +1432,26 @@ def msa_sparse_atten_fwd_sm100(
             # instruction_selection: ld.shared.u32 (:2251, 2 static); extent: scalar.
             causal_col_limit = q_idx + causal_q_offset - kv_block_col_start + 1
             select(rS, col < min(kv_valid_cols, causal_col_limit), rS, -inf)
-            # instruction_selection: shl.b32 to build the r2p chunk bitmask, then
+            # instruction_selection: the r2p chunk bitmask is
+            #   `0xFFFFFFFF >> max((s+1)*32 - col_limit, 0)`, emitted as
+            #   sub.s32 + max.s32 (mask.py:20, 8 static each = four r2p chunks
+            #   x two warpgroup copies) feeding an **inline-PTX shr.u32**
+            #   (utils.py:452-467).  NOT a shl, and not a plain CuTeDSL shift:
+            #   the helper documents that a normal shift carries LLVM
+            #   shift-by-type-width UB, and this axis is exactly where that
+            #   bites.  Under HAS_SEQUSED_K the offset goes negative, so
+            #   `causal_col_limit <= 0` for the leading `seqlen_q -
+            #   mSeqUsedK[b]` queries and the shift amount reaches >= 32.  PTX
+            #   `shr.u32` clamps to the register width and returns the
+            #   all-zero mask, which is what produces the neutral partial this
+            #   sketch relies on; an LLVM-style shift-by-width is poison there
+            #   and would silently corrupt precisely the band the seqused axis
+            #   introduces.  There is no shift opcode attributed to mask.py:20
+            #   in the export -- the inline asm carries it.  Then
             #   and.b32 per element (mask.py:40, 124 per warpgroup copy = four
             #   32-element r2p chunks x 31 emitted bit tests -- the one whose
-            #   `1 << i` folds is free; 248 across the two copies), then
+            #   `1 << i` folds into the immediate is free; 248 across the two
+            #   copies; there is no `shl` anywhere on this path), then
             #   selp.b32/selp.f32 for the -inf substitution; extent: a
             #   128-element register tile.  `and.b32` at mask.py:40 is the
             #   largest single .loc-attributed opcode group in the whole module
@@ -1339,6 +1516,14 @@ def msa_sparse_atten_fwd_sm100(
         #   because this specialization is causal.  A port that sends all 128
         #   through MUFU has a different instruction mix and a different MUFU
         #   pressure profile.
+        # instruction_selection, NON-CAUSAL (`EX2_EMU_FREQ = 0`):
+        #   `apply_exp2_convert` takes its own `const_expr(ex2_emu_freq == 0)`
+        #   arm (softmax.py:381-383) and sends ALL 128 elements through MUFU --
+        #   no polynomial, and no `fmax(x, -127)` clamp either.  Measured on the
+        #   non-causal export against the causal one: `ex2.approx.ftz.f32`
+        #   224 -> 256, `fma.rn.f32x2` 176 -> 128, `max.f32` 164 -> 132.  The
+        #   predicate above must be short-circuited on the zero frequency
+        #   rather than evaluated -- a modulo by it would divide by zero.
         cast(rP, rS)
         # instruction_selection: cvt.rn.bf16x2.f32 (softmax.py:398, 128 static
         #   = 64 per warpgroup copy); extent: 128 elements as 64 packed
@@ -1486,14 +1671,23 @@ def msa_sparse_atten_fwd_sm100(
                                  cache="streaming")
                         # instruction_selection: st.global.cs.v4.f32 (:2597, 32
                         #   static = 16 per warpgroup copy); extent: 4 fp32 in
-                        #   one 128-bit store.  The bf16/f16 partial path becomes
+                        #   one 128-bit store.  The half paths become
                         #   st.global.cs.v4.b32 of 8 packed halves (:2613-2615)
                         #   with `real_col_to_stg128_half_fake_col`; the fp8 path
                         #   becomes st.global.cs.v4.b32 of 16 packed bytes
                         #   (:2638, 8 static on the fp8-partial export) with
-                        #   `real_col_to_stg128_fp8_fake_col`.  Three different
-                        #   remaps, three different lane counts, one instruction
-                        #   family.
+                        #   `real_col_to_stg128_fp8_fake_col`.
+                        #   bf16 and fp16 share that remap and that lane count
+                        #   but NOT the converter, and the store is only half
+                        #   the operation: `_store_o_partial_vec8_half`
+                        #   const_expr-dispatches on the partial dtype
+                        #   (:2868-2884), taking `stg_128_bf16_cs` with 8 x
+                        #   cvt.rn.bf16.f32 or `stg_128_f16_cs` with 8 x
+                        #   cvt.rn.f16.f32.  Measured on the fp16 export against
+                        #   the fp32 one: cvt.rn.f16.f32 0 -> 128,
+                        #   st.global.cs.v4.f32 32 -> 0, st.global.cs.v4.b32
+                        #   0 -> 16, rcp.approx 32 -> 16 (the reciprocal count
+                        #   follows the store width: 32 fp32, 16 half, 8 fp8).
 
         fence("view_async_tmem_load")
         # instruction_selection: tcgen05.wait::ld.sync.aligned (:2985, 2 static);
@@ -1559,8 +1753,10 @@ computed once.
 
 | map | rank | box | swizzle | built where | notes |
 | --- | --- | --- | --- | --- | --- |
-| K | 3 | `(128, 128)` over `[total_k, 128, head_kv]` | 128B | launcher prologue | `cp.async.bulk.tensor.3d`; the KV-head axis stays in the descriptor |
-| V | 3 | `(128, 128)` MN-major | 128B | launcher prologue | same, after the `[1,0,2]` swap |
+| K, flat | 3 | `(128, 128)` | 128B | launcher prologue | `cp.async.bulk.tensor.3d`. Tensormap dims, fastest-first: `(128, total_k, head_kv)`. Coordinate tuple `(sub*swizzle_elems, kv_row_start, head_kv)`. The KV-head axis stays in the descriptor |
+| K, **paged** | **4** | `(128, 128)` | 128B | launcher prologue | `cp.async.bulk.tensor.4d`. Tensormap dims, fastest-first: `(128, page_size, head_kv, num_pages)`, from the `[2,3,1,0]` host permute (`:380-397`). Coordinate tuple `(sub*swizzle_elems, 0, head_kv, page)`. Paging **appends** the page mode and pins the token coordinate to 0 -- it changes nothing about the first two dims. Same `.tile` load mode, same `mbarrier::complete_tx::bytes`, same `L2::cache_hint`, same 32768 transaction bytes as flat. A rank-3 encode against a rank-4 tensor is silent garbage, so this row is the one the implementation stage must read |
+| V, flat | 3 | `(128, 128)` MN-major | 128B | launcher prologue | dims `(128, total_k, head_kv)` after the `[1,0,2]` swap |
+| V, **paged** | **4** | `(128, 128)` MN-major | 128B | launcher prologue | dims `(128, page_size, head_kv, num_pages)` after the extra `[1,0,2,3]`; coordinate tuple `(sub*swizzle_elems, 0, head_kv, page)`, the K row's mirror |
 | Q (TMA path) | 2 | `(QHEADPERKV, Q_LOAD_TILE)` | 128B | launcher prologue | `Q_LOAD_TILE` = 128 for fp8 Q, else 64 |
 | Q (gather4 path) | 2 | `(box_x, 1)`, `box_x` = 128 for fp8 Q else 64 | 128B | **launcher prologue in the port; a host-built `uint8[128]` kernel argument upstream** | `INTERLEAVE_NONE`, `L2_PROMOTION_256B`, `OOB_FILL_NONE` |
 
@@ -1599,8 +1795,16 @@ compile key serves every shape.
 ## TIRx module and benchmark contract
 
 - `get_kernel(**config)` specializes on `(qhead_per_kv, causal, dtype_mode,
-  partial_dtype)` and removes the temperature output handle when it is absent,
-  then attaches `("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")`.
+  partial_dtype, paged_kv, has_seqused_k)` -- upstream's compile key carries
+  `bool(paged_kv)`, `page_size` and `bool(seqused_k is not None)` as three
+  separate entries (interface.py:1714-1731), and both axes change emitted code,
+  paging additionally changing the TMA rank. It removes the temperature output
+  handle when it is absent and the `page_table` / `seqused_k` input handles the
+  same way, so a flat specialization's signature is byte-for-byte the one it
+  had before the axis existed. Then it attaches
+  `("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")`.
+  `page_size` needs no entry of its own: upstream forces it equal to `blk_kv`
+  (:99-107), which is already fixed at 128.
 - `prepare_data` reuses the split-atomic module's CSR and work-list builders and
   adds Q/K/V plus a **frozen** qsplit assignment: slots `0..degree-1` in CSR
   order per `(q_abs, head_kv)` group. Upstream assigns those slots with a device
@@ -1612,6 +1816,23 @@ compile key serves every shape.
   kernel on identical frozen inputs, **masked to `split < degrees[q_abs, h]`**
   because both buffers arrive uninitialized and a query of degree `d` never
   touches slots `d..topk-1`.
+- **Live slots may legitimately be non-finite under `HAS_SEQUSED_K and
+  CAUSAL`.** `causal_q_offset = seqlen_k - seqlen_q` is not clamped (`:892-901`),
+  and with `seqlen_k = mSeqUsedK[b]` it goes negative whenever the supplied
+  length is shorter than the Q length. The leading `seqlen_q - mSeqUsedK[b]`
+  query indices then have `causal_col_limit = q_idx + causal_q_offset + 1 <= 0`,
+  take the all-masked path, and store the neutral partial the combine kernel
+  expects: `O_partial = 0` and `LSE_partial = -inf` (the row sum is zero, and
+  `:2999` substitutes `-inf` into the `lg2`). The source reaches this state
+  deliberately rather than skipping the slot (`:1007-1009`).
+  This regime is UNREACHABLE for flat (a `cu_seqlens_k` difference is never
+  shorter than its own Q length here) and for paged-without-seqused (full
+  capacity), so it arrives with this extension and with nothing else.
+  Measured at `seqlen_q = 4096`, `mSeqUsedK = 4059`: offset `-37`, and exactly
+  the 37 query indices `0..36` are affected, 1184 live slots in that shape.
+  Both sides compute the same `-inf`, so it compares equal at `rtol = atol = 0`
+  -- but only if neither side "helpfully" clamps an empty row to a finite value,
+  and only if the gate does not read a non-finite live slot as a failure.
 - The benchmark is kernel-only against the compiled CuTe-DSL callable. Unlike
   the two preparation kernels, this one needs no counter rotation: it reads its
   inputs without mutating them and overwrites -- never accumulates into -- the
