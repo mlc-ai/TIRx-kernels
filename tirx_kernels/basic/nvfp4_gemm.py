@@ -15,8 +15,6 @@ from pathlib import Path
 import tirx_kernels.kern as K
 import tvm
 from tirx_kernels.runner import PREPARE_CUDA_ARCH_ENV, bench
-from tvm.backend.cuda.lang import MBarrier, Pipeline, PipelineState, TMABar
-from tvm.tirx.lang.tile_scheduler import ClusterPersistentScheduler2D
 
 
 class WarpRole(IntEnum):
@@ -410,7 +408,7 @@ def make_kernel(M, N, KDIM):
         pair_id = cluster_rank // CTA_GROUP
         id_in_pair = cluster_rank % CTA_GROUP
         pair_leader_rank = pair_id * CTA_GROUP
-        tile_scheduler = ClusterPersistentScheduler2D(
+        tile_scheduler = K.ClusterPersistentScheduler2D(
             "tile_scheduler",
             num_m_tiles=CLUSTER_M_TILES,
             num_n_tiles=CLUSTER_N_TILES,
@@ -439,12 +437,12 @@ def make_kernel(M, N, KDIM):
         output_smem = smem.alloc((WB_PIPE_DEPTH, CTA_M, EPI_TILE), K.bf16, swizzle=D_SWIZZLE_MODE)
         tmem_addr = pool.alloc([1], "uint32", align=4)
         mbar_leader = tid_in_cta == 32
-        smem_pipe = Pipeline(pool, PIPE_DEPTH, full="tma", empty="tcgen05", leader=mbar_leader)
-        tile_full_bar = TMABar(pool, PIPE_DEPTH, leader=mbar_leader)
+        smem_pipe = K.Pipeline(pool, PIPE_DEPTH, full="tma", empty="tcgen05", leader=mbar_leader)
+        tile_full_bar = K.TMABar(pool, PIPE_DEPTH, leader=mbar_leader)
         tile_full_bar.init(1)
-        scale_full_bar = TMABar(pool, PIPE_DEPTH, leader=mbar_leader)
+        scale_full_bar = K.TMABar(pool, PIPE_DEPTH, leader=mbar_leader)
         scale_full_bar.init(1)
-        tmem_pipe = Pipeline(
+        tmem_pipe = K.Pipeline(
             pool,
             TMEM_PIPE_DEPTH,
             full="tcgen05",
@@ -452,7 +450,7 @@ def make_kernel(M, N, KDIM):
             init_empty=CTA_GROUP,
             leader=mbar_leader,
         )
-        tmem_finished = MBarrier(pool, 1, leader=mbar_leader)
+        tmem_finished = K.MBarrier(pool, 1, leader=mbar_leader)
         tmem_finished.init(1)
         smem.commit()
         with K.If(mbar_leader), K.Then():
@@ -487,12 +485,12 @@ def make_kernel(M, N, KDIM):
         pair_mask = K.local_scalar("int32", init=K.int32(0))
         K.assign(pair_mask, pair_mask | (K.int32(1) << pair_leader_rank))
         K.assign(pair_mask, pair_mask | (K.int32(1) << (pair_leader_rank + 1)))
-        tma_cur = PipelineState(PIPE_DEPTH, 1)
-        mma_smem = PipelineState(PIPE_DEPTH, 0)
-        mma_tmem = PipelineState(TMEM_PIPE_DEPTH, 1)
+        tma_cur = K.PipelineState(PIPE_DEPTH, 1)
+        mma_smem = K.PipelineState(PIPE_DEPTH, 0)
+        mma_tmem = K.PipelineState(TMEM_PIPE_DEPTH, 1)
         accum = K.local_scalar("int32", init=0)
-        epi_cur = PipelineState(TMEM_PIPE_DEPTH, 0)
-        epi_wb_state = PipelineState(WB_PIPE_DEPTH, 1)
+        epi_cur = K.PipelineState(TMEM_PIPE_DEPTH, 0)
+        epi_wb_state = K.PipelineState(WB_PIPE_DEPTH, 1)
         alpha_local = K.local_scalar("float32")
         K.ptx.ld.global_.nc.f32(alpha_local, alpha.ptr_to([0]))
 

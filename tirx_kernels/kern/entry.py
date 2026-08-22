@@ -24,9 +24,6 @@ from tvm.tirx.script.builder import ir as I
 REGS_PER_CTA = 65536
 _REGS_PER_THREAD_MAX = 255
 
-# The name ScriptMacro._find_parser_def looks for in each caller's module globals.
-_PARSER_GLOBAL = "__current_script_parser__"
-
 
 def entry_regs(warps: int, min_blocks_per_sm: int = 1) -> int:
     """The per-thread register allocation ptxas pins for a *warps*-wide entry.
@@ -280,29 +277,6 @@ def _declare_param(name, ann, scalar_params):
     )
 
 
-def _make_host_parser():
-    """A parser object for the in-tree ``@T.inline`` helpers to run against.
-
-    ``Pipeline`` / ``MBarrier`` / ``PipelineState`` — the protocol layer a kern
-    kernel uses raw — are built out of ``@T.inline`` methods, and an inline
-    re-parses its own source into whatever IRBuilder is current. To find the
-    parser it walks the call stack for a module global named
-    ``__current_script_parser__``. A traced body has no parser at all, so the
-    session lends it one: the source and var table are replaced by the inline
-    itself, leaving only the dispatch tokens to set (``tirx``, the token the
-    ``T.prim_func`` parser pushes around a function body).
-
-    The global lives in *this* module because ``kernel``'s call into the user
-    function is the frame that keeps it on the stack for the whole trace.
-    """
-    from tvm.script.parser.core.diagnostics import Source
-    from tvm.script.parser.core.parser import Parser
-
-    parser = Parser(Source("pass"), {})
-    parser.dispatch_tokens = ["default", "tirx"]
-    return parser
-
-
 def _flat_frame(frame):
     """Open *frame* so it wraps the rest of the body without a ``with`` block.
 
@@ -466,8 +440,6 @@ def kernel(
                 session.lane_id = I.lane_id([32])
                 session.thread_id = I.thread_id([session.nthreads])
                 _TLS.session = session
-                prev_parser = globals().get(_PARSER_GLOBAL)
-                globals()[_PARSER_GLOBAL] = _make_host_parser()
                 try:
                     if host_prelude is None:
                         fn(*args)
@@ -479,10 +451,6 @@ def kernel(
                         session.pool.commit()
                 finally:
                     _TLS.session = prev
-                    if prev_parser is None:
-                        globals().pop(_PARSER_GLOBAL, None)
-                    else:
-                        globals()[_PARSER_GLOBAL] = prev_parser
         func = ib.get()
         if session.specialize is not None:
             # Adjacent role guards become an else-if chain. Done on the built

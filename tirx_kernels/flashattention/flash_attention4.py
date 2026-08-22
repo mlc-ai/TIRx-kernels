@@ -30,7 +30,6 @@ import tvm.testing
 from tirx_kernels.runner import bench
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
-from tvm.tirx.lang.tile_scheduler import FlashAttentionLinearScheduler, FlashAttentionLPTScheduler
 
 IKET_EVENT_NAMES = (
     "correction",
@@ -538,7 +537,7 @@ def make_kernel(
 
         # ---- scheduler and prologue — orig:L725-758 --------------------------
         scheduler = (
-            FlashAttentionLPTScheduler(
+            K.FlashAttentionLPTScheduler(
                 "fa_scheduler",
                 num_batches=BATCH_SIZE,
                 num_heads=NUM_KV_HEADS,
@@ -546,7 +545,7 @@ def make_kernel(
                 l2_swizzle=L2_SWIZZLE,
             )
             if is_causal
-            else FlashAttentionLinearScheduler(
+            else K.FlashAttentionLinearScheduler(
                 "fa_scheduler",
                 num_batches=BATCH_SIZE,
                 num_heads=NUM_KV_HEADS,

@@ -4,7 +4,7 @@
 
 The base language is tirx script plus the in-tree ``T.ptx`` instruction table,
 used as-is: one call is one instruction, spelled the way the ISA spells it.
-The protocol layer re-exports the in-tree ``lang`` classes (``Pipeline``,
+The protocol layer implements native traced classes (``Pipeline``,
 ``PipelineState``, ``MBarrier``, and the one-way barriers ``TMABar`` /
 ``TCGen05Bar``) so a kernel's source is ``K``-only. On top of that ``K`` adds
 three primitive families — the things neither PTX nor ``lang`` has a word for:
@@ -40,14 +40,12 @@ instruction or a shape.
 from __future__ import annotations
 
 import tvm
-from tvm.backend.cuda.lang import MBarrier, Pipeline, PipelineState, TCGen05Bar, TMABar
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as _T
 from tvm.tirx.script.builder import ir as _I
 
 from . import idioms
 from .entry import Kernel, TensorMap, cta_id, gptr, kernel, lane_id, thread_id, warp_id
-from .ring import RingState
 from .smem import (
     KDesc,
     KStep,
@@ -508,11 +506,28 @@ def __getattr__(name):
     return value
 
 
+# Protocol helpers import only after Kern's public primitives exist, so their
+# native overrides can express themselves through K rather than a second,
+# private IRBuilder surface.
+from .pipeline import MBarrier, Pipeline, PipelineState, TCGen05Bar, TMABar
+from .ring import RingState
+from .scheduler import (
+    ClusterLaunchControlScheduler,
+    ClusterPersistentScheduler2D,
+    FlashAttentionLinearScheduler,
+    FlashAttentionLPTScheduler,
+    query_cancel_first_ctaid_x,
+)
+
 __all__ = [
     "SW32B",
     "SW64B",
     "SW128B",
     "SWNONE",
+    "ClusterLaunchControlScheduler",
+    "ClusterPersistentScheduler2D",
+    "FlashAttentionLPTScheduler",
+    "FlashAttentionLinearScheduler",
     "KDesc",
     "KStep",
     "KTile",
@@ -542,6 +557,7 @@ __all__ = [
     "kernel",
     "lane_id",
     "ptx",
+    "query_cancel_first_ctaid_x",
     "smem_desc_add_16B_offset",
     "smem_pool",
     "specialize",

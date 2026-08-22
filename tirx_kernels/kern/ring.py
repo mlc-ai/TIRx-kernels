@@ -3,10 +3,9 @@
 
 """Unsigned subtract-wrap state for phase-tracked software rings."""
 
-from tvm.script import tirx as T
+import tirx_kernels.kern as K
 
 
-@T.meta_class
 class RingState:
     """Own a ``(stage, phase)`` cursor with a fixed unsigned stride.
 
@@ -22,21 +21,19 @@ class RingState:
             raise ValueError(f"ring stride must be in [1, {depth}], got {stride!r}")
         self.depth = depth
         self.stride = stride
-        self.stage = T.local_scalar("uint32")
-        self.phase = T.local_scalar("uint32")
+        self.stage = K.local_scalar(K.u32, name="stage")
+        self.phase = K.local_scalar(K.u32, name="phase")
         self.init(stage, phase)
 
-    @T.inline
     def init(self, stage=0, phase=0):
-        self.stage = T.cast(stage, "uint32")
-        self.phase = T.cast(phase, "uint32")
+        K.assign(self.stage, K.Cast(K.u32, stage))
+        K.assign(self.phase, K.Cast(K.u32, phase))
 
-    @T.inline
     def advance(self):
-        self.stage = self.stage + T.uint32(self.stride)
-        if self.stage >= T.uint32(self.depth):
-            self.stage = self.stage - T.uint32(self.depth)
-            self.phase = self.phase ^ T.uint32(1)
+        K.assign(self.stage, self.stage + K.uint32(self.stride))
+        with K.If(self.stage >= K.uint32(self.depth)), K.Then():
+            K.assign(self.stage, self.stage - K.uint32(self.depth))
+            K.assign(self.phase, self.phase ^ K.uint32(1))
 
 
 __all__ = ["RingState"]

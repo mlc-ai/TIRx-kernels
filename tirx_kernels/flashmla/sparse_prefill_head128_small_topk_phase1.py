@@ -12,7 +12,6 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
-from tvm.backend.cuda.lang.clc import query_cancel_first_ctaid_x
 
 B_H = 128
 B_TOPK = 64
@@ -447,7 +446,7 @@ def make_kernel(
             def advance(self):
                 K.cuda.mbarrier_wait(K.address_of(clc_response_ready.buf[0]), self.epoch.phase)
                 next_job = K.local_scalar("uint32")
-                query_cancel_first_ctaid_x(next_job, K.address_of(clc_response[0]))
+                K.query_cancel_first_ctaid_x(next_job, K.address_of(clc_response[0]))
                 remote_empty = K.local_scalar("uint64")
                 K.ptx["mapa.shared::cluster.u64"](
                     remote_empty, K.address_of(clc_empty.buf[0]), K.uint32(0)

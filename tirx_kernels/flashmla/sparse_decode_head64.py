@@ -17,7 +17,6 @@ import torch
 import tirx_kernels.kern as K
 import tvm
 from tvm.ir import PointerType, PrimType
-from tvm.tirx.lang.pipeline import PipelineState
 
 B_H = 64
 B_TOPK = 64
@@ -560,8 +559,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             # kernel.cuh:134-150.  Scale/exp warpgroup and its 224-register
             # allocation.  The output and S register/shared layouts match the
             # fixed dual-GEMM TMEM datapath used by the CUDA source.
-            rs_buf = PipelineState(NUM_BUFS, phase=0)
-            rs_index = PipelineState(NUM_INDEX_BUFS, phase=0)
+            rs_buf = K.PipelineState(NUM_BUFS, phase=0)
+            rs_index = K.PipelineState(NUM_INDEX_BUFS, phase=0)
             scale_pair = K.cuda.make_float2(sm_scale_div_log2, sm_scale_div_log2)
             attn_sink_log2 = K.local_scalar("float32", init=K.float32(-float("inf")))
             with K.If(have_attn_sink), K.Then():
@@ -1035,8 +1034,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             # call as a separate parser-time specialization.  This keeps the
             # scheduler and its registers inside the K-selected warp role.
             def run_wg1_role(role: K.constexpr):
-                rs_buf = PipelineState(NUM_BUFS, phase=0)
-                rs_index = PipelineState(NUM_INDEX_BUFS, phase=0)
+                rs_buf = K.PipelineState(NUM_BUFS, phase=0)
+                rs_index = K.PipelineState(NUM_INDEX_BUFS, phase=0)
 
                 qk_nope_desc = K.SmemDescriptor()
                 qk_rope_desc = K.SmemDescriptor()
@@ -1079,7 +1078,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
                 (sched_begin_req, sched_end_req, sched_begin_block, sched_end_block) = (
                     unpack_scheduler_meta(4)
                 )
-                batch_epoch = PipelineState(1, phase=0)
+                batch_epoch = K.PipelineState(1, phase=0)
 
                 # The CUDA return exits only this role's run_main_loop lambda.
                 with K.If(sched_begin_req < b), K.Then():
@@ -1755,8 +1754,8 @@ def make_main_kernel(model_type, presence, use_pdl=False):
         def dequant():
             # kernel.cuh:747-759.  The dequant warpgroup keeps 208 registers
             # and assigns exactly eight threads per token group.
-            rs_buf = PipelineState(NUM_BUFS, phase=0)
-            rs_index = PipelineState(NUM_INDEX_BUFS, phase=0)
+            rs_buf = K.PipelineState(NUM_BUFS, phase=0)
+            rs_index = K.PipelineState(NUM_INDEX_BUFS, phase=0)
             group_idx = idx_in_warpgroup // 8
             idx_in_group = idx_in_warpgroup % 8
 
@@ -1781,7 +1780,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             (sched_begin_req, sched_end_req, sched_begin_block, sched_end_block) = (
                 unpack_scheduler_meta(4)
             )
-            batch_epoch = PipelineState(1, phase=0)
+            batch_epoch = K.PipelineState(1, phase=0)
 
             # The CUDA return exits only this role's run_main_loop lambda.
             with K.If(sched_begin_req < b), K.Then():

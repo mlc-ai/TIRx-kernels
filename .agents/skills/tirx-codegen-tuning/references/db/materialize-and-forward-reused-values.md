@@ -48,6 +48,23 @@ q_begin: T.int32 = chunk_idx * target
 q_begin = K.local_scalar(K.i32, init=chunk_idx * target, name="q_begin")
 ```
 
+Preserve an untyped parser assignment too when it acted as an inferred-width
+or single-evaluation boundary. Materialize compact element offsets at the
+parser-inferred 32-bit width and strided byte/store offsets at 64-bit width;
+making every offset 64-bit is not equivalent.
+
+```python
+# before: tracing aliases and expands both expression trees at each use.
+x_offset = row * hidden + lane
+store_offset = batch * stride + x_offset
+
+# after: preserve the parser's inferred integer boundaries.
+x_offset = K.local_scalar(K.i32, init=row * hidden + lane, name="x_offset")
+store_offset = K.local_scalar(
+    K.i64, init=batch * stride + x_offset, name="store_offset"
+)
+```
+
 Where the reference's own compiler CSEd two accesses to the same element across
 opaque inline asm, reuse the earlier value explicitly; two excess loads and a
 redundant integer max disappeared that way.
@@ -93,6 +110,14 @@ aliases preserved global-load and branch counts but lowered issue-active from
 parser's scalar bindings, including stable source names, restored byte-identical
 SASS; all 12 correctness cases passed and the same paired cases measured
 0.999951 and 1.000013 after/before.
+
+In one normalization port, omitting ordinary untyped offset assignments changed
+the fused path from 744 instructions / 126 registers to 728 / 124 and slowed it
+by 5.8%; the quantized path stayed at 696 instructions but fell from 90 to 82
+registers and slowed by 2.0%. Restoring the compact offsets as 32-bit locals and
+the strided/store offsets as 64-bit locals made both SASS images byte-identical
+to the parser builds. Correctness passed, and 15-round same-GPU A/B measured
+1.000239 and 1.000194 after/before on the two affected configurations.
 
 ## Boundary
 
