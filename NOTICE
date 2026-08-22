@@ -1,6 +1,12 @@
 tirx-kernels
 Copyright (c) 2026 TIRx authors
 
+This product includes modified software from cuDNN Frontend
+(https://github.com/NVIDIA/cudnn-frontend):
+
+cuDNN Frontend
+Copyright (c) 2020-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 This product includes modified software from FlashInfer
 (https://github.com/flashinfer-ai/flashinfer):
 
