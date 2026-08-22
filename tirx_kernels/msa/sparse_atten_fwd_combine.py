@@ -23,7 +23,6 @@ from functools import lru_cache
 from typing import Any
 
 import tirx_kernels.kern as K
-from tvm.tirx.script.builder import ir as I
 
 KERNEL_META = {
     "name": "msa_sparse_atten_fwd_combine_sm100",
@@ -191,7 +190,6 @@ def make_kernel(
         arch="sm_100a",
         min_blocks_per_sm=min_blocks_per_sm,
         grid=False,
-        thread_layout=False,
     )
     def msa_sparse_atten_fwd_combine(
         o_partial: K.gptr[partial_ty],
@@ -225,10 +223,10 @@ def make_kernel(
         # Grid: (ceil(seqlen*num_head / tile_m), ceil(head_dim / k_block), batch)
         # with the head axis innermost inside the flattened row index
         # (combine.py:401-418).
-        m_block, k_block, batch = I.cta_id(
+        m_block, k_block, batch = K.cta_id(
             [(total_q * head_q + (TILE_M - 1)) // TILE_M, HEAD_DIM // K_BLOCK_SIZE, num_batches]
         )
-        tidx = I.thread_id([NUM_THREADS])
+        tidx = K.thread_id()
 
         # -------------------------------------------------------------------
         # Storage. One dynamic allocation carved into the source's five fields
