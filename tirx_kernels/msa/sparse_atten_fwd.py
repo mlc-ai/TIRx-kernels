@@ -78,11 +78,20 @@ TMEM_TOTAL = 512
 # `split_P_arrive = n_block // 4 * 3`, floored to a multiple of 32 (:165-167).
 SPLIT_P_ARRIVE = 96
 
-# Register budgets on the causal path (:173-181).
-NUM_REGS_SOFTMAX = 176
-NUM_REGS_STORE = 112
+# Register budgets (:173-181). Softmax gains what store gives up, so the two
+# move together or the launch exceeds its 512-register budget; `num_regs_other`
+# is DERIVED as `512 - softmax*2 - store` and lands on 48 either way, which is
+# why the export shows `setmaxnreg.dec 48` three times in both parities.
+NUM_REGS_SOFTMAX_CAUSAL = 176
+NUM_REGS_SOFTMAX_NONCAUSAL = 192
+NUM_REGS_STORE_CAUSAL = 112
+NUM_REGS_STORE_NONCAUSAL = 80
 NUM_REGS_OTHER = 48
-EX2_EMU_FREQ = 16
+# `ex2_emu_freq = 16 if causal else 0` (:180-184). Zero does not mean "every
+# sixteenth" with a different period -- it selects `apply_exp2_convert`'s own
+# `const_expr(ex2_emu_freq == 0)` arm (softmax.py:381-383), which sends every
+# element through real MUFU with no polynomial and no `fmax(x, -127)` clamp.
+EX2_EMU_FREQ_CAUSAL = 16
 EX2_EMU_START_FRG = 1
 
 # cuTensorMapEncodeTiled enum values.
@@ -161,6 +170,12 @@ _TMA_G2S_2D_CACHE = (
 )
 _TMA_G2S_3D_CACHE = (
     "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
+)
+# Paging appends a page mode to the KV descriptors, so the same copy is issued
+# at rank 4. Every other modifier -- load mode, completion, cache hint -- and
+# the transaction byte count are unchanged from the 3-D form.
+_TMA_G2S_4D_CACHE = (
+    "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
 )
 # L2 eviction policies, per the reference's own defaults (tma_utils.py:23-24,
 # :204, :251). Which tensor gets which is load-bearing, not cosmetic: a KV block
@@ -990,9 +1005,8 @@ DTYPE_MODES: dict[str, dict[str, str]] = {
     },
 }
 
-# `mO_partial.element_type`, validated at :372-377. fp16 is accepted upstream
-# but never exercised there, so it stays out of this port's domain.
-PARTIAL_DTYPES = ("float32", "bfloat16", "float8_e4m3")
+# `mO_partial.element_type`, validated at :372-377.
+PARTIAL_DTYPES = ("float32", "bfloat16", "float16", "float8_e4m3")
 
 _TORCH_DTYPES = {
     "bfloat16": "bfloat16",
@@ -1024,6 +1038,8 @@ def _kernel(
     lse_partial_h: T.handle,
     lse_temperature_partial_h: T.Optional(T.handle),
     q_flat_h: T.handle,
+    page_table_h: T.Optional(T.handle),
+    seqused_k_h: T.Optional(T.handle),
     cu_seqlens_q_h: T.handle,
     cu_seqlens_k_h: T.handle,
     softmax_scale_log2: T.float32,
@@ -1046,6 +1062,17 @@ def _kernel(
     dtype_mode: T.constexpr,
     partial_dtype: T.constexpr,
 ):
+    # Paging and `seqused_k` are selected by handle presence, the convention this
+    # module already uses for `lse_temperature_partial_h`: a flat specialization
+    # pins both to None and its signature is unchanged.
+    paged = T.meta_var(page_table_h is not None)
+    seqused = T.meta_var(seqused_k_h is not None)
+
+    # Trace-time register split and exp2 mix; see the constants block.
+    num_regs_softmax = T.meta_var(NUM_REGS_SOFTMAX_CAUSAL if causal else NUM_REGS_SOFTMAX_NONCAUSAL)
+    num_regs_store = T.meta_var(NUM_REGS_STORE_CAUSAL if causal else NUM_REGS_STORE_NONCAUSAL)
+    ex2_emu_freq = T.meta_var(EX2_EMU_FREQ_CAUSAL if causal else 0)
+
     mode = T.meta_var(DTYPE_MODES[dtype_mode])
     q_dtype = T.meta_var(mode["q"])
     k_dtype = T.meta_var(mode["k"])
@@ -1073,6 +1100,15 @@ def _kernel(
     q_load_tile = T.meta_var(HEAD_DIM if q_bytes == 1 else K_TILE)
     q_tokens_per_group = T.meta_var(M_BLOCK // qheadperkv)
 
+    # Paging changes the RANK of the K/V tensors, so the binding has to change
+    # with it: `[num_pages, head_kv, page_size, head_dim]` against the flat
+    # `[total_k, head_kv, head_dim]`. The element count is identical --
+    # `num_pages * page_size == total_k` -- and the kernel only ever takes
+    # `.data` from these, but a rank mismatch is rejected at the call boundary.
+    # One binding for both axes. The kernel only takes `.data` from K/V -- the
+    # tensormap carries the real shape -- and `num_pages * page_size == total_k`,
+    # so the same 3-D binding describes the same bytes either way. The host
+    # hands over a 3-D view; a 4-D binding here faults the launcher.
     k = T.match_buffer(k_h, (total_k, num_heads_kv, HEAD_DIM), k_ty, scope="global")
     v = T.match_buffer(v_h, (total_k, num_heads_kv, HEAD_DIM), v_ty, scope="global")
     k2q_q_indices = T.match_buffer(k2q_q_indices_h, (num_heads_kv * nnz,), "int32", scope="global")
@@ -1099,6 +1135,20 @@ def _kernel(
     q_flat = T.match_buffer(q_flat_h, (total_q * head_q, HEAD_DIM), q_ty, scope="global")
     cu_seqlens_q = T.match_buffer(cu_seqlens_q_h, (num_batches + 1,), "int32", scope="global")
     cu_seqlens_k = T.match_buffer(cu_seqlens_k_h, (num_batches + 1,), "int32", scope="global")
+    # `page_size == blk_kv` is mandatory upstream (:99-107), so a CTA's KV block
+    # is exactly one page and the page table is rectangular. That is what lets
+    # `pages_per_seq` come from the scalars already in the ABI instead of a new
+    # argument: upstream reads it as `mPageTable.shape[1]` (:211).
+    if paged:
+        # Runtime values, as upstream's `mPageTable.shape[1]` is; derived from
+        # scalars already in the ABI because the page table is rectangular.
+        # The table holds one entry per page, and `num_batches * pages_per_seq`
+        # is exactly `num_pages`, so the binding shape stays an expression over
+        # PrimFunc params -- a match_buffer shape cannot name a locally derived
+        # scalar.
+        page_table = T.match_buffer(page_table_h, (total_k // N_BLOCK,), "int32", scope="global")
+    if seqused:
+        seqused_k = T.match_buffer(seqused_k_h, (num_batches,), "int32", scope="global")
 
     # -----------------------------------------------------------------------
     # TMA descriptors, encoded in the launcher prologue.
@@ -1114,62 +1164,44 @@ def _kernel(
     # tensor. Both boxes are one 128-byte swizzle atom wide, so a 128-wide tile
     # takes two issues.
     # -----------------------------------------------------------------------
+    # Paging appends a page mode and pins the token coordinate to 0; it changes
+    # nothing about the first two dims. Dims are fastest-first, so the flat form
+    # is (head_dim, total_k, head_kv) and the paged one
+    # (head_dim, page_size, head_kv, num_pages) -- the `layout_t = [2,3,1,0]`
+    # host permute (:380-397). A rank-3 encode against a rank-4 tensor is silent
+    # garbage, which is why the rank follows the tensor and not the caller.
     k_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        k_map,
-        k_ty,
-        3,
-        k.data,
-        HEAD_DIM,
-        num_heads_kv,
-        total_k,
-        HEAD_DIM * k_bytes,
-        num_heads_kv * HEAD_DIM * k_bytes,
-        _swizzle_elems(k_bytes),
-        1,
-        N_BLOCK,
-        1,
-        1,
-        1,
-        0,
-        _SWIZZLE_128B,
-        _L2_PROMOTION_256B,
-        0,
-    )
-    v_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
-    T.call_packed(
-        "runtime.cuTensorMapEncodeTiled",
-        v_map,
-        v_ty,
-        3,
-        v.data,
-        HEAD_DIM,
-        num_heads_kv,
-        total_k,
-        HEAD_DIM * v_bytes,
-        num_heads_kv * HEAD_DIM * v_bytes,
-        _swizzle_elems(v_bytes),
-        1,
-        N_BLOCK,
-        1,
-        1,
-        1,
-        0,
-        _SWIZZLE_128B,
-        _L2_PROMOTION_256B,
-        0,
-    )
-    # The fp8 staging path lands in a PLAIN buffer, so its descriptor must carry
-    # no swizzle. The reference builds a separate `cpasync.make_tiled_tma_atom`
-    # over a row-major box for exactly this reason (:474-479); reusing the
-    # swizzled MMA descriptor writes permuted bytes that the dequantization then
-    # reads back in logical order, which silently scrambles every row.
-    if k_stage_fp8 or v_stage_fp8:
-        k_stage_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+    if paged:
         T.call_packed(
             "runtime.cuTensorMapEncodeTiled",
-            k_stage_map,
+            k_map,
+            k_ty,
+            4,
+            k.data,
+            HEAD_DIM,
+            N_BLOCK,
+            num_heads_kv,
+            total_k // N_BLOCK,
+            HEAD_DIM * k_bytes,
+            N_BLOCK * HEAD_DIM * k_bytes,
+            num_heads_kv * N_BLOCK * HEAD_DIM * k_bytes,
+            _swizzle_elems(k_bytes),
+            N_BLOCK,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            _SWIZZLE_128B,
+            _L2_PROMOTION_256B,
+            0,
+        )
+    else:
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            k_map,
             k_ty,
             3,
             k.data,
@@ -1178,21 +1210,49 @@ def _kernel(
             total_k,
             HEAD_DIM * k_bytes,
             num_heads_kv * HEAD_DIM * k_bytes,
-            HEAD_DIM,
+            _swizzle_elems(k_bytes),
             1,
             N_BLOCK,
             1,
             1,
             1,
             0,
-            0,
+            _SWIZZLE_128B,
             _L2_PROMOTION_256B,
             0,
         )
-        v_stage_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+    v_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+    if paged:
         T.call_packed(
             "runtime.cuTensorMapEncodeTiled",
-            v_stage_map,
+            v_map,
+            v_ty,
+            4,
+            v.data,
+            HEAD_DIM,
+            N_BLOCK,
+            num_heads_kv,
+            total_k // N_BLOCK,
+            HEAD_DIM * v_bytes,
+            N_BLOCK * HEAD_DIM * v_bytes,
+            num_heads_kv * N_BLOCK * HEAD_DIM * v_bytes,
+            _swizzle_elems(v_bytes),
+            N_BLOCK,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            _SWIZZLE_128B,
+            _L2_PROMOTION_256B,
+            0,
+        )
+    else:
+        T.call_packed(
+            "runtime.cuTensorMapEncodeTiled",
+            v_map,
             v_ty,
             3,
             v.data,
@@ -1201,17 +1261,130 @@ def _kernel(
             total_k,
             HEAD_DIM * v_bytes,
             num_heads_kv * HEAD_DIM * v_bytes,
-            HEAD_DIM,
+            _swizzle_elems(v_bytes),
             1,
             N_BLOCK,
             1,
             1,
             1,
             0,
-            0,
+            _SWIZZLE_128B,
             _L2_PROMOTION_256B,
             0,
         )
+    # The fp8 staging path lands in a PLAIN buffer, so its descriptor must carry
+    # no swizzle. The reference builds a separate `cpasync.make_tiled_tma_atom`
+    # over a row-major box for exactly this reason (:474-479); reusing the
+    # swizzled MMA descriptor writes permuted bytes that the dequantization then
+    # reads back in logical order, which silently scrambles every row.
+    if k_stage_fp8 or v_stage_fp8:
+        # The staging descriptor follows the same rank as the MMA one: paging is
+        # a property of the tensor, not of who reads it. Leaving this rank-3
+        # while the load arm issues the 4-D copy is an illegal instruction, and
+        # the two are selected by different flags -- rank by `paged`, staging by
+        # `k_stage_fp8` -- so they have to be kept in step by hand.
+        k_stage_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        if paged:
+            T.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                k_stage_map,
+                k_ty,
+                4,
+                k.data,
+                HEAD_DIM,
+                N_BLOCK,
+                num_heads_kv,
+                total_k // N_BLOCK,
+                HEAD_DIM * k_bytes,
+                N_BLOCK * HEAD_DIM * k_bytes,
+                num_heads_kv * N_BLOCK * HEAD_DIM * k_bytes,
+                HEAD_DIM,
+                N_BLOCK,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                0,
+                0,
+                _L2_PROMOTION_256B,
+                0,
+            )
+        else:
+            T.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                k_stage_map,
+                k_ty,
+                3,
+                k.data,
+                HEAD_DIM,
+                num_heads_kv,
+                total_k,
+                HEAD_DIM * k_bytes,
+                num_heads_kv * HEAD_DIM * k_bytes,
+                HEAD_DIM,
+                1,
+                N_BLOCK,
+                1,
+                1,
+                1,
+                0,
+                0,
+                _L2_PROMOTION_256B,
+                0,
+            )
+        v_stage_map: T.let[T.TensorMap()] = T.tvm_stack_alloca("tensormap", 1)
+        if paged:
+            T.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                v_stage_map,
+                v_ty,
+                4,
+                v.data,
+                HEAD_DIM,
+                N_BLOCK,
+                num_heads_kv,
+                total_k // N_BLOCK,
+                HEAD_DIM * v_bytes,
+                N_BLOCK * HEAD_DIM * v_bytes,
+                num_heads_kv * N_BLOCK * HEAD_DIM * v_bytes,
+                HEAD_DIM,
+                N_BLOCK,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                0,
+                0,
+                _L2_PROMOTION_256B,
+                0,
+            )
+        else:
+            T.call_packed(
+                "runtime.cuTensorMapEncodeTiled",
+                v_stage_map,
+                v_ty,
+                3,
+                v.data,
+                HEAD_DIM,
+                num_heads_kv,
+                total_k,
+                HEAD_DIM * v_bytes,
+                num_heads_kv * HEAD_DIM * v_bytes,
+                HEAD_DIM,
+                1,
+                N_BLOCK,
+                1,
+                1,
+                1,
+                0,
+                0,
+                _L2_PROMOTION_256B,
+                0,
+            )
 
     # The TMA-Q box is one token group of `qheadperkv` rows; the gather4 box is
     # a single row, because the instruction supplies four row coordinates.
@@ -1297,6 +1470,11 @@ def _kernel(
     s_q_idx = pool.alloc((O_STAGE * q_tokens_per_group,), "int32", align=16)
     s_row_meta = pool.alloc((8,), "int32", align=16)
     s_diag_q_count = pool.alloc((1,), "int32", align=16)
+    # `sPagedKvIdx` (:581): the physical page for this CTA's KV block. Allocated
+    # unconditionally, exactly as the source does, so flat and paged share every
+    # later offset in the pool; written by thread 0 and read by both KV-load
+    # warps under `paged`.
+    s_paged_kv_idx = pool.alloc((1,), "int32", align=16)
     s_q_load_m_idx = pool.alloc((Q_STAGE * q_tokens_per_group,), "int32", align=16)
     s_qidx_meta = pool.alloc((QIDX_META_STAGES * q_tokens_per_group,), "int32", align=16)
 
@@ -1361,12 +1539,31 @@ def _kernel(
         )
         row_start: T.int32 = base_row_start + work_q_begin[0]
         count_raw: T.int32 = work_q_count[0]
-        seqlen_k: T.int32 = ld_global_i32(cu_seqlens_k, batch_idx[0] + 1) - ld_global_i32(
-            cu_seqlens_k, batch_idx[0]
-        )
+        # Upstream reads this as `mPageTable.shape[1]` (:211). The table is
+        # rectangular because `page_size == blk_kv`, so `num_batches *
+        # pages_per_seq == num_pages == total_k / page_size`, and the quotient
+        # of two ABI scalars recovers it without a new argument.
+        if paged:
+            pages_per_seq: T.int32 = udiv_i32(udiv_i32(total_k, N_BLOCK), num_batches)
+        # `_logical_seqlen_k` (:204-212), in the source's own priority order.
+        # `seqused` is tested FIRST: checking paged first would silently
+        # substitute the zero-padded paged capacity for a shorter supplied
+        # length.
+        if seqused:
+            seqlen_k: T.int32 = ld_global_i32(seqused_k, batch_idx[0])
+        elif paged:
+            seqlen_k: T.int32 = pages_per_seq * N_BLOCK
+        else:
+            seqlen_k: T.int32 = ld_global_i32(cu_seqlens_k, batch_idx[0] + 1) - ld_global_i32(
+                cu_seqlens_k, batch_idx[0]
+            )
         kv_valid_cols: T.int32 = T.min(T.max(seqlen_k - kv_block_idx[0] * N_BLOCK, 0), N_BLOCK)
         q_batch_offset: T.int32 = ld_global_i32(cu_seqlens_q, batch_idx[0])
-        k_batch_offset: T.int32 = ld_global_i32(cu_seqlens_k, batch_idx[0])
+        # Paging offsets by page, not by batch (:880-884).
+        if paged:
+            k_batch_offset: T.int32 = 0
+        else:
+            k_batch_offset: T.int32 = ld_global_i32(cu_seqlens_k, batch_idx[0])
         st_shared_i32(s_row_meta, 0, batch_idx[0])
         st_shared_i32(s_row_meta, 1, kv_block_idx[0])
         st_shared_i32(s_row_meta, 2, row_start)
@@ -1374,17 +1571,40 @@ def _kernel(
         st_shared_i32(s_row_meta, 4, kv_valid_cols)
         st_shared_i32(s_row_meta, 5, q_batch_offset)
         st_shared_i32(s_row_meta, 6, k_batch_offset)
-        seqlen_q: T.int32 = ld_global_i32(cu_seqlens_q, batch_idx[0] + 1) - q_batch_offset
-        causal_q_offset: T.int32 = seqlen_k - seqlen_q
-        st_shared_i32(s_row_meta, 7, causal_q_offset)
+        # Computed ONLY under `const_expr(self.causal)` (:892-901); a non-causal
+        # build never loads `cu_seqlens_q[batch+1]` at all. Deliberately
+        # unclamped: with `seqused_k` shorter than the Q length the offset goes
+        # negative, the leading `seqlen_q - seqused_k[b]` queries have no legal
+        # key, and their neutral partial is O = 0 with LSE = -inf. Clamping it
+        # to a finite value would diverge from the source.
+        causal_q_offset = T.alloc_local((1,), "int32")
+        causal_q_offset[0] = 0
+        if causal:
+            seqlen_q: T.int32 = ld_global_i32(cu_seqlens_q, batch_idx[0] + 1) - q_batch_offset
+            causal_q_offset[0] = seqlen_k - seqlen_q
+        st_shared_i32(s_row_meta, 7, causal_q_offset[0])
+
+        # The physical page for this CTA's KV block, resolved once by thread 0
+        # (:903-906, paged_kv.py:60-65) and published under the same fence as
+        # the row metadata below -- paging adds no barrier of its own.
+        if paged:
+            st_shared_i32(
+                s_paged_kv_idx,
+                0,
+                ld_global_i32(page_table, batch_idx[0] * pages_per_seq + kv_block_idx[0]),
+            )
 
         # The causal diagonal split point: a 32-step binary search over the CSR
         # row, which is sorted by q_idx (:259-285, :919-935). The export keeps
         # the loop rolled with exactly one probe load in the body.
+        # Computed ONLY under `const_expr(self.causal)` (:919-934): a non-causal
+        # build emits no search at all and leaves the count at zero, which is
+        # also the only value its consumer would accept -- a search result there
+        # would drive the diagonal mask over rows that have no diagonal.
         diag_q_count = T.alloc_local((1,), "int32")
         diag_q_count[0] = 0
-        if count_raw > 0 and kv_valid_cols > 0:
-            q_threshold: T.int32 = (kv_block_idx[0] * N_BLOCK + kv_valid_cols) - causal_q_offset
+        if causal and count_raw > 0 and kv_valid_cols > 0:
+            q_threshold: T.int32 = (kv_block_idx[0] * N_BLOCK + kv_valid_cols) - causal_q_offset[0]
             lo = T.alloc_local((1,), "int32")
             hi = T.alloc_local((1,), "int32")
             lo[0] = 0
@@ -1473,7 +1693,7 @@ def _kernel(
     # -----------------------------------------------------------------------
     if tidx >= Q_LOAD_WARP_BASE * WARP_SIZE and tidx < MMA_WARP_ID * WARP_SIZE:
         if cta_valid_work != 0:
-            T.evaluate(T.ptx.setmaxnreg.dec.sync.aligned.u32(T.uint32(NUM_REGS_STORE)))
+            T.evaluate(T.ptx.setmaxnreg.dec.sync.aligned.u32(T.uint32(num_regs_store)))
             q_row_start: T.int32 = ld_shared_i32(s_row_meta, 2)
             q_count_raw: T.int32 = ld_shared_i32(s_row_meta, 3)
             q_batch_off: T.int32 = ld_shared_i32(s_row_meta, 5)
@@ -1692,49 +1912,106 @@ def _kernel(
             kv_has_work: T.int32 = T.cast(ld_shared_i32(s_row_meta, 3) > 0, "int32")
             if kv_has_work != 0:
                 kv_row_start: T.int32 = k_batch_off + kv_block_load * N_BLOCK
+                # Read warp-wide, in this warp's own arm, AFTER the has-work
+                # early-out (:1569 for K, :1610 for V -- two static loads in the
+                # module, not one hoisted read). Within an arm the value feeds
+                # every subtile issue.
                 if warp_idx == KV_LOAD_WARP_BASE:
+                    page_idx_k = T.alloc_local((1,), "int32")
+                    if paged:
+                        page_idx_k[0] = ld_shared_i32(s_paged_kv_idx, 0)
                     if T.cuda.elect_sync():
                         for sub in T.unroll(KV_SUBTILES(k_bytes)):
-                            T.evaluate(
-                                T.ptx[_TMA_G2S_3D_CACHE](
-                                    T.ptr_byte_offset(
-                                        (s_k_fp8 if k_stage_fp8 else s_k).ptr_to([0, 0]),
-                                        sub * N_BLOCK * _swizzle_elems(k_bytes) * k_bytes,
-                                        k_ty,
-                                    ),
-                                    T.address_of(k_stage_map if k_stage_fp8 else k_map),
-                                    T.int32(sub * _swizzle_elems(k_bytes)),
-                                    head_kv_idx[0],
-                                    kv_row_start,
-                                    T.cuda.cvta_generic_to_shared(
-                                        (bar_k_tma if k_stage_fp8 else bar_k).ptr_to([0])
-                                    ),
-                                    _KV_TMA_CACHE_HINT,
+                            # PAGED_KV selects the rank and the coordinate tuple
+                            # and nothing else; the staging destination is an
+                            # independent axis (:1332-1340), so the two must not
+                            # be composed with an `elif`.
+                            if paged:
+                                T.evaluate(
+                                    T.ptx[_TMA_G2S_4D_CACHE](
+                                        T.ptr_byte_offset(
+                                            (s_k_fp8 if k_stage_fp8 else s_k).ptr_to([0, 0]),
+                                            sub * N_BLOCK * _swizzle_elems(k_bytes) * k_bytes,
+                                            k_ty,
+                                        ),
+                                        T.address_of(k_stage_map if k_stage_fp8 else k_map),
+                                        T.int32(sub * _swizzle_elems(k_bytes)),
+                                        T.int32(0),
+                                        head_kv_idx[0],
+                                        page_idx_k[0],
+                                        T.cuda.cvta_generic_to_shared(
+                                            (bar_k_tma if k_stage_fp8 else bar_k).ptr_to([0])
+                                        ),
+                                        _KV_TMA_CACHE_HINT,
+                                    )
                                 )
-                            )
+                            else:
+                                T.evaluate(
+                                    T.ptx[_TMA_G2S_3D_CACHE](
+                                        T.ptr_byte_offset(
+                                            (s_k_fp8 if k_stage_fp8 else s_k).ptr_to([0, 0]),
+                                            sub * N_BLOCK * _swizzle_elems(k_bytes) * k_bytes,
+                                            k_ty,
+                                        ),
+                                        T.address_of(k_stage_map if k_stage_fp8 else k_map),
+                                        T.int32(sub * _swizzle_elems(k_bytes)),
+                                        head_kv_idx[0],
+                                        kv_row_start,
+                                        T.cuda.cvta_generic_to_shared(
+                                            (bar_k_tma if k_stage_fp8 else bar_k).ptr_to([0])
+                                        ),
+                                        _KV_TMA_CACHE_HINT,
+                                    )
+                                )
+                        # OUTSIDE the paged/flat conditional, as in the source
+                        # (:1579-1580): an arm that omitted it would never signal
+                        # the barrier and the MMA warp's wait would hang.
                         T.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
                             (bar_k_tma if k_stage_fp8 else bar_k).ptr_to([0]), T.uint32(1)
                         )
                 if warp_idx == KV_LOAD_WARP_BASE + 1:
+                    page_idx_v = T.alloc_local((1,), "int32")
+                    if paged:
+                        page_idx_v[0] = ld_shared_i32(s_paged_kv_idx, 0)
                     if T.cuda.elect_sync():
                         for sub in T.unroll(KV_SUBTILES(v_bytes)):
-                            T.evaluate(
-                                T.ptx[_TMA_G2S_3D_CACHE](
-                                    T.ptr_byte_offset(
-                                        (s_v_fp8 if v_stage_fp8 else s_v).ptr_to([0, 0]),
-                                        sub * N_BLOCK * _swizzle_elems(v_bytes) * v_bytes,
-                                        v_ty,
-                                    ),
-                                    T.address_of(v_stage_map if v_stage_fp8 else v_map),
-                                    T.int32(sub * _swizzle_elems(v_bytes)),
-                                    head_kv_idx[0],
-                                    kv_row_start,
-                                    T.cuda.cvta_generic_to_shared(
-                                        (bar_v_tma if v_stage_fp8 else bar_v).ptr_to([0])
-                                    ),
-                                    _KV_TMA_CACHE_HINT,
+                            if paged:
+                                T.evaluate(
+                                    T.ptx[_TMA_G2S_4D_CACHE](
+                                        T.ptr_byte_offset(
+                                            (s_v_fp8 if v_stage_fp8 else s_v).ptr_to([0, 0]),
+                                            sub * N_BLOCK * _swizzle_elems(v_bytes) * v_bytes,
+                                            v_ty,
+                                        ),
+                                        T.address_of(v_stage_map if v_stage_fp8 else v_map),
+                                        T.int32(sub * _swizzle_elems(v_bytes)),
+                                        T.int32(0),
+                                        head_kv_idx[0],
+                                        page_idx_v[0],
+                                        T.cuda.cvta_generic_to_shared(
+                                            (bar_v_tma if v_stage_fp8 else bar_v).ptr_to([0])
+                                        ),
+                                        _KV_TMA_CACHE_HINT,
+                                    )
                                 )
-                            )
+                            else:
+                                T.evaluate(
+                                    T.ptx[_TMA_G2S_3D_CACHE](
+                                        T.ptr_byte_offset(
+                                            (s_v_fp8 if v_stage_fp8 else s_v).ptr_to([0, 0]),
+                                            sub * N_BLOCK * _swizzle_elems(v_bytes) * v_bytes,
+                                            v_ty,
+                                        ),
+                                        T.address_of(v_stage_map if v_stage_fp8 else v_map),
+                                        T.int32(sub * _swizzle_elems(v_bytes)),
+                                        head_kv_idx[0],
+                                        kv_row_start,
+                                        T.cuda.cvta_generic_to_shared(
+                                            (bar_v_tma if v_stage_fp8 else bar_v).ptr_to([0])
+                                        ),
+                                        _KV_TMA_CACHE_HINT,
+                                    )
+                                )
                         T.ptx.mbarrier.arrive.release.cta.shared__cta.b64(
                             (bar_v_tma if v_stage_fp8 else bar_v).ptr_to([0]), T.uint32(1)
                         )
@@ -2094,6 +2371,9 @@ def _kernel(
         count_raw_sm: T.int32 = ld_shared_i32(s_row_meta, 3)
         kv_valid_cols: T.int32 = ld_shared_i32(s_row_meta, 4)
         q_batch_off_sm: T.int32 = ld_shared_i32(s_row_meta, 5)
+        # Read unconditionally, as the source does (:1119-1127): both cells only
+        # ever feed the diagonal mask, so a non-causal build leaves two dead
+        # scalar loads behind rather than gating them away.
         causal_q_off: T.int32 = ld_shared_i32(s_row_meta, 7)
         diag_q_count_sm: T.int32 = ld_shared_i32(s_diag_q_count, 0)
 
@@ -2128,7 +2408,12 @@ def _kernel(
 
         if count_raw_sm > 0:
             num_q_groups_sm: T.int32 = uceil_div_i32(count_raw_sm, q_tokens_per_group)
-            kv_block_col_start: T.int32 = kv_block_sm * N_BLOCK
+            # Zero unless causal (:2461-2463); it only ever offsets the
+            # diagonal column limit, which a non-causal build never computes.
+            if causal:
+                kv_block_col_start: T.int32 = kv_block_sm * N_BLOCK
+            else:
+                kv_block_col_start: T.int32 = 0
             # WG0 takes the even Q groups, WG1 the odd ones (:2465-2468).
             num_stage_groups: T.int32 = udiv_i32(num_q_groups_sm + (1 - stage), 2)
 
@@ -2138,12 +2423,6 @@ def _kernel(
                 producer_phase: T.int32 = phase ^ 1
                 qidx_meta_slot: T.int32 = (
                     T.bitwise_and(qi_group, QIDX_META_STAGES - 1) * q_tokens_per_group
-                )
-                # How many of this group's tokens still sit on the causal
-                # diagonal and therefore need per-column masking (:2478-2486).
-                qi_group_start: T.int32 = qi_group * q_tokens_per_group
-                masked_tok_count: T.int32 = T.max(
-                    0, T.min(q_tokens_per_group, diag_q_count_sm - qi_group_start)
                 )
 
                 # ---------------- softmax step (:2186-2352) ----------------
@@ -2166,13 +2445,25 @@ def _kernel(
                 # how the reference emits it too (mask.py:36-46, :71-121).
                 col_limit = T.alloc_local((1,), "int32")
                 col_limit[0] = kv_valid_cols
-                if masked_tok_count > 0:
-                    tok_of_row: T.int32 = udiv_i32(group_tidx, qheadperkv)
-                    q_idx_mask: T.int32 = T.bitwise_and(
-                        ld_shared_i32(s_qidx_meta, qidx_meta_slot + tok_of_row), Q_IDX_MASK
+                if causal:
+                    # How many of this group's tokens still sit on the causal
+                    # diagonal and therefore need per-column masking
+                    # (:2478-2486). A non-causal build passes a literal zero
+                    # here and takes the column-limit-only arm (:2544-2548), so
+                    # none of this is emitted.
+                    qi_group_start: T.int32 = qi_group * q_tokens_per_group
+                    masked_tok_count: T.int32 = T.max(
+                        0, T.min(q_tokens_per_group, diag_q_count_sm - qi_group_start)
                     )
-                    causal_col_limit: T.int32 = q_idx_mask + causal_q_off - kv_block_col_start + 1
-                    col_limit[0] = T.min(kv_valid_cols, causal_col_limit)
+                    if masked_tok_count > 0:
+                        tok_of_row: T.int32 = udiv_i32(group_tidx, qheadperkv)
+                        q_idx_mask: T.int32 = T.bitwise_and(
+                            ld_shared_i32(s_qidx_meta, qidx_meta_slot + tok_of_row), Q_IDX_MASK
+                        )
+                        causal_col_limit: T.int32 = (
+                            q_idx_mask + causal_q_off - kv_block_col_start + 1
+                        )
+                        col_limit[0] = T.min(kv_valid_cols, causal_col_limit)
                 if col_limit[0] < N_BLOCK:
                     for chunk in T.unroll(N_BLOCK // MASK_R2P_CHUNK):
                         shift: T.int32 = T.max((chunk + 1) * MASK_R2P_CHUNK - col_limit[0], 0)
@@ -2247,8 +2538,16 @@ def _kernel(
                 # decision on (j, k), so both indices have to be Python ints.
                 for j in range(4):
                     for k in range(0, 32, 2):
+                        # The zero-frequency arm is a SHORT-CIRCUIT, not a
+                        # period of zero: `apply_exp2_convert` has its own
+                        # `const_expr(ex2_emu_freq == 0)` branch
+                        # (softmax.py:381-383) that takes real exp2 for both
+                        # elements of every pair, with no polynomial and no
+                        # `fmax` clamp. Reaching the modulo with a zero
+                        # frequency would divide by zero at trace time.
                         use_mufu = T.meta_var(
-                            (k % EX2_EMU_FREQ) < (EX2_EMU_FREQ - 4)
+                            ex2_emu_freq == 0
+                            or (k % ex2_emu_freq) < (ex2_emu_freq - 4)
                             or j >= 3
                             or j < EX2_EMU_START_FRG
                         )
@@ -2315,24 +2614,35 @@ def _kernel(
 
     if warp_idx < SOFTMAX1_WARP_BASE:
         if cta_valid_work != 0:
-            T.evaluate(T.ptx.setmaxnreg.inc.sync.aligned.u32(T.uint32(NUM_REGS_SOFTMAX)))
+            T.evaluate(T.ptx.setmaxnreg.inc.sync.aligned.u32(T.uint32(num_regs_softmax)))
             softmax_warpgroup(0)
 
     if warp_idx >= SOFTMAX1_WARP_BASE and warp_idx < Q_LOAD_WARP_BASE:
         if cta_valid_work != 0:
-            T.evaluate(T.ptx.setmaxnreg.inc.sync.aligned.u32(T.uint32(NUM_REGS_SOFTMAX)))
+            T.evaluate(T.ptx.setmaxnreg.inc.sync.aligned.u32(T.uint32(num_regs_softmax)))
             softmax_warpgroup(1)
 
 
 def get_kernel(**config):
     """Return the TIRx specialization for one compile key."""
     config.pop("label", None)
+    paged = bool(config.get("paged", False))
+    seqused = bool(config.get("seqused", False))
+    if seqused and not paged:
+        raise ValueError("seqused_k is only supported together with page_table")
     kernel = _kernel.specialize(
         qheadperkv=int(config["qhead_per_kv"]),
         causal=bool(config.get("causal", True)),
         dtype_mode=str(config.get("dtype", "bf16")),
         partial_dtype=str(config.get("partial_dtype", "float32")),
         **({} if config.get("temperature") else {"lse_temperature_partial_h": None}),
+        # Both axes are selected by handle presence, so a flat specialization
+        # pins them to None and keeps the signature it had before the axis
+        # existed. Upstream's compile key carries them as separate entries
+        # (interface.py:1714-1731); `page_size` needs none because it is forced
+        # equal to `blk_kv`.
+        **({} if paged else {"page_table_h": None}),
+        **({} if seqused else {"seqused_k_h": None}),
     )
     return kernel.with_attr("tirx.kernel_launch_params", list(LAUNCH_TAGS))
 
@@ -2359,9 +2669,13 @@ def _case(
     causal: bool = True,
     blk_kv: int = BLK_KV,
     seqlen_pattern: str = "uniform",
+    paged: bool = False,
+    seqused: bool = False,
 ) -> dict:
     return {
         "label": label,
+        "paged": paged,
+        "seqused": seqused,
         "batch": batch,
         "seqlen_q": seqlen_q,
         "seqlen_k": seqlen_k,
@@ -2481,6 +2795,53 @@ BENCH_CONFIGS = [
         qhead_per_kv=2,
         topk=4,
     ),
+    # Paged. `paged_ring48k_bf16_qh16_t16` deliberately mirrors the flat
+    # marquee row shape for shape, so the pair reads directly as the cost of
+    # the page indirection rather than of a different workload.
+    _case(
+        label="paged_ring48k_bf16_qh16_t16",
+        batch=1,
+        seqlen_q=49152,
+        seqlen_k=49152,
+        head_kv=1,
+        qhead_per_kv=16,
+        topk=16,
+        paged=True,
+    ),
+    _case(
+        label="paged_seqused_bf16_s16384_qh4_t16",
+        batch=2,
+        seqlen_q=16384,
+        seqlen_k=16384,
+        head_kv=2,
+        qhead_per_kv=4,
+        topk=16,
+        paged=True,
+        seqused=True,
+    ),
+    _case(
+        label="paged_fp8_s16384_qh16_t16",
+        batch=1,
+        seqlen_q=16384,
+        seqlen_k=16384,
+        head_kv=2,
+        qhead_per_kv=16,
+        topk=16,
+        dtype="fp8",
+        partial_dtype="bfloat16",
+        temperature=1.0,
+        paged=True,
+    ),
+    _case(
+        label="paged_edge_b1_s2048_bf16_t4",
+        batch=1,
+        seqlen_q=2048,
+        seqlen_k=2048,
+        head_kv=1,
+        qhead_per_kv=2,
+        topk=4,
+        paged=True,
+    ),
 ]
 
 # Correctness runs at test scale: a full reference for the marquee shapes would
@@ -2592,6 +2953,139 @@ CONFIGS = [
         topk=2,
         seqlen_pattern="varlen",
     ),
+    # Paged KV. `page_size == blk_kv`, so a CTA's block is one page and the only
+    # kernel-visible change is the TMA coordinate; these cover both Q paths,
+    # both KV staging forms, and the two `seqused_k` states.
+    _case(
+        label="paged_bf16_s4096_qh4_t16",
+        batch=2,
+        seqlen_q=4096,
+        seqlen_k=4096,
+        head_kv=2,
+        qhead_per_kv=4,
+        topk=16,
+        paged=True,
+    ),
+    _case(
+        label="paged_bf16_s4096_qh16_t8",
+        batch=2,
+        seqlen_q=4096,
+        seqlen_k=4096,
+        head_kv=2,
+        qhead_per_kv=16,
+        topk=8,
+        paged=True,
+    ),
+    _case(
+        label="paged_seqused_bf16_s4096_qh4_t16",
+        batch=3,
+        seqlen_q=4096,
+        seqlen_k=4096,
+        head_kv=2,
+        qhead_per_kv=4,
+        topk=16,
+        paged=True,
+        seqused=True,
+    ),
+    # Varlen under `seqused_k`: the per-batch trims land at different offsets
+    # inside the last page, so the column limit and the causal diagonal move
+    # independently per batch.
+    _case(
+        label="paged_seqused_varlen_b3_s2048_qh8_t8",
+        batch=3,
+        seqlen_q=2048,
+        seqlen_k=2048,
+        head_kv=2,
+        qhead_per_kv=8,
+        topk=8,
+        paged=True,
+        seqused=True,
+        seqlen_pattern="varlen",
+    ),
+    _case(
+        label="paged_fp8_s2048_qh16_t8",
+        batch=2,
+        seqlen_q=2048,
+        seqlen_k=2048,
+        head_kv=2,
+        qhead_per_kv=16,
+        topk=8,
+        dtype="fp8",
+        partial_dtype="bfloat16",
+        temperature=1.0,
+        paged=True,
+    ),
+    # FP8 K/V staged to BF16: the staging descriptor is a second rank-4 map.
+    _case(
+        label="paged_fp8kv_s2048_qh4_t8",
+        batch=2,
+        seqlen_q=2048,
+        seqlen_k=2048,
+        head_kv=2,
+        qhead_per_kv=4,
+        topk=8,
+        dtype="bf16q_fp8kv",
+        paged=True,
+    ),
+    _case(
+        label="paged_seqused_fp8_pvbf16_s2048_qh8_t8",
+        batch=2,
+        seqlen_q=2048,
+        seqlen_k=2048,
+        head_kv=2,
+        qhead_per_kv=8,
+        topk=8,
+        dtype="fp8_pvbf16",
+        paged=True,
+        seqused=True,
+    ),
+    # `causal=False`: a different register budget, `ex2_emu_freq = 0`, no
+    # diagonal binary search, and a column-limit-only mask (:173-184).
+    _case(
+        label="corr_noncausal_bf16_s2048_qh4_t8",
+        batch=2,
+        seqlen_q=2048,
+        seqlen_k=2048,
+        head_kv=2,
+        qhead_per_kv=4,
+        topk=8,
+        causal=False,
+    ),
+    _case(
+        label="corr_noncausal_paged_fp8_s2048_qh16_t8",
+        batch=2,
+        seqlen_q=2048,
+        seqlen_k=2048,
+        head_kv=2,
+        qhead_per_kv=16,
+        topk=8,
+        dtype="fp8",
+        partial_dtype="bfloat16",
+        causal=False,
+        paged=True,
+    ),
+    # FP16 partials share the BF16 v8 epilogue store width (:372-377).
+    _case(
+        label="corr_partial_fp16_s2048_qh8_t8",
+        batch=2,
+        seqlen_q=2048,
+        seqlen_k=2048,
+        head_kv=2,
+        qhead_per_kv=8,
+        topk=8,
+        partial_dtype="float16",
+    ),
+    # topk=32 is the top of upstream's supported set; it changes the split-slot
+    # count and the work list, not the compiled code.
+    _case(
+        label="corr_topk32_s4096_qh4",
+        batch=1,
+        seqlen_q=4096,
+        seqlen_k=4096,
+        head_kv=2,
+        qhead_per_kv=4,
+        topk=32,
+    ),
 ]
 
 
@@ -2617,6 +3111,74 @@ _CSR_CONFIG_KEYS = (
     "blk_kv",
     "seqlen_pattern",
 )
+
+
+def _seqused_trim(batch: int, blk_kv: int) -> list[int]:
+    """Per-batch shortfall between the logical K length and the paged capacity.
+
+    Every trim stays **inside one page**, which is what keeps the CSR valid
+    without a pruning pass: `ceil(effective / blk_kv)` still equals the capacity
+    row count, so no edge can reference a block past `seqused_k`. Upstream
+    reaches the same state from the other side, selecting against the full
+    length and rewriting out-of-range entries to `-1`
+    (test_sparse_atten.py:956-971); a trim of a whole page or more would need
+    that rewrite to stay a legal input, and an input upstream would never
+    produce is not worth constructing.
+
+    Deterministic and deliberately mixed, so the partial-block column limit and
+    the shifted causal diagonal both get exercised. The first entry is nonzero
+    and the second is the full page rather than the other way round: a
+    single-batch config would otherwise trim nothing, making `seqused_k` equal
+    to the paged capacity and testing the axis only in name.
+    """
+    offsets = (37, 0, blk_kv - 1, 149, blk_kv // 2)
+    return [offsets[i % len(offsets)] % blk_kv for i in range(batch)]
+
+
+def _pack_paged_kv(flat, seqlens_k, page_size: int, page_table):
+    """Scatter `[total_k, head_kv, D]` into `[num_pages, head_kv, page_size, D]`.
+
+    Physical pages come from `page_table`, which is shuffled, so a kernel that
+    ignored the table and walked pages in order would read another sequence's
+    tokens rather than merely stale ones. Trailing partial pages stay zero, as
+    upstream's builder leaves them (test_sparse_atten.py:401).
+    """
+    import torch
+
+    head_kv, dim = flat.shape[1], flat.shape[2]
+    num_pages = int(page_table.numel())
+    paged = torch.zeros((num_pages, head_kv, page_size, dim), dtype=flat.dtype, device=flat.device)
+    table = page_table.tolist()
+    offset = 0
+    for batch_idx, length in enumerate(seqlens_k):
+        length = int(length)
+        for page in range(len(table[batch_idx])):
+            lo = page * page_size
+            hi = min(lo + page_size, length)
+            if hi > lo:
+                paged[int(table[batch_idx][page]), :, : hi - lo] = flat[
+                    offset + lo : offset + hi
+                ].transpose(0, 1)
+        offset += length
+    return paged
+
+
+def _build_page_table(batch: int, pages_per_seq: int, generator):
+    """A shuffled, rectangular `[batch, pages_per_seq]` int32 table.
+
+    16-byte aligned because the production adapter asserts it and over-allocates
+    to guarantee it (sparse_fmha_adapter.py:239-242).
+    """
+    import torch
+
+    num_pages = batch * pages_per_seq
+    padded = torch.empty(num_pages + 4, dtype=torch.int32, device="cuda")
+    shift = (-padded.data_ptr()) % 16 // padded.element_size()
+    table = padded[shift : shift + num_pages]
+    table.copy_(torch.randperm(num_pages, device="cuda", generator=generator).to(torch.int32))
+    table = table.view(batch, pages_per_seq)
+    assert table.data_ptr() % 16 == 0
+    return table
 
 
 def _frozen_qsplit(csr: dict[str, Any]):
@@ -2669,6 +3231,11 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
     from tirx_kernels.msa.sparse_prepare_fwd_split_atomic import prepare_data as prepare_csr
 
     config.pop("label", None)
+    paged = bool(config.get("paged", False))
+    seqused = bool(config.get("seqused", False))
+    if seqused and not paged:
+        raise ValueError("seqused_k is only supported together with page_table")
+
     csr_config = {key: config[key] for key in _CSR_CONFIG_KEYS if key in config}
     csr = prepare_csr(seed=seed, **csr_config)
 
@@ -2693,6 +3260,35 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
     k = k_bf16.to(_torch_dtype(mode["k"])).contiguous()
     v = v_bf16.to(_torch_dtype(mode["v"])).contiguous()
 
+    # Paged KV. `page_size == blk_kv` is mandatory upstream (:99-107), so a CTA's
+    # KV block is exactly one page and the pages-per-sequence count is uniform;
+    # that rectangularity is what lets the kernel recover `pages_per_seq` from
+    # the scalars it already takes instead of a new argument.
+    page_table = seqused_k = None
+    k_paged = v_paged = None
+    if paged:
+        blk_kv = config["blk_kv"]
+        pages_per_seq = max((int(length) + blk_kv - 1) // blk_kv for length in csr["seqlens_k"])
+        page_table = _build_page_table(len(csr["seqlens_k"]), pages_per_seq, generator)
+        k_paged = _pack_paged_kv(k, csr["seqlens_k"], blk_kv, page_table)
+        v_paged = _pack_paged_kv(v, csr["seqlens_k"], blk_kv, page_table)
+        if seqused:
+            trims = _seqused_trim(len(csr["seqlens_k"]), blk_kv)
+            seqused_k = torch.tensor(
+                [int(length) - trim for length, trim in zip(csr["seqlens_k"], trims, strict=True)],
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            # Without `seqused_k` the kernel takes the full paged capacity as the
+            # logical length (:210-211), so every batch must fill its pages
+            # exactly or the tail of zero-padding would be attended to. The CSR's
+            # lengths are already blk_kv-aligned, which is that condition.
+            assert all(int(length) % blk_kv == 0 for length in csr["seqlens_k"])
+            assert all(
+                (int(length) + blk_kv - 1) // blk_kv == pages_per_seq for length in csr["seqlens_k"]
+            ), "paged without seqused_k requires uniform lengths: capacity is the logical length"
+
     cu_seqlens_k = torch.zeros(len(csr["seqlens_k"]) + 1, dtype=torch.int32, device=device)
     cu_seqlens_k[1:] = torch.tensor(csr["seqlens_k"], dtype=torch.int32, device=device).cumsum(0)
 
@@ -2703,8 +3299,15 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
         "csr": csr,
         "q": q,
         "q_flat": q.reshape(-1, HEAD_DIM),
-        "k": k,
-        "v": v,
+        # Paged runs hand the kernel and the reference the page-major tensors;
+        # the flat ones stay for the dequantized twins and for host-side checks.
+        "k": k_paged if paged else k,
+        "v": v_paged if paged else v,
+        "k_flat": k,
+        "v_flat": v,
+        "paged": paged,
+        "page_table": page_table,
+        "seqused_k": seqused_k,
         # The bf16 twins the fp8-KV path's exact-match oracle re-runs against.
         "k_dequantized": k.to(torch.bfloat16).contiguous(),
         "v_dequantized": v.to(torch.bfloat16).contiguous(),
@@ -2728,7 +3331,10 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
         "qhead_per_kv": qhead_per_kv,
         "topk": topk,
         "total_q": total_q,
-        "total_k": total_k,
+        # Under paging the K/V buffers span the page array, not the packed
+        # sequences, and the kernel shapes its match_buffer from this value.
+        "total_k": (int(page_table.numel()) * config["blk_kv"]) if paged else total_k,
+        "total_k_flat": total_k,
         "total_rows": csr["total_rows"],
         "nnz": csr["nnz_capacity"],
         "num_batches": len(csr["seqlens_k"]),
@@ -2769,8 +3375,11 @@ def tirx_args(data: dict[str, Any], outputs: dict[str, Any]) -> tuple:
     # keep their real shape, and only because their base pointer reaches a
     # tensor map.
     args = [
-        as_bits(data["k"]),
-        as_bits(data["v"]),
+        # The kernel binds K/V with one 3-D shape on both axes and reads only
+        # their base pointer; the tensormap carries the paged geometry. A paged
+        # tensor is contiguous, so this view is free and the bytes are the same.
+        as_bits(data["k"].reshape(-1, data["head_kv"], HEAD_DIM)),
+        as_bits(data["v"].reshape(-1, data["head_kv"], HEAD_DIM)),
         data["k2q_q_indices"].reshape(-1),
         data["k2q_qsplit_indices"].reshape(-1),
         data["k2q_row_ptr"].reshape(-1),
@@ -2781,8 +3390,14 @@ def tirx_args(data: dict[str, Any], outputs: dict[str, Any]) -> tuple:
     ]
     if data["lse_temperature_scale"] is not None:
         args.append(outputs["lse_temperature_partial"].reshape(-1))
+    args.append(as_bits(data["q_flat"]))
+    # Optional handles, in the reference's own argument order: both are absent
+    # from the signature entirely when the specialization pins them to None.
+    if data.get("page_table") is not None:
+        args.append(data["page_table"].reshape(-1))
+    if data.get("seqused_k") is not None:
+        args.append(data["seqused_k"])
     args += [
-        as_bits(data["q_flat"]),
         data["cu_seqlens_q"],
         data["cu_seqlens_k"],
         data["softmax_scale"] * math.log2(math.e),
@@ -2817,6 +3432,8 @@ def reference_case(data: dict[str, Any], outputs: dict[str, Any]) -> dict[str, A
         "lse_partial": outputs["lse_partial"],
         "lse_temperature_partial": outputs.get("lse_temperature_partial"),
         "q_flat": data["q_flat"],
+        "page_table": data.get("page_table"),
+        "seqused_k": data.get("seqused_k"),
         "cu_seqlens_q": data["cu_seqlens_q"],
         "cu_seqlens_k": data["cu_seqlens_k"],
         "softmax_scale": data["softmax_scale"],

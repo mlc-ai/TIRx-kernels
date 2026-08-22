@@ -45,8 +45,6 @@ every specialization in this port:
 | `head_dim` | 128 | `__init__` raises otherwise (`:78-81`) |
 | `n_block_size` | 128 | the KV block width the schedule is built around |
 | `m_block_size` | 128 | 128 packed Q heads per MMA tile |
-| `causal` | `True` | the dominant upstream coverage; a real codegen axis (`:177-184`) |
-| `paged_kv` | `False` | out of scope, see below |
 | `use_prepare_scheduler` | `True` | `__init__` raises otherwise (`:100-102`) |
 | `fp8_pair_dequant` | `True` | the shipped default (`interface.py:1860`); the port pins it rather than reading the environment |
 | `has_v_global_scale` | `False` | **unreachable**: the interface pins it (`interface.py:1862-1866`) and applies V's tensor scale once in the combine kernel |
@@ -57,27 +55,21 @@ In scope, i.e. the specializations this module compiles:
 | --- | --- | --- |
 | Q dtype | `bf16`, `fp8_e4m3` | the largest axis. It fixes the **dequant target program** (a BF16 conversion chain vs an FP8 pair chain), the single `mma_kind` (`"f16"` vs `"f8f6f4"`, `:347`), `tmem_s_to_p_offset` (64 vs 96, `:352-354`), the **whole gather4 Q body** (`:2014-2056`: FP8 issues one copy per gather with no prefetch, BF16 issues two half-row copies plus a prefetch), and **where the K tensor scale is applied**. |
 | `qheadperkv` | 1, 2, 4 / 8, 16 | selects the whole Q-load warpgroup program: `use_q_gather4` (`:84`) picks a raw gather4 descriptor path for 1/2/4 and a CUTE-managed TMA path for 8/16. Also sets `q_tokens_per_group = 128 // qheadperkv` (`:112`) and `tokens_per_gather4 = 4 // qheadperkv` (`:90`). |
-| `partial_dtype` | fp32, bf16, fp8 e4m3 | three distinct epilogue store paths: 4-lane, 8-lane and 16-lane 128-bit stores with three different swizzle-inverse column remaps (`:3041-3269`) |
+| `partial_dtype` | fp32, bf16, **fp16**, fp8 e4m3 | three store WIDTHS -- 4-lane, 8-lane and 16-lane 128-bit stores with three different swizzle-inverse column remaps (`:3041-3269`) -- but FOUR programs: bf16 and fp16 share the 8-lane width and the remap yet take different converters, `cvt.rn.bf16.f32` against `cvt.rn.f16.f32`, dispatched by `const_expr` at `:2868-2884`. Saying fp16 "shares the bf16 path" is true of the width and false of the arithmetic. |
 | temperature LSE | on / off | `mLSE_temperature_partial is not None` adds one scaled row-sum reduction, one `sScaleTemperature` publish and one extra LSE store |
 | `has_k_global_scale` | `True` / `False` | not a scalar difference but two different device paths, one per Q dtype: BF16 Q folds the tensor scale into the dequantized values, FP8 Q multiplies the FP32 S accumulator instead |
+| `paged_kv` | `False` / `True` | `page_table is not None` at this kernel's host entry (`interface.py:1867`; `page_size = int(k.shape[2])` at `:1871`, compile key `:1910-1926`). `page_size == blk_kv` (`:103-111`) makes a CTA's KV block exactly one page, so paging swaps one TMA coordinate rather than gathering: K/V become `[num_pages, head_kv, page_size, 64]`, the descriptors go rank 4, `k_batch_offset` becomes 0, and thread 0 resolves the page into `sPagedKvIdx` (`:864-867`). The one NVFP4-specific part is the block-scale row, `_paged_kv_scale_row` (`:1328-1336`), threaded to four dequant call sites through the two dequant wrappers. |
+| `has_seqused_k` | `False` / `True` | paged-only at the host entry (`interface.py:367-369`); returns `mSeqUsedK[batch]` ahead of the paged-capacity and `cu_seqlens_k` fallbacks (`:205-216`). Under causal masking it can drive `causal_q_offset` negative, which leaves the leading `seqlen_q - seqlen_k` queries with no legal key and a legitimately `-inf` LSE. |
+| `causal` | `False` / `True` | `num_regs_softmax` 176 -> 192, `num_regs_store` 112 -> 80, `num_regs_other` derived as `512 - softmax*2 - store` and landing on 48 either way, `ex2_emu_freq` 16 -> 0 (`:177-185`); the diagonal binary search is skipped and `causal_q_offset` is pinned to 0. |
 
 Out of scope, with the predicate that excludes each:
 
-- **paged KV** -- `page_table is not None` at the host entry; requires
-  `page_size == blk_kv` (`:103-111`), swaps in rank-4 descriptors, and replaces
-  `_flat_kv_scale_row` with `_paged_kv_scale_row` (`:1328-1336`). Upstream tests
-  it; this port excludes it for symmetry with the already-merged sibling, whose
-  bench marquee is likewise flat.
-- **`seqused_k`** -- `seqused_k is not None`; paged-only upstream
-  (`interface.py:367-369`).
-- **`causal=False`** -- upstream's only non-causal NVFP4 coverage is one tiny
-  flat test; it would change `num_regs_softmax` 176 -> 192, `num_regs_store`
-  112 -> 80, and `ex2_emu_freq` 16 -> 0, i.e. remove the polynomial exp2 mixing
-  entirely.
-- **`fp8_pair_dequant=False`** -- environment-gated off the default; under the
-  pinned toolchain its body is the same instruction family as the pair path.
-- **fp16 partials** -- accepted by the dtype check but never exercised upstream
-  for NVFP4; it shares the bf16 8-lane store path (`:3105-3173`).
+- **`fp8_pair_dequant=False`** -- environment-gated off the default
+  (`interface.py:1860`); the port pins it True rather than reading the
+  environment, and under the pinned toolchain its body is the same instruction
+  family as the pair path.
+- **`page_size != blk_kv`** -- rejected at `:103-111`; the equality is what makes
+  a CTA's KV block exactly one page.
 - **the BF16/FP8-KV sibling** `SparseAttentionForwardSm100` (`atten_fwd.py`) --
   a separate class, already ported.
 - **the combine kernel** `fwd/combine.py` -- a downstream consumer, and the
@@ -87,11 +79,51 @@ Out of scope, with the predicate that excludes each:
 ## The line-info export this sketch is annotated from
 
 Every `instruction_selection` annotation below is read out of a line-info PTX
-export, not out of the source text. Six exports, one per structurally distinct
-in-scope compile key, are preserved under
+export, not out of the source text. Eight exports are preserved under
 `.porting/sparse_atten_fwd_nvfp4_kv/ptx_lineinfo/<name>/`;
 `.porting/sparse_atten_fwd_nvfp4_kv/export_findings.md` records what they
-settle. Unqualified counts below are from `bf16q_tmaq_qh16_fp32` (5922
+settle. Six cover the flat compile keys; the seventh and eighth are the two
+paged builds, `paged_bf16q_tmaq_qh16_fp32` (BF16-Q) and
+`paged_fp8q_gather4_qh4_bf16partial` (FP8-Q). A paged annotation cites whichever
+matches its Q dtype -- the two dequant programs have different source sites, so
+the BF16-Q scalar arm's `.loc 1 1450` / `:1625` occur only in the seventh and
+the FP8-Q pair arm's `.loc 1 1384` / `:1558` only in the eighth.
+
+Three newly in-scope axes have no export of THIS kernel, each for a stated
+reason rather than by omission:
+
+- `causal=False` -- the axis is computed by character-identical code in the
+  BF16 sibling (`atten_fwd.py:173-181` against `atten_fwd_nvfp4_kv.py:177-185`,
+  both deriving `num_regs_other = 48`), and the sibling's causal/non-causal
+  export pair measures it: `setmaxnreg.inc` 176 -> 192, `dec` 112 -> 80,
+  `dec 48` x3 in both, `ex2.approx` 224 -> 256, static instructions
+  5571 -> 5082. That identity settles the CONSTANTS; the control-flow
+  consequences annotated here -- the deleted diagonal search, the deleted
+  `mCuSeqlensQ[batch+1]` load, the compiled-out causal-mask arm, the
+  zero-frequency exp2 arm -- come from that same sibling pair.
+- `partial_dtype=fp16` -- both classes call the same
+  `common/copy_utils.stg_128_f16_cs`, exported in the sibling as
+  `bf16_tmaq_qh16_fp16partial`.
+- `has_seqused_k` -- its entire device delta is one `ld.global.u32` of
+  `mSeqUsedK[batch]` replacing the paged-capacity multiply at `:212-215`,
+  plus the negative-`causal_q_offset` consequence recorded in the scope table.
+  Both are visible in the sibling's `paged_seqused_bf16_tmaq_qh16_fp32`.
+
+There are FOUR `.file` numbering families across these eight exports, measured
+from their tails:
+
+| build | 3 | 6 | 7 | 8 |
+| --- | --- | --- | --- | --- |
+| BF16-Q flat | `quack/copy_utils.py` | `utils.py` | `mask.py` | `softmax.py` |
+| FP8-Q flat | `quack/copy_utils.py` | `mask.py` | `utils.py` | `softmax.py` |
+| BF16-Q paged | `paged_kv.py` | `blackwell_helpers.py` | `utils.py` | `mask.py` |
+| FP8-Q paged | `paged_kv.py` | `mask.py` | `utils.py` | `softmax.py` |
+
+The paged FP8-Q build is NOT the paged BF16-Q shift applied to the FP8-Q order:
+`paged_kv.py` enters as file 3, but `quack/copy_utils.py` drops out of that
+build entirely, and the two exactly cancel -- so its numbering coincides with
+flat FP8-Q rather than shifting by one. Applying the BF16-Q paged shift to it
+would read its `.loc 6` region as `blackwell_helpers.py` when it is `mask.py`. Unqualified counts below are from `bf16q_tmaq_qh16_fp32` (5922
 instructions, 161 predicated). Counting convention: instruction lines minus
 predicated lines.
 
@@ -111,11 +143,13 @@ re-derived from the source text:
    rather than taken from the host (which is 13.2). Both dequant helpers gate
    their fast paths on `>= 13.2` (`utils.py:652-693`, `:697-771`), so the pin
    takes the **fallbacks**, and the export confirms it: `mul.e4m3x4.e2m1x4`
-   count is **0 in all six exports**. The port transcribes the fallback chains.
+   count is **0 in all eight exports**, both paged ones included. The port transcribes the fallback chains.
 2. **Re-read the `.file` id table for every export.** The ids are assigned per
    export and they are *not* stable even across this kernel's own
-   specializations: the BF16-Q builds number `utils.py` 6 and `mask.py` 7, and
-   all three FP8-Q builds number them the other way round. The table sits at the
+   specializations: see the four-family table above. In particular the two
+   paged builds do NOT share a numbering -- `paged_kv.py` enters as file 3 in
+   both, but `quack/copy_utils.py` drops out of the FP8-Q paged build and
+   cancels the insertion. The table sits at the
    very end of the PTX and its lines are tab-indented, so a `^\.file` grep finds
    nothing -- read the tail. Assuming one export's numbering for another
    silently reattributes a whole region.
@@ -307,7 +341,7 @@ mma_kind  = "f8f6f4" if q_dtype is fp8 else "f16"   # ONE kind, both GEMMs (:347
 tmem_s_to_p = N_BLOCK - N_BLOCK * width(q_dtype) // 32    # 64 bf16 / 96 fp8 (:352-354)
 tokens_per_warp   = ceil(q_tokens_per_group / NUM_Q_LOAD_WARPS)  # TMA program
 subtiles_per_token = 1 if q_dtype is fp8 else 2      # BF16 Q splits on K_TILE
-partial_dtype     # fp32 | bf16 | fp8e4m3
+partial_dtype     # fp32 | bf16 | fp16 | fp8e4m3
 has_temperature   # LSE_temperature_partial is not None
 has_k_global      # k_global_scale is not None
 # instruction_selection: none; extent: compile-time constants only.
@@ -315,8 +349,12 @@ has_k_global      # k_global_scale is not None
 #   Q's dtype, so one `mma_kind` covers both GEMMs.
 
 # Runtime ABI, in the source's parameter order (:296-324).
-mK, mV                    # global uint8 (total_k, PACKED_HEAD_DIM, head_kv) --
-                          # permuted host-side (:365-379); V is MN-major
+mK, mV                    # global uint8. FLAT: (total_k, PACKED_HEAD_DIM,
+                          # head_kv), host permute [0,2,1] / [1,0,2] (:365-372).
+                          # PAGED: (num_pages, head_kv, page_size,
+                          # PACKED_HEAD_DIM), host permute [2,3,1,0] and the
+                          # extra [1,0,2,3] for V (:373-379) -> rank-4
+                          # descriptors. V is MN-major either way.
 mKScale, mVScale          # global uint8, E4M3 bytes in cuBLAS 128x4 tiled order
 mKGlobalScale             # global f32[1] or absent
 mVGlobalScale             # always absent (interface pins has_v_global_scale off)
@@ -330,7 +368,10 @@ mLSE_partial              # global f32 (topk, total_q, head_q)
 mLSE_temperature_partial  # optional, same shape
 mQ_flat                   # global q_dtype (total_q*head_q, HEAD_DIM)
 mQ_gather4_desc           # raw uint8[128] TensorMap, gather4 program only
-mPageTable, mSeqUsedK     # absent in this port
+mPageTable                # optional i32 (batch, pages_per_seq); PAGED_KV only.
+                          # pages_per_seq = mPageTable.shape[1] (:211 analogue)
+mSeqUsedK                 # optional i32 (batch,); HAS_SEQUSED_K only, and the
+                          # host accepts it only alongside mPageTable
 mCuSeqlensQ, mCuSeqlensK  # global i32 (batch+1,)
 softmax_scale_log2        # f32, host-computed: softmax_scale * log2(e)  (:487)
 lse_temperature_scale_log2 # f32, host-computed, chained off the above  (:488)
@@ -376,10 +417,14 @@ sQLoadMIdx   = tile("shared", "i32", (Q_STAGE, q_tokens_per_group))
 sRowMeta     = tile("shared", "i32", (8,))   # batch, kv_block, row_start, count,
                                              # valid_cols, q_off, k_off, causal_off
 sDiagQCount  = tile("shared", "i32", (1,))
-sPagedKvIdx  = tile("shared", "i32", (1,))   # allocated unconditionally and read
-                                             # only on the paged path (out of
-                                             # scope), but it shifts every later
-                                             # offset, so it is not omissible
+sPagedKvIdx  = tile("shared", "i32", (1,))   # written by thread 0 from the page
+                                             # table under the same publish
+                                             # fence as sRowMeta; read warp-wide
+                                             # once per KV-load warp, and ONCE
+                                             # PER ITERATION in each of the two
+                                             # dequant task loops.  Allocated
+                                             # unconditionally, so flat and
+                                             # paged share every later offset
 tmem_addr    = tile("shared", "u32", (1,))
 tmem_dealloc_mbar = mbar(1)                  # 8 B, likewise unconditional
 
@@ -427,7 +472,7 @@ bar_epilogue     = named_barrier(id=13, threads=128)   # +stage -> 13, 14
 # `SoftmaxStatsW0..W7`, but `_wg_softmax` passes `signal_stats_barrier=False`
 # (:2784-2786, :2795-2797) and `_epilogue_step` gets `use_stats_barrier=False`
 # (:2853), so both guarded sites are compiled out: no `bar.*` operand in any of
-# the six exports names an id in 3..10, and the softmax-to-epilogue stats edge is
+# the eight exports names an id in 3..10, and the softmax-to-epilogue stats edge is
 # carried by the `mbar_sm_stats` PIPE alone.  Dropping the eight dead ids is also
 # what lets this renumbering fit: `bar_epilogue + stage` occupies 13 AND 14, so
 # the scheme uses SEVEN ids, 8..14 -- inside the sixteen the hardware has, which
@@ -517,33 +562,81 @@ if tid == 0:
     base_row_start = load_global(mK2qCounts, head_kv_idx * (rows + 1) + row_linear)
     row_start = base_row_start + work_q_begin
     count_raw = work_q_count
-    seqlen_k = load_global(mCuSeqlensK, batch_idx + 1) - load_global(mCuSeqlensK, batch_idx)
-    seqlen_q = load_global(mCuSeqlensQ, batch_idx + 1) - load_global(mCuSeqlensQ, batch_idx)
+    # The logical K length, in the source's own priority order (:205-216).
+    # `seqused` is tested FIRST; checking paged first would silently substitute
+    # the paged capacity for a shorter supplied length.
+    if HAS_SEQUSED_K:
+        seqlen_k = load_global(mSeqUsedK, batch_idx)
+        # instruction_selection: ld.global.u32 (1 static); extent: scalar.
+    elif PAGED_KV:
+        seqlen_k = pages_per_seq * N_BLOCK
+        # instruction_selection: integer multiply, no load; extent: scalar.
+        #   The FULL paged capacity, zero-padded tail pages included.
+    else:
+        seqlen_k = load_global(mCuSeqlensK, batch_idx + 1) - load_global(mCuSeqlensK, batch_idx)
     q_batch_offset = load_global(mCuSeqlensQ, batch_idx)
-    k_batch_offset = load_global(mCuSeqlensK, batch_idx)
-    # instruction_selection: ld.global.u32 -- `mCuSeqlensQ[batch+1]` at :855 and
-    #   `mCuSeqlensK[batch+1]` at :821, plus the two base loads; extent: scalar
-    #   each.  Four loads, not two: each cu_seqlens length is a difference.
+    k_batch_offset = 0 if PAGED_KV else load_global(mCuSeqlensK, batch_idx)
+    # instruction_selection: ld.global.u32, and the COUNT is per axis, not a
+    #   constant.  Each cu_seqlens length is a difference, and both the paged
+    #   and non-causal arms delete loads: flat+causal 4, flat+non-causal 3,
+    #   paged+causal 2 (both from mCuSeqlensQ -- the paged export carries no
+    #   mCuSeqlensK load at all, since `_logical_seqlen_k` takes the multiply
+    #   arm and `k_batch_offset` is the immediate 0 at :841-845),
+    #   paged+non-causal 1.
     kv_valid_cols  = clamp(seqlen_k - kv_block_idx * N_BLOCK, 0, N_BLOCK)
-    causal_q_offset = seqlen_k - seqlen_q
+    if CAUSAL:
+        seqlen_q = load_global(mCuSeqlensQ, batch_idx + 1) - q_batch_offset
+        # instruction_selection: ld.global.u32 (.loc 1 855 23), 1 static;
+        #   extent: scalar.  ONLY under causal -- my non-causal export has zero
+        #   `.loc 1 855` and zero `.loc 1 862`, so hoisting this out of the
+        #   branch gives the non-causal build a load the source does not have.
+        causal_q_offset = seqlen_k - seqlen_q
+        # May be NEGATIVE under `seqused_k`, which is legal: the leading
+        # `seqlen_q - seqlen_k` queries then have no valid key, run the
+        # all-masked path, and store a neutral partial whose LSE is exactly
+        # -inf. Clamping it to a finite value diverges from the source.
+    else:
+        causal_q_offset = 0                       # (:893-901 analogue)
+    if PAGED_KV:
+        page_idx = load_global(mPageTable, batch_idx * pages_per_seq + kv_block_idx)
+        # instruction_selection: ld.global.u32 (1 static); extent: scalar.
+        store_shared(sPagedKvIdx, 0, page_idx)
+        # instruction_selection: st.shared.u32 (1 static); extent: scalar.  A
+        #   separate scalar store -- it targets a different array than the two
+        #   sRowMeta vector stores -- riding the same thread-0 region and the
+        #   same publish fence, so paging adds no barrier (:864-867, :890-891).
     store_shared(sRowMeta, 0..7, those values)
     # instruction_selection: st.shared.v4.u32 (:849, :863) -- the eight words go
     #   out as two four-word stores; extent: 4 words each.
 
     # Causal diagonal split point over the CSR row, which is sorted by q_idx.
-    # A FIXED 32-trip loop with `unroll=1` and a predicated body -- not a
-    # data-dependent `while`.  The export keeps it rolled ($L__BB0_7, one
-    # probe load in the body), so 32 is an upper bound on int32-sized rows
-    # rather than a trip count the loop actually runs to convergence.
-    left, right = 0, count_raw
-    for _ in range(32):                       # rolled, unroll=1
-        if left < right:
-            mid = (left + right) // 2
-            probe = load_global(mK2qIndices, head_kv_idx * nnz + row_start + mid)
-            # instruction_selection: ld.global.u32 (:243), ONE per iteration
-            #   inside the rolled loop; extent: scalar.
-            left, right = (mid + 1, right) if probe < q_threshold else (left, mid)
-    store_shared(sDiagQCount, 0, left)
+    # The whole search sits inside `const_expr(self.causal)` AND, within it,
+    # behind a runtime guard: a row with no work or no visible column skips it
+    # (:874-889).  Under `causal=False` the region is compiled out entirely --
+    # my non-causal export carries zero `.loc 1 277/278/285` and zero
+    # `.loc 1 243`, against 1/2/1 and 2 in the causal build.
+    diag_q_count = 0
+    if CAUSAL:
+        row_has_visible_cols = count_raw > 0 and kv_valid_cols > 0
+        if row_has_visible_cols:
+            # The first q_idx at or past the diagonal, where the threshold is
+            # the row's last visible column mapped back into q space.
+            q_threshold = kv_block_idx * N_BLOCK + kv_valid_cols - causal_q_offset
+            # A FIXED 32-trip loop with `unroll=1` and a predicated body -- not
+            # a data-dependent `while`.  The export keeps it rolled
+            # ($L__BB0_7, one probe load in the body), so 32 is an upper bound
+            # on int32-sized rows rather than a trip count run to convergence.
+            left, right = 0, count_raw
+            for _ in range(32):                       # rolled, unroll=1
+                if left < right:
+                    mid = (left + right) // 2
+                    probe = load_global(mK2qIndices,
+                                        head_kv_idx * nnz + row_start + mid)
+                    # instruction_selection: ld.global.u32 (:243), ONE per
+                    #   iteration inside the rolled loop; extent: scalar.
+                    left, right = (mid + 1, right) if probe < q_threshold else (left, mid)
+            diag_q_count = left
+    store_shared(sDiagQCount, 0, diag_q_count)
     # instruction_selection: st.shared.u32 (:890); extent: scalar.  The one
     #   scalar the metadata block publishes outside the two sRowMeta vector stores.
 
@@ -596,10 +689,28 @@ if 4 <= warp < 8 and cta_valid_work:
 # ===========================================================================
 def kv_load_warp(is_v):
     if has_work:                     # no-work CTAs do nothing at all here
+        if PAGED_KV:
+            page_idx = load_shared(sPagedKvIdx, 0)
+            # instruction_selection: ld.shared.u32 (paged export,
+            #   .loc 1 1709 53 for K / .loc 1 1744 53 for V, 1 static each);
+            #   extent: scalar, WARP-WIDE.  It sits OUTSIDE the elected region:
+            #   the export shows this load immediately before the copy helper's
+            #   `elect.sync` (.loc 1 1734 / :1769), so all 32 lanes execute it.
+            #   Once per KV-load warp and reused across the issue -- a claim
+            #   that holds HERE and not in the dequant loops, where the same
+            #   cell is re-read every iteration.
         with elect():                # region 1 (:1734/:1769) -- the copy only
             copy_g2s(mV if is_v else mK, sVFp4 if is_v else sKFp4,
                      bar=mbar_v_tma if is_v else mbar_k_tma, hint=0)
-            # instruction_selection: cp.async.bulk.tensor.3d.shared::cluster
+            # instruction_selection, PAGED: cp.async.bulk.tensor.**4d**
+            #   .shared::cluster.global.tile.mbarrier::complete_tx::bytes
+            #   .L2::cache_hint (paged export, 2 static -- one for K, one for V,
+            #   where the BF16 sibling needs two each because its row is two
+            #   swizzle atoms wide and the packed FP4 row is one).  Coordinates
+            #   are fastest-first `(head_dim_offset, token_in_page, head_kv,
+            #   page)` with the token coordinate pinned to 0.  Load mode,
+            #   completion and cache hint are UNCHANGED from the flat form.
+            # instruction_selection, FLAT: cp.async.bulk.tensor.3d.shared::cluster
             #   .global.tile.mbarrier::complete_tx::bytes.L2::cache_hint
             #   (:1734,:1769, 2 static); extent: a (PACKED_HEAD_DIM, 1, N_BLOCK)
             #   box = 8192 bytes.  Half the sibling's transaction size, because
@@ -644,8 +755,31 @@ def scale_128x4_offset(row, col):
 # instruction_selection: integer shift/mask/mad chain, no memory op (:1204-1211);
 #   extent: scalar.
 
-def flat_kv_scale_row(token, head_kv_idx):
-    return token * num_heads_kv + head_kv_idx        # (:1319-1326)
+# THE one genuine NVFP4 paged difference. `scale_128x4_offset` above is
+# layout-only and identical either way; what moves is the logical row fed into
+# it. Both forms are the row-major flattening of the tensor the kernel actually
+# reads, which is why the host quantizer needs no paged-specific helper -- it
+# flattens `prod(shape[:-1])` and the order falls out (quantize.py:174-239).
+#
+# The two arms take DIFFERENT arguments, and that is the whole point. The flat
+# arm takes the absolute token `k_batch_offset + kv_block_idx*N_BLOCK + row`;
+# the paged arm takes the INTRA-PAGE row `row`, 0..N_BLOCK-1, and never
+# computes the absolute token at all. Feeding the absolute token to the paged
+# form yields `(page*H+h)*N_BLOCK + k_batch_offset + kv_block_idx*N_BLOCK + row`
+# -- a different, in-range E4M3 byte for every task. It does not fault and the
+# values look plausible; only the bitwise gate catches it.
+
+def paged_kv_scale_row(row, head_kv_idx, page_idx):    # (:1328-1336)
+    return (page_idx * num_heads_kv + head_kv_idx) * N_BLOCK + row
+    # instruction_selection: mad.lo.s32 then shl.b32 by 7 then add.s32
+    #   (paged export, .loc 1 1336 12 and .loc 1 1336 11); extent: scalar.
+    #   Against flat the whole-module counts move `cvt.s64.s32` 44 -> 46,
+    #   `mul.lo.s64` 40 -> 41, `shl.b64` 38 -> 39 -- one extra multiply and
+    #   add, nothing structural.
+
+def flat_kv_scale_row(token, head_kv_idx):             # (:1319-1326)
+    return token * num_heads_kv + head_kv_idx
+    # instruction_selection: integer mad, no memory op; extent: scalar.
 
 def dequant_kv(sFp4, sDst, mbar_tma, mbar_ready, dequant_bar, mScale, is_v):
     if not has_work:
@@ -667,7 +801,21 @@ def dequant_kv(sFp4, sDst, mbar_tma, mbar_ready, dequant_bar, mScale, is_v):
             # constant in the source and it must not be conflated.
             row       = task_idx // SCALE_COLS
             scale_col = task_idx - row * SCALE_COLS
-            token     = k_batch_offset + token_in_block_base + row
+            if PAGED_KV:
+                page_idx  = load_shared(sPagedKvIdx, 0)
+                # instruction_selection: ld.shared.u32, ONE PER ITERATION
+                #   (paged export: .loc 1 1450 19 at the K site inside the
+                #   `.pragma "nounroll"` loop $L__BB0_89, .loc 1 1625 19 at the
+                #   V site inside $L__BB0_120 -- `dequant_kv` is parameterised
+                #   by `is_v`, so this one arm covers both); extent: scalar.
+                #   The backend does NOT hoist it out of the task loop, so a
+                #   port that lifts it changes the hottest loop's instruction
+                #   count.  This is a different read from the KV-load warps'
+                #   one -- that one really is once per warp; this one is not.
+                scale_row = paged_kv_scale_row(row, head_kv_idx, page_idx)
+            else:
+                token     = k_batch_offset + token_in_block_base + row
+                scale_row = flat_kv_scale_row(token, head_kv_idx)
 
             r_words = reg_tile([2], "u32")           # 8 bytes = 16 FP4 values
             copy_s2r(sFp4[row * PACKED_HEAD_DIM + scale_col * 8 ..+ 8], r_words)
@@ -684,8 +832,8 @@ def dequant_kv(sFp4, sDst, mbar_tma, mbar_ready, dequant_bar, mScale, is_v):
             # instruction_selection: ld.shared.v2.u32 (:1472 K, :1647 V), ONE per
             #   iteration; extent: 16 FP4 values as two 32-bit words.
 
-            scale_byte = load_global(mScale, scale_128x4_offset(
-                flat_kv_scale_row(token, head_kv_idx), scale_col))
+            scale_byte = load_global(mScale,
+                                     scale_128x4_offset(scale_row, scale_col))
             # instruction_selection: ld.global.u8 (:1233), ONE per task, issued
             #   inside the loop; extent: scalar.  ZERO-extending here; the FP8
             #   path's loader is sign-extending instead, which is a real operand-
@@ -763,7 +911,21 @@ def dequant_kv(sFp4, sDst, mbar_tma, mbar_ready, dequant_bar, mScale, is_v):
         for pair_idx in range(task, TOTAL_PAIRS, NUM_DEQUANT_WARPS * 32):  # rolled
             row       = pair_idx // (SCALE_COLS // 2)
             pair_col  = pair_idx - row * (SCALE_COLS // 2)
-            token     = k_batch_offset + token_in_block_base + row
+            if PAGED_KV:
+                page_idx  = load_shared(sPagedKvIdx, 0)
+                # instruction_selection: ld.shared.u32, ONE PER ITERATION, at
+                #   this program's own sites -- .loc 1 1384 (K) and .loc 1 1558
+                #   (V); extent: scalar.  Not hoisted, same as the BF16-Q path.
+                #   Measured directly in `paged_fp8q_gather4_qh4_bf16partial`:
+                #   the cell sits at +3888 in that layout and carries FOUR
+                #   reads, whose nearest preceding `.loc` are 1709 53 and
+                #   1744 53 (the two KV-load warps) and 1384 23 / 1558 23
+                #   (these two pair sites).  Same four-read shape as the BF16-Q
+                #   paged build at its own offset +3504.
+                scale_row = paged_kv_scale_row(row, head_kv_idx, page_idx)
+            else:
+                token     = k_batch_offset + token_in_block_base + row
+                scale_row = flat_kv_scale_row(token, head_kv_idx)
 
             r_words = reg_tile([4], "u32")           # 16 bytes = 32 FP4 values
             copy_s2r(sFp4[row * PACKED_HEAD_DIM + pair_col * 16 ..+ 16], r_words)
@@ -1178,9 +1340,27 @@ def softmax_warpgroup(stage):
     # instruction_selection: bar.sync id=8, 288 threads (:1089,:1156); extent:
     #   warpgroup.  Entry side -- arrive AND wait.
 
+    # The source const_expr-splits the `_softmax_step` call site itself
+    # (:2744-2752 causal vs :2788-2821 non-causal). The causal arm derives the
+    # two quantities the mask needs; the non-causal arm passes literal
+    # `Int32(0)` for both and never computes `kv_block_col_start` (:2727-2729).
+    if CAUSAL:
+        kv_block_col_start = kv_block_idx * N_BLOCK          # (:2727-2729)
+        diag_q_count = load_shared(sDiagQCount, 0)
+        # instruction_selection: ld.shared.u32; extent: scalar.
+    else:
+        kv_block_col_start = 0
+        diag_q_count = 0
+
     # WG0 takes even Q groups, WG1 odd.
     for qi_iter in range((num_q_groups + (1 - stage)) // 2):
         qi_group = qi_iter * 2 + stage
+        if CAUSAL:
+            # How many of this group's tokens still sit on the diagonal.
+            masked_tok_count = clamp(diag_q_count - qi_group * q_tokens_per_group,
+                                     0, q_tokens_per_group)
+        else:
+            masked_tok_count = 0                             # literal (:2788-2821)
         softmax_step(stage, qi_group)
         named_barrier_arrive_and_wait(bar_epilogue + stage)
         # instruction_selection: bar.sync id=13 or 14, 128 threads (:2822);
@@ -1216,19 +1396,29 @@ def softmax_step(stage, qi_group):
         #   that commutes.  On the BF16 path this multiply does not exist: the
         #   tensor scale was folded into the dequantized K values instead.
 
-    # Causal mask: a runtime branch on whether this Q group straddles the
-    # diagonal. Both arms end in the same bit-test body, but they compute
-    # different column limits, and only the diagonal arm reads q_idx.
-    need_causal_mask = masked_tok_count > 0
-    if need_causal_mask:
-        tok = group_tidx // qheadperkv          # :2513
-        q_idx = load_shared(sQIdxMeta, meta_slot + tok) & 0xFFFFFF
-        # instruction_selection: ld.shared.u32 x2 whole-kernel (:2515); extent:
-        #   scalar.  Present only on this arm.
-        col_limit = min(kv_valid_cols,
-                        q_idx + causal_q_offset - kv_block_col_start + 1)
+    # Causal mask. The ENTIRE construct below is inside `const_expr(self.causal
+    # and apply_causal_mask)` (:2510-2546): under `causal=False` the caller
+    # passes `mask_causal=False` and the runtime branch, the q_idx read and the
+    # diagonal column limit are all compiled out, leaving only `kv_valid_cols`.
+    # Measured: `.loc 1 2511` 2 -> 0 and `.loc 1 2515` 4 -> 0 between the causal
+    # and non-causal exports, with the mask region shrinking 522 -> 498 lines.
+    if CAUSAL:
+        # A runtime branch on whether this Q group straddles the diagonal. Both
+        # arms end in the same bit-test body, but they compute different column
+        # limits, and only the diagonal arm reads q_idx.
+        need_causal_mask = masked_tok_count > 0
+        if need_causal_mask:
+            tok = group_tidx // qheadperkv          # :2513
+            q_idx = load_shared(sQIdxMeta, meta_slot + tok) & 0xFFFFFF
+            # instruction_selection: ld.shared.u32 x2 whole-kernel (:2515);
+            #   extent: scalar.  Present only on this arm, and only in a causal
+            #   build.
+            col_limit = min(kv_valid_cols,
+                            q_idx + causal_q_offset - kv_block_col_start + 1)
+        else:
+            col_limit = kv_valid_cols
     else:
-        col_limit = kv_valid_cols
+        col_limit = kv_valid_cols               # (:2537-2546)
     if col_limit < N_BLOCK:                 # mask.py:114
         # A fully-visible tile skips the bit-test body entirely -- the mask
         # region below is reached only under this runtime guard, which is why
@@ -1325,11 +1515,24 @@ def softmax_step(stage, qi_group):
     # and the loop steps in PAIRS (softmax.py:378-396).
     for j in range(4):                       # frg_cnt = 128 // 32
         for k in range(0, 32, 2):
+            if EX2_EMU_FREQ == 0:
+                # The non-causal build. `apply_exp2_convert` has its own
+                # `const_expr(ex2_emu_freq == 0)` arm (softmax.py:381-383) that
+                # takes real exp2 for BOTH elements of every pair -- there is no
+                # emulation and no `fmax` clamp. Reaching the predicate below
+                # with a zero frequency would be a modulo by zero.
+                exp2(r_s[j*32+k]); exp2(r_s[j*32+k+1])
+                continue
             emulate = (k % EX2_EMU_FREQ >= EX2_EMU_FREQ - EX2_EMU_RES
                        and EX2_EMU_START_FRG <= j < 4 - 1)
             if emulate: exp2_poly_pair(r_s[j*32+k], r_s[j*32+k+1])
             else:       exp2(r_s[j*32+k]); exp2(r_s[j*32+k+1])
-        # instruction_selection: ex2.approx.ftz.f32 for 112 of every 128
+        # instruction_selection, NON-CAUSAL (EX2_EMU_FREQ = 0): every element
+        #   takes real MUFU -- `ex2.approx.ftz.f32` 224 -> 256 whole-module,
+        #   the polynomial `fma.rn.f32x2` 176 -> 128 (all 24 per warpgroup
+        #   gone), and `max.f32` 164 -> 132 as the emulation's 32 `fmax(x,-127)`
+        #   clamps disappear with it.  Measured against the causal build.
+        # instruction_selection, CAUSAL: ex2.approx.ftz.f32 for 112 of every 128
         #   (softmax.py:389-390, 112 at each of two sites), and
         #   `utils.ex2_emulation_2` -- a degree-3 FFMA polynomial evaluated on a
         #   PAIR (`utils.evaluate_polynomial_2`, 3 fma.rn.f32x2 at `.loc 6 924`,
@@ -1466,17 +1669,33 @@ def epilogue_step(stage, qi_group):
                         # instruction_selection: rcp.approx.ftz.f32, 32 whole-
                         #   kernel, 16 per warpgroup (:3070), one per 128-bit
                         #   store; extent: scalar.  The zero/NaN guard is BEFORE
-                        #   the reciprocal.
+                        #   the reciprocal.  Its whole-kernel count follows the store
+                        #   width: 32 for fp32, 16 for the 8-lane half paths,
+                        #   8 for fp8.
                         mul(scaled, r_o[cols], row_scale, lanes=2)
                         # instruction_selection: mul.rn.f32x2, two per fp32 store
                         #   group (:3086,:3088); extent: the group.
                         copy_r2g(o_partial_ptr + fake_col(partial_dtype, col),
                                  scaled, cache="cs")
-                        # instruction_selection: st.global.cs.v4.f32 (fp32, 32
-                        #   whole-kernel, 16 per warpgroup, :2866), or v4.b32 of
-                        #   eight packed
-                        #   halves (bf16) / sixteen packed bytes (fp8); extent:
-                        #   128 bits.  The address goes through
+                        # instruction_selection: one 128-bit store per group,
+                        #   but the CONVERTER in front of it is what the partial
+                        #   dtype selects, and the two half formats differ:
+                        #     fp32 -- st.global.cs.v4.f32, no convert (32
+                        #       whole-kernel, 16 per warpgroup, :2866);
+                        #     bf16 -- 8 x cvt.rn.bf16.f32 packed into
+                        #       st.global.cs.v4.b32 (:2882, stg_128_bf16_cs);
+                        #     fp16 -- 8 x cvt.rn.f16.f32 packed into
+                        #       st.global.cs.v4.b32 (:2884, stg_128_f16_cs).
+                        #       Measured on the fp16 export: 128 cvt.rn.f16.f32,
+                        #       16 st.global.cs.v4.b32, `.loc 1 2884` 16 with
+                        #       `.loc 1 2882` 0, against 32 st.global.cs.v4.f32
+                        #       and 0 converts in the fp32 build.  The lane
+                        #       count, the fake-column remap
+                        #       (real_col_to_stg128_half_fake_col, :3160) and
+                        #       the control flow are shared with bf16 -- only
+                        #       the convert opcode is not;
+                        #     fp8  -- sixteen packed bytes in st.global.cs.v4.b32.
+                        #   extent: 128 bits.  The address goes through
                         #   real_col_to_stg128*_fake_col: O_partial is stored in
                         #   fake-column order, the combine kernel reads it back
                         #   that way, and the permutation is what makes these
@@ -1558,8 +1777,10 @@ and exactly one of TMA-Q / gather4-Q.
 
 | descriptor | rank | element | box | swizzle | policy | notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| K | 3 | uint8 | `(PACKED_HEAD_DIM, 1, N_BLOCK)` | 128 B | zero | 8192 transaction bytes -- half the sibling's |
-| V | 3 | uint8 | `(PACKED_HEAD_DIM, 1, N_BLOCK)` | 128 B | zero | MN-major source permute done host-side |
+| K, flat | 3 | uint8 | `(PACKED_HEAD_DIM, 1, N_BLOCK)` | 128 B | zero | 8192 transaction bytes -- half the sibling's |
+| V, flat | 3 | uint8 | `(PACKED_HEAD_DIM, 1, N_BLOCK)` | 128 B | zero | MN-major source permute done host-side |
+| K, **paged** | **4** | uint8 | `(PACKED_HEAD_DIM, N_BLOCK, 1, 1)` | 128 B | zero | global dims fastest-first `(PACKED_HEAD_DIM, page_size, head_kv, num_pages)` from the `[2,3,1,0]` host permute (`:373-379`); coordinate tuple `(0, 0, head_kv, page)`; same 8192 transaction bytes and same `.tile` / `mbarrier::complete_tx::bytes` / `L2::cache_hint` as flat |
+| V, **paged** | **4** | uint8 | `(PACKED_HEAD_DIM, N_BLOCK, 1, 1)` | 128 B | zero | same dims, with the extra `[1,0,2,3]` MN-major permute; coordinate tuple `(0, 0, head_kv, page)` |
 | Q (TMA program) | 2 | q_dtype | `(swizzle_elems, qheadperkv)` | 128 B | zero | present only for qheadperkv 8/16 |
 | Q (gather4 program) | 2 | q_dtype | `(box_x, 1)` | 128 B | EVICT_LAST | `box_x` = 128 for FP8 Q, 64 for BF16 Q; the instruction supplies four row coordinates |
 
@@ -1586,11 +1807,21 @@ unpacked one, so the two must coexist.
 Resolved at trace time, so each appears as straight-line code rather than a
 branch: `qheadperkv` and the Q-load program it selects, `q_dtype` and with it
 the dequant program / `mma_kind` / `tmem_s_to_p` / gather4 box width and k-tile
-split, `partial_dtype` and its store width, `has_temperature`, `has_k_global`.
+split, `partial_dtype` and its store width, `has_temperature`, `has_k_global`,
+`causal`, `paged_kv`, `has_seqused_k`.
+
+The last three are `const_expr` in the source exactly like the others, and each
+deletes code rather than selecting between equal-cost arms: `causal=False`
+removes the diagonal search, the `mCuSeqlensQ[batch+1]` load, the whole
+causal-mask arm and the exp2 emulation; `paged_kv` swaps the KV descriptors to
+rank 4, pins `k_batch_offset` to 0 and changes the block-scale row;
+`has_seqused_k` replaces the paged-capacity multiply with one `ld.global.u32`
+of `mSeqUsedK[batch]`.
 
 Runtime branches that survive: `cta_valid_work`, `has_work`, `qi < count_raw`,
 `qi_lse < count_raw` (the LSE block's own guard), `row < M_BLOCK`,
-`need_causal_mask`, `col_limit < N_BLOCK` (the mask body runs only on a partly
+`need_causal_mask` (**causal builds only** -- it does not survive a
+non-causal specialization), `col_limit < N_BLOCK` (the mask body runs only on a partly
 visible tile), `group_tidx < q_tokens_per_group` (the metadata publish and the
 epilogue decode), `tok_idx < q_tokens_per_group` (the TMA per-warp partition),
 `num_q_groups > 1`, the 32-trip search's `left < right` predicate, and the
