@@ -50,6 +50,13 @@ conflicts to zero against the reference's 612.
 Smaller is not automatically better when it adds synchronization or breaks
 vector alignment.
 
+Twist on the byte offset, never on the row index. A `Swizzle<B,4,3>` XORs bits
+`[4, 4+B)` of the byte offset with bits `[7, 7+B)`, and those source bits sit at
+128 bytes whatever the row is: a 128-byte row twists on the row index only by
+coincidence, a 64-byte row twists on `row >> 1` and a 32-byte row on `row >> 2`.
+A formula written from the wide case passes its own correctness matrix and reads
+the right bytes from the wrong places on every narrower element type.
+
 ## Verification
 
 Measure bank conflicts, static registers, dynamic LDL/STL, and writeback depth
