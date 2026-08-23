@@ -49,5 +49,5 @@ it, and do not substitute a global CTA rank for the in-cluster rank.
 
 Check PTX/SASS for one intended in-cluster rank read, the expected mask/shift or
 divmod pair, and no repeated coordinate reconstruction. Run every legal cluster
-shape and both singleton and multi-CTA guard paths, then the complete
-correctness matrix.
+shape and both singleton and multi-CTA guard paths through targeted performance
+measurement, then the complete correctness and performance matrices.

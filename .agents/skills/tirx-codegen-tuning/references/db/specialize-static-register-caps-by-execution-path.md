@@ -70,6 +70,15 @@ The next lower cap spilled 16 bytes of stack. This is both a non-monotonic
 schedule response and a sharp spill boundary; neither can be inferred from the
 requested number alone.
 
+A neighboring path made the scope narrower still. Caps 68 and 72 spilled 8 and
+16 bytes of stack, while spill-free caps 76, 80, and 84 measured 0.9901x,
+0.9912x, and 0.9887x. A cap of 88 was retained only for one statically known
+shape instead of its whole dtype/layout family. That selector cleared an
+eight-row sibling guard at a 0.9945x minimum and a complete 160-row matrix at a
+0.9918x minimum. Static dimensions and batch count can therefore be part of the
+codegen selector when the measured schedule response does not generalize to
+neighboring shapes.
+
 An underfilled launch isolated the scheduling effect from occupancy. With only
 16 CTAs on 148 SMs, lowering realized allocation from 96 to 80 registers could
 not reduce actual CTA occupancy; it kept the complete opcode vectors identical
@@ -106,6 +115,11 @@ complete matrix; applying the cap to both modes produced another distinct
 schedule rather than a guaranteed transfer. Select the scope from compile-time
 live-range and protocol identity, then guard every affected sibling.
 
+A shape-specific cap is valid only when those dimensions are compile-time
+specialization keys. Do not turn a runtime shape into control flow around the
+attribute, and do not generalize a single-shape result without measuring the
+adjacent static shapes that remain uncapped.
+
 ## Verification
 
 Confirm that CUDA and PTX contain the requested `__maxnreg__` and `.maxnreg`,
@@ -114,8 +128,9 @@ and scheduled SASS rather than trusting the declaration. Run correctness plus
 the affected performance shapes and guard shapes on every retained cap.
 
 Also confirm that each labeled sweep candidate places `.maxnreg` on the intended
-compile-time branch. A cap accidentally applied to a sibling specialization is
-an invalid experiment even when its benchmark label and output files say
+compile-time branch. Inspect both the intended beneficiary and an uncapped
+sibling in emitted PTX. A cap accidentally applied to a sibling specialization
+is an invalid experiment even when its benchmark label and output files say
 otherwise.
 
 Hash or normalize the final cubin before labeling neighboring caps duplicate.
