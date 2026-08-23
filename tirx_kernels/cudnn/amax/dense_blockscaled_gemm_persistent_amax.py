@@ -1573,7 +1573,9 @@ def _make_kernel(
                 advance_work(work)
 
             K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-            K.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](tmem_base, K.uint32(512))
+            with K.If(warp == 0):
+                with K.Then():
+                    K.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](tmem_base, K.uint32(512))
             K.ptx.cp.async_.bulk.wait_group.read(0)
 
     kernel.__annotations__ = {
