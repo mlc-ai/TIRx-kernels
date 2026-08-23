@@ -62,6 +62,14 @@ spill-free, yet their scheduled binaries and affected timings differed. The
 matrix. Treat each distinct final binary as an independent schedule candidate,
 including adjacent caps that land on the same realized allocation.
 
+Another spill-free path measured caps 76, 80, 84, 88, and 96 at 0.9701x,
+0.9698x, 1.0007x, 0.9967x, and 0.9988x. The 80-cap candidate realized the same
+80 registers as the uncapped path but still produced a worse schedule, while
+the selected 84 cap cleared an eight-row family guard at a 0.9965x minimum.
+The next lower cap spilled 16 bytes of stack. This is both a non-monotonic
+schedule response and a sharp spill boundary; neither can be inferred from the
+requested number alone.
+
 An underfilled launch isolated the scheduling effect from occupancy. With only
 16 CTAs on 148 SMs, lowering realized allocation from 96 to 80 registers could
 not reduce actual CTA occupancy; it kept the complete opcode vectors identical
@@ -104,6 +112,11 @@ Confirm that CUDA and PTX contain the requested `__maxnreg__` and `.maxnreg`,
 then read the realized register allocation, stack size, local-memory traffic,
 and scheduled SASS rather than trusting the declaration. Run correctness plus
 the affected performance shapes and guard shapes on every retained cap.
+
+Also confirm that each labeled sweep candidate places `.maxnreg` on the intended
+compile-time branch. A cap accidentally applied to a sibling specialization is
+an invalid experiment even when its benchmark label and output files say
+otherwise.
 
 Hash or normalize the final cubin before labeling neighboring caps duplicate.
 Zero spill, equal realized registers, or equal static instruction totals are not

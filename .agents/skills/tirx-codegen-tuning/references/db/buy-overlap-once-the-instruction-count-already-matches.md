@@ -32,6 +32,32 @@ for f in frags:
     _consume(f)
 ```
 
+The same scheduling rule applies to independent special functions. Do not
+serialize every element through the whole dependency chain when the reference
+issues one operation class for the complete fragment before beginning the next
+class.
+
+```python
+# before: every element waits on its own complete chain.
+for i in K.unroll(FRAGMENT):
+    exp[i] = _exp2(gate[i])
+    denom[i] = 1.0 + exp[i]
+    reciprocal[i] = _reciprocal(_round_if_required(denom[i]))
+    out[i] = value[i] * gate[i] * reciprocal[i]
+
+# after: expose independent operations within each dependency level.
+for i in K.unroll(FRAGMENT):
+    reciprocal[i] = _exp2(gate[i])
+for i in K.unroll(FRAGMENT):
+    reciprocal[i] = 1.0 + reciprocal[i]
+for i in K.unroll(FRAGMENT):
+    reciprocal[i] = _round_if_required(reciprocal[i])
+for i in K.unroll(FRAGMENT):
+    reciprocal[i] = _reciprocal(reciprocal[i])
+for i in K.unroll(FRAGMENT):
+    out[i] = value[i] * gate[i] * reciprocal[i]
+```
+
 ## Rationale
 
 On a kernel at roughly a third of memory throughput and two fifths of compute,
@@ -47,6 +73,15 @@ wait, instead of draining one column pass at a time, raised static instructions
 from 3552 to 3872 and stores from 18 to 34, and moved four measured shapes by
 +0.0345, +0.0134, +0.0046 and +0.0030.
 
+A 32-value activation epilogue showed the same effect without memory loads.
+Grouping all `ex2`, add, optional round-trip conversion, reciprocal, and final
+multiply operations by dependency level matched the reference PTX order and
+reduced one realized allocation from 69 to 64 registers without spill. On the
+five directly comparable guard rows, the minimum ratio moved from 0.9909x to
+0.9967x; two affected rows improved by 0.0084x and 0.0101x. The staged form
+then survived the complete correctness matrix and the complete performance
+matrix.
+
 ## Boundary
 
 The trade is bounded by register live range, and the ceiling is
@@ -55,6 +90,11 @@ shapes cost 13% on one and 3% on another, both of them the specializations whose
 operand dtype left least room for the extra live fragments. Select the form from
 the same compile-time predicate that decides the operand dtype or the load
 program, and measure both arms.
+
+Dependency-level staging also lengthens the lifetime of every intermediate in
+the fragment. Keep it only when the generated schedule exposes independent
+special-function work without introducing stack or local-memory traffic; a
+larger source-level array is not evidence of more overlap by itself.
 
 Deeper pipelines follow the same split. Raising a load pipeline from two stages
 to three cost nothing in occupancy on a register-limited kernel and still helped

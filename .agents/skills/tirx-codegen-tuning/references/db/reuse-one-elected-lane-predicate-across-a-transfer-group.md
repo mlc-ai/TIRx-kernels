@@ -51,6 +51,15 @@ or control flow whose inactive lanes do not execute the original election.  Do
 not extend one predicate across unrelated pipeline phases merely to reduce the
 static instruction count.
 
+Keep the election inside the control region it governs. In one counterexample,
+moving an election above a CTA-uniform leader branch and reusing it for that
+branch's barrier issue plus two following transfer regions was numerically
+correct but changed the generated schedule catastrophically: only 6 of 34
+targeted rows passed and the minimum ratio was 0.6662x. The apparent active-mask
+equivalence did not make the three regions one profitable issue group. Hoist
+only after the source PTX/SASS shows one election governing the same contiguous
+region.
+
 ## Verification
 
 Confirm in SASS that the hot loop contains one election for the logical transfer
