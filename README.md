@@ -19,6 +19,13 @@ upstream project.
 | `allgather_gemm`      | `allgather_gemm.py`      | AllGather + GEMM (multi-GPU, NVSHMEM) |
 | `gemm_reduce_scatter` | `gemm_reduce_scatter.py` | GEMM + ReduceScatter (multi-GPU, NVSHMEM) |
 
+`cudnn/` — NVIDIA cuDNN Frontend ports:
+
+| Kernel                                               | Module                                           | What it is |
+| ---------------------------------------------------- | ------------------------------------------------ | ---------- |
+| `cudnn_sm100_dense_blockscaled_gemm_persistent_amax` | `amax/dense_blockscaled_gemm_persistent_amax.py` | Persistent block-scaled GEMM with fused output amax |
+| `cudnn_sm100_dense_gemm_persistent_swiglu`           | `swiglu/dense_gemm_persistent_swiglu.py`         | Persistent dense GEMM with a fused SwiGLU epilogue |
+
 `flashattention/` — Dao-AILab flash-attention ports:
 
 | Kernel                           | Module                        | What it is |
