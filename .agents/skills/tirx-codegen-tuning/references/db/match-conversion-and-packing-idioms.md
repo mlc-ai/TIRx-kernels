@@ -100,6 +100,24 @@ else:
             T.ptx.mov.b32(words[pair], halves[2 * pair], halves[2 * pair + 1])
 ```
 
+The inverse case matters too. If the reference narrows scalars and performs
+scalar halfword stores, keep the narrowed halves live through those stores
+instead of using packed conversion merely because two values fit in one word.
+
+```python
+# before: packed narrowing is immediately undone for scalar stores.
+for pair in K.unroll(NUM_VALUES // 2):
+    words[pair] = _cvt_pair(values[2 * pair + 1], values[2 * pair])
+for i in K.unroll(NUM_VALUES):
+    K.ptx.st.shared.b16(dst[i], _extract_half(words[i // 2], i & 1))
+
+# after: scalar narrowing feeds the reference's scalar transaction directly.
+for i in K.unroll(NUM_VALUES):
+    halves[i] = _cvt_scalar(values[i])
+for i in K.unroll(NUM_VALUES):
+    K.ptx.st.shared.b16(dst[i], halves[i])
+```
+
 The PTX store's data carrier is independent as well. If the reference feeds the
 low byte of a word directly to `st.global.b8`, preserve the word carrier instead
 of inserting a TIR-level narrowing operation.
@@ -157,6 +175,14 @@ suite. A broader candidate initially failed elsewhere because of an unrelated
 global register policy; separating store width from register selection kept the
 packing result usable.
 
+In another measured scalar-store epilogue, replacing sixteen packed
+conversions plus halfword extraction with 32 scalar conversions feeding 32
+`st.shared.b16` operations matched the reference instruction shape. Two small
+guard rows moved from 0.9805x to 0.9827x and from 0.9899x to 0.9923x; the latter
+cleared the strict gate, while the former still required an independent
+register-schedule fix. This rewrite was retained through the complete
+correctness and performance matrices.
+
 ## Boundary
 
 The exact packed/scalar selector is a property of the source fragment layout
@@ -174,6 +200,10 @@ Direct halfword stores require exact byte-order and alignment equivalence.
 Confirm that no later consumer expects the temporary 32-bit packed words, and
 do not infer the rewrite from output dtype alone; it applies only when the
 conversion result is already the final memory representation.
+
+Scalar halfword stores have the same constraint. They are appropriate when the
+reference transaction is scalar and packing would be immediately reversed;
+they are not a general replacement for a naturally packed shared transaction.
 
 ## Verification
 
