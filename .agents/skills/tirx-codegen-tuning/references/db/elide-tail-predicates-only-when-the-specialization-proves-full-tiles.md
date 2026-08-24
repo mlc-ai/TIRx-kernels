@@ -31,12 +31,11 @@ predicate, and select instructions unless the specialization exposes the proof
 to tracing.  Removing that work from a drain-bound warp can shorten the whole
 persistent pipeline even when the guarded reference kernel remains generic.
 
-In the SM100 KDA backward safe-gate path, the full-tile specialization removed
-16 `FSEL` sites and all 15 `ISETP.LE.AND` sites in the final SASS.  On the same
-B200 GPU and the same five-round `bench_suite` protocol, the safe workload
-changed from 1642.624 us TIRx / 1616.763 us reference (ratio 0.984256) to
-1584.229 us TIRx / 1616.954 us reference (ratio 1.020656), a 3.686% TIRx
-latency reduction.  The final unspliced eleven-row suite had minimum ratio
+In one SM100 persistent backward safe-gate path, the full-tile specialization
+removed 16 `FSEL` sites and all 15 `ISETP.LE.AND` sites in the final SASS.  The
+safe workload changed from 1642.624 us TIRx / 1616.763 us reference (ratio
+0.984256) to 1584.229 us TIRx / 1616.954 us reference (ratio 1.020656), a 3.686%
+TIRx latency reduction.  The complete eleven-row matrix had minimum ratio
 0.994679.
 
 ## Boundary
@@ -44,8 +43,8 @@ latency reduction.  The final unspliced eleven-row suite had minimum ratio
 This is valid only when the compiled artifact is tied to the exact static shape
 fact.  Do not infer full tiles from a benchmark sample if the same artifact may
 later receive different runtime sequence lengths.  Do not delete the ragged
-fallback: the KDA `(17, 33)` safe-gate case was separately checked against both
-the standalone source and the mathematical oracle.
+fallback: the `(17, 33)` safe-gate case was separately checked against both the
+standalone source and the mathematical oracle.
 
 Static instruction reduction alone is not the gate.  A related dead-tail
 unrolling change elsewhere reduced static code but regressed its complete
@@ -55,6 +54,5 @@ matrix; isolate this specialization split and let `bench_suite` decide.
 
 Confirm in final SASS that the intended compare/select sites disappear only
 from the full-tile specialization.  Run correctness for both an aligned case
-and a ragged fallback, then run the complete frozen workload matrix.  Record
-raw per-side samples from one unspliced `bench_suite` run and require every row,
-not only the affected one, to pass the project ratio gate.
+and a ragged fallback, then run the complete frozen workload matrix and require
+every row, not only the affected one, to pass the project ratio gate.
