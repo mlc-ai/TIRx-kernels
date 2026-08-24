@@ -59,6 +59,23 @@ fragment/output family, cluster regime, and resource limit that produced the
 measured response. Let unrelated paths use native allocation when a shared
 budget changes their entry allocation or trips an allocator limit.
 
+Two constraints bind before any sweep, and only the first is usually checked.
+The budget is warpgroup-uniform, so roles sharing a warpgroup cannot move
+independently. The budget must also balance globally: increases are funded only
+by what the decreasing roles release. Against a 96-register default, one kernel's
+decreasing roles released 14,336 registers for increasing roles that required
+12,288; raising one producer role's budget dropped the released pool to 11,264,
+and the increasing roles then blocked forever inside `setmaxnreg.inc`. It
+compiled cleanly and hung at runtime -- a shape that normally finished in 0.034 s
+did not complete in 240 s. Compute the release-versus-require arithmetic for the
+whole kernel, not for the role being changed.
+
+Check whether registers bind at all before sweeping. Zero local and zero shared
+spilling on both sides means no role is starved and a larger cap buys nothing.
+Where the sweep did pay, it was narrow: a collective-issuing warpgroup improved
+by 0.1-1.0% at 56 registers, and funding a further rise to 72 out of the reduce
+role regressed the shapes that role dominates.
+
 ## Verification
 
 Record realized allocation and dynamic local traffic, not only the requested

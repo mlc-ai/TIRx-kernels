@@ -167,6 +167,14 @@ held. Source-size predication changes issue and dependency behavior, not just
 branch syntax, so preserve protocol-on and protocol-off shapes as separate
 performance guards.
 
+Predication pays where a branch DIVERGES, not wherever a branch exists. In a
+gather whose validity flag is row-uniform -- every lane of the warp takes the
+same arm -- replacing the if/else with a predicated copy and a predicated
+zero-fill measured neutral at +0.4%, +0.0%, -0.1%, -0.4%, because those branches
+never diverged in the first place. Check that the guard actually varies across
+the warp before rewriting it; divergent-branch counters separate the two cases
+where branch counts do not.
+
 ## Verification
 
 Confirm predicate polarity and inactive-lane memory behavior, then compare BRA,

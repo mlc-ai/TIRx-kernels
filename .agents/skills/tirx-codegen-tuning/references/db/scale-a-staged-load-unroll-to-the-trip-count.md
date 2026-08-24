@@ -51,6 +51,20 @@ factor against its per-thread trip count and found the crossover at 8, not 28:
 `unroll = 8 if trips >= 8 else min(4, trips)` took that kernel's whole matrix
 from three failing shapes to zero.
 
+A rolled loop in the reference's source text is not a statement that the loop
+should be rolled. One port transcribed a preprocess loop in the reference's own
+rolled form for faithfulness, leaving a single body and one load in flight; the
+reference's compiler had unrolled the same loop. The kernel is purely
+bandwidth-bound, and the rolled form ran at 50.1% of memory throughput against
+the reference's 74.9%, 141.3 us against 94.8. Restoring the unroll took it to
+83.8% and 84.5 us -- faster than the reference. Read the factor off the
+reference's generated code, not its source.
+
+The cost lands unevenly when the loop's grid scales with a problem dimension. That
+preprocess kernel launches one block per head, so the 64-head program paid the
+deficit twice over relative to the 32-head one, and the shortfall showed up as a
+one-program failure pattern that looked like a main-kernel problem.
+
 ## Boundary
 
 Do not assume monotonicity: unroll 6 and 8 regressed back to 5.75 and 6.26
