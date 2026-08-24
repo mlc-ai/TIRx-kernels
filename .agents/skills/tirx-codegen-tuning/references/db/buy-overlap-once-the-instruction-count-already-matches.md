@@ -100,6 +100,17 @@ Deeper pipelines follow the same split. Raising a load pipeline from two stages
 to three cost nothing in occupancy on a register-limited kernel and still helped
 one dtype while regressing another by 0.023.
 
+In a warp-specialized kernel, exclude the warp that issues the collectives from
+this trade. That warp is typically on a small register budget, and three
+independent attempts to buy overlap inside it all lost: fully unrolling its
+matrix chains ran 4x slower, keeping one running descriptor per issue slot cost
+2.4-3.0%, and straight-lining only its eight shortest chains -- two static
+issues becoming four -- cost 6.9-10.7% on the wider of two compiled programs
+while leaving the narrower one flat. The same kernel gained from the opposite
+direction: removing a runtime multiply from each issue was worth 0.4-1.7%.
+Spend the extra instructions in the consumer warps, and measure per compiled
+program, since the cost of code growth there did not transfer between them.
+
 ## Verification
 
 Compare executed instructions against the reference before choosing a

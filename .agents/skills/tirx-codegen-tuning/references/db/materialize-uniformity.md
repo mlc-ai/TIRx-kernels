@@ -74,6 +74,13 @@ machine code at the site: one that holds an index in a uniform register may
 still move it into a per-thread register to scale it, in which case its
 advantage there is precomputation, not the datapath.
 
+The proof costs a `__shfl_sync`, and it is only repaid when there is
+vector-datapath work for it to move. Applying it to a shared-memory base and a
+tensor-memory base whose derived addresses were already reloaded into registers
+per warp role measured neutral to slightly negative: +0.7%, +1.0%, +0.0%, +0.4%.
+Confirm from the generated code that uniform-datapath instructions actually
+replace vector ones before keeping the hint.
+
 ## Verification
 
 Confirm vector versus uniform op counts, branch topology, registers, and the
