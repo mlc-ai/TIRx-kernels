@@ -801,6 +801,7 @@ def _make_main(
     use_dstate0,
     use_initial_state,
     safe_gate,
+    full_tiles,
     dynamic_scheduler,
     l2norm,
     n_heads_out,
@@ -1929,22 +1930,30 @@ def _make_main(
                                 _tanh_approx(safe_a * (gate_prefix[row1] + safe_bias) * 0.5) * 0.5
                                 + 0.5
                             )
-                            K.assign(
-                                gate_prefix[row0],
-                                K.if_then_else(
-                                    token_base + row0 < sequence_length,
-                                    K.float32(-7.213475204444817) * gate0,
-                                    K.float32(0.0),
-                                ),
-                            )
-                            K.assign(
-                                gate_prefix[row1],
-                                K.if_then_else(
-                                    token_base + row1 < sequence_length,
-                                    K.float32(-7.213475204444817) * gate1,
-                                    K.float32(0.0),
-                                ),
-                            )
+                            if full_tiles:
+                                K.assign(
+                                    gate_prefix[row0], K.float32(-7.213475204444817) * gate0
+                                )
+                                K.assign(
+                                    gate_prefix[row1], K.float32(-7.213475204444817) * gate1
+                                )
+                            else:
+                                K.assign(
+                                    gate_prefix[row0],
+                                    K.if_then_else(
+                                        token_base + row0 < sequence_length,
+                                        K.float32(-7.213475204444817) * gate0,
+                                        K.float32(0.0),
+                                    ),
+                                )
+                                K.assign(
+                                    gate_prefix[row1],
+                                    K.if_then_else(
+                                        token_base + row1 < sequence_length,
+                                        K.float32(-7.213475204444817) * gate1,
+                                        K.float32(0.0),
+                                    ),
+                                )
                     else:
                         with K.unroll(16) as row:
                             with K.If(token_base + row < sequence_length), K.Then():
@@ -3457,6 +3466,7 @@ def get_kernel(**config):
         use_dstate0=bool(config.get("use_dstate0", False)),
         use_initial_state=bool(config.get("use_initial_state", False)),
         safe_gate=bool(config.get("safe_gate", False)),
+        full_tiles=all(int(length) % _BT == 0 for length in config["seq_lens"]),
         dynamic_scheduler=bool(config.get("dynamic_scheduler", False)),
         l2norm=bool(config.get("l2norm", False)),
         n_heads_out=int(config.get("n_heads_out", config.get("heads", 1))),
