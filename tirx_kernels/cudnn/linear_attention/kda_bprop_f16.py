@@ -1917,24 +1917,43 @@ def _make_main(
                             gate_prefix[row],
                             arena.ptr_to([_raw_f32_byte(_SMEM_GATE, raw_stage, row, channel)]),
                         )
-                        with K.If(token_base + row >= sequence_length), K.Then():
-                            K.assign(gate_prefix[row], K.float32(0.0))
-                        if safe_gate:
-                            with K.If(token_base + row < sequence_length), K.Then():
-                                gate_sigmoid = (
-                                    _tanh_approx(safe_a * (gate_prefix[row] + safe_bias) * 0.5)
-                                    * 0.5
-                                    + 0.5
-                                )
-                                K.assign(
-                                    gate_prefix[row], K.float32(-7.213475204444817) * gate_sigmoid
-                                )
-                        else:
+                    if safe_gate:
+                        with K.unroll(8) as row_pair:
+                            row0 = row_pair * 2
+                            row1 = row0 + 1
+                            gate0 = (
+                                _tanh_approx(safe_a * (gate_prefix[row0] + safe_bias) * 0.5) * 0.5
+                                + 0.5
+                            )
+                            gate1 = (
+                                _tanh_approx(safe_a * (gate_prefix[row1] + safe_bias) * 0.5) * 0.5
+                                + 0.5
+                            )
+                            K.assign(
+                                gate_prefix[row0],
+                                K.if_then_else(
+                                    token_base + row0 < sequence_length,
+                                    K.float32(-7.213475204444817) * gate0,
+                                    K.float32(0.0),
+                                ),
+                            )
+                            K.assign(
+                                gate_prefix[row1],
+                                K.if_then_else(
+                                    token_base + row1 < sequence_length,
+                                    K.float32(-7.213475204444817) * gate1,
+                                    K.float32(0.0),
+                                ),
+                            )
+                    else:
+                        with K.unroll(16) as row:
                             with K.If(token_base + row < sequence_length), K.Then():
                                 K.assign(
                                     gate_prefix[row],
                                     gate_prefix[row] * K.float32(1.4426950408889634),
                                 )
+                            with K.If(token_base + row >= sequence_length), K.Then():
+                                K.assign(gate_prefix[row], K.float32(0.0))
                     prefix = K.local_scalar("float32", init=K.float32(0.0))
                     with K.unroll(8) as row_pair:
                         row0 = row_pair * 2
