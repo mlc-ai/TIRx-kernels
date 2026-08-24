@@ -518,7 +518,6 @@ def _tmem_cell(base, row, row_delta, column):
 
 
 def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out):
-
     @K.kernel(warps=32, arch="sm_100a", grid=1)
     def prologue(
         base_q: K.gptr[K.i64],
@@ -1931,12 +1930,8 @@ def _make_main(
                                 + 0.5
                             )
                             if full_tiles:
-                                K.assign(
-                                    gate_prefix[row0], K.float32(-7.213475204444817) * gate0
-                                )
-                                K.assign(
-                                    gate_prefix[row1], K.float32(-7.213475204444817) * gate1
-                                )
+                                K.assign(gate_prefix[row0], K.float32(-7.213475204444817) * gate0)
+                                K.assign(gate_prefix[row1], K.float32(-7.213475204444817) * gate1)
                             else:
                                 K.assign(
                                     gate_prefix[row0],
