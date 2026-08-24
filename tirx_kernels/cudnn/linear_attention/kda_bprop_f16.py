@@ -244,11 +244,11 @@ def _barrier_ptr(arena, byte_offset, stage=0):
 def _wait_barrier(arena, byte_offset, stage, phase):
     ready = K.local_scalar("uint32", init=K.uint32(0))
     with K.While(ready == K.uint32(0)):
+        barrier_address = K.cuda.cvta_generic_to_shared(arena.ptr_to([0])) + K.cast(
+            byte_offset + stage * 8, "uint32"
+        )
         K.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
-            ready,
-            _barrier_ptr(arena, byte_offset, stage),
-            K.cast(phase, "uint32"),
-            K.uint32(_TRY_WAIT_TICKS),
+            ready, barrier_address, K.cast(phase, "uint32"), K.uint32(_TRY_WAIT_TICKS)
         )
 
 
