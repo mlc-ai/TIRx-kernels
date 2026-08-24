@@ -337,7 +337,11 @@ def _bwd_load(
     for desc in (desc_q, desc_do, desc_dq):
         K.ptx.prefetch.tensormap(K.address_of(desc))
 
-    with K.If(lane == 0), K.Then():
+    # One hardware election owns this whole transfer group -- the expect_tx and
+    # every TMA issue behind it. `lane == 0` is a per-lane comparison ptxas
+    # cannot read as an election, and it rebuilds one around the group.
+    qdo_leader = K.local_scalar("uint32", init=K.cuda.elect_sync())
+    with K.If(qdo_leader != K.uint32(0)), K.Then():
         # The Q/dO pipeline is acquired before the transfer is announced
         # (:1152-1155); it runs once, so the wait is on the initial phase.
         p_qdo.empty.wait(0, 1)
@@ -447,6 +451,9 @@ def _bwd_load_kv(
     groups = head_dim // 64
     full_tiles = (topk % K.int32(block)) == K.int32(0)  # :1344
 
+    lane0_rd = K.local_scalar("uint32")
+    K.assign(lane0_rd, K.cast(lane == K.int32(0), "uint32"))
+
     def read_indices(tile_index):
         """This warp's 16 top-k indices, read by lane 0 and broadcast."""
         r = K.alloc_local([16], "int32")
@@ -455,12 +462,16 @@ def _bwd_load_kv(
             gidx = tile_index * K.int32(block) + K.int32(row)
             v = K.local_scalar(K.i32, init=K.int32(-1))
             # The bound is the allocation extent, not `topk`: rows past the
-            # length are read and then discarded.
-            K.ptx["ld.global.b32"](
-                v,
-                topk_idxs.ptr_to([token * max_topk + gidx]),
-                pred=(lane == 0) & (gidx < K.int32(max_topk)),
-            )
+            # length are read and then discarded. It is also dead whenever the
+            # extent is a whole number of blocks, which every compiled shape
+            # is: the walk stops at `tile_count * block`, and that is at most
+            # `max_topk`. Dropping it leaves one comparison where combining the
+            # two needed a predicate operation on every read.
+            if max_topk % block:
+                issue = (lane == 0) & (gidx < K.int32(max_topk))
+            else:
+                issue = lane0_rd
+            K.ptx["ld.global.b32"](v, topk_idxs.ptr_to([token * max_topk + gidx]), pred=issue)
             bc = K.local_scalar(K.i32)
             K.ptx.shfl_sync.idx.b32(bc, v, K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF))
             K.assign(r[i], bc)
@@ -767,8 +778,13 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                 # One elected-lane predicate owns every issue in this role: as an
                 # instruction predicate rather than a branch, the descriptor
                 # arithmetic stays warp-wide and the warp never reconverges.
-                lane0 = K.local_scalar("uint32")
-                K.assign(lane0, K.cast(lane == K.int32(0), "uint32"))
+                # `elect.sync`, not `lane == 0`: a tcgen05 MMA is a warp
+                # collective, so ptxas must establish a single issuing lane. Given
+                # a per-lane comparison it rebuilds that around EVERY issue --
+                # an ELECT, two predicate ops and a branch per MMA. The hardware
+                # election yields the uniform predicate the instruction wants,
+                # and one election owns every issue in this role.
+                lane0 = K.local_scalar("uint32", init=K.cuda.elect_sync())
 
                 st_k = K.PipelineState(1, phase=0)
                 st_s = K.PipelineState(1, phase=0)
@@ -1518,11 +1534,14 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk):
             with K.If((idx_q_t < K.int32(block_q)) & (idx_q < seqlen_q)), K.Then():
                 acc = K.local_scalar(K.f32, init=K.float32(0.0))
                 base_o = idx_q * (num_head * head_dim_v) + head * head_dim_v
-                # A rolled walk over the head dimension, as upstream (`:678`):
-                # one body, not `d_steps` copies of it.
-                step = K.local_scalar(K.i32, init=K.int32(0))
-                with K.While(step < K.int32(d_steps)):
-                    d = (tidx + step * K.int32(SUM_ODO_THREADS_D)) * K.int32(SUM_ODO_ELEM_PER_LOAD)
+                # Unrolled over the head dimension. This kernel is purely
+                # bandwidth-bound and its grid scales with the head count, so
+                # its loads have to be in flight together: rolled to a single
+                # body it sustains 50% of memory throughput against the
+                # reference's 75%, and the 64-head program pays that twice over
+                # because it launches twice the blocks.
+                for i in range(d_steps):
+                    d = (tidx + i * SUM_ODO_THREADS_D) * SUM_ODO_ELEM_PER_LOAD
                     ow = K.alloc_local([2], "uint32")
                     dw = K.alloc_local([2], "uint32")
                     K.ptx["ld.global.v2.b32"](ow[0], ow[1], out.ptr_to([base_o + d]))
@@ -1549,7 +1568,6 @@ def make_sum_odo_kernel(*, head_dim, num_head, dtype, max_topk):
                         # `add.rn.f32.<narrow>` takes the narrow value first.
                         K.ptx[add_wide](frag, nv, frag)
                     K.ptx["add.f32"](acc, acc, frag)
-                    K.assign(step, step + K.int32(1))
 
                 total = _butterfly_sum_f32(acc, (1, 2, 4))
 
