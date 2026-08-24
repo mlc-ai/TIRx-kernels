@@ -1,0 +1,23 @@
+# The upstream benchmark sweep (benchmark/dsa/benchmark_dsa_sparse_attention_backward.py:
+# seqlens x topks, seqlen_kv == seqlen_q, bf16, sink on, full-length topk_length)
+# mirrored onto both compiled head-dim programs. This 16-row matrix is the
+# performance gate's required set.
+kernel: cudnn_sm100_dsa_sparse_attention_backward
+selection_rationale: d512/h64 and d576/h32 are separately compiled programs with different TMEM alias maps, tail MMAs and barrier assignments, so the defaults pair the source benchmark's lightest and heaviest d512 shapes with a mid-sweep d576 shape; the full 16-row matrix is that sweep on both programs and is what the port gate requires.
+configs:
+  - {config: d512_h64_bf16_sq4096_t128_len, default: true, selection_role: small}
+  - {config: d512_h64_bf16_sq4096_t512_len, default: false}
+  - {config: d512_h64_bf16_sq4096_t1024_len, default: false}
+  - {config: d512_h64_bf16_sq4096_t2048_len, default: false}
+  - {config: d512_h64_bf16_sq8192_t128_len, default: false}
+  - {config: d512_h64_bf16_sq8192_t512_len, default: false}
+  - {config: d512_h64_bf16_sq8192_t1024_len, default: false}
+  - {config: d512_h64_bf16_sq8192_t2048_len, default: true, selection_role: large}
+  - {config: d576_h32_bf16_sq4096_t128_len, default: false}
+  - {config: d576_h32_bf16_sq4096_t512_len, default: false}
+  - {config: d576_h32_bf16_sq4096_t1024_len, default: false}
+  - {config: d576_h32_bf16_sq4096_t2048_len, default: false}
+  - {config: d576_h32_bf16_sq8192_t128_len, default: false}
+  - {config: d576_h32_bf16_sq8192_t512_len, default: true, selection_role: medium}
+  - {config: d576_h32_bf16_sq8192_t1024_len, default: false}
+  - {config: d576_h32_bf16_sq8192_t2048_len, default: false}
