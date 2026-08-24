@@ -40,8 +40,56 @@ CONFIGS = [
     },
 ]
 
-# The final performance-gate matrix is frozen only after the correctness gate.
-BENCH_CONFIGS = []
+# The performance matrix spans every accepted specialization and three
+# production-scale points while keeping checkpoint construction outside timing.
+BENCH_CONFIGS = [
+    {"label": "perf_basic_b1_s2048_h16", "seq_lens": (2048,), "heads": 16},
+    {"label": "perf_tail_b2_ragged_h16", "seq_lens": (2047, 4093), "heads": 16},
+    {
+        "label": "perf_grouped_b1_s8192_h64_q64_k16_v32",
+        "seq_lens": (8192,),
+        "heads": 64,
+        "q_heads": 64,
+        "k_heads": 16,
+        "v_heads": 32,
+    },
+    {"label": "perf_l2_b1_s8192_h16", "seq_lens": (8192,), "heads": 16, "l2norm": True},
+    {
+        "label": "perf_l2_b4_s8192_h64",
+        "seq_lens": (8192, 8192, 8192, 8192),
+        "heads": 64,
+        "l2norm": True,
+    },
+    {"label": "perf_safe_b1_s8192_h16", "seq_lens": (8192,), "heads": 16, "safe_gate": True},
+    {"label": "perf_beta_b1_s8192_h16", "seq_lens": (8192,), "heads": 16, "beta_sigmoid": True},
+    {
+        "label": "perf_state_b1_s8192_h16",
+        "seq_lens": (8192,),
+        "heads": 16,
+        "use_initial_state": True,
+        "use_dstate_in": True,
+        "use_dstate0": True,
+    },
+    {
+        "label": "perf_dynamic_b4_s2048_h64",
+        "seq_lens": (2048, 2048, 2048, 2048),
+        "heads": 64,
+        "dynamic_scheduler": True,
+    },
+    {
+        "label": "perf_order_scratch_b4_s2048_h64",
+        "seq_lens": (2048, 2048, 2048, 2048),
+        "heads": 64,
+        "run_order": True,
+    },
+    {
+        "label": "perf_order_generate_b4_s2048_h64",
+        "seq_lens": (2048, 2048, 2048, 2048),
+        "heads": 64,
+        "run_order": True,
+        "order_generate": True,
+    },
+]
 
 
 _BT = 16
