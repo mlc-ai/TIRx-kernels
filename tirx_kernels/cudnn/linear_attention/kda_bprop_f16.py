@@ -2043,29 +2043,28 @@ def _make_main(
                     qk1_hi = K.local_scalar("float32", init=_opaque_f32_zero())
                     with K.unroll(2) as half:
                         dim_base = half * 64 + lane_in_group * 8
+                        q_fragment = K.alloc_local((4,), "uint32")
+                        k_fragment = K.alloc_local((4,), "uint32")
+                        K.ptx.ld.shared.v4.b32(
+                            q_fragment[0],
+                            q_fragment[1],
+                            q_fragment[2],
+                            q_fragment[3],
+                            arena.ptr_to([_raw_bf16_byte(_SMEM_Q, raw_stage, decay_row, dim_base)]),
+                        )
+                        K.ptx.ld.shared.v4.b32(
+                            k_fragment[0],
+                            k_fragment[1],
+                            k_fragment[2],
+                            k_fragment[3],
+                            arena.ptr_to([_raw_bf16_byte(_SMEM_K, raw_stage, decay_row, dim_base)]),
+                        )
                         with K.unroll(8) as dim_offset:
-                            q_bits = K.local_scalar("uint16")
-                            k_bits = K.local_scalar("uint16")
-                            K.ptx.ld.shared.b16(
-                                q_bits,
-                                arena.ptr_to(
-                                    [
-                                        _raw_bf16_byte(
-                                            _SMEM_Q, raw_stage, decay_row, dim_base + dim_offset
-                                        )
-                                    ]
-                                ),
-                            )
-                            K.ptx.ld.shared.b16(
-                                k_bits,
-                                arena.ptr_to(
-                                    [
-                                        _raw_bf16_byte(
-                                            _SMEM_K, raw_stage, decay_row, dim_base + dim_offset
-                                        )
-                                    ]
-                                ),
-                            )
+                            shift = K.cast((dim_offset % 2) * 16, "uint32")
+                            q_word = K.shift_right(q_fragment[dim_offset // 2], shift)
+                            k_word = K.shift_right(k_fragment[dim_offset // 2], shift)
+                            q_bits = K.cast(q_word, "uint16")
+                            k_bits = K.cast(k_word, "uint16")
                             K.ptx.cvt.f32.bf16(raw_q[half * 8 + dim_offset], q_bits)
                             K.ptx.cvt.f32.bf16(raw_k[half * 8 + dim_offset], k_bits)
                             if l2norm:
@@ -2120,25 +2119,28 @@ def _make_main(
                     exp_last = K.alloc_local((16,), "float32")
                     with K.unroll(2) as half:
                         dim_base = half * 64 + lane_in_group * 8
-                        with K.unroll(8) as dim_offset:
-                            K.ptx.ld.shared.f32(
-                                exp_g[half * 8 + dim_offset],
+                        with K.unroll(2) as group:
+                            fragment_base = half * 8 + group * 4
+                            K.ptx.ld.shared.v4.f32(
+                                exp_g[fragment_base],
+                                exp_g[fragment_base + 1],
+                                exp_g[fragment_base + 2],
+                                exp_g[fragment_base + 3],
                                 arena.ptr_to(
                                     [
                                         _raw_f32_byte(
-                                            _SMEM_GATE, raw_stage, decay_row, dim_base + dim_offset
+                                            _SMEM_GATE, raw_stage, decay_row, dim_base + group * 4
                                         )
                                     ]
                                 ),
                             )
-                            K.ptx.ld.shared.f32(
-                                exp_last[half * 8 + dim_offset],
+                            K.ptx.ld.shared.v4.f32(
+                                exp_last[fragment_base],
+                                exp_last[fragment_base + 1],
+                                exp_last[fragment_base + 2],
+                                exp_last[fragment_base + 3],
                                 arena.ptr_to(
-                                    [
-                                        _raw_f32_byte(
-                                            _SMEM_GATE, raw_stage, 15, dim_base + dim_offset
-                                        )
-                                    ]
+                                    [_raw_f32_byte(_SMEM_GATE, raw_stage, 15, dim_base + group * 4)]
                                 ),
                             )
                     K.ptx.fence.proxy.async_.shared__cta()
