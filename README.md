@@ -35,6 +35,10 @@ list.
   [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py)
   — BF16 Kimi Delta Attention backward;
   [schedule sketch](.agents/sketch/cudnn/sm100_kda_bprop_f16.md)
+- **Sparse attention:**
+  [`cudnn_sm100_dsa_sparse_attention_backward`](tirx_kernels/cudnn/dsa/sparse_attention_backward.py)
+  — DeepSeek sparse attention backward, four device kernels over a per-token
+  top-k index list; head dimensions 512 and 576
 
 ### FlashAttention ports
 

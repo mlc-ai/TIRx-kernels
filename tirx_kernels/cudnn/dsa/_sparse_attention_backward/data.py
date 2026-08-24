@@ -207,6 +207,89 @@ def reference_backward(
     return dq, dkv, d_sink
 
 
+# --- TMA descriptors -------------------------------------------------------
+# The four rank-3 TensorMaps the `bwd` kernel consumes. Encoded host-side into
+# 64-byte-aligned 128-byte payloads, the same mechanism the FlashAttention
+# backward port uses.
+#
+# Every one has a 64x64 box: `Q`/`dO` are loaded as `head_dim // 64` issues of
+# 64 dims x 64 heads, and the `dQ` stores go out two boxes per 128-wide round.
+# The swizzle is 128B (mode 3) throughout, matching the S<3,4,3> every SMEM
+# layout in this kernel carries.
+_TMA_SWIZZLE_128B = 3
+_TMA_L2_256B = 2
+
+
+class _AlignedTensorMap:
+    """Host storage for one 64-byte-aligned, 128-byte TensorMap payload."""
+
+    def __init__(self):
+        import ctypes
+
+        self._storage = ctypes.create_string_buffer(128 + 64)
+        base = ctypes.addressof(self._storage)
+        self.ptr = ctypes.c_void_p((base + 63) & ~63)
+
+
+def _encode_tensormap(tensor, dtype, global_dims, global_strides, box_dims):
+    """One ``cuTensorMapEncodeTiled``; element strides are all 1 here."""
+    import ctypes
+
+    import tvm
+
+    rank = len(global_dims)
+    descriptor = _AlignedTensorMap()
+    tvm.get_global_func("runtime.cuTensorMapEncodeTiled")(
+        descriptor.ptr,
+        dtype,
+        rank,
+        ctypes.c_void_p(int(tensor.data_ptr())),
+        *global_dims,
+        *global_strides,
+        *box_dims,
+        *((1,) * rank),  # elementStrides
+        0,  # CU_TENSOR_MAP_INTERLEAVE_NONE
+        _TMA_SWIZZLE_128B,
+        _TMA_L2_256B,
+        0,  # CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    )
+    return descriptor
+
+
+def build_tensor_maps(q, dout, dq, *, head_dim, head_dim_v, num_head, seqlen_q, dtype_name):
+    """`desc_Q`, `desc_dO`, `desc_dQ` and, at d576, `desc_dQ_64`.
+
+    TMA dimensions are innermost-first, so a row-major `(S_q, H, D)` tensor is
+    described as `(D, H, S_q)`; the byte strides exclude the innermost, which is
+    implicitly the element size.
+    """
+    esize = 2
+    maps = {
+        "q": _encode_tensormap(
+            q,
+            dtype_name,
+            (head_dim, num_head, seqlen_q),
+            (head_dim * esize, num_head * head_dim * esize),
+            (64, 64, 1),
+        ),
+        "do": _encode_tensormap(
+            dout,
+            dtype_name,
+            (head_dim_v, num_head, seqlen_q),
+            (head_dim_v * esize, num_head * head_dim_v * esize),
+            (64, 64, 1),
+        ),
+        "dq": _encode_tensormap(
+            dq,
+            dtype_name,
+            (head_dim, num_head, seqlen_q),
+            (head_dim * esize, num_head * head_dim * esize),
+            (64, 64, 1),
+        ),
+    }
+    return maps
+
+
 def prepare_data(**config):
     """Allocate one input set shared by TIRx, the upstream kernel, and the oracle."""
     if not torch.cuda.is_available():
@@ -340,7 +423,79 @@ def tirx_launch(executables, data):
     (``_interface_sm100.py:105-162``), which is what keeps the two timing scopes
     comparable.
     """
-    raise NotImplementedError("the TIRx launch closure is written with the kernels")
+    import math
+
+    inputs = data["inputs"]
+    out = data["tirx"]
+    der = data["derived"]
+    seqlen_q = der["seqlen_q"]
+    seqlen_kv = der["seqlen_kv"]
+    head_dim_v = der["head_dim_v"]
+    num_head = inputs["q"].shape[1]
+    head_dim = inputs["q"].shape[2]
+    # The workspace planes are head-contiguous and padded to a multiple of 8
+    # rows, matching the upstream `roundup8` (:105-162).
+    plane = num_head * ((seqlen_q + 7) // 8 * 8)
+
+    sum_odo, bwd, convert, sum_dsink = executables
+    ws_lse_odo = out["ws_lse_odo"].view(-1).view(torch.float32)
+    ws_dkv = out["ws_dkv"].view(-1).view(torch.float32)
+    maps = build_tensor_maps(
+        inputs["q"],
+        inputs["dout"],
+        out["dq"],
+        head_dim=head_dim,
+        head_dim_v=head_dim_v,
+        num_head=num_head,
+        seqlen_q=seqlen_q,
+        dtype_name=str(inputs["q"].dtype).rsplit(".", 1)[-1],
+    )
+    neg_log2_e = -math.log2(math.e)
+    scale = inputs["softmax_scale"]
+    topk_idxs = inputs["topk_idxs"].reshape(-1)
+    # The non-compact variant has no topk_length tensor; pass the idx buffer as
+    # a placeholder so the ABI stays fixed -- the kernel never reads it.
+    topk_length = (
+        inputs["topk_length"].reshape(-1) if inputs["topk_length"] is not None else topk_idxs
+    )
+
+    def launch():
+        out["dkv"].zero_()
+        out["d_sink"].zero_()
+        ws_lse_odo.zero_()
+        ws_dkv.zero_()
+        sum_odo(
+            inputs["out"].reshape(-1),
+            inputs["dout"].reshape(-1),
+            inputs["lse"].reshape(-1),
+            inputs["attn_sink"].reshape(-1),
+            ws_lse_odo,
+            seqlen_q,
+            plane,
+            -1.0,
+            neg_log2_e,
+        )
+        bwd(
+            maps["q"].ptr,
+            maps["do"].ptr,
+            maps["dq"].ptr,
+            inputs["kv"].reshape(-1),
+            out["dq"].reshape(-1),
+            ws_dkv,
+            topk_idxs,
+            topk_length,
+            ws_lse_odo,
+            seqlen_q,
+            seqlen_kv,
+            plane,
+            scale,
+        )
+        convert(ws_dkv, out["dkv"].reshape(-1), seqlen_kv)
+        sum_dsink(
+            ws_lse_odo, inputs["attn_sink"].reshape(-1), out["d_sink"].reshape(-1), seqlen_q, plane
+        )
+
+    return launch
 
 
 def validate_outputs(data, sources=("tirx",), with_oracle=True, atol=5e-2, rtol=5e-2):
