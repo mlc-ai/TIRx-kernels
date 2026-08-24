@@ -63,6 +63,17 @@ rewrite is not guaranteed to flip codegen. The cost appears only where the guard
 is live, so a specialization launching exactly the guarded warp count shows
 nothing and a wider one pays.
 
+The win is not always the uniform datapath, and reaching for it a second time
+can cost. Broadcasting a warp index and a cluster rank dropped 56 instructions
+and 5 registers with the uniform opcode count flat at 363 to 362 -- ptxas
+simplified the warp predicates once the invariance was stated, and moved nothing
+onto the scalar pipe. Extending the same broadcast to a loop counter that ptxas
+already knew was warp-invariant added 8 instructions and increased no U-prefixed
+opcode at all. Before assuming a reference keeps a value uniform, read its own
+machine code at the site: one that holds an index in a uniform register may
+still move it into a per-thread register to scale it, in which case its
+advantage there is precomputation, not the datapath.
+
 ## Verification
 
 Confirm vector versus uniform op counts, branch topology, registers, and the
