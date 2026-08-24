@@ -2377,9 +2377,10 @@ def _make_main(
                                 for accum_slot in range(8):
                                     K.assign(hacc[accum_slot], _opaque_f32_zero())
                                 with K.unroll(16) as pair:
-                                    state_lo = K.local_scalar("float32")
-                                    state_hi = K.local_scalar("float32")
-                                    _unpack_bf16_pair(state_words[pair], state_lo, state_hi)
+                                    state_lo = K.cast(state_words[pair], "uint16")
+                                    state_hi = K.cast(
+                                        K.shift_right(state_words[pair], K.uint32(16)), "uint16"
+                                    )
                                     value0 = value_plane * 64 + row_half * 32 + pair * 2
                                     h0_bits = K.local_scalar("uint16")
                                     h1_bits = K.local_scalar("uint16")
@@ -2411,14 +2412,15 @@ def _make_main(
                                             ]
                                         ),
                                     )
-                                    h0 = K.local_scalar("float32")
-                                    h1 = K.local_scalar("float32")
-                                    K.ptx.cvt.f32.bf16(h0, h0_bits)
-                                    K.ptx.cvt.f32.bf16(h1, h1_bits)
                                     accum_lo = (2 * pair) % 8
                                     accum_hi = (2 * pair + 1) % 8
-                                    next_lo, next_hi = _ffma2(
-                                        h0, h1, state_lo, state_hi, hacc[accum_lo], hacc[accum_hi]
+                                    next_lo = K.local_scalar("float32")
+                                    next_hi = K.local_scalar("float32")
+                                    K.ptx.fma.rn.f32.bf16(
+                                        next_lo, h0_bits, state_lo, hacc[accum_lo]
+                                    )
+                                    K.ptx.fma.rn.f32.bf16(
+                                        next_hi, h1_bits, state_hi, hacc[accum_hi]
                                     )
                                     K.assign(hacc[accum_lo], next_lo)
                                     K.assign(hacc[accum_hi], next_hi)
