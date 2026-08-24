@@ -70,6 +70,16 @@ count of six later realized 80 registers with zero stack and local traffic, yet
 regressed the gate from 0.981x to 0.976x. Match an occupancy mechanism, not the
 reference's register number.
 
+In a measured 384-thread SM100 block-scaled GEMM/SwiGLU family, bounds of one
+and two left three representative ordinary, FP4, and FP32 specializations at
+122-130 registers. A bound of three moved all three to 96 registers with zero
+stack. The change passed 58 correctness configurations and a 23-row targeted
+matrix at a 1.00109 minimum reference/TIRx ratio. Its supplemented 234-row
+matrix passed at a 0.99768 minimum after replacing one frozen set of eight
+host-interfered measurements. This result supports sweeping the resident-block
+boundary across heterogeneous specializations; it does not establish that 96
+registers or a bound of three is generally optimal.
+
 Use `tirx.max_registers` when an exact per-specialization ceiling, rather than a
 minimum resident-block target, is the demonstrated lever. The two contracts are
 mutually exclusive.
