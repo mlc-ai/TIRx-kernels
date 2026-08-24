@@ -31,6 +31,10 @@ list.
   [`cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py)
   — MoE grouped GEMM with a dGLU backward epilogue;
   [schedule sketch](.agents/sketch/cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias.md)
+- **Linear attention:**
+  [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py)
+  — BF16 Kimi Delta Attention backward;
+  [schedule sketch](.agents/sketch/cudnn/sm100_kda_bprop_f16.md)
 
 ### FlashAttention ports
 
