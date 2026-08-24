@@ -4018,7 +4018,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         source_launch()
         torch.cuda.synchronize()
         _validate_outputs(data, sources=("tirx", "source"), with_oracle=False)
-        references = {"cudnn_frontend": source_launch}
+        references = {"cudnn_frontend": lambda: source_launch}
     return bench(
         {"tirx": tirx_launch},
         references=references,
