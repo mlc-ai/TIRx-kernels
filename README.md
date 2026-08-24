@@ -19,7 +19,6 @@ list.
 - **Distributed:**
   [`allgather_gemm`](tirx_kernels/basic/allgather_gemm.py),
   [`gemm_reduce_scatter`](tirx_kernels/basic/gemm_reduce_scatter.py)
-  — multi-GPU via NVSHMEM
 
 ### cuDNN Frontend ports
 
@@ -29,16 +28,10 @@ list.
   [`cudnn_sm100_dense_blockscaled_gemm_persistent_swiglu_interleaved_quant`](tirx_kernels/cudnn/swiglu/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py)
 - **Grouped GEMM:**
   [`cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py)
-  — MoE grouped GEMM with a dGLU backward epilogue;
-  [schedule sketch](.agents/sketch/cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias.md)
 - **Linear attention:**
   [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py)
-  — BF16 Kimi Delta Attention backward;
-  [schedule sketch](.agents/sketch/cudnn/sm100_kda_bprop_f16.md)
 - **Sparse attention:**
   [`cudnn_sm100_dsa_sparse_attention_backward`](tirx_kernels/cudnn/dsa/sparse_attention_backward.py)
-  — DeepSeek sparse attention backward, four device kernels over a per-token
-  top-k index list; head dimensions 512 and 576
 
 ### FlashAttention ports
 
@@ -46,7 +39,6 @@ list.
   [`flash_attention4`](tirx_kernels/flashattention/flash_attention4.py)
 - **Backward:**
   [`flash_attention_backward_sm100`](tirx_kernels/flashattention/flash_attention_backward.py)
-  — head dimension 128; [schedule sketch](tirx_kernels/flashattention/flash_attention_backward_sm100_sketch.md)
 
 ### FlashInfer ports
 
@@ -137,7 +129,6 @@ Grouped by the FlashInfer Python entry point each port backs.
 - **Elastic communication:**
   [`deepep_dispatch`](tirx_kernels/deepep/dispatch.py),
   [`deepep_combine`](tirx_kernels/deepep/combine.py)
-  — multi-GPU, 8 ranks over NVLink
 
 ### MSA ports
 
