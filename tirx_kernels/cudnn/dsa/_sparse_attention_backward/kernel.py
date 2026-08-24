@@ -44,9 +44,9 @@ BWD_THREADS = BWD_WARPS * 32
 REGS_LOAD_KV = 40
 REGS_COMPUTE = 128
 REGS_REDUCE = 128
-REGS_MMA = 40
-REGS_LOAD = 40
-REGS_EMPTY = 40
+REGS_MMA = 56
+REGS_LOAD = 56
+REGS_EMPTY = 56
 
 # ``dsa_bwd_sm100.py:82-131``: named barrier ids and their participant counts.
 BAR_CTA_SYNC = (1, 640)
@@ -200,7 +200,7 @@ def _desc_add16(desc, offset):
     return out
 
 
-def _gemm(d, a, b, idesc, accumulate, n_iter, unroll):
+def _gemm(d, a, b, idesc, accumulate, n_iter, unroll, pred=None):
     """One tcgen05 k-loop, ROLLED: `n_iter` iterations of `unroll` issues.
 
     The source's chains are rolled loops, not fully unrolled ones (`unroll=4`
@@ -223,24 +223,42 @@ def _gemm(d, a, b, idesc, accumulate, n_iter, unroll):
     b_desc, b_it, b_u = b
     flag = K.local_scalar("uint32")
     K.assign(flag, K.cast(accumulate, "uint32"))
+    # The descriptors walk forward by one iteration step rather than being
+    # rebuilt from the base each issue. Every per-issue offset is then a
+    # trace-time constant, which drops a runtime multiply and an add from the
+    # issuing warp's critical path -- and that warp is what the reduce warps
+    # wait on at the write-after-read barriers.
+    a_cur = K.local_scalar("uint64")
+    b_cur = K.local_scalar("uint64")
+    K.assign(a_cur, a_desc)
+    K.assign(b_cur, b_desc)
     it = K.local_scalar(K.i32, init=K.int32(0))
     with K.While(it < K.int32(n_iter)):
         for u in range(unroll):
             _mma(
                 MMA_F16,
                 d,
-                _desc_add16(a_desc, it * K.int32(a_it) + K.int32(u * a_u)),
-                _desc_add16(b_desc, it * K.int32(b_it) + K.int32(u * b_u)),
+                _desc_add16(a_cur, u * a_u),
+                _desc_add16(b_cur, u * b_u),
                 idesc,
                 flag,
+                pred,
             )
             K.assign(flag, K.uint32(1))
+        K.assign(a_cur, _desc_add16(a_cur, a_it))
+        K.assign(b_cur, _desc_add16(b_cur, b_it))
         K.assign(it, it + K.int32(1))
 
 
-def _mma(mma, d, a_desc, b_desc, idesc, accumulate):
-    """One `tcgen05.mma` in its dense non-ws operand form."""
-    K.ptx[mma](
+def _mma(mma, d, a_desc, b_desc, idesc, accumulate, pred=None):
+    """One `tcgen05.mma` in its dense non-ws operand form.
+
+    `pred` is the ISA's one-elected-lane issue form as an instruction predicate
+    rather than a branch around the chain: the descriptor arithmetic then runs
+    warp-wide with no reconvergence, which is what keeps the issuing warp from
+    diverging on every chain.
+    """
+    ops = (
         K.Cast("uint32", d),
         a_desc,
         b_desc,
@@ -251,6 +269,10 @@ def _mma(mma, d, a_desc, b_desc, idesc, accumulate):
         K.uint32(0),
         K.ptx.pred(accumulate),
     )
+    if pred is None:
+        K.ptx[mma](*ops)
+    else:
+        K.ptx[mma](*ops, pred=pred)
 
 
 # The instruction descriptors every tcgen05 MMA carries, read out of the
@@ -434,8 +456,11 @@ def _bwd_load_kv(
             v = K.local_scalar(K.i32, init=K.int32(-1))
             # The bound is the allocation extent, not `topk`: rows past the
             # length are read and then discarded.
-            with K.If((lane == 0) & (gidx < K.int32(max_topk))), K.Then():
-                K.ptx["ld.global.b32"](v, topk_idxs.ptr_to([token * max_topk + gidx]))
+            K.ptx["ld.global.b32"](
+                v,
+                topk_idxs.ptr_to([token * max_topk + gidx]),
+                pred=(lane == 0) & (gidx < K.int32(max_topk)),
+            )
             bc = K.local_scalar(K.i32)
             K.ptx.shfl_sync.idx.b32(bc, v, K.uint32(0), K.uint32(31), K.uint32(0xFFFFFFFF))
             K.assign(r[i], bc)
@@ -739,6 +764,12 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     _desc_at(D_WIDE, smem_base + K.uint32(OFF_K + b * 16384)) for b in range(5)
                 ]
 
+                # One elected-lane predicate owns every issue in this role: as an
+                # instruction predicate rather than a branch, the descriptor
+                # arithmetic stays warp-wide and the warp never reconverges.
+                lane0 = K.local_scalar("uint32")
+                K.assign(lane0, K.cast(lane == K.int32(0), "uint32"))
+
                 st_k = K.PipelineState(1, phase=0)
                 st_s = K.PipelineState(1, phase=0)
                 st_dp = K.PipelineState(1, phase=0)
@@ -759,37 +790,37 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                 with K.While(idx >= K.int32(0)):
                     p_k.full.wait(0, st_k.phase)
                     p_s.empty.wait(0, st_s.phase ^ 1)
-                    with K.If(lane == K.int32(0)), K.Then():
-                        # S = Q @ K^T over the whole head dimension: one
-                        # chain, ACCUMULATE false on the first k-phase and true
-                        # after. Q and K share the k walk because both are
-                        # K-major over the same 64-wide block stride.
-                        _gemm(
-                            t_s,
-                            (d_q_k, *(512, 2)),
-                            (d_k_k, *(512, 2)),
-                            idesc["qk"],
-                            0,
-                            head_dim // 64,
-                            4,
-                        )
-                        K.ptx[TCGEN05_COMMIT](p_s.full.buf.ptr_to([0]))
+                    # S = Q @ K^T over the whole head dimension: one
+                    # chain, ACCUMULATE false on the first k-phase and true
+                    # after. Q and K share the k walk because both are
+                    # K-major over the same 64-wide block stride.
+                    _gemm(
+                        t_s,
+                        (d_q_k, *(512, 2)),
+                        (d_k_k, *(512, 2)),
+                        idesc["qk"],
+                        0,
+                        head_dim // 64,
+                        4,
+                        pred=lane0,
+                    )
+                    K.ptx[TCGEN05_COMMIT](p_s.full.buf.ptr_to([0]), pred=lane0)
 
                     # dP = dO @ V^T. V is columns 0:head_dim_v of the shared KV
                     # buffer, so this reads the same gathered tile with a
                     # shorter K extent -- no separate alias needed.
                     p_dp.empty.wait(0, st_dp.phase ^ 1)
-                    with K.If(lane == K.int32(0)), K.Then():
-                        _gemm(
-                            t_dp,
-                            (d_do_k, *(512, 2)),
-                            (d_k_k, *(512, 2)),
-                            idesc["qk"],
-                            0,
-                            head_dim_v // 64,
-                            4,
-                        )
-                        K.ptx[TCGEN05_COMMIT](p_dp.full.buf.ptr_to([0]))
+                    _gemm(
+                        t_dp,
+                        (d_do_k, *(512, 2)),
+                        (d_k_k, *(512, 2)),
+                        idesc["qk"],
+                        0,
+                        head_dim_v // 64,
+                        4,
+                        pred=lane0,
+                    )
+                    K.ptx[TCGEN05_COMMIT](p_dp.full.buf.ptr_to([0]), pred=lane0)
 
                     # --- dKV generation A: dKV0, dKV1 (:1531-1594) ----------
                     # dKV = dO^T @ P, then += Q^T @ dS into the SAME columns:
@@ -801,30 +832,30 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                         # Skipped on the first processed tile and compensated
                         # by one unpaired arrive after the loop (:1752-1757).
                         K.ptx.bar.sync(K.uint32(war_gen_a[0]), K.uint32(war_gen_a[1]))
-                    with K.If(lane == K.int32(0)), K.Then():
-                        for j in range(2):
-                            _gemm(
-                                t_dkv[j],
-                                (d_do_mn[j], *(256, 128)),
-                                (d_p_k, *(4, 2)),
-                                idesc["dkv"],
-                                0,
-                                2,
-                                2,
-                            )
+                    for j in range(2):
+                        _gemm(
+                            t_dkv[j],
+                            (d_do_mn[j], *(256, 128)),
+                            (d_p_k, *(4, 2)),
+                            idesc["dkv"],
+                            0,
+                            2,
+                            2,
+                            pred=lane0,
+                        )
                     p_ds.full.wait(0, st_ds_m.phase)
-                    with K.If(lane == K.int32(0)), K.Then():
-                        for j in range(2):
-                            _gemm(
-                                t_dkv[j],
-                                (d_q_mn[j], *(256, 128)),
-                                (d_ds_k, *(4, 2)),
-                                idesc["dkv"],
-                                1,
-                                2,
-                                2,
-                            )
-                        K.ptx[TCGEN05_COMMIT](p_dkv.full.buf.ptr_to([st_dkv.stage]))
+                    for j in range(2):
+                        _gemm(
+                            t_dkv[j],
+                            (d_q_mn[j], *(256, 128)),
+                            (d_ds_k, *(4, 2)),
+                            idesc["dkv"],
+                            1,
+                            2,
+                            2,
+                            pred=lane0,
+                        )
+                    K.ptx[TCGEN05_COMMIT](p_dkv.full.buf.ptr_to([st_dkv.stage]), pred=lane0)
                     st_dkv.advance()
 
                     if tail:
@@ -833,46 +864,47 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                         K.ptx.bar.sync(
                             K.uint32(BAR_T2R_DKV01_DONE[0]), K.uint32(BAR_T2R_DKV01_DONE[1])
                         )
-                        with K.If(lane == K.int32(0)), K.Then():
-                            _gemm(
-                                t_dkv4,
-                                (d_q_mn[4], *(256, 128)),
-                                (d_ds_k, *(4, 2)),
-                                idesc["dkv4"],
-                                0,
-                                2,
-                                2,
-                            )
-                            # No matching acquire upstream: the source leans on
-                            # barrier 7 above for what an acquire would give.
-                            K.ptx[TCGEN05_COMMIT](p_dkv.full.buf.ptr_to([st_dkv.stage]))
+                        _gemm(
+                            t_dkv4,
+                            (d_q_mn[4], *(256, 128)),
+                            (d_ds_k, *(4, 2)),
+                            idesc["dkv4"],
+                            0,
+                            2,
+                            2,
+                            pred=lane0,
+                        )
+                        # No matching acquire upstream: the source leans on
+                        # barrier 7 above for what an acquire would give.
+                        K.ptx[TCGEN05_COMMIT](p_dkv.full.buf.ptr_to([st_dkv.stage]), pred=lane0)
                         st_dkv.advance()
 
                     # --- dQ0..dQ3 (and dQ4) (:1622-1676) --------------------
                     # dQ accumulates across the WHOLE top-k axis in TMEM and is
                     # published only after the loop, so ACCUMULATE is False
                     # only on the first processed tile.
-                    with K.If(lane == K.int32(0)), K.Then():
-                        for j in range(4):
-                            _gemm(
-                                t_dq[j],
-                                (d_k_mn[j], *(256, 128)),
-                                (d_ds_mn, *(256, 128)),
-                                idesc["dq"],
-                                acc_dq,
-                                2,
-                                2,
-                            )
-                        if tail:
-                            _gemm(
-                                t_dq4,
-                                (d_k_mn[4], *(256, 128)),
-                                (d_ds_mn, *(256, 128)),
-                                idesc["dq4"],
-                                acc_dq,
-                                2,
-                                2,
-                            )
+                    for j in range(4):
+                        _gemm(
+                            t_dq[j],
+                            (d_k_mn[j], *(256, 128)),
+                            (d_ds_mn, *(256, 128)),
+                            idesc["dq"],
+                            acc_dq,
+                            2,
+                            2,
+                            pred=lane0,
+                        )
+                    if tail:
+                        _gemm(
+                            t_dq4,
+                            (d_k_mn[4], *(256, 128)),
+                            (d_ds_mn, *(256, 128)),
+                            idesc["dq4"],
+                            acc_dq,
+                            2,
+                            2,
+                            pred=lane0,
+                        )
 
                     # The KV tile's SMEM is reusable from here (:1683).
                     # `p_k`'s empty barrier is tcgen05-flavoured and expects
@@ -882,37 +914,37 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     # forward, which deadlocks the gather warps from the third
                     # tile on. The commit also carries the real ordering: sK is
                     # reusable only once the MMAs reading it have retired.
-                    with K.If(lane == K.int32(0)), K.Then():
-                        K.ptx[TCGEN05_COMMIT](p_k.empty.buf.ptr_to([0]))
+                    K.ptx[TCGEN05_COMMIT](p_k.empty.buf.ptr_to([0]), pred=lane0)
 
                     # --- dKV generation B: dKV2, dKV3 (:1689-1746) ----------
                     # Unconditional, unlike generation A's WAR barrier.
                     K.ptx.bar.sync(K.uint32(war_gen_b[0]), K.uint32(war_gen_b[1]))
                     p_dkv.empty.wait(st_dkv.stage, st_dkv.phase ^ 1)
-                    with K.If(lane == K.int32(0)), K.Then():
-                        for j in range(2):
-                            _gemm(
-                                t_dkv23[j],
-                                (d_do_mn[2 + j], *(256, 128)),
-                                (d_p_k, *(4, 2)),
-                                idesc["dkv"],
-                                0,
-                                2,
-                                2,
-                            )
-                        K.ptx[TCGEN05_COMMIT](p_p.empty.buf.ptr_to([0]))
-                        for j in range(2):
-                            _gemm(
-                                t_dkv23[j],
-                                (d_q_mn[2 + j], *(256, 128)),
-                                (d_ds_k, *(4, 2)),
-                                idesc["dkv"],
-                                1,
-                                2,
-                                2,
-                            )
-                        K.ptx[TCGEN05_COMMIT](p_dkv.full.buf.ptr_to([st_dkv.stage]))
-                        K.ptx[TCGEN05_COMMIT](p_ds.empty.buf.ptr_to([0]))
+                    for j in range(2):
+                        _gemm(
+                            t_dkv23[j],
+                            (d_do_mn[2 + j], *(256, 128)),
+                            (d_p_k, *(4, 2)),
+                            idesc["dkv"],
+                            0,
+                            2,
+                            2,
+                            pred=lane0,
+                        )
+                    K.ptx[TCGEN05_COMMIT](p_p.empty.buf.ptr_to([0]), pred=lane0)
+                    for j in range(2):
+                        _gemm(
+                            t_dkv23[j],
+                            (d_q_mn[2 + j], *(256, 128)),
+                            (d_ds_k, *(4, 2)),
+                            idesc["dkv"],
+                            1,
+                            2,
+                            2,
+                            pred=lane0,
+                        )
+                    K.ptx[TCGEN05_COMMIT](p_dkv.full.buf.ptr_to([st_dkv.stage]), pred=lane0)
+                    K.ptx[TCGEN05_COMMIT](p_ds.empty.buf.ptr_to([0]), pred=lane0)
                     st_dkv.advance()
 
                     K.assign(acc_dq, K.int32(1))
@@ -928,9 +960,8 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                 # the last one. Exactly ONE compensating arrive closes that
                 # (:1752-1757) -- one per WAR barrier would hang instead.
                 K.ptx.bar.sync(K.uint32(war_gen_a[0]), K.uint32(war_gen_a[1]))
-                with K.If(lane == K.int32(0)), K.Then():
-                    K.ptx[TCGEN05_COMMIT](p_dq.full.buf.ptr_to([0]))
-                    K.ptx[TCGEN05_COMMIT](p_qdo.empty.buf.ptr_to([0]))
+                K.ptx[TCGEN05_COMMIT](p_dq.full.buf.ptr_to([0]), pred=lane0)
+                K.ptx[TCGEN05_COMMIT](p_qdo.empty.buf.ptr_to([0]), pred=lane0)
 
             with r_compute:
                 rwarp = K.warp_id_in_role()
@@ -1305,7 +1336,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                     """`atom.global.add.v4.f32` per row: four dims, one row."""
                     for i in range(8):
                         b = i * 2 - i % 2
-                        with K.If(r[i] >= K.int32(0)), K.Then():
+                        if True:
                             K.ptx["atom.global.add.v4.f32"](
                                 sink4[0],
                                 sink4[1],
@@ -1318,6 +1349,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                                 regs[b + 2],
                                 regs[b + 16],
                                 regs[b + 18],
+                                pred=r[i] >= K.int32(0),
                             )
                     K.ptx.bar.sync(K.uint32(BAR_REDUCE_SYNC[0]), K.uint32(BAR_REDUCE_SYNC[1]))
 
@@ -1350,7 +1382,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                         # The tail is 64 dims wide, so a 2-wide atomic.
                         for i in range(8):
                             b = i * 2 - i % 2
-                            with K.If(r[i] >= K.int32(0)), K.Then():
+                            if True:
                                 K.ptx["atom.global.add.v2.f32"](
                                     sink4[0],
                                     sink4[1],
@@ -1363,6 +1395,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                                     ),
                                     g4[b],
                                     g4[b + 2],
+                                    pred=r[i] >= K.int32(0),
                                 )
                         K.ptx.bar.sync(K.uint32(BAR_REDUCE_SYNC[0]), K.uint32(BAR_REDUCE_SYNC[1]))
                         p_dkv.empty.arrive(st_r.stage)
