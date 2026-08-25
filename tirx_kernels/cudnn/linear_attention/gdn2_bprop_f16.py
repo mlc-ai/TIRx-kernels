@@ -1932,7 +1932,7 @@ def _make_main(
                 desc_dwo = _descriptor_slot(descriptor_workspace, n_desc, 11, batch)
                 desc_db = _descriptor_slot(descriptor_workspace, n_desc, 12, batch)
                 with K.If(_elected()), K.Then():
-                    for desc in (desc_dq, desc_dk, desc_dv, desc_dgate):
+                    for desc in (desc_dq, desc_dk, desc_dv, desc_dgate, desc_db, desc_dwo):
                         K.ptx.fence.proxy.tensormap__generic.acquire.gpu(desc)
                 pending_token = K.local_scalar("int32", init=K.int32(0))
                 pending_writes = K.local_scalar("bool", init=K.bool(False))
@@ -2719,7 +2719,9 @@ def _make_main(
                                 pa0, pb0 = _fadd2(hacc[0], hacc[2], hacc[4], hacc[6])
                                 pa1, pb1 = _fadd2(hacc[1], hacc[3], hacc[5], hacc[7])
                                 part_a, part_b = _fadd2(pa0, pb0, pa1, pb1)
-                                K.assign(dgate_last, dgate_last + part_a + part_b)
+                                # Bracketed: the source adds the two partials to each
+                                # other before folding, and the order is contractual.
+                                K.assign(dgate_last, dgate_last + (part_a + part_b))
                         _arrive_barrier(arena, _BAR_DSTATE_SMEM_CG2_DONE)
                     _arrive_barrier(arena, _BAR_STATE_INP_CG2_DONE, serial % 2)
 
@@ -2728,7 +2730,7 @@ def _make_main(
                     dgate_values = K.alloc_local((16,), "float32")
                     last_dot = K.alloc_local((4,), "float32")
                     for slot in range(4):
-                        K.assign(last_dot[slot], K.float32(0.0))
+                        K.assign(last_dot[slot], _opaque_f32_zero())
                     for token in range(16):
                         K.assign(dk_values[token], K.float32(0.0))
 
@@ -2931,7 +2933,8 @@ def _make_main(
                             )
                     K.assign(
                         dgate_values[15],
-                        dgate_values[15] + last_dot[0] + last_dot[1] + last_dot[2] + last_dot[3],
+                        dgate_values[15]
+                        + ((last_dot[0] + last_dot[1]) + (last_dot[2] + last_dot[3])),
                     )
 
                     if l2norm:
@@ -3297,7 +3300,6 @@ def _make_main(
                             ]
                         ),
                     )
-                    K.ptx.fence.proxy.async_.shared__cta()
 
                     # The per-value write gate is read in the same transposed
                     # fragment form as V, so Y = W * V - state_k.
@@ -3604,8 +3606,6 @@ def _make_main(
                     _arrive_barrier(arena, _BAR_DWO_TMASTG_READY, dwo_stage)
                     _arrive_barrier(arena, _BAR_V_DONE, raw_stage)
                     _arrive_barrier(arena, _BAR_W_DONE, raw_stage)
-
-                    K.ptx.bar.sync(K.uint32(4), K.uint32(128))
 
                     _wait_barrier(
                         arena, _BAR_DSTATE_ACC_READY, dstate_consumer.stage, dstate_consumer.phase
