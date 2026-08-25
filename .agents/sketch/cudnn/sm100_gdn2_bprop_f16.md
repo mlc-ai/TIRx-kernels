@@ -36,8 +36,8 @@ the kernel emits two additional gradients, `dW_out = V*dY` and a per-channel
 
 Writer line-info evidence is under `.porting/gdn2_bprop_f16/source_export/`,
 one directory per accepted branch.  Each holds two PTX files with both `.file`
-and `.loc`: the main `kernel_cutlass_kernel_Gdn2BwdCfg...sm_100a.ptx` and the
-`kernel_cutlass_prologue_kernel_...ptx`.  Unless stated otherwise, PTX line
+and `.loc`: the main `cutlass_host_Gdn2BwdCfg...sm_100a.ptx` and the
+`cutlass_prologue_...sm_100a.ptx`.  Unless stated otherwise, PTX line
 numbers below refer to the `basic` branch's main PTX.  Static counts use
 instruction lines minus predicated lines.
 
@@ -118,7 +118,13 @@ gemm(dst, lhs, rhs, accumulate=False)
 `init`, `wait`, `arrive`, `expect_bytes`, `commit`, `release`, `fence`,
 `barrier`, stage/phase advancement, register-budget changes, descriptor field
 replacement, directional-copy groups, and TMEM allocation are schedule
-operations.  Each key movement, computation, or synchronization occurrence
+operations.  Three of them lower uniformly everywhere they appear, so they are
+annotated once here rather than at each of their many sites:
+`wait(bar, stage, phase)` is
+`mbarrier.try_wait.parity.acquire.cta.shared::cta.b64` inside a spin loop (82
+sites); `arrive(bar, stage)` is `mbarrier.arrive.shared.b64` (50 sites); and
+`expect_bytes` is `mbarrier.arrive.expect_tx.shared.b64` (8 sites, one per TMA
+tensor).  Each key movement, computation, or synchronization occurrence
 below is immediately followed by the selected instruction or instruction
 family observed in the writer export.
 
@@ -167,13 +173,16 @@ sched_ctr  : gmem[i32, 2]                  # dynamic-scheduler ticket
 tmaps      : gmem[u64, 14 * B * 16]        # 14 descriptor arrays, 128 B slots
 
 # ==========================================================================
-# Descriptor arrays.  Arrays 0..11 are rank-3; Gate and dGate are FP32 with
-# [32,1,16] boxes, the other 16-bit tensors use [64,1,16].  The checkpoint
-# array is rank-4 with box [64,DK,1,1].  All use 128-byte swizzle.
+# Descriptor arrays, in the source's own index order.  Arrays 0..12 are
+# rank-3; Gate and dGate are FP32 with [32,1,16] boxes, the other 16-bit
+# tensors use [64,1,16].  Only array 13, the checkpoint, is rank-4 with box
+# [64,DK,1,1].  All use 128-byte swizzle.
 # ==========================================================================
-TMAP_Q, TMAP_K, TMAP_V, TMAP_GATE, TMAP_BETA, TMAP_W, TMAP_DO = 0, 1, 2, 3, 4, 5, 6
-TMAP_CKPT                                                     = 7
-TMAP_DQ, TMAP_DK, TMAP_DV, TMAP_DGATE, TMAP_DBETA, TMAP_DWO   = 8, 9, 10, 11, 12, 13
+TMAP_Q, TMAP_K, TMAP_V, TMAP_GATE     = 0, 1, 2, 3
+TMAP_DO, TMAP_BETA, TMAP_W            = 4, 5, 6
+TMAP_DQ, TMAP_DK, TMAP_DV             = 7, 8, 9
+TMAP_DGATE, TMAP_DWO, TMAP_DBETA      = 10, 11, 12
+TMAP_CKPT                             = 13
 
 # ==========================================================================
 # Linear SMEM.  One arena; every region is a byte range.  Declaration order is
@@ -184,9 +193,10 @@ TMAP_DQ, TMAP_DK, TMAP_DV, TMAP_DGATE, TMAP_DBETA, TMAP_DWO   = 8, 9, 10, 11, 12
 arena = linear_buffer(smem, u8, 225280, 0, 1024, whole_kernel)
 
 BARRIERS       =      0;  BARRIERS_END       =    984   # 123 slots x 8 B
-TMEM_HOLD      =    984
-SCHED          =   1008                                 # 8 x i32 ring
-RED1           =   1024;  NORM               =   1280   # f32 scratch
+TMEM_HOLD      =    984;  TMEM_HOLD_END      =    988
+SCHED          =    992;  SCHED_END          =   1024   # 8 x i32 ring, align 16
+RED1           =   1024;  RED1_END           =   1280   # f32 cross-warp scratch
+NORM           =   1280;  NORM_END           =   1792   # f32 q/k inverse norms
 STATE          =   2048;  STATE_END          =  34816   # [DK][DV]
 DSTATE         =  34816;  DSTATE_END         =  67584
 K_DECAY        =  67584;  K_DECAY_END        =  75776   # 2 x [BT][DK]
@@ -195,21 +205,23 @@ K_RESTORE      =  83968;  K_RESTORE_END      =  92160
 Q_DECAY        =  92160;  Q_DECAY_END        = 100352
 STATE_DIAG     = 100352;  STATE_DIAG_END     = 108544   # 2 x 8 x [16][16], 32B swz
 INTERMEDIATE   = 108544;  INTERMEDIATE_END   = 113664   # 2 x 5 x [16][16], 32B swz
-DO             = 114688;  DO_END             = 122880
-BETA           = 122880;  BETA_END           = 131072
-BANK_FILL      = 131072 - 1024                          # pad, never addressed
-SQ             = 131072;  SQ_END             = 139264
+DO             = 113664;  DO_END             = 121856
+BETA           = 121856;  BETA_END           = 130048
+BANK_FILL      = 130048;  BANK_FILL_END      = 131072   # pad, never addressed
+SQ             = 131072;  SQ_END             = 139264   # high group starts here
 SK             = 139264;  SK_END             = 147456
 SV             = 147456;  SV_END             = 155648
 SGATE          = 155648;  SGATE_END          = 172032   # f32
 SW             = 172032;  SW_END             = 180224
 SU             = 180224;  SU_END             = 184320
 SDY            = 184320;  SDY_END            = 188416
-SDQ            = 188416;  SDK                = 192512
+SDQ            = 188416;  SDQ_END            = 192512
+SDK            = 192512;  SDK_END            = 196608
 SDV            = 196608;  SDV_END            = 204800
 SDGATE         = 204800;  SDGATE_END         = 212992   # f32
 SDWO           = 212992;  SDWO_END           = 221184
 SDB            = 221184;  SDB_END            = 225280
+assert SQ == 131072             # the pad places the high group at 128 KB exactly
 assert SDB_END == 225280        # 7168 B of headroom under the 232448 B cap
 
 # Scalar address functions.  Each selects bytes; none is a layout.
@@ -294,8 +306,9 @@ def prologue_kernel():
     for array in range(14):
         for batch in range(B):
             copy_p2g(param_descriptor(array), descriptor_slot(tmaps, array, batch))
-            # instruction_selection: st.global.v4.b32 per 128-byte slot;
-            # extent: one descriptor (224 st.global in the prologue export)
+            # instruction_selection: st.global.b64; extent: a constexpr-unrolled
+            # 16 per descriptor, 14 arrays -> the 224 st.global.b64 in the
+            # prologue export.  There is no st.global.v4.b32 there.
             replace_field(GLOBAL_ADDRESS, base + cu_seqlens[batch] * row_stride)
             replace_field(GLOBAL_DIM[2], seqlen_b)
             # instruction_selection: tensormap.replace.tile.global_address
@@ -342,29 +355,40 @@ def persistent_backward():
 # Persistent tile scheduler.  The TMA warp owns the ticket; the other fifteen
 # warps each elect one lane and consume through an eight-deep SMEM ring.
 # ==========================================================================
-def sched_publish_next(tile_idx, num_ctas):
-    if DYN_SCHED:
-        if elected():
-            ticket = atomic_add(sched_ctr, 1)
-            # instruction_selection: atom.global.add.u32; extent: scalar
-            # (absent entirely when DYN_SCHED is off -- verified in the export)
-        next_tile = ticket + num_ctas
-    else:
-        next_tile = tile_idx + num_ctas
-    wait("sched_done", sched_stage, sched_phase)
-    copy_r2s(next_tile, SCHED + sched_stage * 4)
-    arrive("sched_ready", sched_stage)
-    # instruction_selection: st.shared.b32 then mbarrier.arrive.shared.b64
+# The ENTIRE ring protocol is compile-time gated.  With DYN_SCHED off there is
+# no barrier traffic, no SMEM traffic and no atomic at all -- the export for the
+# `basic` branch carries zero `atom.global`, and one in the `dynamic` branch.
+def sched_publish_next(tile_idx, num_ctas):          # warp 14 only
+    if not DYN_SCHED:
+        return tile_idx + num_ctas
+    wait("sched_done", sched.stage, sched.phase)
+    if elected():
+        ticket = atomic_add(sched_ctr, 1)
+        # instruction_selection: atom.global.add.u32; extent: scalar, one lane
+        copy_r2s(num_ctas + ticket, SCHED + sched.stage * 4)
+        # instruction_selection: st.shared.b32; extent: scalar
+    warp_sync()
+    # instruction_selection: bar.warp.sync; extent: publishes the elected lane's
+    # store to the whole warp before every lane reads it back
+    copy_s2r(SCHED + sched.stage * 4, next_tile)     # ALL lanes read it back
+    # instruction_selection: ld.shared.b32; extent: scalar
+    if elected():
+        arrive("sched_ready", sched.stage)
+        # instruction_selection: mbarrier.arrive.shared.b64
+    sched = advance(sched, 8)
     return next_tile
 
-def sched_next_tile():
-    wait("sched_ready", sched_stage, sched_phase)
-    copy_s2r(SCHED + sched_stage * 4, next_tile)
-    # instruction_selection: ld.shared.s32; extent: scalar
+def sched_next_tile(tile_idx, num_ctas):             # the other fifteen warps
+    if not DYN_SCHED:
+        return tile_idx + num_ctas
+    wait("sched_ready", sched.stage, sched.phase)
+    copy_s2r(SCHED + sched.stage * 4, next_tile)
+    # instruction_selection: ld.shared.b32; extent: scalar
     if elected():
-        arrive("sched_done", sched_stage)
-    # instruction_selection: mbarrier.arrive.shared.b64; extent: one lane per warp
-    # `sched_done` carries arrival count 15 -- every warp except the producer.
+        arrive("sched_done", sched.stage)
+        # instruction_selection: mbarrier.arrive.shared.b64; extent: one lane per
+        # warp -- `sched_done` carries arrival count 15, every warp but the producer
+    sched = advance(sched, 8)
     return next_tile
 
 # ==========================================================================
@@ -401,7 +425,9 @@ def tma_warp():
                 copy_g2s(gmem_tile(tensor, b, head, tok0), tensor + raw.stage * ...,
                          completion=bar + "_ready")
                 # instruction_selection: cp.async.bulk.tensor.3d.shared::cta
-                #   .global.tile.mbarrier::complete_tx::bytes; extent: one [BT,dim] tile
+                #   .global.tile.mbarrier::complete_tx::bytes; extent: DK//64 = 2
+                #   issues per 16-bit tile, DK//32 = 4 for the FP32 gate.  The 16
+                #   3d loads are Q2 + K2 + Gate4 + Beta2 + dO2 + V2 + W2.
 
             if chunk >= FIRST_STATE_CHUNK:
                 wait("state_cg0_done", state.stage, state.phase)
@@ -470,19 +496,27 @@ def super_mma_warp():
             cast(l_packed, l_regs)
             # instruction_selection: cvt.rn.bf16x2.f32; extent: 8 lanes -> 4 packs
             sub(tinv_acc, eye_mask, l_packed)          # T_inv <- I - L
+            transpose(mov_lpow, l_packed)          # once before the loop
             for _round in range(3):
-                transpose(mov_lpow, l_packed)
-                # instruction_selection: movmatrix.sync.aligned.m8n8.trans.b16;
-                # extent: 4 packs per round
                 gemm(sq_acc, l_packed, mov_lpow)       # square the strict power
-                gemm(upd_acc, tinv_packed, sq_acc)     # fold into the inverse
-                # instruction_selection: 2 x mma.sync...m16n8k16; extent: one round
+                cast(l_packed, sq_acc)                 # io round-trip each round
+                transpose(mov_lpow, l_packed)          # and again after squaring
+                # instruction_selection: movmatrix.sync.aligned.m8n8.trans.b16;
+                # extent: 4 initial + 3 x 4 = the export's 16 sites
+                gemm(upd_acc, tinv_packed, mov_lpow)   # fold into the inverse
+                cast(tinv_packed, upd_acc)
+                # instruction_selection: 2 x mma.sync...m16n8k16 per round, with a
+                # cvt.rn.bf16x2.f32 round-trip between them -- the rounding is
+                # part of the numerical contract, not an artifact
             copy_r2s(tinv_packed, inter_byte(inter_stage, slot=1, ...))
             # instruction_selection: stmatrix.sync.aligned.m8n8.x4.shared.b16
             arrive("t_inv_ready", inter_stage)
 
             # ---- dM = dY @ U^T, then the two strict tiles -----------------
-            wait("dy_smem_ready"); wait("u_smem_ready")
+            # U-readiness is transitive: CG1 arrives u_smem_ready before
+            # dy_smem_ready, so warp 12 waits only the reverse edge and dY.
+            wait("dm_done", inter_stage, inter_phase)
+            wait("dy_smem_ready")
             for k_block in range(DV // 16):
                 copy_s2r(SDY + ..., a_frag); copy_s2r(SU + ..., b_frag)
                 # instruction_selection: ldmatrix...x4.shared.b16
@@ -535,10 +569,17 @@ def tcgen05_warp():
 # ==========================================================================
 def epilogue_warp():
     while tile_idx < total_tiles:
-        ...decode; for chunk in reverse_walk:
+        ...decode
+        if elected():
+            for array in (TMAP_DQ, TMAP_DK, TMAP_DV, TMAP_DGATE, TMAP_DWO, TMAP_DBETA):
+                acquire_tensormap(descriptor_slot(tmaps, array, b))
+                # instruction_selection: fence.proxy.tensormap::generic.acquire.gpu;
+                # extent: 6 of the export's 14 acquires; warp 14 owns the other 8
+        for chunk in reverse_walk:
             writes = chunk < wend       # [wend, cend) is the right warm-up
 
             # ---- A = tril_incl(Q_decay @ K_inv^T) ------------------------
+            wait("a_done", inter_stage, inter_phase)      # reverse edge from warp 13
             wait("q_decay_k_restore_ready", decay_stage, decay_phase)
             for k_block in range(DK // 16):
                 copy_s2r(Q_DECAY + ..., a_frag); copy_s2r(K_INV + ..., b_frag)
@@ -551,35 +592,52 @@ def epilogue_warp():
             arrive("a_ready", inter_stage)
 
             # ---- dA = tril_incl(dO @ U^T) --------------------------------
-            wait("do_ready", raw_stage, raw_phase); wait("u_smem_ready")
+            # Only warp 13 waits `do_ready`; the epilogue's edge is `u_smem_ready`.
+            wait("da_done", inter_stage, inter_phase)     # reverse edge from warp 13
+            wait("u_smem_ready")
             for k_block in range(DV // 16):
                 copy_s2r(DO + ..., a_frag); copy_s2r(SU + ..., b_frag)
                 gemm(da_acc, a_frag, b_frag, accumulate=True)
                 # instruction_selection: 8 x mma.sync...m16n8k16; extent: dA
+            arrive("do_done", raw_stage)          # released BEFORE the mask/store
             select(da_tile, lower_incl_mask, da_acc, 0.0)
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta; extent: one of
+            # the 17 generic-to-async-proxy publishes in the kernel
             copy_r2s(da_tile, inter_byte(inter_stage, slot=2, ...))
-            arrive("da_ready", inter_stage); arrive("do_done", raw_stage)
+            arrive("da_ready", inter_stage)
 
             # ---- one-behind store ladder ---------------------------------
-            # Six stores issue in a fixed order, then their staging buffers are
-            # released one at a time so each frees as early as possible.
-            if writes:
-                for (stage_buf, bar, desc) in ((SDQ, "dq", TMAP_DQ), (SDK, "dk", TMAP_DK),
-                                               (SDGATE, "dgate", TMAP_DGATE),
-                                               (SDB, "db", TMAP_DBETA),
-                                               (SDV, "dv", TMAP_DV),
-                                               (SDWO, "dwo", TMAP_DWO)):
-                    wait(bar + "_tmastg_ready", ...)
-                    copy_s2g(stage_buf, gmem_tile(desc, b, head, tok0))
-                    # instruction_selection: cp.async.bulk.tensor.3d.global
-                    #   .shared::cta.tile.bulk_group; extent: one [BT,dim] tile
-                commit_store_group()
-                # instruction_selection: cp.async.bulk.commit_group
-                for slot in (5, 4, 3, 2, 1, 0):
+            # The ladder stores the PREVIOUS chunk (`pend_start`/`pend_writes`),
+            # so it runs only from the second iteration on.  The six staging
+            # waits are UNCONDITIONAL -- only the store and its commit sit under
+            # `pend_writes`.  Gating the waits instead would desynchronise every
+            # staging barrier's phase on a warm-up chunk.
+            LADDER = ((SDQ, "dq", TMAP_DQ), (SDK, "dk", TMAP_DK),
+                      (SDGATE, "dgate", TMAP_DGATE), (SDB, "db", TMAP_DBETA),
+                      (SDV, "dv", TMAP_DV), (SDWO, "dwo", TMAP_DWO))
+            if rev > 0:
+                for (stage_buf, bar, desc) in LADDER:
+                    wait(bar + "_tmastg_ready", cursor[bar].stage, cursor[bar].phase)
+                    if pend_writes:
+                        copy_s2g(stage_buf + cursor[bar].stage * ...,
+                                 gmem_tile(desc, b, head_o, pend_start))
+                        # instruction_selection: cp.async.bulk.tensor.3d.global
+                        #   .shared::cta.tile.bulk_group; extent: one [BT,dim] tile
+                        commit_store_group()
+                        # instruction_selection: cp.async.bulk.commit_group;
+                        # extent: ONE PER STORE, which is what makes the staged
+                        # wait_group(5..0) below release exactly one buffer each
+                for (slot, (_, bar, _)) in zip((5, 4, 3, 2, 1, 0), LADDER):
                     wait_store_group(slot)
                     # instruction_selection: cp.async.bulk.wait_group.read;
-                    # extent: staged release, one buffer freed per step
-                    arrive(release_for(slot) + "_tmastg_done", ...)
+                    # extent: staged release, one staging buffer freed per step
+                    arrive(bar + "_tmastg_done", cursor[bar].stage)
+                    cursor[bar] = advance(cursor[bar], stages_of(bar))
+            pend_start, pend_writes = tok0, writes
+        # ---- tile tail: the same ladder once more, draining the last chunk --
+        if sk_nt > 0:
+            ...                     # identical six-store block over pend_start
 ```
 
 Out-of-range rows need no predicate here: the prologue capped `GLOBAL_DIM[2]`
@@ -593,11 +651,19 @@ chunk loop at all.
 # Warps 0..3: gate prefix, normalization, and the four decay operands.
 # ==========================================================================
 def compute_group_0():
+    barrier(id=3, threads=416)      # TMEM-lifecycle rendezvous after setmaxnreg
+    # instruction_selection: barrier.sync 3, 416; extent: one of four such sites
     while tile_idx < total_tiles:
         ...decode; for chunk in reverse_walk:
+            # All four raw waits happen up front, before any gate arithmetic.
+            wait("q_ready", raw_stage, raw_phase)
+            wait("k_ready", raw_stage, raw_phase)
             wait("gate_ready", raw_stage, raw_phase)
+            wait("beta_ready", raw_stage, raw_phase)
             copy_s2r(SGATE + raw_f32_byte(...), raw_gate[0:16])
-            # instruction_selection: ld.shared.f32; extent: 16 tokens of one channel
+            # instruction_selection: ld.shared.b32; extent: 16 tokens of one
+            # channel.  The export carries no ld.shared.f32 at all -- 36 ld.shared.b32
+            # and 32 st.shared.b32 cover every f32 SMEM access.
 
             # ---- gate -> log2 domain, then an in-chunk inclusive prefix ----
             if SAFE_GATE:
@@ -615,7 +681,19 @@ def compute_group_0():
             # instruction_selection: add.rn.f32x2; extent: one token pair per step
             exp2(eG, prefix); exp2(eGl, chunk_total)
             # instruction_selection: ex2.approx.ftz.f32; extent: 16 tokens
-            arrive("gate_done", raw_stage)      # count CG0+CG2: WG2 reads it too
+            # eG MUST round-trip through sGate: the prefix scan runs on a channel
+            # assignment (warp*32 + lane) that differs from the operand assignment
+            # (decay_row, lane_in_row_group), and warps 8..11 read the same buffer.
+            # That shared reader is why `gate_done` carries CG0+CG2 = 256.
+            copy_r2s(eG, SGATE + raw_f32_byte(...))
+            # instruction_selection: st.shared.b32; extent: 16 tokens
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
+            arrive("gate_done", raw_stage)
+            copy_s2r(SGATE + raw_f32_byte(...), eG_operand)    # per operand channel
+            copy_s2r(SGATE + raw_f32_byte(row=BT-1, ...), eGl_operand)
+            # instruction_selection: ld.shared.b32; extent: the re-read under the
+            # operand channel assignment
 
             if L2NORM:
                 rsqrt(q_inv_norm, max(sum_sq_q, 1e-24)); rsqrt(k_inv_norm, ...)
@@ -623,7 +701,7 @@ def compute_group_0():
                 copy_r2s(q_inv_norm, NORM + ...); copy_r2s(k_inv_norm, ...)
 
             # ---- the four operands.  Beta enters K_decay ONLY. -------------
-            wait("k_ready"); wait("beta_ready"); wait("q_ready")
+            wait("decay_done", decay_stage, decay_phase)   # reverse edge, warp 13
             mul(k_value, raw_k, k_inv_norm)
             mul(k_beta, k_value, raw_beta)                 # GDN-2: Beta folded in
             mul(K_decay_pack, cast(k_beta), cast(eG))
@@ -631,53 +709,110 @@ def compute_group_0():
             rcp(exp_neg_g, eG)                             # never a divide
             # instruction_selection: rcp.approx.ftz.f32; extent: 2 per pack
             mul(K_inv_pack, cast(k_value), cast(exp_neg_g))   # no Beta here
-            mul(K_restore_pack, cast(k_value), cast(eGl / eG))
-            mul(Q_decay_pack, cast(q_value), cast(eG * scale))
+            # K_restore reuses the ALREADY-ROUNDED K_inv rather than re-deriving
+            # from K, and the scale is folded into Q BEFORE the eG multiply.  The
+            # rounding points differ from the algebraically equal forms.
+            mul(K_restore_pack, K_inv_pack, cast(eGl))
+            mul(Q_decay_pack, cast(q_value * scale), cast(eG))
             for pack in (K_decay, K_inv, K_restore, Q_decay):
                 copy_r2s(pack, raw_io_byte(base, decay_stage, row, dim))
                 # instruction_selection: st.shared.v4.b32; extent: 8 channels
             fill(STATE_DIAG + inter..., diag(eGl))          # 8 k-atoms of [16][16]
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
             arrive("k_decay_inv_ready", decay_stage)
             arrive("q_decay_k_restore_ready", decay_stage)
+            arrive("q_done", raw_stage); arrive("k_done", raw_stage)
 
+            wait("qk_raw_done", qk_stage, qk_phase)         # reverse edge from CG2
             copy_r2t(raw_q, tmem_cell(TM_QRAW_INP, row, qk_stage * 8))
             copy_r2t(raw_k, tmem_cell(TM_KRAW_INP, row, qk_stage * 8))
-            # instruction_selection: tcgen05.st.sync.aligned.32x32b.x4.b32;
-            # extent: the raw Q/K ring WG2 later re-reads
+            # instruction_selection: tcgen05.st.sync.aligned.32x32b.x8.b32;
+            # extent: 2 sites, the raw Q/K ring warps 8..11 later re-read
+            tcgen05_wait_store()
+            # instruction_selection: tcgen05.wait::st.sync.aligned
             arrive("qk_raw_ready", qk_stage)
+            barrier(id=1, threads=128)
+            # instruction_selection: barrier.sync 1, 128; extent: the CG0-local
+            # rendezvous after publishing the raw ring
 
             if chunk >= FIRST_STATE_CHUNK:                  # state SMEM -> TMEM
                 wait("state_ready")
-                copy_s2r(state_byte(...), state_regs); copy_r2t(state_regs, TM_STATE_INP)
-                # instruction_selection: ld.shared.b16 then
-                #   tcgen05.st.sync.aligned.16x128b.x2.b32
-                arrive("state_inp_ready", state_inp_stage); arrive("state_cg0_done")
+                wait("state_inp_done", state_inp_stage, state_inp_phase)
+                wait("state_inp_cg2_done", state_inp_stage, state_inp_phase)
+                copy_s2r(state_byte(...), state_regs)
+                # instruction_selection: ld.shared.b16
+                copy_r2t(state_regs, TM_STATE_INP + state_inp_stage * 64)
+                # instruction_selection: tcgen05.st.sync.aligned.32x32b.x4.b32;
+                # extent: 16 sites
+                tcgen05_wait_store()
+                # instruction_selection: tcgen05.wait::st.sync.aligned
+                arrive("state_cg0_done")
+            arrive("state_inp_ready", state_inp_stage)   # UNCONDITIONAL: the phase
+            # advances even on a chunk that loads no state
 
 # ==========================================================================
 # Warps 4..7: the value side.  Owns dV and the new dW_out.
 # ==========================================================================
 def compute_group_1():
+    barrier(id=3, threads=416)
+    # instruction_selection: barrier.sync 3, 416
     while tile_idx < total_tiles:
-        ...decode; for chunk in reverse_walk:
-            # ---- Y = W*V - state_k ---------------------------------------
-            wait("state_k_acc_ready"); wait("v_ready"); wait("w_ready")
-            copy_t2r(tmem_cell(TM_STATE_K_ACC, row, col), state_k)
-            # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x16.b32
+        ...decode
+        # dht seed runs at the TOP of the tile, before the chunk loop: a
+        # non-terminal item seeds zeros but still walks the same path, so the
+        # pipeline shape is uniform.
+        if USE_DSTATE_IN:
+            seed_true = (cend == num_chunks_b)
+            copy_g2r(dstate_in_tile, dh_seed) if seed_true else fill(dh_seed, 0.0)
+            copy_r2t(cast(dh_seed), TM_DSTATE_INP); arrive("dstate_inp_ready")
+        for chunk in reverse_walk:
+            # ---- Y: two variants.  Chunk 0 with no entering state is W*V only.
+            wait("v_ready", raw_stage, raw_phase)
+            wait("w_ready", raw_stage, raw_phase)
             copy_s2r(SV + ..., v_val); copy_s2r(SW + ..., w_val)
-            sub(y_val, mul(w_val, v_val), state_k)          # GDN-2: W gates V
+            # instruction_selection: ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16;
+            # extent: 4 sites, V and W in the transposed operand form
+            if chunk >= FIRST_STATE_CHUNK:
+                wait("state_k_acc_ready")
+                copy_t2r(tmem_cell(TM_STATE_K_ACC, row, col), state_k)
+                # instruction_selection: tcgen05.ld.sync.aligned.16x256b.x2.b32;
+                # extent: 2 sites
+                sub(y_val, mul(w_val, v_val), state_k)      # GDN-2: W gates V
+                # instruction_selection: sub.bf16x2; extent: 8 packs
+            else:
+                mul(y_val, w_val, v_val)                    # no entering state
             copy_r2t(cast(y_val), tmem_cell(TM_Y_INP, ...))
-            # instruction_selection: tcgen05.st...32x32b.x4.b32; extent: Y operand
+            # instruction_selection: tcgen05.st.sync.aligned.16x128b.x2.b32;
+            # extent: 2 sites
+            tcgen05_wait_store()
+            # instruction_selection: tcgen05.wait::st.sync.aligned
             arrive("y_inp_ready")
 
-            wait("u_acc_ready"); copy_t2r(TM_U_ACC, u_val); copy_r2s(cast(u_val), SU)
-            # instruction_selection: tcgen05.ld then stmatrix...x4.shared.b16
-            arrive("u_smem_ready")
+            # dU is restaged BEFORE U: du_acc is finished by GEMMs 3 and 5, which
+            # precede GEMM 7's u_acc in the in-order tcgen05 queue.
             wait("du_acc_ready"); copy_t2r(TM_DU_ACC, du_val)
-            copy_r2t(cast(du_val), TM_DU_INP); arrive("du_inp_ready")
+            # instruction_selection: tcgen05.ld.sync.aligned.16x256b.x2.b32
+            copy_r2t(cast(du_val), TM_DU_INP)
+            # instruction_selection: tcgen05.st.sync.aligned.16x128b.x2.b32
+            tcgen05_wait_store(); arrive("du_inp_ready")
+
+            wait("u_acc_ready"); copy_t2r(TM_U_ACC, u_val)
+            # instruction_selection: tcgen05.ld.sync.aligned.16x256b.x2.b32
+            copy_r2s(cast(u_val), SU)
+            # instruction_selection: stmatrix.sync.aligned.m8n8.x4.trans.shared.b16
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
+            arrive("u_smem_ready")
 
             wait("dy_acc_ready"); copy_t2r(TM_DY_ACC, dy_val)   # ALIAS of state_k
-            copy_r2t(cast(-dy_val), TM_NEG_DY_INP); arrive("neg_dy_inp_ready")
-            copy_r2s(cast(dy_val), SDY); arrive("dy_smem_ready")
+            # instruction_selection: tcgen05.ld.sync.aligned.16x256b.x2.b32
+            copy_r2t(cast(-dy_val), TM_NEG_DY_INP)
+            # instruction_selection: tcgen05.st.sync.aligned.16x128b.x2.b32
+            tcgen05_wait_store(); arrive("neg_dy_inp_ready")
+            copy_r2s(cast(dy_val), SDY)
+            # instruction_selection: stmatrix.sync.aligned.m8n8.x4.trans.shared.b16
+            fence_proxy_async_shared_cta(); arrive("dy_smem_ready")
             # dY gains a tcgen05 consumer in GDN-2 (dk_decay uses plain dY, not
             # Beta*dY), hence the extra `dy_smem_done` MMA_COMMIT edge.
 
@@ -697,9 +832,25 @@ def compute_group_1():
             arrive("v_done", raw_stage); arrive("w_done", raw_stage)
             # V and W are released only HERE, after the dW_out product needs V.
 
-            wait("dstate_acc_ready"); copy_t2r(TM_DSTATE_ACC, dh)
-            copy_r2t(cast(dh), TM_DSTATE_INP); copy_r2s(cast(dh), DSTATE)
-            arrive("dstate_inp_ready"); arrive("dstate_smem_ready")
+            # dH capture is UNCONDITIONALLY waited but only performed when a
+            # next chunk exists; the SMEM copy re-reads TMEM rather than reusing
+            # the registers already in hand.
+            wait("dstate_acc_ready")
+            if rev + 1 < sk_nt:
+                copy_t2r(TM_DSTATE_ACC, dh)
+                # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x32.b32;
+                # extent: 4 sites
+                copy_r2t(cast(dh), TM_DSTATE_INP)
+                # instruction_selection: tcgen05.st.sync.aligned.32x32b.x16.b32;
+                # extent: 4 sites
+                tcgen05_wait_store()
+                copy_t2r(TM_DSTATE_INP, dh_reread)          # explicit re-read
+                # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x16.b32;
+                # extent: 4 sites
+                copy_r2s(cast(dh_reread), DSTATE)
+                # instruction_selection: stmatrix.sync.aligned.m8n8.x4.trans.shared.b16
+                fence_proxy_async_shared_cta()
+                arrive("dstate_inp_ready"); arrive("dstate_smem_ready")
     # tail: seed d_final_state when cend == num_chunks_b, drain dstate0 when
     # wstart == 0, and pass through for a zero-length sequence.
     arrive("tmem_done")
@@ -708,8 +859,33 @@ def compute_group_1():
 # Warps 8..11: gradient drain.  One lane owns one key channel x 16 tokens.
 # ==========================================================================
 def compute_group_2():
+    barrier(id=3, threads=416)
+    # instruction_selection: barrier.sync 3, 416
     while tile_idx < total_tiles:
         ...decode; for chunk in reverse_walk:
+            wait("k_decay_inv_ready", decay_stage, decay_phase)
+            copy_s2r(SGATE + raw_f32_byte(...), eG)      # written back by CG0
+            # instruction_selection: ld.shared.b32; extent: 16 tokens
+            fence_proxy_async_shared_cta(); arrive("gate_done", raw_stage)
+
+            # ---- dGate_last hdot: eGl * sum_v(dH[v,c] * S[c,v]) -------------
+            # This term exists only when a dState is carried, and it is the
+            # kernel's single largest FMA family.
+            if USE_DSTATE_IN and chunk >= FIRST_STATE_CHUNK:
+                wait("state_inp_ready", state_inp_stage, state_inp_phase)
+                wait("dstate_smem_ready")
+                copy_t2r(tmem_cell(TM_STATE_INP, ...), state_cols)
+                # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x16.b32;
+                # extent: 4 sites
+                copy_s2r(DSTATE + state_byte(...), dh_cols)
+                for j in range(DV):
+                    fma(hacc[(2 * j) % 8], dh_cols[j], state_cols[j], hacc[(2 * j) % 8])
+                    # instruction_selection: fma.rn.f32.bf16; extent: 128 issues
+                    # over a FIXED 8-way interleave, not a compiler-chosen tree
+                reduce_fixed_tree(dgate_last_val, hacc[0:8])
+                # instruction_selection: add.rn.f32x2; extent: the fixed fadd2 tree
+                arrive("dstate_smem_cg2_done"); arrive("state_inp_cg2_done")
+
             wait("dk_restore_part_acc_ready")
             copy_t2r(tmem_cell(TM_DK_RESTORE, row, col), dk_restore_part)
             # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x16.b32
@@ -722,7 +898,8 @@ def compute_group_2():
 
             wait("dq_acc_ready"); copy_t2r(TM_DQ_ACC, dq_vec)
             mul(dq_n, mul_packed(eG, scale), dq_vec)
-            # instruction_selection: mul.rn.f32x2; extent: one token pair
+            # instruction_selection: mul.f32x2; extent: TWO packed multiplies per
+            # token pair -- (eG*scale) then (*dq_vec); 40 sites in the export
 
             wait("dk_inv_part_acc_ready"); copy_t2r(TM_DK_INV_ACC, dk_inv_part)
             fma(dk_n, dk_inv_part, rcp(eG), dk_n)
@@ -730,6 +907,9 @@ def compute_group_2():
             # ---- dK_decay drain seeds BOTH dBeta and dGate -----------------
             wait("dk_decay_part_acc_ready"); copy_t2r(TM_DK_DECAY_ACC, dk_decay_part)
             copy_t2r(tmem_cell(TM_KRAW_INP, ...), k_raw)     # raw K from the ring
+            # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x8.b32; extent:
+            # one of FOUR separate ring reads -- raw K three times (the restore
+            # drain, here, and the dGate finalize) and raw Q once
             for t in range(BT):
                 mul(dk_decay, -eG[t], dk_decay_part[t])
                 mul(db_regs[t], k_n[t], dk_decay)            # GDN-2: per-channel dBeta
@@ -753,23 +933,61 @@ def compute_group_2():
                     # the chain rule; swapping these corrupts dGate silently.
             add(dgate_regs[BT-1], dgate_regs[BT-1],
                 (dgate_last_acc[0]+dgate_last_acc[1]) + (dgate_last_acc[2]+dgate_last_acc[3]))
+            if USE_DSTATE_IN and chunk >= FIRST_STATE_CHUNK:
+                fma(dgate_regs[BT-1], eGl, dgate_last_val, dgate_regs[BT-1])
             arrive("beta_done", raw_stage)
 
-            if L2NORM:                       # row projection: grad -= k * <k, grad>
-                for (grad, qk_col) in ((dq_n, TM_QRAW_INP), (dk_n, TM_KRAW_INP)):
-                    reduce_dot(dots, grad, raw_qk)
+            if L2NORM:      # row projection: grad <- (grad - a*norm*<a,grad>)*norm
+                for (grad, qk_col, inv_off) in ((dq_n, TM_QRAW_INP, 0),
+                                                (dk_n, TM_KRAW_INP, BT)):
+                    copy_t2r(tmem_cell(qk_col, ...), raw_lo)   # two halves
+                    copy_t2r(tmem_cell(qk_col, ...), raw_hi)
+                    # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x8.b32
+                    mul(part, raw_pair, grad_pair)
+                    # instruction_selection: mul.f32x2; extent: 2 per token pair
+                    for delta in (16, 8, 4, 2, 1):
+                        shuffle_xor(peer, part, delta); add(part, part, peer)
+                        # instruction_selection: shfl.sync.bfly.b32; extent: a
+                        # 5-step butterfly over the lanes of one row
+                    if lane == 0:
+                        copy_r2s(part, RED1 + warp_id * 4)
                     barrier(id=2, threads=128)
-                    # instruction_selection: barrier.sync 2, 128; extent: the
-                    # cross-warp half of the dot product
+                    # instruction_selection: barrier.sync 2, 128; extent: the first
+                    # of TWO such barriers per gradient
+                    copy_s2r(RED1, four_warp_parts)
+                    reduce_fixed_tree(dots, four_warp_parts)
+                    # instruction_selection: add.rn.f32x2; extent: a fixed 4-term
+                    # tree over the four warps, not a compiler-chosen reduction
+                    copy_s2r(NORM + inv_off, inv_norm)
                     fma(grad, -raw_qk, dots * inv_norm, grad)
-            reverse_cumsum(dgate_regs)       # in-register suffix scan over 16 tokens
-
-            for (regs, base, bar) in ((dq_n, SDQ, "dq"), (dk_n, SDK, "dk"),
-                                      (dgate_regs, SDGATE, "dgate"),
-                                      (db_regs, SDB, "db")):
+                    mul(grad, grad, inv_norm)          # the post-multiply
+                    barrier(id=2, threads=128)
+                    # instruction_selection: barrier.sync 2, 128; extent: the second
+                    # barrier, before RED1 is reused by the next gradient
+            # dQ and dK stage FIRST, before the cumsum, so their staging buffers
+            # release as early as possible.
+            for (regs, base, bar) in ((dq_n, SDQ, "dq"), (dk_n, SDK, "dk")):
+                wait(bar + "_tmastg_done", ...)
                 copy_r2s(cast(regs), base + ...)
-                # instruction_selection: st.shared.b16 (st.shared.f32 for dGate)
-                arrive(bar + "_tmastg_ready")
+                # instruction_selection: st.shared.b16; extent: 16 tokens
+            fence_proxy_async_shared_cta()
+            arrive("dq_tmastg_ready"); arrive("dk_tmastg_ready")
+
+            tcgen05_wait_load()
+            # instruction_selection: tcgen05.wait::ld.sync.aligned
+            arrive("qk_raw_done", qk_stage)
+
+            reverse_cumsum(dgate_regs)
+            # instruction_selection: add.f32 chain; extent: a STRICTLY SEQUENTIAL
+            # suffix accumulation from t = BT-1 down to 0, not a parallel scan
+
+            for (regs, base, bar) in ((dgate_regs, SDGATE, "dgate"), (db_regs, SDB, "db")):
+                wait(bar + "_tmastg_done", ...)
+                copy_r2s(cast(regs), base + ...)
+                # instruction_selection: st.shared.b32 for the FP32 dGate,
+                # st.shared.b16 for dBeta; extent: 16 tokens
+            fence_proxy_async_shared_cta()
+            arrive("dgate_tmastg_ready"); arrive("db_tmastg_ready")
     arrive("tmem_done")
 ```
 
@@ -781,23 +999,29 @@ accumulation, so a GEMM whose K extent is 128 expands to eight issues and one
 whose K extent is 16 expands to one.  Two sites are duplicated for the
 `accumulate=True`/`False` twin.
 
-| # | FP32 TMEM destination | A operand | B operand | M x N x K | issues | accumulate |
-| ---: | --- | --- | --- | --- | ---: | --- |
-| 1 | `state_k_acc` | `state` (SMEM) | `K_decay^T` | 128 x 16 x 128 | 8 | on k>0 |
-| 2 | `dq_acc` | `state` (TMEM) | `dO^T` | 128 x 16 x 128 | 8 | on k>0 |
-| 3 | `du_acc` | `dstate_inp` (TMEM) | `K_restore` | 128 x 16 x 128 | 8 | on k>0 |
-| 4 | `dstate_acc` | `dstate_inp` (TMEM) | `diag(eGl)` | 128 x 16 x 16 | 8 | per k-atom |
-| 5 | `du_acc` | `dO^T` (SMEM) | `A` | 128 x 16 x 16 | 1 | yes |
-| 6 | `dstate_acc` | `dO^T` (SMEM) | `Q_decay` | 128 x 128 x 16 | 1 | yes |
-| 7 | `u_acc` | `Y` (TMEM) | `T_inv` | 128 x 16 x 16 | 1 | no |
-| 8 | `dy_acc` | `dU` (TMEM) | `T_inv` | 128 x 16 x 16 | 1 | no |
-| 9 | `dk_restore_acc` | `dH` (SMEM) | `U^T` | 128 x 16 x 128 | 8 | on k>0 |
-| 10 | `dstate_acc` | `-dY` (TMEM) | `K_decay` | 128 x 128 x 16 | 1 | yes |
-| 11 | `dk_inv_acc` | `Q_decay^T` (SMEM) | `dA` | 128 x 16 x 16 | 1 | no |
-| 12 | `dq_acc` | `K_inv^T` (SMEM) | `dA^T` | 128 x 16 x 16 | 1 | twin |
-| 13 | `dk_decay_acc` | `state` (TMEM) | `dY^T` | 128 x 16 x 128 | 8 | on k>0 |
-| 14 | `dk_inv_acc` | `K_decay^T` (SMEM) | `-dM_strict` | 128 x 16 x 16 | 1 | yes |
-| 15 | `dk_decay_acc` | `K_inv^T` (SMEM) | `dM_strict^T` | 128 x 16 x 16 | 1 | twin |
+Three loop-level waits sit OUTSIDE any GEMM's guard, so their phases advance
+even on a chunk whose MMA is skipped: `dqk_acc_done` (the loop-carried
+backpressure edge from warps 8..11, whose cursor starts at phase 1),
+`state_inp_ready`, and `do_ready`.  `dstate0_acc_stored` is waited once at
+teardown before the TMEM dealloc.
+
+| # | FP32 TMEM destination | A operand | B operand | M x N x K | issues | acc | guard | waits | publishes |
+| ---: | --- | --- | --- | --- | ---: | --- | --- | --- | --- |
+| 1 | `state_k_acc` | `state` (SMEM) | `K_decay^T` | 128 x 16 x 128 | 8 | on k>0 | `chunk >= FIRST_STATE_CHUNK` | `state_ready`, `k_decay_inv_ready` | `state_k_acc_ready`, `state_done` |
+| 2 | `dq_acc` | `state` (TMEM) | `dO^T` | 128 x 16 x 128 | 8 | on k>0 | `chunk >= FIRST_STATE_CHUNK` | (`state_inp_ready`, `do_ready` hoisted) | none yet |
+| 3 | `du_acc` | `dstate_inp` (TMEM) | `K_restore` | 128 x 16 x 128 | 8 | on k>0 | `has_dstate` | `dstate_inp_ready`, `q_decay_k_restore_ready` | none yet |
+| 4 | `dstate_acc` | `dstate_inp` (TMEM) | `diag(eGl)` | 128 x 16 x 16 | 8 | per k-atom | `has_dstate` | same stage | none yet |
+| 5 | `du_acc` | `dO^T` (SMEM) | `A` | 128 x 16 x 16 | 1 | yes | `has_dstate` | `a_ready` | `du_acc_ready`, `a_done` |
+| 6 | `dstate_acc` | `dO^T` (SMEM) | `Q_decay` | 128 x 128 x 16 | 1 | yes | `has_dstate` | `q_decay_k_restore_ready` | `do_mma_done` |
+| 7 | `u_acc` | `Y` (TMEM) | `T_inv` | 128 x 16 x 16 | 1 | no | none | `y_inp_ready`, `t_inv_ready` | `u_acc_ready` |
+| 8 | `dy_acc` | `dU` (TMEM) | `T_inv` | 128 x 16 x 16 | 1 | no | none | `du_inp_ready` | `dy_acc_ready`, `t_inv_done` |
+| 9 | `dk_restore_acc` | `dH` (SMEM) | `U^T` | 128 x 16 x 128 | 8 | on k>0 | `has_dstate` | `dstate_smem_ready`, `u_smem_ready` | `dk_restore_part_acc_ready` |
+| 10 | `dstate_acc` | `-dY` (TMEM) | `K_decay` | 128 x 128 x 16 | 1 | yes | none | `neg_dy_inp_ready` | `dstate_acc_ready`, `decay_done` |
+| 11 | `dk_inv_acc` | `Q_decay^T` (SMEM) | `dA` | 128 x 16 x 16 | 1 | no | none | `da_ready` | none yet |
+| 12 | `dq_acc` | `K_inv^T` (SMEM) | `dA^T` | 128 x 16 x 16 | 1 | twin | `chunk >= FIRST_STATE_CHUNK` selects the twin | same stage | `dq_acc_ready`, `da_done` |
+| 13 | `dk_decay_acc` | `state` (TMEM) | `dY^T` | 128 x 16 x 128 | 8 | on k>0 | `chunk >= FIRST_STATE_CHUNK` | `dy_smem_ready` | `dy_smem_done`, `state_inp_done` |
+| 14 | `dk_inv_acc` | `K_decay^T` (SMEM) | `-dM_strict` | 128 x 16 x 16 | 1 | yes | none | `dm_ready` | `dk_inv_part_acc_ready` |
+| 15 | `dk_decay_acc` | `K_inv^T` (SMEM) | `dM_strict^T` | 128 x 16 x 16 | 1 | twin | `chunk >= FIRST_STATE_CHUNK` selects the twin | same stage | `dk_decay_part_acc_ready`, `dm_done`, `decay_done` |
 
 Issue vector `8,8,8,8,1,1,1,1,8,1,1,1,8,1,1` sums to 57 runtime issues; the two
 accumulate twins add two more static sites, giving the **59**
