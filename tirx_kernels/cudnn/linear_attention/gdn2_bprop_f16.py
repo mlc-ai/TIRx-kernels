@@ -588,6 +588,11 @@ def _rsqrt_approx(value):
     return result
 
 
+def _pack_u32_pair(low, high):
+    """Two adjacent 32-bit words as one 64-bit store operand."""
+    return K.bitwise_or(K.cast(low, "uint64"), K.shift_left(K.cast(high, "uint64"), K.uint64(32)))
+
+
 def _opaque_f32_zero():
     value = K.local_scalar("float32")
     K.ptx.mov.b32(value, K.uint32(0))
@@ -1708,8 +1713,14 @@ def _make_main(
                     _tcgen_commit(arena, _BAR_DQ_ACC_READY)
                     _tcgen_commit(arena, _BAR_DA_DONE, inter_stage)
 
-                    _wait_barrier(arena, _BAR_DV_TMASTG_READY, serial % 2, (serial // 2) & 1)
                     with K.If(chunk >= first_state_chunk), K.Then():
+                        # The operand is the dedicated dY tile, so the edge is that
+                        # tile's own release rather than the value-gradient staging
+                        # buffer's, and it belongs inside this guard.
+                        # Explicit phase from the chunk serial, not a cursor: the
+                        # wait is guarded while the producer arrives every chunk,
+                        # so a cursor would drift.
+                        _wait_barrier(arena, _BAR_DY_SMEM_READY, 0, serial % 2)
                         _tcgen_mma_ts(
                             tmem_base + _TMEM_DK_DECAY,
                             tmem_base + _TMEM_STATE_INPUT + (serial % 2) * 64,
@@ -2878,8 +2889,7 @@ def _make_main(
                         K.assign(db_values[token], k_native * dk_decay)
                         K.assign(dgate_values[token], beta_value * dk_decay)
                         K.assign(dk_values[token], dk_values[token] + dgate_values[token])
-                    K.ptx.fence.proxy.async_.shared__cta()
-                    _arrive_barrier(arena, _BAR_BETA_DONE, raw_stage)
+                    K.ptx.tcgen05.wait__ld.sync.aligned()
                     _arrive_barrier(arena, _BAR_DQK_ACC_DONE)
 
                     qraw = K.alloc_local((8,), "uint32")
@@ -2916,10 +2926,25 @@ def _make_main(
                             )
                             K.assign(q_value, q_value * q_norm)
                             K.assign(k_value, k_value * k_norm)
+                        reload_bits = K.local_scalar("uint16")
+                        K.ptx.ld.shared.b16(
+                            reload_bits,
+                            arena.ptr_to([_raw_bf16_byte(_SMEM_BETA, raw_stage, token, channel)]),
+                        )
+                        beta_reload = K.local_scalar("float32")
+                        K.ptx.cvt.f32.bf16(beta_reload, reload_bits)
+                        if beta_sigmoid:
+                            # Third of the three sigmoid sites: the operand build,
+                            # the decay drain, and here.  Each reloads and rounds
+                            # independently, which is what the reference does.
+                            K.assign(beta_reload, _tanh_approx(beta_reload * 0.5) * 0.5 + 0.5)
+                            K.assign(
+                                beta_reload, K.cast(K.cast(beta_reload, "bfloat16"), "float32")
+                            )
                         K.assign(
                             dgate_values[token],
                             q_value * dq_values[token]
-                            + beta_self[token] * db_values[token]
+                            + beta_reload * db_values[token]
                             - k_value * (dk_values[token] - dgate_values[token]),
                         )
                         if beta_sigmoid:
@@ -2928,9 +2953,12 @@ def _make_main(
                             # these silently corrupts dGate.
                             K.assign(
                                 db_values[token],
-                                db_values[token]
-                                * (beta_self[token] - beta_self[token] * beta_self[token]),
+                                db_values[token] * (beta_reload - beta_reload * beta_reload),
                             )
+                    # The erase-gate stage is released only now, after the finalize
+                    # has reloaded it: this group is its second reader.
+                    K.ptx.fence.proxy.async_.shared__cta()
+                    _arrive_barrier(arena, _BAR_BETA_DONE, raw_stage)
                     K.assign(
                         dgate_values[15],
                         dgate_values[15]
@@ -3657,9 +3685,28 @@ def _make_main(
                                 ),
                                 *[dstate_words[i] for i in range(16)],
                             )
+                        K.ptx.tcgen05.wait__st.sync.aligned()
+                        _arrive_barrier(arena, _BAR_DSTATE_INP_READY)
+
+                        # The shared-memory copy re-reads the operand back out of
+                        # tensor memory rather than reusing the registers that were
+                        # just packed, matching the frozen source.
+                        with K.unroll(4) as key_subtile:
+                            reread = K.alloc_local((16,), "uint32")
+                            K.ptx["tcgen05.ld.sync.aligned.32x32b.x16.b32"](
+                                *[reread[i] for i in range(16)],
+                                K.cast(
+                                    tmem_col
+                                    + _TMEM_DSTATE_INPUT
+                                    + key_subtile * 16
+                                    + K.shift_left(dstate_row, K.int32(16)),
+                                    "uint32",
+                                ),
+                            )
+                            K.ptx.tcgen05.wait__ld.sync.aligned()
                             with K.unroll(4) as half:
                                 key_base = key_subtile * 32 + half * 8
-                                K.ptx.st.shared.v4.b32(
+                                K.ptx.st.shared.v2.b64(
                                     arena.ptr_to(
                                         [
                                             _SMEM_DSTATE
@@ -3671,13 +3718,9 @@ def _make_main(
                                             * 2
                                         ]
                                     ),
-                                    dstate_words[half * 4],
-                                    dstate_words[half * 4 + 1],
-                                    dstate_words[half * 4 + 2],
-                                    dstate_words[half * 4 + 3],
+                                    _pack_u32_pair(reread[half * 4], reread[half * 4 + 1]),
+                                    _pack_u32_pair(reread[half * 4 + 2], reread[half * 4 + 3]),
                                 )
-                        K.ptx.tcgen05.wait__st.sync.aligned()
-                        _arrive_barrier(arena, _BAR_DSTATE_INP_READY)
                         K.ptx.fence.proxy.async_.shared__cta()
                         _arrive_barrier(arena, _BAR_DSTATE_SMEM_READY)
 
