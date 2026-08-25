@@ -110,25 +110,28 @@ _DV = 128
 
 def _normalized_config(config):
     """Fill the accepted-branch defaults for one config entry."""
-    resolved = {
-        "label": config["label"],
-        "seq_lens": tuple(config["seq_lens"]),
-        "heads": config["heads"],
-        "dtype": config.get("dtype", "bfloat16"),
-        "l2norm": config.get("l2norm", False),
-        "safe_gate": config.get("safe_gate", False),
-        "beta_sigmoid": config.get("beta_sigmoid", False),
-        "use_initial_state": config.get("use_initial_state", False),
-        "use_dstate_in": config.get("use_dstate_in", False),
-        "use_dstate0": config.get("use_dstate0", False),
-        "dynamic_scheduler": config.get("dynamic_scheduler", False),
-        "run_order": config.get("run_order", False),
-        "order_generate": config.get("order_generate", False),
-    }
+    resolved = {key: value for key, value in config.items() if key != "label"}
+    resolved["seq_lens"] = tuple(resolved.get("seq_lens", (64,)))
+    resolved.setdefault("heads", 1)
     heads = resolved["heads"]
-    resolved["q_heads"] = config.get("q_heads", heads)
-    resolved["k_heads"] = config.get("k_heads", heads)
-    resolved["v_heads"] = config.get("v_heads", heads)
+    resolved.setdefault("q_heads", heads)
+    resolved.setdefault("k_heads", heads)
+    resolved.setdefault("v_heads", heads)
+    resolved.setdefault("dtype", "bfloat16")
+    resolved.setdefault("num_sms", 148)
+    resolved.setdefault("scale", 1.0 / (_DK**0.5))
+    for key in (
+        "l2norm",
+        "safe_gate",
+        "beta_sigmoid",
+        "use_initial_state",
+        "use_dstate_in",
+        "use_dstate0",
+        "dynamic_scheduler",
+        "run_order",
+        "order_generate",
+    ):
+        resolved.setdefault(key, False)
     return resolved
 
 
@@ -159,24 +162,24 @@ def _make_main(config):
     return main
 
 
-def get_kernel(config):
+def get_kernel(**config):
     resolved = _normalized_config(config)
     return [_make_prologue(resolved).func, _make_main(resolved).func]
 
 
-def prepare_data(config):
+def prepare_data(**config):
     raise NotImplementedError("gdn2 backward data construction is not implemented yet")
 
 
-def run_test(config):
+def run_test(**config):
     raise NotImplementedError("gdn2 backward correctness is not implemented yet")
 
 
-def prepare_bench(config):
+def prepare_bench(**config):
     raise NotImplementedError("gdn2 backward benchmark setup is not implemented yet")
 
 
-def run_bench(config):
+def run_bench(*, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=0.0, **config):
     raise NotImplementedError("gdn2 backward benchmarking is not implemented yet")
 
 

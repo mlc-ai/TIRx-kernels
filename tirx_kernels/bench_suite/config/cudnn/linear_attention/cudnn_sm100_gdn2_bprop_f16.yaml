@@ -1,0 +1,23 @@
+# Complete performance-path matrix for the cuDNN Frontend GDN-2 backward port.
+kernel: cudnn_sm100_gdn2_bprop_f16
+selection_rationale: The selected defaults cover an underfilled small launch, the production L2-normalized path, and a large multi-batch production point; the full matrix additionally covers ragged tails with a zero-length sequence, grouped heads, safe gate, beta sigmoid, state I/O, dynamic scheduling, both prologue ordering modes, and the upstream benchmark's own batch and sequence-length sweep at 64 heads.
+configs:
+  - {config: perf_basic_b1_s2048_h16, default: true, selection_role: small}
+  - {config: perf_tail_b2_ragged_h16, default: false}
+  - {config: perf_grouped_b1_s8192_hq64_hk16_hv16, default: false}
+  - {config: perf_l2_b1_s8192_h16, default: true, selection_role: medium}
+  - {config: perf_l2_b4_s8192_h64, default: true, selection_role: large}
+  - {config: perf_safe_b1_s8192_h16, default: false}
+  - {config: perf_beta_b1_s8192_h16, default: false}
+  - {config: perf_state_b1_s8192_h16, default: false}
+  - {config: perf_dynamic_b4_s2048_h64, default: false}
+  - {config: perf_order_scratch_b4_s2048_h64, default: false}
+  - {config: perf_order_generate_b4_s2048_h64, default: false}
+  - {config: perf_l2_b4_s2048_h64, default: false}
+  - {config: perf_l2_b4_s4096_h64, default: false}
+  - {config: perf_l2_b4_s16384_h64, default: false}
+  - {config: perf_l2_b4_s32768_h64, default: false}
+  - {config: perf_l2_b1_s8192_h64, default: false}
+  - {config: perf_l2_b2_s8192_h64, default: false}
+  - {config: perf_l2_b8_s8192_h64, default: false}
+  - {config: perf_l2_b16_s8192_h64, default: false}
