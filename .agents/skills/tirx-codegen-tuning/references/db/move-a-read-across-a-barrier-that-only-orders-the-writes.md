@@ -51,17 +51,45 @@ memory latency with the whole warpgroup already synchronized.
 The trade is instructions for overlap, not instructions saved. Staging the
 values costs a local array and a pre-initialization, and measured on a metadata
 publish the rewrite raised executed global loads from 173,425 to 266,698 and
-shared stores from 611,442 to 704,222 at warp level. It still won: five
-alternating paired rounds, 5/5, 0.76% on the target shape, moving its mean ratio
-from 0.9875 to 1.0000, and a second shape on the same load program gained 1.6%
-without being aimed at. Expect the instruction count to go up and judge the
-change on time.
+shared stores from 611,442 to 704,222 at warp level. It still won: the target
+mean ratio moved from 0.9875 to 1.0000, and a second
+shape on the same load program gained 1.6% without being aimed at. Expect the
+instruction count to go up and judge the change on time.
 
 The stall breakdown confirms where the time comes from rather than leaving it
 inferred. Samples move out of memory latency and into issue: long_scoreboard
 25.3% to 24.7%, no_instructions 10.8% to 10.3%, while selected rises 12.6% to
 13.0% and not_selected 4.7% to 5.2%. More warps are ready and fewer are blocked
 on a load, which is the whole of the trade.
+
+The same ordering proof applies to an explicit TMEM load and wait when the
+intervening barrier protects reuse of the eventual shared-memory destination.
+Issue the TMEM reads, wait for that unrelated destination to become reusable,
+then drain the TMEM reads immediately before their first conversion or use.
+
+```python
+# before: TMEM latency and destination-reuse latency are paid in series.
+frag0 = _load_tmem(first_address)
+frag1 = _load_tmem(second_address)
+_wait_tmem_loads()
+_convert(frag0, frag1)
+_wait_destination_reuse()
+_store_shared(frag0, frag1)
+
+# after: the reuse wait covers part of the outstanding TMEM latency.
+frag0 = _load_tmem(first_address)
+frag1 = _load_tmem(second_address)
+_wait_destination_reuse()
+_wait_tmem_loads()
+_convert(frag0, frag1)
+_store_shared(frag0, frag1)
+```
+
+On a measured no-checkpoint output path, this single reorder moved the focused
+ratio from 0.9764x to 0.9954x. Across its complete matrix, the minimum moved
+from 0.9688x to 0.9831x and the mean from 0.9892x to 0.9936x. The rewrite
+passed the complete correctness matrix and remained in the later complete
+performance-matrix winner.
 
 ## Boundary
 
@@ -71,6 +99,11 @@ what the barrier exists to order -- hoisting that read is a correctness bug, not
 a tuning change. The staged values also occupy registers for the length of the
 barrier; on a warp already near its budget the trade can invert, and the same
 rewrite that wins on one operand dtype can lose on the one with less headroom.
+
+For the TMEM form, the barrier must order only reuse of the later shared-memory
+destination; it must not prove that the TMEM producer has completed. Keep the
+explicit TMEM wait before first use, and preserve the original schedule on
+execution paths where the two waits participate in the same protocol.
 
 ## Verification
 
@@ -85,3 +118,7 @@ no_instructions 10.8% to 10.3%, against selected 12.6% to 13.0% and not_selected
 
 Confirm the region still does its work rather than having become dead: corrupt
 the published value and check the bitwise gate fails.
+
+For TMEM, confirm the realized order is load issues, independent barrier wait,
+TMEM wait, conversion, then shared store. Test both the reordered specialization
+and a control specialization that retains the original protocol.
