@@ -84,6 +84,36 @@ matrix.
 
 ## Boundary
 
+The staged width is itself the lever, and it can want the COMPLETE fragment.
+On a scalar pass reading three shared tiles per token, staging eight tokens at a
+time beat one token at a time on every required shape. Narrowing to four then
+regressed every one of them (-0.0025, -0.0019, -0.0008, -0.0004, -0.0004) even
+though it lowered the MIO pressure the staging had added, and widening to the
+whole sixteen-token fragment -- 48 loads in flight -- was the best of the three,
+taking four shapes stuck at 0.988x to 0.9907x, 0.9917x, 0.9921x and 0.9924x and
+the matrix from five failing shapes to one. Sweep the width in both directions
+before settling; the small-trip guidance that suits a global-load staging loop
+is not general, and here the extra live range was worth paying for.
+
+The transform is site-selective, and the site can be judged in advance. Of five
+scalar shared-memory ladders staged the same way in one kernel, the three that
+paid all fed a long arithmetic chain in a register-rich consumer warpgroup and
+ran every iteration of the hot loop. The two that did not pay failed for
+identifiable reasons: one fed tensor-memory stores rather than arithmetic and
+sat behind a conditional so it did not run every iteration (measured -0.0008 and
+-0.0007 on the two tightest shapes), and the other was already being scheduled
+ahead of its consumers. Prefer ladders whose staged values feed a long dependent
+chain, and check whether the region is even entered every iteration.
+
+Removing genuinely redundant work in these loops loses. Unpacking each packed
+pair once into a per-token array, in place of unpacking every word twice and
+selecting a half, removes real converts and real selects that the generated code
+was keeping (`SEL` 39 against the reference's zero). It was measured twice, once
+before and once after an unrelated front-end fix, and lost both times -- on the
+clean measurement it took the matrix from two failing shapes to six and cost the
+worst shape 0.0125. The redundant arithmetic was sitting in stall shadow, and
+removing it shortened the very chain the staging had been lengthening on purpose.
+
 The trade is bounded by register live range, and the ceiling is
 dispatch-specific rather than global: the same rewrite that gained on eight
 shapes cost 13% on one and 3% on another, both of them the specializations whose

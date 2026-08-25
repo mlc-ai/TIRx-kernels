@@ -79,6 +79,28 @@ no spill.
       )
   ```
 
+- When such a region also contains barrier *waits*, split it by what actually
+  needs one lane instead of predicating everything in it. A wait is safe
+  warp-wide -- every lane spins on the same barrier and phase -- so it leaves
+  the guard entirely, while the arrivals and transfer issues keep it as `@p`.
+  Electing once above the region and dropping the branch is what removes the
+  reconvergence; predicating the issues is what preserves single-lane
+  semantics.
+
+  ```python
+  # before: one elected region holds the waits, the arrivals and the issues.
+  with K.If(_elected()), K.Then():
+      _wait_barrier(...)
+      _expect_tx(...)
+      _issue_transfer(...)
+
+  # after: the waits run warp-wide; only what must be single-lane is predicated.
+  leader = K.cuda.elect_sync()
+  _wait_barrier(...)
+  _expect_tx(..., pred=leader)
+  _issue_transfer(..., pred=leader)
+  ```
+
 ## Rationale
 
 - Replacing repeated pad checks with the `T.constexpr` specialization removed
@@ -108,6 +130,18 @@ no spill.
   tensor pipe from 67.3% to 74.2% of cycles against the reference's 73.5%. On
   the gate the mainloop half is what moved the family, from 0.939-0.983x to
   0.995-1.035x.
+- A transfer warp's per-chunk block -- ten barrier waits, eight expect-tx
+  arrivals and eight tensor-copy issues inside one elected region entered every
+  chunk -- was the single largest divergent region left in a warp-specialized
+  backward kernel, which carried `ELECT` 80 against the reference's 52, `PLOP3`
+  96 against 28, and `WARPSYNC.COLLECTIVE`/`ENDCOLLECTIVE`/`BSSY`/`BSYNC` at
+  8/8/20/20 against zero, worth 3928 branch-resolving samples. Letting the waits
+  run warp-wide and predicating the sixteen single-lane issues moved the
+  tightest shape by +0.0116 to 1.0016 and five more by +0.0057 to +0.0099,
+  taking the required matrix from one failing shape to none with the worst shape
+  at 0.993x. It was the last change the gate needed, after twelve expansions
+  that had each moved a required shape by 0.002 or less.
+
 - In a rows-one, full-vector specialization, making the launch proof explicit
   removed eight asynchronous-copy row/source-byte guards, eight weight-column
   guards, and eight output-row guards. Static SASS fell from 693 to 669
@@ -166,6 +200,15 @@ dependency-protocol shapes fell to about 0.987x while their non-protocol guards
 held. Source-size predication changes issue and dependency behavior, not just
 branch syntax, so preserve protocol-on and protocol-off shapes as separate
 performance guards.
+
+The payoff scales with what the region holds and how often it runs, not with
+how many guards exist. In the same kernel whose per-chunk transfer block was
+worth +0.0116, predicating seven elected regions that each wrapped exactly ONE
+barrier arrival was worth nothing twice: on the first protocol the target shape
+fell 0.0016, and on a clean re-measurement it gained 0.0002 while a passing
+shape lost 0.0007, merely moving which shape failed. Those arrivals ran a couple
+of times per CTA against the transfer block's once per chunk. Count the dynamic
+executions of the region and the instructions inside it before rewriting a guard.
 
 Predication pays where a branch DIVERGES, not wherever a branch exists. In a
 gather whose validity flag is row-uniform -- every lane of the warp takes the
