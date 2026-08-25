@@ -1134,6 +1134,28 @@ def _make_main(
                                 _barrier_ptr(arena, _BAR_BETA_READY, raw_stage),
                                 K.uint64(0),
                             )
+                        # Entering state, issued between the erase gate and dO,
+                        # matching the source's load order.
+                        with K.If(chunk >= (0 if use_initial_state else 1)), K.Then():
+                            _wait_barrier(
+                                arena, _BAR_STATE_CG0_DONE, state_cursor.stage, state_cursor.phase
+                            )
+                            _wait_barrier(
+                                arena, _BAR_STATE_DONE, state_cursor.stage, state_cursor.phase
+                            )
+                            _expect_tx(arena, _BAR_STATE_READY, state_cursor.stage, 32768)
+                            for value_coord in (0, 64):
+                                K.ptx[_TMA_G2S_4D](
+                                    arena.ptr_to([_SMEM_STATE + value_coord * 256]),
+                                    desc_state,
+                                    K.int32(value_coord),
+                                    K.int32(0),
+                                    K.cast(chunk, "int32"),
+                                    K.cast(head, "int32"),
+                                    _barrier_ptr(arena, _BAR_STATE_READY, state_cursor.stage),
+                                    K.uint64(0),
+                                )
+                            state_cursor.advance()
                         _wait_barrier(arena, _BAR_DO_DONE, raw_stage, raw_phase)
                         _wait_barrier(arena, _BAR_DO_MMA_DONE, raw_stage, raw_phase)
                         _expect_tx(arena, _BAR_DO_READY, raw_stage, 4096)
@@ -1178,28 +1200,6 @@ def _make_main(
                                 K.uint64(0),
                             )
 
-                    first_state_chunk = 0 if use_initial_state else 1
-                    with K.If(chunk >= first_state_chunk), K.Then():
-                        with K.If(_elected()), K.Then():
-                            _wait_barrier(
-                                arena, _BAR_STATE_CG0_DONE, state_cursor.stage, state_cursor.phase
-                            )
-                            _wait_barrier(
-                                arena, _BAR_STATE_DONE, state_cursor.stage, state_cursor.phase
-                            )
-                            _expect_tx(arena, _BAR_STATE_READY, state_cursor.stage, 32768)
-                            for value_coord in (0, 64):
-                                K.ptx[_TMA_G2S_4D](
-                                    arena.ptr_to([_SMEM_STATE + value_coord * 256]),
-                                    desc_state,
-                                    K.int32(value_coord),
-                                    K.int32(0),
-                                    K.cast(chunk, "int32"),
-                                    K.cast(head, "int32"),
-                                    _barrier_ptr(arena, _BAR_STATE_READY, state_cursor.stage),
-                                    K.uint64(0),
-                                )
-                        state_cursor.advance()
                     raw.advance()
                 K.assign(tile, next_tile)
         with super_mma:
