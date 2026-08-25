@@ -641,10 +641,14 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
         base_v: K.gptr[K.i64],
         base_gate: K.gptr[K.i64],
         base_do: K.gptr[K.i64],
+        base_beta: K.gptr[K.i64],
+        base_w: K.gptr[K.i64],
         base_dq: K.gptr[K.i64],
         base_dk: K.gptr[K.i64],
         base_dv: K.gptr[K.i64],
         base_dgate: K.gptr[K.i64],
+        base_dwo: K.gptr[K.i64],
+        base_db: K.gptr[K.i64],
         base_checkpoint: K.gptr[K.i64],
         descriptor_workspace: K.gptr[K.i64],
         cu_seqlens: K.gptr[K.i32],
@@ -653,10 +657,14 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
         v: K.gptr[K.u8],
         gate: K.gptr[K.u8],
         do: K.gptr[K.u8],
+        beta: K.gptr[K.u8],
+        w: K.gptr[K.u8],
         dq: K.gptr[K.u8],
         dk: K.gptr[K.u8],
         dv: K.gptr[K.u8],
         dgate: K.gptr[K.u8],
+        dwo: K.gptr[K.u8],
+        db: K.gptr[K.u8],
         checkpoints: K.gptr[K.u8],
         work_item_staging: K.gptr[K.i32],
         work_count: K.gptr[K.i32],
@@ -668,10 +676,14 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
         v_row_stride_bytes: K.i32,
         gate_row_stride_bytes: K.i32,
         do_row_stride_bytes: K.i32,
+        beta_row_stride_bytes: K.i32,
+        w_row_stride_bytes: K.i32,
         dq_row_stride_bytes: K.i32,
         dk_row_stride_bytes: K.i32,
         dv_row_stride_bytes: K.i32,
         dgate_row_stride_bytes: K.i32,
+        dwo_row_stride_bytes: K.i32,
+        db_row_stride_bytes: K.i32,
         checkpoint_row_stride_bytes: K.i32,
         checkpoint_every_n: K.i32,
     ):
@@ -846,20 +858,40 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
                                 source, order_arena.ptr_to([16_384 + destination * 4])
                             )
                             write_work_item(destination, source)
-        maps = (base_q, base_k, base_v, base_gate, base_do, base_dq, base_dk, base_dv, base_dgate)
-        bases = (q, k, v, gate, do, dq, dk, dv, dgate)
+        # Source index order: q0 k1 v2 gate3 do4 beta5 w6 dq7 dk8 dv9 dgate10
+        # dwo11 db12, with the rank-4 checkpoint at 13 below.
+        maps = (
+            base_q,
+            base_k,
+            base_v,
+            base_gate,
+            base_do,
+            base_beta,
+            base_w,
+            base_dq,
+            base_dk,
+            base_dv,
+            base_dgate,
+            base_dwo,
+            base_db,
+        )
+        bases = (q, k, v, gate, do, beta, w, dq, dk, dv, dgate, dwo, db)
         strides = (
             q_row_stride_bytes,
             k_row_stride_bytes,
             v_row_stride_bytes,
             gate_row_stride_bytes,
             do_row_stride_bytes,
+            beta_row_stride_bytes,
+            w_row_stride_bytes,
             dq_row_stride_bytes,
             dk_row_stride_bytes,
             dv_row_stride_bytes,
             dgate_row_stride_bytes,
+            dwo_row_stride_bytes,
+            db_row_stride_bytes,
         )
-        for array_index in range(9):
+        for array_index in range(13):
             with K.If(warp == array_index), K.Then():
                 with K.If(_elected()), K.Then():
                     with K.serial(n_batch) as batch:
@@ -880,7 +912,7 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
                         )
                         _replace_tensormap_dim(slot, 2, sequence_length)
                     K.ptx.fence.proxy.tensormap__generic.release.gpu()
-        with K.If(warp == 9), K.Then():
+        with K.If(warp == 13), K.Then():
             with K.If(_elected()), K.Then():
                 checkpoint_prefix = K.local_scalar("int32", init=K.int32(0))
                 with K.serial(n_batch) as batch:
@@ -892,7 +924,7 @@ def _make_prologue(*, run_order, order_generate, dynamic_scheduler, n_heads_out)
                     checkpoint_count = K.local_scalar("int32", init=K.int32(0))
                     with K.If(sequence_length > 0), K.Then():
                         K.assign(checkpoint_count, (sequence_length - 1) // checkpoint_every_n + 1)
-                    slot = descriptor_workspace.ptr_to([(9 * n_batch + batch) * _TENSOR_MAP_WORDS])
+                    slot = descriptor_workspace.ptr_to([(13 * n_batch + batch) * _TENSOR_MAP_WORDS])
                     _copy_tensormap(base_checkpoint, slot)
                     _replace_tensormap_address(
                         slot,
@@ -1452,9 +1484,11 @@ def _make_main(
                     do_amajor = _raw_smem_descriptor(
                         arena, _SMEM_DO + raw_stage * 4096, 2048, 1024, 2
                     )
-                    dv_lead = _raw_smem_descriptor(
-                        arena, _SMEM_DV + (serial % 2) * 4096, 16, 1024, 2
-                    )
+                    # GDN-2: this operand is PLAIN dY.  The sibling kernel reused
+                    # its dV staging tile here because dV was the erase-gate-scaled
+                    # dY; here dV is the write-gate product instead, so the dK_decay
+                    # GEMM must read the dedicated dY tile.
+                    dy_lead = _raw_smem_descriptor(arena, _SMEM_DY, 16, 1024, 2)
                     u_lead = _raw_smem_descriptor(arena, _SMEM_U, 16, 1024, 2)
                     inter_a = _raw_smem_descriptor(
                         arena, _SMEM_INTERMEDIATE + inter_stage * 2560, 16, 256, 6
@@ -1577,6 +1611,8 @@ def _make_main(
                         k_extent=16,
                     )
                     _tcgen_commit(arena, _BAR_U_ACC_READY)
+                    # dO's last MMA consumer: releases the raw stage for reload.
+                    _tcgen_commit(arena, _BAR_DO_MMA_DONE, raw_stage)
 
                     _wait_barrier(arena, _BAR_DU_INP_READY, du_consumer.stage, du_consumer.phase)
                     du_consumer.advance()
@@ -1677,7 +1713,7 @@ def _make_main(
                         _tcgen_mma_ts(
                             tmem_base + _TMEM_DK_DECAY,
                             tmem_base + _TMEM_STATE_INPUT + (serial % 2) * 64,
-                            dv_lead,
+                            dy_lead,
                             134481040,
                             n=16,
                             k_extent=128,
@@ -1723,6 +1759,9 @@ def _make_main(
                             accumulate=False,
                         )
                     _tcgen_commit(arena, _BAR_DK_DECAY_PART_ACC_READY)
+                    # GDN-2 only: dK_decay consumes plain dY from SMEM, so the
+                    # value group must be told before it overwrites the tile.
+                    _tcgen_commit(arena, _BAR_DY_SMEM_DONE)
                     _tcgen_commit(arena, _BAR_DM_DONE, inter_stage)
                     _tcgen_commit(arena, _BAR_DECAY_DONE, decay_stage)
 
@@ -2093,6 +2132,9 @@ def _make_main(
                     _wait_barrier(arena, _BAR_GATE_READY, raw_stage, (serial // 2) & 1)
                     _wait_barrier(arena, _BAR_Q_READY, raw_stage, (serial // 2) & 1)
                     _wait_barrier(arena, _BAR_K_READY, raw_stage, (serial // 2) & 1)
+                    # GDN-2: the erase gate is a tile now, so this group must wait
+                    # for its transfer before folding it into the decayed key.
+                    _wait_barrier(arena, _BAR_BETA_READY, raw_stage, (serial // 2) & 1)
 
                     gate_prefix = K.alloc_local((16,), "float32")
                     with K.unroll(16) as row:
@@ -2359,32 +2401,35 @@ def _make_main(
                         dim_base = half * 64 + lane_in_group * 8
                         decay_words = K.alloc_local((4,), "uint32")
                         # The per-key erase gate arrives as a [BT, DK] tile and is
-                        # folded into K_decay only; K_inv stays ungated.  This is
-                        # the whole of the GDN-2 gating delta on the key side.
+                        # folded into K_decay only; K_inv stays ungated.  Read it
+                        # exactly like raw K: one vector load over this lane's eight
+                        # channels, then unpacked by half-word shift.
                         raw_beta = K.alloc_local((8,), "float32")
-                        with K.unroll(2) as beta_group:
-                            beta_bits = K.alloc_local((4,), "uint32")
-                            K.ptx.ld.shared.v4.b32(
-                                beta_bits[0],
-                                beta_bits[1],
-                                beta_bits[2],
-                                beta_bits[3],
-                                arena.ptr_to(
-                                    [
-                                        _raw_bf16_byte(
-                                            _SMEM_BETA,
-                                            raw_stage,
-                                            decay_row,
-                                            dim_base + beta_group * 4,
-                                        )
-                                    ]
-                                ),
-                            )
-                            for word in range(4):
-                                _unpack_bf16_pair(
-                                    beta_bits[word],
-                                    raw_beta[beta_group * 4 + word * 2],
-                                    raw_beta[beta_group * 4 + word * 2 + 1],
+                        beta_fragment = K.alloc_local((4,), "uint32")
+                        K.ptx.ld.shared.v4.b32(
+                            beta_fragment[0],
+                            beta_fragment[1],
+                            beta_fragment[2],
+                            beta_fragment[3],
+                            arena.ptr_to(
+                                [_raw_bf16_byte(_SMEM_BETA, raw_stage, decay_row, dim_base)]
+                            ),
+                        )
+                        with K.unroll(8) as beta_offset:
+                            beta_shift = K.cast((beta_offset % 2) * 16, "uint32")
+                            beta_word = K.shift_right(beta_fragment[beta_offset // 2], beta_shift)
+                            K.ptx.cvt.f32.bf16(raw_beta[beta_offset], K.cast(beta_word, "uint16"))
+                            if beta_sigmoid:
+                                # The tile holds logits in this mode; the gate is
+                                # sigmoid(beta) rounded through the I/O dtype, and
+                                # every consumer must see the same rounded value.
+                                K.assign(
+                                    raw_beta[beta_offset],
+                                    _tanh_approx(raw_beta[beta_offset] * 0.5) * 0.5 + 0.5,
+                                )
+                                K.assign(
+                                    raw_beta[beta_offset],
+                                    K.cast(K.cast(raw_beta[beta_offset], "bfloat16"), "float32"),
                                 )
                         with K.unroll(4) as pair:
                             reg = half * 8 + pair * 2
@@ -2786,7 +2831,10 @@ def _make_main(
                     )
                     # GDN-2 seeds BOTH dBeta and dGate from the dK_decay drain:
                     # dBeta is per key channel (k_n * dk_decay), and dGate takes the
-                    # Beta-weighted share of the same product.
+                    # Beta-weighted share of the same product.  This group is the
+                    # erase gate's second reader, which is why its ready barrier
+                    # carries two compute groups' worth of arrivals.
+                    _wait_barrier(arena, _BAR_BETA_READY, raw_stage, (serial // 2) & 1)
                     kd_words = K.alloc_local((8,), "uint32")
                     K.ptx["tcgen05.ld.sync.aligned.32x32b.x8.b32"](
                         *[kd_words[i] for i in range(8)],
@@ -2828,6 +2876,8 @@ def _make_main(
                         K.assign(db_values[token], k_native * dk_decay)
                         K.assign(dgate_values[token], beta_value * dk_decay)
                         K.assign(dk_values[token], dk_values[token] + dgate_values[token])
+                    K.ptx.fence.proxy.async_.shared__cta()
+                    _arrive_barrier(arena, _BAR_BETA_DONE, raw_stage)
                     _arrive_barrier(arena, _BAR_DQK_ACC_DONE)
 
                     qraw = K.alloc_local((8,), "uint32")
@@ -3278,7 +3328,7 @@ def _make_main(
                                     _SMEM_W,
                                     raw_stage,
                                     token_row,
-                                    value_base + value_col_offset + 64,
+                                    value_base + 16 + value_col_offset,
                                 )
                             ]
                         ),
@@ -3468,6 +3518,7 @@ def _make_main(
                     dy_addr1 = _raw_bf16_byte(
                         _SMEM_DY, 0, token_row, value_base + 16 + value_col_offset
                     )
+                    _wait_barrier(arena, _BAR_DY_SMEM_DONE, 0, (serial + 1) & 1)
                     K.ptx.stmatrix.sync.aligned.m8n8.x4.trans.shared.b16(
                         arena.ptr_to([dy_addr0]), *[dy_pack0[i] for i in range(4)]
                     )
@@ -3761,7 +3812,9 @@ def _make_work_items(torch, seq_lens, heads):
     return torch.tensor(rows, dtype=torch.int32, device="cuda")
 
 
-def _effective_inputs(torch, q, k, gate, beta, *, l2norm, safe_gate, beta_sigmoid, a_log, dt_bias):
+def _effective_inputs(
+    torch, q, k, gate, beta, *, l2norm, safe_gate, beta_sigmoid, a_log, dt_bias, io_dtype
+):
     q_effective = q
     k_effective = k
     if l2norm:
@@ -3772,7 +3825,11 @@ def _effective_inputs(torch, q, k, gate, beta, *, l2norm, safe_gate, beta_sigmoi
         gate_effective = -5.0 * torch.sigmoid(
             a_log.exp()[None, :, None] * (gate + dt_bias[None, :, :])
         )
-    beta_effective = beta.sigmoid() if beta_sigmoid else beta
+    # The kernel rounds sigmoid(beta) through the I/O dtype before using it, and
+    # the gradient depends on that rounded value, so the reference must too.
+    beta_effective = beta
+    if beta_sigmoid:
+        beta_effective = beta.sigmoid().to(io_dtype).to(beta.dtype)
     return q_effective, k_effective, gate_effective, beta_effective
 
 
@@ -3876,10 +3933,10 @@ def _prepare_data(config, *, with_oracle):
     q_heads = config["q_heads"]
     k_heads = config["k_heads"]
     v_heads = config["v_heads"]
+    io_dtype = _io_dtype(torch, config)
     q = (0.2 * torch.randn(total_tokens, q_heads, _DK, device="cuda")).to(io_dtype)
     k = (0.2 * torch.randn(total_tokens, k_heads, _DK, device="cuda")).to(io_dtype)
     v = (0.2 * torch.randn(total_tokens, v_heads, _DV, device="cuda")).to(io_dtype)
-    io_dtype = _io_dtype(torch, config)
     gate = torch.empty(total_tokens, heads, _DK, dtype=torch.float32, device="cuda").uniform_(
         -1.5, -0.5
     )
@@ -3939,6 +3996,7 @@ def _prepare_data(config, *, with_oracle):
             beta_sigmoid=config["beta_sigmoid"],
             a_log=a_log.double() if a_log is not None else None,
             dt_bias=dt_bias.double() if dt_bias is not None else None,
+            io_dtype=io_dtype,
         )
         output_ref, final_ref, checkpoints = _forward_and_checkpoints(
             torch,
@@ -4115,10 +4173,14 @@ def _tirx_launch(executables, data):
             data["v"].view(torch.uint8).reshape(-1),
             data["gate"].view(torch.uint8).reshape(-1),
             data["do"].view(torch.uint8).reshape(-1),
+            data["beta"].view(torch.uint8).reshape(-1),
+            data["w"].view(torch.uint8).reshape(-1),
             output["dq"].view(torch.uint8).reshape(-1),
             output["dk"].view(torch.uint8).reshape(-1),
             output["dv"].view(torch.uint8).reshape(-1),
             output["dgate"].view(torch.uint8).reshape(-1),
+            output["dw"].view(torch.uint8).reshape(-1),
+            output["dbeta"].view(torch.uint8).reshape(-1),
             data["checkpoints"].view(torch.uint8).reshape(-1),
             work["staging"].reshape(-1) if work["staging"] is not None else dummy_i32,
             work["work_count"],
@@ -4130,10 +4192,14 @@ def _tirx_launch(executables, data):
             data["v"].stride(0) * data["v"].element_size(),
             data["gate"].stride(0) * data["gate"].element_size(),
             data["do"].stride(0) * data["do"].element_size(),
+            data["beta"].stride(0) * data["beta"].element_size(),
+            data["w"].stride(0) * data["w"].element_size(),
             output["dq"].stride(0) * output["dq"].element_size(),
             output["dk"].stride(0) * output["dk"].element_size(),
             output["dv"].stride(0) * output["dv"].element_size(),
             output["dgate"].stride(0) * output["dgate"].element_size(),
+            output["dw"].stride(0) * output["dw"].element_size(),
+            output["dbeta"].stride(0) * output["dbeta"].element_size(),
             data["checkpoints"].stride(0) * data["checkpoints"].element_size(),
             _BT,
         )
@@ -4263,12 +4329,20 @@ def _validate_outputs(data, *, sources, with_oracle):
     import torch
 
     config = data["config"]
+    # Tolerances are against the FP64 recurrence.  dGate and dBeta are the two
+    # small-magnitude gradients: dBeta is a per-key-channel product of BF16 terms
+    # whose mean magnitude is around 1e-4, so its relative residual against an
+    # FP64 reference is dominated by input quantization rather than by the
+    # kernel.  The upstream implementation shows the same residual on the same
+    # inputs, and the kernel is additionally compared against it directly, which
+    # is the tighter check.
     limits = {
         "dq": 0.10,
         "dk": 0.10,
         "dv": 0.10,
         "dgate": 0.30,
-        "dbeta": 0.10,
+        "dbeta": 0.25,
+        "dw": 0.10,
         "d_initial_state": 0.10,
     }
     failures = {}
