@@ -109,7 +109,10 @@ _TENSOR_MAP_BYTES = 128
 _TENSOR_MAP_WORDS = 16
 _TENSOR_MAP_ARRAYS = 14
 _MAIN_SMEM_BYTES = 225_280
-_TRY_WAIT_TICKS = 10_000_000
+# Suspend-time hint on every mbarrier try_wait.  The source spins with a hint of
+# one tick (SASS `NANOSLEEP.SYNCS 0x1` at all of its wait sites); a large hint
+# makes ptxas sleep past the release and pays that latency at every handshake.
+_TRY_WAIT_TICKS = 1
 _TMA_G2S_3D = (
     "cp.async.bulk.tensor.3d.shared::cta.global.tile"
     ".mbarrier::complete_tx::bytes.cta_group::1.L2::cache_hint"
@@ -320,10 +323,14 @@ _TMEM_K_RAW = 480
 
 
 def _elected():
-    lane = K.local_scalar("uint32")
-    pred = K.local_scalar("uint32")
-    K.ptx.elect_sync(lane, pred, K.uint32(0xFFFFFFFF))
-    return pred == K.uint32(1)
+    """Single-issuing-lane predicate, taken from the hardware election.
+
+    Comparing an elect_sync result against one hands ptxas a per-lane condition
+    it cannot prove selects a single lane, so it rebuilds the election inside a
+    WARPSYNC.COLLECTIVE/ENDCOLLECTIVE region with its own reconvergence at every
+    guard.  The hardware election yields the uniform predicate directly.
+    """
+    return K.cuda.elect_sync()
 
 
 def _copy_tensormap(src_map, dst):
@@ -368,14 +375,31 @@ def _wait_barrier(arena, byte_offset, stage, phase):
         )
 
 
-def _arrive_barrier(arena, byte_offset, stage=0):
-    K.ptx.mbarrier.arrive.shared.b64(_barrier_ptr(arena, byte_offset, stage), K.uint32(1))
+def _arrive_barrier(arena, byte_offset, stage=0, pred=None):
+    """Arrive on one mbarrier, optionally as a predicated single instruction.
+
+    A lane-guarded arrival written as a branch costs an elect collective region
+    and a reconvergence pair around one instruction; the reference carries no
+    such regions at all, so a single-instruction elected region is expressed as
+    an `@p` guard instead.
+    """
+    if pred is None:
+        K.ptx.mbarrier.arrive.shared.b64(_barrier_ptr(arena, byte_offset, stage), K.uint32(1))
+    else:
+        K.ptx.mbarrier.arrive.shared.b64(
+            _barrier_ptr(arena, byte_offset, stage), K.uint32(1), pred=pred
+        )
 
 
-def _expect_tx(arena, byte_offset, stage, nbytes):
-    K.ptx.mbarrier.arrive.expect_tx.shared.b64(
-        _barrier_ptr(arena, byte_offset, stage), K.uint32(nbytes)
-    )
+def _expect_tx(arena, byte_offset, stage, nbytes, pred=None):
+    if pred is None:
+        K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+            _barrier_ptr(arena, byte_offset, stage), K.uint32(nbytes)
+        )
+    else:
+        K.ptx.mbarrier.arrive.expect_tx.shared.b64(
+            _barrier_ptr(arena, byte_offset, stage), K.uint32(nbytes), pred=pred
+        )
 
 
 def _tcgen_commit(arena, byte_offset, stage=0):
@@ -1043,8 +1067,9 @@ def _make_main(
                         next_tile,
                         arena.ptr_to([_SMEM_SCHED + K.cast(sched_producer.stage, "int32") * 4]),
                     )
-                    with K.If(_elected()), K.Then():
-                        _arrive_barrier(arena, _BAR_SCHED_READY, sched_producer.stage)
+                    _arrive_barrier(
+                        arena, _BAR_SCHED_READY, sched_producer.stage, pred=K.cuda.elect_sync()
+                    )
                     sched_producer.advance()
 
                 head_q = head if q_ratio == 1 else head // q_ratio
@@ -1077,128 +1102,143 @@ def _make_main(
                     token = chunk * _BT
                     raw_stage = raw.stage
                     raw_phase = raw.phase
-                    with K.If(_elected()), K.Then():
-                        _wait_barrier(arena, _BAR_Q_DONE, raw_stage, raw_phase)
-                        _expect_tx(arena, _BAR_Q_READY, raw_stage, 4096)
-                        for d_coord in (0, 64):
-                            K.ptx[_TMA_G2S_3D](
-                                arena.ptr_to(
-                                    [_SMEM_Q + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
-                                ),
-                                desc_q,
-                                K.int32(d_coord),
-                                K.cast(head_q, "int32"),
-                                K.cast(token, "int32"),
-                                _barrier_ptr(arena, _BAR_Q_READY, raw_stage),
-                                K.uint64(0),
-                            )
-                        _wait_barrier(arena, _BAR_K_DONE, raw_stage, raw_phase)
-                        _expect_tx(arena, _BAR_K_READY, raw_stage, 4096)
-                        for d_coord in (0, 64):
-                            K.ptx[_TMA_G2S_3D](
-                                arena.ptr_to(
-                                    [_SMEM_K + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
-                                ),
-                                desc_k,
-                                K.int32(d_coord),
-                                K.cast(head_k, "int32"),
-                                K.cast(token, "int32"),
-                                _barrier_ptr(arena, _BAR_K_READY, raw_stage),
-                                K.uint64(0),
-                            )
-                        _wait_barrier(arena, _BAR_GATE_DONE, raw_stage, raw_phase)
-                        _expect_tx(arena, _BAR_GATE_READY, raw_stage, 8192)
-                        for d_coord in (0, 32, 64, 96):
-                            K.ptx[_TMA_G2S_3D](
-                                arena.ptr_to(
-                                    [_SMEM_GATE + K.cast(raw_stage, "int32") * 8192 + d_coord * 64]
-                                ),
-                                desc_gate,
-                                K.int32(d_coord),
+                    # One election owns this warp's whole per-chunk transfer group.  The
+                    # waits need no lane guard -- every lane in the warp waits on the same
+                    # phase -- while the expect_tx arrivals and the TMA issues must stay
+                    # single-lane, so they carry the predicate on the instruction instead of
+                    # sitting inside a divergent region and its reconvergence.
+                    tma_leader = K.cuda.elect_sync()
+                    _wait_barrier(arena, _BAR_Q_DONE, raw_stage, raw_phase)
+                    _expect_tx(arena, _BAR_Q_READY, raw_stage, 4096, pred=tma_leader)
+                    for d_coord in (0, 64):
+                        K.ptx[_TMA_G2S_3D](
+                            arena.ptr_to(
+                                [_SMEM_Q + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
+                            ),
+                            desc_q,
+                            K.int32(d_coord),
+                            K.cast(head_q, "int32"),
+                            K.cast(token, "int32"),
+                            _barrier_ptr(arena, _BAR_Q_READY, raw_stage),
+                            K.uint64(0),
+                            pred=tma_leader,
+                        )
+                    _wait_barrier(arena, _BAR_K_DONE, raw_stage, raw_phase)
+                    _expect_tx(arena, _BAR_K_READY, raw_stage, 4096, pred=tma_leader)
+                    for d_coord in (0, 64):
+                        K.ptx[_TMA_G2S_3D](
+                            arena.ptr_to(
+                                [_SMEM_K + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
+                            ),
+                            desc_k,
+                            K.int32(d_coord),
+                            K.cast(head_k, "int32"),
+                            K.cast(token, "int32"),
+                            _barrier_ptr(arena, _BAR_K_READY, raw_stage),
+                            K.uint64(0),
+                            pred=tma_leader,
+                        )
+                    _wait_barrier(arena, _BAR_GATE_DONE, raw_stage, raw_phase)
+                    _expect_tx(arena, _BAR_GATE_READY, raw_stage, 8192, pred=tma_leader)
+                    for d_coord in (0, 32, 64, 96):
+                        K.ptx[_TMA_G2S_3D](
+                            arena.ptr_to(
+                                [_SMEM_GATE + K.cast(raw_stage, "int32") * 8192 + d_coord * 64]
+                            ),
+                            desc_gate,
+                            K.int32(d_coord),
+                            K.cast(head, "int32"),
+                            K.cast(token, "int32"),
+                            _barrier_ptr(arena, _BAR_GATE_READY, raw_stage),
+                            K.uint64(0),
+                            pred=tma_leader,
+                        )
+                    _wait_barrier(arena, _BAR_BETA_DONE, raw_stage, raw_phase)
+                    _expect_tx(arena, _BAR_BETA_READY, raw_stage, 4096, pred=tma_leader)
+                    for d_coord in (0, 64):
+                        K.ptx[_TMA_G2S_3D](
+                            arena.ptr_to(
+                                [_SMEM_BETA + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
+                            ),
+                            desc_beta,
+                            K.int32(d_coord),
+                            K.cast(head, "int32"),
+                            K.cast(token, "int32"),
+                            _barrier_ptr(arena, _BAR_BETA_READY, raw_stage),
+                            K.uint64(0),
+                            pred=tma_leader,
+                        )
+                    # Entering state, issued between the erase gate and dO,
+                    # matching the source's load order.
+                    with K.If(chunk >= (0 if use_initial_state else 1)), K.Then():
+                        _wait_barrier(
+                            arena, _BAR_STATE_CG0_DONE, state_cursor.stage, state_cursor.phase
+                        )
+                        _wait_barrier(
+                            arena, _BAR_STATE_DONE, state_cursor.stage, state_cursor.phase
+                        )
+                        _expect_tx(
+                            arena, _BAR_STATE_READY, state_cursor.stage, 32768, pred=tma_leader
+                        )
+                        for value_coord in (0, 64):
+                            K.ptx[_TMA_G2S_4D](
+                                arena.ptr_to([_SMEM_STATE + value_coord * 256]),
+                                desc_state,
+                                K.int32(value_coord),
+                                K.int32(0),
+                                K.cast(chunk, "int32"),
                                 K.cast(head, "int32"),
-                                K.cast(token, "int32"),
-                                _barrier_ptr(arena, _BAR_GATE_READY, raw_stage),
+                                _barrier_ptr(arena, _BAR_STATE_READY, state_cursor.stage),
                                 K.uint64(0),
+                                pred=tma_leader,
                             )
-                        _wait_barrier(arena, _BAR_BETA_DONE, raw_stage, raw_phase)
-                        _expect_tx(arena, _BAR_BETA_READY, raw_stage, 4096)
-                        for d_coord in (0, 64):
-                            K.ptx[_TMA_G2S_3D](
-                                arena.ptr_to(
-                                    [_SMEM_BETA + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
-                                ),
-                                desc_beta,
-                                K.int32(d_coord),
-                                K.cast(head, "int32"),
-                                K.cast(token, "int32"),
-                                _barrier_ptr(arena, _BAR_BETA_READY, raw_stage),
-                                K.uint64(0),
-                            )
-                        # Entering state, issued between the erase gate and dO,
-                        # matching the source's load order.
-                        with K.If(chunk >= (0 if use_initial_state else 1)), K.Then():
-                            _wait_barrier(
-                                arena, _BAR_STATE_CG0_DONE, state_cursor.stage, state_cursor.phase
-                            )
-                            _wait_barrier(
-                                arena, _BAR_STATE_DONE, state_cursor.stage, state_cursor.phase
-                            )
-                            _expect_tx(arena, _BAR_STATE_READY, state_cursor.stage, 32768)
-                            for value_coord in (0, 64):
-                                K.ptx[_TMA_G2S_4D](
-                                    arena.ptr_to([_SMEM_STATE + value_coord * 256]),
-                                    desc_state,
-                                    K.int32(value_coord),
-                                    K.int32(0),
-                                    K.cast(chunk, "int32"),
-                                    K.cast(head, "int32"),
-                                    _barrier_ptr(arena, _BAR_STATE_READY, state_cursor.stage),
-                                    K.uint64(0),
-                                )
-                            state_cursor.advance()
-                        _wait_barrier(arena, _BAR_DO_DONE, raw_stage, raw_phase)
-                        _wait_barrier(arena, _BAR_DO_MMA_DONE, raw_stage, raw_phase)
-                        _expect_tx(arena, _BAR_DO_READY, raw_stage, 4096)
-                        for d_coord in (0, 64):
-                            K.ptx[_TMA_G2S_3D](
-                                arena.ptr_to(
-                                    [_SMEM_DO + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
-                                ),
-                                desc_do,
-                                K.int32(d_coord),
-                                K.cast(head, "int32"),
-                                K.cast(token, "int32"),
-                                _barrier_ptr(arena, _BAR_DO_READY, raw_stage),
-                                K.uint64(0),
-                            )
-                        _wait_barrier(arena, _BAR_V_DONE, raw_stage, raw_phase)
-                        _expect_tx(arena, _BAR_V_READY, raw_stage, 4096)
-                        for d_coord in (0, 64):
-                            K.ptx[_TMA_G2S_3D](
-                                arena.ptr_to(
-                                    [_SMEM_V + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
-                                ),
-                                desc_v,
-                                K.int32(d_coord),
-                                K.cast(head_v, "int32"),
-                                K.cast(token, "int32"),
-                                _barrier_ptr(arena, _BAR_V_READY, raw_stage),
-                                K.uint64(0),
-                            )
-                        _wait_barrier(arena, _BAR_W_DONE, raw_stage, raw_phase)
-                        _expect_tx(arena, _BAR_W_READY, raw_stage, 4096)
-                        for d_coord in (0, 64):
-                            K.ptx[_TMA_G2S_3D](
-                                arena.ptr_to(
-                                    [_SMEM_W + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
-                                ),
-                                desc_w,
-                                K.int32(d_coord),
-                                K.cast(head, "int32"),
-                                K.cast(token, "int32"),
-                                _barrier_ptr(arena, _BAR_W_READY, raw_stage),
-                                K.uint64(0),
-                            )
+                        state_cursor.advance()
+                    _wait_barrier(arena, _BAR_DO_DONE, raw_stage, raw_phase)
+                    _wait_barrier(arena, _BAR_DO_MMA_DONE, raw_stage, raw_phase)
+                    _expect_tx(arena, _BAR_DO_READY, raw_stage, 4096, pred=tma_leader)
+                    for d_coord in (0, 64):
+                        K.ptx[_TMA_G2S_3D](
+                            arena.ptr_to(
+                                [_SMEM_DO + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
+                            ),
+                            desc_do,
+                            K.int32(d_coord),
+                            K.cast(head, "int32"),
+                            K.cast(token, "int32"),
+                            _barrier_ptr(arena, _BAR_DO_READY, raw_stage),
+                            K.uint64(0),
+                            pred=tma_leader,
+                        )
+                    _wait_barrier(arena, _BAR_V_DONE, raw_stage, raw_phase)
+                    _expect_tx(arena, _BAR_V_READY, raw_stage, 4096, pred=tma_leader)
+                    for d_coord in (0, 64):
+                        K.ptx[_TMA_G2S_3D](
+                            arena.ptr_to(
+                                [_SMEM_V + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
+                            ),
+                            desc_v,
+                            K.int32(d_coord),
+                            K.cast(head_v, "int32"),
+                            K.cast(token, "int32"),
+                            _barrier_ptr(arena, _BAR_V_READY, raw_stage),
+                            K.uint64(0),
+                            pred=tma_leader,
+                        )
+                    _wait_barrier(arena, _BAR_W_DONE, raw_stage, raw_phase)
+                    _expect_tx(arena, _BAR_W_READY, raw_stage, 4096, pred=tma_leader)
+                    for d_coord in (0, 64):
+                        K.ptx[_TMA_G2S_3D](
+                            arena.ptr_to(
+                                [_SMEM_W + K.cast(raw_stage, "int32") * 4096 + d_coord * 32]
+                            ),
+                            desc_w,
+                            K.int32(d_coord),
+                            K.cast(head, "int32"),
+                            K.cast(token, "int32"),
+                            _barrier_ptr(arena, _BAR_W_READY, raw_stage),
+                            K.uint64(0),
+                            pred=tma_leader,
+                        )
 
                     raw.advance()
                 K.assign(tile, next_tile)
@@ -1423,8 +1463,9 @@ def _make_main(
                         tile,
                         arena.ptr_to([_SMEM_SCHED + K.cast(sched_consumer.stage, "int32") * 4]),
                     )
-                    with K.If(_elected()), K.Then():
-                        _arrive_barrier(arena, _BAR_SCHED_DONE, sched_consumer.stage)
+                    _arrive_barrier(
+                        arena, _BAR_SCHED_DONE, sched_consumer.stage, pred=K.cuda.elect_sync()
+                    )
                     sched_consumer.advance()
                 else:
                     K.assign(tile, tile + num_sms)
@@ -1789,8 +1830,9 @@ def _make_main(
                         tile,
                         arena.ptr_to([_SMEM_SCHED + K.cast(sched_consumer.stage, "int32") * 4]),
                     )
-                    with K.If(_elected()), K.Then():
-                        _arrive_barrier(arena, _BAR_SCHED_DONE, sched_consumer.stage)
+                    _arrive_barrier(
+                        arena, _BAR_SCHED_DONE, sched_consumer.stage, pred=K.cuda.elect_sync()
+                    )
                     sched_consumer.advance()
                 else:
                     K.assign(tile, tile + num_sms)
@@ -2095,8 +2137,9 @@ def _make_main(
                         tile,
                         arena.ptr_to([_SMEM_SCHED + K.cast(sched_consumer.stage, "int32") * 4]),
                     )
-                    with K.If(_elected()), K.Then():
-                        _arrive_barrier(arena, _BAR_SCHED_DONE, sched_consumer.stage)
+                    _arrive_barrier(
+                        arena, _BAR_SCHED_DONE, sched_consumer.stage, pred=K.cuda.elect_sync()
+                    )
                     sched_consumer.advance()
                 else:
                     K.assign(tile, tile + num_sms)
@@ -2235,43 +2278,47 @@ def _make_main(
                     k_words = K.alloc_local((8,), "uint32")
                     raw_segment = channel // 64
                     raw_channel = channel % 64
+                    # Issue the whole raw Q/K fragment before packing any of it:
+                    # packed a pair at a time, each pack sits one instruction
+                    # behind its own two loads.
+                    q_lo_stage = K.alloc_local((8,), "uint16")
+                    q_hi_stage = K.alloc_local((8,), "uint16")
+                    k_lo_stage = K.alloc_local((8,), "uint16")
+                    k_hi_stage = K.alloc_local((8,), "uint16")
                     with K.unroll(8) as pair:
-                        q_lo_bits = K.local_scalar("uint16")
-                        q_hi_bits = K.local_scalar("uint16")
-                        k_lo_bits = K.local_scalar("uint16")
-                        k_hi_bits = K.local_scalar("uint16")
                         K.ptx.ld.shared.b16(
-                            q_lo_bits,
+                            q_lo_stage[pair],
                             arena.ptr_to([_raw_bf16_byte(_SMEM_Q, raw_stage, pair * 2, channel)]),
                         )
                         K.ptx.ld.shared.b16(
-                            q_hi_bits,
+                            q_hi_stage[pair],
                             arena.ptr_to(
                                 [_raw_bf16_byte(_SMEM_Q, raw_stage, pair * 2 + 1, channel)]
                             ),
                         )
                         K.ptx.ld.shared.b16(
-                            k_lo_bits,
+                            k_lo_stage[pair],
                             arena.ptr_to([_raw_bf16_byte(_SMEM_K, raw_stage, pair * 2, channel)]),
                         )
                         K.ptx.ld.shared.b16(
-                            k_hi_bits,
+                            k_hi_stage[pair],
                             arena.ptr_to(
                                 [_raw_bf16_byte(_SMEM_K, raw_stage, pair * 2 + 1, channel)]
                             ),
                         )
+                    with K.unroll(8) as pair:
                         K.assign(
                             q_words[pair],
                             K.bitwise_or(
-                                K.cast(q_lo_bits, "uint32"),
-                                K.shift_left(K.cast(q_hi_bits, "uint32"), K.uint32(16)),
+                                K.cast(q_lo_stage[pair], "uint32"),
+                                K.shift_left(K.cast(q_hi_stage[pair], "uint32"), K.uint32(16)),
                             ),
                         )
                         K.assign(
                             k_words[pair],
                             K.bitwise_or(
-                                K.cast(k_lo_bits, "uint32"),
-                                K.shift_left(K.cast(k_hi_bits, "uint32"), K.uint32(16)),
+                                K.cast(k_lo_stage[pair], "uint32"),
+                                K.shift_left(K.cast(k_hi_stage[pair], "uint32"), K.uint32(16)),
                             ),
                         )
                     q_tmem = (
@@ -2596,8 +2643,9 @@ def _make_main(
                         tile,
                         arena.ptr_to([_SMEM_SCHED + K.cast(sched_consumer.stage, "int32") * 4]),
                     )
-                    with K.If(_elected()), K.Then():
-                        _arrive_barrier(arena, _BAR_SCHED_DONE, sched_consumer.stage)
+                    _arrive_barrier(
+                        arena, _BAR_SCHED_DONE, sched_consumer.stage, pred=K.cuda.elect_sync()
+                    )
                     sched_consumer.advance()
                 else:
                     K.assign(tile, tile + num_sms)
@@ -2745,6 +2793,16 @@ def _make_main(
                     for token in range(16):
                         K.assign(dk_values[token], K.float32(0.0))
 
+                    # One reciprocal per token, shared by the restore path and the
+                    # inverse drain below.  has_dstate is a runtime predicate, so
+                    # its two consumers sit in different basic blocks and the
+                    # compiler cannot common the divides itself; issuing them as
+                    # one pass also keeps each MUFU off its consumer's critical
+                    # path.
+                    rcp_gate = K.alloc_local((16,), "float32")
+                    with K.unroll(16) as token:
+                        K.assign(rcp_gate[token], _rcp_approx(gate_decay[token]))
+
                     with K.If(has_dstate), K.Then():
                         _wait_barrier(
                             arena,
@@ -2768,10 +2826,7 @@ def _make_main(
                         )
                         K.ptx.tcgen05.wait__ld.sync.aligned()
                         with K.unroll(16) as token:
-                            K.assign(
-                                dk_values[token],
-                                gate_last * _rcp_approx(gate_decay[token]) * restore[token],
-                            )
+                            K.assign(dk_values[token], gate_last * rcp_gate[token] * restore[token])
                             k_lo = K.local_scalar("float32")
                             k_hi = K.local_scalar("float32")
                             _unpack_bf16_pair(kraw[token // 2], k_lo, k_hi)
@@ -2823,8 +2878,7 @@ def _make_main(
                     )
                     with K.unroll(16) as token:
                         K.assign(
-                            dk_values[token],
-                            dk_values[token] + inverse[token] * _rcp_approx(gate_decay[token]),
+                            dk_values[token], dk_values[token] + inverse[token] * rcp_gate[token]
                         )
 
                     _wait_barrier(
@@ -2856,20 +2910,32 @@ def _make_main(
                     K.ptx.tcgen05.wait__ld.sync.aligned()
                     db_values = K.alloc_local((16,), "float32")
                     beta_self = K.alloc_local((16,), "float32")
+                    # Issue the whole erase-gate fragment before converting any of
+                    # it: one scalar load per token feeding its own cvt leaves the
+                    # convert one instruction behind the load, and the resulting
+                    # short-scoreboard stalls are the drain group's largest.
+                    beta_bits_stage = K.alloc_local((16,), "uint16")
                     with K.unroll(16) as token:
-                        beta_bits = K.local_scalar("uint16")
                         K.ptx.ld.shared.b16(
-                            beta_bits,
+                            beta_bits_stage[token],
                             arena.ptr_to([_raw_bf16_byte(_SMEM_BETA, raw_stage, token, channel)]),
                         )
-                        beta_value = K.local_scalar("float32")
-                        K.ptx.cvt.f32.bf16(beta_value, beta_bits)
-                        if beta_sigmoid:
-                            K.assign(beta_value, _tanh_approx(beta_value * 0.5) * 0.5 + 0.5)
-                            # The source rounds sigmoid(beta) through the io dtype
-                            # before using it, and the gradient depends on that.
-                            K.assign(beta_value, K.cast(K.cast(beta_value, "bfloat16"), "float32"))
-                        K.assign(beta_self[token], beta_value)
+                    with K.unroll(16) as token:
+                        K.ptx.cvt.f32.bf16(beta_self[token], beta_bits_stage[token])
+                    if beta_sigmoid:
+                        with K.unroll(16) as token:
+                            K.assign(
+                                beta_self[token], _tanh_approx(beta_self[token] * 0.5) * 0.5 + 0.5
+                            )
+                        # The source rounds sigmoid(beta) through the io dtype
+                        # before using it, and the gradient depends on that.
+                        with K.unroll(16) as token:
+                            K.assign(
+                                beta_self[token],
+                                K.cast(K.cast(beta_self[token], "bfloat16"), "float32"),
+                            )
+                    with K.unroll(16) as token:
+                        beta_value = beta_self[token]
 
                         kd_lo = K.local_scalar("float32")
                         kd_hi = K.local_scalar("float32")
@@ -2903,6 +2969,32 @@ def _make_main(
                         K.cast(kraw_col + K.shift_left(tmem_row, K.int32(16)), "uint32"),
                     )
                     K.ptx.tcgen05.wait__ld.sync.aligned()
+                    # Same staging as the decay drain above: the finalize is this
+                    # group's second read of the erase gate, and it has the same
+                    # load-to-use distance of one.
+                    reload_bits_stage = K.alloc_local((16,), "uint16")
+                    beta_reload_stage = K.alloc_local((16,), "float32")
+                    with K.unroll(16) as token:
+                        K.ptx.ld.shared.b16(
+                            reload_bits_stage[token],
+                            arena.ptr_to([_raw_bf16_byte(_SMEM_BETA, raw_stage, token, channel)]),
+                        )
+                    with K.unroll(16) as token:
+                        K.ptx.cvt.f32.bf16(beta_reload_stage[token], reload_bits_stage[token])
+                    if beta_sigmoid:
+                        # Third of the three sigmoid sites: the operand build, the
+                        # decay drain, and here.  Each reloads and rounds
+                        # independently, which is what the reference does.
+                        with K.unroll(16) as token:
+                            K.assign(
+                                beta_reload_stage[token],
+                                _tanh_approx(beta_reload_stage[token] * 0.5) * 0.5 + 0.5,
+                            )
+                        with K.unroll(16) as token:
+                            K.assign(
+                                beta_reload_stage[token],
+                                K.cast(K.cast(beta_reload_stage[token], "bfloat16"), "float32"),
+                            )
                     with K.unroll(16) as token:
                         q_lo = K.local_scalar("float32")
                         q_hi = K.local_scalar("float32")
@@ -2926,21 +3018,7 @@ def _make_main(
                             )
                             K.assign(q_value, q_value * q_norm)
                             K.assign(k_value, k_value * k_norm)
-                        reload_bits = K.local_scalar("uint16")
-                        K.ptx.ld.shared.b16(
-                            reload_bits,
-                            arena.ptr_to([_raw_bf16_byte(_SMEM_BETA, raw_stage, token, channel)]),
-                        )
-                        beta_reload = K.local_scalar("float32")
-                        K.ptx.cvt.f32.bf16(beta_reload, reload_bits)
-                        if beta_sigmoid:
-                            # Third of the three sigmoid sites: the operand build,
-                            # the decay drain, and here.  Each reloads and rounds
-                            # independently, which is what the reference does.
-                            K.assign(beta_reload, _tanh_approx(beta_reload * 0.5) * 0.5 + 0.5)
-                            K.assign(
-                                beta_reload, K.cast(K.cast(beta_reload, "bfloat16"), "float32")
-                            )
+                        beta_reload = beta_reload_stage[token]
                         K.assign(
                             dgate_values[token],
                             q_value * dq_values[token]
@@ -3101,14 +3179,31 @@ def _make_main(
                     _arrive_barrier(arena, _BAR_QK_RAW_DONE, qk_stage)
                     _wait_barrier(arena, _BAR_DQ_TMASTG_DONE, 0, (serial + 1) & 1)
                     _wait_barrier(arena, _BAR_DK_TMASTG_DONE, 0, (serial + 1) & 1)
+                    # Round the whole fragment before storing any of it, and keep
+                    # each destination's stores together: interleaving a convert
+                    # with its own store puts every store one instruction behind
+                    # the rounding it waits on.
+                    dq_bits = K.alloc_local((16,), "uint16")
+                    dk_bits = K.alloc_local((16,), "uint16")
+                    with K.unroll(16) as token:
+                        K.assign(
+                            dq_bits[token],
+                            K.reinterpret("uint16", K.cast(dq_values[token], "bfloat16")),
+                        )
+                    with K.unroll(16) as token:
+                        K.assign(
+                            dk_bits[token],
+                            K.reinterpret("uint16", K.cast(dk_values[token], "bfloat16")),
+                        )
                     with K.unroll(16) as token:
                         K.ptx.st.shared.b16(
                             arena.ptr_to([_raw_bf16_byte(_SMEM_DQ, 0, token, channel)]),
-                            K.reinterpret("uint16", K.cast(dq_values[token], "bfloat16")),
+                            dq_bits[token],
                         )
+                    with K.unroll(16) as token:
                         K.ptx.st.shared.b16(
                             arena.ptr_to([_raw_bf16_byte(_SMEM_DK, 0, token, channel)]),
-                            K.reinterpret("uint16", K.cast(dk_values[token], "bfloat16")),
+                            dk_bits[token],
                         )
                     K.ptx.fence.proxy.async_.shared__cta()
                     _arrive_barrier(arena, _BAR_DQ_TMASTG_READY)
@@ -3124,14 +3219,21 @@ def _make_main(
                         K.assign(dgate_values[token], suffix)
                     _wait_barrier(arena, _BAR_DGATE_TMASTG_DONE, 0, (serial + 1) & 1)
                     _wait_barrier(arena, _BAR_DB_TMASTG_DONE, 0, (serial + 1) & 1)
+                    db_bits = K.alloc_local((16,), "uint16")
+                    with K.unroll(16) as token:
+                        K.assign(
+                            db_bits[token],
+                            K.reinterpret("uint16", K.cast(db_values[token], "bfloat16")),
+                        )
                     with K.unroll(16) as token:
                         K.ptx.st.shared.f32(
                             arena.ptr_to([_raw_f32_byte(_SMEM_DGATE, 0, token, channel)]),
                             dgate_values[token],
                         )
+                    with K.unroll(16) as token:
                         K.ptx.st.shared.b16(
                             arena.ptr_to([_raw_bf16_byte(_SMEM_DB, 0, token, channel)]),
-                            K.reinterpret("uint16", K.cast(db_values[token], "bfloat16")),
+                            db_bits[token],
                         )
                     K.ptx.fence.proxy.async_.shared__cta()
                     _arrive_barrier(arena, _BAR_DGATE_TMASTG_READY)
@@ -3146,8 +3248,9 @@ def _make_main(
                         tile,
                         arena.ptr_to([_SMEM_SCHED + K.cast(sched_consumer.stage, "int32") * 4]),
                     )
-                    with K.If(_elected()), K.Then():
-                        _arrive_barrier(arena, _BAR_SCHED_DONE, sched_consumer.stage)
+                    _arrive_barrier(
+                        arena, _BAR_SCHED_DONE, sched_consumer.stage, pred=K.cuda.elect_sync()
+                    )
                     sched_consumer.advance()
                 else:
                     K.assign(tile, tile + num_sms)
@@ -3602,33 +3705,66 @@ def _make_main(
 
                     value_segment = group_thread // 64
                     value_column = group_thread - value_segment * 64
-                    for token in range(16):
-                        element = (
-                            value_segment * 1024
-                            + token * 64
-                            + _swizzle_xor_128b(token, value_column, 2)
-                        )
-                        dy_bits = K.local_scalar("uint16")
-                        w_bits = K.local_scalar("uint16")
-                        v_bits = K.local_scalar("uint16")
-                        K.ptx.ld.shared.b16(dy_bits, arena.ptr_to([_SMEM_DY + element * 2]))
-                        K.ptx.ld.shared.b16(
-                            w_bits, arena.ptr_to([_SMEM_W + raw_stage * 4096 + element * 2])
-                        )
-                        K.ptx.ld.shared.b16(
-                            v_bits, arena.ptr_to([_SMEM_V + raw_stage * 4096 + element * 2])
-                        )
-                        dy_value = K.cast(K.reinterpret("bfloat16", dy_bits), "float32")
-                        w_value = K.cast(K.reinterpret("bfloat16", w_bits), "float32")
-                        v_value = K.cast(K.reinterpret("bfloat16", v_bits), "float32")
-                        K.ptx.st.shared.b16(
-                            arena.ptr_to([_SMEM_DV + dv_stage * 4096 + element * 2]),
-                            K.reinterpret("uint16", K.cast(w_value * dy_value, "bfloat16")),
-                        )
-                        K.ptx.st.shared.b16(
-                            arena.ptr_to([_SMEM_DWO + dwo_stage * 4096 + element * 2]),
-                            K.reinterpret("uint16", K.cast(v_value * dy_value, "bfloat16")),
-                        )
+                    # Issued a token at a time, each of the three reads is consumed
+                    # one instruction later and the converts stall on shared memory.
+                    # Stage the reads a half-fragment at a time instead: eight
+                    # tokens keeps 24 loads in flight without stretching the live
+                    # range far enough to spill this group's 184-register budget.
+                    elements = [
+                        value_segment * 1024
+                        + token * 64
+                        + _swizzle_xor_128b(token, value_column, 2)
+                        for token in range(16)
+                    ]
+                    for half in range(1):
+                        span = range(16)
+                        dy_bits = K.alloc_local((16,), "uint16")
+                        w_bits = K.alloc_local((16,), "uint16")
+                        v_bits = K.alloc_local((16,), "uint16")
+                        for slot, token in enumerate(span):
+                            K.ptx.ld.shared.b16(
+                                dy_bits[slot], arena.ptr_to([_SMEM_DY + elements[token] * 2])
+                            )
+                            K.ptx.ld.shared.b16(
+                                w_bits[slot],
+                                arena.ptr_to([_SMEM_W + raw_stage * 4096 + elements[token] * 2]),
+                            )
+                            K.ptx.ld.shared.b16(
+                                v_bits[slot],
+                                arena.ptr_to([_SMEM_V + raw_stage * 4096 + elements[token] * 2]),
+                            )
+                        dy_value = K.alloc_local((16,), "float32")
+                        w_value = K.alloc_local((16,), "float32")
+                        v_value = K.alloc_local((16,), "float32")
+                        for slot in range(16):
+                            K.assign(
+                                dy_value[slot],
+                                K.cast(K.reinterpret("bfloat16", dy_bits[slot]), "float32"),
+                            )
+                        for slot in range(16):
+                            K.assign(
+                                w_value[slot],
+                                K.cast(K.reinterpret("bfloat16", w_bits[slot]), "float32"),
+                            )
+                        for slot in range(16):
+                            K.assign(
+                                v_value[slot],
+                                K.cast(K.reinterpret("bfloat16", v_bits[slot]), "float32"),
+                            )
+                        for slot, token in enumerate(span):
+                            K.ptx.st.shared.b16(
+                                arena.ptr_to([_SMEM_DV + dv_stage * 4096 + elements[token] * 2]),
+                                K.reinterpret(
+                                    "uint16", K.cast(w_value[slot] * dy_value[slot], "bfloat16")
+                                ),
+                            )
+                        for slot, token in enumerate(span):
+                            K.ptx.st.shared.b16(
+                                arena.ptr_to([_SMEM_DWO + dwo_stage * 4096 + elements[token] * 2]),
+                                K.reinterpret(
+                                    "uint16", K.cast(v_value[slot] * dy_value[slot], "bfloat16")
+                                ),
+                            )
                     K.ptx.fence.proxy.async_.shared__cta()
                     _arrive_barrier(arena, _BAR_DV_TMASTG_READY, dv_stage)
                     _arrive_barrier(arena, _BAR_DWO_TMASTG_READY, dwo_stage)
@@ -3767,8 +3903,9 @@ def _make_main(
                         tile,
                         arena.ptr_to([_SMEM_SCHED + K.cast(sched_consumer.stage, "int32") * 4]),
                     )
-                    with K.If(_elected()), K.Then():
-                        _arrive_barrier(arena, _BAR_SCHED_DONE, sched_consumer.stage)
+                    _arrive_barrier(
+                        arena, _BAR_SCHED_DONE, sched_consumer.stage, pred=K.cuda.elect_sync()
+                    )
                     sched_consumer.advance()
                 else:
                     K.assign(tile, tile + num_sms)
