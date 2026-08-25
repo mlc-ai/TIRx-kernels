@@ -60,6 +60,11 @@ on a loop bounded by a runtime row length regressed three shapes
 and leave the general path on the ordinary loop.
 
 The staged array is real registers. Keep `trips` small; the win here came at 4.
+That ceiling is specific to staging global loads whose destinations were being
+serialized. A shared-memory ladder feeding a long arithmetic chain measured the
+opposite preference -- 4 regressed every required shape against 8, and the
+complete 16-element fragment beat both -- so sweep the width rather than
+assuming either direction.
 
 ## Verification
 

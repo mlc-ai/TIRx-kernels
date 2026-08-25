@@ -43,6 +43,18 @@ sleep backoff in a flag spin loses, seen from the other side: here the sleep is
 inserted by ptxas from an operand most callers copy without noticing, and it
 loses for the same reason -- release-detection latency.
 
+Read "no useful neighbours" as co-resident runnable warps, not as occupancy. A
+warp-specialized backward kernel running one CTA of sixteen warps per
+multiprocessor has low occupancy by the usual measure and still gained nothing
+here: its hint was 10,000,000 ticks against the reference's 1 -- visible in SASS
+as `NANOSLEEP.SYNCS 0x989680` against `0x1` at every one of ~330 wait sites, and
+as the largest single stall divergence left at the time -- yet matching the
+reference's hint measured +0.0002 mean on one parent, mixed on a second (one
+required shape +0.0008, another -0.0011), and no better on a third. A sleeping
+consumer warp in that design always has producer warps to run. A large static
+divergence with a clean mechanism is not a timing result; keep the change if it
+matches the reference, but do not spend expansions on it.
+
 ## Verification
 
 Count `NANOSLEEP` sites in the SASS before and after, and confirm the wait

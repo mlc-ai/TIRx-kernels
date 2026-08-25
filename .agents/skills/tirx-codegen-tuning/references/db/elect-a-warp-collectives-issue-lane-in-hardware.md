@@ -69,6 +69,18 @@ machinery to remove, not one per instruction.
 converged. Binding it inside a guard leaves the excluded lanes never reaching
 it.
 
+Check that the two spellings differ before rewriting one into the other. Taking
+the predicate from the hardware-election helper, in place of comparing a raw
+elect against one, can lower to exactly the same machine code: two builds of one
+kernel differing only in that substitution disassembled to identical opcode
+histograms -- `ELECT` 80/80, `WARPSYNC.COLLECTIVE` 8/8, `BSSY` 20/20, `PLOP3`
+96/96 -- and measured indistinguishable. The lever is whether the guard rides on
+the instruction or wraps a branch, not which helper produced the predicate; a
+substitution that leaves a multi-statement guarded region still a branch changes
+nothing. A contaminated benchmark run initially credited that no-op with a
+0.0174 gain, so confirm a codegen difference exists before believing a timing
+one.
+
 An election establishes *a* lane, not lane 0. Do not swap it in where the
 guarded code also depends on being the lowest lane for addressing or ordering.
 
