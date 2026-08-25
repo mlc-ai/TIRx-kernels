@@ -45,16 +45,17 @@ with K.serial(num_chunks - 1) as recurrent_chunk:
 
 ## Rationale
 
-The overlap is useful only when it does not lengthen hot control flow. In the
-GDN2 prefill port, applying the load motion while `have_state` was runtime added
-one `BSSY`/`BSYNC` pair, three static `R2UR`, and eight static NOPs. Its nine-row
-targeted `bench_suite` fell to a 0.9169 minimum and 0.9506 mean ratio.
+The overlap is useful only when it does not lengthen hot control flow. In one
+recurrent prefill kernel, applying the load motion while `have_state` was runtime
+added one `BSSY`/`BSYNC` pair, three static `R2UR`, and eight static NOPs. Its
+nine-row affected performance matrix fell to a 0.9169 minimum and 0.9506 mean
+ratio.
 
 Peeling the first chunk removed the recurrent state predicate. Reapplying the
 same load motion then moved both target `LDTM` instructions ahead of the two W
 `LDSM` instructions while leaving the parent's counts unchanged: 10 `BSSY`, 10
 `BSYNC`, 54 `R2UR`, and 49 NOPs. The complete candidate matrix passed with a
-0.9949 minimum and 1.0030 mean ratio; the fresh promoted run passed with a
+0.9949 minimum and 1.0030 mean ratio; the final complete matrix passed with a
 0.9953 minimum and 1.0029 mean ratio.
 
 ## Boundary
@@ -64,8 +65,8 @@ iterations must have state ready under the same pipeline protocol. The TMEM
 wait is not removed: it stays before first use. The work moved between load and
 wait must be independent of both the TMEM destination registers and the barrier
 that proves the TMEM accumulator ready. Keep the original order for paths where
-state presence remains runtime-dependent; the GDN2 port does this for its large
-checkpoint specializations.
+state presence remains runtime-dependent; the measured kernel does this for its
+large-checkpoint specializations.
 
 ## Verification
 
@@ -73,5 +74,4 @@ Check generated CUDA or line-info SASS for the intended `LDTM` -> independent
 work -> `wait::ld` order, then compare `BSSY`, `BSYNC`, `R2UR`, and NOP counts
 against the parent. Reject the change if the overlap creates another runtime
 predicate region. Run affected correctness, including the peeled first chunk
-and recurrent chunks, then use one complete `bench_suite` raw run for the final
-performance decision.
+and recurrent chunks, then run the complete performance matrix.
