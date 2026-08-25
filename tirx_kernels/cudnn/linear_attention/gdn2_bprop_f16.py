@@ -3264,7 +3264,7 @@ def _make_main(
                             K.ptx.tcgen05.wait__ld.sync.aligned()
                             with K.unroll(2) as half:
                                 key_base = key_subtile * 16 + half * 8
-                                K.ptx.st.shared.v4.b32(
+                                K.ptx.st.shared.v2.b64(
                                     arena.ptr_to(
                                         [
                                             _SMEM_DSTATE
@@ -3276,10 +3276,10 @@ def _make_main(
                                             * 2
                                         ]
                                     ),
-                                    seed_words[half * 4],
-                                    seed_words[half * 4 + 1],
-                                    seed_words[half * 4 + 2],
-                                    seed_words[half * 4 + 3],
+                                    _pack_u32_pair(seed_words[half * 4], seed_words[half * 4 + 1]),
+                                    _pack_u32_pair(
+                                        seed_words[half * 4 + 2], seed_words[half * 4 + 3]
+                                    ),
                                 )
                         K.ptx.fence.proxy.async_.shared__cta()
                         _arrive_barrier(arena, _BAR_DSTATE_SMEM_READY)
