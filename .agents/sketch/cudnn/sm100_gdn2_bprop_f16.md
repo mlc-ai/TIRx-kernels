@@ -503,13 +503,18 @@ def super_mma_warp():
                 transpose(mov_lpow, l_packed)          # and again after squaring
                 # instruction_selection: movmatrix.sync.aligned.m8n8.trans.b16;
                 # extent: 4 initial + 3 x 4 = the export's 16 sites
-                gemm(upd_acc, tinv_packed, mov_lpow)   # fold into the inverse
-                cast(tinv_packed, upd_acc)
-                # instruction_selection: 2 x mma.sync...m16n8k16 per round, with a
-                # cvt.rn.bf16x2.f32 round-trip between them -- the rounding is
-                # part of the numerical contract, not an artifact
+                gemm(upd_acc, tinv_packed, mov_lpow)   # T_inv @ L^(2^r)
+                # The round ACCUMULATES into the series; assigning here would
+                # never sum it and T_inv would be wrong on every chunk.
+                add(tinv_acc, cast_f32(tinv_packed), upd_acc)
+                cast(tinv_packed, tinv_acc)
+                # instruction_selection: 2 x mma.sync...m16n8k16 per round, then
+                # 4 x add.rn.f32x2 over the io round-tripped T_inv; the rounding
+                # and the four-way bracketing are both part of the contract
             copy_r2s(tinv_packed, inter_byte(inter_stage, slot=1, ...))
             # instruction_selection: stmatrix.sync.aligned.m8n8.x4.shared.b16
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
             arrive("t_inv_ready", inter_stage)
 
             # ---- dM = dY @ U^T, then the two strict tiles -----------------
@@ -527,6 +532,8 @@ def super_mma_warp():
             copy_r2s(-dm_strict, inter_byte(inter_stage, slot=4, ...))
             # instruction_selection: 2 x stmatrix...x4.shared.b16; extent: the
             # +/- pair, so dk_inv and dk_decay can share one accumulator sign
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
             arrive("dm_ready", inter_stage)
 
 # ==========================================================================
@@ -571,7 +578,7 @@ def epilogue_warp():
     while tile_idx < total_tiles:
         ...decode
         if elected():
-            for array in (TMAP_DQ, TMAP_DK, TMAP_DV, TMAP_DGATE, TMAP_DWO, TMAP_DBETA):
+            for array in (TMAP_DQ, TMAP_DK, TMAP_DV, TMAP_DGATE, TMAP_DBETA, TMAP_DWO):
                 acquire_tensormap(descriptor_slot(tmaps, array, b))
                 # instruction_selection: fence.proxy.tensormap::generic.acquire.gpu;
                 # extent: 6 of the export's 14 acquires; warp 14 owns the other 8
@@ -589,6 +596,8 @@ def epilogue_warp():
             select(a_tile, lower_incl_mask, a_acc, 0.0)
             copy_r2s(a_tile, inter_byte(inter_stage, slot=0, ...))
             # instruction_selection: stmatrix...x4.shared.b16
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
             arrive("a_ready", inter_stage)
 
             # ---- dA = tril_incl(dO @ U^T) --------------------------------
@@ -599,6 +608,8 @@ def epilogue_warp():
                 copy_s2r(DO + ..., a_frag); copy_s2r(SU + ..., b_frag)
                 gemm(da_acc, a_frag, b_frag, accumulate=True)
                 # instruction_selection: 8 x mma.sync...m16n8k16; extent: dA
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
             arrive("do_done", raw_stage)          # released BEFORE the mask/store
             select(da_tile, lower_incl_mask, da_acc, 0.0)
             fence_proxy_async_shared_cta()
@@ -649,8 +660,7 @@ chunk loop at all.
 ```python
 # ==========================================================================
 # Warps 0..3: gate prefix, normalization, and the four decay operands.
-# ==========================================================================
-def compute_group_0():
+# ==========================================================================def compute_group_0():
     barrier(id=3, threads=416)      # TMEM-lifecycle rendezvous after setmaxnreg
     # instruction_selection: barrier.sync 3, 416; extent: one of four such sites
     while tile_idx < total_tiles:
@@ -681,49 +691,19 @@ def compute_group_0():
             # instruction_selection: add.rn.f32x2; extent: one token pair per step
             exp2(eG, prefix); exp2(eGl, chunk_total)
             # instruction_selection: ex2.approx.ftz.f32; extent: 16 tokens
+
+            wait("decay_done", decay_stage, decay_phase)   # reverse edge, warp 13
+
             # eG MUST round-trip through sGate: the prefix scan runs on a channel
             # assignment (warp*32 + lane) that differs from the operand assignment
             # (decay_row, lane_in_row_group), and warps 8..11 read the same buffer.
             # That shared reader is why `gate_done` carries CG0+CG2 = 256.
             copy_r2s(eG, SGATE + raw_f32_byte(...))
             # instruction_selection: st.shared.b32; extent: 16 tokens
-            fence_proxy_async_shared_cta()
-            # instruction_selection: fence.proxy.async.shared::cta
-            arrive("gate_done", raw_stage)
-            copy_s2r(SGATE + raw_f32_byte(...), eG_operand)    # per operand channel
-            copy_s2r(SGATE + raw_f32_byte(row=BT-1, ...), eGl_operand)
-            # instruction_selection: ld.shared.b32; extent: the re-read under the
-            # operand channel assignment
-
-            if L2NORM:
-                rsqrt(q_inv_norm, max(sum_sq_q, 1e-24)); rsqrt(k_inv_norm, ...)
-                # instruction_selection: rsqrt.approx.ftz.f32; extent: one per row
-                copy_r2s(q_inv_norm, NORM + ...); copy_r2s(k_inv_norm, ...)
-
-            # ---- the four operands.  Beta enters K_decay ONLY. -------------
-            wait("decay_done", decay_stage, decay_phase)   # reverse edge, warp 13
-            mul(k_value, raw_k, k_inv_norm)
-            mul(k_beta, k_value, raw_beta)                 # GDN-2: Beta folded in
-            mul(K_decay_pack, cast(k_beta), cast(eG))
-            # instruction_selection: mul.bf16x2; extent: 4 packs per dim half
-            rcp(exp_neg_g, eG)                             # never a divide
-            # instruction_selection: rcp.approx.ftz.f32; extent: 2 per pack
-            mul(K_inv_pack, cast(k_value), cast(exp_neg_g))   # no Beta here
-            # K_restore reuses the ALREADY-ROUNDED K_inv rather than re-deriving
-            # from K, and the scale is folded into Q BEFORE the eG multiply.  The
-            # rounding points differ from the algebraically equal forms.
-            mul(K_restore_pack, K_inv_pack, cast(eGl))
-            mul(Q_decay_pack, cast(q_value * scale), cast(eG))
-            for pack in (K_decay, K_inv, K_restore, Q_decay):
-                copy_r2s(pack, raw_io_byte(base, decay_stage, row, dim))
-                # instruction_selection: st.shared.v4.b32; extent: 8 channels
             fill(STATE_DIAG + inter..., diag(eGl))          # 8 k-atoms of [16][16]
-            fence_proxy_async_shared_cta()
-            # instruction_selection: fence.proxy.async.shared::cta
-            arrive("k_decay_inv_ready", decay_stage)
-            arrive("q_decay_k_restore_ready", decay_stage)
-            arrive("q_done", raw_stage); arrive("k_done", raw_stage)
+            # instruction_selection: st.shared.b16; extent: 8 atoms
 
+            # ---- raw Q/K into the TMEM ring, then the CG0-local rendezvous --
             wait("qk_raw_done", qk_stage, qk_phase)         # reverse edge from CG2
             copy_r2t(raw_q, tmem_cell(TM_QRAW_INP, row, qk_stage * 8))
             copy_r2t(raw_k, tmem_cell(TM_KRAW_INP, row, qk_stage * 8))
@@ -733,13 +713,81 @@ def compute_group_0():
             # instruction_selection: tcgen05.wait::st.sync.aligned
             arrive("qk_raw_ready", qk_stage)
             barrier(id=1, threads=128)
-            # instruction_selection: barrier.sync 1, 128; extent: the CG0-local
-            # rendezvous after publishing the raw ring
+            # instruction_selection: barrier.sync 1, 128; extent: separates the ring
+            # publish from the raw operand fetch below
 
+            # ---- raw Q/K/Beta register fetch, then release those three stages
+            copy_s2r(SQ + raw_io_byte(...), raw_q_regs)
+            copy_s2r(SK + raw_io_byte(...), raw_k_regs)
+            copy_s2r(BETA + raw_io_byte(...), raw_beta_regs)
+            # instruction_selection: ld.shared.v4.b32; extent: 8 channels each
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
+            arrive("q_done", raw_stage); arrive("k_done", raw_stage)
+            arrive("beta_done", raw_stage)   # the other half of beta_done's 256
+
+            if L2NORM:
+                # The squared sums use a FIXED four-accumulator ffma2 bracketing
+                # seeded with opaque zeros so the optimizer cannot reassociate.
+                fill(qacc[0:4], opaque_f32_zero()); fill(kacc[0:4], opaque_f32_zero())
+                for pair in range(DK // 8):
+                    fma_packed(qacc[pair % 4], raw_q_pair, raw_q_pair, qacc[pair % 4])
+                    fma_packed(kacc[pair % 4], raw_k_pair, raw_k_pair, kacc[pair % 4])
+                    # instruction_selection: fma.rn.f32x2; extent: the fixed 4-way
+                    # interleave over this lane's channels
+                for delta in (1, 2, 4, 8, 16, 32):
+                    shuffle_xor(peer, sum_sq, delta); add(sum_sq, sum_sq, peer)
+                    # instruction_selection: shfl.sync.bfly.b32; extent: six steps,
+                    # three per gradient, reducing across the row group
+                rsqrt(q_inv_norm, max(sum_sq_q, 1e-24)); rsqrt(k_inv_norm, ...)
+                # instruction_selection: rsqrt.approx.ftz.f32; extent: 2 sites
+                if lane_in_row_group == 0:
+                    copy_r2s(q_inv_norm, NORM + ...); copy_r2s(k_inv_norm, NORM + BT + ...)
+                    # instruction_selection: st.shared.b32; extent: one lane per row
+
+            # ---- eG/eGl re-read under the OPERAND channel assignment --------
+            copy_s2r(SGATE + raw_f32_byte(...), eG_operand)
+            copy_s2r(SGATE + raw_f32_byte(row=BT-1, ...), eGl_operand)
+            # instruction_selection: ld.shared.b32; extent: the re-read
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
+            arrive("gate_done", raw_stage)
+            # gate_done releases the sGate stage for TMA reload, so it MUST come
+            # after CG0 has finished reading eG and eGl back out of it.
+
+            # ---- the four operands.  Beta enters K_decay ONLY. -------------
+            mul(k_value, raw_k, k_inv_norm)
+            mul(k_beta, k_value, raw_beta)                 # GDN-2: Beta folded in
+            mul(K_decay_pack, cast(k_beta), cast(eG))
+            # instruction_selection: mul.bf16x2; extent: 4 packs per dim half
+            rcp(exp_neg_g, eG)                             # never a divide
+            # instruction_selection: rcp.approx.ftz.f32; extent: 2 per pack
+            mul(K_inv_pack, cast(k_value), cast(exp_neg_g))   # no Beta here
+            copy_r2s(K_decay_pack, raw_io_byte(K_DECAY, decay_stage, row, dim))
+            copy_r2s(K_inv_pack,   raw_io_byte(K_INV,   decay_stage, row, dim))
+            # instruction_selection: st.shared.v4.b32; extent: 8 channels each
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
+            arrive("k_decay_inv_ready", decay_stage)
+
+            # K_restore reuses the ALREADY-ROUNDED K_inv rather than re-deriving
+            # from K, and the scale is folded into Q BEFORE the eG multiply.  The
+            # rounding points differ from the algebraically equal forms.
+            mul(K_restore_pack, K_inv_pack, cast(eGl))
+            mul(Q_decay_pack, cast(q_value * scale), cast(eG))
+            copy_r2s(K_restore_pack, raw_io_byte(K_RESTORE, decay_stage, row, dim))
+            copy_r2s(Q_decay_pack,   raw_io_byte(Q_DECAY,   decay_stage, row, dim))
+            # instruction_selection: st.shared.v4.b32; extent: 8 channels each
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
+            arrive("q_decay_k_restore_ready", decay_stage)
+
+            # Only `state_ready` is guarded; the two reverse edges advance every
+            # chunk so their phases stay aligned with warp 13 and warps 8..11.
+            wait("state_inp_done", state_inp_stage, state_inp_phase)
+            wait("state_inp_cg2_done", state_inp_stage, state_inp_phase)
             if chunk >= FIRST_STATE_CHUNK:                  # state SMEM -> TMEM
                 wait("state_ready")
-                wait("state_inp_done", state_inp_stage, state_inp_phase)
-                wait("state_inp_cg2_done", state_inp_stage, state_inp_phase)
                 copy_s2r(state_byte(...), state_regs)
                 # instruction_selection: ld.shared.b16
                 copy_r2t(state_regs, TM_STATE_INP + state_inp_stage * 64)
@@ -751,9 +799,6 @@ def compute_group_0():
             arrive("state_inp_ready", state_inp_stage)   # UNCONDITIONAL: the phase
             # advances even on a chunk that loads no state
 
-# ==========================================================================
-# Warps 4..7: the value side.  Owns dV and the new dW_out.
-# ==========================================================================
 def compute_group_1():
     barrier(id=3, threads=416)
     # instruction_selection: barrier.sync 3, 416
@@ -762,10 +807,23 @@ def compute_group_1():
         # dht seed runs at the TOP of the tile, before the chunk loop: a
         # non-terminal item seeds zeros but still walks the same path, so the
         # pipeline shape is uniform.
-        if USE_DSTATE_IN:
-            seed_true = (cend == num_chunks_b)
-            copy_g2r(dstate_in_tile, dh_seed) if seed_true else fill(dh_seed, 0.0)
-            copy_r2t(cast(dh_seed), TM_DSTATE_INP); arrive("dstate_inp_ready")
+        if USE_DSTATE_IN and sk_nt > 0:
+            wait("dstate_smem_done"); wait("dstate_smem_cg2_done")
+            seed_true = (cend == num_chunks_b)     # non-terminal items seed zeros
+            copy_g2r(dstate_in_tile, dh_in)
+            select(dh_seed, seed_true, dh_in, 0.0)          # per element
+            copy_r2t(dh_seed, TM_DSTATE_ACC)       # the FP32 seed: dH itself
+            # instruction_selection: tcgen05.st.sync.aligned.32x32b.x16.b32
+            copy_r2t(cast(dh_seed), TM_DSTATE_INP) # and the f16 A-operand form
+            # instruction_selection: tcgen05.st.sync.aligned.32x32b.x16.b32
+            tcgen05_wait_store()
+            # instruction_selection: tcgen05.wait::st.sync.aligned
+            arrive("dstate_inp_ready")
+            copy_t2r(TM_DSTATE_INP, dh_reread)     # re-read, then publish to SMEM
+            copy_r2s(cast(dh_reread), DSTATE)
+            # instruction_selection: stmatrix.sync.aligned.m8n8.x4.trans.shared.b16
+            fence_proxy_async_shared_cta()
+            arrive("dstate_smem_ready")
         for chunk in reverse_walk:
             # ---- Y: two variants.  Chunk 0 with no entering state is W*V only.
             wait("v_ready", raw_stage, raw_phase)
@@ -828,6 +886,8 @@ def compute_group_1():
                 copy_r2s(cast(mul(w_v, dy_v)), SDV  + dv_stage  * 4096 + ...)
                 copy_r2s(cast(mul(v_v, dy_v)), SDWO + dwo_stage * 4096 + ...)
                 # instruction_selection: st.shared.b16; extent: dV and dW_out
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
             arrive("dv_tmastg_ready"); arrive("dwo_tmastg_ready")
             arrive("v_done", raw_stage); arrive("w_done", raw_stage)
             # V and W are released only HERE, after the dW_out product needs V.
@@ -837,6 +897,8 @@ def compute_group_1():
             # the registers already in hand.
             wait("dstate_acc_ready")
             if rev + 1 < sk_nt:
+                wait("dstate_smem_done")
+                wait("dstate_smem_cg2_done")
                 copy_t2r(TM_DSTATE_ACC, dh)
                 # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x32.b32;
                 # extent: 4 sites
@@ -868,11 +930,17 @@ def compute_group_2():
             # instruction_selection: ld.shared.b32; extent: 16 tokens
             fence_proxy_async_shared_cta(); arrive("gate_done", raw_stage)
 
-            # ---- dGate_last hdot: eGl * sum_v(dH[v,c] * S[c,v]) -------------
-            # This term exists only when a dState is carried, and it is the
-            # kernel's single largest FMA family.
-            if USE_DSTATE_IN and chunk >= FIRST_STATE_CHUNK:
-                wait("state_inp_ready", state_inp_stage, state_inp_phase)
+            # `has_dstate` is a RUNTIME boolean, not the compile-time flag: a
+            # dState exists once the reverse walk has produced one, so it is
+            # `rev > 0`, forced True when USE_DSTATE_IN. The hdot is therefore
+            # live even in the `basic` branch, which is why the basic export
+            # carries 128 fma.rn.f32.bf16.
+            has_dstate = (rev > 0) or USE_DSTATE_IN
+
+            # ---- dGate_last hdot: sum_v(dH[v,c] * S[c,v]) -------------------
+            fill(dgate_last_val, 0.0)
+            wait("state_inp_ready", state_inp_stage, state_inp_phase)  # UNGUARDED
+            if has_dstate:
                 wait("dstate_smem_ready")
                 copy_t2r(tmem_cell(TM_STATE_INP, ...), state_cols)
                 # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x16.b32;
@@ -884,17 +952,24 @@ def compute_group_2():
                     # over a FIXED 8-way interleave, not a compiler-chosen tree
                 reduce_fixed_tree(dgate_last_val, hacc[0:8])
                 # instruction_selection: add.rn.f32x2; extent: the fixed fadd2 tree
-                arrive("dstate_smem_cg2_done"); arrive("state_inp_cg2_done")
+                arrive("dstate_smem_cg2_done")
+            arrive("state_inp_cg2_done", state_inp_stage)   # UNGUARDED, pairs
+            # with CG0's state_inp_cg2_done wait on every chunk
 
-            wait("dk_restore_part_acc_ready")
-            copy_t2r(tmem_cell(TM_DK_RESTORE, row, col), dk_restore_part)
-            # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x16.b32
-            for t in range(BT):
-                mul(dk_hat, eGl * rcp(eG[t]), dk_restore_part[t])
-                # instruction_selection: rcp.approx.ftz.f32 then mul.f32
-                fma(dgate_last_acc[t % 4], k_n[t], dk_hat, dgate_last_acc[t % 4])
-                # instruction_selection: fma.rn.f32; extent: a FIXED 4-way
-                # interleaved accumulation, not a compiler-chosen tree
+            fill(dgate_last_acc[0:4], opaque_f32_zero())
+            fill(dk_n[0:BT], 0.0)        # valid accumulator on the no-dstate path
+            if has_dstate:
+                wait("dk_restore_part_acc_ready")
+                copy_t2r(tmem_cell(TM_DK_RESTORE, row, col), dk_restore_part)
+                # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x16.b32
+                copy_t2r(tmem_cell(TM_KRAW_INP, ...), k_raw)   # ring read 1 of 4
+                # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x8.b32
+                for t in range(BT):
+                    mul(dk_hat, eGl * rcp(eG[t]), dk_restore_part[t])
+                    # instruction_selection: rcp.approx.ftz.f32 then mul.f32
+                    fma(dgate_last_acc[t % 4], k_n[t], dk_hat, dgate_last_acc[t % 4])
+                    # instruction_selection: fma.rn.f32; extent: a FIXED 4-way
+                    # interleaved accumulation, not a compiler-chosen tree
 
             wait("dq_acc_ready"); copy_t2r(TM_DQ_ACC, dq_vec)
             mul(dq_n, mul_packed(eG, scale), dq_vec)
@@ -920,10 +995,25 @@ def compute_group_2():
                     #   and back to f32 -- the rounding is part of the contract
                 mul(dgate_regs[t], beta_v, dk_decay)
                 add(dk_n[t], dk_n[t], dgate_regs[t])
+            tcgen05_wait_load()
+            # instruction_selection: tcgen05.wait::ld.sync.aligned; extent: one of
+            # the export's two sites
             arrive("dqk_acc_done")
 
-            # ---- dGate finalize -------------------------------------------
+            # ---- dGate finalize: its OWN ring reads and its OWN beta reload -
+            copy_t2r(tmem_cell(TM_QRAW_INP, ...), q_raw)     # ring read 3 of 4
+            copy_t2r(tmem_cell(TM_KRAW_INP, ...), k_raw)     # ring read 4 of 4
+            # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x8.b32;
+            # extent: 2 sites; with the restore drain and the dk_decay drain these
+            # are the four separate ring reads (raw K three times, raw Q once)
             for t in range(BT):
+                mul(q_n[t], q_raw[t], q_inv_norm) if L2NORM else assign(q_n[t], q_raw[t])
+                copy_s2r(BETA + raw_io_byte(...), beta_v)     # reloaded, not reused
+                if BETA_SIGMOID:
+                    tanh(s, beta_v * 0.5); cast(beta_v, s * 0.5 + 0.5)
+                    # instruction_selection: tanh.approx.f32; extent: the THIRD of
+                    # three sigmoid sites (CG0, the dk_decay drain, here), which is
+                    # what makes the beta_sigmoid branch's delta 48 and not 16
                 dgate_regs[t] = q_n[t]*dq_n[t] + beta_v*db_regs[t] \
                                 - k_n[t]*(dk_n[t] - dgate_regs[t])
                 # instruction_selection: fma.rn.f32 chain; extent: one token
@@ -933,8 +1023,10 @@ def compute_group_2():
                     # the chain rule; swapping these corrupts dGate silently.
             add(dgate_regs[BT-1], dgate_regs[BT-1],
                 (dgate_last_acc[0]+dgate_last_acc[1]) + (dgate_last_acc[2]+dgate_last_acc[3]))
-            if USE_DSTATE_IN and chunk >= FIRST_STATE_CHUNK:
+            if has_dstate and chunk >= FIRST_STATE_CHUNK:
                 fma(dgate_regs[BT-1], eGl, dgate_last_val, dgate_regs[BT-1])
+            fence_proxy_async_shared_cta()
+            # instruction_selection: fence.proxy.async.shared::cta
             arrive("beta_done", raw_stage)
 
             if L2NORM:      # row projection: grad <- (grad - a*norm*<a,grad>)*norm
@@ -942,22 +1034,27 @@ def compute_group_2():
                                                 (dk_n, TM_KRAW_INP, BT)):
                     copy_t2r(tmem_cell(qk_col, ...), raw_lo)   # two halves
                     copy_t2r(tmem_cell(qk_col, ...), raw_hi)
-                    # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x8.b32
+                    # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x8.b32;
+                    # extent: 2 of FOUR reads per gradient -- the l2norm export
+                    # takes tcgen05.ld from 28 to 36 for exactly this reason
                     mul(part, raw_pair, grad_pair)
                     # instruction_selection: mul.f32x2; extent: 2 per token pair
-                    for delta in (16, 8, 4, 2, 1):
-                        shuffle_xor(peer, part, delta); add(part, part, peer)
+                    for off in range(5):           # ASCENDING: 1, 2, 4, 8, 16
+                        shuffle_xor(peer, part, 1 << off); add(part, part, peer)
                         # instruction_selection: shfl.sync.bfly.b32; extent: a
                         # 5-step butterfly over the lanes of one row
-                    if lane == 0:
-                        copy_r2s(part, RED1 + warp_id * 4)
+                    copy_r2s(part, RED1 + (warp_in_group * BT + t) * 4)
+                    # RED1 is 256 B = 4 warps x 16 tokens, not one scalar per warp
                     barrier(id=2, threads=128)
                     # instruction_selection: barrier.sync 2, 128; extent: the first
                     # of TWO such barriers per gradient
-                    copy_s2r(RED1, four_warp_parts)
+                    copy_s2r(RED1 + t * 4, four_warp_parts)   # the four warps' t
                     reduce_fixed_tree(dots, four_warp_parts)
                     # instruction_selection: add.rn.f32x2; extent: a fixed 4-term
                     # tree over the four warps, not a compiler-chosen reduction
+                    copy_t2r(tmem_cell(qk_col, ...), raw_lo)  # reads 3 and 4, after
+                    copy_t2r(tmem_cell(qk_col, ...), raw_hi)  # the barrier
+                    # instruction_selection: tcgen05.ld.sync.aligned.32x32b.x8.b32
                     copy_s2r(NORM + inv_off, inv_norm)
                     fma(grad, -raw_qk, dots * inv_norm, grad)
                     mul(grad, grad, inv_norm)          # the post-multiply
@@ -999,24 +1096,27 @@ accumulation, so a GEMM whose K extent is 128 expands to eight issues and one
 whose K extent is 16 expands to one.  Two sites are duplicated for the
 `accumulate=True`/`False` twin.
 
-Three loop-level waits sit OUTSIDE any GEMM's guard, so their phases advance
-even on a chunk whose MMA is skipped: `dqk_acc_done` (the loop-carried
-backpressure edge from warps 8..11, whose cursor starts at phase 1),
-`state_inp_ready`, and `do_ready`.  `dstate0_acc_stored` is waited once at
-teardown before the TMEM dealloc.
+Six loop-level waits sit OUTSIDE any GEMM's guard, so their phases advance even
+on a chunk whose MMA is skipped: `k_decay_inv_ready`, `dqk_acc_done` (the
+loop-carried backpressure edge from warps 8..11, whose cursor starts at phase
+1), `state_inp_ready`, `do_ready`, `q_decay_k_restore_ready`, and
+`u_smem_ready`.  They are listed here rather than in the per-row waits column.
+`dstate0_acc_stored` is waited once at teardown before the TMEM dealloc.  With
+row 6 publishing nothing and `decay_done` attributed only to row 15, the
+publishes column sums to exactly the export's 19 commits.
 
 | # | FP32 TMEM destination | A operand | B operand | M x N x K | issues | acc | guard | waits | publishes |
 | ---: | --- | --- | --- | --- | ---: | --- | --- | --- | --- |
-| 1 | `state_k_acc` | `state` (SMEM) | `K_decay^T` | 128 x 16 x 128 | 8 | on k>0 | `chunk >= FIRST_STATE_CHUNK` | `state_ready`, `k_decay_inv_ready` | `state_k_acc_ready`, `state_done` |
+| 1 | `state_k_acc` | `state` (SMEM) | `K_decay^T` | 128 x 16 x 128 | 8 | on k>0 | `chunk >= FIRST_STATE_CHUNK` | `state_ready` | `state_k_acc_ready`, `state_done` |
 | 2 | `dq_acc` | `state` (TMEM) | `dO^T` | 128 x 16 x 128 | 8 | on k>0 | `chunk >= FIRST_STATE_CHUNK` | (`state_inp_ready`, `do_ready` hoisted) | none yet |
-| 3 | `du_acc` | `dstate_inp` (TMEM) | `K_restore` | 128 x 16 x 128 | 8 | on k>0 | `has_dstate` | `dstate_inp_ready`, `q_decay_k_restore_ready` | none yet |
+| 3 | `du_acc` | `dstate_inp` (TMEM) | `K_restore` | 128 x 16 x 128 | 8 | on k>0 | `has_dstate` | `dstate_inp_ready` | none yet |
 | 4 | `dstate_acc` | `dstate_inp` (TMEM) | `diag(eGl)` | 128 x 16 x 16 | 8 | per k-atom | `has_dstate` | same stage | none yet |
 | 5 | `du_acc` | `dO^T` (SMEM) | `A` | 128 x 16 x 16 | 1 | yes | `has_dstate` | `a_ready` | `du_acc_ready`, `a_done` |
-| 6 | `dstate_acc` | `dO^T` (SMEM) | `Q_decay` | 128 x 128 x 16 | 1 | yes | `has_dstate` | `q_decay_k_restore_ready` | `do_mma_done` |
-| 7 | `u_acc` | `Y` (TMEM) | `T_inv` | 128 x 16 x 16 | 1 | no | none | `y_inp_ready`, `t_inv_ready` | `u_acc_ready` |
+| 6 | `dstate_acc` | `dO^T` (SMEM) | `Q_decay` | 128 x 128 x 16 | 1 | yes | `has_dstate` | (hoisted) | none yet |
+| 7 | `u_acc` | `Y` (TMEM) | `T_inv` | 128 x 16 x 16 | 1 | no | none | `y_inp_ready`, `t_inv_ready` | `u_acc_ready`, `do_mma_done` |
 | 8 | `dy_acc` | `dU` (TMEM) | `T_inv` | 128 x 16 x 16 | 1 | no | none | `du_inp_ready` | `dy_acc_ready`, `t_inv_done` |
-| 9 | `dk_restore_acc` | `dH` (SMEM) | `U^T` | 128 x 16 x 128 | 8 | on k>0 | `has_dstate` | `dstate_smem_ready`, `u_smem_ready` | `dk_restore_part_acc_ready` |
-| 10 | `dstate_acc` | `-dY` (TMEM) | `K_decay` | 128 x 128 x 16 | 1 | yes | none | `neg_dy_inp_ready` | `dstate_acc_ready`, `decay_done` |
+| 9 | `dk_restore_acc` | `dH` (SMEM) | `U^T` | 128 x 16 x 128 | 8 | on k>0 | `has_dstate` | `dstate_smem_ready` | `dk_restore_part_acc_ready` |
+| 10 | `dstate_acc` | `-dY` (TMEM) | `K_decay` | 128 x 128 x 16 | 1 | yes | none | `neg_dy_inp_ready` | `dstate_acc_ready` |
 | 11 | `dk_inv_acc` | `Q_decay^T` (SMEM) | `dA` | 128 x 16 x 16 | 1 | no | none | `da_ready` | none yet |
 | 12 | `dq_acc` | `K_inv^T` (SMEM) | `dA^T` | 128 x 16 x 16 | 1 | twin | `chunk >= FIRST_STATE_CHUNK` selects the twin | same stage | `dq_acc_ready`, `da_done` |
 | 13 | `dk_decay_acc` | `state` (TMEM) | `dY^T` | 128 x 16 x 128 | 8 | on k>0 | `chunk >= FIRST_STATE_CHUNK` | `dy_smem_ready` | `dy_smem_done`, `state_inp_done` |
@@ -1057,6 +1157,7 @@ table in `.porting/gdn2_bprop_f16/static_opcode_evidence.md`.
 | `rcp.approx.ftz.f32` | 48 | `1/eG` is a reciprocal, never a divide |
 | `ex2.approx.ftz.f32` | 16 | the gate lives in log2 space |
 | `barrier.sync` | 7 | named barriers at 512, 416 and 128 threads |
+| `fence.proxy.async.shared::cta` | 17 | one per generic-to-async-proxy publish; the `state` branch has 18, the extra being the dht seed's, which `basic` does not compile |
 | `setmaxnreg` | 7 | three compute groups plus four single warps |
 | `atom.global` | 0 | the ticket atomic appears only in the `dynamic` branch, where it is 1 |
 
