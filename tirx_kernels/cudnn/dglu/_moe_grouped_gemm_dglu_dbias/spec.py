@@ -575,7 +575,10 @@ def derive(config):
     dbias_bytes = 128 * epi_n * 2 * 4 if config["with_dbias"] else 4
 
     a_stage_bytes = cta_tile_m * K_TILE * 2
-    b_stage_bytes = tile_n * K_TILE * 2
+    # Under a two-CTA atom the N operand is split across the CTA pair, so each
+    # CTA stages only its half. The AB expect_tx the reference emits is
+    # ``(a_stage_bytes + b_stage_bytes) * atom_thr``.
+    b_stage_bytes = (tile_n // thr) * K_TILE * 2
     ab_stage_bytes = a_stage_bytes + b_stage_bytes
 
     mbar_helpers_bytes = 1024
@@ -616,6 +619,7 @@ def derive(config):
         "helper_grid": helper_grid,
         "needs_helper": needs_helper,
         "workspace_bytes": workspace_bytes,
+        "ab_expect_tx_bytes": (a_stage_bytes + b_stage_bytes) * thr,
         "smem": {
             "c_bytes": c_bytes,
             "d_bytes": d_bytes,
