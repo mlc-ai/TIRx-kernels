@@ -70,120 +70,47 @@ def _validate(head_dim: int, coff: int) -> None:
         raise ValueError(f"coff={coff} is outside the source dispatch domain")
 
 
-_SOURCE_EXP_PTX = r"""
-// tirx.reqntid compressor_fwd_kernel 64 1 1
-__forceinline__ __device__ float tirx_csa_source_exp(
-        float value, float magic_bias, float magic_scale) {
-  float result;
-  asm volatile(
-      "{.reg .f32 rounded, exponent, offset, negated, reduced, fraction;\n"
-      " .reg .b32 exponent_bits;\n"
-      " fma.rn.f32 rounded, %1, 0f3BBB989D, 0f3F000000;\n"
-      " cvt.sat.f32.f32 rounded, rounded;\n"
-      " fma.rm.f32 exponent, rounded, %3, %2;\n"
-      " add.f32 offset, exponent, 0fCB40007F;\n"
-      " neg.f32 negated, offset;\n"
-      " fma.rn.f32 reduced, %1, 0f3FB8AA3B, negated;\n"
-      " fma.rn.f32 reduced, %1, 0f32A57060, reduced;\n"
-      " shl.b32 exponent_bits, exponent, 23;\n"
-      " ex2.approx.ftz.f32 fraction, reduced;\n"
-      " mul.f32 %0, fraction, exponent_bits;}\n"
-      : "=f"(result)
-      : "f"(value), "f"(magic_bias), "f"(magic_scale));
-  return result;
-}
-"""
-
-_EXP_CONSTANTS_PTX = r"""
-__forceinline__ __device__ void tirx_csa_exp_constants(
-        float& magic_bias, float& magic_scale) {
-  asm volatile(
-      "mov.b32 %0, 0f4B400001;\n"
-      "mov.b32 %1, 0f437C0000;\n"
-      : "=f"(magic_bias), "=f"(magic_scale));
-}
-"""
-
-_ORDERED_MAX_PTX = r"""
-__forceinline__ __device__ float tirx_csa_ordered_max(
-        float candidate, float current) {
-  float result;
-  asm volatile(
-      "{.reg .pred greater;\n"
-      " setp.gt.f32 greater, %1, %2;\n"
-      " selp.f32 %0, %1, %2, greater;}\n"
-      : "=f"(result)
-      : "f"(candidate), "f"(current));
-  return result;
-}
-"""
-
-_SCAN_BOUNDARY_PTX = r"""
-__forceinline__ __device__ void tirx_csa_scan_boundary(
-        int& seq_idx, int& block_in_sequence, int bb,
-        int sequence_number, int sequence_begin, int sequence_end) {
-  asm volatile(
-      "{.reg .pred before_begin, before_end;\n"
-      " .reg .s32 candidate_sequence, candidate_block;\n"
-      " setp.lt.s32 before_begin, %2, %4;\n"
-      " setp.lt.s32 before_end, %2, %5;\n"
-      " selp.b32 candidate_sequence, %3, %0, before_end;\n"
-      " sub.s32 candidate_block, %2, %4;\n"
-      " selp.b32 candidate_block, candidate_block, %1, before_end;\n"
-      " selp.b32 %0, %0, candidate_sequence, before_begin;\n"
-      " selp.b32 %1, %1, candidate_block, before_begin;}\n"
-      : "+r"(seq_idx), "+r"(block_in_sequence)
-      : "r"(bb), "r"(sequence_number), "r"(sequence_begin), "r"(sequence_end));
-}
-"""
+def _f32_bits(bits: int):
+    return K.reinterpret("float32", K.uint32(bits))
 
 
 def _source_exp(value, magic_bias, magic_scale):
     """Reproduce the source expansion with its literal PTX immediates."""
-    return K.cuda.func_call(
-        "tirx_csa_source_exp",
-        value,
-        magic_bias,
-        magic_scale,
-        source_code=_SOURCE_EXP_PTX,
-        return_type="float32",
-    )
+    rounded = K.local_scalar("float32")
+    exponent = K.local_scalar("float32")
+    offset = K.local_scalar("float32")
+    negated = K.local_scalar("float32")
+    reduced = K.local_scalar("float32")
+    fraction = K.local_scalar("float32")
+    exponent_bits = K.local_scalar("float32")
+    result = K.local_scalar("float32")
+    K.ptx.fma.rn.f32(rounded, value, _f32_bits(0x3BBB989D), _f32_bits(0x3F000000))
+    K.ptx.cvt.sat.f32.f32(rounded, rounded)
+    K.ptx.fma.rm.f32(exponent, rounded, magic_scale, magic_bias)
+    K.ptx["add.f32"](offset, exponent, _f32_bits(0xCB40007F))
+    K.ptx.neg.f32(negated, offset)
+    K.ptx.fma.rn.f32(reduced, value, _f32_bits(0x3FB8AA3B), negated)
+    K.ptx.fma.rn.f32(reduced, value, _f32_bits(0x32A57060), reduced)
+    K.ptx.shl.b32(exponent_bits, exponent, K.uint32(23))
+    K.ptx.ex2.approx.ftz.f32(fraction, reduced)
+    K.ptx["mul.f32"](result, fraction, exponent_bits)
+    return result
 
 
 def _ordered_max(candidate, current):
     """Select with the source kernel's strict ordered floating-point predicate."""
-    return K.cuda.func_call(
-        "tirx_csa_ordered_max",
-        candidate,
-        current,
-        source_code=_ORDERED_MAX_PTX,
-        return_type="float32",
-    )
+    greater = K.local_scalar("uint32")
+    result = K.local_scalar("float32")
+    K.ptx.setp.gt.f32(greater, candidate, current)
+    K.ptx.selp.f32(result, candidate, current, K.ptx.pred(greater))
+    return result
 
 
-def _load4_bf16x2_source(stride_bytes: int) -> str:
-    offsets = [index * stride_bytes for index in range(4)]
-    return rf"""
-__forceinline__ __device__ void tirx_csa_load4_bf16x2(
-        unsigned int& score0, unsigned int& value0,
-        unsigned int& score1, unsigned int& value1,
-        unsigned int& score2, unsigned int& value2,
-        unsigned int& score3, unsigned int& value3,
-        const void* score_pointer, const void* value_pointer) {{
-  asm volatile(
-      "ld.global.b32 %0, [%8+{offsets[0]}];\n"
-      "ld.global.b32 %1, [%9+{offsets[0]}];\n"
-      "ld.global.b32 %2, [%8+{offsets[1]}];\n"
-      "ld.global.b32 %3, [%9+{offsets[1]}];\n"
-      "ld.global.b32 %4, [%8+{offsets[2]}];\n"
-      "ld.global.b32 %5, [%9+{offsets[2]}];\n"
-      "ld.global.b32 %6, [%8+{offsets[3]}];\n"
-      "ld.global.b32 %7, [%9+{offsets[3]}];\n"
-      : "=r"(score0), "=r"(value0), "=r"(score1), "=r"(value1),
-        "=r"(score2), "=r"(value2), "=r"(score3), "=r"(value3)
-      : "l"(score_pointer), "l"(value_pointer));
-}}
-"""
+def _load4_bf16x2(score_words, value_words, start, score_pointer, value_pointer, stride_bytes):
+    for index in range(4):
+        byte_offset = K.int32(index * stride_bytes)
+        K.ptx.ld.global_.b32(score_words[start + index], K.ptx.addr(score_pointer, byte_offset))
+        K.ptx.ld.global_.b32(value_words[start + index], K.ptx.addr(value_pointer, byte_offset))
 
 
 def get_kernel(head_dim: int, coff: int, **kwargs):
@@ -193,21 +120,8 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
     ncol = head_dim // vec
     width = coff * head_dim
     win = 8 if coff == 2 else 4
-    load4_bf16x2_source = _load4_bf16x2_source(width * 2)
 
-    @K.kernel(
-        warps=2,
-        arch="sm_100a",
-        grid=lambda p: [p["nb_total"], K.ceildiv(ncol, 64), 1],
-        allowed_func_calls=(
-            "tirx_csa_exp_constants",
-            "tirx_csa_load4_bf16x2",
-            "tirx_csa_ordered_max",
-            "tirx_csa_scan_boundary",
-            "tirx_csa_source_exp",
-        ),
-        warp_scope=False,
-    )
+    @K.kernel(warps=2, arch="sm_100a", grid=lambda p: [p["nb_total"], K.ceildiv(ncol, 64), 1])
     def compressor_fwd(
         kv: K.gptr[K.bf16],
         score: K.gptr[K.bf16],
@@ -256,15 +170,30 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
                         K.ptx.ld.global_.b32(
                             sequence_end, cu_seqlens_comp.ptr_to([sequence_number + 1])
                         )
-                        K.cuda.func_call(
-                            "tirx_csa_scan_boundary",
-                            seq_idx,
+                        before_begin = K.local_scalar("uint32")
+                        before_end = K.local_scalar("uint32")
+                        candidate_sequence = K.local_scalar("int32")
+                        candidate_block = K.local_scalar("int32")
+                        K.ptx.setp.lt.s32(before_begin, bb, sequence_begin)
+                        K.ptx.setp.lt.s32(before_end, bb, sequence_end)
+                        K.ptx.selp.b32(
+                            candidate_sequence, sequence_number, seq_idx, K.ptx.pred(before_end)
+                        )
+                        K.ptx.sub.s32(candidate_block, bb, sequence_begin)
+                        K.ptx.selp.b32(
+                            candidate_block,
+                            candidate_block,
                             block_in_sequence,
-                            bb,
-                            sequence_number,
-                            sequence_begin,
-                            sequence_end,
-                            source_code=_SCAN_BOUNDARY_PTX,
+                            K.ptx.pred(before_end),
+                        )
+                        K.ptx.selp.b32(
+                            seq_idx, seq_idx, candidate_sequence, K.ptx.pred(before_begin)
+                        )
+                        K.ptx.selp.b32(
+                            block_in_sequence,
+                            block_in_sequence,
+                            candidate_block,
+                            K.ptx.pred(before_begin),
                         )
                         K.assign(sequence_begin, sequence_end)
 
@@ -298,19 +227,13 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
                     score_words = K.alloc_local([win], "uint32")
                     value_words = K.alloc_local([win], "uint32")
                     own_offset = token * K.int32(width) + K.int32(head_dim) + column
-                    K.cuda.func_call(
-                        "tirx_csa_load4_bf16x2",
-                        score_words[4],
-                        value_words[4],
-                        score_words[5],
-                        value_words[5],
-                        score_words[6],
-                        value_words[6],
-                        score_words[7],
-                        value_words[7],
+                    _load4_bf16x2(
+                        score_words,
+                        value_words,
+                        4,
                         score.ptr_to([own_offset]),
                         kv.ptr_to([own_offset]),
-                        source_code=load4_bf16x2_source,
+                        width * 2,
                     )
                 for k in range(win):
                     score_bits = K.alloc_local([vec], "uint16")
@@ -323,19 +246,13 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
                                 K.ptx.ld.global_.b16(value_bits[0], kv.ptr_to([offset]))
                             else:
                                 if k == 0:
-                                    K.cuda.func_call(
-                                        "tirx_csa_load4_bf16x2",
-                                        score_words[0],
-                                        value_words[0],
-                                        score_words[1],
-                                        value_words[1],
-                                        score_words[2],
-                                        value_words[2],
-                                        score_words[3],
-                                        value_words[3],
+                                    _load4_bf16x2(
+                                        score_words,
+                                        value_words,
+                                        0,
                                         score.ptr_to([offset]),
                                         kv.ptr_to([offset]),
-                                        source_code=load4_bf16x2_source,
+                                        width * 2,
                                     )
                                 K.ptx.mov.b32(score_bits[0], score_bits[1], score_words[k])
                                 K.ptx.mov.b32(value_bits[0], value_bits[1], value_words[k])
@@ -382,12 +299,8 @@ def get_kernel(head_dim: int, coff: int, **kwargs):
                 # every scalar exponential expansion in the thread.
                 magic_bias = K.local_scalar("float32")
                 magic_scale = K.local_scalar("float32")
-                K.cuda.func_call(
-                    "tirx_csa_exp_constants",
-                    magic_bias,
-                    magic_scale,
-                    source_code=_EXP_CONSTANTS_PTX,
-                )
+                K.ptx.mov.b32(magic_bias, K.uint32(0x4B400001))
+                K.ptx.mov.b32(magic_scale, K.uint32(0x437C0000))
 
                 outputs = K.alloc_local([vec], "float32")
                 for lane in range(vec):
