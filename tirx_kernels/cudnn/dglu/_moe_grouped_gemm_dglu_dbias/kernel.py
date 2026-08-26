@@ -74,6 +74,11 @@ def _elected():
 
 
 def _try_wait_acquire(dst, barrier, phase):
+    """The non-blocking look-ahead peek: acquire scope, and no suspend hint.
+
+    Four of these in the anchor export, at `PTX 863, 919, 1170, 1241`; their
+    status predicates the blocking acquire that follows.
+    """
     K.ptx.mbarrier.try_wait.parity.acquire.cta.shared__cta.b64(
         dst, barrier, K.cast(phase, "uint32")
     )
@@ -82,19 +87,15 @@ def _try_wait_acquire(dst, barrier, phase):
 def _wait_plain(barrier, phase):
     """Spin on one mbarrier until its phase flips.
 
-    The retry takes the hintless `try_wait` -- the same form the source's own
-    hot waits use. Given a suspend-time hint, ptxas expands the wait inline into
-    four instructions: the check, a `NANOSLEEP`, a second check and the branch.
-    That is where 48.6% of this port's not-issued samples were parked, against
-    12.8% for the reference, and it puts three instructions between the barrier
-    and the load that depends on it. Without the hint the wait is two
-    instructions -- the check and one predicated branch to an out-of-line retry
-    -- and the export shows the reference's dependent `LDS.128` issuing directly
-    behind its branch.
+    The blocking form, carrying the source's suspend-time hint. Twenty-nine of
+    these in the anchor export against four hintless peeks, and the hint is a
+    per-kernel constant read off that export rather than a knob.
     """
     ready = K.local_scalar("uint32", init=K.uint32(0))
     with K.While(ready == K.uint32(0)):
-        _try_wait_acquire(ready, barrier, phase)
+        K.ptx.mbarrier.try_wait.parity.shared.b64(
+            ready, barrier, K.cast(phase, "uint32"), K.uint32(_TRY_WAIT_TICKS)
+        )
 
 
 def _wait_plain_if_needed(barrier, phase, speculative_ready):
@@ -324,12 +325,11 @@ def _descriptor_with_address(base, shared_address):
     return K.bitwise_or(K.uint64(base), address_field)
 
 
-_TMA_G2S_3D = (
-    "cp.async.bulk.tensor.3d.shared::cluster.global.tile"
-    ".mbarrier::complete_tx::bytes.L2::cache_hint"
+_TMA_G2S_3D_CTA = (
+    "cp.async.bulk.tensor.3d.shared::cta.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint"
 )
-_TMA_G2S_4D = (
-    "cp.async.bulk.tensor.4d.shared::cluster.global.tile"
+_TMA_G2S_3D_CLUSTER = (
+    "cp.async.bulk.tensor.3d.shared::cluster.global.tile"
     ".mbarrier::complete_tx::bytes.L2::cache_hint"
 )
 _TMA_MCAST = ".multicast::cluster"
@@ -338,10 +338,16 @@ _TMA_MCAST = ".multicast::cluster"
 def _tma_load(destination, descriptor, coords, barrier, mask, *, two_cta, desc_ptr=None):
     """One `cp.async.bulk.tensor` load, multicast only when a mask is given.
 
+    A copy takes the `shared::cluster` stem only when it actually addresses the
+    cluster -- a two-CTA copy, or a multicast one. The anchor export carries two
+    of each stem, its A and B loads against its two C loads;
+    `tile128_c1x1`, whose single-CTA atom sits in a singleton cluster, carries
+    four `shared::cta` and no `shared::cluster` at all.
+
     The two-CTA MMA adds `.cta_group::2`; the multicast form inserts its mask
     modifier before the cache hint, matching the operand order the export shows.
     """
-    stem = _TMA_G2S_3D if len(coords) == 3 else _TMA_G2S_4D
+    stem = _TMA_G2S_3D_CLUSTER if (two_cta or mask is not None) else _TMA_G2S_3D_CTA
     if mask is not None:
         head, _, tail = stem.partition(".mbarrier::complete_tx::bytes")
         stem = head + ".mbarrier::complete_tx::bytes" + _TMA_MCAST + tail
@@ -1227,7 +1233,7 @@ def _make_kernel(
                 _wait_plain(ab_pipe.empty.ptr_to([ab_prod.stage]), ab_prod.phase)
                 ab_prod.advance()
 
-        # ---- Role 3: warp 4, persistent block-scaled MMA ------------------
+        # ---- Role 3: warp 4, persistent MMA -------------------------------
         with mma_role:
             K.ptx.bar.sync(K.uint32(3), K.uint32(160))
             acc_tmem_base = K.local_scalar("uint32")
@@ -1249,9 +1255,6 @@ def _make_kernel(
                     _try_wait_acquire(
                         ab_full_ready, ab_pipe.full.ptr_to([ab_cons.stage]), ab_cons.phase
                     )
-                    # One accumulator mbarrier stage, two TMEM regions: the
-                    # stage index is the producer phase's complement, so
-                    # successive tiles alternate between the strided regions.
                     _wait_plain(acc_pipe.empty.ptr_to([acc_prod.stage]), acc_prod.phase)
                     accumulate = K.local_scalar("uint32", init=K.uint32(0))
                     # Two real accumulator stages, each its own `cta_tile_n`
@@ -1407,7 +1410,6 @@ def _make_kernel(
 
             acc_cons = K.PipelineState(acc_stages, phase=0)
             c_cons = K.PipelineState(c_stages, phase=0)
-            d_prod = K.PipelineState(max(1, d_stages // 2), phase=1)
             epi_info = K.PipelineState(tile_stages, phase=0)
             epi_expert = K.local_scalar("int32")
             epi_tile_m = K.local_scalar("int32")
@@ -1415,40 +1417,33 @@ def _make_kernel(
             epi_slots = (epi_expert, epi_tile_m, epi_tile_n)
 
             # The register tile is walked two elements at a time throughout the
-            # epilogue, and the pairs are always issued packed: one
-            # `mul.rn.f32x2` / `add.rn.f32x2` per pair where the scalar form
-            # issues two, for identical numbers -- each half of a packed line
-            # rounds exactly as its scalar sibling.
-            #
-            # The source only writes packed intrinsics under `vectorized_f32`,
-            # but its scalar branch is packed for it: on a `vectorized_f32=False`
-            # shape the reference still retires roughly a quarter of TIRx's FP32
-            # instruction count, which a scalar lowering cannot do. Emitting the
-            # packed form on every specialization is what actually matches the
-            # reference's machine code.
+            # epilogue. Under `vectorized_f32` each pair issues one
+            # `mul.rn.f32x2` / `add.rn.f32x2` where the scalar form issues two,
+            # for identical numbers -- each half of a packed line rounds exactly
+            # as its scalar sibling -- and `scalar_f32` is its own export branch.
             packed_pair = K.local_scalar("uint64")
-            ops = _arithmetic(True, packed_pair)
+            ops = _arithmetic(vectorized_f32, packed_pair)
             epi_lane = K.local_scalar("int32", init=K.thread_id() % K.int32(32))
             epi_warp = _warp_uniform(K.thread_id() // K.int32(32))
 
-            def dbias_reduce(real_subtile, tile_base):
-                """One subtile's contribution to this expert's dBias column sums.
+            def dbias_warp_base():
+                return K.local_scalar(
+                    "int32", init=offsets["sDbias"] + epi_warp * K.int32(64 * 32 * 4)
+                )
+
+            def dbias_transpose():
+                """Stage this subtile's 64 columns into `sDbias` as (column, row).
 
                 Each thread holds one row's 32 gate and 32 up values, so a column
-                sum is a reduction *across* threads. The 64 columns go to SMEM as
-                (column, row) -- the transpose -- each warp into its own 8 KiB
-                block; then one thread takes two whole columns and sums their 32
-                rows, the four warps' partial sums are combined, and warp 0
-                atomically accumulates a bf16 pair per column.
+                sum is a reduction *across* threads; the transpose is what turns
+                it into one. Each warp writes its own 8 KiB block.
 
                 Rows are stored with the source's `((col >> 1) & 7) << 2` XOR on
                 the row-group index. It cancels out of the sum -- it is there so
                 that the 32 lanes reading 32 different columns hit 32 different
                 banks instead of all landing on the same one.
                 """
-                warp_base = K.local_scalar(
-                    "int32", init=offsets["sDbias"] + epi_warp * K.int32(64 * 32 * 4)
-                )
+                warp_base = dbias_warp_base()
                 group = K.local_scalar("int32", init=epi_lane // K.int32(4))
                 sub = K.local_scalar("int32", init=epi_lane % K.int32(4))
                 # `group ^ swizzle` for each of the eight constant swizzles.
@@ -1464,6 +1459,16 @@ def _make_kernel(
                             * K.int32(4),
                         )
                         K.ptx.st.shared.b32(smem.ptr_to([slot]), fragment[n])
+
+            def dbias_reduce(real_subtile, tile_base):
+                """Reduce the staged transpose into this expert's column sums.
+
+                One thread takes two whole columns and sums their 32 rows, the
+                four warps' partial sums are combined through the front of the
+                same buffer, and warp 0 atomically accumulates a BF16 pair per
+                column.
+                """
+                warp_base = dbias_warp_base()
                 K.ptx.bar.sync(K.uint32(2), K.uint32(128))
 
                 # Lanes 0-15 take the gate half's even columns, 16-31 the up
@@ -1542,8 +1547,11 @@ def _make_kernel(
                     )
                     packed = K.local_scalar("uint32")
                     K.ptx["cvt.rn.bf16x2.f32"](packed, totals[1], totals[0])
-                    # Same over-range tiles as the scale factors, and the source
-                    # guards this accumulate for the same reason.
+                    # A cluster covers `cluster_n` column tiles whether or not
+                    # the output has that many, so the last cluster carries
+                    # tiles past the end. The D store is a TMA and its
+                    # descriptor drops those writes on its own; this accumulate
+                    # is a plain reduction and needs the bound spelled out.
                     with K.If(n_offset < K.int32(N_out)), K.Then():
                         K.ptx["red.global.add.noftz.bf16x2"](
                             named["dbias"].ptr_to(
@@ -1643,9 +1651,8 @@ def _make_kernel(
                         # C fragments are the C dtype, so it releases with
                         # nothing between the load and the fence; widening first
                         # would hold the buffer for another forty-odd
-                        # instructions, and with only two C stages on a
-                        # four-bit specialization the producer has no slack to
-                        # absorb that.
+                        # instructions, and with only two C stages the producer
+                        # has no slack to absorb that.
                         K.ptx["fence.proxy.async.shared::cta"]()
                         with K.If(K.lane_id() == K.int32(0)), K.Then():
                             K.ptx.mbarrier.arrive.shared.b64(c_pipe.empty.ptr_to([c_cons.stage]))
@@ -1796,9 +1803,19 @@ def _make_kernel(
                             K.assign(rC1[span[half]], d_gate[half])
                             K.assign(rC2[span[half]], d_up[half])
 
+                    # The dBias transpose is staged straight out of the gradient
+                    # registers, before the dProb fold, and its reduction runs
+                    # after -- the order `dbias_reduction` is called in and the
+                    # order the export's barriers appear in.
+                    if generate_dbias:
+                        dbias_transpose()
+
                     folded_prob = K.local_scalar("float32")
                     K.ptx["add.f32"](folded_prob, dprob_pair[0], dprob_pair[1])
                     K.ptx["add.f32"](dprob_acc, dprob_acc, folded_prob)
+
+                    if generate_dbias:
+                        dbias_reduce(real_subtile, d_tile_base)
 
                     # ---- convert D and stage it through SMEM -------------
                     _pack_output(rD1, rC1, d_dtype, d_bits)
@@ -1867,16 +1884,6 @@ def _make_kernel(
                                     K.uint64(0),
                                 )
                         K.ptx["cp.async.bulk.commit_group"]()
-                        d_prod.advance()
-                    # The dBias column sums are taken with the tile's D store
-                    # already in flight. They read the activation fragments,
-                    # which the packing only copied, and they touch their own
-                    # shared region, so nothing in them depends on the store --
-                    # and the reduction is a transpose through shared memory
-                    # with two barriers in it, which is exactly the kind of work
-                    # a bulk store wants underneath it.
-                    if generate_dbias:
-                        dbias_reduce(real_subtile, d_tile_base)
                     K.ptx.bar.sync(K.uint32(2), K.uint32(128))
                     K.assign(real_subtile, real_subtile + K.int32(1))
                     K.assign(subtile, subtile + K.int32(1))
@@ -1887,7 +1894,6 @@ def _make_kernel(
                 # where the accumulator lives -- hence its `4 * atom_thr`
                 # arrivals. Releasing locally leaves the leader's MMA waiting on
                 # a stage nobody frees.
-                K.ptx["tcgen05.wait::ld.sync.aligned"]()
                 with K.If(_elected()), K.Then():
                     peer_bar = K.local_scalar("uint32")
                     local_bar = K.local_scalar("uint32")
@@ -1913,12 +1919,15 @@ def _make_kernel(
                 # is immediately discarded.
                 K.ptx["red.global.add.f32"](named["dprob"].ptr_to([thread_row]), dprob_acc)
 
-            # Release the TMEM allocation permit and free the columns. Both are
-            # warp 0's: the permit is a warp-wide instruction and the source
-            # issues it under the same predicate as the deallocation.
-            K.ptx.bar.sync(K.uint32(2), K.uint32(128))
+            # Release the TMEM allocation permit, then synchronize the four
+            # epilogue warps, then free the columns. Both tensor-memory
+            # instructions are warp 0's -- each is `.sync.aligned`, and the
+            # export predicates both on the allocator warp -- but the permit
+            # goes *before* the barrier and the deallocation after it.
             with K.If(warp == K.int32(0)), K.Then():
                 K.ptx[f"tcgen05.relinquish_alloc_permit.{cta_group}.sync.aligned"]()
+            K.ptx.bar.sync(K.uint32(2), K.uint32(128))
+            with K.If(warp == K.int32(0)), K.Then():
                 if atom_thr > 1:
                     # A CTA pair frees its TMEM collectively: each CTA arrives on
                     # its peer's deallocation barrier and waits on its own before
