@@ -85,10 +85,18 @@ def prepare_data(**config):
             ),
         }
 
+    # (N, K, L) views of the same values, one k-major and one n-major, so a
+    # specialization can be handed the layout its ``b_major`` promises.
+    b_kmajor = b.permute(1, 2, 0)
+    b_nmajor = b.permute(0, 2, 1).contiguous().permute(2, 1, 0)
+
     b_ptrs = None
     b_experts = None
     if config["weight_mode"] == "discrete":
-        b_experts = [b[i].contiguous() for i in range(L)]
+        b_experts = [
+            b[i].contiguous() if config["b_major"] == "k" else b[i].t().contiguous().t()
+            for i in range(L)
+        ]
         b_ptrs = torch.tensor(
             [int(t.data_ptr()) for t in b_experts], dtype=torch.int64, device=device
         )
@@ -98,6 +106,8 @@ def prepare_data(**config):
         "derived": derived,
         "a": a,
         "b": b,
+        "b_kmajor": b_kmajor,
+        "b_nmajor": b_nmajor,
         "b_ptrs": b_ptrs,
         "b_experts": b_experts,
         "c": c,
@@ -304,7 +314,9 @@ def compile_reference(data):
         if workspace is not None
         else cute.runtime.nullptr(dtype=cutlass.Uint8, assumed_align=128)
     )
-    b_dense = data["b"].permute(1, 2, 0)
+    # ``b`` is (N, K, L) either way; only which extent is contiguous differs, and
+    # the leading dimension the DSL is told about must actually carry stride 1.
+    b_dense = data["b_kmajor"] if b_major == "k" else data["b_nmajor"]
     b_argument = (
         dlpack(data["b_ptrs"], align=8).iterator
         if discrete
