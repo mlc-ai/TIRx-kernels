@@ -171,7 +171,7 @@ Named barriers (`:183-198`): id 0 the CTA-wide init barrier (`bar.sync 0`,
 plus four epilogue warps), id 4 scheduler (32). Barrier **id 1 (256 threads)
 does not occur in the anchor** — it appears only in the singleton-cluster
 branches, where it replaces the cluster wait. Anchor totals: 12 `bar.sync`
-(1x id 0, 2x id 4, 2x id 3, 7x id 2), 25 `mbarrier.init`, 33
+(1x id 0, 2x id 4, 2x id 3, 7x id 2), 23 `mbarrier.init`, 33
 `mbarrier.try_wait`, 25 `elect.sync`.
 
 ## Primitive vocabulary
@@ -269,10 +269,14 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #   # instruction_selection: tcgen05.alloc.cta_group::N.sync.aligned.shared::cta.b32; extent: once per kernel
 #
 # Init order (source 1189-1250, 1272-1282, 1325-1328):
-#   mbarrier_init(...)                       # 25 objects, PTX 118-231
+#   mbarrier_init(...)                       # 22 objects, PTX 118-225
+#     # ab_full/empty 5+5 at 0..72, acc_full/empty 2+2 at 80..104,
+#     # tile_info_full/empty 2+2 at 112..136, c_full/empty 2+2 at 176..200.
 #   fence_mbarrier_init()                    # PTX 232
 #   named_barrier(0, 256)                    # PTX 233  -- CTA-wide init barrier
-#   fence_mbarrier_init()                    # PTX 246
+#   if elect_one():                          # PTX 238
+#       mbarrier_init(tmem_dealloc, 32)      # source 1272, PTX 243 -- the 23rd
+#   fence_mbarrier_init()                    # PTX 246, publishes that one barrier
 #   cluster_arrive_relaxed()                 # PTX 248
 #   ... smem tensor setup, the two multicast masks, MMA fragment construction ...
 #   cluster_wait()                           # PTX 262
@@ -355,7 +359,9 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #     for each work tile:
 #         if expert_idx < 0: break
 #         update_expert_info(padded_offsets, expert_idx)     # ext, token range
-#         status = peek(ab_empty[ab_stage], phase)           # source 1441
+#         status = True                                      # source 1439
+#         if k_tile_cnt > 0 and is_leader_cta:               # source 1440
+#             status = peek(ab_empty[ab_stage], phase)       # source 1441
 #         for k_tile in range(k_tile_cnt):
 #             acquire(ab_empty[ab_stage], phase, unless=status)
 #             leader = elect_one()
@@ -399,6 +405,7 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #     stage, phase = advance(stage, phase, num_tile_stage)
 #     for each work tile:
 #         if expert_idx < 0: break
+#         status = True                                      # source 1532
 #         if k_tile_cnt > 0 and is_leader_cta:               # source 1533
 #             status = peek(ab_full[ab_stage], phase)        # source 1534
 #         if is_leader_cta:                                  # source 1546
