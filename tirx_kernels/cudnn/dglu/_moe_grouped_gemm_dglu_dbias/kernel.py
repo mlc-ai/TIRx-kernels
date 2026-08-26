@@ -256,33 +256,30 @@ def _tcgen05_commit(barrier, mask, cta_group, cluster_size):
 
 
 def _unpack_input(values, words, dtype, bits):
-    """Expand one thread's row of an epilogue tile into 32 FP32 values."""
-    if bits == 16:
-        converter = "cvt.f32.bf16" if dtype == "bfloat16" else "cvt.f32.f16"
-        for word in range(16):
-            low = K.local_scalar("uint16")
-            high = K.local_scalar("uint16")
-            K.ptx["mov.b32"](low, high, words[word])
-            K.ptx[converter](values[2 * word + 0], low)
-            K.ptx[converter](values[2 * word + 1], high)
-    else:
-        for word in range(32):
-            K.ptx["mov.b32"](values[word], words[word])
+    """Widen one thread's row of a 16-bit epilogue tile into 32 FP32 values.
+
+    A 32-bit C never reaches here: its shared words are the values already, and
+    the caller loads them straight into the fragment.
+    """
+    converter = "cvt.f32.bf16" if dtype == "bfloat16" else "cvt.f32.f16"
+    for word in range(16):
+        low = K.local_scalar("uint16")
+        high = K.local_scalar("uint16")
+        K.ptx["mov.b32"](low, high, words[word])
+        K.ptx[converter](values[2 * word + 0], low)
+        K.ptx[converter](values[2 * word + 1], high)
 
 
 def _pack_output(words, values, dtype, bits):
     """Pack a 32-element FP32 fragment into the output dtype's storage words.
 
     A 16-bit output uses `cvt.rn.bf16x2.f32` / `cvt.rn.f16x2.f32`, two elements
-    to a word; FP32 is a move.
+    to a word. A 32-bit output never reaches here -- the gradient registers are
+    already its representation, so the caller stages them directly.
     """
-    if bits == 16:
-        converter = "cvt.rn.bf16x2.f32" if dtype == "bfloat16" else "cvt.rn.f16x2.f32"
-        for word in range(16):
-            K.ptx[converter](words[word], values[2 * word + 1], values[2 * word + 0])
-    else:
-        for word in range(32):
-            K.ptx["mov.b32"](words[word], values[word])
+    converter = "cvt.rn.bf16x2.f32" if dtype == "bfloat16" else "cvt.rn.f16x2.f32"
+    for word in range(16):
+        K.ptx[converter](words[word], values[2 * word + 1], values[2 * word + 0])
 
 
 def _instruction_descriptor(M, N, a_major, b_major):
@@ -1421,12 +1418,24 @@ def _make_kernel(
             epi_slots = (epi_expert, epi_tile_m, epi_tile_n)
 
             # The register tile is walked two elements at a time throughout the
-            # epilogue. Under `vectorized_f32` each pair issues one
-            # `mul.rn.f32x2` / `add.rn.f32x2` where the scalar form issues two,
-            # for identical numbers -- each half of a packed line rounds exactly
-            # as its scalar sibling -- and `scalar_f32` is its own export branch.
+            # epilogue, and the pairs are always issued packed: one
+            # `mul.rn.f32x2` / `add.rn.f32x2` per pair where the scalar form
+            # issues two, for identical numbers -- each half of a packed line
+            # rounds exactly as its scalar sibling, and a `neg` plus a packed
+            # `add` equals a `sub` bit for bit.
+            #
+            # `vectorized_f32` governs which intrinsics the reference's *author*
+            # writes, not what its machine executes: its compiler pairs the
+            # scalar arithmetic anyway, and on a scalar specialization the
+            # reference retires roughly a quarter of a scalar lowering's FP32
+            # instruction count. The larger half of the effect is register
+            # pressure -- pairing halves the value-carrying registers in a wide
+            # epilogue and takes the stack frame with it.
+            #
+            # The flag still selects the dGeGLU up-branch filter below, where
+            # the reference's two arms genuinely disagree.
             packed_pair = K.local_scalar("uint64")
-            ops = _arithmetic(vectorized_f32, packed_pair)
+            ops = _arithmetic(True, packed_pair)
             epi_lane = K.local_scalar("int32", init=K.thread_id() % K.int32(32))
             epi_warp = _warp_uniform(K.thread_id() // K.int32(32))
 
@@ -1568,8 +1577,11 @@ def _make_kernel(
             rC1 = K.alloc_local((32,), "float32")
             rC2 = K.alloc_local((32,), "float32")
             d_words = 32 * d_bits // 32
-            rD1 = K.alloc_local((d_words,), "uint32")
-            rD2 = K.alloc_local((d_words,), "uint32")
+            if d_bits == 32:
+                rD1, rD2 = rC1, rC2
+            else:
+                rD1 = K.alloc_local((d_words,), "uint32")
+                rD2 = K.alloc_local((d_words,), "uint32")
             # Counts subtiles across the whole persistent loop, so the two D
             # slots keep alternating across work tiles.
             prev_subtiles = K.local_scalar("int32", init=K.int32(0))
@@ -1638,7 +1650,16 @@ def _make_kernel(
                         c_slot = offsets["sC"] + c_cons.stage * derived["c_stage_bytes"]
                         # Each thread owns one row of the 128x32 subtile, so
                         # its slice starts at row * 32 * c_bits/8 bytes.
-                        raw = K.alloc_local((c_words,), "uint32")
+                        #
+                        # An FP32 C needs no widening at all -- its shared words
+                        # already are the values -- so the vector loads land
+                        # straight in the fragment. Going through a staging
+                        # array first cost 32 `mov.b32` per fragment, and a
+                        # register-to-register move written as inline assembly
+                        # is opaque to ptxas: it cannot coalesce them away. The
+                        # generated code carried 65 such call sites on an FP32-C
+                        # specialization against none on a 16-bit one.
+                        raw = fragment if c_bits == 32 else K.alloc_local((c_words,), "uint32")
                         c_row = K.local_scalar("int32", init=K.thread_id() * K.int32(c_row_bytes))
                         for word in range(0, c_words, 4):
                             # The descriptor swizzled this box on the way in, so
@@ -1661,7 +1682,8 @@ def _make_kernel(
                         with K.If(K.lane_id() == K.int32(0)), K.Then():
                             K.ptx.mbarrier.arrive.shared.b64(c_pipe.empty.ptr_to([c_cons.stage]))
                         c_cons.advance()
-                        _unpack_input(fragment, raw, c_dtype, c_bits)
+                        if c_bits != 32:
+                            _unpack_input(fragment, raw, c_dtype, c_bits)
 
                     # ---- dGLU derivative, elementwise over the subtile ----
                     # The register tile is walked two elements at a time: a
@@ -1812,8 +1834,13 @@ def _make_kernel(
                     K.ptx["add.f32"](dprob_acc, dprob_acc, folded_prob)
 
                     # ---- convert D and stage it through SMEM -------------
-                    _pack_output(rD1, rC1, d_dtype, d_bits)
-                    _pack_output(rD2, rC2, d_dtype, d_bits)
+                    # An FP32 D is already the gradient's own representation, so
+                    # the packing is an identity copy and the staging stores read
+                    # the gradient registers directly. The conversion registers
+                    # exist only for a narrower D.
+                    if d_bits != 32:
+                        _pack_output(rD1, rC1, d_dtype, d_bits)
+                        _pack_output(rD2, rC2, d_dtype, d_bits)
 
                     with K.If(warp == K.int32(0)), K.Then():
                         # The D pipeline is a bulk-group counter, not an
