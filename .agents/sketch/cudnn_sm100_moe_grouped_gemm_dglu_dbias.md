@@ -55,6 +55,7 @@ degenerate export cannot be annotated.
 | `tile128_c1x1` | one-CTA tile, singleton cluster | 3604 | 1115 | `f425a929` | `0x08400490` | 3 |
 | `tile_n64` | narrow tile_n | 3683 | 1127 | `098f01b9` | `0x08100490` | 6 |
 | `scalar_f32` | scalar (non-packed) epilogue math | 3501 | 849 | `201ea257` | `0x10400490` | 5 |
+| `nodbias` | bf16 C, dBias off -- the depth-6 point | 3197 | 952 | `354e50c1` | `0x10400490` | 6 |
 
 Instruction counts follow the corpus convention, instruction lines minus
 predicated lines: `anchor` = 2263 - 120 = **2143**.
@@ -70,7 +71,7 @@ predicated lines: `anchor` = 2263 - 120 = **2143**.
 | shape | 4 experts x 256 tokens, `N = 512`, `K = 512` | |
 | `epi_tile` | `(128, 32)`, 8 subtile pairs per tile | `:261` |
 | `k_tile` | 64 = instruction K 16 x `mma_inst_tile_k` 4 | `:224-230` |
-| stages | acc 2, **AB 5**, C 2, D 2, tile-info 2 | `:2244-2282` |
+| stages | acc 2, **AB 5**, C 2, D 2, tile-info 2 | `:2239-2282` |
 | AB `expect_tx` | **65536** = `(a_stage 16384 + b_stage 16384) * atom_thr 2` | `PTX 903-904` |
 | C `expect_tx` | **8192** = `128 * 32 * 2 B` | `PTX 3658` |
 | TMEM columns | **512** = `clamp(next_pow2(num_acc_stage * cta_tile_n), 32, 512)` | `:289-294`, `PTX 1427-1428` |
@@ -81,9 +82,11 @@ predicated lines: `anchor` = 2263 - 120 = **2143**.
 **AB depth is 5, and dBias does not change it at this tile.** The solve is
 `(232448 - reserved) // (a_stage + b_stage)` over `a_stage = b_stage = 16 KiB`,
 which lands on 5 both with dBias (`anchor`) and with FP32 C and no dBias
-(`cf32_nodbias`, whose larger sC cancels the sDbias saving). The depth does move
-with the tile: `tile128_c1x1` gets 3 (one CTA, so a full 32 KiB sB stage) and
-`tile_n64` gets 6.
+(`cf32_nodbias`, whose larger sC cancels the sDbias saving). Dropping dBias at a
+bf16 C does raise it, to 6 (`nodbias`: 12 AB mbarriers, sA-to-sB span
+132096 - 33792 = 98304 = 6 x 16384). The depth also moves with the tile:
+`tile128_c1x1` gets 3 (one CTA, so a full 32 KiB sB stage) and `tile_n64` gets 6.
+Every depth in the evidence table is read from an export, none inferred.
 
 **TMEM columns are derived, not pinned.** `anchor` and `tile128_c1x1` allocate
 512; `tile_n64` allocates **128** (`tcgen05.alloc` immediate). This is the
@@ -163,7 +166,7 @@ block-scaled sibling (`:158-162`). Sections below appear in **source order**.
 | 0-3 | epilogue | per subtile pair: TMEM read, `alpha^2` scale, C read, two GLU gradients, dprob and dBias accumulation, D store | consumes `acc_full`, `c_full`; releases `acc_empty`, `c_empty`; warp 0 owns TMEM alloc and the D stores |
 | 6 | C load | per subtile pair: two `shared::cta` `cp.async.bulk.tensor`, gate then up, into two separate C stages | consumes `c_empty`; publishes `c_full` |
 
-Named barriers (`:186-206`): id 0 the CTA-wide init barrier (`bar.sync 0`,
+Named barriers (`:183-198`): id 0 the CTA-wide init barrier (`bar.sync 0`,
 `PTX 233`), id 2 epilogue (128 threads), id 3 TMEM lifecycle (160 = MMA warp
 plus four epilogue warps), id 4 scheduler (32). Barrier **id 1 (256 threads)
 does not occur in the anchor** — it appears only in the singleton-cluster
@@ -271,8 +274,11 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #   named_barrier(0, 256)                    # PTX 233  -- CTA-wide init barrier
 #   fence_mbarrier_init()                    # PTX 246
 #   cluster_arrive_relaxed()                 # PTX 248
-#   ... TMEM allocation is issued here ...
+#   ... smem tensor setup, the two multicast masks, MMA fragment construction ...
 #   cluster_wait()                           # PTX 262
+#     # The source comment at 1322-1323 is explicit: cluster wait BEFORE the
+#     # tensor-memory allocation. The allocation itself is issued much later, in
+#     # the epilogue role at source 1608 / PTX 1427-1428.
 #     # When cluster_size == 1 the cluster wait degenerates and the source uses
 #     # named_barrier(1, 256) instead; that is the only place barrier 1 appears.
 #
@@ -315,7 +321,9 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #             sInfo[1, stage] = tile_m_idx
 #             sInfo[2, stage] = tile_n_idx
 #             sInfo[3, stage] = k_tile_cnt
-#               # instruction_selection: st.shared.b32 x4; extent: one work tile
+#               # instruction_selection: st.shared.v4.b32; extent: one 16 B work-tile record
+#               # The four words are contiguous i32 and vectorize; the
+#               # termination record is the same single store of {-1, 0, 0, 0}.
 #         fence_async_shared()
 #         named_barrier(4, 32)                  # PTX 520, 726
 #         arrive(tile_info_full[stage])
@@ -325,6 +333,8 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #           # dynamic: one atom.global.add.u32 ticket, broadcast across the cluster
 #         stage, phase = advance(stage, phase, num_tile_stage)
 #     producer_tail(tile_info_empty, num_tile_stage)   # source 1369
+#       # Consumers release stage S right after reading its four words, so the
+#       # producer is free to refill S while the consumers still work that tile.
 #       # instruction_selection: 2x blocking try_wait; extent: drain both stages
 
 # ==========================================================================
@@ -334,10 +344,15 @@ Each is one PTX instruction, one tile, or one loop of one family:
 # with role(tma_warp):
 #     prefetch the A, B, C and D descriptors             # source 1166-1172
 #       # instruction_selection: prefetch.tensormap x4; extent: once per kernel, PTX 84-93
+#     acquire(tile_info_full[stage], phase)      # prologue record, before the loop
 #     for each work tile:
-#         acquire(tile_info_full[stage], phase); read sInfo
-#         if expert_idx < 0:
-#             fence_async_shared(); arrive(tile_info_empty[stage]); break
+#         # Read the record, then release the stage immediately -- the tile's own
+#         # work runs from registers with stage S already free, which is what
+#         # keeps the two-stage tile-info pipeline a full tile ahead.
+#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]   # already acquired
+#         fence_async_shared(); arrive(tile_info_empty[stage])
+#         stage, phase = advance(stage, phase, num_tile_stage)
+#         if expert_idx < 0: break
 #         update_expert_info(padded_offsets, expert_idx)     # ext, token range
 #         status = peek(ab_empty[ab_stage], phase)           # source 1441
 #         for k_tile in range(k_tile_cnt):
@@ -355,8 +370,7 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #               # instruction_selection: cp.async.bulk.tensor.3d.shared::cluster...cta_group::2; extent: one 128x64 bf16 half-tile
 #             ab_stage, phase = advance(ab_stage, phase, num_ab_stage)
 #             status = peek(ab_empty[ab_stage], phase)        # source 1459
-#         fence_async_shared(); arrive(tile_info_empty[stage])  # source 1489-1491
-#         stage, phase = advance(stage, phase, num_tile_stage)
+#         acquire(tile_info_full[stage], phase)   # next tile's record, bottom of body
 #     producer_tail(ab_empty, num_ab_stage)                    # source 1495
 #       # instruction_selection: 5x blocking try_wait; extent: drain all AB stages
 #
@@ -371,14 +385,20 @@ Each is one PTX instruction, one tile, or one loop of one family:
 # ==========================================================================
 # with role(mma_warp):
 #     named_barrier(3, 160)                     # PTX 1107, TMEM base published
+#     acquire(tile_info_full[stage], phase)      # prologue record, before the loop
 #     for each work tile:
-#         acquire(tile_info_full[stage], phase); read sInfo
-#         if expert_idx < 0:
-#             fence_async_shared(); arrive(tile_info_empty[stage]); break
-#         if k_tile_cnt > 0 and is_leader_cta:               # source 1533
-#             acquire(acc_empty[acc_stage], phase)
-#             acc_col = acc_stage * cta_tile_n
+#         # Read the record, then release the stage immediately -- the tile's own
+#         # work runs from registers with stage S already free, which is what
+#         # keeps the two-stage tile-info pipeline a full tile ahead.
+#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]   # already acquired
+#         fence_async_shared(); arrive(tile_info_empty[stage])
+#         stage, phase = advance(stage, phase, num_tile_stage)
+#         if expert_idx < 0: break
+#         if k_tile_cnt > 0:                                 # source 1533
 #             status = peek(ab_full[ab_stage], phase)        # source 1534
+#         if is_leader_cta:                                  # source 1546
+#             acquire(acc_empty[acc_stage], phase)           # source 1547
+#             acc_col = acc_stage * cta_tile_n
 #             for k_tile in range(k_tile_cnt):
 #                 acquire(ab_full[ab_stage], phase, unless=status)
 #                 a_desc = smem_descriptor(sA + ab_stage * 16384)
@@ -396,8 +416,7 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #             umma_arrive(acc_full[acc_stage])               # source 1581
 #               # instruction_selection: tcgen05.commit...multicast::cluster.b64; extent: accumulator publish, PTX 1340
 #         acc_stage, phase = advance(acc_stage, phase, num_acc_stage)
-#         fence_async_shared(); arrive(tile_info_empty[stage])  # source 1593-1595
-#         stage, phase = advance(stage, phase, num_tile_stage)
+#         acquire(tile_info_full[stage], phase)   # next tile's record, bottom of body
 #     producer_tail(acc_empty, 1)                              # source 1599
 #
 # `accumulate` is false only on the very first issue of a tile, which clears the
@@ -414,14 +433,19 @@ Each is one PTX instruction, one tile, or one loop of one family:
 # with role(epilogue_warps):
 #     warp 0 only: tmem_alloc(tmem_cols)        # PTX 1427-1428
 #     named_barrier(3, 160)                     # PTX 1431
+#     acquire(tile_info_full[stage], phase)      # prologue record, before the loop
 #     for each work tile:
-#         acquire(tile_info_full[stage], phase); read sInfo
-#         if expert_idx < 0:
-#             fence_async_shared(); arrive(tile_info_empty[stage]); break
+#         # Read the record, then release the stage immediately -- the tile's own
+#         # work runs from registers with stage S already free, which is what
+#         # keeps the two-stage tile-info pipeline a full tile ahead.
+#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]   # already acquired
+#         fence_async_shared(); arrive(tile_info_empty[stage])
+#         stage, phase = advance(stage, phase, num_tile_stage)
+#         if expert_idx < 0: break
 #         square_alpha = alpha[expert] * alpha[expert]
 #         beta_e       = beta[expert]
 #         p            = prob[row_of_this_thread]
-#         dprob_vec    = zeros(32)
+#         dProbVal     = 0.0                                   # source 1732
 #         acquire(acc_full[acc_stage], phase)                  # PTX 1538
 #         for subtile in range(epi_tile_cnt):                  # 8 pairs
 #             acc = tmem_load_32x32b_x32(acc_col + subtile * 32)
@@ -446,14 +470,14 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #             #   s      = 1 / (1 + exp2(-LOG2_E * x1))
 #             #     # instruction_selection: ex2.approx.ftz.f32 then rcp.approx.ftz.f32; extent: 32 values
 #             #   swish  = x1 * s
-#             #   dprob_vec += g * x2 * swish
+#             #   dprob_sub  = g * x2 * swish          # ASSIGNED, fresh per subtile
 #             #   d1 = g * p * x2 * s * (1 + x1 * (1 - s))
 #             #   d2 = g * p * swish
 #             #
 #             # ---- dGeGLU (source 944-1083) ----------------------------------
 #             #   y1 = min(x1, 7.0);  y2 = clamp(x2, -7.0, 7.0)
 #             #   s  = 1 / (1 + exp2(-LOG2_E * 1.702 * y1))
-#             #   dprob_vec += g * s * (y2 + linear_offset) * y1
+#             #   dprob_sub  = g * s * (y2 + linear_offset) * y1   # ASSIGNED per subtile
 #             #   d1 = g * s * (1 + 1.702 * y1 * (1 - s)) * (y2 + linear_offset) * p
 #             #   d2 = g * y1 * s * p
 #             #   d1 *= (x1 <= 7.0 ? y1 : 0.0)
@@ -475,33 +499,20 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #                   # Scalar, not vectorized: the (32, 1, epi_n*2*32) stride puts
 #                   # consecutive n 128 B apart.
 #
-#             d1_bits = pack_bf16x2(d1 pairs)   # source 1853, 16 issues
-#             d2_bits = pack_bf16x2(d2 pairs)   # source 1854, 16 issues
-#               # instruction_selection: cvt.rn.bf16x2.f32 x16 each; extent: 32 values per half
-#             warp 0: bulk_wait(0)                            # source 1900, PTX 3325
-#             named_barrier(2, 128)                           # source 1901, PTX 3383
-#             smem_st_v4(sD + d1_stage * 8192, d1_bits)       # source 1904, 4 issues
-#             smem_st_v4(sD + d2_stage * 8192, d2_bits)       # source 1911, 4 issues
-#               # instruction_selection: st.shared.v4.b32 x4 each; extent: one 128x32 D block per half
-#             fence_async_shared()
-#             named_barrier(2, 128)                           # source 1917, PTX 3425
-#             warp 0: tma_store_3d(desc_d, (col_d1, row, 0), sD + d1_stage * 8192)
-#             warp 0: tma_store_3d(desc_d, (col_d2, row, 0), sD + d2_stage * 8192)
-#               # instruction_selection: cp.async.bulk.tensor.3d S2G x2; extent: two 128x32 D blocks
-#             warp 0: bulk_commit()                           # source 1929, PTX 3449
-#             named_barrier(2, 128)                           # source 1930, PTX 3452
-#             d1_stage, d2_stage = next two values of (subtile_counter % num_d_stage)
+#             if with_dprob:                                   # source 1808-1829, indent 20
+#                 dprob_acc = packed_pairwise_sum(dprob_sub)   # 32 -> 2
+#                   # instruction_selection: add.rn.f32x2 x16; extent: 32-element reduction
+#                 dProbVal += dprob_acc[0] + dprob_acc[1]      # source 1823, scalar fold
+#                 # Reduce-then-sum, once per subtile -- NOT accumulate-then-reduce.
+#                 # The summation tree is load-bearing: the oracle reproduces this
+#                 # same 32-column subtile grouping rather than summing the row.
 #
-#         dprob_acc = packed_pairwise_sum(dprob_vec)          # source 1808-1829
-#           # instruction_selection: add.rn.f32x2 x16; extent: 32-element reduction, then one scalar fold
-#           # This order is load-bearing: the oracle reproduces the same
-#           # 32-column subtile grouping rather than summing the row.
-#
-#         if elect_one(): arrive(acc_empty[acc_stage])        # source 1935-1936, PTX 3465
-#         acc_stage, phase = advance(acc_stage, phase, num_acc_stage)
-#
-#         if with_dbias:
-#             # dbias_reduction, source 686-765: SMEM transpose, no shuffles
+#             if with_dbias:                                   # source 1834-1848, indent 20
+#                 n_base_d1 = tile_n_idx * (tile_n * 2) + (2 * subtile + 0) * 32
+#                 n_base_d2 = tile_n_idx * (tile_n * 2) + (2 * subtile + 1) * 32
+#                 # dbias_reduction, source 686-765: SMEM transpose, no shuffles.
+#                 # Runs once PER SUBTILE, so all 8 column pairs of the work tile
+#                 # are reduced and each carries its own n_base.
 #             named_barrier(2, 128)                           # source 707, PTX 2843
 #             col_a = 2 * lane if lane < 16 else epi_n + 2 * (lane - 16)
 #             col_b = col_a + 1
@@ -524,8 +535,26 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #                         atomic_add_bf16x2(&dbias[expert, n_offset], total)
 #                           # instruction_selection: cvt.rn.bf16x2.f32 + red.global.add.noftz.bf16x2; extent: one column pair, PTX 3316
 #
-#         fence_async_shared(); arrive(tile_info_empty[stage])   # source 1942-1948, PTX 3499-3503
-#         stage, phase = advance(stage, phase, num_tile_stage)
+#             d1_bits = pack_bf16x2(d1 pairs)   # source 1853, 16 issues
+#             d2_bits = pack_bf16x2(d2 pairs)   # source 1854, 16 issues
+#               # instruction_selection: cvt.rn.bf16x2.f32 x16 each; extent: 32 values per half
+#             warp 0: bulk_wait(0)                            # source 1900, PTX 3325
+#             named_barrier(2, 128)                           # source 1901, PTX 3383
+#             smem_st_v4(sD + d1_stage * 8192, d1_bits)       # source 1904, 4 issues
+#             smem_st_v4(sD + d2_stage * 8192, d2_bits)       # source 1911, 4 issues
+#               # instruction_selection: st.shared.v4.b32 x4 each; extent: one 128x32 D block per half
+#             fence_async_shared()
+#             named_barrier(2, 128)                           # source 1917, PTX 3425
+#             warp 0: tma_store_3d(desc_d, (col_d1, row, 0), sD + d1_stage * 8192)
+#             warp 0: tma_store_3d(desc_d, (col_d2, row, 0), sD + d2_stage * 8192)
+#               # instruction_selection: cp.async.bulk.tensor.3d S2G x2; extent: two 128x32 D blocks
+#             warp 0: bulk_commit()                           # source 1929, PTX 3449
+#             named_barrier(2, 128)                           # source 1930, PTX 3452
+#             d1_stage, d2_stage = next two values of (subtile_counter % num_d_stage)
+#
+#         if elect_one(): arrive(acc_empty[acc_stage])        # source 1935-1936, PTX 3465
+#         acc_stage, phase = advance(acc_stage, phase, num_acc_stage)
+#         acquire(tile_info_full[stage], phase)   # next tile's record, bottom of body
 #         atomic_add_f32(&dprob[row_of_this_thread], dprob_acc)  # source 1950-1955, PTX 3513
 #           # instruction_selection: atom.global.add.f32; extent: one per epilogue thread per work tile
 #           # Flushed AFTER the tile-info release, not before.
@@ -546,13 +575,18 @@ Each is one PTX instruction, one tile, or one loop of one family:
 
 # ==========================================================================
 # Warp 6: C loads
-# source 1971-2044; PTX 3643-3776
+# source 1971-2041; PTX 3643-3776
 # ==========================================================================
 # with role(c_load_warp):
+#     acquire(tile_info_full[stage], phase)      # prologue record, before the loop
 #     for each work tile:
-#         acquire(tile_info_full[stage], phase); read sInfo
-#         if expert_idx < 0:
-#             fence_async_shared(); arrive(tile_info_empty[stage]); break
+#         # Read the record, then release the stage immediately -- the tile's own
+#         # work runs from registers with stage S already free, which is what
+#         # keeps the two-stage tile-info pipeline a full tile ahead.
+#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]   # already acquired
+#         fence_async_shared(); arrive(tile_info_empty[stage])
+#         stage, phase = advance(stage, phase, num_tile_stage)
+#         if expert_idx < 0: break
 #         for subtile in range(epi_tile_cnt):           # 8 pairs
 #             for half in (0, 1):                       # gate block, then up block
 #                 acquire(c_empty[c_stage], phase)
@@ -563,8 +597,7 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #                             c_full[c_stage], pred=leader)
 #                   # instruction_selection: cp.async.bulk.tensor.3d.shared::cta...; extent: one 128x32 C block, PTX 3667/3703
 #                 c_stage, phase = advance(c_stage, phase, num_c_stage)
-#         fence_async_shared(); arrive(tile_info_empty[stage])   # source 2034-2036
-#         stage, phase = advance(stage, phase, num_tile_stage)
+#         acquire(tile_info_full[stage], phase)   # next tile's record, bottom of body
 #     producer_tail(c_empty, num_c_stage)                       # source 2041
 #
 # The gate and up halves land in SEPARATE C stages, which is why num_c_stage is
@@ -595,7 +628,7 @@ The PTX column carries **anchor-export line numbers**.
 | accumulator release | 1935-1937 | Warps 0-3 | 3465 |
 | dprob flush | 1950-1955 | Warps 0-3 | 3513 |
 | teardown | 1960-1967 | Warps 0-3 | 3524-3556 |
-| C-load warp | 1971-2044 | Warp 6 | 3643-3776 |
+| C-load warp | 1971-2041 | Warp 6 | 3643-3776 |
 | stage solve | 2244-2282 | Anchor values | n/a |
 
 ## Out of scope
