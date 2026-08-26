@@ -32,15 +32,6 @@ def test_func_call_is_rejected_by_default_and_reports_callee():
 def test_only_exact_kernel_local_helpers_are_exempt():
     assert LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL == {
         "cudnn_sm100_bsa_forward_blk64": frozenset({"tirx_bsa_pv_mma_chain"}),
-        "cudnn_sm100_csa_compressor_fwd": frozenset(
-            {
-                "tirx_csa_exp_constants",
-                "tirx_csa_load4_bf16x2",
-                "tirx_csa_ordered_max",
-                "tirx_csa_scan_boundary",
-                "tirx_csa_source_exp",
-            }
-        ),
         "gemm_reduce_scatter": frozenset(
             {
                 "enqueue_remote",
