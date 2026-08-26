@@ -235,7 +235,7 @@ def _derived_gptr_shape(name, ann, scalar_params):
         raise ValueError(
             f"gptr parameter {name!r} shape refers to unknown scalar parameter {missing!r}"
         ) from error
-    if not isinstance(shape, (tuple, list)) or not shape:
+    if not isinstance(shape, tuple | list) or not shape:
         raise TypeError(f"gptr parameter {name!r} shape must return a non-empty tuple or list")
     for index, extent in enumerate(shape):
         if isinstance(extent, bool):
@@ -290,7 +290,7 @@ def _flat_frame(frame):
 def _resolve_grid(grid, params):
     if grid is None:
         return params["num_sms"] if "num_sms" in params else 1
-    if isinstance(grid, (list, tuple)):
+    if isinstance(grid, list | tuple):
         if not grid:
             raise ValueError("grid must contain at least one CTA dimension")
         dimensions = [_resolve_grid(dimension, params) for dimension in grid]
@@ -342,6 +342,7 @@ def kernel(
     host_prelude=None,
     allowed_func_calls: tuple[str, ...] = (),
     check_ir: bool = True,
+    warp_scope: bool = True,
 ):
     """Declare a kernel entry.
 
@@ -390,6 +391,12 @@ def kernel(
         keyword-only ``host`` parameter.  This is for real host/device
         contracts such as runtime TensorMap encoding; the returned values are
         IR objects owned by this one function, not a second body to splice.
+    warp_scope : bool, optional
+        Declare the entry's warp- and lane-id scopes. Disable this only for a
+        flat thread-only kernel that never calls ``K.warp_id()``,
+        ``K.lane_id()``, or defines warp roles. The CUDA lowering may still
+        materialize its standard warp-uniform launch helper independently of
+        these source-level scope declarations.
     """
 
     def decorator(fn):
@@ -436,8 +443,9 @@ def kernel(
                 # switch would let kernels silently change the launch ABI (or
                 # leave thread scope to a second builder owner), so it is not
                 # part of the kernel DSL contract.
-                session.warp_scope_id = I.warp_id([warps])
-                session.lane_id = I.lane_id([32])
+                if warp_scope:
+                    session.warp_scope_id = I.warp_id([warps])
+                    session.lane_id = I.lane_id([32])
                 session.thread_id = I.thread_id([session.nthreads])
                 _TLS.session = session
                 try:
@@ -495,9 +503,15 @@ def thread_id():
 
 def warp_id():
     """Warp-uniform CTA-local id owned by the current kernel entry."""
-    return current().warp_id()
+    value = current().warp_id()
+    if value is None:
+        raise RuntimeError("K.warp_id() is unavailable because @K.kernel set warp_scope=False")
+    return value
 
 
 def lane_id():
     """Warp-local lane id owned by the current kernel entry."""
-    return current().lane_id
+    value = current().lane_id
+    if value is None:
+        raise RuntimeError("K.lane_id() is unavailable because @K.kernel set warp_scope=False")
+    return value

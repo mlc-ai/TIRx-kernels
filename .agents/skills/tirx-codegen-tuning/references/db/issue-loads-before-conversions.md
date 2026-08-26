@@ -43,6 +43,36 @@ independent work or a real synchronization boundary. Program order is the
 lever; which side of a barrier ptxas finally places the work is not something
 the kernel controls.
 
+When an overlap window has an always-valid half and a predicated half, issue
+the always-valid group first, then the predicated group, and delay consumers of
+both. Otherwise the predicate and the first half's conversion chain can cut the
+load issue window in two even though each half is staged internally.
+
+```python
+previous_words = K.alloc_local([N], "uint32")
+current_words = K.alloc_local([N], "uint32")
+
+# before: the first conversion chain separates the two load groups.
+with K.If(has_previous):
+    load_group(previous_words, previous_ptr)
+    convert_group(previous_values, previous_words)
+load_group(current_words, current_ptr)
+convert_group(current_values, current_words)
+
+# after: every independent load is issued before either conversion chain.
+load_group(current_words, current_ptr)
+with K.If(has_previous):
+    load_group(previous_words, previous_ptr)
+with K.If(has_previous):
+    convert_group(previous_values, previous_words)
+convert_group(current_values, current_words)
+```
+
+If ordinary local-array staging still compiles to the old schedule, a bounded
+multi-output device helper can give every load a distinct output register and
+make the issue boundary real. Use it only after final SASS proves that the
+compiler erased the ordinary rewrite.
+
 ## Rationale
 
 The benchmark harness zeroes a 256 MB buffer before every timed iteration, so
@@ -66,6 +96,16 @@ count -- four shared loads per thread rather than eight -- gained on every
 specialization that ran it (+0.0015, +0.0056, +0.0022) with an untouched control
 dispatch flat, once the batch covered the whole trip count.
 
+An eight-position overlap window supplied the predicated-boundary case. A
+plain load-first rewrite and a typed-load helper both collapsed to the same 832
+final instructions at 48 registers. Grouping each half separately changed the
+binary but still failed both measured shapes. Issuing the eight always-valid
+score/value loads before the eight predicated score/value loads, with all 16
+ahead of the first BF16 conversion, reduced long-scoreboard samples from 1299
+to 552. The final allocation was 53 registers with no spill; all 18 correctness
+cases passed, and the complete four-shape benchmark matrix measured
+1.0249-1.1635x against the reference.
+
 ## Boundary
 
 It can regress when the staged raw values spill or the loads usually hit cache.
@@ -87,8 +127,18 @@ but the final cubin remained identical at 661 instructions, 92 registers, and
 the same relevant opcode counts. With no generated-code lever left, the rewrite
 was reverted before timing.
 
+Staging width is not monotonic. In the predicated-window experiment, a
+half-window boundary paid the code-size and live-range cost without passing the
+benchmark, and a smaller group restored the old register count without
+recovering performance. Preserve the full issue window only while the extra
+outputs remain in registers, and do not use an opaque multi-output helper for
+loads whose independence, address validity, or ordering is not statically
+established.
+
 ## Verification
 
 Confirm the load issue window and load-to-first-consumer distance in SASS, then
 measure long-scoreboard stalls, registers, spills, and the complete shape
-matrix.
+matrix. For a predicated window, verify that the unconditional and conditional
+groups both precede the first consumer rather than checking each group in
+isolation.
