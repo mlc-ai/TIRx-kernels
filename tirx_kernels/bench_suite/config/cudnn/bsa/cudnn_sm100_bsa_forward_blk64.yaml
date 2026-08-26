@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: cudnn_sm100_bsa_forward_blk64
+selection_rationale: The selected defaults cover a small ordinary singleton-split launch, a medium variable-sparsity CLC launch, and a large eight-way split-plus-combine launch; the full matrix additionally covers long-query static and CLC scheduling, empty sparse rows, split counts 2/4/8, masked and unmasked blocks, ragged Q/KV tails, batch/head occupancy, and 64-bit KV strides.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: p00_b1_h1_sq64_skv4096_kv16_nomask_s1_static, default: true, selection_role: small}
+  - {config: p01_b1_h2_sq4097_skv8191_kv64_mask_s1_static, default: false}
+  - {config: p02_b2_h8_sq4096_skv8191_kv32_mask_s1_static, default: false}
+  - {config: p03_b1_h4_sq8192_skv4096_kv16_mask_s1_clc, default: false}
+  - {config: p04_b1_h8_sq4096_skv8192_maxkv32_var_mask_s1_clc, default: true, selection_role: medium}
+  - {config: p05_b2_h4_sq4097_skv8191_maxkv32_empty_mask_s1_clc, default: false}
+  - {config: p06_b1_h4_sq1024_skv32768_kv256_mask_s2_static, default: false}
+  - {config: p07_b1_h4_sq4097_skv16384_maxkv128_var_mask_s2_static, default: false}
+  - {config: p08_b1_h4_sq2048_skv32768_kv256_mask_s4_static, default: false}
+  - {config: p09_b1_h8_sq2048_skv65536_kv512_nomask_s8_static, default: true, selection_role: large}
+  - {config: p10_b1_h4_sq4096_skv8192_kv32_mask_s1_static_i64kv, default: false}
