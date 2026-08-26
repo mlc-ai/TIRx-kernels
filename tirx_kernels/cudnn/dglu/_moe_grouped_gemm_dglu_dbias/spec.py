@@ -523,15 +523,19 @@ def default_bench_labels():
     return labels
 
 
-def upstream_launch_is_flaky(mode):
-    """No known unreliable upstream corner for the bf16 kernel.
+def upstream_disagrees_with_reference(mode):
+    """Specializations where the upstream kernel is not a usable arbiter.
 
-    The blockscaled sibling skips its upstream comparison on one corner whose
-    trigger involves ``discrete_col_sfd``, which this kernel does not have. The
-    hook stays so the correctness gate can pin one down if bring-up finds it.
+    At ``tile_n = 32`` -- the narrowest tile ``can_implement_bf16_grouped_gemm``
+    accepts, and the only one where the epilogue's 32-column subtile loop runs a
+    single iteration -- the upstream kernel deterministically disagrees with its
+    own documented formula: 2156 of 524288 output elements are wrong by up to
+    2.5 at the bring-up shape, reproducing bit-for-bit across four consecutive
+    launches on the same inputs. Every wider tile agrees with the FP32 oracle to
+    BF16 rounding, and so does this port at ``tile_n = 32``, on the same bytes.
+    The row is kept in the matrix and arbitrated by the oracle alone.
     """
-    del mode
-    return False
+    return mode["mma_tiler_mn"][1] == 32
 
 
 # ---------------------------------------------------------------------------
@@ -539,92 +543,163 @@ def upstream_launch_is_flaky(mode):
 # ---------------------------------------------------------------------------
 
 
-def derive(config):
-    """Closed form of the upstream ``_setup_attributes`` and ``_compute_stages``.
+def _next_pow2(value):
+    result = 1
+    while result < value:
+        result *= 2
+    return result
 
-    Validated element-for-element against the upstream class over the whole
-    configuration matrix during the correctness gate.
+
+def derive(mode, *, group_m_list, N, K_dim):
+    """Static launch, staging, and storage facts for one specialization.
+
+    Closed form of the upstream ``_setup_attributes`` and ``_compute_stages``,
+    reconciled against the line-info PTX exports: the AB depths (5/5/3/6), the
+    AB ``expect_tx`` byte counts (65536/49152/24576) and the shared offsets
+    (``sC`` 1024, ``sD`` 17408, ``sA`` 33792, ``sB`` 115712, ``sDbias``
+    197632) all reproduce here exactly.
     """
-    tile_m, tile_n = config["mma_tiler_mn"]
-    cluster_m, cluster_n = config["cluster_shape_mn"]
-    thr = atom_thr(config)
-    group_m_list = tuple(config["group_m_list"])
     L = len(group_m_list)
-    N = config["N"]
-    K_dim = config["K_dim"]
-
-    padded = []
+    padded_offsets = []
     running = 0
     for rows in group_m_list:
         running += align_up(rows, FIX_PAD_SIZE)
-        padded.append(running)
+        padded_offsets.append(running)
     tokens_total = running
+    if not valid_mode(mode):
+        raise ValueError(f"unsupported source specialization: {mode_label(mode)}")
+    if not valid_shape(mode, tokens_total=tokens_total, N=N, K_dim=K_dim, L=L):
+        raise ValueError(f"unsupported shape for {mode_label(mode)}")
 
+    c_bits = dtype_bits(mode["c_dtype"])
+    d_bits = dtype_bits(mode["d_dtype"])
+    tile_m, tile_n = mode["mma_tiler_mn"]
+    use_2cta = tile_m == 256
+    thr = 2 if use_2cta else 1
+    cluster_m, cluster_n = mode["cluster_shape_mn"]
+    cluster_size = cluster_m * cluster_n
+
+    k_tile = K_TILE
     cta_tile_m = tile_m // thr
-    c_bits = dtype_bits(config["c_dtype"])
-    d_bits = dtype_bits(config["d_dtype"])
+    cta_tile_n = tile_n
+    epi_m, epi_n = EPI_TILE
 
     num_acc_stage = 2
     num_c_stage = 2
     num_d_stage = 2
     num_tile_stage = 2
 
-    epi_m, epi_n = EPI_TILE
-    c_bytes = epi_m * epi_n * num_c_stage * c_bits // 8
-    d_bytes = epi_m * epi_n * num_d_stage * d_bits // 8
-    dbias_bytes = 128 * epi_n * 2 * 4 if config["with_dbias"] else 4
-
-    a_stage_bytes = cta_tile_m * K_TILE * 2
+    a_stage_bytes = cta_tile_m * k_tile * 2
     # Under a two-CTA atom the N operand is split across the CTA pair, so each
-    # CTA stages only its half. The AB expect_tx the reference emits is
+    # CTA stages only its half. The AB ``expect_tx`` the reference emits is
     # ``(a_stage_bytes + b_stage_bytes) * atom_thr``.
-    b_stage_bytes = (tile_n // thr) * K_TILE * 2
+    b_stage_bytes = (cta_tile_n // thr) * k_tile * 2
     ab_stage_bytes = a_stage_bytes + b_stage_bytes
 
-    mbar_helpers_bytes = 1024
+    c_stage_bytes = epi_m * epi_n * c_bits // 8
+    d_stage_bytes = epi_m * epi_n * d_bits // 8
+    c_bytes = c_stage_bytes * num_c_stage
+    d_bytes = d_stage_bytes * num_d_stage
+    # ``sDbias`` is a four-warp column-major f32 scratch; upstream still
+    # declares one element when the reduction is off, and that element is part
+    # of the budget the stage count is solved against.
+    dbias_bytes = 128 * 2 * epi_n * 4 if mode["with_dbias"] else 4
     sinfo_bytes = 4 * 4 * num_tile_stage
+    mbar_helpers_bytes = 1024
     reserved = mbar_helpers_bytes + sinfo_bytes + c_bytes + d_bytes + dbias_bytes
     num_ab_stage = (SMEM_CAPACITY - reserved) // ab_stage_bytes
-    if num_ab_stage < 1:
-        raise AssertionError(f"no shared-memory budget for one AB stage: {config['label']}")
+    if num_ab_stage <= 0:
+        raise ValueError("the source stage heuristic exceeds the SM100 shared-memory capacity")
 
-    cluster_size = cluster_m * cluster_n
-    grid = (cluster_m, cluster_n, MAX_ACTIVE_CLUSTERS[cluster_size])
+    # ``utils.get_num_tmem_alloc_cols`` over the accumulator fanned across the
+    # accumulator stages. Unlike the block-scaled sibling this is derived, not
+    # pinned at the full 512 columns.
+    num_tmem_alloc_cols = min(max(_next_pow2(cta_tile_n * num_acc_stage), 32), 512)
 
-    needs_helper = config["weight_mode"] == "discrete" or config["sched"] == "dynamic"
-    helper_grid = (L if config["weight_mode"] == "discrete" else 1, 1, 1)
-    workspace_bytes = (128 * L if config["weight_mode"] == "discrete" else 0) + (
-        4 if config["sched"] == "dynamic" else 0
+    # Shared-memory byte map, in the upstream ``SharedStorage`` declaration
+    # order with its alignments.
+    offsets = {}
+    cursor = 0
+
+    def place(name, byte_count, alignment=8):
+        nonlocal cursor
+        cursor = align_up(cursor, alignment)
+        offsets[name] = cursor
+        cursor += byte_count
+        return offsets[name]
+
+    place("ab_full", num_ab_stage * 8)
+    place("ab_empty", num_ab_stage * 8)
+    place("acc_full", num_acc_stage * 8)
+    place("acc_empty", num_acc_stage * 8)
+    place("tile_full", num_tile_stage * 8)
+    place("tile_empty", num_tile_stage * 8)
+    place("sinfo", sinfo_bytes, 16)
+    if mode["sched"] == "dynamic":
+        place("cluster_mbar", 2 * 8)
+        place("cluster_broadcast", 4 * 4, 16)
+    place("c_full", num_c_stage * 8)
+    place("c_empty", num_c_stage * 8)
+    place("tmem_dealloc", 8)
+    place("tmem_slot", 4, 4)
+    protocol_bytes = cursor
+    if protocol_bytes > mbar_helpers_bytes:
+        raise ValueError("the protocol region overflows the reserve the stage count assumes")
+    place("sC", c_bytes, 1024)
+    place("sD", d_bytes, 1024)
+    place("sA", num_ab_stage * a_stage_bytes, 1024)
+    place("sB", num_ab_stage * b_stage_bytes, 1024)
+    place("sDbias", dbias_bytes, 128)
+    shared_bytes = align_up(cursor, 1024)
+    if shared_bytes > SMEM_CAPACITY:
+        raise ValueError(f"dynamic shared memory {shared_bytes} exceeds {SMEM_CAPACITY}")
+
+    n_out = 2 * N
+    # One 128-byte tensor-map image per expert for the single discrete "b" slot,
+    # then the dynamic scheduler's 4-byte ticket counter in the tail.
+    workspace_bytes = (128 * L if mode["weight_mode"] == "discrete" else 0) + (
+        4 if mode["sched"] == "dynamic" else 0
     )
 
     return {
         "L": L,
-        "N": N,
-        "K": K_dim,
         "tokens_total": tokens_total,
-        "padded_offsets": tuple(padded),
-        "use_2cta": thr == 2,
+        "padded_offsets": tuple(padded_offsets),
+        "group_m_list": tuple(group_m_list),
+        "N": N,
+        "n_out": n_out,
+        "K": K_dim,
+        "k_tiles": ceil_div(K_dim, k_tile),
+        "mma_tiler": (tile_m, tile_n, k_tile),
+        "cta_tile_shape_mnk": (cta_tile_m, cta_tile_n, k_tile),
+        "use_2cta": use_2cta,
         "atom_thr": thr,
-        "cta_tile_shape_mnk": (cta_tile_m, tile_n, K_TILE),
-        "k_tile": K_TILE,
-        "k_tile_count": ceil_div(K_dim, K_TILE),
         "epi_tile": EPI_TILE,
         "num_acc_stage": num_acc_stage,
         "num_ab_stage": num_ab_stage,
         "num_c_stage": num_c_stage,
         "num_d_stage": num_d_stage,
         "num_tile_stage": num_tile_stage,
-        "grid": grid,
-        "threads_per_cta": 256,
-        "helper_grid": helper_grid,
-        "needs_helper": needs_helper,
+        "a_stage_bytes": a_stage_bytes,
+        "b_stage_bytes": b_stage_bytes,
+        "ab_stage_bytes": ab_stage_bytes,
+        "ab_expect_tx_bytes": ab_stage_bytes * thr,
+        "c_stage_bytes": c_stage_bytes,
+        "d_stage_bytes": d_stage_bytes,
+        "num_tmem_alloc_cols": num_tmem_alloc_cols,
+        "grid": (cluster_m, cluster_n, MAX_ACTIVE_CLUSTERS[cluster_size]),
+        "cluster_size": cluster_size,
+        "generate_dbias": mode["with_dbias"],
+        "smem_offsets": offsets,
+        "shared_bytes": shared_bytes,
         "workspace_bytes": workspace_bytes,
-        "ab_expect_tx_bytes": (a_stage_bytes + b_stage_bytes) * thr,
-        "smem": {
-            "c_bytes": c_bytes,
-            "d_bytes": d_bytes,
-            "dbias_bytes": dbias_bytes,
-            "a_stage_bytes": a_stage_bytes,
-            "b_stage_bytes": b_stage_bytes,
-        },
+        "needs_helper": mode["weight_mode"] == "discrete" or mode["sched"] == "dynamic",
+        "helper_grid": (L if mode["weight_mode"] == "discrete" else 1, 1, 1),
     }
+
+
+def derive_for_config(config):
+    mode = {key: config[key] for key in MODE_KEYS}
+    mode["mma_tiler_mn"] = tuple(mode["mma_tiler_mn"])
+    mode["cluster_shape_mn"] = tuple(mode["cluster_shape_mn"])
+    return derive(mode, group_m_list=config["group_m_list"], N=config["N"], K_dim=config["K_dim"])

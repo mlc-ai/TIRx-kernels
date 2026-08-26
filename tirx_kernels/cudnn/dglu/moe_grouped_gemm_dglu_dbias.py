@@ -54,7 +54,7 @@ def run_test(**config):
     executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
     tirx_launch = _data.tirx_launch(executables, data)
     tirx_launch()
-    if _spec.upstream_launch_is_flaky(kernel_config):
+    if _spec.upstream_disagrees_with_reference(kernel_config):
         torch.cuda.synchronize()
         _data.validate_outputs(data, sources=("tirx",))
     else:

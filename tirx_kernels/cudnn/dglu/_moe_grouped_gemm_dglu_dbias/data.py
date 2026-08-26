@@ -36,7 +36,7 @@ def prepare_data(**config):
     """Allocate one input set plus per-implementation output sets."""
     import torch
 
-    derived = _spec.derive(config)
+    derived = _spec.derive_for_config(config)
     L, N, K = derived["L"], derived["N"], derived["K"]
     M = derived["tokens_total"]
     device = "cuda"
@@ -79,16 +79,18 @@ def prepare_data(**config):
                 else None
             ),
             "workspace": (
-                torch.zeros(derived["workspace_bytes"] + 128, dtype=torch.uint8, device=device)
+                torch.zeros(derived["workspace_bytes"], dtype=torch.uint8, device=device)
                 if derived["workspace_bytes"]
                 else None
             ),
         }
 
-    # (N, K, L) views of the same values, one k-major and one n-major, so a
-    # specialization can be handed the layout its ``b_major`` promises.
-    b_kmajor = b.permute(1, 2, 0)
-    b_nmajor = b.permute(0, 2, 1).contiguous().permute(2, 1, 0)
+    # The dense weight image, in the storage order this specialization's
+    # ``b_major`` promises: (L, N, K) when K is contiguous and (L, K, N) when N
+    # is. The reference takes an (N, K, L) view of the same bytes; the port
+    # takes them flat and reads the extents out of its tensor map.
+    b_dense = b.contiguous() if config["b_major"] == "k" else b.permute(0, 2, 1).contiguous()
+    b_view = b_dense.permute(1, 2, 0) if config["b_major"] == "k" else b_dense.permute(2, 1, 0)
 
     b_ptrs = None
     b_experts = None
@@ -106,8 +108,8 @@ def prepare_data(**config):
         "derived": derived,
         "a": a,
         "b": b,
-        "b_kmajor": b_kmajor,
-        "b_nmajor": b_nmajor,
+        "b_dense": b_dense,
+        "b_view": b_view,
         "b_ptrs": b_ptrs,
         "b_experts": b_experts,
         "c": c,
@@ -172,10 +174,20 @@ def reference_outputs(data):
                     ref * sigmoid * (1 + 1.702 * gate * (1 - sigmoid)) * (up + linear_offset) * p
                 )
                 d_up = ref * gate * sigmoid * p
+                # Upstream's gradient filters scale by a *value*, not by a 0/1
+                # mask, and its two arms disagree above the upper bound: the
+                # packed one runs the tests in an order that leaves the upper
+                # bound inert on the up branch -- a value above +7 zeroes the
+                # intermediate, and zero passes the lower test -- while the
+                # scalar one applies both. Each specialization is held to the
+                # arm its ``vectorized_f32`` selects.
                 gate_filter = torch.where(gate_raw > 7.0, torch.zeros_like(gate_raw), gate_raw)
-                up_filter = torch.where(
-                    (up_raw > 7.0) | (up_raw < -7.0), torch.zeros_like(up_raw), up_raw
-                )
+                if config["vectorized_f32"]:
+                    up_filter = torch.where(up_raw < -7.0, torch.zeros_like(up_raw), up)
+                else:
+                    up_filter = torch.where(
+                        (up_raw > 7.0) | (up_raw < -7.0), torch.zeros_like(up_raw), up_raw
+                    )
                 d_gate = d_gate * gate_filter
                 d_up = d_up * up_filter
 
@@ -316,7 +328,7 @@ def compile_reference(data):
     )
     # ``b`` is (N, K, L) either way; only which extent is contiguous differs, and
     # the leading dimension the DSL is told about must actually carry stride 1.
-    b_dense = data["b_kmajor"] if b_major == "k" else data["b_nmajor"]
+    b_dense = data["b_view"]
     b_argument = (
         dlpack(data["b_ptrs"], align=8).iterator
         if discrete
@@ -375,14 +387,62 @@ def compile_reference(data):
 
 
 def tirx_launch(executables, data):
-    """Bind the compiled TIRx entries to this input set.
+    """Bind the TIRx entries' flat byte-array ABI to this input set.
 
-    The argument order is the kernel ABI, which the kernel-sketch stage fixes.
+    ``executables`` is one compiled module per PrimFunc that ``get_kernel``
+    returned: the optional descriptor pre-kernel followed by the main kernel,
+    launched in that order on the same stream exactly as the upstream
+    ``__call__`` launches them.
     """
-    raise NotImplementedError(
-        "the TIRx launch ABI is defined by the kernel-sketch stage; the kernel body "
-        "is still the scaffold placeholder"
-    )
+    import torch
+
+    config = data["config"]
+    derived = data["derived"]
+    outputs = data["tirx"]
+    if not isinstance(executables, list | tuple):
+        executables = [executables]
+    discrete = config["weight_mode"] == "discrete"
+
+    def raw(tensor):
+        return tensor.view(torch.uint8).reshape(-1)
+
+    helper_arguments = None
+    if derived["needs_helper"]:
+        # The dense branch has no pointer array; the helper only resets the
+        # scheduler counter there, and its first parameter is an int32 stand-in.
+        helper_arguments = [
+            data["b_ptrs"] if discrete else data["padded_offsets"],
+            outputs["workspace"],
+        ]
+    main_arguments = [
+        raw(data["a"]),
+        data["b_ptrs"] if discrete else raw(data["b_dense"]),
+        raw(data["c"]),
+        raw(outputs["d"]),
+        data["padded_offsets"],
+        data["alpha"],
+        data["beta"],
+        # The launch ABI takes these flat; the (rows, 1, 1) shape is the upstream
+        # tensor contract, not the kernel's.
+        data["prob"].reshape(-1),
+        outputs["dprob"].reshape(-1),
+    ]
+    if derived["generate_dbias"]:
+        main_arguments.append(raw(outputs["dbias"]))
+    if outputs["workspace"] is not None:
+        main_arguments.append(outputs["workspace"])
+
+    if helper_arguments is None:
+        calls = [(executables[-1], main_arguments)]
+    else:
+        calls = [(executables[0], helper_arguments), (executables[-1], main_arguments)]
+
+    def launch():
+        for executable, arguments in calls:
+            executable(*arguments)
+
+    launch._keep_alive = (executables, main_arguments, helper_arguments)
+    return launch
 
 
 # ---------------------------------------------------------------------------
