@@ -360,8 +360,12 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #         if expert_idx < 0: break
 #         update_expert_info(padded_offsets, expert_idx)     # ext, token range
 #         status = True                                      # source 1439
-#         if k_tile_cnt > 0 and is_leader_cta:               # source 1440
+#         if k_tile_cnt > 0:                                 # source 1440
 #             status = peek(ab_empty[ab_stage], phase)       # source 1441
+#           # No is_leader_cta here, unlike the MMA warp at 1533: warp 5 runs on
+#           # both CTAs of the cluster and both must acquire their AB stage. A
+#           # true status means SKIP the blocking acquire, so over-guarding this
+#           # peek would let a non-leader CTA write into an unreleased stage.
 #         for k_tile in range(k_tile_cnt):
 #             acquire(ab_empty[ab_stage], phase, unless=status)
 #             leader = elect_one()
@@ -376,7 +380,8 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #                                   ab_full[ab_stage], mask_b, pred=leader)
 #               # instruction_selection: cp.async.bulk.tensor.3d.shared::cluster...cta_group::2; extent: one 128x64 bf16 half-tile
 #             ab_stage, phase = advance(ab_stage, phase, num_ab_stage)
-#             status = peek(ab_empty[ab_stage], phase)        # source 1459
+#             if k_tile < k_tile_cnt - 1:                     # source 1458
+#                 status = peek(ab_empty[ab_stage], phase)    # source 1459
 #         acquire(tile_info_full[stage], phase)   # next tile's record
 #         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
 #         fence_async_shared(); arrive(tile_info_empty[stage])
@@ -424,7 +429,8 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #                 umma_arrive(ab_empty[ab_stage])            # source 1579
 #                   # instruction_selection: tcgen05.commit...multicast::cluster.b64; extent: AB release, PTX 1325
 #                 ab_stage, phase = advance(ab_stage, phase, num_ab_stage)
-#                 status = peek(ab_full[ab_stage], phase)    # source 1555
+#                 if k_tile < k_tile_cnt - 1:                # source 1554
+#                     status = peek(ab_full[ab_stage], phase)  # source 1555
 #             umma_arrive(acc_full[acc_stage])               # source 1581
 #               # instruction_selection: tcgen05.commit...multicast::cluster.b64; extent: accumulator publish, PTX 1340
 #         acc_stage, phase = advance(acc_stage, phase, num_acc_stage)
