@@ -152,6 +152,31 @@ def test_thread_layout_is_not_a_kernel_entry_option():
         K.thread_id([32])
 
 
+def test_thread_only_entry_omits_warp_and_lane_scopes():
+    import pytest
+
+    @K.kernel(warps=2, arch="sm_100a", grid=False, warp_scope=False)
+    def probe(out: K.gptr(K.f32)):
+        K.ptx.st.global_.f32(out.ptr_to([K.thread_id()]), K.float32(0))
+
+    script = probe.func.script()
+    assert "T.thread_id([64])" in script
+    assert "T.warp_id" not in script
+    assert "T.lane_id" not in script
+
+    with pytest.raises(RuntimeError, match="warp_scope=False"):
+
+        @K.kernel(warps=2, arch="sm_100a", grid=False, warp_scope=False)
+        def invalid_warp(out: K.gptr(K.f32)):
+            K.ptx.st.global_.f32(out.ptr_to([K.warp_id()]), K.float32(0))
+
+    with pytest.raises(RuntimeError, match="warp_scope=False"):
+
+        @K.kernel(warps=2, arch="sm_100a", grid=False, warp_scope=False)
+        def invalid_lane(out: K.gptr(K.f32)):
+            K.ptx.st.global_.f32(out.ptr_to([K.lane_id()]), K.float32(0))
+
+
 def test_gptr_shape_reuses_entry_scalar_parameters():
     @K.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: K.gptr(K.f32, shape=lambda p: (p["rows"], p["cols"])), rows: K.i32, cols: K.i32):

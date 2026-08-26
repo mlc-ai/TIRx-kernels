@@ -29,8 +29,17 @@ def test_func_call_is_rejected_by_default_and_reports_callee():
     assert "callee=unexpected_helper" in str(error.value)
 
 
-def test_only_exact_nvshmem_runtime_calls_are_exempt_for_gemm_reduce_scatter():
+def test_only_exact_kernel_local_helpers_are_exempt():
     assert LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL == {
+        "cudnn_sm100_csa_compressor_fwd": frozenset(
+            {
+                "tirx_csa_exp_constants",
+                "tirx_csa_load4_bf16x2",
+                "tirx_csa_ordered_max",
+                "tirx_csa_scan_boundary",
+                "tirx_csa_source_exp",
+            }
+        ),
         "gemm_reduce_scatter": frozenset(
             {
                 "enqueue_remote",
@@ -38,7 +47,7 @@ def test_only_exact_nvshmem_runtime_calls_are_exempt_for_gemm_reduce_scatter():
                 "ld_reduce_8_fp16",
                 "semaphore_notify_remote",
             }
-        )
+        ),
     }
 
     for callee in NVSHMEM_RUNTIME_FUNC_CALLS:
