@@ -1,6 +1,6 @@
 # Sweep register budgets by role and shape
 
-**Symptoms:** `register_spill`, `excess_address_math`, `low_occupancy`
+**Symptoms:** `register_spill`, `excess_address_math`, `low_occupancy`, `register_budget_mismatch`, `schedule_regression`
 
 ## Symptom
 
@@ -51,6 +51,14 @@ rows on two GPUs, retained zero failures across the correctness matrix, and
 helped the final 66-row suite clear its strict gate at a 0.9907x minimum. The
 same value had regressed other outputs when applied globally.
 
+Budget redistribution can matter even when total allocation and spill counts
+stay fixed. One 16-warp pipeline kept its collective total at 2048 registers
+while changing three role budgets from 192/80/48 to 192/88/40. Both forms had
+zero local and shared spilling, but the correction-preserving allocation reduced
+elapsed cycles from 23,294 to 22,896 and executed instructions from 11,406 to
+11,377. It subsequently passed complete targeted and full matrices at 0.995x
+and 1.002x minimum ratios.
+
 ## Boundary
 
 An occupancy proof only shows that a larger budget is affordable; it does not
@@ -71,10 +79,18 @@ did not complete in 240 s. Compute the release-versus-require arithmetic for the
 whole kernel, not for the role being changed.
 
 Check whether registers bind at all before sweeping. Zero local and zero shared
-spilling on both sides means no role is starved and a larger cap buys nothing.
-Where the sweep did pay, it was narrow: a collective-issuing warpgroup improved
-by 0.1-1.0% at 56 registers, and funding a further rise to 72 out of the reduce
-role regressed the shapes that role dominates.
+spilling rules out an obvious capacity failure, but does not prove that role
+budgets are schedule-insensitive: redistribution at a fixed total can still
+change issue order and the critical path. Increasing the total cap without a
+resource argument remains unlikely to help. Where a sweep did pay, it was
+narrow: a collective-issuing warpgroup improved by 0.1-1.0% at 56 registers,
+and funding a further rise to 72 out of the reduce role regressed the shapes
+that role dominates.
+
+Eliminating a spill counter is also not sufficient acceptance evidence. A
+shape-scoped rebalance removed six shared-spilling requests, yet its two
+critical benchmark ratios were only 0.981x and 0.989x. Continue through the
+performance matrix after the generated-code symptom is repaired.
 
 ## Verification
 
