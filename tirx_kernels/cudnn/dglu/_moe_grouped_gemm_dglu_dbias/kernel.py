@@ -37,8 +37,6 @@ import tirx_kernels.kern as K
 
 from . import spec
 
-_TRY_WAIT_TICKS = 0x989680  # 10,000,000, the source's mbarrier spin bound
-
 # dGeGLU's constants are literals in the bf16 source rather than parameters:
 # `sigmoid(1.702 * clamp(gate, max=7))` and `clamp(up, -7, 7)`.
 GEGLU_ALPHA = 1.702
@@ -87,15 +85,21 @@ def _try_wait_acquire(dst, barrier, phase):
 def _wait_plain(barrier, phase):
     """Spin on one mbarrier until its phase flips.
 
-    The blocking form, carrying the source's suspend-time hint. Twenty-nine of
-    these in the anchor export against four hintless peeks, and the hint is a
-    per-kernel constant read off that export rather than a knob.
+    The retry takes the hintless `try_wait`, the form the reference reserves for
+    its look-ahead peeks. Given the suspend-time hint the reference carries at
+    its 29 blocking acquires, ptxas expands the wait inline around a
+    `NANOSLEEP.SYNCS 0x989680` -- four instructions, with the sleep and a
+    re-check standing between the barrier and the load that depends on it.
+    Without the hint it emits a two-instruction check and moves the retry out of
+    line, so the dependent load issues directly behind the branch.
+
+    This kernel runs one CTA per multiprocessor, so a sleeping warp has nothing
+    to yield to and the sleep buys nothing the two extra instructions on every
+    handshake do not cost back.
     """
     ready = K.local_scalar("uint32", init=K.uint32(0))
     with K.While(ready == K.uint32(0)):
-        K.ptx.mbarrier.try_wait.parity.shared.b64(
-            ready, barrier, K.cast(phase, "uint32"), K.uint32(_TRY_WAIT_TICKS)
-        )
+        _try_wait_acquire(ready, barrier, phase)
 
 
 def _wait_plain_if_needed(barrier, phase, speculative_ready):
@@ -1803,19 +1807,9 @@ def _make_kernel(
                             K.assign(rC1[span[half]], d_gate[half])
                             K.assign(rC2[span[half]], d_up[half])
 
-                    # The dBias transpose is staged straight out of the gradient
-                    # registers, before the dProb fold, and its reduction runs
-                    # after -- the order `dbias_reduction` is called in and the
-                    # order the export's barriers appear in.
-                    if generate_dbias:
-                        dbias_transpose()
-
                     folded_prob = K.local_scalar("float32")
                     K.ptx["add.f32"](folded_prob, dprob_pair[0], dprob_pair[1])
                     K.ptx["add.f32"](dprob_acc, dprob_acc, folded_prob)
-
-                    if generate_dbias:
-                        dbias_reduce(real_subtile, d_tile_base)
 
                     # ---- convert D and stage it through SMEM -------------
                     _pack_output(rD1, rC1, d_dtype, d_bits)
@@ -1884,6 +1878,17 @@ def _make_kernel(
                                     K.uint64(0),
                                 )
                         K.ptx["cp.async.bulk.commit_group"]()
+                    # The dBias column sums are taken with the tile's D store
+                    # already in flight. They read the activation fragments,
+                    # which the packing only copied, and they touch their own
+                    # shared region, so nothing in them depends on the store.
+                    # The placement has to be after the *barrier* that precedes
+                    # the store, not merely after the shared writes: ptxas is
+                    # free to hoist across plain stores and is not free to hoist
+                    # across `bar.sync`, so the earlier position bought nothing.
+                    if generate_dbias:
+                        dbias_transpose()
+                        dbias_reduce(real_subtile, d_tile_base)
                     K.ptx.bar.sync(K.uint32(2), K.uint32(128))
                     K.assign(real_subtile, real_subtile + K.int32(1))
                     K.assign(subtile, subtile + K.int32(1))
