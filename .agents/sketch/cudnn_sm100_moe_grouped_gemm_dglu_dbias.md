@@ -344,14 +344,15 @@ Each is one PTX instruction, one tile, or one loop of one family:
 # with role(tma_warp):
 #     prefetch the A, B, C and D descriptors             # source 1166-1172
 #       # instruction_selection: prefetch.tensormap x4; extent: once per kernel, PTX 84-93
-#     acquire(tile_info_full[stage], phase)      # prologue record, before the loop
+#     # Prologue record, read and released before the loop. The wait, the read,
+#     # the fence and the release are adjacent everywhere, so a tile's work runs
+#     # from registers with its tile-info stage already free -- that is what keeps
+#     # the two-stage pipeline a full tile ahead.
+#     acquire(tile_info_full[stage], phase)
+#     expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
+#     fence_async_shared(); arrive(tile_info_empty[stage])
+#     stage, phase = advance(stage, phase, num_tile_stage)
 #     for each work tile:
-#         # Read the record, then release the stage immediately -- the tile's own
-#         # work runs from registers with stage S already free, which is what
-#         # keeps the two-stage tile-info pipeline a full tile ahead.
-#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]   # already acquired
-#         fence_async_shared(); arrive(tile_info_empty[stage])
-#         stage, phase = advance(stage, phase, num_tile_stage)
 #         if expert_idx < 0: break
 #         update_expert_info(padded_offsets, expert_idx)     # ext, token range
 #         status = peek(ab_empty[ab_stage], phase)           # source 1441
@@ -370,7 +371,10 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #               # instruction_selection: cp.async.bulk.tensor.3d.shared::cluster...cta_group::2; extent: one 128x64 bf16 half-tile
 #             ab_stage, phase = advance(ab_stage, phase, num_ab_stage)
 #             status = peek(ab_empty[ab_stage], phase)        # source 1459
-#         acquire(tile_info_full[stage], phase)   # next tile's record, bottom of body
+#         acquire(tile_info_full[stage], phase)   # next tile's record
+#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
+#         fence_async_shared(); arrive(tile_info_empty[stage])
+#         stage, phase = advance(stage, phase, num_tile_stage)
 #     producer_tail(ab_empty, num_ab_stage)                    # source 1495
 #       # instruction_selection: 5x blocking try_wait; extent: drain all AB stages
 #
@@ -385,16 +389,17 @@ Each is one PTX instruction, one tile, or one loop of one family:
 # ==========================================================================
 # with role(mma_warp):
 #     named_barrier(3, 160)                     # PTX 1107, TMEM base published
-#     acquire(tile_info_full[stage], phase)      # prologue record, before the loop
+#     # Prologue record, read and released before the loop. The wait, the read,
+#     # the fence and the release are adjacent everywhere, so a tile's work runs
+#     # from registers with its tile-info stage already free -- that is what keeps
+#     # the two-stage pipeline a full tile ahead.
+#     acquire(tile_info_full[stage], phase)
+#     expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
+#     fence_async_shared(); arrive(tile_info_empty[stage])
+#     stage, phase = advance(stage, phase, num_tile_stage)
 #     for each work tile:
-#         # Read the record, then release the stage immediately -- the tile's own
-#         # work runs from registers with stage S already free, which is what
-#         # keeps the two-stage tile-info pipeline a full tile ahead.
-#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]   # already acquired
-#         fence_async_shared(); arrive(tile_info_empty[stage])
-#         stage, phase = advance(stage, phase, num_tile_stage)
 #         if expert_idx < 0: break
-#         if k_tile_cnt > 0:                                 # source 1533
+#         if k_tile_cnt > 0 and is_leader_cta:               # source 1533
 #             status = peek(ab_full[ab_stage], phase)        # source 1534
 #         if is_leader_cta:                                  # source 1546
 #             acquire(acc_empty[acc_stage], phase)           # source 1547
@@ -416,7 +421,10 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #             umma_arrive(acc_full[acc_stage])               # source 1581
 #               # instruction_selection: tcgen05.commit...multicast::cluster.b64; extent: accumulator publish, PTX 1340
 #         acc_stage, phase = advance(acc_stage, phase, num_acc_stage)
-#         acquire(tile_info_full[stage], phase)   # next tile's record, bottom of body
+#         acquire(tile_info_full[stage], phase)   # next tile's record
+#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
+#         fence_async_shared(); arrive(tile_info_empty[stage])
+#         stage, phase = advance(stage, phase, num_tile_stage)
 #     producer_tail(acc_empty, 1)                              # source 1599
 #
 # `accumulate` is false only on the very first issue of a tile, which clears the
@@ -433,19 +441,20 @@ Each is one PTX instruction, one tile, or one loop of one family:
 # with role(epilogue_warps):
 #     warp 0 only: tmem_alloc(tmem_cols)        # PTX 1427-1428
 #     named_barrier(3, 160)                     # PTX 1431
-#     acquire(tile_info_full[stage], phase)      # prologue record, before the loop
+#     # Prologue record, read and released before the loop. The wait, the read,
+#     # the fence and the release are adjacent everywhere, so a tile's work runs
+#     # from registers with its tile-info stage already free -- that is what keeps
+#     # the two-stage pipeline a full tile ahead.
+#     acquire(tile_info_full[stage], phase)
+#     expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
+#     fence_async_shared(); arrive(tile_info_empty[stage])
+#     stage, phase = advance(stage, phase, num_tile_stage)
 #     for each work tile:
-#         # Read the record, then release the stage immediately -- the tile's own
-#         # work runs from registers with stage S already free, which is what
-#         # keeps the two-stage tile-info pipeline a full tile ahead.
-#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]   # already acquired
-#         fence_async_shared(); arrive(tile_info_empty[stage])
-#         stage, phase = advance(stage, phase, num_tile_stage)
 #         if expert_idx < 0: break
 #         square_alpha = alpha[expert] * alpha[expert]
 #         beta_e       = beta[expert]
 #         p            = prob[row_of_this_thread]
-#         dProbVal     = 0.0                                   # source 1732
+#         dProbVal     = 0.0                                   # source 1727
 #         acquire(acc_full[acc_stage], phase)                  # PTX 1538
 #         for subtile in range(epi_tile_cnt):                  # 8 pairs
 #             acc = tmem_load_32x32b_x32(acc_col + subtile * 32)
@@ -513,27 +522,27 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #                 # dbias_reduction, source 686-765: SMEM transpose, no shuffles.
 #                 # Runs once PER SUBTILE, so all 8 column pairs of the work tile
 #                 # are reduced and each carries its own n_base.
-#             named_barrier(2, 128)                           # source 707, PTX 2843
-#             col_a = 2 * lane if lane < 16 else epi_n + 2 * (lane - 16)
-#             col_b = col_a + 1
-#             sum_a = sum_b = 0.0
-#             for g in range(8):                              # source 721-733
-#                 m_base = g * 4
-#                 off_a  = warp_base + col_a * 32 + (m_base ^ (((col_a >> 1) & 0x7) << 2))
-#                 off_b  = warp_base + col_b * 32 + (m_base ^ (((col_b >> 1) & 0x7) << 2))
-#                 sum_a += sum(smem_ld_b32(off_a + j) for j in range(4))
-#                 sum_b += sum(smem_ld_b32(off_b + j) for j in range(4))
-#               # instruction_selection: ld.shared.b32 x64; extent: 32 rows per column pair
-#               # The XOR swizzle applies to the ROW-GROUP BASE, not the column, and
-#               # the 128-bit copy atom decays to scalars because the swizzled offset
-#               # is not provably 16-byte aligned.
-#             named_barrier(2, 128)                           # source 741, PTX 3242
-#             smem_st_b32 x2 -> this warp's 64-bit partial slot   # source 746
-#             named_barrier(2, 128)                           # source 747, PTX 3255
-#             warp 0: total = sum of the four warps' partials      # source 755, ld.shared.b32 x8
-#                     if n_offset < dbias_n_total:
-#                         atomic_add_bf16x2(&dbias[expert, n_offset], total)
-#                           # instruction_selection: cvt.rn.bf16x2.f32 + red.global.add.noftz.bf16x2; extent: one column pair, PTX 3316
+#                 named_barrier(2, 128)                           # source 707, PTX 2843
+#                 col_a = 2 * lane if lane < 16 else epi_n + 2 * (lane - 16)
+#                 col_b = col_a + 1
+#                 sum_a = sum_b = 0.0
+#                 for g in range(8):                              # source 721-733
+#                     m_base = g * 4
+#                     off_a  = warp_base + col_a * 32 + (m_base ^ (((col_a >> 1) & 0x7) << 2))
+#                     off_b  = warp_base + col_b * 32 + (m_base ^ (((col_b >> 1) & 0x7) << 2))
+#                     sum_a += sum(smem_ld_b32(off_a + j) for j in range(4))
+#                     sum_b += sum(smem_ld_b32(off_b + j) for j in range(4))
+#                   # instruction_selection: ld.shared.b32 x64; extent: 32 rows per column pair
+#                   # The XOR swizzle applies to the ROW-GROUP BASE, not the column, and
+#                   # the 128-bit copy atom decays to scalars because the swizzled offset
+#                   # is not provably 16-byte aligned.
+#                 named_barrier(2, 128)                           # source 741, PTX 3242
+#                 smem_st_b32 x2 -> this warp's 64-bit partial slot   # source 746
+#                 named_barrier(2, 128)                           # source 747, PTX 3255
+#                 warp 0: total = sum of the four warps' partials      # source 755, ld.shared.b32 x8
+#                         if n_offset < dbias_n_total:
+#                             atomic_add_bf16x2(&dbias[expert, n_offset], total)
+#                               # instruction_selection: cvt.rn.bf16x2.f32 + red.global.add.noftz.bf16x2; extent: one column pair, PTX 3316
 #
 #             d1_bits = pack_bf16x2(d1 pairs)   # source 1853, 16 issues
 #             d2_bits = pack_bf16x2(d2 pairs)   # source 1854, 16 issues
@@ -554,10 +563,13 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #
 #         if elect_one(): arrive(acc_empty[acc_stage])        # source 1935-1936, PTX 3465
 #         acc_stage, phase = advance(acc_stage, phase, num_acc_stage)
-#         acquire(tile_info_full[stage], phase)   # next tile's record, bottom of body
-#         atomic_add_f32(&dprob[row_of_this_thread], dprob_acc)  # source 1950-1955, PTX 3513
+#         acquire(tile_info_full[stage], phase)          # next tile's record
+#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
+#         fence_async_shared(); arrive(tile_info_empty[stage])   # source 1942-1948
+#         stage, phase = advance(stage, phase, num_tile_stage)
+#         atomic_add_f32(&dprob[row_of_this_thread], dProbVal)   # source 1954
 #           # instruction_selection: atom.global.add.f32; extent: one per epilogue thread per work tile
-#           # Flushed AFTER the tile-info release, not before.
+#           # The record is fully released before the flush, as at source 1942-1955.
 #
 #     tmem_relinquish()                        # source 1960, PTX 3524
 #     named_barrier(2, 128)                    # source 1961, PTX 3529
@@ -578,14 +590,15 @@ Each is one PTX instruction, one tile, or one loop of one family:
 # source 1971-2041; PTX 3643-3776
 # ==========================================================================
 # with role(c_load_warp):
-#     acquire(tile_info_full[stage], phase)      # prologue record, before the loop
+#     # Prologue record, read and released before the loop. The wait, the read,
+#     # the fence and the release are adjacent everywhere, so a tile's work runs
+#     # from registers with its tile-info stage already free -- that is what keeps
+#     # the two-stage pipeline a full tile ahead.
+#     acquire(tile_info_full[stage], phase)
+#     expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
+#     fence_async_shared(); arrive(tile_info_empty[stage])
+#     stage, phase = advance(stage, phase, num_tile_stage)
 #     for each work tile:
-#         # Read the record, then release the stage immediately -- the tile's own
-#         # work runs from registers with stage S already free, which is what
-#         # keeps the two-stage tile-info pipeline a full tile ahead.
-#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]   # already acquired
-#         fence_async_shared(); arrive(tile_info_empty[stage])
-#         stage, phase = advance(stage, phase, num_tile_stage)
 #         if expert_idx < 0: break
 #         for subtile in range(epi_tile_cnt):           # 8 pairs
 #             for half in (0, 1):                       # gate block, then up block
@@ -597,7 +610,10 @@ Each is one PTX instruction, one tile, or one loop of one family:
 #                             c_full[c_stage], pred=leader)
 #                   # instruction_selection: cp.async.bulk.tensor.3d.shared::cta...; extent: one 128x32 C block, PTX 3667/3703
 #                 c_stage, phase = advance(c_stage, phase, num_c_stage)
-#         acquire(tile_info_full[stage], phase)   # next tile's record, bottom of body
+#         acquire(tile_info_full[stage], phase)   # next tile's record
+#         expert_idx, tile_m_idx, tile_n_idx, _ = sInfo[:, stage]
+#         fence_async_shared(); arrive(tile_info_empty[stage])
+#         stage, phase = advance(stage, phase, num_tile_stage)
 #     producer_tail(c_empty, num_c_stage)                       # source 2041
 #
 # The gate and up halves land in SEPARATE C stages, which is why num_c_stage is
@@ -629,7 +645,7 @@ The PTX column carries **anchor-export line numbers**.
 | dprob flush | 1950-1955 | Warps 0-3 | 3513 |
 | teardown | 1960-1967 | Warps 0-3 | 3524-3556 |
 | C-load warp | 1971-2041 | Warp 6 | 3643-3776 |
-| stage solve | 2244-2282 | Anchor values | n/a |
+| stage solve | 2239-2282 | Anchor values | n/a |
 
 ## Out of scope
 
