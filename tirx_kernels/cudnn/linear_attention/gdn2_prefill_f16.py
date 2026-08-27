@@ -2805,7 +2805,46 @@ def _new_outputs(torch, config, total_tokens):
     return result
 
 
-def _prepare_data(config):
+def _reference(
+    torch, q, k, v, gate, beta, w, cu_seqlens, *, scale, initial_state, checkpoint_every_n_tokens
+):
+    from itertools import pairwise
+
+    bounds = [int(value) for value in cu_seqlens.cpu().tolist()]
+    heads = gate.shape[1]
+    output = torch.empty(q.shape[0], heads, _DV, dtype=torch.float64, device=q.device)
+    finals = []
+    checkpoints = []
+    for batch, (begin, end) in enumerate(pairwise(bounds)):
+        if initial_state is None:
+            state = torch.zeros(heads, _DK, _DV, dtype=torch.float64, device=q.device)
+        else:
+            state = initial_state[batch].double().transpose(-1, -2).contiguous()
+        if checkpoint_every_n_tokens and end > begin:
+            checkpoints.append(state.transpose(-1, -2).clone())
+        for local_token, token in enumerate(range(begin, end)):
+            state = gate[token].double().exp()[..., None] * state
+            erase = torch.einsum("hd,hdv->hv", beta[token].double() * k[token].double(), state)
+            v_new = w[token].double() * v[token].double() - erase
+            state = state + torch.einsum("hd,hv->hdv", k[token].double(), v_new)
+            output[token] = torch.einsum("hd,hdv->hv", q[token].double() * scale, state)
+            boundary = local_token + 1
+            if (
+                checkpoint_every_n_tokens
+                and boundary % checkpoint_every_n_tokens == 0
+                and boundary < end - begin
+            ):
+                checkpoints.append(state.transpose(-1, -2).clone())
+        finals.append(state.transpose(-1, -2))
+    checkpoint_tensor = (
+        torch.stack(checkpoints)
+        if checkpoints
+        else torch.empty(0, heads, _DV, _DK, dtype=torch.float64, device=q.device)
+    )
+    return output, torch.stack(finals), checkpoint_tensor
+
+
+def _prepare_data(config, *, with_oracle):
     import torch
 
     config = _normalized_config(config)
@@ -2854,6 +2893,38 @@ def _prepare_data(config):
     tirx_owner, tirx_workspace = _aligned_i64(torch, workspace_bytes)
     source_owner, source_workspace = _aligned_i64(torch, workspace_bytes)
 
+    oracle = None
+    if with_oracle:
+        q_ref = q.double().repeat_interleave(config["heads"] // config["q_heads"], dim=1)
+        k_ref = k.double().repeat_interleave(config["heads"] // config["k_heads"], dim=1)
+        v_ref = v.double().repeat_interleave(config["heads"] // config["v_heads"], dim=1)
+        if config["l2norm"]:
+            q_ref = torch.nn.functional.normalize(q_ref, dim=-1, eps=1e-12)
+            k_ref = torch.nn.functional.normalize(k_ref, dim=-1, eps=1e-12)
+        gate_ref = gate.double()
+        if config["safe_gate"]:
+            gate_ref = float(config["gate_lower_bound"]) * torch.sigmoid(
+                a_log.double().exp()[None, :, None] * (gate_ref + dt_bias.double()[None, :, :])
+            )
+        beta_ref = beta.double().sigmoid() if config["beta_sigmoid"] else beta.double()
+        output_ref, state_ref, checkpoint_ref = _reference(
+            torch,
+            q_ref,
+            k_ref,
+            v_ref,
+            gate_ref,
+            beta_ref,
+            w,
+            cu_seqlens,
+            scale=float(config["scale"]),
+            initial_state=initial_state,
+            checkpoint_every_n_tokens=int(config["checkpoint_every_n_tokens"]),
+        )
+        oracle = {"output": output_ref}
+        if config["store_final_state"]:
+            oracle["final_state"] = state_ref
+        if checkpoint_ref.numel():
+            oracle["checkpoints"] = checkpoint_ref
     return {
         "config": config,
         "q": q,
@@ -2871,13 +2942,14 @@ def _prepare_data(config):
         "work": _prepare_work_tables(torch, config),
         "tirx_workspace": tirx_workspace,
         "source_workspace": source_workspace,
+        "oracle": oracle,
         "_workspace_owners": (tirx_owner, source_owner),
     }
 
 
 def prepare_data(**config):
-    """Allocate the shared input set plus source/TIRx output buffers."""
-    return _prepare_data(config)
+    """Allocate independent TIRx/source outputs and an FP64 recurrence oracle."""
+    return _prepare_data(config, with_oracle=True)
 
 
 def _encode_tiled_map(tensor, dimensions, strides, box):
@@ -3109,13 +3181,21 @@ def _rms_ratio(torch, actual, expected):
     return float(((difference_square_sum / elements).sqrt() / denominator).item())
 
 
-def _validate_outputs(data, *, sources):
+def _validate_outputs(data, *, sources, with_oracle):
     import math
 
     import torch
 
     limit = 0.01 if data["config"]["io_dtype"] == "float16" else 0.02
     failures = {}
+    if with_oracle:
+        if data["oracle"] is None:
+            raise AssertionError("oracle validation requested without oracle data")
+        for source_name in sources:
+            for name, expected in data["oracle"].items():
+                ratio = _rms_ratio(torch, data[source_name][name], expected)
+                if not math.isfinite(ratio) or ratio >= limit:
+                    failures[f"{source_name}.{name}"] = ratio
     if "tirx" in sources and "source" in sources:
         for name in data["tirx"]:
             ratio = _rms_ratio(torch, data["tirx"][name], data["source"][name])
@@ -3128,20 +3208,20 @@ def _validate_outputs(data, *, sources):
 
 
 def run_test(**config):
-    """Compare TIRx with the upstream kernel on identical inputs."""
+    """Compare TIRx and source with the independent FP64 recurrence."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
     config = _normalized_config(config)
-    data = _prepare_data(config)
+    data = _prepare_data(config, with_oracle=True)
     executables = [compile_kernel(func) for func in get_kernel(**config)]
     tirx_launch = _tirx_launch(executables, data)
     source_launch = _source_launch(data)
     tirx_launch()
     source_launch()
     torch.cuda.synchronize()
-    _validate_outputs(data, sources=("tirx", "source"))
+    _validate_outputs(data, sources=("tirx", "source"), with_oracle=True)
     return {"tokens": sum(config["seq_lens"]), "heads": config["heads"]}
 
 
@@ -3164,7 +3244,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     from tirx_kernels.runner import bench, external_references_enabled
 
     config = _normalized_config({**prepared["config"], **kwargs})
-    data = _prepare_data(config)
+    data = _prepare_data(config, with_oracle=False)
     tirx_launch = _tirx_launch(prepared["executables"], data)
     tirx_launch()
     torch.cuda.synchronize()
@@ -3173,7 +3253,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         source_launch = _source_launch(data)
         source_launch()
         torch.cuda.synchronize()
-        _validate_outputs(data, sources=("tirx", "source"))
+        _validate_outputs(data, sources=("tirx", "source"), with_oracle=False)
         references = {"cudnn_frontend": lambda: source_launch}
     return bench(
         {"tirx": tirx_launch},

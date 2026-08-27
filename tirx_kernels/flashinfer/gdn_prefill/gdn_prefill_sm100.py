@@ -926,12 +926,6 @@ def make_kernel(HQ: int, HV: int):
                     K.ptx[TC_LD_32](
                         *(sub[i] for i in range(32)), tmem_at(tmem, TM_STATE + s * 32, rowbits1)
                     )
-                    # No tcgen05.wait::ld on any cg1 tmem load: the frozen kernel
-                    # has none at these six sites (orig:L940/L1877/L1977/L2011/
-                    # L2045/L2109) and lets the register dependency carry the
-                    # ordering. Adding them cost ~0.5% and is the one place this
-                    # port is knowingly *less* conservative than the ISA reads;
-                    # see gdn_port_NOTES.md §7.
                     for vec in range(8):
                         K.ptx[ST_G_V4](
                             final_state.ptr_to([base + s * 32 + vec * 4]),
@@ -940,6 +934,7 @@ def make_kernel(HQ: int, HV: int):
                             sub[vec * 4 + 2],
                             sub[vec * 4 + 3],
                         )
+                K.ptx[WAIT_LD]()
                 p_kv.empty.arrive(st_kvc.stage)
                 st_kvc.advance()
 
@@ -1040,6 +1035,7 @@ def make_kernel(HQ: int, HV: int):
                                         scale_pair(
                                             fr, p, f2(cumprod_f[2 * g], cumprod_f[2 * g + 1])
                                         )
+                            K.ptx[WAIT_LD]()
                             p_cg1.empty.arrive(st_cg1c.stage)  # release KS
                             st_cg1c.advance()
                             for p in range(32):  # orig:L1998-2002
@@ -1082,6 +1078,7 @@ def make_kernel(HQ: int, HV: int):
                             cg1_acc_ld(fr, TM_CG1)
                             for p in range(32):
                                 pack_f16x2(nvw[p], fr[2 * p], fr[2 * p + 1])
+                            K.ptx[WAIT_LD]()
                             p_cg1.empty.arrive(st_cg1c.stage)  # release NV
                             st_cg1c.advance()
                             for h in range(2):
@@ -1106,6 +1103,7 @@ def make_kernel(HQ: int, HV: int):
                             for p in range(32):
                                 pack_f16x2(nvw[p], fr[2 * p], fr[2 * p + 1])
                             store_o_frag(nvw, s_o[st_op.stage])
+                            K.ptx[WAIT_LD]()
                             K.ptx[FENCE_ASYNC]()
                             p_qs.empty.arrive(st_qsc.stage)  # release QKV
                             st_qsc.advance()

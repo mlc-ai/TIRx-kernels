@@ -559,6 +559,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
     spec.check_dispatch(
         {
             "head_dim": head_dim,
+            "num_head": num_head,
             "dtype": dtype,
             "topk_mode": "full",
             "sink_mode": "normal",
@@ -1155,6 +1156,7 @@ def make_bwd_kernel(*, head_dim, num_head, dtype, max_topk, has_topk_length):
                 # --- dQ epilogue: 4 rounds (5 at d576) (:2033-2140) --------
                 # One wait for the whole epilogue: dQ was committed once.
                 p_dq.full.wait(0, 0)
+                K.ptx["fence.proxy.async.shared::cta"]()
                 t_dq_e = [
                     (tcol, off)
                     for off in (TMEM_DQ0_OFFSET, TMEM_DQ1_OFFSET, TMEM_DQ2_OFFSET, TMEM_DQ3_OFFSET)
@@ -1467,19 +1469,20 @@ SUM_ODO_THREADS_Q = 16
 SUM_ODO_ELEM_PER_LOAD = 4
 
 
-def _shfl_bfly_f32(value, lane_xor):
+def _shfl_bfly_f32(value, lane_xor, membermask):
     """One ``shfl.sync.bfly.b32`` on an f32, reinterpreted through u32."""
     out = K.local_scalar(K.u32)
     K.ptx.shfl_sync.bfly.b32(
-        out, K.reinterpret(K.u32, value), K.uint32(lane_xor), K.uint32(31), K.uint32(0xFFFFFFFF)
+        out, K.reinterpret(K.u32, value), K.uint32(lane_xor), K.uint32(31), membermask
     )
     return K.reinterpret(K.f32, out)
 
 
 def _butterfly_sum_f32(value, lane_xors):
     """Sum across the lanes an xor-mask set spans; clamp 31 keeps it in-group."""
+    membermask = K.local_scalar(K.u32, init=K.tvm_warp_activemask())
     for lane_xor in lane_xors:
-        peer = _shfl_bfly_f32(value, lane_xor)
+        peer = _shfl_bfly_f32(value, lane_xor, membermask)
         total = K.local_scalar(K.f32)
         K.ptx.add.f32(total, value, peer)
         value = total

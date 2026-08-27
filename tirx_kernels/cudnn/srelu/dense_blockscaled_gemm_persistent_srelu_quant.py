@@ -11,8 +11,6 @@ Upstream source:
 """
 
 import heapq
-import importlib.util
-import os
 from functools import cache
 from itertools import combinations
 
@@ -3127,22 +3125,11 @@ def prepare_data(**config):
 
 @cache
 def _load_reference_source():
-    root = os.environ.get("CUDNN_FRONTEND_PATH")
-    if root is None:
-        root = os.path.join(os.path.dirname(__file__), "../../../.reference-deps/cudnn-frontend")
-    source_path = os.path.abspath(
-        os.path.join(
-            root,
-            "python/cudnn/gemm/cutedsl/dense/srelu/"
-            "dense_blockscaled_gemm_persistent_srelu_quant.py",
-        )
+    from tirx_kernels.cudnn._reference import load_reference_module
+
+    return load_reference_module(
+        "cudnn.gemm.cutedsl.dense.srelu.dense_blockscaled_gemm_persistent_srelu_quant"
     )
-    spec = importlib.util.spec_from_file_location("tirx_cudnn_frontend_srelu_source", source_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load cuDNN Frontend source: {source_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _compile_reference(data, config):

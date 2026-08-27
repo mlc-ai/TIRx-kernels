@@ -1,6 +1,8 @@
-# TIRx kernels
+# Kern kernels on TIRx
 
-High-performance GPU kernels written in [TIRx](https://github.com/apache/tvm).
+High-performance GPU kernels authored in
+[Kern](tirx_kernels/kern/README.md) and compiled through
+[TIRx](https://github.com/apache/tvm).
 
 ## Kernels
 

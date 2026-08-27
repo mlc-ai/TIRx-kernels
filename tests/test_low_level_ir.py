@@ -31,7 +31,6 @@ def test_func_call_is_rejected_by_default_and_reports_callee():
 
 def test_only_exact_kernel_local_helpers_are_exempt():
     assert LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL == {
-        "cudnn_sm100_bsa_forward_blk64": frozenset({"tirx_bsa_pv_mma_chain"}),
         "gemm_reduce_scatter": frozenset(
             {
                 "enqueue_remote",
@@ -39,7 +38,7 @@ def test_only_exact_kernel_local_helpers_are_exempt():
                 "ld_reduce_8_fp16",
                 "semaphore_notify_remote",
             }
-        ),
+        )
     }
 
     for callee in NVSHMEM_RUNTIME_FUNC_CALLS:

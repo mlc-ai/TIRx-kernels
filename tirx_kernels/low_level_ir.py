@@ -27,10 +27,7 @@ NVSHMEM_RUNTIME_FUNC_CALLS = frozenset(
     }
 )
 LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL: Mapping[str, frozenset[str]] = MappingProxyType(
-    {
-        "cudnn_sm100_bsa_forward_blk64": frozenset({"tirx_bsa_pv_mma_chain"}),
-        "gemm_reduce_scatter": NVSHMEM_RUNTIME_FUNC_CALLS,
-    }
+    {"gemm_reduce_scatter": NVSHMEM_RUNTIME_FUNC_CALLS}
 )
 
 

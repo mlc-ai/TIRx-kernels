@@ -43,79 +43,6 @@ TMA_G2S_5D = (
 TMA_S2G_4D = "cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group.L2::cache_hint"
 TMA_CACHE = K.uint64(0)
 
-_PV_MMA_CHAIN = r"""
-__forceinline__ __device__ void tirx_bsa_pv_mma_chain(
-        uint32_t tmem_acc,
-        uint32_t tmem_a,
-        uint64_t smem_desc_b_start,
-        uint32_t accumulate,
-        uint64_t* plast_full,
-        uint32_t plast_phase) {
-    uint32_t smem_desc_b_lo_start = static_cast<uint32_t>(smem_desc_b_start);
-    uint32_t plast_addr = static_cast<uint32_t>(__cvta_generic_to_shared(plast_full));
-    uint32_t zero_init = accumulate == 0;
-    asm volatile(
-        "{\n"
-        ".reg .pred leader_thread, p, plast_ready;\n"
-        ".reg .b32 idesc, tmem_acc_reg, tmem_a_reg;\n"
-        ".reg .b32 smem_desc_b_lo_start, smem_desc_b_lo, smem_desc_b_hi;\n"
-        ".reg .b64 smem_desc_b;\n"
-        "elect.sync _|leader_thread, -1;\n"
-        "mov.b32 idesc, 0x4410490;\n"
-        "mov.b32 tmem_acc_reg, %0;\n"
-        "mov.b32 tmem_a_reg, %1;\n"
-        "mov.b32 smem_desc_b_lo_start, %2;\n"
-        "mov.b32 smem_desc_b_lo, smem_desc_b_lo_start;\n"
-        "mov.b32 smem_desc_b_hi, 0x40004040;\n"
-        "mov.b64 smem_desc_b, {smem_desc_b_lo_start, smem_desc_b_hi};\n"
-        "setp.eq.b32 p, %3, 0;\n"
-        "@leader_thread tcgen05.mma.ws.cta_group::1.kind::f16 "
-        "[tmem_acc_reg], [tmem_a_reg], smem_desc_b, idesc, p, 0;\n"
-        "add.u32 smem_desc_b_lo, smem_desc_b_lo_start, 0x80;\n"
-        "mov.b64 smem_desc_b, {smem_desc_b_lo, smem_desc_b_hi};\n"
-        "@leader_thread tcgen05.mma.ws.cta_group::1.kind::f16 "
-        "[tmem_acc_reg], [tmem_a_reg + 0x8], smem_desc_b, idesc, 1, 0;\n"
-        "tirx_bsa_plast_wait:\n"
-        "mbarrier.try_wait.parity.shared::cta.b64 plast_ready, [%4], %5, 1;\n"
-        "@plast_ready bra.uni tirx_bsa_plast_done;\n"
-        "bra.uni tirx_bsa_plast_wait;\n"
-        "tirx_bsa_plast_done:\n"
-        "add.u32 smem_desc_b_lo, smem_desc_b_lo, 0x80;\n"
-        "mov.b64 smem_desc_b, {smem_desc_b_lo, smem_desc_b_hi};\n"
-        "@leader_thread tcgen05.mma.ws.cta_group::1.kind::f16 "
-        "[tmem_acc_reg], [tmem_a_reg + 0x10], smem_desc_b, idesc, 1, 0;\n"
-        "add.u32 smem_desc_b_lo, smem_desc_b_lo, 0x80;\n"
-        "mov.b64 smem_desc_b, {smem_desc_b_lo, smem_desc_b_hi};\n"
-        "@leader_thread tcgen05.mma.ws.cta_group::1.kind::f16 "
-        "[tmem_acc_reg], [tmem_a_reg + 0x18], smem_desc_b, idesc, 1, 0;\n"
-        "add.u32 smem_desc_b_lo, smem_desc_b_lo, 0x680;\n"
-        "mov.b64 smem_desc_b, {smem_desc_b_lo, smem_desc_b_hi};\n"
-        "@leader_thread tcgen05.mma.ws.cta_group::1.kind::f16 "
-        "[tmem_acc_reg], [tmem_a_reg + 0x20], smem_desc_b, idesc, 1, 0;\n"
-        "add.u32 smem_desc_b_lo, smem_desc_b_lo, 0x80;\n"
-        "mov.b64 smem_desc_b, {smem_desc_b_lo, smem_desc_b_hi};\n"
-        "@leader_thread tcgen05.mma.ws.cta_group::1.kind::f16 "
-        "[tmem_acc_reg], [tmem_a_reg + 0x28], smem_desc_b, idesc, 1, 0;\n"
-        "add.u32 smem_desc_b_lo, smem_desc_b_lo, 0x80;\n"
-        "mov.b64 smem_desc_b, {smem_desc_b_lo, smem_desc_b_hi};\n"
-        "@leader_thread tcgen05.mma.ws.cta_group::1.kind::f16 "
-        "[tmem_acc_reg], [tmem_a_reg + 0x30], smem_desc_b, idesc, 1, 0;\n"
-        "add.u32 smem_desc_b_lo, smem_desc_b_lo, 0x80;\n"
-        "mov.b64 smem_desc_b, {smem_desc_b_lo, smem_desc_b_hi};\n"
-        "@leader_thread tcgen05.mma.ws.cta_group::1.kind::f16 "
-        "[tmem_acc_reg], [tmem_a_reg + 0x38], smem_desc_b, idesc, 1, 0;\n"
-        "}\n"
-        :
-        : "r"(tmem_acc),
-          "r"(tmem_a),
-          "r"(smem_desc_b_lo_start),
-          "r"(zero_init),
-          "r"(plast_addr),
-          "r"(plast_phase)
-        : "memory");
-}
-"""
-
 
 def _load_i32(buffer, index):
     out = K.local_scalar("int32")
@@ -410,13 +337,7 @@ def make_forward_kernel(**config):
     q_blocks = (seqlen_q + 63) // 64
     grid = (q_blocks, heads if use_clc else heads * splits, batch)
 
-    @K.kernel(
-        warps=WARPS,
-        arch="sm_100a",
-        min_blocks_per_sm=1,
-        grid=grid,
-        allowed_func_calls=("tirx_bsa_pv_mma_chain",),
-    )
+    @K.kernel(warps=WARPS, arch="sm_100a", min_blocks_per_sm=1, grid=grid)
     def forward(
         q_map: K.TensorMap,
         k_map: K.TensorMap,
@@ -737,16 +658,20 @@ def make_forward_kernel(**config):
                 v_stage_desc = K.SmemDescriptor()
                 v_stage_desc.init(kv_smem.ptr_to([kv_stage * 32768]), ldo=512, sdo=64, swizzle=3)
                 v_stage_desc.make_lo_uniform()
-                K.cuda.func_call(
-                    "tirx_bsa_pv_mma_chain",
-                    K.uint32(256 + stage * 128),
-                    K.uint32(stage * 128),
-                    v_stage_desc.desc,
-                    K.cast(accumulate, "uint32"),
-                    plast_full.ptr_to([stage]),
-                    K.cast(phase, "uint32"),
-                    source_code=_PV_MMA_CHAIN,
-                )
+                for ki, v_offset in enumerate(
+                    (0x000, 0x080, 0x100, 0x180, 0x800, 0x880, 0x900, 0x980)
+                ):
+                    if ki == 2:
+                        _wait(plast_full, stage, phase)
+                    with K.If(K.cuda.elect_sync()), K.Then():
+                        K.ptx[MMA_WS_F16](
+                            K.uint32(256 + stage * 128),
+                            K.uint32(stage * 128 + ki * 8),
+                            v_stage_desc.add_16B_offset(v_offset),
+                            K.uint32(ID_PV),
+                            K.cast(accumulate != 0 if ki == 0 else True, "bool"),
+                            K.uint64(0),
+                        )
 
             with K.While(work_valid != 0):
                 load_tile_metadata()
@@ -1088,6 +1013,7 @@ def make_forward_kernel(**config):
                     for stage in range(2):
                         _wait(oacc_full, stage, oacc_phase)
                         K.ptx.tcgen05.fence__after_thread_sync()
+                    K.ptx.fence.proxy.async_.shared__cta()
                     _wait(oepi_empty, 0, oepi_phase)
                 with K.If(has_work == K.bool(False)), K.Then():
                     for stage in range(2):
