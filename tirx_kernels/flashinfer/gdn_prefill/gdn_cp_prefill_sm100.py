@@ -3253,6 +3253,7 @@ def _make_prefill(spec):
                             _mn_opt_pack_iox2(fragment[pair * 2], fragment[pair * 2 + 1], io_dtype),
                         )
                     _prefill_opt_store_o_fragment(s_o, st_o.stage, cg1_thread, o_words)
+                    K.ptx.tcgen05.wait__ld.sync.aligned()
                     K.ptx.fence.proxy.async_.shared__cta()
                     p_qstate.empty.arrive(st_qstate_c.stage)
                     st_qstate_c.advance()
