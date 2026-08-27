@@ -9,16 +9,11 @@ One input set is shared by TIRx, the upstream kernel and the oracle, with a
 separate output set per implementation so the three can be compared directly.
 """
 
-import importlib
-import importlib.machinery
 import os
-import sys
-import types
-from functools import cache
+
+from tirx_kernels.cudnn._reference import import_cutlass_reference, load_reference_module
 
 from . import spec as _spec
-
-_REFERENCE_PACKAGE = "tirx_cudnn_frontend_grouped"
 
 _TORCH_DTYPES = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}
 
@@ -213,71 +208,14 @@ def reference_outputs(data):
 # ---------------------------------------------------------------------------
 
 
-@cache
 def load_reference_source():
-    """Import the upstream kernel without executing the cuDNN API package.
+    """Import the upstream kernel from the pinned cuDNN Frontend install.
 
-    The kernel and its scheduler/util siblings import only cutlass and each
-    other, so a synthetic package rooted at ``cutedsl/grouped`` resolves their
-    relative imports while ``dglu/__init__.py`` -- which pulls in the compiled
-    ``cudnn`` extension -- is never run.
+    The dotted import runs ``grouped/__init__`` and ``dglu/__init__`` on the
+    way down, which reach the compiled ``cudnn`` extension -- safe against the
+    source install, and cached so the cost is paid once per process.
     """
-    root = os.environ.get("CUDNN_FRONTEND_PATH")
-    if root is None:
-        raise RuntimeError("CUDNN_FRONTEND_PATH must point to a cuDNN Frontend source checkout")
-    grouped = os.path.join(root, "python/cudnn/gemm/cutedsl/grouped")
-    if not os.path.isdir(grouped):
-        raise RuntimeError(f"cannot find the grouped GEMM sources under {grouped}")
-    for name, path in (
-        (_REFERENCE_PACKAGE, grouped),
-        (f"{_REFERENCE_PACKAGE}.dglu", os.path.join(grouped, "dglu")),
-    ):
-        if name in sys.modules:
-            continue
-        module = types.ModuleType(name)
-        module.__path__ = [path]
-        module.__spec__ = importlib.machinery.ModuleSpec(name, None, is_package=True)
-        module.__spec__.submodule_search_locations = [path]
-        sys.modules[name] = module
-    return importlib.import_module(f"{_REFERENCE_PACKAGE}.dglu.moe_grouped_gemm_dglu_dbias")
-
-
-def _rebind_submodules(package):
-    """Re-attach already-loaded submodules to a freshly re-executed package."""
-    prefix = package.__name__ + "."
-    for name, module in list(sys.modules.items()):
-        if not name.startswith(prefix) or module is None:
-            continue
-        child = name[len(prefix) :]
-        if "." in child:
-            continue
-        if getattr(package, child, None) is not module:
-            setattr(package, child, module)
-    return package
-
-
-def import_cutlass_reference():
-    """Recover from CuTeDSL's non-idempotent generated builder imports."""
-    try:
-        return _rebind_submodules(importlib.import_module("cutlass"))
-    except RuntimeError as exc:
-        message = str(exc)
-        if "Attribute builder for '" not in message or "is already registered" not in message:
-            raise
-        mlir_ir = sys.modules.get("cutlass._mlir.ir")
-        if mlir_ir is None:
-            raise
-        register_attribute_builder = mlir_ir.register_attribute_builder
-
-        def register_replacing_builder(kind, replace=False):
-            del replace
-            return register_attribute_builder(kind, replace=True)
-
-        mlir_ir.register_attribute_builder = register_replacing_builder
-        try:
-            return _rebind_submodules(importlib.import_module("cutlass"))
-        finally:
-            mlir_ir.register_attribute_builder = register_attribute_builder
+    return load_reference_module("cudnn.gemm.cutedsl.grouped.dglu.moe_grouped_gemm_dglu_dbias")
 
 
 def compile_reference(data):

@@ -16,13 +16,9 @@ Upstream sources:
 (``__call__`` argument contract, ``dswiglu``/``dgeglu``/``dsituglu``).
 """
 
-import importlib
-import importlib.machinery
-import importlib.util
 import os
-import sys
-import types
-from functools import cache
+
+from tirx_kernels.cudnn._reference import import_cutlass_reference, load_reference_module
 
 from . import spec
 
@@ -511,97 +507,17 @@ def reference_outputs(data):
 # Upstream kernel as reference
 # ---------------------------------------------------------------------------
 
-_REFERENCE_PACKAGE = "tirx_cudnn_frontend_grouped"
 
-
-@cache
 def load_reference_source():
-    """Import the upstream kernel module without executing the cuDNN API package.
+    """Import the upstream kernel from the pinned cuDNN Frontend install.
 
-    The kernel and its scheduler/util siblings import only cutlass and each other,
-    so a synthetic package rooted at ``cutedsl/grouped`` resolves their relative
-    imports while ``dglu/__init__.py`` -- which pulls in the compiled ``cudnn``
-    extension -- is never run.
+    The dotted import runs ``grouped/__init__`` and ``dglu/__init__`` on the
+    way down, which reach the compiled ``cudnn`` extension -- safe against the
+    source install, and cached so the cost is paid once per process.
     """
-    root = os.environ.get("CUDNN_FRONTEND_PATH")
-    if root is None:
-        raise RuntimeError("CUDNN_FRONTEND_PATH must point to a cuDNN Frontend source checkout")
-    grouped = os.path.join(root, "python/cudnn/gemm/cutedsl/grouped")
-    if not os.path.isdir(grouped):
-        raise RuntimeError(f"cannot find the grouped GEMM sources under {grouped}")
-    for name, path in (
-        (_REFERENCE_PACKAGE, grouped),
-        (f"{_REFERENCE_PACKAGE}.dglu", os.path.join(grouped, "dglu")),
-    ):
-        if name in sys.modules:
-            continue
-        module = types.ModuleType(name)
-        module.__path__ = [path]
-        module.__spec__ = importlib.machinery.ModuleSpec(name, None, is_package=True)
-        module.__spec__.submodule_search_locations = [path]
-        sys.modules[name] = module
-    return importlib.import_module(
-        f"{_REFERENCE_PACKAGE}.dglu.moe_blockscaled_grouped_gemm_dglu_dbias"
+    return load_reference_module(
+        "cudnn.gemm.cutedsl.grouped.dglu.moe_blockscaled_grouped_gemm_dglu_dbias"
     )
-
-
-def _rebind_submodules(package):
-    """Re-attach already-loaded submodules to a freshly re-executed package.
-
-    A failed ``import cutlass`` drops ``cutlass`` from ``sys.modules`` but leaves
-    every ``cutlass.*`` submodule behind. On the retry the package body re-runs,
-    and its inner ``import cutlass._mlir`` finds that submodule already loaded,
-    so the import system never binds it as an attribute of the new package
-    object. The upstream kernel reaches for ``cutlass._mlir.dialects.math`` in
-    its amax reduction and fails with an ``AttributeError`` that has nothing to
-    do with the kernel under test.
-    """
-    prefix = package.__name__ + "."
-    for name, module in list(sys.modules.items()):
-        if not name.startswith(prefix) or module is None:
-            continue
-        child = name[len(prefix) :]
-        if "." in child:
-            continue
-        if getattr(package, child, None) is not module:
-            setattr(package, child, module)
-    return package
-
-
-def import_cutlass_reference():
-    """Recover from CuTeDSL's non-idempotent generated builder imports."""
-    try:
-        return _rebind_submodules(importlib.import_module("cutlass"))
-    except RuntimeError as exc:
-        message = str(exc)
-        if "Attribute builder for '" not in message or "is already registered" not in message:
-            raise
-        mlir_ir = sys.modules.get("cutlass._mlir.ir")
-        if mlir_ir is None:
-            raise
-        register_attribute_builder = mlir_ir.register_attribute_builder
-
-        def register_replacing_builder(kind, replace=False):
-            del replace
-            return register_attribute_builder(kind, replace=True)
-
-        mlir_ir.register_attribute_builder = register_replacing_builder
-        try:
-            return _rebind_submodules(importlib.import_module("cutlass"))
-        finally:
-            mlir_ir.register_attribute_builder = register_attribute_builder
-
-
-def _cute_dtype(cutlass, dtype):
-    return {
-        "float4_e2m1fn": cutlass.Float4E2M1FN,
-        "float8_e4m3fn": cutlass.Float8E4M3FN,
-        "float8_e5m2": cutlass.Float8E5M2,
-        "float8_e8m0fnu": cutlass.Float8E8M0FNU,
-        "float16": cutlass.Float16,
-        "bfloat16": cutlass.BFloat16,
-        "float32": cutlass.Float32,
-    }[dtype]
 
 
 def compile_reference(data):

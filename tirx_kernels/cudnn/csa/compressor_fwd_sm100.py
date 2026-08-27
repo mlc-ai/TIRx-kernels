@@ -433,33 +433,10 @@ def _launch(executable, data, output_key="out"):
     )
 
 
-_REFERENCE_SOURCE = None
-
-
 def _load_reference_source():
-    global _REFERENCE_SOURCE
-    if _REFERENCE_SOURCE is not None:
-        return _REFERENCE_SOURCE
+    from tirx_kernels.cudnn._reference import load_reference_module
 
-    import importlib.util
-    import os
-    from pathlib import Path
-
-    root = os.environ.get("CUDNN_FRONTEND_PATH")
-    if root is None:
-        raise RuntimeError("CUDNN_FRONTEND_PATH must point to a cuDNN Frontend source checkout")
-    source_path = Path(root) / "python/cudnn/csa/compressor/compressor_sm100.py"
-    if not source_path.is_file():
-        raise RuntimeError(f"CUDNN_FRONTEND_PATH does not contain {source_path.relative_to(root)}")
-    spec = importlib.util.spec_from_file_location(
-        "tirx_cudnn_frontend_csa_compressor_source", source_path
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load cuDNN Frontend compressor source from {source_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _REFERENCE_SOURCE = module
-    return module
+    return load_reference_module("cudnn.csa.compressor.compressor_sm100")
 
 
 def _source_launch(data):

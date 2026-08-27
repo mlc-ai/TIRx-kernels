@@ -11,10 +11,6 @@ Upstream source:
 """
 
 import heapq
-import importlib
-import importlib.util
-import os
-import sys
 from functools import cache
 from itertools import combinations, product
 
@@ -2502,50 +2498,18 @@ def prepare_data(**config):
     }
 
 
-@cache
 def _load_reference_source():
-    root = os.environ.get("CUDNN_FRONTEND_PATH")
-    if root is None:
-        raise RuntimeError("CUDNN_FRONTEND_PATH must point to a cuDNN Frontend source checkout")
-    source_path = os.path.join(
-        root,
-        "python/cudnn/gemm/cutedsl/dense/swiglu/"
-        "dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py",
+    from tirx_kernels.cudnn._reference import load_reference_module
+
+    return load_reference_module(
+        "cudnn.gemm.cutedsl.dense.swiglu.dense_blockscaled_gemm_persistent_swiglu_interleaved_quant"
     )
-    spec = importlib.util.spec_from_file_location("tirx_cudnn_frontend_swiglu_source", source_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load cuDNN Frontend source: {source_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _import_cutlass_reference():
-    """Recover from CuTeDSL's non-idempotent generated builder imports."""
-    try:
-        return importlib.import_module("cutlass")
-    except RuntimeError as exc:
-        message = str(exc)
-        if "Attribute builder for '" not in message or "is already registered" not in message:
-            raise
-        mlir_ir = sys.modules.get("cutlass._mlir.ir")
-        if mlir_ir is None:
-            raise
-        register_attribute_builder = mlir_ir.register_attribute_builder
-
-        def register_replacing_builder(kind, replace=False):
-            del replace
-            return register_attribute_builder(kind, replace=True)
-
-        mlir_ir.register_attribute_builder = register_replacing_builder
-        try:
-            return importlib.import_module("cutlass")
-        finally:
-            mlir_ir.register_attribute_builder = register_attribute_builder
 
 
 def _compile_reference(data, config):
-    cutlass = _import_cutlass_reference()
+    from tirx_kernels.cudnn._reference import import_cutlass_reference
+
+    cutlass = import_cutlass_reference()
     import cutlass.cute as cute
     import torch
     from cuda.bindings import driver as cuda

@@ -3110,32 +3110,10 @@ def _tirx_launch(executables, data):
     return launch
 
 
-_REFERENCE_SOURCE = None
-
-
 def _load_reference_source():
-    global _REFERENCE_SOURCE
-    if _REFERENCE_SOURCE is not None:
-        return _REFERENCE_SOURCE
-    import importlib
-    import os
-    import sys
+    from tirx_kernels.cudnn._reference import load_reference_module
 
-    root = os.environ.get("CUDNN_FRONTEND_PATH")
-    if root is None:
-        raise RuntimeError("CUDNN_FRONTEND_PATH must point to a cuDNN Frontend source checkout")
-    python_root = os.path.join(root, "python")
-    if python_root not in sys.path:
-        sys.path.append(python_root)
-    import cudnn
-
-    cudnn_root = os.path.join(python_root, "cudnn")
-    if cudnn_root not in cudnn.__path__:
-        cudnn.__path__.append(cudnn_root)
-    _REFERENCE_SOURCE = importlib.import_module(
-        "cudnn.linear_attention.frost.kernel.gdn2_prefill_f16"
-    )
-    return _REFERENCE_SOURCE
+    return load_reference_module("cudnn.linear_attention.frost.kernel.gdn2_prefill_f16")
 
 
 def _source_launch(data):
