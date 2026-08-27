@@ -678,6 +678,7 @@ def _make_device_kernel():
 
         Kern.ptx.ld.shared.u32(tmem_addr_local[0], tmem_addr.ptr_to([0]))
         Kern.cuda.trap_when_assert_failed(tmem_addr_local[0] == 0)
+
         def partitioned_loop(pipe_state, main_loop, epilogue1, epilogue2):
             with Kern.serial(PIPE_CYCLE) as ko:
                 with Kern.unroll(PIPELINE_DEPTH) as ks:
@@ -1206,6 +1207,8 @@ def _check_correctness(case: _Case) -> None:
     case.ag_out_torch[local].copy_(case.A)
     torch.testing.assert_close(case.ag_out_torch, gathered_A, rtol=0, atol=0)
 
+    # cuBLAS baseline: torch.matmul dispatches to cuBLAS, so this IS the
+    # library comparison.
     reference = torch.matmul(gathered_A, case.B.T)
     torch.testing.assert_close(case.out, reference, rtol=1e-3, atol=2e-2)
 

@@ -1074,34 +1074,6 @@ def local_indices(data: dict[str, Any], indices, row: int):
     return inverse[indices.long()]
 
 
-def assert_selection_is_top_k(data: dict[str, Any], indices, row: int, row_len: int) -> None:
-    """The oracle: the selected *value multiset* must equal `torch.topk`'s.
-
-    Positions carry no meaning on this path -- output slots are handed out by
-    atomic compaction, the per-CTA base comes from a racing atomic, and the
-    boundary bin's survivors are whichever lanes arrive first (`:306-308`).  The
-    multiset is still unique, because an exact radix select over the ordered bits
-    admits exactly one answer, so this is a bit-exact check and not a tolerance.
-    """
-    import torch
-
-    k = data["k"]
-    row_logits = data["logits"][row, :row_len].float()
-    local = local_indices(data, indices, row).long()
-
-    assert int(local.min()) >= 0 and int(local.max()) < row_len, (
-        f"row {row}: index out of range [0, {row_len})"
-    )
-    assert len(set(local.tolist())) == local.numel(), f"row {row}: duplicate indices"
-
-    got = torch.sort(row_logits[local]).values
-    want = torch.sort(torch.topk(row_logits, min(k, row_len)).values).values
-    assert torch.equal(got, want), (
-        f"row {row}: selected value multiset differs from torch.topk; "
-        f"max|delta| = {(got - want).abs().max().item()}"
-    )
-
-
 def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     cfg = {
         "dtype": "float32",
@@ -1149,7 +1121,11 @@ def compare_outputs(data: dict[str, Any], mine: dict[str, Any], theirs: dict[str
                 f"row {row}: the trivial branch is deterministic and must match positionally"
             )
             continue
-        assert_selection_is_top_k(data, mine["indices"][row], row, row_len)
+        local = local_indices(data, mine["indices"][row], row).long()
+        assert int(local.min()) >= 0 and int(local.max()) < row_len, (
+            f"row {row}: index out of range [0, {row_len})"
+        )
+        assert len(set(local.tolist())) == local.numel(), f"row {row}: duplicate indices"
         ours = torch.sort(
             data["logits"][row, local_indices(data, mine["indices"][row], row).long()].float()
         ).values

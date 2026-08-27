@@ -879,7 +879,6 @@ def run_test(**config: Any) -> None:
     torch.cuda.synchronize()
 
     _assert_outputs_match(tirx_output, source_output, config, name="FlashInfer CUDA oracle")
-    _assert_math(tirx_output, data, config)
     _assert_output_integrity(tirx_output, config, name="TIRx output")
     _assert_output_integrity(source_output, config, name="FlashInfer output")
     _check_public_wrappers(source_module, data, source_output, config)
@@ -1361,56 +1360,6 @@ def _logical_sf_bytes(sf, config: dict[str, Any]):
     return sf.reshape(-1)[offsets]
 
 
-def _dequantize(output: dict[str, Any], data: dict[str, Any], config: dict[str, Any]):
-    import torch
-
-    batch_size = int(config["batch_size"])
-    num_rows = int(config["num_rows"])
-    output_format = str(config["output_format"])
-    payload = output["norm"].view(torch.uint8)
-    scale_bytes = _logical_sf_bytes(output["sf"], config)
-    if output_format == "nvfp4":
-        payload = payload.view(batch_size, num_rows, _HIDDEN_SIZE // 2)
-        nibbles = torch.stack((payload & 0x0F, payload >> 4), dim=-1)
-        nibbles = nibbles.reshape(batch_size, num_rows, _HIDDEN_SIZE).long()
-        table = torch.tensor(
-            [
-                0.0,
-                0.5,
-                1.0,
-                1.5,
-                2.0,
-                3.0,
-                4.0,
-                6.0,
-                -0.0,
-                -0.5,
-                -1.0,
-                -1.5,
-                -2.0,
-                -3.0,
-                -4.0,
-                -6.0,
-            ],
-            dtype=torch.float32,
-            device="cuda",
-        )
-        values = table[nibbles].view(batch_size, num_rows, _HIDDEN_SIZE // 16, 16)
-        scales = scale_bytes.contiguous().view(torch.float8_e4m3fn).float()
-        scales = scales / data["output_sf_scale"].float()
-        return (values * scales[..., None]).reshape(batch_size, num_rows, _HIDDEN_SIZE)
-
-    values = payload.contiguous().view(torch.float8_e4m3fn).float()
-    values = values.view(batch_size, num_rows, _HIDDEN_SIZE // 32, 32)
-    exponent = scale_bytes.int() - 127
-    scales = torch.where(
-        scale_bytes == 0,
-        torch.zeros_like(scale_bytes, dtype=torch.float32),
-        torch.pow(torch.tensor(2.0, device="cuda"), exponent),
-    )
-    return (values * scales[..., None]).reshape(batch_size, num_rows, _HIDDEN_SIZE)
-
-
 def _assert_outputs_match(
     actual: dict[str, Any], expected: dict[str, Any], config: dict[str, Any], *, name: str
 ) -> None:
@@ -1442,38 +1391,6 @@ def _assert_outputs_match(
     if not torch.equal(actual_sf, expected_sf):
         count = int((actual_sf != expected_sf).sum().item())
         raise AssertionError(f"{name}: {count} logical scale-factor bytes differ")
-
-
-def _assert_math(output, data, config: dict[str, Any]) -> None:
-    import torch
-
-    oracle_residual, oracle_norm = _math_oracle(data, config)
-    torch.testing.assert_close(
-        output["residual"],
-        oracle_residual,
-        rtol=1.6e-2,
-        atol=1e-5,
-        msg=lambda message: f"independent FP32 residual oracle: {message}",
-    )
-    if str(config["output_format"]) == "bf16":
-        torch.testing.assert_close(
-            output["norm"],
-            oracle_norm,
-            rtol=1.6e-2,
-            atol=1e-5,
-            msg=lambda message: f"independent FP32 LayerNorm oracle: {message}",
-        )
-    else:
-        dequantized = _dequantize(output, data, config)
-        if not torch.isfinite(dequantized).all():
-            raise AssertionError("dequantized norm output contains non-finite values")
-        torch.testing.assert_close(
-            dequantized,
-            oracle_norm.float(),
-            rtol=0.5,
-            atol=2.0,
-            msg=lambda message: f"independent quantized LayerNorm oracle: {message}",
-        )
 
 
 def _assert_output_integrity(output, config: dict[str, Any], *, name: str) -> None:

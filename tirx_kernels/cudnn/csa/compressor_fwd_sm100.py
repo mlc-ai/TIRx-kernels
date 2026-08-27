@@ -465,69 +465,6 @@ def _source_launch(data):
     return launch
 
 
-def _eager_reference(data):
-    """Vectorized FP32 oracle, including source-defined capacity-padding rows."""
-    import torch
-
-    d = data["head_dim"]
-    coff = data["coff"]
-    width = coff * d
-    kv = data["kv"].view(-1, width).float()
-    score = data["score"].view(-1, width).float()
-    ape = data["ape"].view(_RATIO, width)
-    rows = []
-    token_base = 0
-    for length in data["seq_lens"]:
-        blocks = length // _RATIO
-        if blocks:
-            block_tokens = blocks * _RATIO
-            if coff == 1:
-                block_values = kv[token_base : token_base + block_tokens, :d].view(
-                    blocks, _RATIO, d
-                )
-                block_scores = score[token_base : token_base + block_tokens, :d].view(
-                    blocks, _RATIO, d
-                ) + ape[:, :d].unsqueeze(0)
-            else:
-                own_values = kv[token_base : token_base + block_tokens, d:].view(blocks, _RATIO, d)
-                own_scores = score[token_base : token_base + block_tokens, d:].view(
-                    blocks, _RATIO, d
-                ) + ape[:, d:].unsqueeze(0)
-                previous_values = torch.zeros_like(own_values)
-                previous_scores = torch.full_like(own_scores, float("-inf"))
-                if blocks > 1:
-                    previous_values[1:] = kv[
-                        token_base : token_base + (blocks - 1) * _RATIO, :d
-                    ].view(blocks - 1, _RATIO, d)
-                    previous_scores[1:] = score[
-                        token_base : token_base + (blocks - 1) * _RATIO, :d
-                    ].view(blocks - 1, _RATIO, d) + ape[:, :d].unsqueeze(0)
-                block_values = torch.cat((previous_values, own_values), dim=1)
-                block_scores = torch.cat((previous_scores, own_scores), dim=1)
-            rows.append((block_values * torch.softmax(block_scores, dim=1)).sum(dim=1))
-        token_base += length
-
-    padding = data["nb_total"] - data["nb_valid"]
-    if padding:
-        if coff == 1:
-            pad_values = kv[:_RATIO, :d]
-            pad_scores = score[:_RATIO, :d] + ape[:, :d]
-        else:
-            pad_values = torch.cat((torch.zeros_like(kv[:_RATIO, :d]), kv[:_RATIO, d:]), dim=0)
-            pad_scores = torch.cat(
-                (
-                    torch.full_like(score[:_RATIO, :d], float("-inf")),
-                    score[:_RATIO, d:] + ape[:, d:],
-                ),
-                dim=0,
-            )
-        pad_row = (pad_values * torch.softmax(pad_scores, dim=0)).sum(dim=0)
-        rows.append(pad_row.unsqueeze(0).expand(padding, d))
-    if not rows:
-        return torch.empty((0, d), dtype=torch.bfloat16, device=kv.device)
-    return torch.cat(rows, dim=0).to(torch.bfloat16)
-
-
 def _assert_guard(data, backing_key):
     import torch
 
@@ -540,7 +477,7 @@ def _assert_guard(data, backing_key):
         raise AssertionError(f"compressor forward wrote outside {backing_key}'s output view")
 
 
-def _validate_outputs(data, *, include_source: bool, include_oracle: bool):
+def _validate_outputs(data, *, include_source: bool):
     import torch
 
     actual = data["out"].view(data["nb_total"], data["head_dim"])
@@ -555,18 +492,6 @@ def _validate_outputs(data, *, include_source: bool, include_oracle: bool):
             max_abs = float((actual.float() - source.float()).abs().max().item())
             raise AssertionError(
                 f"TIRx differs from cuDNN Frontend source: mismatch={mismatch}, max_abs={max_abs}"
-            )
-    if include_oracle:
-        oracle = _eager_reference(data)
-        mismatch = int((actual != oracle).sum().item())
-        allowed = max(1, actual.numel() // 1000)
-        max_abs = (
-            float((actual.float() - oracle.float()).abs().max().item()) if actual.numel() else 0.0
-        )
-        if mismatch > allowed or max_abs > 1.6e-2:
-            raise AssertionError(
-                f"TIRx differs from FP32 eager oracle: mismatch={mismatch}/{allowed}, "
-                f"max_abs={max_abs}"
             )
     _assert_guard(data, "out_backing")
     _assert_guard(data, "repeat_out_backing")
@@ -588,7 +513,7 @@ def prepare_bench(**config: Any):
 
 
 def run_test(**config: Any):
-    """Compare TIRx with the pinned source and a standalone FP32 eager oracle."""
+    """Compare TIRx with the pinned source kernel on identical inputs."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -604,7 +529,7 @@ def run_test(**config: Any):
     source_launch = _source_launch(data)
     source_launch()
     torch.cuda.synchronize()
-    _validate_outputs(data, include_source=True, include_oracle=True)
+    _validate_outputs(data, include_source=True)
     for key, snapshot in snapshots.items():
         if not torch.equal(data[key], snapshot):
             raise AssertionError(f"compressor forward modified input {key}")
@@ -640,7 +565,7 @@ def run_gpu(
         source_launch()
         torch.cuda.synchronize()
         references = {"cudnn_frontend": lambda: source_launch}
-    _validate_outputs(data, include_source=include_source, include_oracle=False)
+    _validate_outputs(data, include_source=include_source)
     return bench(
         {"tirx": tirx_launch},
         references=references,

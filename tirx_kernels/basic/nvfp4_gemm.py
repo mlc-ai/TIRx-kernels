@@ -57,6 +57,8 @@ def prepare_data(M: int, N: int, K: int, *, return_origin: bool = False):
         B_origin, B_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False
     )
     alpha = 1.0 / (A_global_sf * B_global_sf)
+    # cuBLAS baseline: torch.mm on the pre-quantization operands dispatches
+    # to cuBLAS, so this IS the library comparison.
     C_ref = torch.mm(A_origin, B_origin.T)
     if return_origin:
         return (A_fp4, B_fp4, A_sf, B_sf, alpha, C_ref, A_origin, B_origin)
@@ -660,10 +662,7 @@ def make_kernel(M, N, KDIM):
                         )
                         K.ptx[_TCGEN05_CP_2SM](
                             K.Cast(
-                                "uint32",
-                                sfb_tmem_col
-                                + flat % 4 * SFB_n_chunks * 4
-                                + flat // 4 * 4,
+                                "uint32", sfb_tmem_col + flat % 4 * SFB_n_chunks * 4 + flat // 4 * 4
                             ),
                             sfb_cp_desc,
                         )

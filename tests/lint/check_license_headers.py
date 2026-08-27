@@ -122,6 +122,7 @@ FILE_OVERRIDES = {
 
 # Native modules inside port buckets — package markers and our own harnesses.
 PORT_DIR_EXCEPTIONS = {
+    "tirx_kernels/cudnn/_reference.py",
     "tirx_kernels/deepep/utils/_buffer.py",
     "tirx_kernels/deepep/utils/_runtime.py",
     "tirx_kernels/flashinfer/utils/_flashkda_bench.py",

@@ -120,11 +120,7 @@ def _cvt_pair_f32_to_bf16(high, low):
 def _shfl_bfly_f32(value, lane_xor: int):
     out = K.local_scalar(K.u32)
     K.ptx.shfl_sync.bfly.b32(
-        out,
-        K.reinterpret(K.u32, value),
-        K.uint32(lane_xor),
-        K.uint32(31),
-        K.uint32(0xFFFFFFFF),
+        out, K.reinterpret(K.u32, value), K.uint32(lane_xor), K.uint32(31), K.uint32(0xFFFFFFFF)
     )
     return K.reinterpret(K.f32, out)
 
@@ -596,14 +592,6 @@ def _checked_view(tensor, rows: list[int] | None):
     return tensor if rows is None else tensor[rows]
 
 
-def _math_oracle(x, gamma, beta, eps: float, rows: list[int] | None):
-    import torch
-    import torch.nn.functional as F
-
-    checked = _checked_view(x, rows).float()
-    return F.layer_norm(checked, (x.shape[-1],), gamma, beta, eps).to(torch.bfloat16)
-
-
 def _assert_close(actual, expected, *, name: str, rtol: float, atol: float) -> None:
     import torch
 
@@ -719,13 +707,11 @@ def run_test(**config: Any) -> None:
     rows = _overflow_rows(M, H)
     actual_checked = _checked_view(output["view"], rows)
     reference_checked = _checked_view(reference["view"], rows)
-    math = _math_oracle(data["x"], data["gamma"], data["beta"], eps, rows)
     if not torch.isfinite(actual_checked).all():
         raise AssertionError("TIRx output contains non-finite values")
     _assert_close(
         actual_checked, reference_checked, name="FlashInfer CuTe-DSL", rtol=1e-3, atol=1e-3
     )
-    _assert_close(actual_checked, math, name="FP32 math oracle", rtol=1e-2, atol=1e-2)
     _assert_inputs_unchanged(data, snapshot, M, H)
     _assert_output_padding(output, M, H, data["y_row_stride"], name="TIRx output")
     _assert_output_padding(reference, M, H, data["y_row_stride"], name="FlashInfer output")

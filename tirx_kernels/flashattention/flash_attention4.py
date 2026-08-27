@@ -21,7 +21,6 @@ import os
 from functools import partial
 from typing import Any
 
-import numpy as np
 import torch
 
 import tirx_kernels.kern as K
@@ -1413,19 +1412,17 @@ def run_test(batch_size, seq_len, num_qo_heads, num_kv_heads, head_dim, is_causa
     launch()
     torch.cuda.synchronize()
 
-    q_ref = q.float().transpose(1, 2)
-    k_ref = k.float().transpose(1, 2)
-    v_ref = v.float().transpose(1, 2)
-    if num_qo_heads != num_kv_heads:
-        repeat_factor = num_qo_heads // num_kv_heads
-        k_ref = k_ref.repeat_interleave(repeat_factor, dim=1)
-        v_ref = v_ref.repeat_interleave(repeat_factor, dim=1)
-    scores = torch.matmul(q_ref, k_ref.transpose(-2, -1)) * (1.0 / math.sqrt(head_dim))
-    if is_causal:
-        mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
-        scores.masked_fill_(mask, float("-inf"))
-    ref = torch.matmul(torch.softmax(scores, dim=-1), v_ref).transpose(1, 2).to(torch.float16)
-    np.testing.assert_allclose(out.cpu().numpy(), ref.cpu().numpy(), rtol=0.01, atol=0.01)
+    # The upstream FA4 forward on the same inputs is the arbiter (the sibling
+    # backward port validates the same way via flash_attn.cute.interface).
+    from flash_attn.cute.interface import _flash_attn_fwd
+
+    with torch.no_grad():
+        ref = _flash_attn_fwd(
+            q=q_dev, k=k_dev, v=v_dev, softmax_scale=1.0 / math.sqrt(head_dim), causal=is_causal
+        )[0]
+    if not torch.isfinite(out).all():
+        raise AssertionError("output contains a non-finite value")
+    torch.testing.assert_close(out, ref, rtol=0.01, atol=0.01)
 
 
 def run_gpu(

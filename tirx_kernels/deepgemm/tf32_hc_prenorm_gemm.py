@@ -1049,6 +1049,8 @@ def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
     torch.cuda.synchronize()
+    # Library-anchored: the torch ref is a yardstick, not the arbiter --
+    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
     tirx_d, tirx_sqr = _launch_tirx_hc(data)
     torch.cuda.synchronize()

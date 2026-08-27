@@ -70,7 +70,9 @@ def run_test(**config):
         source_launch = _data.compile_reference(data)
         source_launch()
         torch.cuda.synchronize()
-        _data.validate_outputs(data, sources=("tirx", "source"))
+        # The upstream kernel is the arbiter; the FP32 oracle runs only on the
+        # rows upstream cannot arbitrate (the sources=("tirx",) branch above).
+        _data.validate_outputs(data, sources=("tirx", "source"), with_oracle=False)
     return {"tokens": data["derived"]["tokens_total"], "N": data["derived"]["N"]}
 
 

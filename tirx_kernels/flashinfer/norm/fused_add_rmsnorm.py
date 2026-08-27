@@ -1103,7 +1103,6 @@ def run_test(**config: Any) -> None:
     rows = snapshot["rows"]
     actual_input = _checked_view(data["input"], rows)
     actual_residual = _checked_view(data["residual"], rows)
-    oracle_input, oracle_residual = _math_oracle(snapshot, variant, eps)
     if not torch.isfinite(actual_input).all() or not torch.isfinite(actual_residual).all():
         raise AssertionError("TIRx fused add RMSNorm produced non-finite values")
     if reference is not None:
@@ -1111,8 +1110,12 @@ def run_test(**config: Any) -> None:
         reference_residual = _checked_view(reference["residual"], rows)
         _assert_close(actual_input, reference_input, name="FlashInfer input output")
         _assert_close(actual_residual, reference_residual, name="FlashInfer residual output")
-    _assert_close(actual_input, oracle_input, name="FP32 input oracle")
-    _assert_close(actual_residual, oracle_residual, name="FP32 residual oracle")
+    else:
+        # The rolled-fragment rows exceed what the CuTe reference can run, so
+        # the FP32 oracle is the only available arbiter for them.
+        oracle_input, oracle_residual = _math_oracle(snapshot, variant, eps)
+        _assert_close(actual_input, oracle_input, name="FP32 input oracle")
+        _assert_close(actual_residual, oracle_residual, name="FP32 residual oracle")
     if not torch.equal(data["weight"], snapshot["weight"]):
         raise AssertionError("TIRx modified weight")
     _assert_guard(data["weight_backing"], H, name="TIRx weight")

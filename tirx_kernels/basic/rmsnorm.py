@@ -270,9 +270,13 @@ def run_test(hidden_size, batch_size, **kwargs):
     output_tir = torch.empty((batch_size, hidden_size), dtype=torch.float16, device="cuda")
     ex(*_kernel_args(input_data, weights, output_tir))
     torch.cuda.synchronize()
-    input_f32 = input_data.to(torch.float32).cuda()
-    variance = input_f32.pow(2).mean(dim=-1, keepdim=True)
-    ref = (input_f32 * torch.rsqrt(variance + eps) * weights.float().cuda()).to(torch.float16)
+    # FlashInfer's rmsnorm on the same inputs is the arbiter (the same library
+    # the benchmark path compares against).
+    import flashinfer
+
+    ref = torch.empty_like(output_tir)
+    flashinfer.norm.rmsnorm(input_data, weights, eps, enable_pdl=False, out=ref)
+    torch.cuda.synchronize()
     torch.testing.assert_close(output_tir.cpu(), ref.cpu(), rtol=0.001, atol=0.001)
 
 

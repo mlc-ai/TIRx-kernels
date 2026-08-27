@@ -178,10 +178,14 @@ def _tirx_launch(data, config, executable=None):
 
 
 def run_test(**config):
-    """Compare only the valid rows of each group against the oracle."""
+    """Compare only the valid rows of each group against DeepGEMM."""
     import torch
 
-    from ._sm100_fp8_fp4_gemm_1d1d.data import assert_within_threshold, masked_slice_diff
+    from ._sm100_fp8_fp4_gemm_1d1d.data import (
+        assert_within_threshold,
+        deepgemm_launch_m_grouped_masked,
+        masked_slice_diff,
+    )
 
     config.pop("label", None)
     data = prepare_data(**config)
@@ -190,8 +194,13 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
+    # DeepGEMM itself, on the same quantized operands, is the arbiter; only the
+    # `[g, :masked_m[g]]` rows are defined on either side.
+    _, deepgemm_out = deepgemm_launch_m_grouped_masked(data)
+    torch.cuda.synchronize()
+
     return assert_within_threshold(
-        masked_slice_diff(data["d"], data["ref"], data["masked_m"]),
+        masked_slice_diff(data["d"], deepgemm_out, data["masked_m"]),
         data,
         kernel="deepgemm_sm100_m_grouped_fp8_gemm_masked",
         detail=(f"g={data['num_groups']} N={data['N']} K={data['K']} b_dtype={data['b_dtype']}"),

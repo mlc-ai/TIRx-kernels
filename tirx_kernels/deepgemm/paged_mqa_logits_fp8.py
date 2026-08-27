@@ -1217,9 +1217,7 @@ def get_kernel(**kwargs: Any):
             # warp's tcgen05.alloc (see the UMMA role).
             K.ptx.bar.sync(9, K.uint32(num_math_threads + 2 * 32))
             math_wg_u32 = K.Cast("uint32", warpgroup_idx)
-            tmem_start_base = K.uint32(tmem_col) + math_wg_u32 * K.uint32(
-                umma_n * num_umma_stages
-            )
+            tmem_start_base = K.uint32(tmem_col) + math_wg_u32 * K.uint32(umma_n * num_umma_stages)
             math_thread_idx = K.local_scalar(
                 "uint32",
                 init=(K.Cast("uint32", K.warp_id_in_role()) % K.uint32(4)) * K.uint32(32)
@@ -1448,7 +1446,6 @@ def _compile_tirx_paged_mqa_key(config: PagedMQALogitsFP8Config) -> tuple[tuple[
 
 
 def _compile_tirx_paged_mqa(config: PagedMQALogitsFP8Config) -> Any:
-
     compile_kwargs = _compile_tirx_paged_mqa_kwargs(config)
     return _compile_tirx_paged_mqa_for_config(**compile_kwargs)
 
@@ -1798,6 +1795,8 @@ def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     config: PagedMQALogitsFP8Config = data["config"]
     deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+    # Library-anchored: the torch ref is a yardstick, not the arbiter --
+    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_paged_mqa(data)
     torch.cuda.synchronize()

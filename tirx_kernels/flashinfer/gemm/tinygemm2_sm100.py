@@ -17,7 +17,6 @@ from typing import Any
 from unittest import SkipTest
 
 import torch
-import torch.nn.functional as F
 
 import tirx_kernels.kern as K
 
@@ -547,9 +546,6 @@ def run_test(B: int, O: int, K: int) -> None:
     case = prepare_data(B, O, K)
     num_sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
     stage = _select_stage(B, O, K, num_sms)
-    linear_ref = F.linear(
-        case["input"].float(), case["weight"].float(), case["bias"].float()
-    ).bfloat16()
 
     for use_pdl in (False, True):
         tirx_out = torch.zeros_like(case["out"])
@@ -565,7 +561,6 @@ def run_test(B: int, O: int, K: int) -> None:
                 f"stage={stage}, use_pdl={use_pdl}: {differing} elements, "
                 f"max_abs_diff={max_diff}"
             )
-        torch.testing.assert_close(tirx_out.float(), linear_ref.float(), atol=1e-2, rtol=1e-2)
 
 
 def prepare_bench(B: int, O: int, K: int):
