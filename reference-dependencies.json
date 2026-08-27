@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "python_requirements": [
-    "nvidia-cutlass-dsl[cu13]==4.6.2",
+    "nvidia-cutlass-dsl[cu13]==4.7.0",
     "nvidia-cuda-cccl==13.2.75",
     "quack-kernels==0.6.4"
   ],
@@ -83,6 +83,17 @@
       "url": "https://github.com/MiniMax-AI/MSA.git",
       "revision": "80434d7f67877c6570ca19cac444b84bc9855dac",
       "install_subdirectory": "."
+    },
+    {
+      "name": "cudnn-frontend",
+      "import_name": "cudnn",
+      "url": "https://github.com/NVIDIA/cudnn-frontend.git",
+      "revision": "aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5",
+      "install_subdirectory": ".",
+      "build_requirements": [
+        "pybind11==2.13.6",
+        "pybind11-global==2.13.6"
+      ]
     }
   ]
 }

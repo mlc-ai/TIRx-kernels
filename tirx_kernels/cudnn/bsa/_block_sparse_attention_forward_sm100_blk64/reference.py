@@ -5,55 +5,19 @@
 
 """Lazy loader for the upstream SM100 blk64 BSA forward pass.
 
-Upstream source: ``python/cudnn/block_sparse_attention/_interface.py``.
+Upstream source: ``python/cudnn/block_sparse_attention/_interface.py``, from the
+cuDNN Frontend source install pinned in ``reference-dependencies.json``.
 """
-
-import importlib
-import os
-import sys
-import types
-from pathlib import Path
 
 import torch
 
-_PACKAGE = "cudnn.block_sparse_attention"
-_INTERFACE = f"{_PACKAGE}._interface"
+from tirx_kernels.cudnn._reference import load_reference_module
 
-
-def checkout_root():
-    configured = os.environ.get("CUDNN_FRONTEND_PATH")
-    if configured:
-        return Path(configured).resolve()
-    return Path(__file__).resolve().parents[4] / ".reference-deps" / "cudnn-frontend"
-
-
-def _bind_checkout():
-    package_dir = checkout_root() / "python" / "cudnn" / "block_sparse_attention"
-    if not package_dir.is_dir():
-        raise RuntimeError(
-            f"cuDNN Frontend checkout does not contain block sparse attention: {package_dir}"
-        )
-
-    existing = sys.modules.get(_PACKAGE)
-    if existing is not None:
-        bound = getattr(existing, "__path__", None)
-        if bound and Path(next(iter(bound))).resolve() == package_dir.resolve():
-            return
-        raise RuntimeError(
-            f"{_PACKAGE} was already imported from {bound}; cannot bind it to {package_dir}"
-        )
-
-    cudnn = importlib.import_module("cudnn")
-    package = types.ModuleType(_PACKAGE)
-    package.__path__ = [str(package_dir)]
-    package.__package__ = _PACKAGE
-    sys.modules[_PACKAGE] = package
-    cudnn.block_sparse_attention = package
+_INTERFACE = "cudnn.block_sparse_attention._interface"
 
 
 def load_interface():
-    _bind_checkout()
-    return importlib.import_module(_INTERFACE)
+    return load_reference_module(_INTERFACE)
 
 
 def compile_reference(data):

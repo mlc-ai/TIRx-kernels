@@ -83,7 +83,14 @@ def checkout_source(source: dict[str, Any], source_root: Path) -> Path:
 
 def source_build_environment() -> dict[str, str]:
     env = os.environ.copy()
-    cccl = distribution("nvidia-cuda-cccl")
+    try:
+        cccl = distribution("nvidia-cuda-cccl")
+    except PackageNotFoundError:
+        # The cccl headers come from the global requirement group, which a
+        # targeted --only run skips; sources that need them fail in their own
+        # builds, and the rest must not be blocked on an unrelated header set.
+        print("nvidia-cuda-cccl is not installed; building without its headers", flush=True)
+        return env
     utility = next(
         (
             Path(file.locate())
@@ -144,13 +151,16 @@ def target_versions(target: Path) -> dict[str, str]:
     }
 
 
-def install(lock: dict[str, Any], source_root: Path) -> None:
-    requirements = lock["python_requirements"]
-    run(sys.executable, "-m", "pip", "install", "--upgrade", *lock["test_requirements"])
-    run(sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps", *requirements)
+def install(lock: dict[str, Any], source_root: Path, only: set[str] | None = None) -> None:
+    if only is None:
+        requirements = lock["python_requirements"]
+        run(sys.executable, "-m", "pip", "install", "--upgrade", *lock["test_requirements"])
+        run(sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps", *requirements)
     build_env = source_build_environment()
     source_root.mkdir(parents=True, exist_ok=True)
     for name, isolated in lock.get("isolated_python_requirements", {}).items():
+        if only is not None and name not in only:
+            continue
         target = source_root / name
         run(
             sys.executable,
@@ -164,11 +174,24 @@ def install(lock: dict[str, Any], source_root: Path) -> None:
             *isolated,
         )
     for source in lock["sources"]:
+        if only is not None and source["name"] not in only:
+            continue
         checkout = checkout_source(source, source_root)
         materialize_source_links(source, checkout)
         if import_uses_checkout(source, checkout):
             print(f"{source['name']} already imports from its pinned checkout", flush=True)
             continue
+        build_requirements = source.get("build_requirements", [])
+        if build_requirements:
+            run(
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--no-deps",
+                *build_requirements,
+            )
         install_path = checkout / source["install_subdirectory"]
         run(
             sys.executable,
@@ -183,9 +206,8 @@ def install(lock: dict[str, Any], source_root: Path) -> None:
         )
 
 
-def check(lock: dict[str, Any], source_root: Path) -> None:
-    failures: list[str] = []
-    for requirement in [*lock["python_requirements"], *lock["test_requirements"]]:
+def check_installed_pins(requirements: list[str], failures: list[str]) -> None:
+    for requirement in requirements:
         package, expected = requirement_pin(requirement)
         try:
             actual = version(package)
@@ -195,7 +217,15 @@ def check(lock: dict[str, Any], source_root: Path) -> None:
         if actual != expected:
             failures.append(f"{package}=={actual}, expected {expected}")
 
+
+def check(lock: dict[str, Any], source_root: Path, only: set[str] | None = None) -> None:
+    failures: list[str] = []
+    if only is None:
+        check_installed_pins([*lock["python_requirements"], *lock["test_requirements"]], failures)
+
     for name, requirements in lock.get("isolated_python_requirements", {}).items():
+        if only is not None and name not in only:
+            continue
         target = source_root / name
         if not target.is_dir():
             failures.append(f"missing isolated dependency directory: {target}")
@@ -210,6 +240,8 @@ def check(lock: dict[str, Any], source_root: Path) -> None:
                 failures.append(f"{package}=={actual} under {target}, expected {expected}")
 
     for source in lock["sources"]:
+        if only is not None and source["name"] not in only:
+            continue
         checkout = source_root / source["name"]
         if not (checkout / ".git").exists():
             failures.append(f"missing checkout: {checkout}")
@@ -236,6 +268,7 @@ def check(lock: dict[str, Any], source_root: Path) -> None:
             materialize_source_links(source, checkout)
         except (FileNotFoundError, RuntimeError) as error:
             failures.append(str(error))
+        check_installed_pins(source.get("build_requirements", []), failures)
         resolved_import_paths = import_paths(source["import_name"])
         if not resolved_import_paths:
             failures.append(f"cannot find import {source['import_name']!r}")
@@ -261,20 +294,39 @@ def main() -> None:
         help=f"checkout directory (default: {DEFAULT_SOURCE_ROOT})",
     )
     parser.add_argument("--check", action="store_true", help="verify the installed lock only")
+    parser.add_argument(
+        "--only",
+        action="append",
+        metavar="NAME",
+        help=(
+            "restrict to the named source or isolated dependency set (repeatable); "
+            "the global python/test requirement groups are skipped when used"
+        ),
+    )
     args = parser.parse_args()
     lock = load_lock()
     source_root = args.source_root.resolve()
+    only: set[str] | None = None
+    if args.only:
+        known = {source["name"] for source in lock["sources"]} | set(
+            lock.get("isolated_python_requirements", {})
+        )
+        unknown = set(args.only) - known
+        if unknown:
+            raise SystemExit(f"unknown --only names: {', '.join(sorted(unknown))}")
+        only = set(args.only)
     if not args.check:
-        install(lock, source_root)
+        install(lock, source_root, only)
         run(
             sys.executable,
             str(Path(__file__).resolve()),
             "--check",
             "--source-root",
             str(source_root),
+            *[f"--only={name}" for name in sorted(only or ())],
         )
         return
-    check(lock, source_root)
+    check(lock, source_root, only)
 
 
 if __name__ == "__main__":
