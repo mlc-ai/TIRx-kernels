@@ -144,6 +144,24 @@ unchanged at 0.979-0.980x. A broader address-base materialization removed 16
 static instructions and reduced registers from 92 to 88 with no spill, yet the
 affected path still regressed to 0.985x. Both changes were reverted.
 
+Shared-memory swizzles can benefit from materializing an arena-relative row
+offset rather than repeatedly forming and canceling the absolute shared base.
+In one block-scaled epilogue this changed 69 registers / 984 static
+instructions into 66 / 960, improved a frozen 136-row targeted minimum from
+0.974556 to 0.976191, and raised its geometric mean from 0.998707 to 1.005177.
+The subsequent 184-row validation still had five strict-gate failures and a
+0.974381 minimum. Keep the relative-offset form only when its alignment proof
+holds, and treat the resource reduction as mechanism evidence rather than a
+full-matrix performance verdict.
+
+Composing the same relative-offset rewrite with a source-shaped native
+accumulator wait preserved the 66-register / 960-instruction program. A
+worktree-isolated 136-row run improved the geometric mean from 1.001507 to
+1.005664, but raised the minimum by only 0.000999, from 0.973880 to 0.974879,
+and left six strict-gate failures in the FP32-output path. Do not infer
+composition safety from resource counts or an aggregate: require the minimum
+and every affected path to clear the targeted trigger before full validation.
+
 ## Verification
 
 Count instructions in the corresponding PTX/SASS basic block and inspect ptxas

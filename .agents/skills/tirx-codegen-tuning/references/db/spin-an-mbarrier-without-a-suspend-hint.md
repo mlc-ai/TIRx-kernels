@@ -55,6 +55,17 @@ consumer warp in that design always has producer warps to run. A large static
 divergence with a clean mechanism is not a timing result; keep the change if it
 matches the reference, but do not spend expansions on it.
 
+A dense SM100 block-scaled GEMM exposed a related boundary: replacing a TIRx
+`While` around the hinted `try_wait` with the native `K.cuda.mbarrier_wait`
+helper kept the same 10,000,000-tick hint but moved the slow retry loop out of
+line, matching the reference's hot `TRYWAIT; @!P BRA` control-flow shape. The
+change was unique, correctness-clean, spill-free, and preserved 69 registers
+and 968 static instructions, yet its 136-row targeted result regressed from
+`(min=0.973880, geomean=1.001507)` to `(min=0.971149,
+geomean=0.998895)`. Treat cold-loop placement as an instruction-selection
+check, not a sufficient performance hypothesis; measure the complete fixed
+roster even when the hot-path SASS becomes reference-shaped.
+
 ## Verification
 
 Count `NANOSLEEP` sites in the SASS before and after, and confirm the wait

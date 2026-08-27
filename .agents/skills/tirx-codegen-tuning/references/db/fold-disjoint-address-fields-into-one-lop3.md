@@ -45,6 +45,15 @@ between a barrier wait and the shared load that depends on it. The lane-field
 fold added a second effect -- eleven per-thread operations moved onto the
 uniform datapath, which issues on a separate scalar pipe.
 
+In another measured block-scaled epilogue, replacing only a proven-disjoint
+row-plus-vector shared-memory offset with OR reduced allocation from 66 to 55
+registers and static SASS from 960 to 952 instructions, with zero spill. All 41
+correctness configurations passed. Its 136-row targeted minimum improved by
+0.00450 and its geometric mean by 0.00344; a subsequent 184-row matrix improved
+to a 0.98292 minimum and 1.01575 geometric mean but retained five strict-gate
+failures. This confirms the address rewrite as a real code-generation lever,
+not as a guarantee that every affected shape will improve enough.
+
 ## Boundary
 
 The disjointness is arithmetic, not a heuristic. Every caller has to pass a base
@@ -52,6 +61,13 @@ aligned to the field width, and the twisted field has to fit inside that
 alignment; verify both before rewriting, because an unaligned caller silently
 reads the wrong bytes. The payoff also scales with how many terms share one
 base: a row wide enough for eight chunks shows it and a two-chunk row does not.
+
+OR and XOR are arithmetically interchangeable only under the same disjointness
+proof, but they need not schedule identically. In the measured epilogue, a
+dtype-specific OR path and an XOR path had the same 56-register, 952-instruction
+resource summary while producing different executable code and different
+timings. Keep the operation as a specialization choice when the output width
+changes how often the address combine executes.
 
 ## Verification
 
