@@ -30,6 +30,25 @@ if ILP_ROWS == 4 and SEQ_LEN == 8:
         T.attr({"tirx.launch_bounds_min_blocks_per_sm": 8})
 ```
 
+For a persistent kernel whose launch grid is already capped by measured
+concurrent residency, also test omitting the minimum-block contract instead of
+assuming that a value of one is neutral.
+
+```python
+# before: a second launch constraint duplicates the persistent grid cap.
+return K.kernel(
+    warps=WARPS,
+    min_blocks_per_sm=1,
+    grid=[CLUSTER_M, CLUSTER_N, active_clusters],
+)(kernel)
+
+# after: the grid still limits concurrency; ptxas chooses allocation freely.
+return K.kernel(
+    warps=WARPS,
+    grid=[CLUSTER_M, CLUSTER_N, active_clusters],
+)(kernel)
+```
+
 ## Rationale
 
 The value becomes the second CUDA `__launch_bounds__` argument and imposes a
@@ -50,6 +69,15 @@ one moved the allocation from 63 to 90 registers, reduced static SASS from 664
 to 656 instructions, and introduced no spill. Two non-protocol paths reached
 1.016x and 1.005x, while the dependency-protocol path improved from about
 0.945x to 0.959x.
+
+In one measured six-warp persistent kernel whose grid already capped active
+clusters, removing only a minimum-block count of one changed allocation from 56
+to 54 registers and static SASS from 944 to 928 instructions, with zero spill.
+All 41 correctness configurations passed. The four affected performance rows
+moved from one strict failure at a 0.98973 minimum to zero failures at a 0.99928
+minimum; the complete 30-row matrix then passed at a 0.99766 minimum and
+1.00986 geometric mean. A minimum-block count of one can therefore alter ptxas
+code selection even when it does not appear to demand additional residency.
 
 ## Boundary
 
@@ -84,7 +112,13 @@ Use `tirx.max_registers` when an exact per-specialization ceiling, rather than a
 minimum resident-block target, is the demonstrated lever. The two contracts are
 mutually exclusive.
 
+Removing the bound is only justified when another proven launch rule already
+enforces the intended concurrency. Without that cap, the change can alter
+residency as well as register allocation and must be evaluated as a different
+launch policy.
+
 ## Verification
 
 Compare resource usage, achieved occupancy, and dynamic local-memory traffic on
-both sides; do not infer success from the declared launch bound alone.
+both sides, including the no-bound case when concurrency is capped elsewhere;
+do not infer success from the declared launch bound alone.

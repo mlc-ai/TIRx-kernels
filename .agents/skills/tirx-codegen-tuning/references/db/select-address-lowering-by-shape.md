@@ -56,6 +56,17 @@ point, copy, or store counts. It still measured only 0.980x, so the shorter
 instruction stream did not translate to a shorter timed path and the rewrite
 was reverted.
 
+A measured block-scaled epilogue showed the same choice within one store helper.
+Hoisting every output base across the epilogue produced 69 registers and 976
+static instructions. Forming the complete row, swizzle, and stage offset at the
+use site only for the wider FP32 output reduced that specialization to 64
+registers and 960 instructions with zero spill, while narrower outputs retained
+the hoisted form. All 41 correctness configurations passed. The 136-row
+targeted result reached a 0.97877 minimum and 1.00850 geometric mean, but the
+30-row validation still had four failures at a 0.97928 minimum. The reusable
+result is the shape-selective live-range reduction; the static improvement alone
+is not a performance verdict.
+
 ## Boundary
 
 Native offsets, explicit arithmetic, and cursor induction are alternative
