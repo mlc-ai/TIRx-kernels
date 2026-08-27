@@ -27,7 +27,8 @@ list.
   [`cudnn_sm100_dense_gemm_persistent_swiglu`](tirx_kernels/cudnn/swiglu/dense_gemm_persistent_swiglu.py),
   [`cudnn_sm100_dense_blockscaled_gemm_persistent_swiglu_interleaved_quant`](tirx_kernels/cudnn/swiglu/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py)
 - **Grouped GEMM:**
-  [`cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py)
+  [`cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py),
+  [`cudnn_sm100_moe_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_grouped_gemm_dglu_dbias.py)
 - **Linear attention:**
   [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py),
   [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py),
