@@ -1,6 +1,8 @@
-# TIRx kernels
+# Kern kernels on TIRx
 
-High-performance GPU kernels written in [TIRx](https://github.com/apache/tvm).
+High-performance GPU kernels authored in
+[Kern](tirx_kernels/kern/README.md) and compiled through
+[TIRx](https://github.com/apache/tvm).
 
 ## Kernels
 
@@ -9,7 +11,7 @@ All kernels target `sm_100a`. **Kernel** is the registry name accepted by the
 directory under `tirx_kernels/`. Each bucket holds the kernels ported from one
 upstream project.
 
-`basic/` — native TIRx kernels, with no single upstream project:
+`basic/` — native Kern kernels, with no single upstream project:
 
 | Kernel                | Module                   | What it is |
 | --------------------- | ------------------------ | ---------- |
