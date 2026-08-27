@@ -63,6 +63,11 @@ def check_dispatch(config):
     head_dim = config["head_dim"]
     if head_dim not in SUPPORTED_HEAD_DIMS:
         raise ValueError(f"head_dim must be one of {SUPPORTED_HEAD_DIMS}, got {head_dim}")
+    expected_num_head = SUPPORTED_GEOMETRIES[head_dim]
+    if config["num_head"] != expected_num_head:
+        raise ValueError(
+            f"head_dim {head_dim} requires num_head={expected_num_head}, got {config['num_head']}"
+        )
     if config["dtype"] not in SUPPORTED_DTYPES:
         raise ValueError(f"dtype must be one of {SUPPORTED_DTYPES}, got {config['dtype']}")
     if config["topk_mode"] not in TOPK_MODES:
