@@ -38,7 +38,7 @@ def test_only_exact_kernel_local_helpers_are_exempt():
                 "ld_reduce_8_fp16",
                 "semaphore_notify_remote",
             }
-        ),
+        )
     }
 
     for callee in NVSHMEM_RUNTIME_FUNC_CALLS:
