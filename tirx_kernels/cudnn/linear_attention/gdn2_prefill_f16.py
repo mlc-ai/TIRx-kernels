@@ -3208,7 +3208,7 @@ def _validate_outputs(data, *, sources, with_oracle):
 
 
 def run_test(**config):
-    """Compare TIRx with the independent FP64 recurrence."""
+    """Compare TIRx and source with the independent FP64 recurrence."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -3217,9 +3217,11 @@ def run_test(**config):
     data = _prepare_data(config, with_oracle=True)
     executables = [compile_kernel(func) for func in get_kernel(**config)]
     tirx_launch = _tirx_launch(executables, data)
+    source_launch = _source_launch(data)
     tirx_launch()
+    source_launch()
     torch.cuda.synchronize()
-    _validate_outputs(data, sources=("tirx",), with_oracle=True)
+    _validate_outputs(data, sources=("tirx", "source"), with_oracle=True)
     return {"tokens": sum(config["seq_lens"]), "heads": config["heads"]}
 
 
