@@ -85,6 +85,7 @@ MONITOR_INTERVAL = 0.5  # seconds between nvidia-smi polls during a workload
 DEFAULT_UTIL_THRESHOLD = 0.0  # % GPU util above which a card counts as busy.
 DEFAULT_MEM_THRESHOLD = 0.0  # % physical memory above the idle floor that counts as busy.
 IDLE_GPU_MEMORY_FLOOR_MIB = 512.0
+MAX_ROUND_SAMPLE_SPREAD = 0.02
 
 
 # Tiny real workload used to decide whether a GPU is actually usable.
@@ -328,6 +329,7 @@ class GpuPool:
         self._known_indices: tuple[str, ...] = tuple(
             sorted(allowed, key=int) if allowed is not None else ()
         )
+        self._quarantined: set[str] = set()
         self._external_occupied: set[str] | None = None
         self._change_generation = 0
         self.util_threshold = util_threshold
@@ -453,7 +455,16 @@ class GpuPool:
         gpus = self._all_gpus()
         if self._allowed is not None:
             gpus = [g for g in gpus if g[0] in self._allowed]
+        gpus = [g for g in gpus if g[0] not in self._quarantined]
         return len(gpus)
+
+    def admitted_count(self) -> int:
+        """Number of startup-admitted cards not quarantined during this run."""
+        with self._changed:
+            return sum(
+                (self._allowed is None or idx in self._allowed) and idx not in self._quarantined
+                for idx in self._known_indices
+            )
 
     def try_acquire_many(self, count: int) -> tuple[str, ...] | None:
         """Atomically claim currently eligible GPUs without waiting."""
@@ -467,6 +478,7 @@ class GpuPool:
                 for idx in self._known_indices
                 if (self._allowed is None or idx in self._allowed)
                 and idx not in self._owned
+                and idx not in self._quarantined
                 and idx not in self._external_occupied
             ]
             if len(free) < count:
@@ -487,12 +499,22 @@ class GpuPool:
                 idx not in self._known_indices
                 or (self._allowed is not None and idx not in self._allowed)
                 or idx in self._owned
+                or idx in self._quarantined
                 or idx in self._external_occupied
                 for idx in requested
             ):
                 return None
             self._owned.update(requested)
             return requested
+
+    def quarantine_many(self, indices: tuple[str, ...] | list[str]) -> None:
+        """Exclude cards that admitted foreign work for the rest of this run."""
+        with self._changed:
+            previous = set(self._quarantined)
+            self._quarantined.update(idx for idx in indices if idx in self._known_indices)
+            if self._quarantined != previous:
+                self._change_generation += 1
+                self._changed.notify_all()
 
     def refresh_external_occupancy(self) -> set[str]:
         """Poll foreign-visible occupancy and wake dispatch if eligibility changed."""
@@ -1057,7 +1079,8 @@ def _base_attempt_record(attempt: _PreparedAttempt) -> dict:
         "started_at": datetime.fromtimestamp(attempt.started_at, timezone.utc).isoformat(
             timespec="seconds"
         ),
-        "retry_in_place": attempt.attempt > 1,
+        "retry_in_place": False,
+        "replacement_prepare": attempt.attempt > 1,
     }
 
 
@@ -1698,6 +1721,31 @@ def _finalize_bench_record(
     row["status"] = "ok"
 
 
+def _round_sample_spreads(result: dict) -> dict[str, float]:
+    """Return implementations whose finite positive samples vary by over 2%."""
+    samples = result.get("round_samples")
+    if not isinstance(samples, dict):
+        return {}
+    spreads: dict[str, float] = {}
+    for implementation, values in samples.items():
+        if (
+            not isinstance(values, list)
+            or len(values) < 2
+            or any(
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value <= 0
+                for value in values
+            )
+        ):
+            continue
+        spread = max(values) / min(values) - 1.0
+        if spread > MAX_ROUND_SAMPLE_SPREAD:
+            spreads[str(implementation)] = spread
+    return spreads
+
+
 def run_scheduled_jobs(
     workloads: list[dict],
     pool: GpuPool,
@@ -1716,6 +1764,7 @@ def run_scheduled_jobs(
         return [], [], {}
 
     visible = pool.total_visible()
+    max_required_gpus = max(workload.get("num_gpus", 1) for workload in workloads)
     if max_prepare_processes is None:
         max_prepare_processes = min(n_jobs, max(1, min(os.cpu_count() or 1, max(4, visible * 2))))
     if ready_backlog is None:
@@ -1723,7 +1772,7 @@ def run_scheduled_jobs(
     if max_prepare_processes < 1 or ready_backlog < max_prepare_processes:
         raise ValueError("ready_backlog must be >= max_prepare_processes >= 1")
 
-    pending = deque(workloads)
+    pending = deque((workload, 1) for workload in workloads)
     active: dict[int, _PreparedAttempt] = {}
     ready: deque[_PreparedAttempt] = deque()
     records: list[dict] = []
@@ -1770,7 +1819,7 @@ def run_scheduled_jobs(
         item.state = "STOPPING_INTERFERED_GPU"
         log(
             f"[bench-suite] >>> INTERFERED {item.label} attempt {item.attempt}: "
-            f"{detail[:160]}; retrying GPU stage in place <<<"
+            f"{detail[:160]}; re-preparing on a newly selected GPU <<<"
         )
         try:
             os.kill(item.process.pid, signal.SIGUSR1)
@@ -1779,6 +1828,7 @@ def run_scheduled_jobs(
 
     def acknowledge_interference(item: _PreparedAttempt, message: dict) -> None:
         pending_interference = item.pending_interference or {}
+        abandoned_gpus = list(item.gpus)
         retry_log.append(
             {
                 "kernel": item.workload["kernel"],
@@ -1789,20 +1839,24 @@ def run_scheduled_jobs(
                 "resident_context_bytes_after_cleanup": message.get(
                     "resident_context_bytes_after_cleanup", {}
                 ),
-                "retry_in_place": True,
+                "abandoned_gpus": abandoned_gpus,
+                "retry_in_place": False,
+                "replacement_prepare": True,
             }
         )
+        pool.quarantine_many(item.gpus)
         release_gpus(item)
-        item.gpus = ()
-        item.physical_gpu_uuids = ()
-        item.nvml_owned_pids.clear()
-        item.nvml_ownership_pending = False
-        item.pending_interference = None
-        item.interference_stop_deadline = None
-        item.attempt += 1
-        item.state = "READY"
-        item.ready_since = time.time()
-        ready.append(item)
+        try:
+            _send_child(item, {"type": "CANCEL"})
+        except OSError:
+            pass
+        item.state = "RESTARTING_AFTER_INTERFERENCE"
+        if pool.admitted_count() < max_required_gpus:
+            raise RuntimeError(
+                "all startup-admitted GPU capacity was quarantined after external "
+                "interference; start a new run when an idle GPU is available"
+            )
+        pending.appendleft((item.workload, item.attempt + 1))
 
     def spawn_available() -> None:
         while (
@@ -1811,10 +1865,10 @@ def run_scheduled_jobs(
             and buffered_count() < ready_backlog
             and len(active) < ready_backlog + visible
         ):
-            workload = pending.popleft()
+            workload, attempt = pending.popleft()
             item = _spawn_prepared_attempt(
                 workload,
-                1,
+                attempt,
                 log_dir,
                 rounds=rounds,
                 cooldown=cooldown,
@@ -2006,14 +2060,32 @@ def run_scheduled_jobs(
                     ):
                         if item.state == "STOPPING_INTERFERED_GPU":
                             acknowledge_interference(item, message)
-                            _send_child(item, {"type": "RETRY_GPU"})
+                            continue
+
+                        result = message.get("result") or {}
+                        sample_spreads = _round_sample_spreads(result)
+                        if sample_spreads:
+                            detail = "round-sample spread exceeded 2%: " + ", ".join(
+                                f"{implementation}={spread:.2%}"
+                                for implementation, spread in sorted(sample_spreads.items())
+                            )
+                            item.pending_interference = {
+                                "intruder_pids": [],
+                                "detail": detail[:240],
+                            }
+                            item.state = "STOPPING_INTERFERED_GPU"
+                            log(
+                                f"[bench-suite] >>> INTERFERED {item.label} "
+                                f"attempt {item.attempt}: {detail[:160]}; "
+                                "re-preparing on a newly selected GPU <<<"
+                            )
+                            acknowledge_interference(item, message)
                             continue
 
                         _send_child(item, {"type": "ACCEPT_RESULT"})
                         release_gpus(item)
                         record = _base_attempt_record(item)
                         record["physical_gpu_uuids"] = list(item.physical_gpu_uuids)
-                        result = message.get("result") or {}
                         status = result.get("status")
                         if status in ("SKIP", "FAIL"):
                             record.update(result)
@@ -2057,7 +2129,7 @@ def run_scheduled_jobs(
                             },
                         )
                         break
-                if eof and item.state not in ("RESULT", "FAILED"):
+                if eof and item.state not in ("RESULT", "FAILED", "RESTARTING_AFTER_INTERFERENCE"):
                     item.process.poll()
                     fail(item)
                     break
@@ -2071,6 +2143,13 @@ def run_scheduled_jobs(
                     _finish_attempt_process(item)
                     active.pop(fd, None)
                 elif item.state == "RESULT" and item.process.poll() is not None:
+                    fd = item.control.fileno()
+                    _finish_attempt_process(item)
+                    active.pop(fd, None)
+                elif (
+                    item.state == "RESTARTING_AFTER_INTERFERENCE"
+                    and item.process.poll() is not None
+                ):
                     fd = item.control.fileno()
                     _finish_attempt_process(item)
                     active.pop(fd, None)
@@ -2376,7 +2455,10 @@ def main() -> None:
     #    (including busy ones — the probe is light, finishes fine on a
     #    contended card; this catches broken drivers / ECC). Probe failures
     #    are banned for the rest of the run.
-    # 2. Per-workload acquire: re-scan utilization/memory every time we need a card.
+    # 2. Admission gate: cards occupied before the probe remain excluded for the
+    #    whole run.  A bursty foreign job must not become eligible merely because
+    #    it is between child processes when a workload is dispatched.
+    # 3. Per-workload acquire: re-scan utilization/memory every time we need a card.
     listing_pool = GpuPool(util_threshold=args.util_threshold, mem_threshold=args.mem_threshold)
     in_filter = [idx for idx, _ in _visible_gpu_rows(listing_pool._all_gpus())]
     if not in_filter:
@@ -2419,20 +2501,29 @@ def main() -> None:
             print(f"[bench-suite]   gpu {idx}: {err}", file=sys.stderr)
         sys.exit(1)
 
+    admitted = usable - set(occupied_now)
+    if not admitted:
+        print(
+            "[bench-suite] no startup-idle GPUs passed the health probe; "
+            "occupied cards stay excluded for this run.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     max_required_gpus = max(workload.get("num_gpus", 1) for workload in workloads)
-    if max_required_gpus > len(usable):
+    if max_required_gpus > len(admitted):
         print(
             f"[bench-suite] workload requires {max_required_gpus} GPU(s), but only "
-            f"{len(usable)} passed the startup probe.",
+            f"{len(admitted)} startup-idle GPU(s) passed the health probe.",
             file=sys.stderr,
         )
         sys.exit(2)
 
     pool = GpuPool(
-        allowed=usable, util_threshold=args.util_threshold, mem_threshold=args.mem_threshold
+        allowed=admitted, util_threshold=args.util_threshold, mem_threshold=args.mem_threshold
     )
-    n_gpus = len(usable)
-    compile_profile = gpu_compile_profile(usable)
+    n_gpus = len(admitted)
+    compile_profile = gpu_compile_profile(admitted)
     _repo_git = collect_repo_git()
     label = args.label or _repo_git.get("tirx-kernels") or _repo_git.get("tir") or "local"
     agg_note = (
@@ -2442,7 +2533,8 @@ def main() -> None:
         else ""
     )
     print(
-        f"[bench-suite] {len(workloads)} workloads, {n_gpus} probe-OK GPU(s) in pool, "
+        f"[bench-suite] {len(workloads)} workloads, {len(usable)} probe-OK GPU(s), "
+        f"{n_gpus} startup-idle GPU(s) in pool, "
         f"one-shot prepared children, compile-profile={compile_profile}, "
         f"label={label}{agg_note}",
         flush=True,
