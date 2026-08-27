@@ -3140,6 +3140,7 @@ def _make_prefill(spec):
                                 )
                                 K.ptx.mov.b32(fragment[pair * 2], K.cuda.float2_x(mul[0]))
                                 K.ptx.mov.b32(fragment[pair * 2 + 1], K.cuda.float2_y(mul[0]))
+                    K.ptx.tcgen05.wait__ld.sync.aligned()
                     p_cg1.empty.arrive(st_shared.stage)
                     st_shared.advance()
                     with K.unroll(32) as pair:
@@ -3194,6 +3195,7 @@ def _make_prefill(spec):
                             nv_words[pair],
                             _mn_opt_pack_iox2(fragment[pair * 2], fragment[pair * 2 + 1], io_dtype),
                         )
+                    K.ptx.tcgen05.wait__ld.sync.aligned()
                     p_cg1.empty.arrive(st_shared.stage)
                     st_shared.advance()
                     with K.unroll(2) as row_half:
