@@ -585,7 +585,6 @@ def derive(mode, *, group_m_list, N, K_dim):
     epi_m, epi_n = EPI_TILE
 
     num_acc_stage = 2
-    num_c_stage = 2
     num_d_stage = 2
     num_tile_stage = 2
 
@@ -598,7 +597,6 @@ def derive(mode, *, group_m_list, N, K_dim):
 
     c_stage_bytes = epi_m * epi_n * c_bits // 8
     d_stage_bytes = epi_m * epi_n * d_bits // 8
-    c_bytes = c_stage_bytes * num_c_stage
     d_bytes = d_stage_bytes * num_d_stage
     # ``sDbias`` is a four-warp column-major f32 scratch; upstream still
     # declares one element when the reduction is off, and that element is part
@@ -606,8 +604,23 @@ def derive(mode, *, group_m_list, N, K_dim):
     dbias_bytes = 128 * 2 * epi_n * 4 if mode["with_dbias"] else 4
     sinfo_bytes = 4 * 4 * num_tile_stage
     mbar_helpers_bytes = 1024
-    reserved = mbar_helpers_bytes + sinfo_bytes + c_bytes + d_bytes + dbias_bytes
-    num_ab_stage = (SMEM_CAPACITY - reserved) // ab_stage_bytes
+
+    def ab_depth(c_stages):
+        reserved = (
+            mbar_helpers_bytes + sinfo_bytes + c_stage_bytes * c_stages + d_bytes + dbias_bytes
+        )
+        return (SMEM_CAPACITY - reserved) // ab_stage_bytes
+
+    # Upstream pins ``num_c_stage`` at 2. The AB depth is a floor division, so
+    # on some specializations the epilogue can carry twice the C staging inside
+    # the remainder without costing an AB stage; where it can, take it. A
+    # deeper C ring lets the loader run two subtiles ahead of the epilogue
+    # instead of one, which is what the short shapes -- the ones whose
+    # persistent grid gives each cluster only a work tile or two -- have no
+    # other way to hide the C transfer behind.
+    num_ab_stage = ab_depth(2)
+    num_c_stage = 4 if ab_depth(4) == num_ab_stage else 2
+    c_bytes = c_stage_bytes * num_c_stage
     if num_ab_stage <= 0:
         raise ValueError("the source stage heuristic exceeds the SM100 shared-memory capacity")
 
