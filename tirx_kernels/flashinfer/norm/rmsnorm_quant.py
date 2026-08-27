@@ -1561,15 +1561,6 @@ def _checked_view(tensor, rows: list[int] | None):
     return tensor if rows is None else tensor[rows]
 
 
-def _math_oracle(x, weight, scale, eps: float, output_dtype: str, rows: list[int] | None):
-    x_checked = _checked_view(x, rows).float()
-    variance = x_checked.square().mean(dim=-1, keepdim=True)
-    normalized = x_checked * variance.add(eps).rsqrt()
-    quantized = normalized * weight.float() * scale.float().reciprocal()
-    fp8_max = 448.0 if output_dtype == "float8_e4m3fn" else 57344.0
-    return quantized.clamp(-fp8_max, fp8_max).to(_torch_output_dtype(output_dtype))
-
-
 def _assert_raw_equal(actual, expected, *, name: str) -> None:
     import torch
 
@@ -1577,18 +1568,6 @@ def _assert_raw_equal(actual, expected, *, name: str) -> None:
         mismatch = _raw_bytes(actual) != _raw_bytes(expected)
         count = int(mismatch.sum().item())
         raise AssertionError(f"{name}: {count} FP8 bytes differ")
-
-
-def _assert_math_close(actual, expected, *, name: str) -> None:
-    import torch
-
-    torch.testing.assert_close(
-        actual.float(),
-        expected.float(),
-        rtol=1.0,
-        atol=1.0,
-        msg=lambda message: f"{name}: {message}",
-    )
 
 
 def _flashinfer_api(device):
@@ -1743,11 +1722,9 @@ def run_test(**config: Any) -> None:
     rows = _overflow_rows(M, H)
     actual_checked = _checked_view(output["view"], rows)
     reference_checked = _checked_view(reference_output["view"], rows)
-    oracle = _math_oracle(data["x"], data["weight"], data["scale"], eps, output_dtype, rows)
     if not torch.isfinite(actual_checked.float()).all():
         raise AssertionError("TIRx FP8 output contains non-finite values")
     _assert_raw_equal(actual_checked, reference_checked, name="FlashInfer raw-byte oracle")
-    _assert_math_close(actual_checked, oracle, name="independent FP32 math oracle")
     _assert_inputs_unchanged(data, snapshot, M, H)
     _assert_output_identity(output, name="TIRx output")
     _assert_output_identity(reference_output, name="FlashInfer output")

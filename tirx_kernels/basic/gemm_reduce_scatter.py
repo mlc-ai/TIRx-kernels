@@ -1262,6 +1262,8 @@ def _allocate_case(
 def _reference_outputs(
     runtime: DistributedRuntime, data: dict[str, torch.Tensor], config: GemmRSConfig
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # cuBLAS baseline: torch.mm dispatches to cuBLAS, so this IS the
+    # library comparison.
     partial = torch.mm(data["A"], data["B"].T)
     expected = torch.empty(
         (config.local_m, config.N), dtype=torch.float16, device=f"cuda:{runtime.device_index}"

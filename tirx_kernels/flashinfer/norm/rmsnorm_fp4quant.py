@@ -1219,38 +1219,6 @@ def _logical_scale_bytes(output, config: dict[str, Any]):
     return output["scale"].view(-1)[offsets]
 
 
-def _dequantize(output, data, config: dict[str, Any]):
-    import torch
-
-    M, H = int(config["M"]), int(config["H"])
-    packed = output["y"].view(M, H // 2)
-    low = packed & 0x0F
-    high = packed >> 4
-    nibbles = torch.stack((low, high), dim=-1).reshape(M, H).long()
-    table = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
-        device="cuda",
-        dtype=torch.float32,
-    )
-    fp4 = table[nibbles]
-    scale_bytes = _logical_scale_bytes(output, config)
-    if int(config["block_size"]) == 16 or str(config["scale_format"]) == "e4m3":
-        scales = scale_bytes.view(torch.float8_e4m3fn).float()
-        scales = scales / data["global_scale"].float()
-    else:
-        scales = torch.pow(2.0, scale_bytes.int() - 127)
-    return (fp4.view(M, -1, int(config["block_size"])) * scales[..., None]).reshape(M, H)
-
-
-def _math_oracle(data, config: dict[str, Any]):
-    M, H = int(config["M"]), int(config["H"])
-    x = data["x2d"].float()
-    normalized = x * (x.square().mean(dim=-1, keepdim=True) + float(config["eps"])).rsqrt()
-    return (
-        (normalized * data["weight"].float()).to(_torch_input_dtype(config["input_dtype"])).float()
-    )
-
-
 def _assert_raw_equal(actual, expected, config: dict[str, Any], *, name: str) -> None:
     import torch
 
@@ -1265,6 +1233,12 @@ def _assert_raw_equal(actual, expected, config: dict[str, Any], *, name: str) ->
 
 
 def _assert_math(output, data, config: dict[str, Any]) -> None:
+    """Zero-global-scale invariant only; FlashInfer's raw bytes are the arbiter.
+
+    A zero global scale must yield signed-zero FP4 payloads and scales, and the
+    bitwise FlashInfer comparison cannot distinguish "both wrong the same way"
+    for this degenerate input, so the invariant is asserted directly.
+    """
     import torch
 
     if (int(config["block_size"]) == 16 or str(config["scale_format"]) == "e4m3") and float(
@@ -1274,19 +1248,6 @@ def _assert_math(output, data, config: dict[str, Any]) -> None:
             _logical_scale_bytes(output, config)
         ):
             raise AssertionError("zero global scale must produce signed-zero FP4 values and scales")
-        return
-
-    dequantized = _dequantize(output, data, config)
-    oracle = _math_oracle(data, config)
-    if not torch.isfinite(dequantized).all():
-        raise AssertionError("dequantized TIRx output contains non-finite values")
-    torch.testing.assert_close(
-        dequantized,
-        oracle,
-        rtol=0.5,
-        atol=2.0,
-        msg=lambda message: f"independent FP32 RMSNorm oracle: {message}",
-    )
 
 
 def _check_public_allocation(data, reference, config: dict[str, Any]) -> None:

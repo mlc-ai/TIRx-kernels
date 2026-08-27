@@ -213,10 +213,15 @@ def _tirx_launch(data, config, executable=None):
 
 
 def run_test(**config):
-    """Compile, launch and compare against the dequantized-matmul oracle."""
+    """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
-    from ._sm100_fp8_fp4_gemm_1d1d.data import assert_within_threshold, calc_diff, psum_slice_diff
+    from ._sm100_fp8_fp4_gemm_1d1d.data import (
+        assert_within_threshold,
+        calc_diff,
+        deepgemm_launch_m_grouped_contiguous,
+        psum_slice_diff,
+    )
 
     config.pop("label", None)
     data = prepare_data(**config)
@@ -225,16 +230,20 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
+    # DeepGEMM itself, on the same quantized operands, is the arbiter.
+    _, deepgemm_out = deepgemm_launch_m_grouped_contiguous(data)
+    torch.cuda.synchronize()
+
     if data["use_psum_layout"]:
         diff = psum_slice_diff(
             data["d"],
-            data["ref"],
+            deepgemm_out,
             data["grouped_layout"],
             data["alignment"],
             zero_padding=data["ensure_zero_padding"],
         )
     else:
-        diff = calc_diff(data["d"], data["ref"])
+        diff = calc_diff(data["d"], deepgemm_out)
     return assert_within_threshold(
         diff,
         data,

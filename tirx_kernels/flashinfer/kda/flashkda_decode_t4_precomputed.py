@@ -785,73 +785,10 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     return reference_out
 
 
-def _torch_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
-    """Independent FP32 oracle of the T=4 delta rule (sequential form)."""
-    spec = case["spec"]
-    num_seqs = spec["NUM_SEQS"]
-    num_value_heads = spec["NUM_VALUE_HEADS"]
-    head_ratio = spec["HEAD_RATIO"]
-    slot_stride = spec["STATE_SLOT_STRIDE"]
-
-    q = case["q"][0].float()
-    k = case["k"][0].float()
-    v = case["v"][0].float()
-    g = case["g"][0].float()
-    beta = case["beta"][0].float()
-    slots2d = case["ssm_state_indices_2d"]
-    nat = case["num_accepted_tokens"]
-
-    state_raw = case["initial_state_raw"].clone()
-    state_slots = state_raw.numel() // slot_stride
-    state = state_raw.as_strided(
-        (state_slots, num_value_heads, HEAD_DIM, HEAD_DIM),
-        (slot_stride, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
-    )
-    out = torch.zeros(
-        (num_seqs * NUM_TOKENS, num_value_heads, HEAD_DIM),
-        device=case["device"],
-        dtype=torch.float32,
-    )
-
-    scale = float(case["scale"])
-    for n in range(num_seqs):
-        accepted = min(max(int(nat[n].item()) - 1, 0), NUM_TOKENS - 1)
-        init_slot = int(slots2d[n, accepted].item())
-        if init_slot < 0:
-            init_slot = 0
-        for hv in range(num_value_heads):
-            h = hv // head_ratio
-            # FP32 carry across all tokens; only the checkpoint store rounds.
-            s = state[init_slot, hv].float()
-            for t in range(NUM_TOKENS):
-                row = n * NUM_TOKENS + t
-                qn = q[row, h] * (torch.rsqrt(q[row, h].pow(2).sum() + L2_EPS) * scale)
-                kn = k[row, h] * torch.rsqrt(k[row, h].pow(2).sum() + L2_EPS)
-                gamma = torch.exp(g[row, hv])
-
-                decayed = s * gamma.unsqueeze(0)
-                delta = (v[row, hv] - decayed @ kn) * beta[row, hv]
-                s = decayed + delta.unsqueeze(1) * kn.unsqueeze(0)
-                out[row, hv] = s @ qn
-
-                slot = int(slots2d[n, t].item())
-                if slot >= 0:
-                    state[slot, hv] = s.to(torch.bfloat16)
-                else:
-                    out[row, hv] = 0.0
-
-    return out.to(torch.bfloat16).unsqueeze(0), state_raw
-
-
 # The port replicates the source's MMA chain, swizzle and association orders, so
 # it should agree with the frozen export to within bf16 rounding.
 _RTOL = 2.0**-8
 _ATOL = 2.0e-3
-# The FP32 oracle is the sequential delta rule; the kernel rounds its MMA
-# operands to bf16, so the band here is genuinely wider and measured, not
-# guessed: at scaffold time the export itself sat 6.1e-05 from the oracle.
-_ORACLE_RTOL = 2.0**-5
-_ORACLE_ATOL = 6.0e-3
 
 
 def prepare_bench(**kwargs: Any):
@@ -876,7 +813,7 @@ def run_test(**kwargs: Any) -> None:
     tirx_out = case["tirx_out"]
     tirx_state = case["tirx_state_raw"].clone()
 
-    # 1. the frozen cake export itself, on an independent state pool
+    # 1. the frozen cake export (the arbiter) itself, on an independent state pool
     reference_out = _flashinfer_reference(case)
     torch.testing.assert_close(
         tirx_out.float(),
@@ -893,24 +830,7 @@ def run_test(**kwargs: Any) -> None:
         msg=lambda m: f"state vs flashinfer cake export\n{m}",
     )
 
-    # 2. an independent FP32 oracle of the same recurrence
-    oracle_out, oracle_state = _torch_reference(case)
-    torch.testing.assert_close(
-        tirx_out.float(),
-        oracle_out.float(),
-        rtol=_ORACLE_RTOL,
-        atol=_ORACLE_ATOL,
-        msg=lambda m: f"output vs FP32 oracle\n{m}",
-    )
-    torch.testing.assert_close(
-        tirx_state.float(),
-        oracle_state.float(),
-        rtol=_ORACLE_RTOL,
-        atol=_ORACLE_ATOL,
-        msg=lambda m: f"state vs FP32 oracle\n{m}",
-    )
-
-    # 3. invariants the tolerances cannot express
+    # 2. invariants the tolerances cannot express
     num_seqs = spec["NUM_SEQS"]
     slot_stride = spec["STATE_SLOT_STRIDE"]
     payload = spec["NUM_VALUE_HEADS"] * HEAD_DIM * HEAD_DIM

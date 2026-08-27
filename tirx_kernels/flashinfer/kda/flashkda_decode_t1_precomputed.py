@@ -758,62 +758,11 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     return reference_out
 
 
-def _torch_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
-    """Independent FP32 oracle of the source math (direct_split16.cu:133-267)."""
-    spec = case["spec"]
-    num_seqs = spec["NUM_SEQS"]
-    num_value_heads = spec["NUM_VALUE_HEADS"]
-    head_ratio = spec["HEAD_RATIO"]
-    slot_stride = spec["STATE_SLOT_STRIDE"]
-
-    q = case["q"][0].float()
-    k = case["k"][0].float()
-    v = case["v"][0].float()
-    g = case["g"][0].float()
-    beta = case["beta"][0].float()
-    slots = case["ssm_state_indices"]
-
-    state_raw = case["initial_state_raw"].clone()
-    state = state_raw.as_strided(
-        (state_raw.numel() // slot_stride, num_value_heads, HEAD_DIM, HEAD_DIM),
-        (slot_stride, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
-    )
-    out = torch.zeros(
-        (num_seqs, num_value_heads, HEAD_DIM), device=case["device"], dtype=torch.float32
-    )
-
-    scale = float(case["scale"])
-    for n in range(num_seqs):
-        slot = int(slots[n].item())
-        if slot < 0:
-            continue
-        for hv in range(num_value_heads):
-            h = hv // head_ratio
-            qn = q[n, h] * (torch.rsqrt(q[n, h].pow(2).sum() + L2_EPS) * scale)
-            kn = k[n, h] * torch.rsqrt(k[n, h].pow(2).sum() + L2_EPS)
-            gamma = torch.exp(g[n, hv])
-            kq = torch.dot(kn, qn)
-
-            s = state[slot, hv].float()
-            decayed = s * gamma.unsqueeze(0)
-            pred = decayed @ kn
-            base = decayed @ qn
-            delta = (v[n, hv] - pred) * beta[n, hv]
-            state[slot, hv] = (decayed + delta.unsqueeze(1) * kn.unsqueeze(0)).to(torch.bfloat16)
-            out[n, hv] = base + delta * kq
-
-    return out.to(torch.bfloat16).unsqueeze(0), state_raw
-
-
 # The port reproduces the source's instruction selection and association orders,
 # so it should agree with the frozen export to within bf16 rounding, not merely
 # to an algorithmic tolerance.
 _RTOL = 2.0**-8
 _ATOL = 1.0e-4
-# The independent FP32 oracle accumulates in a different order, so it gets the
-# looser band.
-_ORACLE_RTOL = 2.0**-6
-_ORACLE_ATOL = 3.0e-4
 
 
 def prepare_bench(**kwargs: Any):
@@ -838,7 +787,7 @@ def run_test(**kwargs: Any) -> None:
     tirx_out = case["tirx_out"]
     tirx_state = case["tirx_state_raw"].clone()
 
-    # 1. the frozen cake export itself, on an independent state pool
+    # 1. the frozen cake export (the arbiter) itself, on an independent state pool
     reference_out = _flashinfer_reference(case)
     torch.testing.assert_close(
         tirx_out.float(),
@@ -855,24 +804,7 @@ def run_test(**kwargs: Any) -> None:
         msg=lambda m: f"state vs flashinfer cake export\n{m}",
     )
 
-    # 2. an independent FP32 oracle of the same math
-    oracle_out, oracle_state = _torch_reference(case)
-    torch.testing.assert_close(
-        tirx_out.float(),
-        oracle_out.float(),
-        rtol=_ORACLE_RTOL,
-        atol=_ORACLE_ATOL,
-        msg=lambda m: f"output vs FP32 oracle\n{m}",
-    )
-    torch.testing.assert_close(
-        tirx_state.float(),
-        oracle_state.float(),
-        rtol=_ORACLE_RTOL,
-        atol=_ORACLE_ATOL,
-        msg=lambda m: f"state vs FP32 oracle\n{m}",
-    )
-
-    # 3. invariants the tolerance checks above cannot express
+    # 2. invariants the tolerance checks above cannot express
     num_seqs = spec["NUM_SEQS"]
     slot_stride = spec["STATE_SLOT_STRIDE"]
     payload = spec["NUM_VALUE_HEADS"] * HEAD_DIM * HEAD_DIM

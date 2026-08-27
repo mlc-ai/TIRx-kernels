@@ -1268,10 +1268,8 @@ def get_kernel(**kwargs: Any):
                             tmem_addr[0],
                             K.uint32(k),
                             runtime_desc_i[0],
-                            K.uint32(sfkv_tmem_col)
-                            + umma_group_idx * K.uint32(num_sfkv // 32),
-                            K.uint32(sfq_tmem_col)
-                            + umma_group_idx * K.uint32(num_sfq_atom // 32),
+                            K.uint32(sfkv_tmem_col) + umma_group_idx * K.uint32(num_sfkv // 32),
+                            K.uint32(sfq_tmem_col) + umma_group_idx * K.uint32(num_sfq_atom // 32),
                         )
                 with K.If(K.cuda.elect_sync()), K.Then():
                     full_tmem_barriers.arrive(
@@ -1525,7 +1523,6 @@ def _compile_tirx_paged_mqa_key(config: PagedMQALogitsFP4Config) -> tuple[tuple[
 
 
 def _compile_tirx_paged_mqa(config: PagedMQALogitsFP4Config) -> Any:
-
     compile_kwargs = _compile_tirx_paged_mqa_kwargs(config)
     return _compile_tirx_paged_mqa_for_config(**compile_kwargs)
 
@@ -1793,6 +1790,8 @@ def _assert_correct(data: dict[str, Any], logits: torch.Tensor, *, name: str) ->
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
     deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+    # Library-anchored: the torch ref is a yardstick, not the arbiter --
+    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_paged_mqa(data)
     torch.cuda.synchronize()

@@ -123,9 +123,7 @@ def _kernel(
             q_count_t0 = ld_global_i32(scheduler_metadata, work_base + 3)
             q_begin_t0 = ld_global_i32(scheduler_metadata, work_base + 2)
             row_linear_t0 = ld_global_i32(scheduler_metadata, work_base + 1)
-            row_base_t0 = ld_global_i32(
-                k2q_row_ptr, head_kv_idx * (total_rows + 1) + row_linear_t0
-            )
+            row_base_t0 = ld_global_i32(k2q_row_ptr, head_kv_idx * (total_rows + 1) + row_linear_t0)
             st_shared_i32(srow, 0, row_base_t0 + q_begin_t0)
             st_shared_i32(srow, 1, q_count_t0)
             st_shared_i32(srow, 2, batch_idx_t0)
@@ -672,6 +670,9 @@ def run_test(**config):
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
+    # Invariant checker retained by design: slot order is atomic-race
+    # dependent, so bitwise-vs-reference is meaningless and the metadata
+    # contract is what both sides must satisfy.
     assert_split_metadata(data, outputs)
     torch.testing.assert_close(
         outputs["split_counts"], reference_outputs["split_counts"], rtol=0, atol=0

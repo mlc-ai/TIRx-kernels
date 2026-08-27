@@ -798,6 +798,9 @@ def run_test(**config):
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
+    # Invariant checker retained by design: the schedule layout is
+    # nondeterministic (atomic slot handout), so bitwise-vs-reference is
+    # meaningless and the contract itself is what both sides must satisfy.
     assert_schedule_matches(data, outputs)
 
 

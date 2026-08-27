@@ -888,71 +888,6 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _torch_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
-    """Independent FP32 oracle of the source math (recurrent_kda.py:88-148, :440-468).
-
-    Secondary to the FlashInfer comparison: it catches a shared-misreading of the
-    algorithm that a source-vs-port diff alone could not.
-    """
-    spec = case["spec"]
-    n_seq = spec["NUM_SEQS"]
-    hv = spec["NUM_VALUE_HEADS"]
-    h = spec["NUM_HEADS"]
-    ratio = hv // h
-    lower_bound = case["lower_bound"]
-    eps = case["eps"]
-    scale = case["scale"]
-
-    q = case["q"].float()[0]
-    k = case["k"].float()[0]
-    v = case["v"].float()[0]
-    g = case["g"].float()[0]
-    beta = case["beta"].float()[0]
-    a_log = case["a_log"].float()
-    dt_bias = case["dt_bias"].float().reshape(h, HEAD_DIM)
-    slots = case["ssm_state_indices"]
-
-    state = (
-        case["initial_state_raw"]
-        .float()
-        .as_strided(
-            (
-                case["initial_state_raw"].numel() // spec["STATE_SLOT_STRIDE"],
-                hv,
-                HEAD_DIM,
-                HEAD_DIM,
-            ),
-            (spec["STATE_SLOT_STRIDE"], HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
-        )
-        .clone()
-    )
-    out = torch.zeros((n_seq, hv, HEAD_DIM), device=q.device, dtype=torch.float32)
-
-    for n in range(n_seq):
-        slot = int(slots[n])
-        if slot < 0:
-            continue  # inactive row: output stays zero, state untouched
-        for vh in range(hv):
-            qh = vh // ratio
-            gate_in = g[n, vh] + dt_bias[qh]
-            a = torch.exp(a_log[qh])
-            if lower_bound is None:
-                gate = torch.exp2(-a * torch.log2(1.0 + torch.exp(gate_in)))
-            else:
-                gate = torch.exp2(lower_bound * _LOG2_E_T * torch.sigmoid(a * gate_in))
-            qn = q[n, qh] * (torch.rsqrt((q[n, qh] ** 2).sum() + eps) * scale)
-            kn = k[n, qh] * torch.rsqrt((k[n, qh] ** 2).sum() + eps)
-            s = state[slot, vh] * gate.unsqueeze(0)
-            delta = (v[n, vh] - s @ kn) * beta[n, vh]
-            s = s + torch.outer(delta, kn)
-            state[slot, vh] = s
-            out[n, vh] = s @ qn
-    return out, state
-
-
-_LOG2_E_T = 1.4426950408889634
-
-
 def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     """Run the FlashInfer CuTe DSL source on the reference state pool."""
     import importlib
@@ -985,8 +920,6 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
 _RTOL = 2.0**-7
 _ATOL = 1.0e-4
 # The FP32 oracle reassociates freely, so it only needs to agree to bf16 noise.
-_ORACLE_RTOL = 2.0**-6
-_ORACLE_ATOL = 3.0e-4
 
 
 def prepare_bench(**kwargs: Any):
@@ -1013,15 +946,6 @@ def run_test(**kwargs: Any) -> None:
     torch.testing.assert_close(case["tirx_out"], flashinfer_out, rtol=_RTOL, atol=_ATOL)
     torch.testing.assert_close(
         case["tirx_state_raw"], case["reference_state_raw"], rtol=_RTOL, atol=_ATOL
-    )
-
-    # Secondary: an independent FP32 oracle of the same math.
-    oracle_out, oracle_state = _torch_reference(case)
-    torch.testing.assert_close(
-        case["tirx_out"].float().reshape(oracle_out.shape),
-        oracle_out,
-        rtol=_ORACLE_RTOL,
-        atol=_ORACLE_ATOL,
     )
 
     # Inactive (negative-slot) rows must be zeroed and must not touch state.

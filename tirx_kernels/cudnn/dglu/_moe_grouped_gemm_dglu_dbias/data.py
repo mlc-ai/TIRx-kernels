@@ -123,7 +123,13 @@ def prepare_data(**config):
 
 
 def reference_outputs(data):
-    """FP32 reference for D, dprob and dbias, following the upstream formulas."""
+    """FP32 reference for D, dprob and dbias, following the upstream formulas.
+
+    Retained solely for the rows the upstream kernel cannot arbitrate --
+    ``spec.upstream_disagrees_with_reference`` (tile_n = 32, where upstream is
+    deterministically wrong). Every other row is validated against the upstream
+    kernel directly.
+    """
     import torch
 
     config = data["config"]

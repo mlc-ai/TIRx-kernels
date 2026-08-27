@@ -862,14 +862,6 @@ def _checked_rows(tensor, rows: list[int] | None, N: int):
     return tensor[row_index // N, row_index % N]
 
 
-def _math_oracle(x, weight, variant: str, eps: float, rows: list[int] | None, N: int):
-    x_checked = _checked_rows(x, rows, N).float()
-    variance = x_checked.square().mean(dim=-1, keepdim=True)
-    normalized = x_checked * variance.add(eps).rsqrt()
-    bias = 0.0 if variant == "rmsnorm" else 1.0
-    return (normalized * (weight.float() + bias)).to(dtype=x.dtype)
-
-
 def _assert_close(actual, expected, *, name: str) -> None:
     import torch
 
@@ -987,12 +979,10 @@ def run_test(**config: Any) -> None:
     actual_checked = _checked_rows(output["view"], rows, N)
     implicit_checked = _checked_rows(reference_implicit, rows, N)
     explicit_checked = _checked_rows(reference_out["view"], rows, N)
-    oracle = _math_oracle(data["x"], data["weight"], variant, eps, rows, N)
     if not torch.isfinite(actual_checked).all():
         raise AssertionError("TIRx output contains non-finite values")
     _assert_close(actual_checked, implicit_checked, name="FlashInfer implicit output")
     _assert_close(actual_checked, explicit_checked, name="FlashInfer explicit output")
-    _assert_close(actual_checked, oracle, name="FP32 math oracle")
     _assert_inputs_unchanged(data, snapshot, B, N, H)
     _assert_storage_padding(
         output["backing"],

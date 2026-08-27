@@ -985,6 +985,8 @@ def run_test(**kwargs: Any) -> None:
     config: MQALogitsFP8Config = data["config"]
     clean_logits = not config.compressed_logits
     deepgemm_logits = _run_deepgemm_mqa(data, clean_logits=clean_logits)
+    # Library-anchored: the torch ref is a yardstick, not the arbiter --
+    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_mqa(data)
     torch.cuda.synchronize()

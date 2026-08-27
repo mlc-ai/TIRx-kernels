@@ -237,10 +237,14 @@ def _tirx_launch(data, config, executable=None):
 
 
 def run_test(**config):
-    """Compile, launch and compare against the dequantized-matmul oracle."""
+    """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
-    from ._sm100_fp8_fp4_gemm_1d1d.data import assert_within_threshold, calc_diff
+    from ._sm100_fp8_fp4_gemm_1d1d.data import (
+        assert_within_threshold,
+        calc_diff,
+        deepgemm_launch_k_grouped,
+    )
 
     config.pop("label", None)
     data = prepare_data(**config)
@@ -250,8 +254,13 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
+    # DeepGEMM itself, on the same quantized operands, is the arbiter (the
+    # launcher seeds its own accumulator from C and runs once).
+    _, deepgemm_out = deepgemm_launch_k_grouped(data)
+    torch.cuda.synchronize()
+
     return assert_within_threshold(
-        calc_diff(data["d"], data["ref"]),
+        calc_diff(data["d"], deepgemm_out),
         data,
         kernel="deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
         detail=(

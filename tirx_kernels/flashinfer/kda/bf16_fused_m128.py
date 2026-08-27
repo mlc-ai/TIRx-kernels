@@ -599,48 +599,6 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     return case
 
 
-def _reference_torch(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
-    """Token-serial reference, mirrors tests/kda/test_recurrent_kda_prefill.py::_reference.
-
-    O(total_tokens) python loop; intended for the small correctness configs.
-    """
-    import torch.nn.functional as F
-
-    cfg: FlashKDABf16FusedM128Config = case["config"]
-    scale = case["scale"]
-    q_flat = F.normalize(case["q"].float(), dim=-1)
-    k_flat = F.normalize(case["k"].float(), dim=-1)
-    v_flat = case["v"].float()
-    g_flat = case["g"].float()
-    beta_flat = torch.sigmoid(case["beta"].float())
-    gate = cfg.lower_bound * torch.sigmoid(
-        torch.exp(case["A_log"]).reshape(1, cfg.num_heads, 1)
-        * (g_flat + case["dt_bias"].reshape(1, cfg.num_heads, D_HEAD))
-    )
-    decay = torch.exp(gate)
-    if cfg.use_initial_state:
-        state = case["initial_state"].clone()
-    else:
-        state = torch.zeros(
-            (cfg.num_seqs, cfg.num_heads, D_HEAD, D_HEAD),
-            dtype=torch.bfloat16,
-            device=case["q"].device,
-        )
-    out = torch.empty_like(q_flat)
-    offsets = [0, *torch.cumsum(torch.tensor(cfg.seq_lens), dim=0).tolist()]
-    for sequence in range(cfg.num_seqs):
-        for token in range(offsets[sequence], offsets[sequence + 1]):
-            state_f32 = state[sequence].float()
-            decayed = state_f32 * decay[token].unsqueeze(1)
-            predicted = torch.einsum("hk,hvk->hv", k_flat[token], decayed)
-            residual = beta_flat[token].unsqueeze(-1) * (v_flat[token] - predicted)
-            updated = decayed + residual.unsqueeze(-1) * k_flat[token].unsqueeze(1)
-            state[sequence] = updated.to(torch.bfloat16)
-            projected = torch.einsum("hk,hvk->hv", q_flat[token], state[sequence].float())
-            out[token] = (scale * projected).to(torch.bfloat16)
-    return out.to(torch.bfloat16), state
-
-
 def _load_flashinfer_recurrent_kda():
     """Import the reference kernel from the installed flashinfer."""
     try:
@@ -2531,14 +2489,13 @@ def run_test(**kwargs: Any) -> None:
     compile_kernel(bf16_fused_m128(**kwargs))(*_tirx_args(case))
     torch.cuda.synchronize()
 
-    ref_out, ref_state = _reference_torch(case)
-    torch.testing.assert_close(case["out"], ref_out, rtol=4.01 / 128, atol=5e-3)
-    if cfg.store_final_state:
-        torch.testing.assert_close(case["final_state"], ref_state, rtol=4.01 / 128, atol=5e-3)
-
     flashinfer_out, flashinfer_state = _flashinfer_cuda_reference(case)
     torch.testing.assert_close(case["out"], flashinfer_out, rtol=4.01 / 128, atol=5e-3)
-    if cfg.store_final_state and flashinfer_state is not None:
+    if cfg.store_final_state:
+        # The state comparison must not silently vanish when the reference
+        # declines to return one.
+        if flashinfer_state is None:
+            raise AssertionError("store_final_state set but the reference returned no state")
         torch.testing.assert_close(
             case["final_state"],
             flashinfer_state.reshape(case["final_state"].shape),

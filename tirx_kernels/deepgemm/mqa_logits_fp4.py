@@ -809,8 +809,7 @@ def get_kernel(**kwargs: Any):
                         for math_wg_i in range(num_math_warpgroups):
                             tmem_addr = K.local_scalar(
                                 "uint32",
-                                init=K.uint32(tmem_col)
-                                + tmem_state.stage * K.uint32(umma_n),
+                                init=K.uint32(tmem_col) + tmem_state.stage * K.uint32(umma_n),
                             )
                             tmem_pipe.empty.wait(tmem_state.stage, tmem_state.phase ^ K.uint32(1))
                             # REGION D: block-scaled FP4 UMMA, D = KV @ Q^K.  The
@@ -1216,6 +1215,8 @@ def run_test(**kwargs: Any) -> None:
     config: MQALogitsConfig = data["config"]
     clean_logits = not config.compressed_logits
     deepgemm_logits = _run_deepgemm_mqa(data, clean_logits=clean_logits)
+    # Library-anchored: the torch ref is a yardstick, not the arbiter --
+    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
     deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_mqa(data)
     torch.cuda.synchronize()

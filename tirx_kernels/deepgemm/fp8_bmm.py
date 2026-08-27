@@ -150,10 +150,14 @@ def _tirx_launch(data, config, executable=None):
 
 
 def run_test(**config):
-    """Compile, launch and compare against the dequantized-einsum oracle."""
+    """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
-    from ._sm100_fp8_fp4_gemm_1d1d.data import assert_within_threshold, calc_diff
+    from ._sm100_fp8_fp4_gemm_1d1d.data import (
+        assert_within_threshold,
+        calc_diff,
+        deepgemm_launch_bmm,
+    )
 
     config.pop("label", None)
     data = prepare_data(**config)
@@ -167,8 +171,17 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
+    # DeepGEMM itself, on the same quantized operands, is the arbiter.  The
+    # accumulate entry reads C from its own output, so that output must be
+    # seeded with the same accumulator our launch started from; `z` and the
+    # DeepGEMM buffer share a layout, so the comparison needs no view games.
+    _, deepgemm_out = deepgemm_launch_bmm(
+        data, out=data["z0"].clone() if data["c"] is not None else None
+    )
+    torch.cuda.synchronize()
+
     return assert_within_threshold(
-        calc_diff(data["d"], data["ref"]),
+        calc_diff(data["z"], deepgemm_out),
         data,
         kernel="deepgemm_sm100_fp8_bmm",
         detail=(f"{data['expr']} batch={data['batch']} M={data['M']} N={data['N']} K={data['K']}"),

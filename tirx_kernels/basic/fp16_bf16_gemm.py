@@ -670,6 +670,8 @@ def run_test(dtype, M, N, K, **kwargs):
     with target:
         ex = compile_kernel(kernel)
         ex(A, B, C_tvm)
+    # cuBLAS baseline: torch.matmul dispatches to cuBLAS, so this IS the
+    # library comparison.
     C_ref = torch.matmul(A, B.T)
     torch.testing.assert_close(C_tvm.cpu(), C_ref.cpu(), rtol=0.001, atol=0.01)
 

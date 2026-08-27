@@ -1489,6 +1489,9 @@ def run_test(**kwargs: Any) -> None:
     ex = compile_kernel(prim_func)
     ex(*_tirx_args(case))
     torch.cuda.synchronize()
+    # Torch oracle retained by design: no library exposes phase-1's split
+    # intermediates (out/max_logits/lse per split), so nothing upstream can
+    # arbitrate them.
     ref_out, ref_max_logits, ref_lse = _reference_sparse_prefill(case)
     torch.testing.assert_close(case["out"], ref_out, rtol=4.01 / 128, atol=5e-3)
     torch.testing.assert_close(case["max_logits"], ref_max_logits, rtol=2.01 / 65536, atol=1e-6)
