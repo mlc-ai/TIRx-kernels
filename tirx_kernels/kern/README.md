@@ -36,7 +36,6 @@ def zero(out: K.gptr(K.f32)):
   Keep the default `check_ir=True`. `allowed_func_calls` is only for a task that
   explicitly owns a named runtime-call exception.
 
-The canonical modules under `tirx_kernels/` are the source of truth for
-complete implementation patterns. In particular, use kernels with a schedule
-structure similar to the workload being implemented; do not copy API spellings
-from historical TIRx parser kernels.
+You can learn Kern APIs and complete implementation patterns from the canonical
+modules under `tirx_kernels/`. Do not copy API spellings from historical TIRx
+parser kernels.
