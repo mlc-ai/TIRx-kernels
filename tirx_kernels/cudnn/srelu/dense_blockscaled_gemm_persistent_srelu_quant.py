@@ -3165,6 +3165,11 @@ def _compile_reference(data, config):
     prob = data["prob"]["source"]
     amax = data["source_amax"]
 
+    # Loading the reference can release stale TVM resources from an earlier
+    # test, and CUDA resource cleanup is allowed to change the thread's current
+    # device. DLPack requires it to match the tensor being exported.
+    torch.cuda.set_device(a.device)
+
     def dynamic(tensor, leading_dim):
         return from_dlpack(tensor, assumed_align=16).mark_layout_dynamic(leading_dim=leading_dim)
 
@@ -3207,6 +3212,7 @@ def _compile_reference(data, config):
         epilogue_op=epilogue_op,
         options="--enable-tvm-ffi",
     )
+    torch.cuda.set_device(a.device)
     stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
 
     def launch():
