@@ -140,7 +140,7 @@ Step 5: Continue to the kernel-sketch stage in the main session.
 - Do not create or edit `line_by_line_mapping.yaml` or `partial_line_by_line_mapping.yaml`.
 - Do not claim correctness passes.
 - Do not run expensive benchmarks.
-- Keep the scaffold consistent with `tirx-kernels-kernel-conventions`.
+- Keep the scaffold consistent with `tirx-kernel-integration`.
 - Include existing source test or benchmark shape/config coverage when it is discoverable.
 - Keep `source_overview.md`, `launch_config.md`, and `tensor_overview.md` useful enough to orient later phases.
 - Treat their storage-class, launch, and per-thread claims as **provisional**.

@@ -46,8 +46,8 @@ You should exactly follow the following stages in order:
 4. `correctness gate`: [references/correctness_gate.md](references/correctness_gate.md)
 5. `performance gate`: [references/perf_gate.md](references/perf_gate.md)
 
-For kernels under `tirx-kernels`, also use the tirx-kernels conventions skill:
-[../tirx-kernels-kernel-conventions/SKILL.md](../tirx-kernels-kernel-conventions/SKILL.md).
+For kernels under `tirx-kernels`, also use the TIRx kernel integration skill:
+[../tirx-kernel-integration/SKILL.md](../tirx-kernel-integration/SKILL.md).
 At the start of the performance gate, read and follow the target checkout's
 repo-local `.agents/skills/tirx-codegen-tuning/SKILL.md`. Treat that checkout as
 authoritative; do not substitute a copied or cached version of the codegen skill.
