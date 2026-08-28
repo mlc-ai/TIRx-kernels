@@ -36,6 +36,14 @@ reduce epilogue 148, 16 warps each).
 The device SM count is available to CPU-prepare without initializing CUDA, so
 resolving a grid does not require a device query in the wrong stage.
 
+Matching stops where the reference's grid exceeds a persistent kernel's
+work-item count: the surplus CTAs run only launch, barrier-init, and drain
+code, and that fixed cost lands on the shortest shapes. Launching the
+reference's full SM-count grid instead of `min(work_items, sm_count)` measured
+0.976x against a 0.984-0.988x band on a one-item-per-CTA shape and trimmed a
+second from 1.033x to 1.018x; the clamped grid was retained. Match the grid
+when every CTA receives work; clamp it to the work count when it would not.
+
 ## Verification
 
 Compare the realized grid of every kernel in the chain against its own reference
