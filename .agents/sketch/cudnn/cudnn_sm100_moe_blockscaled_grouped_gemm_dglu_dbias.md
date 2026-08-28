@@ -12,9 +12,9 @@ This is a non-executable execution sketch. It freezes the storage, eight-warp
 role split, MoE persistent tile scheduling, asynchronous protocols, tile
 dataflow, dGLU backward epilogue, dbias/dprob/amax reductions, and FP8 output
 scale-factor path for the single parameterized TIRx module
-[`tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py`](../../tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py)
+[`tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py`](../../../tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py)
 and its device code in
-[`_moe_blockscaled_grouped_gemm_dglu_dbias/kernel.py`](../../tirx_kernels/cudnn/dglu/_moe_blockscaled_grouped_gemm_dglu_dbias/kernel.py).
+[`_moe_blockscaled_grouped_gemm_dglu_dbias/kernel.py`](../../../tirx_kernels/cudnn/dglu/_moe_blockscaled_grouped_gemm_dglu_dbias/kernel.py).
 After the reviewer gate that module is the executable source of truth; this
 sketch remains frozen.
 
