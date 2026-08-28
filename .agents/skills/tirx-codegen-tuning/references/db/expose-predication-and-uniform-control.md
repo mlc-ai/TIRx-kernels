@@ -101,6 +101,27 @@ no spill.
   _issue_transfer(..., pred=leader)
   ```
 
+- When complementary lane groups choose between two pure arithmetic results,
+  and both results are defined for every lane, match a reference that uses
+  exact zero/one weights instead of duplicating a long unrolled body under a
+  divergent branch.
+
+  ```python
+  # before: both unrolled arithmetic bodies survive behind half-warp control.
+  with K.If(lane < HALF), K.Then():
+      result = _left_path(inputs)
+  with K.Else():
+      result = _right_path(inputs)
+
+  # after: one straight-line body selects with exact arithmetic identities.
+  right_weight = K.cast(lane // HALF, "float32")
+  left_weight = K.float32(1.0) - right_weight
+  left = _left_path(inputs)
+  right = _right_path(inputs)
+  scaled_left = _packed_mul(left, left_weight)
+  result = _packed_fma(right, right_weight, scaled_left)
+  ```
+
 ## Rationale
 
 - Replacing repeated pad checks with the `T.constexpr` specialization removed
@@ -149,6 +170,14 @@ no spill.
   copies, eight loads, and eight stores were unchanged. Two affected ratios
   moved from 0.9794 to 0.9895 and from 0.9869 to 0.9955; a neighboring multi-row
   shape stayed flat at 0.9836 to 0.9834.
+
+- A half-warp arithmetic branch around two 32-step unrolled bodies measured
+  94.53% branch efficiency against the reference's 99.96%. Replacing it with
+  the reference's exact zero/one packed blend kept 102 registers and zero stack
+  use, while static SASS fell from 2775 to 2352 instructions. Two production
+  workloads moved from 97.32/191.57 us to 92.72/186.00 us, and a one-work guard
+  moved from 21.62 to 16.77 us; all output orientations retained full numerical
+  agreement.
 
 The reference's source text does not reveal whether it wants this. nvcc
 routinely duplicates a loop around a store predicate the reference wrote per
@@ -218,9 +247,16 @@ never diverged in the first place. Check that the guard actually varies across
 the warp before rewriting it; divergent-branch counters separate the two cases
 where branch counts do not.
 
+An identity-weighted arithmetic blend is legal only when both arms are pure and
+defined for every lane. It cannot replace guarded memory accesses, barriers, or
+other side effects, and inactive-arm NaNs or infinities can defeat the zero
+weight. Preserve the reference's rounding sequence and test both lane groups.
+
 ## Verification
 
 Confirm predicate polarity and inactive-lane memory behavior, then compare BRA,
 BSYNC, reconvergence, code size, registers, and both control-flow outcomes. For
 the `T.constexpr` specialization, test both copies and compare code size,
-registers, and every affected workload.
+registers, and every affected workload. For identity-weighted arithmetic,
+confirm the long body is no longer duplicated in SASS and validate both lane
+groups with asymmetric finite inputs.

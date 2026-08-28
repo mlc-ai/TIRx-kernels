@@ -30,7 +30,8 @@ list.
   [`cudnn_sm100_dense_blockscaled_gemm_persistent_swiglu_interleaved_quant`](tirx_kernels/cudnn/swiglu/dense_blockscaled_gemm_persistent_swiglu_interleaved_quant.py),
   [`cudnn_sm100_dense_blockscaled_gemm_persistent_srelu_quant`](tirx_kernels/cudnn/srelu/dense_blockscaled_gemm_persistent_srelu_quant.py),
   [`cudnn_sm100_dense_blockscaled_gemm_persistent_dsrelu_quant`](tirx_kernels/cudnn/dsrelu/dense_blockscaled_gemm_persistent_dsrelu_quant.py),
-  [`cudnn_sm100_gemm_proj_rope_mxfp8_bf16in`](tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_bf16in.py)
+  [`cudnn_sm100_gemm_proj_rope_mxfp8_bf16in`](tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_bf16in.py),
+  [`cudnn_sm100_gemm_proj_rope_mxfp8_mxfp8in`](tirx_kernels/cudnn/proj_rope_mxfp8/gemm_proj_rope_mxfp8_mxfp8in.py)
 - **Grouped GEMM:**
   [`cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py),
   [`cudnn_sm100_moe_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_grouped_gemm_dglu_dbias.py)

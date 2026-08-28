@@ -50,6 +50,27 @@ for chunk in T.unroll(CHUNKS):
     _publish_chunk(fragment[chunk])
 ```
 
+Likewise, when one pass produces public metadata and a derived value used by a
+single output, consume that derived value at its production point instead of
+retaining a second wide array for a later pass.
+
+```python
+# before: every derived value remains live until the second pass.
+derived = T.alloc_local((ROWS,), "float32")
+for row in T.unroll(ROWS):
+    metadata = _compute_metadata(row)
+    _publish_metadata(row, metadata)
+    derived[row] = _derive(metadata)
+for row in T.unroll(ROWS):
+    _produce_output(row, derived[row])
+
+# after: metadata publication and its dependent output share one lifetime.
+for row in T.unroll(ROWS):
+    metadata = _compute_metadata(row)
+    _publish_metadata(row, metadata)
+    _produce_output(row, _derive(metadata))
+```
+
 ## Rationale
 
 One measured FP32 bias hoist regressed 6.6%; by contrast, staging a larger load
@@ -69,6 +90,14 @@ executed instructions from 11,495 to 11,406. The two critical benchmark ratios
 moved from 0.981x/0.989x to 0.987x/0.997x; a later role-budget adjustment supplied
 the remaining margin without undoing the shorter fragment lifetime.
 
+In a multi-output epilogue, publishing a 32-element metadata array at production
+reduced stack use from 72 to 8 bytes and static local-memory instructions from 34
+to 2; two production workloads improved by 4.75% and 4.91%. Consuming the
+remaining 32-element derived array at production then reduced registers from 128
+to 102, eliminated the stack and static local-memory instructions, and improved
+the same workloads by another 1.12% and 0.88%. Correctness passed for both output
+orientations after each rewrite.
+
 ## Boundary
 
 Do not shorten a fragment lifetime across an ordering that belongs to the
@@ -82,6 +111,12 @@ State hoisted across persistent work also creates a dependency between work
 items that were previously independent. Measure both one-work CTAs, where the
 hoist can only add lifetime, and high-trip-count CTAs, where removing repeated
 tail operations has a chance to repay it.
+
+Lower resource counts do not guarantee a win on short work. The derived-array
+rewrite above made a one-work guard 24.0% slower even though it removed the
+remaining stack traffic, while the persistent production workloads improved.
+Keep short and persistent shapes in the validation matrix when changing phase
+boundaries.
 
 Do not publish earlier than the chunk's own correctness and scheduling boundary.
 Moving publication and release ahead of the chunk-local reduction reduced one
