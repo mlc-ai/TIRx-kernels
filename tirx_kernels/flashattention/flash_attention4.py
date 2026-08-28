@@ -993,7 +993,6 @@ def make_kernel(
                     with K.If(warp_id == 0), K.Then():
                         K.cuda.iket.mark("softmax-phase-2")
                     K.ptx.tcgen05.wait__st.sync.aligned()
-                    K.ptx.tcgen05.wait__ld.sync.aligned()
                     p_ready_2.arrive(wg_id)
                     with K.If(warp_id == 0), K.Then():
                         K.cuda.iket.mark("softmax-phase-3")

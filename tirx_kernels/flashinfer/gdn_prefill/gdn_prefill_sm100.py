@@ -934,7 +934,6 @@ def make_kernel(HQ: int, HV: int):
                             sub[vec * 4 + 2],
                             sub[vec * 4 + 3],
                         )
-                K.ptx[WAIT_LD]()
                 p_kv.empty.arrive(st_kvc.stage)
                 st_kvc.advance()
 
@@ -1035,7 +1034,6 @@ def make_kernel(HQ: int, HV: int):
                                         scale_pair(
                                             fr, p, f2(cumprod_f[2 * g], cumprod_f[2 * g + 1])
                                         )
-                            K.ptx[WAIT_LD]()
                             p_cg1.empty.arrive(st_cg1c.stage)  # release KS
                             st_cg1c.advance()
                             for p in range(32):  # orig:L1998-2002
@@ -1078,7 +1076,6 @@ def make_kernel(HQ: int, HV: int):
                             cg1_acc_ld(fr, TM_CG1)
                             for p in range(32):
                                 pack_f16x2(nvw[p], fr[2 * p], fr[2 * p + 1])
-                            K.ptx[WAIT_LD]()
                             p_cg1.empty.arrive(st_cg1c.stage)  # release NV
                             st_cg1c.advance()
                             for h in range(2):
@@ -1103,7 +1100,6 @@ def make_kernel(HQ: int, HV: int):
                             for p in range(32):
                                 pack_f16x2(nvw[p], fr[2 * p], fr[2 * p + 1])
                             store_o_frag(nvw, s_o[st_op.stage])
-                            K.ptx[WAIT_LD]()
                             K.ptx[FENCE_ASYNC]()
                             p_qs.empty.arrive(st_qsc.stage)  # release QKV
                             st_qsc.advance()
