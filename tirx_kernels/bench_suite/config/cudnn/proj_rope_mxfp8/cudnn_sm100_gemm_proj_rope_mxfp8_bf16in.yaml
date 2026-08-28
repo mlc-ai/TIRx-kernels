@@ -1,0 +1,9 @@
+# Complete source-tested production matrix for the cuDNN Frontend BF16
+# projection GEMM + YARN RoPE + dual-direction MXFP8 port.
+kernel: cudnn_sm100_gemm_proj_rope_mxfp8_bf16in
+selection_rationale: The four required rows are the full upstream BF16 GPU-test matrix, covering 2048/4096 tokens and both physical weight orientations. Three defaults minimally cover both token sizes and both orientations; perf validation still uses all four BENCH_CONFIGS rows.
+configs:
+  - {config: t2048_k1536_h128_w_out_in_false, default: true, selection_role: small}
+  - {config: t2048_k1536_h128_w_out_in_true, default: false}
+  - {config: t4096_k1536_h128_w_out_in_false, default: true, selection_role: medium}
+  - {config: t4096_k1536_h128_w_out_in_true, default: true, selection_role: large}
