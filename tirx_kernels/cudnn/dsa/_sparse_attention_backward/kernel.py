@@ -373,18 +373,22 @@ def _bwd_load(
             )
 
     # LSE and sum_OdO: 32 lanes x 2 f32 = the 64 rows of this head block. The
-    # workspace planes are head-contiguous, so a head block is 64 consecutive
-    # f32 only when it starts at head 0; index each row explicitly instead.
+    # d576 geometry has only 32 heads, so lanes 16-31 must zero-fill instead of
+    # reading beyond the last query's workspace. cp.async's ignore-src form
+    # preserves the 32-lane pipeline arrival while suppressing that global
+    # access. The workspace planes are head-contiguous, so index each row
+    # explicitly instead of treating the head block as a contiguous vector.
     slot = token * num_head + head_block * block
+    ignore_src = K.ptx.pred(lane * 2 >= K.int32(num_head))
     p_lse.empty.wait(0, 1)
     K.ptx["cp.async.ca.shared.global"](
-        smem.ptr_to([off_lse + lane * 8]), ws.ptr_to([plane + slot + lane * 2]), 8, 8
+        smem.ptr_to([off_lse + lane * 8]), ws.ptr_to([plane + slot + lane * 2]), 8, ignore_src
     )
     K.ptx["cp.async.mbarrier.arrive.noinc.shared.b64"](p_lse.full.buf.ptr_to([0]))
 
     p_sum.empty.wait(0, 1)
     K.ptx["cp.async.ca.shared.global"](
-        smem.ptr_to([off_sum + lane * 8]), ws.ptr_to([slot + lane * 2]), 8, 8
+        smem.ptr_to([off_sum + lane * 8]), ws.ptr_to([slot + lane * 2]), 8, ignore_src
     )
     K.ptx["cp.async.mbarrier.arrive.noinc.shared.b64"](p_sum.full.buf.ptr_to([0]))
 
