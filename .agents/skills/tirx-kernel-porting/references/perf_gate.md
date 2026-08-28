@@ -44,7 +44,7 @@ evidence must come from the latest complete bench-suite run. Do not use
 `python -m tirx_kernels.bench`, an ad hoc timer, a partial run, selected shapes,
 or an average ratio as final acceptance evidence.
 
-Follow `tirx-kernels-kernel-conventions` for benchmark scope, references,
+Follow `tirx-kernel-integration` for benchmark scope, references,
 rounds, artifacts, and invalid-run handling.
 
 Use bench-suite measurements to decide whether a candidate improved performance

@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright TIRx authors
 # cuDNN SM100 CSA compressor forward: coarse execution sketch
 
 This is a non-executable execution sketch for
-[`tirx_kernels/cudnn/csa/compressor_fwd_sm100.py`](../../tirx_kernels/cudnn/csa/compressor_fwd_sm100.py).
+[`tirx_kernels/cudnn/csa/compressor_fwd_sm100.py`](../../../tirx_kernels/cudnn/csa/compressor_fwd_sm100.py).
 It freezes the source kernel's one-row/one-column-group CTA mapping, scalar or
 paired lane ownership, APE hoist, ragged segment scan, overlap-window branches,
 serial FP32 reduction order, and BF16 traffic. After the initial sketch review,

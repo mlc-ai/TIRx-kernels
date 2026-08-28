@@ -46,7 +46,7 @@ Do not edit the sketch or return to the sketch-reviewer stage.
    pass on the same implementation. Incidental address arithmetic and local
    scalar plumbing do not invalidate the review.
 
-Complete the target module according to `tirx-kernels-kernel-conventions`,
+Complete the target module according to `tirx-kernel-integration`,
 including the kernel, local helpers, launch metadata, `prepare_data`, `run_test`,
 `run_bench`, `CONFIGS`, and optional `BENCH_CONFIGS` required by the target.
 

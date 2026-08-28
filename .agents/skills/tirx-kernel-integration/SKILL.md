@@ -1,9 +1,9 @@
 ---
-name: tirx-kernels-kernel-conventions
-description: Follow the current tirx-kernels module, registry, licensing, correctness, benchmark, and bench-suite conventions. Use when adding, porting, testing, benchmarking, or reviewing kernels in tirx-kernels, including source attribution, SPDX headers, CONFIGS, BENCH_CONFIGS, run_test, run_bench, tvm.tirx.bench, references, distributed timing, and baseline integration.
+name: tirx-kernel-integration
+description: Integrate kernels into tirx-kernels using its current module, registry, licensing, correctness, benchmark, and bench-suite conventions. Use when adding, porting, testing, benchmarking, or reviewing a kernel in the repository.
 ---
 
-# tirx-kernels Kernel Conventions
+# TIRx Kernel Integration
 
 Use this skill for repository integration around a TIRx kernel. Use
 `tirx-kernel-porting` separately when the task requires implementation-trace-
