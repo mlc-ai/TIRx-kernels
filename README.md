@@ -37,6 +37,7 @@ list.
 - **Linear attention:**
   [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py),
   [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py),
+  [`cudnn_sm100_gdn_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn_recompute_f16.py),
   [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py),
   [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py)
 - **CSA compression:**
