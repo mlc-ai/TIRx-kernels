@@ -59,6 +59,19 @@ elapsed cycles from 23,294 to 22,896 and executed instructions from 11,406 to
 11,377. It subsequently passed complete targeted and full matrices at 0.995x
 and 1.002x minimum ratios.
 
+Instruction count can point at the same role-budget problem from the opposite
+direction. One seven-warp persistent pipeline already executed 5,276 fewer
+basic-opcode thread instructions than its reference, yet used 72 registers per
+thread against 89 and executed 9,269 more synchronization try-wait warp events;
+the accumulator-empty wait alone ran 12,926 times against 6,532. Giving only
+the four-warp epilogue role an 88-register temporal target moved the directly
+affected ratio from 0.9804x to 1.0134x. All 35 correctness configurations and
+seven affected or guard configurations passed, and the complete 28-row matrix
+cleared at a 0.9908x minimum; an equivalent final build repeated the complete
+matrix at a 0.9932x minimum. Once the target already has the shorter instruction
+stream, a register deficit plus excess consumer-release polling is a reason to
+sweep the consumer role rather than keep deleting arithmetic.
+
 ## Boundary
 
 An occupancy proof only shows that a larger budget is affordable; it does not
@@ -92,9 +105,19 @@ shape-scoped rebalance removed six shared-spilling requests, yet its two
 critical benchmark ratios were only 0.981x and 0.989x. Continue through the
 performance matrix after the generated-code symptom is repaired.
 
+A source register count is only a seed for the sweep. In the seven-warp case,
+88 was the nearest legal target below the reference's observed 89, but adjacent
+budgets were not measured and the child was not re-profiled. The timings prove
+that the scoped register intervention repaired the deficit; they do not prove
+that 88 is optimal or that the measured try-wait count itself fell. Do not copy
+the value or claim the counter mechanism without the corresponding sweep and
+post-change profile.
+
 ## Verification
 
 Record realized allocation and dynamic local traffic, not only the requested
 cap. Compile every specialization touched by the selector so allocator cliffs
 cannot hide outside the timing set, then measure the beneficiary and guard
-paths at adjacent budgets.
+paths at adjacent budgets. When excess pipeline polling motivated the sweep,
+re-profile the retained child and compare the same barrier waits before
+attributing the gain to faster stage release.
