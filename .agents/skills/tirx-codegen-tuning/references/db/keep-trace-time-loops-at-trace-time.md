@@ -69,6 +69,17 @@ code size, so it is not a general replacement for runtime iteration. Explicit
 device unrolling is best reserved for small fixed trip counts where preserving
 the source order and scalar indexing is important.
 
+The code-size clause has teeth in the other direction too. A cold path guarded
+by a runtime predicate still occupies the loop body that encloses it, so
+expanding one at trace time costs the hot iterations even though it never
+executes. A tail fixup that a reference writes as a runtime loop over a row, and
+that a port expanded into a Python loop, put 256 unreachable global accesses
+inside a persistent kernel's per-work-item body; restoring the runtime loop took
+the port's excess over the reference from +112 sites per direction to below zero
+and moved three near-gate shapes up by 0.004 to 0.016 with correctness
+unchanged. Match the reference's staging boundary in both directions: expand
+what it expands, and leave as a device loop what it leaves as one.
+
 ## Verification
 
 Compare PTX for `.local`, `ld.local`, `st.local`, and an unexpected loop
