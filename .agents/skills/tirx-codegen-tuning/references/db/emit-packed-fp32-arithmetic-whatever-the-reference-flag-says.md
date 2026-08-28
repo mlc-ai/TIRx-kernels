@@ -33,14 +33,26 @@ def _binary(mnemonic, out, left, right):
 ```
 
 Keep the approximations and comparisons per-element -- `ex2`, `rcp`, `tanh`,
-`setp` have no packed form -- and express a constant-minus-value as a `neg`
-plus a packed `add` rather than reaching back for a scalar `sub`.
+`setp` have no packed form. For a difference, use the packed `sub` directly:
+negating operands ahead of `make_float2` pays one scalar `FADD` per operand,
+because the negation does not fold across the pack.
+
+```python
+# before: two scalar negations per pair survive into SASS.
+K.ptx["add.rn.f32x2"](packed, K.cuda.make_float2(a0, a1), K.cuda.make_float2(-b0, -b1))
+# after: the packed sub folds them.
+K.ptx["sub.rn.f32x2"](packed, K.cuda.make_float2(a0, a1), K.cuda.make_float2(b0, b1))
+```
 
 ## Rationale
 
-Each half of `mul.rn.f32x2` / `add.rn.f32x2` rounds exactly as its scalar
-sibling, and `neg` plus packed `add` equals `sub` bit for bit, so the rewrite is
-numerically exact and needs no tolerance argument. In one block-scaled MoE
+Each half of `mul.rn.f32x2` / `add.rn.f32x2` / `sub.rn.f32x2` rounds exactly
+as its scalar sibling, and `sub` equals `neg` plus `add` bit for bit, so the
+rewrite is numerically exact and needs no tolerance argument. Folding the
+negation into the packed `sub` removed about 520K dynamic scalar `FADD` on one
+latency-bound shape; it measured timing-neutral there only because that chain
+sat in stall shadow, and it survived the complete correctness matrix and the
+final performance-matrix winner. In one block-scaled MoE
 grouped GEMM every activation family with real arithmetic depth moved above
 parity at once -- 0.864 to 1.224, 0.987 to 1.120, 0.955 to 1.120 -- and the
 worst row of the whole port stopped being the worst.

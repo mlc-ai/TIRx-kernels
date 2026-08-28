@@ -34,6 +34,7 @@ list.
   [`cudnn_sm100_moe_grouped_gemm_dglu_dbias`](tirx_kernels/cudnn/dglu/moe_grouped_gemm_dglu_dbias.py)
 - **Linear attention:**
   [`cudnn_sm100_kda_bprop_f16`](tirx_kernels/cudnn/linear_attention/kda_bprop_f16.py),
+  [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py),
   [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py),
   [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py)
 - **CSA compression:**

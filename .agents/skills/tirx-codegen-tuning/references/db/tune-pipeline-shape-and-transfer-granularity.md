@@ -50,7 +50,13 @@ extra TMA issue instructions often regress short shapes.
 
 ## Boundary
 
-Never reduce a protocol ring below its proven safe depth.
+Never reduce a protocol ring below its proven safe depth. Safe depth is also
+not fast depth, and a sibling specialization's tolerance is no proof: an input
+ring one specialization runs correctly at depth three (its iterations are
+longer) starved a throughput build whose consumer keeps a two-stage lookahead
+in flight when the ring was cut from four to three to fund an extra output
+stage -- two shapes near 0.99x fell to 0.92x and 0.82x, and the cut was
+reverted. Fund new stages from rings whose consumers hold no lookahead.
 
 ## Verification
 
