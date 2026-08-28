@@ -1,0 +1,22 @@
+# Complete production sweep for the cuDNN Frontend GDN (v1) prefill port.
+kernel: cudnn_sm100_gdn_prefill_f16
+selection_rationale: The selected defaults cover an underfilled single-batch launch, the central four-batch production point, and the longest state/checkpoint workload; the full matrix sweeps production sequence lengths, batch occupancy, and both normal and final-state/checkpoint stage tuples.
+configs:
+  - {config: perf_b4_s2048_h64_nostate, default: false}
+  - {config: perf_b4_s4096_h64_nostate, default: false}
+  - {config: perf_b4_s8192_h64_nostate, default: true, selection_role: medium}
+  - {config: perf_b4_s16384_h64_nostate, default: false}
+  - {config: perf_b4_s32768_h64_nostate, default: false}
+  - {config: perf_b1_s8192_h64_nostate, default: true, selection_role: small}
+  - {config: perf_b2_s8192_h64_nostate, default: false}
+  - {config: perf_b8_s8192_h64_nostate, default: false}
+  - {config: perf_b16_s8192_h64_nostate, default: false}
+  - {config: perf_b4_s2048_h64_state, default: false}
+  - {config: perf_b4_s4096_h64_state, default: false}
+  - {config: perf_b4_s8192_h64_state, default: false}
+  - {config: perf_b4_s16384_h64_state, default: false}
+  - {config: perf_b4_s32768_h64_state, default: true, selection_role: large}
+  - {config: perf_b1_s8192_h64_state, default: false}
+  - {config: perf_b2_s8192_h64_state, default: false}
+  - {config: perf_b8_s8192_h64_state, default: false}
+  - {config: perf_b16_s8192_h64_state, default: false}
