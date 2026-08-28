@@ -1,4 +1,4 @@
-# Kern kernels on TIRx
+# TIRx kernels
 
 High-performance GPU kernels authored in
 [Kern](tirx_kernels/kern/README.md) and compiled through
