@@ -317,13 +317,34 @@ def _exchange_reduce_store(exchange, o_raw, corr_warp, lane, split_output):
                 )
 
 
+def _kv_head(head, ratio):
+    """Map a Q head onto the KV head whose tile it reads.
+
+    ``head`` comes from the grid or the CLC response and is never negative, so
+    the division is done unsigned. That matters: on the split-KV and CLC paths
+    the source's head index is a signed value of unproven sign and its division
+    costs ten instructions, while the unsigned form stays at one.
+    """
+    if ratio == 1:
+        return head
+    if ratio & (ratio - 1) == 0:
+        return K.cast(
+            K.shift_right(K.cast(head, "uint32"), K.uint32(ratio.bit_length() - 1)), "int32"
+        )
+    return K.cast(K.cast(head, "uint32") // K.uint32(ratio), "int32")
+
+
 def _resolve_splits(value):
     return 2 if value == "auto" else int(value)
 
 
 def make_forward_kernel(**config):
     batch = int(config["batch"])
-    heads = int(config["num_heads"])
+    heads = int(config["num_q_heads"])
+    kv_heads = int(config["num_kv_heads"])
+    if heads % kv_heads != 0:
+        raise ValueError("num_q_heads must be a multiple of num_kv_heads")
+    head_ratio = heads // kv_heads
     seqlen_q = int(config["seqlen_q"])
     seqlen_kv = int(config["seqlen_kv"])
     max_blocks = int(config["kv_blocks"])
@@ -471,6 +492,11 @@ def make_forward_kernel(**config):
         raw_count = K.local_scalar("int32")
         split_start = K.local_scalar("int32", init=0)
         count_index = (batch_idx * heads + head) * q_blocks + q_block
+        # The K/V TensorMap fuses (batch, KV head) into its outermost dimension,
+        # so a Q head selects its group's KV tile here. Both operands read the
+        # live work-item scalars, which is what a persistent CLC producer needs:
+        # the coordinate follows `head` as the scheduler advances it.
+        kv_slot = batch_idx * kv_heads + _kv_head(head, head_ratio)
 
         def load_tile_metadata():
             K.assign(split_start, 0)
@@ -561,7 +587,7 @@ def make_forward_kernel(**config):
                                     K.int32(0),
                                     K.cast(half, "int32"),
                                     sid,
-                                    batch_idx * heads + head,
+                                    kv_slot,
                                     K.cuda.cvta_generic_to_shared(kv_full.ptr_to([kv_stage])),
                                     TMA_CACHE,
                                 )
@@ -574,7 +600,7 @@ def make_forward_kernel(**config):
                                 K.int32(0),
                                 K.int32(0),
                                 sid,
-                                batch_idx * heads + head,
+                                kv_slot,
                                 K.cuda.cvta_generic_to_shared(kv_full.ptr_to([kv_stage])),
                                 TMA_CACHE,
                             )

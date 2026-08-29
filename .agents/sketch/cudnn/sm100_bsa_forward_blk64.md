@@ -33,16 +33,18 @@ logical rectangular region, never a TIRx tile primitive or layout-bearing value.
 
 ## Scope and specializations
 
-The fixed producer geometry is BF16 MHA, `D=DV=128`, Q rows 64, one grouped KV
-iteration of 256 tokens assembled from four indexed sparse blocks of 64, one-CTA
-UMMA, and FP32 score/output accumulation. The producer always uses 512 threads,
-one Q stage, three aliased K/V stages, two alternating score/P stages, two O
-accumulator stages, and all 512 TMEM columns. Source `bsa_fwd_sm100.py:53-188`.
+The fixed producer geometry is BF16 with a constexpr non-packed Q-to-KV head map
+(`H_q = r * H_kv`), `D=DV=128`, Q rows 64, one grouped KV iteration of 256 tokens
+assembled from four indexed sparse blocks of 64, one-CTA UMMA, and FP32
+score/output accumulation. The producer always uses 512 threads, one Q stage,
+three aliased K/V stages, two alternating score/P stages, two O accumulator
+stages, and all 512 TMEM columns. Source `bsa_fwd_sm100.py:53-188`.
 
 In scope:
 
 | axis | accepted values | device-code consequence |
 | --- | --- | --- |
+| head map | MHA `r=1` / GQA / MQA, any `r` with `H_q % H_kv == 0` | only the K/V TMA head coordinate becomes `h//r`; Q, sparse metadata, O, LSE and the grid all stay `H_q`-indexed, and batch remains a separate coordinate contribution folded into the K/V block axis, never into the head. `r=1` folds at trace time and emits nothing, matching the source. For `r>1` the emitted form depends on the work coordinate's provenance — see the head-map instruction selection at the warp-14 body |
 | input presentation | BHSD / BSHD | BSHD is made contiguous as BHSD by the wrapper before either timed launch; producer addressing is the same |
 | sparse count | fixed / per-Q-block variable | fixed reads one scalar; variable loads `block_nums[b,h,qb]`; the latter may specialize an empty-tile branch |
 | block tail mask | present / absent | present loads physical `block_sizes[block_id]`; absent substitutes 64 without a GMEM access |
@@ -52,10 +54,20 @@ In scope:
 | output dtype | BF16 final / FP32 producer partial | FP32 only when split-KV is active; final combine converts to BF16 |
 | scale | default `1/sqrt(128)` / runtime f32 | producer carries both the natural and log2-domain scale |
 
-Out of scope: FP16, GQA/MQA, causal attention, `D` or `DV` other than 128,
-sparse block sizes other than 64, Q tiles other than 64, grouped KV tiles other
-than 256, multi-CTA MMA, cluster dimensions greater than one, and every SM90,
-SM110-specific, or SM120 sibling. Tile primitives are out of scope.
+Out of scope: FP16, PackGQA (the packed Q-head layout), causal attention, `D` or
+`DV` other than 128, sparse block sizes other than 64, Q tiles other than 64,
+grouped KV tiles other than 256, multi-CTA MMA, cluster dimensions greater than
+one, and every SM90, SM110-specific, or SM120 sibling. Tile primitives are out of
+scope.
+
+The two head-adjacent exclusions are properties of the source, not choices. FP16
+is excluded because the source's own conversion helpers emit BF16 unconditionally
+(`bsa_fwd_helpers.py:136-148` for the softmax P operand and `:322-379` for the
+non-FP32 output store), so an FP16 launch would disagree with the instruction
+descriptor rather than fail. PackGQA is excluded because the source's packed LSE
+row bound (`bsa_fwd_sm100.py:2211`) uses the unpacked `seqlen_q` where the packed
+layout needs `seqlen_q * r`, silently dropping rows; the blk128 sibling carries
+the corrected form. Both are refused by the source's own host surface.
 
 Static and split producer launches are ordinary launches. CLC is an explicit
 singleton-cluster launch even though every dimension has extent one; presence
@@ -75,6 +87,37 @@ generated intermediate. The manifest is preserved at
 | split producer | source partial/final result and oracle PASS | `83cd2a7372f594088dc12a21e05120020107a7bfe51830cbd12177893f8247d3` | `.reqntid 512,1,1`, ordinary CTA |
 | split combine | same split PASS | `ce81938a9ed60c37576f4384a5ec28e86c93772d3b8987f52ac7a4a636763a70` | `.reqntid 128,1,1`, ordinary CTA |
 | static clean MLIR | same static PASS | `0ddeda5829230f9b85cc82e2e0f794a844c2ebe2a22b350a0d57c8c2083fe1de` | resolves dynamic storage fields and source mappings |
+
+The head map was exported separately, as three static/fixed producers differing
+only in `qhead_per_kvhead`, so the map's instruction selection is read from a
+diff rather than inferred. Same manifest.
+
+| export | `H_q`/`H_kv` | artifact SHA256 | emitted at `.loc 1 1186 26` |
+| --- | --- | --- | --- |
+| grouped `r=1` | 8 / 8 | `f93b3903d6f4f938cfdf0003b4d5f822b083f4c7eabed496f616b6d3db9585b3` | nothing; the expression folds away |
+| grouped `r=3` | 6 / 2 | `8f346ea25b5f3e0e71b36312af88ccf809b64bc1f78a6ff111d0d88f873431d9` | `cvt.u16.u32` / `mul.hi.u16 %rs, %rs, -21845` / `shr.u16 %rs, %rs, 1` / `cvt.u32.u16` |
+| grouped `r=4` | 8 / 2 | `fb46dfb64585e7240c6857d0a59d156a9f5c170f70dc93eeb9a82078fdc72b1c` | `shr.u32 %r, %r, 2` |
+
+Those three share the static, fixed-count specialization, where `head_idx` is the
+raw `%ctaid.y`. Two further exports cover the scheduling modes that obtain the
+head index differently, and they select a different sequence for the same ratio:
+
+| export | `H_q`/`H_kv` | scheduling | artifact SHA256 | emitted at `.loc 1 1186 26` |
+| --- | --- | --- | --- | --- |
+| grouped `r=4` CLC, variable counts | 8 / 2 | CLC persistent | `973f7d3653034137…` | ten-instruction signed floor division: `shr.s32 ,31` / `shr.u32 ,30` / `add.s32` / `shr.s32 ,2` / `and.b32 ,-4` / `setp.ne.b32` / `setp.lt.s32` / `and.pred` / `selp.b32 ,-1,0` / `add.s32` |
+| grouped `r=8` MQA, split-KV 2 | 8 / 1 | static, split | `93f3642c14259182…` | the same ten-instruction sequence with `,29` / `,3` / `,-8` |
+
+The difference is the operand's provable sign, not the ratio: `%ctaid.y` is
+non-negative, while the split scheduler's `divmod` result and the CLC response
+field are `Int32` of unproven sign, which forces the negative-operand
+correction. Ratio 1 folds away in every mode, static, CLC and split alike.
+
+With register names normalized, that `.loc 1 1186` hunk is the *only* semantic
+difference between the three **static** exports; everything else is register
+renumbering from the one extra live value. Each grouped export was also checked against a
+head-replication oracle — the stock wrapper on the same Q with K/V
+`repeat_interleave`d to `H_q` heads — matching at `atol=0, rtol=0` on O, on LSE,
+and on the LSE finiteness mask.
 
 The static producer contains 64 `tcgen05.mma.ws.cta_group::1.kind::f16`,
 32 `tcgen05.ld.sync.aligned.32x32b.x32.b32`, 16
@@ -131,7 +174,7 @@ rmem_words(name, count, dtype)
 tensormap(name, rank, dtype, box, strides, swizzle, oob_fill)
 byte_ptr(linear_base, scalar_byte_offset)
 pipeline_state(stages, index, phase, count)
-work_cursor(q_blocks, heads, batch, splits, persistent_limit)
+work_cursor(q_blocks, heads, batch, splits, persistent_limit)  # heads is H_q
 ```
 
 Every physical SMEM mapping is a scalar function. `swizzle343(x)` means the
@@ -195,10 +238,14 @@ cluster_try_cancel(full_mbarrier, response); cluster_query_wait()
 # source main:53-188,226-677; export PTX:14-43
 # ---------------------------------------------------------------------------
 P = specialize(
-    B, H, SQ, SKV,
+    B, H, HKV, SQ, SKV,
     has_block_sizes, has_variable_counts, allow_empty,
     kv_splits, use_clc, use_i64_kv_strides, output_dtype,
 )
+# `H` is always the Q head count. `HKV` divides it; `R = H // HKV` is the
+# non-packed head map's ratio and is constexpr, so `h // R` resolves at trace
+# time to nothing (R=1), a shift (R power of two), or a reciprocal multiply.
+R = H // HKV
 M = 64
 N = 256
 D = DV = 128
@@ -231,7 +278,7 @@ else:
 
 launch(
     grid=((ceil_div(SQ,64), H, B) if P.use_clc
-          else (ceil_div(SQ,64), H*kv_splits, B)),
+          else (ceil_div(SQ,64), H*kv_splits, B)),   # H is H_q for every ratio
     block=(512, 1, 1),
     arch="sm_100a",
     min_blocks_per_sm=1,
@@ -477,6 +524,29 @@ if P.use_clc and warp == 15:
 if warp == 14:
     while work.valid:
         qb, h, b, split = work.coordinates
+        # The non-packed head map. `h` stays the Q head everywhere else --
+        # sparse metadata, Q, O and LSE are all Q-head-indexed -- and only the
+        # K/V tiles come from the grouped KV head. Recomputed per work item, so
+        # a persistent CLC producer re-derives it after every advance.
+        hkv = u32(h) // R
+        # instruction_selection: nothing when R==1, in every scheduling mode.
+        #   For R>1 the source's emitted form depends on the provenance of `h`,
+        #   not on R alone. Static non-split takes `h` straight from `%ctaid.y`,
+        #   which is provably non-negative, so `.loc 1 1186` is one unsigned op:
+        #   `shr.u32` for a power-of-two R, or `cvt.u16.u32` /
+        #   `mul.hi.u16 ,-21845` / `shr.u16 ,1` / `cvt.u32.u16` for R==3. Under
+        #   split-KV `h` comes from the scheduler's `divmod` and under CLC from
+        #   the decoded response; both are Int32 of unproven sign, so the source
+        #   emits full floor-division with the negative-operand correction --
+        #   ten instructions for a power-of-two R, nine including
+        #   `mul.hi.s32 ,1431655766` for R==3.
+        #   The port narrows `h` to unsigned first, which is a deliberate and
+        #   benign divergence: `h` is a grid/scheduler head index and is always
+        #   non-negative, so the two forms are equal, and the port keeps the
+        #   one-instruction form in all three scheduling modes rather than
+        #   reproducing the source's ten-instruction signed sequence.
+        #   extent: one scalar integer expression per work item in the load
+        #   role, on no inner loop, in every case
         raw_count, split_start = sparse_count_and_offset(work)
         process = (raw_count > 0) if P.allow_empty else True
         NITER = round_up(raw_count, 8) // 4
@@ -511,7 +581,7 @@ if warp == 14:
                     sid = sparse_id(reverse_group*4 + sub)
                     if kind == K:
                         for d_half in 0..1:
-                            copy_g2s_tma(map_K, (d_half, sid, h, b),
+                            copy_g2s_tma(map_K, (d_half, sid, hkv, b),
                                          KV_UNION + 2*k_tma_elem(
                                              KV_PROD.index, sub, ..., d_half),
                                          KV_PIPE.full[KV_PROD.index])
@@ -519,7 +589,7 @@ if warp == 14:
                             #   extent: exactly two 64x64 BF16 issues per K
                             #   sparse sub-block, eight issues for the K group
                     else:
-                        copy_g2s_tma(map_V, (sid, h, b),
+                        copy_g2s_tma(map_V, (sid, hkv, b),
                                      KV_UNION + 2*v_tma_elem(KV_PROD.index, sub, ...),
                                      KV_PIPE.full[KV_PROD.index])
                         # instruction_selection: same 5-D tensor-bulk family;
@@ -1067,7 +1137,7 @@ still balances the stats and output pipelines, writes O zero, and writes LSE
 offsets `min(aligned_base*s + min(valid-aligned_base*kv_splits, 8*s), valid)`
 when `aligned_base>0`; otherwise—including the 256-split path—it uses even
 ceil-distributed offsets `ceil(valid*s/kv_splits)`. Each split producer follows
-the same program and folds `split*H` into its output-head axis.
+the same program and folds `split*H` into its output-head axis (`H` is H_q, so the combine is unaffected by the head map).
 
 ## Complete split-KV combine sketch
 
@@ -1076,7 +1146,7 @@ The combine exists only for `kv_splits > 1`. Its production specialization is
 `max_splits=2**ceil(log2(kv_splits))`. The physical split extent used by the
 source LSE layout is `max(8,max_splits)`, even when `max_splits==2`. It is an ordinary launch and has no TMEM,
 TMA, cluster, or warp specialization; all four warps execute the same row/column
-program. Source combine `22-147,250-606`; wrapper `_interface.py:885-1005`.
+program. Source combine `22-147,250-594`; wrapper `_interface.py:885-1005`.
 
 ```python
 launch(
@@ -1257,6 +1327,7 @@ compile-time branches, but must not change the execution skeleton:
 
 | branch | specialized differences |
 | --- | --- |
+| `qhead_per_kvhead` | the K/V TMA head coordinate only. `R=1` folds to the plain Q head and must stay byte-identical to the MHA program; other ratios add one scalar integer op per work item, the port narrowing the head index to unsigned so the one-instruction form is kept under CLC and split-KV too |
 | `has_block_sizes` | physical-block size GMEM loads and two 64-column masks versus constant 64 |
 | fixed / variable count | scalar fixed count versus `block_nums[b,h,qb]`; variable count changes scheduler arguments |
 | `allow_empty` | empty-tile control path and zero/-inf output; split buckets can also be empty when the requested split count exceeds a row's live sparse blocks |
@@ -1279,16 +1350,18 @@ The public module exports `KERNEL_META`, `CONFIGS`, `BENCH_CONFIGS`,
 for `kv_splits=1` and producer plus combine for `kv_splits>1`. Device code uses
 `import tirx_kernels.kern as K` exclusively.
 
-Correctness is the module's fixed 22-row matrix: BHSD/BSHD, Q tails 1/63/65,
+Correctness is the module's fixed 35-row matrix: BHSD/BSHD, Q tails 1/63/65,
 masked/unmasked, custom scale, fixed/variable/empty counts, static/CLC,
-split 1/2/3/8/256 and auto-to-2, and the active i64 K/V-stride case. Every row
-must run with no skip. O and LSE are compared both with the production source
+split 1/2/3/8/256 and auto-to-2, the active i64 K/V-stride case, and the
+non-packed head map at ratios 2, 3, 4 and 8 (MQA included) crossed with those
+axes. Every row must run with no skip. O and LSE are compared both with the production source
 and a gathered FP32 oracle; empty rows require exact O zero and LSE `-inf`.
 Split rows additionally validate producer FP32 partial O/LSE before combine.
 
 Performance truth is only `python -m tirx_kernels.bench_suite`. The frozen
-11-row matrix covers short/long and batch/head scaling, static/CLC, fixed,
-variable and empty counts, split 2/4/8, and i64 K/V addressing. Every row must
+23-row matrix covers short/long and batch/head scaling, static/CLC, fixed,
+variable and empty counts, split 2/4/8, i64 K/V addressing, and a grouped-head
+mirror of those axes at ratios 2, 3, 4 and 8. Every row must
 contain five finite positive Proton samples for source and TIRx, `status == ok`,
 no error, and strict `mean(source)/mean(tirx) > 0.99`.
 
@@ -1297,6 +1370,14 @@ no error, and strict `mean(source)/mean(tirx) > 0.99`.
 - Producer launch: 512 threads, one CTA UMMA, 217088 bytes dynamic SMEM aligned
   to 1024, minimum one CTA/SM. CLC alone carries explicit singleton cluster
   metadata and cluster-launch-control instructions.
+- The head map contributes at most one scalar integer instruction per work
+  item, in the load role only: nothing at ratio 1, `shr.u32` at a power-of-two
+  ratio, a 16-bit reciprocal multiply otherwise. It is on no inner loop and
+  changes no issue count. The source itself keeps that one-instruction form only
+  where the head index is the raw `%ctaid.y`; under split-KV and CLC its head
+  index is a signed `Int32` and it emits a ten-instruction floor division. The
+  port narrows to unsigned and keeps one instruction in every mode -- a
+  deliberate divergence, sound because a head index is never negative.
 - Q uses exactly two 4-D tensor-bulk G2S issues. Each K group uses eight 5-D
   issues (two per sparse sub-block), each V group uses four (one per sparse
   sub-block), and O uses exactly two BF16 or four FP32 4-D tensor-bulk S2G

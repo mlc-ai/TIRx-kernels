@@ -47,6 +47,20 @@ whenever the dividend's sign cannot be proven. A scheduler counter read from a
 signed integer global carries no such proof even when every value it can hold is
 a count, so each division emits an absolute value, a sign compare and a chain of
 moves that a reference written in unsigned arithmetic throughout does not have.
+
+The proof travels with the value, not with the variable, so one specialization
+of a kernel can pay the correction while another does not for the identical
+source expression. An index taken straight from a grid coordinate is provably
+non-negative and folds; the same index handed back by a persistent scheduler's
+`divmod`, or decoded from a cluster-launch-control response, is an ordinary
+signed integer and pays again. One kernel dividing a head index by a
+compile-time ratio emitted nothing at ratio one, a single `shr.u32` at a
+power-of-two ratio and a four-instruction 16-bit reciprocal at ratio three while
+the index came from the grid, then a ten-instruction correction for the same two
+power-of-two ratios, and nine with a 32-bit magic multiply for ratio three, once
+persistent and split-KV scheduling supplied the index instead. Cast where the
+scheduler hands the index over and the specializations agree again. Reading only
+the specialization whose index comes from the grid hides the cost entirely.
 The cast took the masked-layout shape from 3.868M to 3.537M instructions against
 the reference's 3.388M, and from 0.976x to above the gate.
 

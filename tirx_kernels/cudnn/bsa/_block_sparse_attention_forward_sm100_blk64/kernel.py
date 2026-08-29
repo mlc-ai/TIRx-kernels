@@ -83,7 +83,12 @@ def _resolve_splits(value):
 
 def make_forward_kernel(**config):
     batch = int(config["batch"])
-    num_heads = int(config["num_heads"])
+    num_heads = int(config["num_q_heads"])
+    if int(config["num_kv_heads"]) != num_heads:
+        raise NotImplementedError(
+            "this scalar bring-up kernel indexes K/V by the Q head and has no "
+            "grouped head map; the warp-specialized producer is the live path"
+        )
     seqlen_q = int(config["seqlen_q"])
     seqlen_kv = int(config["seqlen_kv"])
     max_blocks = int(config["kv_blocks"])
@@ -108,9 +113,10 @@ def make_forward_kernel(**config):
         split_offsets: K.gptr[K.i32],
         softmax_scale: K.f32,
     ):
-        # Numerically direct bring-up transcription of the sparse block/split
-        # contract.  The source-shaped TMA/TMEM datapath replaces this loop in
-        # the implementation-review revision.
+        # Numerically direct transcription of the sparse block/split contract.
+        # The warp-specialized TMA/TMEM producer in ``source_kernel.py`` is the
+        # path this module actually launches; this loop is kept only as a
+        # readable statement of the same contract.
         if use_clc:
             q_block, head, batch_idx = K.cta_id_in_cluster([q_blocks, num_heads, batch])
             split = K.int32(0)
@@ -213,7 +219,7 @@ def make_forward_kernel(**config):
 
 def make_combine_kernel(**config):
     batch = int(config["batch"])
-    num_heads = int(config["num_heads"])
+    num_heads = int(config["num_q_heads"])
     seqlen_q = int(config["seqlen_q"])
     num_splits = _resolve_splits(config["kv_splits"])
     max_splits = 1 << (num_splits - 1).bit_length()

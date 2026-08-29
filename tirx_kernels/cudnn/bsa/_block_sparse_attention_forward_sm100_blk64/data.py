@@ -52,7 +52,7 @@ def _encode_tensormap(tensor, dtype, global_dims, global_strides, box_dims):
     return descriptor
 
 
-def _build_tensor_maps(q, k, v, out, *, seqlen_q, seqlen_kv, heads, batch):
+def _build_tensor_maps(q, k, v, out, *, seqlen_q, seqlen_kv, heads, kv_heads, batch):
     """Build the Q/K/V/O maps in the source kernel's fused block coordinates."""
     physical_blocks = (seqlen_kv + 63) // 64
     q_strides = (128 * 2, seqlen_q * 128 * 2, heads * seqlen_q * 128 * 2)
@@ -71,14 +71,14 @@ def _build_tensor_maps(q, k, v, out, *, seqlen_q, seqlen_kv, heads, batch):
         "k": _encode_tensormap(
             k,
             "bfloat16",
-            (64, 64, 2, physical_blocks, batch * heads),
+            (64, 64, 2, physical_blocks, batch * kv_heads),
             kv_strides,
             (64, 64, 1, 1, 1),
         ),
         "v": _encode_tensormap(
             v,
             "bfloat16",
-            (64, 64, 2, physical_blocks, batch * heads),
+            (64, 64, 2, physical_blocks, batch * kv_heads),
             kv_strides,
             (64, 64, 2, 1, 1),
         ),
@@ -100,7 +100,7 @@ def _resolve_splits(value):
 
 def _counts_from_pattern(config, q_blocks, device):
     batch = config["batch"]
-    heads = config["num_heads"]
+    heads = config["num_q_heads"]
     maximum = config["kv_blocks"]
     mode = config["block_count_mode"]
     if mode == "fixed":
@@ -141,7 +141,7 @@ def _build_split_offsets(counts, num_splits):
 
 def _make_sparse_metadata(config, *, q_blocks, physical_blocks, device):
     maximum = config["kv_blocks"]
-    total = config["batch"] * config["num_heads"] * q_blocks
+    total = config["batch"] * config["num_q_heads"] * q_blocks
     rows = torch.empty((total, maximum), dtype=torch.int32, device=device)
     base = torch.arange(maximum, dtype=torch.int64, device=device)
     # A coprime-ish stride spreads the selected blocks through the KV sequence;
@@ -153,7 +153,7 @@ def _make_sparse_metadata(config, *, q_blocks, physical_blocks, device):
         if maximum > 0:
             values[-1] = physical_blocks - 1
         rows[row] = values.to(torch.int32)
-    return rows.reshape(config["batch"], config["num_heads"], q_blocks, maximum)
+    return rows.reshape(config["batch"], config["num_q_heads"], q_blocks, maximum)
 
 
 def _strided_kv(generator, shape, *, use_i64):
@@ -175,7 +175,8 @@ def prepare_data(**config):
         raise unittest.SkipTest("CUDA is required")
 
     batch = config["batch"]
-    heads = config["num_heads"]
+    heads = config["num_q_heads"]
+    kv_heads = config["num_kv_heads"]
     seqlen_q = config["seqlen_q"]
     seqlen_kv = config["seqlen_kv"]
     q_blocks = (seqlen_q + 63) // 64
@@ -188,10 +189,10 @@ def prepare_data(**config):
         batch, heads, seqlen_q, 128, generator=generator, dtype=torch.bfloat16, device="cuda"
     )
     k_bhsd = _strided_kv(
-        generator, (batch, heads, seqlen_kv, 128), use_i64=config["use_int64_kv_strides"]
+        generator, (batch, kv_heads, seqlen_kv, 128), use_i64=config["use_int64_kv_strides"]
     )
     v_bhsd = _strided_kv(
-        generator, (batch, heads, seqlen_kv, 128), use_i64=config["use_int64_kv_strides"]
+        generator, (batch, kv_heads, seqlen_kv, 128), use_i64=config["use_int64_kv_strides"]
     )
     if config["tensor_layout"] == "bshd":
         q_user = q_bhsd.transpose(1, 2).contiguous()
@@ -244,6 +245,7 @@ def prepare_data(**config):
         seqlen_q=seqlen_q,
         seqlen_kv=seqlen_kv,
         heads=heads,
+        kv_heads=kv_heads,
         batch=batch,
     )
 

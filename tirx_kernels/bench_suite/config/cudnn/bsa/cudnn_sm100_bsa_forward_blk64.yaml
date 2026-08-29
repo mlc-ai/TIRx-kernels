@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 kernel: cudnn_sm100_bsa_forward_blk64
-selection_rationale: The selected defaults cover a small ordinary singleton-split launch, a medium variable-sparsity CLC launch, and a large eight-way split-plus-combine launch; the full matrix additionally covers long-query static and CLC scheduling, empty sparse rows, split counts 2/4/8, masked and unmasked blocks, ragged Q/KV tails, batch/head occupancy, and 64-bit KV strides.
+selection_rationale: The selected defaults cover a small ordinary singleton-split launch, a medium variable-sparsity CLC launch, and a large eight-way split-plus-combine launch, and all three are equal-head so the defaults pin the path every other row shares; the full matrix additionally covers long-query static and CLC scheduling, empty sparse rows, split counts 2/4/8, masked and unmasked blocks, ragged Q/KV tails, batch/head occupancy, 64-bit KV strides, and a grouped Q-to-KV head map at ratios 2, 3, 4 and 8 (MQA included) mirroring those axes at matching shape scale.
 defaults:
   num_gpus: 1
 configs:
@@ -17,3 +17,15 @@ configs:
   - {config: p08_b1_h4_sq2048_skv32768_kv256_mask_s4_static, default: false}
   - {config: p09_b1_h8_sq2048_skv65536_kv512_nomask_s8_static, default: true, selection_role: large}
   - {config: p10_b1_h4_sq4096_skv8192_kv32_mask_s1_static_i64kv, default: false}
+  - {config: p11_b1_h8kv4_sq4096_skv8192_kv32_mask_s1_static_gqa, default: false}
+  - {config: p12_b2_h8kv2_sq4096_skv8191_kv32_mask_s1_static_gqa, default: false}
+  - {config: p13_b1_h8kv4_sq8192_skv4096_kv16_mask_s1_clc_gqa, default: false}
+  - {config: p14_b1_h8kv2_sq4096_skv8192_maxkv32_var_mask_s1_clc_gqa, default: false}
+  - {config: p15_b2_h4kv1_sq4097_skv8191_maxkv32_empty_mask_s1_clc_mqa, default: false}
+  - {config: p16_b1_h8kv2_sq1024_skv32768_kv256_mask_s2_static_gqa, default: false}
+  - {config: p17_b1_h8kv4_sq4097_skv16384_maxkv128_var_mask_s2_static_gqa, default: false}
+  - {config: p18_b1_h8kv1_sq2048_skv32768_kv256_mask_s4_static_mqa, default: false}
+  - {config: p19_b1_h8kv1_sq2048_skv65536_kv512_nomask_s8_static_mqa, default: false}
+  - {config: p20_b1_h8kv2_sq4096_skv8192_kv32_mask_s1_static_i64kv_gqa, default: false}
+  - {config: p21_b1_h8kv1_sq4097_skv8191_kv64_mask_s1_static_mqa, default: false}
+  - {config: p22_b1_h6kv2_sq2048_skv8192_kv32_mask_s1_static_gqa, default: false}
