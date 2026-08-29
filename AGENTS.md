@@ -1,6 +1,6 @@
 # tirx-kernels agent instructions
 
-Use `$tirx-codegen-tuning` before changing emitted instructions, issue
+Use `$tirx-codegen-diagnostics` before changing emitted instructions, issue
 order, predication, uniformity, register lifetimes, address lowering, memory
 width or cache hints, pipeline depth, or synchronization for performance.
 
