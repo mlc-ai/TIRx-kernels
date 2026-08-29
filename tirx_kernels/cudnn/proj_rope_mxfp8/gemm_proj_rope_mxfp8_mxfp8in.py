@@ -354,6 +354,7 @@ def _make_kernel(tokens, k_dim, num_heads):
                     handle_stage = K.local_scalar("int32", init=tma_state.stage)
                     handle_phase = K.local_scalar("int32", init=tma_state.phase)
                     _wait_plain(ab_pipe.empty.ptr_to([handle_stage]), handle_phase)
+                    K.ptx["fence.proxy.async.shared::cta"]()
                     _advance(tma_state)
                     with K.If(_elected()):
                         with K.Then():
