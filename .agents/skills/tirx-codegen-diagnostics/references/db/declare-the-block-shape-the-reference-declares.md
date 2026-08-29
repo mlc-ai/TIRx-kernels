@@ -58,6 +58,13 @@ converted the logical CTA grid to a cluster grid. Cluster-1, cluster-2, and
 cluster-16 correctness all passed, as did 1,025 source-domain configurations;
 the complete measured matrix retained 1.018-1.046x reference/port ratios.
 
+A negative ablation confirmed that matching the host block dimensions is not a
+substitute for keeping the exact-block contract. Removing only the required-block
+attribute from a 512-thread kernel, while retaining the 512-thread host launch
+and `min_blocks_per_sm=1`, replaced `.reqntid` with `.maxntid` and removed the
+singleton-cluster directives. All five targeted rows failed to improve; the
+latency-bound row fell from 0.9575x to 0.9501x with correctness unchanged.
+
 ## Boundary
 
 Use the required-block contract only when fresh reference PTX requires exact
@@ -66,6 +73,12 @@ runtime that understands CUDA's cluster-grid launch semantics. Do not replace a
 register-budget launch bound with it: `.maxntid` and `.reqntid` promise different
 things, and the measured result above establishes source-contract matching, not
 an isolated speedup from strengthening the directive.
+
+Conversely, a profiler reporting singleton blocks-as-clusters is not enough to
+justify weakening an exact-block contract. Removing that contract changes both
+the cluster metadata and the required-thread declaration, so it cannot isolate
+cluster-launch overhead; keep the source-required `.reqntid` and test cluster
+mechanics through a change that preserves it.
 
 ## Verification
 

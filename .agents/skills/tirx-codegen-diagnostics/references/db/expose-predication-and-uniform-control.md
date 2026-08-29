@@ -163,6 +163,17 @@ no spill.
   at 0.993x. It was the last change the gate needed, after twelve expansions
   that had each moved a required shape by 0.002 or less.
 
+- A sparse K/V transfer loop supplied the same mechanism with a global sparse-ID
+  load, an expect-tx arrival, coordinate formation, and 4D tensor-copy issues in
+  one elected-lane branch. Two branch PCs each produced 2,580 divergent branches
+  while the reference produced 150 in total. Hoisting the warp-uniform work and
+  predicating only the load, arrival, and copies kept all 18 tensor-copy sites,
+  reduced static `BSSY.RECONVERGENT` from 8 to 2, predicated-false branch sites
+  from 102 to 84, and `ELECT` from 12 to 11. The latency-bound tail moved from
+  0.9575x to 0.9912x; all 32 correctness configurations passed, and three clean
+  complete 24-row matrices subsequently passed with minima of 0.9979x, 0.9965x,
+  and 0.9907x.
+
 - In a rows-one, full-vector specialization, making the launch proof explicit
   removed eight asynchronous-copy row/source-byte guards, eight weight-column
   guards, and eight output-row guards. Static SASS fell from 693 to 669
@@ -238,6 +249,12 @@ fell 0.0016, and on a clean re-measurement it gained 0.0002 while a passing
 shape lost 0.0007, merely moving which shape failed. Those arrivals ran a couple
 of times per CTA against the transfer block's once per chunk. Count the dynamic
 executions of the region and the instructions inside it before rewriting a guard.
+
+Flattening also makes formerly leader-only arithmetic execute warp-wide. In the
+sparse-transfer experiment above, a work-richer guard moved from 1.2178x to
+1.1954x even though the short divergent tail crossed the gate. Keep coordinate
+formation and descriptor selection small, and require both branch-dominated
+targets and work-dominated guards before applying the rewrite to a shared path.
 
 Predication pays where a branch DIVERGES, not wherever a branch exists. In a
 gather whose validity flag is row-uniform -- every lane of the warp takes the
