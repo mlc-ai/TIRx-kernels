@@ -49,7 +49,7 @@ You should exactly follow the following stages in order:
 For kernels under `tirx-kernels`, also use the TIRx kernel integration skill:
 [../tirx-kernel-integration/SKILL.md](../tirx-kernel-integration/SKILL.md).
 At the start of the performance gate, read and follow the target checkout's
-repo-local `.agents/skills/tirx-codegen-tuning/SKILL.md`. Treat that checkout as
+repo-local `.agents/skills/tirx-codegen-diagnostics/SKILL.md`. Treat that checkout as
 authoritative; do not substitute a copied or cached version of the codegen skill.
 
 Before starting agents, identify `TARGET_REPO_ROOT` as the absolute path of the repo that will receive the target implementation. Choose one fixed absolute `PORT_DIR` under that repo root:
@@ -150,6 +150,6 @@ flowchart LR
    register the child before the next expansion. Bench-suite results remain the
    only performance metric. For a
    `tirx-kernels` target, first read and follow the checkout's repo-local
-   `.agents/skills/tirx-codegen-tuning/SKILL.md`. The correctness reviewer is
+   `.agents/skills/tirx-codegen-diagnostics/SKILL.md`. The correctness reviewer is
    closed and must not be rerun during this stage. Only a complete bench-suite run
    with every shape above `0.99x` source passes.

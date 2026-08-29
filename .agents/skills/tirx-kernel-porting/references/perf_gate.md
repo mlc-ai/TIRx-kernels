@@ -20,7 +20,7 @@ PASS while any required shape is at or below `0.99`.
 ## Required Repo-Local Skill
 
 For a target under `tirx-kernels`, read and follow
-`<TARGET_REPO_ROOT>/.agents/skills/tirx-codegen-tuning/SKILL.md` at the start of
+`<TARGET_REPO_ROOT>/.agents/skills/tirx-codegen-diagnostics/SKILL.md` at the start of
 this gate. Use the skill from the target checkout so its guidance stays aligned
 with that checkout. Before changing emitted instructions, issue order,
 predication, uniformity, register lifetimes, address lowering, memory width or
@@ -53,7 +53,7 @@ iteration, but final PASS requires the latest complete required-shape matrix.
 
 ## Read Once and Freeze Validation Commands
 
-Read this file and the repo-local codegen-tuning skill once when entering the
+Read this file and the repo-local codegen diagnostics skill once when entering the
 performance stage. Do not reread this file, `correctness_gate.md`, or the root
 porting skill during each search expansion. Do not restart either reviewer.
 
@@ -223,7 +223,7 @@ standalone targets unless evidence shows a controllable protocol difference.
 
 ### Strategy 2: Codegen database
 
-Follow the target checkout's repo-local `tirx-codegen-tuning` skill. Search only
+Follow the target checkout's repo-local `tirx-codegen-diagnostics` skill. Search only
 the `**Symptoms:**` rows in its `references/db/`, match the selected parent's
 observed symptom, and read every matching entry in full. Select one applicable
 codegen-database intervention, state why its preconditions match, and make one
