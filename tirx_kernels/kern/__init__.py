@@ -47,6 +47,7 @@ from tvm.tirx.script.builder import ir as _I
 
 from . import idioms
 from .entry import Kernel, TensorMap, cta_id, gptr, kernel, lane_id, thread_id, warp_id
+from .entry import current as _current_session
 from .smem import (
     KDesc,
     KStep,
@@ -207,7 +208,7 @@ class _StmtProxy:
         if _cp_async_needs_src_size(obj, args):
             raise TypeError(f"{obj!r}: missing the trailing src-size operand.\n\n{_CP_ASYNC_HELP}")
         result = obj(*args, **kwargs)
-        if isinstance(result, tvm.ir.Expr):
+        if isinstance(result, tvm.ir.Expr) and _current_session(required=False) is not None:
             result = IRBuilder.current()._set_current_source_span(result)
         if _is_void_call(result):
             _T.evaluate(result)

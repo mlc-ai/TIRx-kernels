@@ -182,6 +182,11 @@ def test_retired_cuda_value_members_are_rejected_with_guidance():
     K.cuda.make_float2  # exempt: pure computation
 
 
+def test_value_constructors_work_outside_kernel_trace():
+    value = K.uint64(0)
+    assert str(value.ty.dtype) == "uint64"
+
+
 def test_kernel_records_python_source_spans():
     import inspect
     import linecache
