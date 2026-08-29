@@ -96,6 +96,13 @@ PORT_BUCKETS = {
 # license requires to stay in the file verbatim (BSD-3 clause 1: the copyright
 # notice, the conditions list and the disclaimer travel with the source).
 FILE_OVERRIDES = {
+    "tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py": {
+        "spdx": "Apache-2.0 AND MIT AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
     "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
         "required_text": (
@@ -228,6 +235,7 @@ def self_test() -> int:
     cudnn = dict(project="cuDNN Frontend", url="https://github.com/NVIDIA/cudnn-frontend")
     fi = dict(project="FlashInfer", url="https://github.com/flashinfer-ai/flashinfer")
     msa = dict(project="MSA", url="https://github.com/MiniMax-AI/MSA")
+    bsa_combine = "tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py"
     gdn = "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py"
     gdn_cp = "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py"
     bsd_port = (
@@ -248,6 +256,27 @@ def self_test() -> int:
             "tirx_kernels/cudnn/amax/x.py",
             port.format(spdx="Apache-2.0", **cudnn),
             False,
+        ),
+        (
+            "valid cudnn-frontend BSD/MIT combine port",
+            bsa_combine,
+            bsd_port.format(spdx="Apache-2.0 AND MIT AND BSD-3-Clause", **cudnn),
+            False,
+        ),
+        (
+            "cudnn-frontend combine port missing MIT terms",
+            bsa_combine,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **cudnn),
+            True,
+        ),
+        (
+            "cudnn-frontend combine port missing BSD disclaimer",
+            bsa_combine,
+            bsd_port.format(spdx="Apache-2.0 AND MIT AND BSD-3-Clause", **cudnn).replace(
+                'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+                "missing disclaimer",
+            ),
+            True,
         ),
         (
             "cudnn-frontend port tagged MIT",
