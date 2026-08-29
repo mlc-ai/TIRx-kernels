@@ -45,6 +45,7 @@ list.
   [`cudnn_sm100_csa_compressor_fwd`](tirx_kernels/cudnn/csa/compressor_fwd_sm100.py)
 - **Sparse attention:**
   [`cudnn_sm100_dsa_sparse_attention_backward`](tirx_kernels/cudnn/dsa/sparse_attention_backward.py),
+  [`cudnn_sm100_bsa_forward_blk128`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk128.py),
   [`cudnn_sm100_bsa_forward_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk64.py),
   [`cudnn_sm100_bsa_forward_combine_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py)
 
