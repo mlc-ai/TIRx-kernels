@@ -10,11 +10,16 @@ nothing goes through the TVMScript parser.
 from __future__ import annotations
 
 import inspect
+import linecache
+import sys
+import sysconfig
 import threading
-from functools import partial
+from functools import cache, partial
+from pathlib import Path
 from types import MappingProxyType
 
 import tvm
+from tvm.ir import SourceName, Span
 from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script.builder import ir as I
 
@@ -115,6 +120,132 @@ class TensorMap:  # pylint: disable=invalid-name
 
 
 _TLS = threading.local()
+
+
+# Kern traces Python directly instead of going through the TVMScript parser.
+# Keep the parser's source-location contract by recording the active user line
+# while the body is being traced.  Frames in Kern itself, TVM, and Python's
+# runtime are implementation details; allowing them to update the active span
+# would make diagnostics point into the DSL rather than to the kernel source.
+_KERN_SOURCE_ROOT = Path(__file__).resolve().parent
+_TVM_SOURCE_ROOT = Path(tvm.__file__).resolve().parent
+_PYTHON_STDLIB_ROOT = Path(sysconfig.get_paths()["stdlib"]).resolve()
+_PYTHON_SITE_ROOTS = tuple(
+    {Path(sysconfig.get_paths()[key]).resolve() for key in ("purelib", "platlib")}
+)
+_SOURCE_NAME_CACHE = {}
+_SOURCE_SPAN_CACHE = {}
+
+
+@cache
+def _is_user_source(filename: str) -> bool:
+    """Whether *filename* belongs to kernel author code rather than machinery."""
+    if not filename or filename.startswith("<"):
+        return False
+    try:
+        path = Path(filename).resolve()
+    except OSError:
+        return False
+    if path == _KERN_SOURCE_ROOT or _KERN_SOURCE_ROOT in path.parents:
+        return False
+    if path == _TVM_SOURCE_ROOT or _TVM_SOURCE_ROOT in path.parents:
+        return False
+    in_stdlib = path == _PYTHON_STDLIB_ROOT or _PYTHON_STDLIB_ROOT in path.parents
+    in_site_packages = any(root == path or root in path.parents for root in _PYTHON_SITE_ROOTS)
+    if in_stdlib and not in_site_packages:
+        return False
+    return True
+
+
+def _source_span(filename: str, line: int) -> Span | None:
+    """Return the one-line span for a Python frame, if it is author code."""
+    if not _is_user_source(filename):
+        return None
+    key = (filename, line)
+    span = _SOURCE_SPAN_CACHE.get(key)
+    if span is not None:
+        return span
+    source_name = _SOURCE_NAME_CACHE.setdefault(filename, SourceName(filename))
+    source_line = linecache.getline(filename, line)
+    end_column = max(2, len(source_line.rstrip("\r\n")) + 1)
+    span = Span(source_name, line, line, 1, end_column)
+    _SOURCE_SPAN_CACHE[key] = span
+    return span
+
+
+def _callable_span(func) -> Span | None:
+    """Return the definition-line span used for generated entry scaffolding."""
+    code = getattr(func, "__code__", None)
+    if code is None:
+        return None
+    return _source_span(code.co_filename, code.co_firstlineno)
+
+
+class _SourceSpanTracer:
+    """Attach the current Python source line to statements emitted by Kern."""
+
+    def __init__(self, builder):
+        self.builder = builder
+        self.previous_trace = None
+        self.active_context = None
+        self.active_frame = None
+        self.active_span = None
+        self.frame_spans = {}
+
+    def __enter__(self):
+        self.previous_trace = sys.gettrace()
+        sys.settrace(self._trace)
+        return self
+
+    def __exit__(self, ptype, value, trace):  # pylint: disable=unused-argument
+        sys.settrace(self.previous_trace)
+        self._restore(None)
+        self.frame_spans.clear()
+
+    def _set_active(self, frame, span):
+        if self.active_frame is frame and self.active_span is span:
+            return
+        if self.active_context is not None:
+            self.active_context.__exit__(None, None, None)
+        self.active_context = self.builder.with_source_span(span)
+        self.active_context.__enter__()
+        self.active_frame = frame
+        self.active_span = span
+
+    def _restore(self, frame):
+        """Restore the nearest caller's span after a nested user helper returns."""
+        if self.active_context is not None:
+            self.active_context.__exit__(None, None, None)
+            self.active_context = None
+        self.active_frame = None
+        self.active_span = None
+        while frame is not None:
+            span = self.frame_spans.get(frame)
+            if span is not None:
+                self.active_context = self.builder.with_source_span(span)
+                self.active_context.__enter__()
+                self.active_frame = frame
+                self.active_span = span
+                return
+            frame = frame.f_back
+
+    def _trace(self, frame, event, arg):  # pylint: disable=unused-argument
+        if event == "call":
+            if _is_user_source(frame.f_code.co_filename):
+                frame.f_trace_lines = True
+                return self._trace
+            return None
+        if event == "line":
+            span = _source_span(frame.f_code.co_filename, frame.f_lineno)
+            if span is not None:
+                self.frame_spans[frame] = span
+                self._set_active(frame, span)
+            return self._trace
+        if event == "return" and frame in self.frame_spans:
+            self.frame_spans.pop(frame, None)
+            if self.active_frame is frame:
+                self._restore(frame.f_back)
+        return self._trace
 
 
 def current(required: bool = True) -> Session | None:
@@ -402,6 +533,7 @@ def kernel(
             raise TypeError("host_prelude= requires a keyword-only `host` parameter")
         session = Session(fn.__name__, warps, arch, min_blocks_per_sm)
         prev = getattr(_TLS, "session", None)
+        function_span = _callable_span(fn)
         with IRBuilder() as ib:
             with I.prim_func():
                 I.func_name(fn.__name__)
@@ -441,10 +573,11 @@ def kernel(
                 session.thread_id = I.thread_id([session.nthreads])
                 _TLS.session = session
                 try:
-                    if host_prelude is None:
-                        fn(*args)
-                    else:
-                        fn(*args, host=host)
+                    with _SourceSpanTracer(ib):
+                        if host_prelude is None:
+                            fn(*args)
+                        else:
+                            fn(*args, host=host)
                     if session.specialize is not None:
                         session.specialize.finalize()
                     if session.pool is not None:
@@ -452,6 +585,11 @@ def kernel(
                 finally:
                     _TLS.session = prev
         func = ib.get()
+        if function_span is not None:
+            # PrimFuncFrame intentionally constructs the function with an
+            # undefined span.  Preserve its generated body and attributes while
+            # giving the function itself the kernel declaration's location.
+            func = func.with_body(func.body, span=function_span)
         if session.specialize is not None:
             # Adjacent role guards become an else-if chain. Done on the built
             # body rather than with nested frames during the trace: a frame

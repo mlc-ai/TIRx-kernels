@@ -35,6 +35,9 @@ def zero(out: K.gptr(K.f32)):
 - Every kernel is checked against the low-level IR contract when it is traced.
   Keep the default `check_ir=True`. `allowed_func_calls` is only for a task that
   explicitly owns a named runtime-call exception.
+- Statements and instruction calls traced from file-backed Python code carry
+  TIRx source spans pointing to the kernel or helper line that emitted them;
+  the resulting `PrimFunc` points to the `@K.kernel` declaration.
 
 You can learn Kern APIs and complete implementation patterns from the canonical
 modules under `tirx_kernels/`. Do not copy API spellings from historical TIRx

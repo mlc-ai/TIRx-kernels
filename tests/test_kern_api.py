@@ -180,3 +180,49 @@ def test_retired_cuda_value_members_are_rejected_with_guidance():
             getattr(K.cuda, name)
     K.cuda.elect_sync  # exempt: pred= idiom
     K.cuda.make_float2  # exempt: pure computation
+
+
+def test_kernel_records_python_source_spans():
+    import inspect
+    import linecache
+
+    def emit(out):
+        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr(K.f32)):
+        K.ptx.st.global_.f32(out.ptr_to([1]), K.float32(1))
+        emit(out)
+
+    assert probe.func.span is not None
+    assert probe.func.span.source_name.name == inspect.getsourcefile(emit)
+    assert "@K.kernel" in linecache.getline(
+        probe.func.span.source_name.name, probe.func.span.line
+    )
+
+    statements = probe.func.body.body.seq
+    stores = [stmt for stmt in statements if type(stmt).__name__ == "Evaluate"]
+    assert len(stores) == 2
+    source_lines = []
+    for store in stores:
+        assert store.span is not None
+        assert store.span.source_name.name == inspect.getsourcefile(emit)
+        assert store.value.span.same_as(store.span)
+        source_lines.append(linecache.getline(store.span.source_name.name, store.span.line))
+    assert "out.ptr_to([1])" in source_lines[0]
+    assert "out.ptr_to([0])" in source_lines[1]
+
+
+def test_kernel_source_span_tracer_is_restored_after_failure():
+    import sys
+
+    import pytest
+
+    previous_trace = sys.gettrace()
+    with pytest.raises(RuntimeError, match="trace failed"):
+
+        @K.kernel(warps=1, arch="sm_100a", grid=False)
+        def probe(out: K.gptr(K.f32)):
+            raise RuntimeError("trace failed")
+
+    assert sys.gettrace() is previous_trace

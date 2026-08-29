@@ -42,6 +42,7 @@ from __future__ import annotations
 import tvm
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
 from tvm.script import tirx as _T
+from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script.builder import ir as _I
 
 from . import idioms
@@ -206,6 +207,8 @@ class _StmtProxy:
         if _cp_async_needs_src_size(obj, args):
             raise TypeError(f"{obj!r}: missing the trailing src-size operand.\n\n{_CP_ASYNC_HELP}")
         result = obj(*args, **kwargs)
+        if isinstance(result, tvm.ir.Expr):
+            result = IRBuilder.current()._set_current_source_span(result)
         if _is_void_call(result):
             _T.evaluate(result)
             return None
