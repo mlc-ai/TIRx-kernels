@@ -732,7 +732,7 @@ def _blockwise_16_to_32(arena, tinv_byte_base, d0, lane, io_dtype):
     )
 
 
-def _blockwise_32_to_64(arena, tinv_byte_base, band, lane, io_dtype):
+def _blockwise_32_to_64(arena, tinv_byte_base, band, lane, io_dtype, store_result):
     """Off-diagonal correction 32x32 -> 64x64 (two warps, one 16-row band each)."""
     lane_off = (lane % 16) * 64 + (lane // 16) * 8
     a_frags = K.alloc_local((8,), "uint32")
@@ -815,16 +815,22 @@ def _blockwise_32_to_64(arena, tinv_byte_base, band, lane, io_dtype):
     for pair in range(8):
         K.assign(o_pack[pair], _pack_io_pair(o_regs[2 * pair], o_regs[2 * pair + 1], io_dtype))
     K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-    _stmatrix_x4(
-        arena.ptr_to([tinv_byte_base + _swizzle_lin_128b((32 + band * 16) * 64 + lane_off) * 2]),
-        [o_pack[0], o_pack[1], o_pack[2], o_pack[3]],
-    )
-    _stmatrix_x4(
-        arena.ptr_to(
-            [tinv_byte_base + _swizzle_lin_128b((32 + band * 16) * 64 + 16 + lane_off) * 2]
-        ),
-        [o_pack[4], o_pack[5], o_pack[6], o_pack[7]],
-    )
+    with K.If(store_result), K.Then():
+        _stmatrix_x4(
+            arena.ptr_to(
+                [tinv_byte_base + _swizzle_lin_128b((32 + band * 16) * 64 + lane_off) * 2]
+            ),
+            [o_pack[0], o_pack[1], o_pack[2], o_pack[3]],
+        )
+        _stmatrix_x4(
+            arena.ptr_to(
+                [
+                    tinv_byte_base
+                    + _swizzle_lin_128b((32 + band * 16) * 64 + 16 + lane_off) * 2
+                ]
+            ),
+            [o_pack[4], o_pack[5], o_pack[6], o_pack[7]],
+        )
 
 
 def _acc_operand(accumulate):
@@ -1445,7 +1451,9 @@ def _make_main(
                     with K.If(do_inv), K.Then():
                         _blockwise_16_to_32(arena, inv_byte_base, inv_warp * 32, lane, io_dtype)
                     K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-                    _blockwise_32_to_64(arena, inv_byte_base, inv_warp, lane, io_dtype)
+                    _blockwise_32_to_64(
+                        arena, inv_byte_base, inv_warp, lane, io_dtype, do_inv
+                    )
                     K.ptx.bar.sync(K.uint32(2), K.uint32(128))
 
                     # ---- post-inverse beta column scaling + publish --------
