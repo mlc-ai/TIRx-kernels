@@ -29,6 +29,33 @@ def _config(label, **overrides):
     return config
 
 
+def upstream_has_ragged_pair_sentinel_bug(config):
+    """Whether the pinned source is unsafe as a numerical arbiter.
+
+    The upstream SM100 blk64 backward source initializes an unpaired inverse-CSR
+    slot with ``SQ // 64``. That is one-past-the-end only for block-aligned SQ;
+    on a ragged shape it aliases the final valid Q block whenever a task has an
+    odd edge count. Edge-count parity depends on generated metadata, so every
+    ragged specialization is conservatively excluded from source arbitration.
+    """
+    return int(config["seqlen_q"]) % 64 != 0
+
+
+def correctness_tolerance_overrides(config):
+    """Tighten the minimal ragged case so a duplicated tail cannot pass."""
+    is_minimal_ragged_case = (
+        int(config["batch"]) == 1
+        and int(config["num_heads"]) == 1
+        and int(config["seqlen_q"]) == 1
+        and int(config["seqlen_kv"]) == 65
+        and int(config["kv_blocks"]) == 2
+        and config["block_count_mode"] == "fixed"
+    )
+    if not is_minimal_ragged_case:
+        return None
+    return {"dv_acc": (1e-3, 1e-3)}
+
+
 def correctness_configs():
     rows = (
         ("c00_b1_h2_sq128_skv256_kv2_mask", dict(num_heads=2)),
@@ -165,7 +192,7 @@ def benchmark_configs():
                 seqlen_kv=16384,
                 kv_blocks=128,
                 block_count_mode="variable",
-                block_count_pattern="0,1,max",
+                block_count_pattern="1,mid,max",
             ),
         ),
         (
@@ -187,9 +214,20 @@ def benchmark_configs():
                 use_int64_kv_strides=True,
             ),
         ),
+        (
+            "p11_b1_h1_sq192000_skv8192_maxkv16_var_mask_auto1024_i64kv",
+            dict(
+                seqlen_q=192000,
+                seqlen_kv=8192,
+                kv_blocks=16,
+                block_count_mode="variable",
+                block_count_pattern="1,mid,max",
+                use_int64_kv_strides=True,
+            ),
+        ),
     )
     configs = []
     for index, (label, overrides) in enumerate(rows):
         configs.append(_config(label, seed=16501 + index, **overrides))
-    assert len(configs) == 11
+    assert len(configs) == 12
     return configs

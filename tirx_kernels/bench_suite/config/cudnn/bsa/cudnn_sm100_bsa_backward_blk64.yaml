@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 kernel: cudnn_sm100_bsa_backward_blk64
-selection_rationale: The selected defaults cover a small ordinary launch, medium variable sparsity including empty rows, and a large auto-1024 three-group launch with 64-bit KV strides. The full matrix additionally covers ragged tails, batch/head occupancy, fixed and variable sparse degree, masked and unmasked blocks, long KV, the 1088 two-group scheduler branch, and the large convert grid.
+selection_rationale: The selected defaults cover a small ordinary launch, medium variable sparsity, and a large block-aligned auto-1024 three-group launch with 64-bit KV strides. The full matrix additionally covers empty rows, ragged tails, batch/head occupancy, fixed and variable sparse degree, masked and unmasked blocks, long KV, the 1088 two-group scheduler branch, and the large convert grid. Ragged backward rows use the analytic oracle because the pinned cuDNN Frontend source has an incorrect odd-pair sentinel.
 defaults:
   num_gpus: 1
 configs:
@@ -16,4 +16,5 @@ configs:
   - {config: p07_b1_h4_sq4097_skv16384_maxkv128_var_mask, default: false}
   - {config: p08_b1_h8_sq2048_skv65536_kv512_nomask, default: false}
   - {config: p09_b1_h2_sq69633_skv8191_kv32_mask_bucket1088, default: false}
-  - {config: p10_b1_h1_sq192001_skv8192_maxkv16_var_mask_auto1024_i64kv, default: true, selection_role: large}
+  - {config: p10_b1_h1_sq192001_skv8192_maxkv16_var_mask_auto1024_i64kv, default: false}
+  - {config: p11_b1_h1_sq192000_skv8192_maxkv16_var_mask_auto1024_i64kv, default: true, selection_role: large}

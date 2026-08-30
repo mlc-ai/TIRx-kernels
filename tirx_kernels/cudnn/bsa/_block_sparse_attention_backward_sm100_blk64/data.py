@@ -147,6 +147,8 @@ def _make_metadata(config, *, q_blocks, kv_blocks, device):
     block_index = block_index.to(torch.int32).reshape(batch, heads, q_blocks, maximum)
 
     values = _pattern_values(config)
+    if config["block_count_mode"] != "variable_empty" and 0 in values:
+        raise ValueError("zero block counts require block_count_mode='variable_empty'")
     pattern_shift = (
         1
         if config["block_count_mode"] == "variable_empty" and any(value != 0 for value in values)
