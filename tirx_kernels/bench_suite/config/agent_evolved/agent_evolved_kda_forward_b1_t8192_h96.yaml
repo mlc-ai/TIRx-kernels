@@ -1,0 +1,3 @@
+kernel: agent_evolved_kda_forward_b1_t8192_h96
+configs:
+  - {config: b1_t8192_h96_k128_v128_bf16, default: true}
