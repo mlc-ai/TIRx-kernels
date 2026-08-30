@@ -358,7 +358,11 @@ def get_kernel(**config):
                 def load_pair(first):
                     q0 = _load_i32(bucketed_indices, bh_edge + K.cast(begin + edge, "int64"))
                     K.assign(edge, edge + K.int32(1))
-                    q1 = K.local_scalar("int32", init=K.int32(seqlen_q // 64))
+                    # Use the first out-of-range query block as the pair sentinel.
+                    # ``seqlen_q // 64`` aliases the last valid block whenever
+                    # the query length is not a multiple of 64, duplicating
+                    # its contribution in the odd-edge pair.
+                    q1 = K.local_scalar("int32", init=K.int32((seqlen_q + 63) // 64))
                     with K.If(edge < count), K.Then():
                         K.assign(
                             q1, _load_i32(bucketed_indices, bh_edge + K.cast(begin + edge, "int64"))
@@ -840,7 +844,7 @@ def get_kernel(**config):
                     dq_pipe.full.wait(dq_cons.stage, dq_cons.phase)
                     q0 = _load_i32(bucketed_indices, bh_edge + K.cast(begin + edge, "int64"))
                     K.assign(edge, edge + K.int32(1))
-                    q1 = K.local_scalar("int32", init=K.int32(seqlen_q // 64))
+                    q1 = K.local_scalar("int32", init=K.int32((seqlen_q + 63) // 64))
                     with K.If(edge < count), K.Then():
                         K.assign(
                             q1, _load_i32(bucketed_indices, bh_edge + K.cast(begin + edge, "int64"))
