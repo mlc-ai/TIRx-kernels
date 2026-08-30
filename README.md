@@ -22,6 +22,15 @@ list.
   [`allgather_gemm`](tirx_kernels/basic/allgather_gemm.py),
   [`gemm_reduce_scatter`](tirx_kernels/basic/gemm_reduce_scatter.py)
 
+### Agent-evolved TIRx
+
+Curated kernels selected from measured agent-evolution runs. Their canonical
+modules retain the supported workload and stable provenance; run logs and
+intermediate candidates remain outside this package.
+
+- **KDA forward:**
+  [`agent_evolved_kda_forward_b1_t8192_h96`](tirx_kernels/agent_evolved/kda_forward_b1_t8192_h96.py)
+
 ### cuDNN Frontend ports
 
 - **Persistent GEMM:**
@@ -199,6 +208,7 @@ remain externally managed runtime/compiler dependencies.
 | `sglang` (+ CUTLASS DSL) | `deepgemm_sm100_fp8_paged_mqa_logits` reference | Optional `sglang_cutedsl` benchmark reference. |
 | `flash_mla`      | `sparse_flashmla_*` / `flash_mla_sparse_fwd` baselines | Reference impls. |
 | `deep_ep`        | `deepep_*` correctness and baselines | Reference implementation. |
+| `flash-linear-attention` | `agent_evolved_kda_forward_b1_t8192_h96` correctness | Independent FLA BF16/Triton chunk reference. |
 | `flash_kda`      | `flashkda_*` optional baselines | Raw FlashKDA benchmark peer. |
 | `fmha_sm100` (MSA) | `msa_*` correctness and baselines | Reference implementation; set `MSA_PATH` to use a checkout elsewhere. |
 | NVSHMEM          | `allgather_gemm`, `gemm_reduce_scatter` | Required to compile/run the GemmComm kernels. |
