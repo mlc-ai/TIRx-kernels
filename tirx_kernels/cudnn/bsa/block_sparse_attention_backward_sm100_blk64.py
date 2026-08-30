@@ -34,19 +34,24 @@ def prepare_data(**config):
 
 
 def run_test(**config):
+    """Validate TIRx against the analytic oracle and usable upstream specializations."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
 
+    tolerance_overrides = _spec.correctness_tolerance_overrides(config)
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
     executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
     tirx_launch = _data.tirx_launch(executables, data)
     tirx_launch()
-    source_launch = _reference.compile_reference(data)
-    source_launch()
+    sources = ("tirx",)
+    if not _spec.upstream_has_ragged_pair_sentinel_bug(kernel_config):
+        source_launch = _reference.compile_reference(data)
+        source_launch()
+        sources = ("tirx", "source")
     torch.cuda.synchronize()
-    _data.validate_outputs(data, sources=("tirx", "source"))
+    _data.validate_outputs(data, sources=sources, tolerance_overrides=tolerance_overrides)
 
 
 def prepare_bench(**config):
@@ -71,12 +76,19 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     tirx_launch()
     torch.cuda.synchronize()
     references = None
-    if external_references_enabled():
+    # The pinned source has the same floor-division sentinel bug fixed in this
+    # port, so it is not a valid numerical or performance baseline for ragged SQ.
+    with_source = external_references_enabled() and not _spec.upstream_has_ragged_pair_sentinel_bug(
+        config
+    )
+    if with_source:
         source_launch = _reference.compile_reference(data)
         source_launch()
         torch.cuda.synchronize()
-        _data.validate_outputs(data, sources=("tirx", "source"), with_oracle=False)
         references = {"cudnn_frontend": lambda: source_launch}
+    _data.validate_outputs(
+        data, sources=("tirx", "source") if with_source else ("tirx",), with_oracle=False
+    )
     return bench(
         {"tirx": tirx_launch},
         references=references,
