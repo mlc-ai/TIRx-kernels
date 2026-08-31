@@ -14,10 +14,10 @@ Module-level constants
 KERNEL_META : dict
     Required keys:
     - "name" (str): unique kernel name used by CLI (e.g. "rmsnorm")
-    - "category" (str): the bucket subdirectory the module lives in. Port
-      buckets are named for their upstream project; ``basic`` holds native
-      TIRx kernels, and ``agent_evolved`` holds curated kernels selected from
-      measured agent-evolution runs.
+    - "category" (str): the bucket subdirectory the module lives in — one of
+      basic, deepgemm, flashattention, flashinfer, flashmla.
+      Each bucket holds the kernels ported from one upstream project;
+      ``basic`` holds native TIRx kernels with no single upstream project.
     - "compute_capability" (int): minimum SM version (e.g. 10 for sm100a)
 
 CONFIGS : list[dict]
