@@ -99,7 +99,7 @@ def test_retired_binding_forms_are_rejected_with_guidance():
 def test_kernel_build_runs_low_level_ir_check_by_default():
     import pytest
 
-    from tirx_kernels.low_level_ir import LowLevelIRContractError
+    from tirx_kernels.kern.low_level_ir import LowLevelIRContractError
 
     def build(**kw):
         @K.kernel(warps=1, arch="sm_100a", grid=False, **kw)
@@ -201,9 +201,7 @@ def test_kernel_records_python_source_spans():
 
     assert probe.func.span is not None
     assert probe.func.span.source_name.name == inspect.getsourcefile(emit)
-    assert "@K.kernel" in linecache.getline(
-        probe.func.span.source_name.name, probe.func.span.line
-    )
+    assert "@K.kernel" in linecache.getline(probe.func.span.source_name.name, probe.func.span.line)
 
     statements = probe.func.body.body.seq
     stores = [stmt for stmt in statements if type(stmt).__name__ == "Evaluate"]

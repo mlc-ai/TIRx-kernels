@@ -4,12 +4,8 @@
 import pytest
 
 import tirx_kernels.kern as K
-from tirx_kernels.low_level_ir import (
-    LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL,
-    NVSHMEM_RUNTIME_FUNC_CALLS,
-    LowLevelIRContractError,
-    check_low_level_ir,
-)
+from tirx_kernels.kern.low_level_ir import LowLevelIRContractError, check_low_level_ir
+from tirx_kernels.runner import run_kernel_test
 
 
 def _kernel_with_func_call(callee: str):
@@ -30,29 +26,31 @@ def test_func_call_is_rejected_by_default_and_reports_callee():
 
 
 def test_only_exact_kernel_local_helpers_are_exempt():
-    assert LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL == {
-        "gemm_reduce_scatter": frozenset(
-            {
-                "enqueue_remote",
-                "exit_barrier_arrive_and_wait",
-                "ld_reduce_8_fp16",
-                "semaphore_notify_remote",
-            }
-        )
-    }
+    allowed_func_calls = frozenset({"expected_runtime_helper"})
 
-    for callee in NVSHMEM_RUNTIME_FUNC_CALLS:
-        report = check_low_level_ir(
-            _kernel_with_func_call(callee), allowed_func_calls=NVSHMEM_RUNTIME_FUNC_CALLS
-        )
-        assert report.ok
-        assert [finding.callee for finding in report.func_calls] == [callee]
+    report = check_low_level_ir(
+        _kernel_with_func_call("expected_runtime_helper"), allowed_func_calls=allowed_func_calls
+    )
+    assert report.ok
+    assert [finding.callee for finding in report.func_calls] == ["expected_runtime_helper"]
 
     with pytest.raises(LowLevelIRContractError):
         check_low_level_ir(
-            _kernel_with_func_call("another_runtime_helper"),
-            allowed_func_calls=NVSHMEM_RUNTIME_FUNC_CALLS,
+            _kernel_with_func_call("another_runtime_helper"), allowed_func_calls=allowed_func_calls
         )
+
+
+def test_correctness_runner_does_not_rebuild_an_already_checked_kernel():
+    class KernelModule:
+        @staticmethod
+        def get_kernel(**_params):
+            raise AssertionError("correctness runner rebuilt the kernel")
+
+        @staticmethod
+        def run_test(**params):
+            assert params == {"value": 3}
+
+    run_kernel_test("probe", {"label": "case", "value": 3}, registry={"probe": KernelModule})
 
 
 def test_kern_smem_descriptor_uniformity_stays_in_low_level_contract():

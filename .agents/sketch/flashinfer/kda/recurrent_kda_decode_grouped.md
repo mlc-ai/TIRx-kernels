@@ -620,7 +620,7 @@ if (n == 0) & (vz == 0) & (tid < D):
 * Helpers (`_ptx_*`, non-FTZ scalar math, BF16 pack/convert, shuffles, guarded
   stores) are imported from the one-warp sibling module rather than duplicated.
 * Every global **and shared** access must go through raw PTX with `ptr_to`:
-  `low_level_ir.py:26` forbids `BufferLoad`/`BufferStore` on `global`, `shared`,
+  `kern/low_level_ir.py` forbids `BufferLoad`/`BufferStore` on `global`, `shared`,
   and `shared.dyn` alike.
 * TVM compiles with `--use_fast_math`, so native FP32 arithmetic lowers to
   `.ftz` forms. The source's only `.ftz` instruction is `ex2.approx.ftz.f32`;

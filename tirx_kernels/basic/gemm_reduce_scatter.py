@@ -14,7 +14,6 @@ import torch.distributed as dist
 
 import tirx_kernels.kern as Kern
 import tvm
-from tirx_kernels.low_level_ir import NVSHMEM_RUNTIME_FUNC_CALLS
 from tvm.ir.type import PointerType, PrimType
 
 from .utils._baselines import create_baseline_suite
@@ -107,6 +106,12 @@ CAPACITY = 2048
 TASK_IDX_LEN = 2
 C2P_THREAD_COUNT = NUM_THREADS * CTA_GROUP
 FUSED_DEVICE_ENTRYPOINT = "test_mma_ss_tma_2sm_persistent"
+_NVSHMEM_RUNTIME_FUNC_CALLS = (
+    "enqueue_remote",
+    "exit_barrier_arrive_and_wait",
+    "ld_reduce_8_fp16",
+    "semaphore_notify_remote",
+)
 
 
 @dataclass(frozen=True)
@@ -533,7 +538,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         arch="sm_100a",
         grid=SM_NUMBER,
         host_prelude=host_prelude,
-        allowed_func_calls=tuple(NVSHMEM_RUNTIME_FUNC_CALLS),
+        allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS,
     )
     def test_mma_ss_tma_2sm_persistent(
         A: Kern.gptr[Kern.f16, (M, K_LOCAL)],

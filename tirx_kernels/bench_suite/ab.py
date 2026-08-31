@@ -31,7 +31,6 @@ _SHARED_HARNESS_PATHS = (
     Path("tirx_kernels/bench"),
     Path("tirx_kernels/bench_suite"),
     Path("tirx_kernels/runner.py"),
-    Path("tirx_kernels/low_level_ir.py"),
     Path("tirx_kernels/basic/utils/_runtime.py"),
 )
 
