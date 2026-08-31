@@ -600,7 +600,7 @@ def kernel(
             # Every kern build passes the low-level IR contract by default:
             # direct global/shared buffer accesses and unlisted func_calls are
             # trace-time errors, not something a later test run discovers.
-            from tirx_kernels.low_level_ir import check_low_level_ir
+            from .low_level_ir import check_low_level_ir
 
             check_low_level_ir(func, allowed_func_calls=allowed_func_calls)
         return Kernel(func, session)

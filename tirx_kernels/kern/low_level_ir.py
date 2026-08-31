@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Any
 
 import tvm
@@ -17,18 +16,6 @@ from tvm.tirx.stmt_functor import StmtExprVisitor
 _FORBIDDEN_SCOPE_ROOTS = ("global", "shared")
 _ADDRESS_OF_OP = "tirx.address_of"
 _FUNC_CALL_OP = "tirx.cuda.func_call"
-
-NVSHMEM_RUNTIME_FUNC_CALLS = frozenset(
-    {
-        "enqueue_remote",
-        "exit_barrier_arrive_and_wait",
-        "ld_reduce_8_fp16",
-        "semaphore_notify_remote",
-    }
-)
-LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL: Mapping[str, frozenset[str]] = MappingProxyType(
-    {"gemm_reduce_scatter": NVSHMEM_RUNTIME_FUNC_CALLS}
-)
 
 
 def _is_forbidden_scope(scope: str) -> bool:
@@ -155,8 +142,9 @@ class _LowLevelIRVisitor(StmtExprVisitor):
         # the outer load is in an allowed scope.
         for index in op.indices:
             self.visit_expr(index)
-        if op.predicate is not None:
-            self.visit_expr(op.predicate)
+        predicate = getattr(op, "predicate", None)
+        if predicate is not None:
+            self.visit_expr(predicate)
 
     def visit_buffer_store_(self, op: tirx.BufferStore) -> None:
         scope = str(op.buffer.scope())
@@ -165,8 +153,9 @@ class _LowLevelIRVisitor(StmtExprVisitor):
         self.visit_expr(op.value)
         for index in op.indices:
             self.visit_expr(index)
-        if op.predicate is not None:
-            self.visit_expr(op.predicate)
+        predicate = getattr(op, "predicate", None)
+        if predicate is not None:
+            self.visit_expr(predicate)
 
     def visit_call_(self, op: tvm.ir.Call) -> None:
         op_name = getattr(op.op, "name", None)
@@ -189,8 +178,9 @@ class _LowLevelIRVisitor(StmtExprVisitor):
                 # real accesses that must be checked normally.
                 for index in addressed.indices:
                     self.visit_expr(index)
-                if addressed.predicate is not None:
-                    self.visit_expr(addressed.predicate)
+                predicate = getattr(addressed, "predicate", None)
+                if predicate is not None:
+                    self.visit_expr(predicate)
                 return
         super().visit_call_(op)
 
@@ -275,8 +265,6 @@ def check_low_level_ir(
 
 
 __all__ = [
-    "LOW_LEVEL_IR_FUNC_CALL_EXCEPTIONS_BY_KERNEL",
-    "NVSHMEM_RUNTIME_FUNC_CALLS",
     "LowLevelIRContractError",
     "LowLevelIRFinding",
     "LowLevelIRReport",

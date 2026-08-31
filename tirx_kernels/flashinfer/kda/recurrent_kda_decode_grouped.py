@@ -104,7 +104,7 @@ def _row_lengths(num_seqs: int, num_tokens: int, empty_rows: int) -> list[int]:
 # The one-warp sibling supplies the shared scalar math, BF16 conversion and
 # shuffle helpers; imported below.  What this kernel needs on top of those is
 # the packed-FP32 granule arithmetic, three non-FTZ scalar forms the sibling
-# does not use, and shared-memory accessors -- ``low_level_ir.py:26`` forbids
+# does not use, and shared-memory accessors -- ``kern.low_level_ir`` forbids
 # BufferLoad/BufferStore on ``shared`` exactly as it does on ``global``, so
 # every SMEM touch goes through ``ptr_to`` and raw PTX.
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ helper below is one PTX instruction of the family the source export uses.
 
 Both scopes go through ``K.ptx.*`` on ``ptr_to`` rather than a native
 ``BufferLoad``/``BufferStore``: the repository's low-level IR contract
-(:mod:`tirx_kernels.low_level_ir`) rejects the native form for ``global`` and
+(:mod:`tirx_kernels.kern.low_level_ir`) rejects the native form for ``global`` and
 ``shared`` alike.
 
 Upstream source: python/fmha_sm100/cute/src/common/copy_utils.py,
@@ -72,11 +72,7 @@ def shfl_idx_i32(value, source_lane):
     """``shfl.sync.idx.b32 d, a, src, 31, -1``; a full-warp broadcast."""
     out = K.local_scalar(K.u32)
     K.ptx.shfl_sync.idx.b32(
-        out,
-        K.reinterpret(K.u32, value),
-        K.uint32(source_lane),
-        K.uint32(31),
-        K.uint32(0xFFFFFFFF),
+        out, K.reinterpret(K.u32, value), K.uint32(source_lane), K.uint32(31), K.uint32(0xFFFFFFFF)
     )
     return K.reinterpret(K.i32, out)
 

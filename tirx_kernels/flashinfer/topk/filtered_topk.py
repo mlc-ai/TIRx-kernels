@@ -952,7 +952,7 @@ def run_test(**config):
 
     import torch
 
-    from tirx_kernels.runner import check_low_level_ir, compile_kernel
+    from tirx_kernels.runner import compile_kernel
 
     try:
         import flashinfer  # noqa: F401
@@ -984,10 +984,6 @@ def run_test(**config):
 
     kernel = get_kernel(**cfg)
     finalize = get_finalize_kernel(**cfg)
-    # The runner only contract-checks `get_kernel`; the finalize kernel is a
-    # second entry point, so check it here too.
-    if finalize is not None:
-        check_low_level_ir(finalize)
     ex = compile_kernel(kernel)
     ex_finalize = compile_kernel(finalize) if finalize is not None else None
 
