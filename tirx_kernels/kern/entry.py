@@ -500,10 +500,12 @@ def kernel(
 
         A high value and warp roles pull against each other, and the pull is
         sharp. The whole register file is a CTA's only at one block per SM;
-        promising *m* leaves ``REGS_PER_CTA // m`` for every role to share.
-        An 8-warp CTA at ``m=8`` has 8192 registers total — 32 a thread — so
-        its roles can afford, say, 40 and 24 but not 64 and 64, which
-        :meth:`Specialize.finalize` refuses. The rmsnorm-style
+        promising *m* first divides it by *m*, then rounds the per-thread
+        allocation down to a multiple of 8 registers. That rounded launch
+        allocation—not the residual register-file capacity—is what every role
+        must share. An 8-warp CTA at ``m=8`` has 8192 registers total — 32 a
+        thread — so its roles can afford, say, 40 and 24 but not 64 and 64,
+        which :meth:`Specialize.finalize` refuses. The rmsnorm-style
         ``min_blocks_per_sm=8`` is advice for occupancy-bound kernels without
         roles; a warp-specialized kernel usually wants 1.
     grid : int | str | list | tuple | callable, optional

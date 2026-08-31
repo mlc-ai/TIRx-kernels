@@ -452,15 +452,26 @@ class Specialize:
                     register_owners[warp] = scope
 
             budget = sum(register_targets) * 32
-            # A CTA's share of the file is the whole file only at one block per
-            # SM. Promising m resident CTAs divides it by m.
-            blocks = self.session.blocks_per_sm
-            ceiling = _entry.REGS_PER_CTA // blocks
+            if self.session.min_blocks_per_sm is None:
+                # Without a pinned launch bound, trace time does not know the
+                # entry allocation selected by ptxas. Keep only the physical
+                # one-CTA ceiling here; Synccheck validates the compiled entry.
+                ceiling = _entry.REGS_PER_CTA
+                available = f"{ceiling} registers physically available to one CTA"
+            else:
+                # entry_regs is the canonical launch allocation: it includes
+                # the blocks/SM division, architectural per-thread cap, and
+                # launch-bound rounding. The rounded-away residual is not
+                # available to setmaxnreg roles.
+                threads = total * 32
+                ceiling = self.session.entry_regs * threads
+                available = (
+                    f"{ceiling}-register launch allocation "
+                    f"({self.session.entry_regs} regs/thread * {threads} threads)"
+                )
             if budget > ceiling:
-                per_sm = "" if blocks == 1 else f" ({_entry.REGS_PER_CTA} // {blocks} blocks/SM)"
                 raise ValueError(
-                    f"{state_name} budget {budget} exceeds the {ceiling} available "
-                    f"to one CTA{per_sm}; regs*32*warps must fit"
+                    f"{state_name} budget {budget} exceeds the {available}; regs*32*warps must fit"
                 )
 
             # setmaxnreg is warpgroup-collective: every warp of a warpgroup
