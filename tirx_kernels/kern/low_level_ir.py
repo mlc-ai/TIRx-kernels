@@ -16,6 +16,8 @@ from tvm.tirx.stmt_functor import StmtExprVisitor
 _FORBIDDEN_SCOPE_ROOTS = ("global", "shared")
 _ADDRESS_OF_OP = "tirx.address_of"
 _FUNC_CALL_OP = "tirx.cuda.func_call"
+_SETMAXNREG_OP = "tirx.ptx.setmaxnreg"
+_MIN_BLOCKS_PER_SM_ATTR = "tirx.launch_bounds_min_blocks_per_sm"
 
 
 def _is_forbidden_scope(scope: str) -> bool:
@@ -116,6 +118,8 @@ class _LowLevelIRVisitor(StmtExprVisitor):
         self.violations: list[LowLevelIRFinding] = []
         self.func_calls: list[LowLevelIRFinding] = []
         self.address_only_loads: list[LowLevelIRFinding] = []
+        self.setmaxnreg_calls: list[LowLevelIRFinding] = []
+        self.has_min_blocks_per_sm = False
 
     def _finding(
         self, node: Any, kind: str, scope: str | None = None, callee: str | None = None
@@ -132,6 +136,11 @@ class _LowLevelIRVisitor(StmtExprVisitor):
     def visit_op_call_(self, op: Any) -> None:
         self.violations.append(self._finding(op, "tile_primitive"))
         super().visit_op_call_(op)
+
+    def visit_attr_(self, op: tirx.AttrStmt) -> None:
+        if str(op.attr_key) == _MIN_BLOCKS_PER_SM_ATTR:
+            self.has_min_blocks_per_sm = True
+        super().visit_attr_(op)
 
     def visit_buffer_load_(self, op: tirx.BufferLoad) -> None:
         scope = str(op.buffer.scope())
@@ -159,6 +168,8 @@ class _LowLevelIRVisitor(StmtExprVisitor):
 
     def visit_call_(self, op: tvm.ir.Call) -> None:
         op_name = getattr(op.op, "name", None)
+        if op_name == _SETMAXNREG_OP:
+            self.setmaxnreg_calls.append(self._finding(op, "setmaxnreg_without_min_blocks_per_sm"))
         if op_name == _FUNC_CALL_OP:
             callee = str(getattr(op.args[0], "value", op.args[0])) if op.args else "<missing>"
             finding = self._finding(op, "func_call", callee=callee)
@@ -239,6 +250,8 @@ def inspect_low_level_ir(
         checked_functions.append(path)
         visitor = _LowLevelIRVisitor(path, allowed_func_calls)
         visitor(prim_func.body)
+        if visitor.setmaxnreg_calls and not visitor.has_min_blocks_per_sm:
+            visitor.violations.extend(visitor.setmaxnreg_calls)
         violations.extend(visitor.violations)
         func_calls.extend(visitor.func_calls)
         address_only_loads.extend(visitor.address_only_loads)

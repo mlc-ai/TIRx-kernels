@@ -138,6 +138,21 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
     build(check_ir=False)  # explicit opt-out still traces
 
 
+def test_specialize_register_targets_require_min_blocks_per_sm():
+    import pytest
+
+    from tirx_kernels.kern.low_level_ir import LowLevelIRContractError
+
+    with pytest.raises(LowLevelIRContractError, match="setmaxnreg_without_min_blocks_per_sm"):
+
+        @K.kernel(warps=4, arch="sm_100a", grid=False)
+        def probe():
+            sp = K.specialize()
+            compute = sp.role("compute", range(4), regs=64)
+            with compute:
+                pass
+
+
 def test_unsupported_tmem_buffer_scope_is_rejected():
     import pytest
 
@@ -226,8 +241,7 @@ def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
 
     build(40)  # 61,440 registers: exactly the rounded CTA pool.
     with pytest.raises(
-        ValueError,
-        match=r"budget 65536 exceeds the 61440-register CTA pool at min_blocks_per_sm=1",
+        ValueError, match=r"budget 65536 exceeds the 61440-register CTA pool at min_blocks_per_sm=1"
     ):
         build(72)  # 65,536 fits the file, but not its rounded warpgroup shares.
 

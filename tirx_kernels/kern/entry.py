@@ -277,7 +277,8 @@ class Session:
         self.min_blocks_per_sm = min_blocks_per_sm
         # None means the entry is UNPINNED: ptxas is free to choose, so there
         # is no promised occupancy to divide by. Keep the one-CTA model for
-        # diagnostics; setmaxnreg users must provide their direction explicitly.
+        # specialization diagnostics that do not request register transitions;
+        # the low-level IR contract rejects setmaxnreg on such an entry.
         self.blocks_per_sm = 1 if min_blocks_per_sm is None else min_blocks_per_sm
         self.entry_regs = entry_regs(warps, self.blocks_per_sm)
         self.nthreads = warps * 32
