@@ -26,7 +26,9 @@ list.
 
 Curated kernels selected from measured agent-evolution runs. Their canonical
 modules retain the supported workload and stable provenance; run logs and
-intermediate candidates remain outside this package.
+intermediate candidates remain outside this package. See the
+[measured speedups](tirx_kernels/agent_evolved/README.md) for the benchmark
+contract and results.
 
 - **KDA forward:**
   [`agent_evolved_kda_forward_b1_t8192_h96`](tirx_kernels/agent_evolved/kda_forward_b1_t8192_h96.py)
