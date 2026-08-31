@@ -536,6 +536,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
     @Kern.kernel(
         warps=NUM_THREADS // 32,
         arch="sm_100a",
+        min_blocks_per_sm=1,
         grid=SM_NUMBER,
         host_prelude=host_prelude,
         allowed_func_calls=_NVSHMEM_RUNTIME_FUNC_CALLS,
@@ -652,11 +653,9 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         specialization.role("idle", [10], regs=None)
         tma_scheduler_role = specialization.role("tma_scheduler", [11], regs=None)
         producer_regs = specialization.register_scope(
-            "producer_regs", warps=range(8, 12), regs=56, direction="dec"
+            "producer_regs", warps=range(8, 12), regs=56
         )
-        consumer_regs = specialization.register_scope(
-            "consumer_regs", warps=range(8), regs=224, direction="inc"
-        )
+        consumer_regs = specialization.register_scope("consumer_regs", warps=range(8), regs=224)
 
         def fetch_next():
             with tma_scheduler_role:

@@ -829,7 +829,7 @@ def _make_kernel(
         lane = K.lane_id()
 
         roles = K.specialize(chain_dispatch=True)
-        epilogue_role = roles.role("epilogue", warps=[0, 1, 2, 3], regs=88, direction="inc")
+        epilogue_role = roles.role("epilogue", warps=[0, 1, 2, 3], regs=88)
         mma_role = roles.role("mma", warps=[4])
         tma_role = roles.role("tma", warps=[5])
         c_role = roles.role("c_load", warps=[6])
@@ -1952,6 +1952,7 @@ def _make_kernel(
     return K.kernel(
         warps=7,
         arch="sm_100a",
+        min_blocks_per_sm=1,
         grid=[cluster_m, cluster_n, num_clusters],
         host_prelude=host_prelude,
     )(kernel)
