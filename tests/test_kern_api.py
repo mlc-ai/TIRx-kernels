@@ -174,7 +174,35 @@ def test_thread_layout_is_not_a_kernel_entry_option():
         K.thread_id([32])
 
 
-def test_specialize_uses_rounded_launch_allocation_as_register_ceiling():
+def test_entry_usage_cap_does_not_shrink_cta_register_pool():
+    from tirx_kernels.kern.entry import cta_register_pool, entry_regs
+
+    class Scanner(StmtExprVisitor):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def visit_call_(self, op):
+            if getattr(op.op, "name", "") == "tirx.ptx.setmaxnreg":
+                self.calls.append((int(op.args[0]), op.args[1].value))
+            super().visit_call_(op)
+
+    assert entry_regs(warps=4, min_blocks_per_sm=2) == 255
+    assert cta_register_pool(warps=4, min_blocks_per_sm=2) == 32768
+
+    @K.kernel(warps=4, arch="sm_100a", min_blocks_per_sm=2, grid=False)
+    def probe(out: K.gptr(K.f32)):
+        sp = K.specialize()
+        compute = sp.role("compute", range(4), regs=256)
+        with compute:
+            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    scanner = Scanner()
+    scanner(probe.func.body)
+    assert scanner.calls == [(256, "inc")]
+
+
+def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
     import pytest
 
     def build(aux_regs):
@@ -196,12 +224,12 @@ def test_specialize_uses_rounded_launch_allocation_as_register_ceiling():
 
         return probe
 
-    build(40)  # 61,440 registers: exactly the rounded launch allocation.
+    build(40)  # 61,440 registers: exactly the rounded CTA pool.
     with pytest.raises(
         ValueError,
-        match=r"budget 65536 exceeds the 61440-register launch allocation .*96 regs/thread",
+        match=r"budget 65536 exceeds the 61440-register CTA pool at min_blocks_per_sm=1",
     ):
-        build(72)  # 65,536 fits the file, but not this entry's launch allocation.
+        build(72)  # 65,536 fits the file, but not its rounded warpgroup shares.
 
 
 def test_gptr_shape_reuses_entry_scalar_parameters():

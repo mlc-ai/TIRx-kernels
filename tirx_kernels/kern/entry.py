@@ -28,14 +28,21 @@ from tvm.tirx.script.builder import ir as I
 # read off this: a role asking for more must .inc, for less .dec.
 REGS_PER_CTA = 65536
 _REGS_PER_THREAD_MAX = 255
+_REGS_PER_THREAD_GRANULARITY = 8
+
+
+def _aligned_register_share(warps: int, min_blocks_per_sm: int) -> int:
+    """The 8-aligned per-thread share of the resident warpgroup pool."""
+    per_thread = REGS_PER_CTA // (min_blocks_per_sm * warps * 32)
+    return per_thread & ~(_REGS_PER_THREAD_GRANULARITY - 1)
 
 
 def entry_regs(warps: int, min_blocks_per_sm: int = 1) -> int:
     """The per-thread register allocation ptxas pins for a *warps*-wide entry.
 
     The register file split over the threads that must fit on the SM at once,
-    capped at the architectural per-thread maximum and rounded down to the
-    8-register allocation granularity.
+    rounded down to the 8-register allocation granularity, then capped at the
+    architectural per-thread usage maximum.
 
     ``min_blocks_per_sm`` is part of that division, not a detail: the second
     ``__launch_bounds__`` operand promises *m* CTAs resident, so each one gets
@@ -48,19 +55,17 @@ def entry_regs(warps: int, min_blocks_per_sm: int = 1) -> int:
     has register count (64) which is larger than the largest temporal register
     count in the program (32)``.
 
-    No in-tree kernel currently combines ``min_blocks_per_sm > 1`` with roles
-    that set ``regs=``, so the ``m`` term is not fixing a live miscompile. What
-    it fixes is a model that lied: the number this returned was wrong whenever
-    ``m > 1``, ``Specialize.role`` quoted it in an error message that was
-    therefore false, and the first kernel to combine the two would have been
-    told its allocation was 248 while ptxas worked to 32.
-
-    The 255 cap matters too: a 256-thread CTA divides out to 256 registers, but
-    a thread can only hold 255, so the entry really gets 248 — and a role asking
-    for 256 is an *increase*, not a decrease.
+    The 255 cap applies only after the pool share is aligned. For example, four
+    warps at ``min_blocks_per_sm=2`` have a 256-register ownership share but
+    ptxas reports at most 255 registers used per thread, so the entry is 255
+    and a role asking for the legal ``setmaxnreg`` target 256 must ``.inc``.
     """
-    per_thread = REGS_PER_CTA // (min_blocks_per_sm * warps * 32)
-    return min(per_thread, _REGS_PER_THREAD_MAX) & ~7
+    return min(_aligned_register_share(warps, min_blocks_per_sm), _REGS_PER_THREAD_MAX)
+
+
+def cta_register_pool(warps: int, min_blocks_per_sm: int = 1) -> int:
+    """Registers one CTA can redistribute after resident-warpgroup rounding."""
+    return _aligned_register_share(warps, min_blocks_per_sm) * warps * 32
 
 
 class gptr:  # pylint: disable=invalid-name
@@ -271,10 +276,8 @@ class Session:
         self.arch = arch
         self.min_blocks_per_sm = min_blocks_per_sm
         # None means the entry is UNPINNED: ptxas is free to choose, so there
-        # is no promised occupancy to divide by. The one-CTA reading is the
-        # only defensible model, and a role with regs= -- the only consumer
-        # that needs the number to be real -- is refused outright while it
-        # holds (Specialize.role).
+        # is no promised occupancy to divide by. Keep the one-CTA model for
+        # diagnostics; setmaxnreg users must provide their direction explicitly.
         self.blocks_per_sm = 1 if min_blocks_per_sm is None else min_blocks_per_sm
         self.entry_regs = entry_regs(warps, self.blocks_per_sm)
         self.nthreads = warps * 32
@@ -500,12 +503,13 @@ def kernel(
 
         A high value and warp roles pull against each other, and the pull is
         sharp. The whole register file is a CTA's only at one block per SM;
-        promising *m* first divides it by *m*, then rounds the per-thread
-        allocation down to a multiple of 8 registers. That rounded launch
-        allocation—not the residual register-file capacity—is what every role
-        must share. An 8-warp CTA at ``m=8`` has 8192 registers total — 32 a
-        thread — so its roles can afford, say, 40 and 24 but not 64 and 64,
-        which :meth:`Specialize.finalize` refuses. The rmsnorm-style
+        promising *m* divides the resident warpgroup pool by *m*, then rounds
+        each warpgroup's per-thread share down to a multiple of 8 registers.
+        An 8-warp CTA at ``m=8`` has 8192 registers total — 32 a thread — so
+        its roles can afford, say, 40 and 24 but not 64 and 64, which
+        :meth:`Specialize.finalize` refuses. The per-thread entry usage is
+        separately capped at 255; that cap does not shrink the CTA pool or the
+        legal ``setmaxnreg(256)`` target. The rmsnorm-style
         ``min_blocks_per_sm=8`` is advice for occupancy-bound kernels without
         roles; a warp-specialized kernel usually wants 1.
     grid : int | str | list | tuple | callable, optional

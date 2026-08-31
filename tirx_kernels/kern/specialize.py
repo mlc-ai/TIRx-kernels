@@ -459,15 +459,14 @@ class Specialize:
                 ceiling = _entry.REGS_PER_CTA
                 available = f"{ceiling} registers physically available to one CTA"
             else:
-                # entry_regs is the canonical launch allocation: it includes
-                # the blocks/SM division, architectural per-thread cap, and
-                # launch-bound rounding. The rounded-away residual is not
-                # available to setmaxnreg roles.
-                threads = total * 32
-                ceiling = self.session.entry_regs * threads
+                # The CTA pool follows the resident-warpgroup share rounded to
+                # setmaxnreg's 8-register granularity. Do not apply the
+                # separate 255-register entry-usage cap: setmaxnreg may claim
+                # the legal 256-register ownership target from this pool.
+                ceiling = _entry.cta_register_pool(total, self.session.min_blocks_per_sm)
                 available = (
-                    f"{ceiling}-register launch allocation "
-                    f"({self.session.entry_regs} regs/thread * {threads} threads)"
+                    f"{ceiling}-register CTA pool "
+                    f"at min_blocks_per_sm={self.session.min_blocks_per_sm}"
                 )
             if budget > ceiling:
                 raise ValueError(
