@@ -2,38 +2,40 @@
 
 ## Goal
 
-Improve TIRx performance as measured by the `tirx-kernels` bench-suite on the
-required shapes. Bench-suite timing is the only performance metric in this gate.
-Generated code, NCU counters, opcode tables, memory tables, lineinfo, and static
-instruction counts are diagnostic evidence only; none of them can accept or
-reject a performance change.
+Improve the TIRx implementation until it matches the source implementation on
+every required shape. Bench-suite timing is the performance acceptance metric.
+NCU reports, generated PTX/SASS, source comparisons, and codegen-database entries
+are diagnostic evidence used to understand and improve performance; they cannot
+accept a performance change by themselves.
 
-The gate is:
+The final performance gate is:
 
 ```text
 source_time / tirx_time > 0.99 for every required shape
 ```
 
+Maintain one append-only ledger throughout this stage. It must record the
+optimization process, including unsuccessful hypotheses and regressions, so that
+later work can build on earlier evidence instead of repeating it.
+
 The writer may create a goal for this stage. Do not complete the goal or claim
 PASS while any required shape is at or below `0.99`.
 
-## Required Repo-Local Skill
+## Repo-Local Guidance
 
-For a target under `tirx-kernels`, read and follow
-`<TARGET_REPO_ROOT>/.agents/skills/tirx-codegen-diagnostics/SKILL.md` at the start of
-this gate. Use the skill from the target checkout so its guidance stays aligned
-with that checkout. Before changing emitted instructions, issue order,
-predication, uniformity, register lifetimes, address lowering, memory width or
-cache hints, pipeline depth, or synchronization for performance, apply that
-skill's symptom-indexed workflow.
+For a target under `tirx-kernels`, follow `tirx-kernel-integration` for benchmark
+scope, references, rounds, artifacts, GPU locking, and invalid-run handling.
 
-If the target is not a `tirx-kernels` checkout or does not contain that skill,
-continue with the diagnostics below; do not silently substitute an unrelated
-cached copy.
+Also obey the target checkout's repo-local instructions. Before changing emitted
+instructions, issue order, predication, uniformity, register lifetimes, address
+lowering, memory width or cache hints, pipeline depth, or synchronization for
+performance, read and apply the checkout's
+`.agents/skills/tirx-codegen-diagnostics/SKILL.md`. Use the target checkout's copy;
+do not substitute a copied or cached version.
 
 ## Hard Acceptance Gate
 
-Every final threshold decision MUST use the `tirx-kernels` bench-suite tool:
+Every final threshold decision must use the `tirx-kernels` bench-suite tool:
 
 ```bash
 python -m tirx_kernels.bench_suite
@@ -41,146 +43,52 @@ python -m tirx_kernels.bench_suite
 
 Ensure the selected workload set contains every required target shape. Final
 evidence must come from the latest complete bench-suite run. Do not use
-`python -m tirx_kernels.bench`, an ad hoc timer, a partial run, selected shapes,
-or an average ratio as final acceptance evidence.
+`python -m tirx_kernels.bench`, an ad hoc timer, a partial shape set, selected
+profiler counters, or an average ratio as final acceptance evidence.
 
-Follow `tirx-kernel-integration` for benchmark scope, references,
-rounds, artifacts, and invalid-run handling.
+Targeted bench-suite workloads may be used during an investigation, but final
+PASS requires the latest complete required-shape matrix.
 
-Use bench-suite measurements to decide whether a candidate improved performance
-and should be retained. Targeted bench-suite workloads may be used during an
-iteration, but final PASS requires the latest complete required-shape matrix.
+## 1. Mandatory Preparation Report
 
-## Read Once and Freeze Validation Commands
+Preparation is mandatory. Do not begin performance-optimization iterations until
+the preparation report passes this entry gate.
 
-Read this file and the repo-local codegen diagnostics skill once when entering the
-performance stage. Do not reread this file, `correctness_gate.md`, or the root
-porting skill during each search expansion. Do not restart either reviewer.
+### Establish the initial performance matrix
 
-At stage entry, write one validation manifest under:
+Run the complete required-shape bench-suite matrix for the correctness-gate
+implementation. Use:
 
-```text
-${PORT_DIR}/perf_gate/validation_manifest.json
+```bash
+python -m tirx_kernels.bench_suite
 ```
 
-Record the exact source/reference identity, required and guard shapes,
-correctness commands, tolerances, targeted bench-suite commands, complete-matrix
-command, and measurement protocol. Search iterations execute this frozen manifest;
-they do not rediscover or reinterpret the gates. Update the manifest only when the
-user changes the task or an actual code-interface change makes a recorded command
-invalid. A timing value is not frozen: paired source/TIRx timings may still be
-remeasured under the fixed protocol.
+Record every required shape, the paired source and TIRx times, and
+`source_time / tirx_time`. Select several of the worst-performing required
+configs, primarily by the lowest ratios. The selected set should cover distinct
+important failing regimes rather than repeatedly profiling equivalent configs.
+Record why each config was selected.
 
-## Global Variant Ledger
+### Collect paired NCU reports
 
-Maintain one append-only global ledger for the complete performance search:
+For every selected config, collect paired reports for the source baseline and the
+current TIRx implementation. Both runs must use the same:
 
-```text
-${PORT_DIR}/perf_gate/variant_ledger.jsonl
-```
+- config and input regime;
+- timing and profiling scope;
+- launch boundaries and kernel instance;
+- profiler sections and collection method.
 
-Initialize it with the correctness-gate implementation as the root variant.
-Every explored result must receive a stable `variant_id` and a ledger row,
-including variants that fail to compile, fail correctness, regress performance,
-duplicate an existing program, or produce no useful change. Preserve each unique
-program under `${PORT_DIR}/perf_gate/variants/<variant_id>/` as an immutable commit,
-tree hash, or complete reproducible patch plus its parent identity. The ledger is
-the search history, not a list containing only winners.
+Collect at least:
 
-Each row must record at least:
+- `InstructionStats`;
+- `MemoryWorkloadAnalysis_Tables`;
+- `SourceCounters`;
+- dynamic SASS opcode counts;
+- predicated-on thread instruction counts;
+- source/PTX/SASS line information.
 
-- `variant_id`, `parent_id`, lineage depth, selected strategy, and code/tree hash;
-- strategy-selection policy, selection reason or probability, and random seed
-  when selection is stochastic;
-- expansion ID and the parent's expansion count at selection time;
-- exact hypothesis and focused code change;
-- compile and correctness status plus validation level: `provisional` or
-  `fully_validated`;
-- targeted and full bench-suite commands, artifacts, per-shape times and ratios;
-- diagnostic artifact paths and a short evidence summary;
-- energy value and the exact energy-function version/parameters;
-- eligibility state: `eligible`, `ineligible`, or `duplicate`;
-- failure, rejection, or duplicate reason when applicable.
-
-Only the main writer performs the search, writes strategy-local artifacts,
-produces candidate patches/commits, appends canonical ledger rows, and changes
-eligibility state.
-
-## Global Energy-Guided Search
-
-The candidate pool contains every quick-validation-passing, reproducible,
-nonduplicate variant, regardless of lineage depth, validation level, or how many
-times it has already been expanded. Select the parent from this complete eligible
-pool. Expansion does not consume or retire a parent: the same parent may be
-selected and expanded again any number of times, including repeatedly with the
-same strategy, as long as each expansion records a concrete new hypothesis or
-attempt.
-
-Before the first selection, run the complete required-shape bench-suite matrix
-for the root variant and store it in the root ledger row. If the root already
-passes the hard gate, no expansion is needed. Otherwise use its failing shapes
-and measurements to initialize the candidate-pool energy values.
-
-Selection may be greedy or stochastic. Define and record an energy function from
-measured bench-suite results and optional novelty/complexity terms. A suitable
-policy is:
-
-```text
-with probability p_greedy:
-    choose argmax energy(eligible_pool)
-otherwise:
-    sample eligible_pool with probability softmax(energy / temperature)
-```
-
-Use nonzero exploration probability so a performance-average variant can still
-be selected. The energy function ranks search candidates only; it must not replace
-the per-shape hard acceptance gate. Do not use profiler counters as if they were
-performance scores. Record the random seed whenever stochastic selection is used.
-The energy function may include an expansion-count or novelty term to avoid
-starvation, but it must not make a previously expanded valid parent ineligible.
-
-After selecting the parent, select exactly one of the three strategies below for
-this expansion. The strategy choice may be deterministic from current evidence or
-sampled from an adaptive probability distribution. Record the chosen strategy,
-the reason or probability assigned to it, and the random seed when sampled. Do
-not run the other two strategies during the same expansion and do not silently
-switch strategies after work on the selected strategy starts.
-
-For each selected parent:
-
-1. Select one strategy and materialize one isolated working copy at exactly the
-   selected parent program.
-2. In the main writer session, execute that strategy using the parent ID, exact
-   target/guard shapes, source baseline, approved sketch, and relevant
-   generated-code paths.
-3. Produce one focused candidate. A blocked or no-change result is still recorded;
-   do not silently substitute work from another strategy.
-4. Do not run GPU measurements that overlap contaminating work. Serialize
-   NCU and bench-suite commands through the environment's shared GPU lock and
-   reject measurements with intruding work according to repository conventions.
-5. Materialize the child and run only the quick validation recorded in the
-   manifest: compile, affected/target correctness, guard correctness, and targeted
-   target/guard bench-suite measurements.
-6. Register the outcome in the global ledger. Add a unique, quick-validation-
-   passing, reproducible child to the eligible pool as `provisional` even when it
-   is not faster than the parent; mark an invalid or duplicate child ineligible
-   while retaining its ledger row. Keep the parent eligible.
-7. Increment the parent's expansion count, then perform the next global selection.
-   Periodically run the complete required-shape matrix for the best current variant.
-
-Continue expanding the candidate pool until one variant passes the latest complete
-required-shape matrix or the search is genuinely blocked. Do not overwrite the
-main target implementation on every experiment. Promote a selected candidate to
-the main working tree only after its immutable variant and measurements are in
-the ledger.
-
-## Performance Strategies
-
-### Strategy 1: Paired NCU and lineinfo
-
-Profile the source and selected parent on the same representative failing shape,
-input regime, timing scope, launch boundaries, and kernel instance. Export paired
-reports with at least:
+A suitable command shape is:
 
 ```bash
 ncu \
@@ -189,129 +97,334 @@ ncu \
   --section SourceCounters \
   --import-sass yes \
   --import-source yes \
-  --source-folders <source-roots-and-generated-code-dump> \
-  --export <source-or-tirx-report> \
-  <equivalent-single-shape-command>
+  --source-folders <source-and-generated-code-roots> \
+  --export <report-path> \
+  <equivalent-single-config-command>
 ```
 
-Compare the complete union of:
+Build with line information and retain the raw NCU reports plus the generated
+source, PTX, SASS, and lineinfo needed to trace observations back to source and
+TIRx operations. `TVM_KERNEL_DUMP=<absolute-directory>` may be used for generated
+code. Serialize NCU and benchmark commands through the repository's shared GPU
+lock, and reject contaminated measurements according to repository conventions.
 
-- dynamic warp-level `sass__inst_executed_per_opcode`;
-- predicated-on thread-level
-  `sass__thread_inst_executed_true_per_opcode`;
-- shared-memory, L1/TEX, L2, and device-memory rows from
-  `MemoryWorkloadAnalysis_Tables`.
+### Preparation artifact and hard gate
 
-Choose one actionable metric where TIRx is demonstrably behind the source. Do not
-equate a large difference with a regression without establishing the harmful
-direction. Trace that metric through its contributing SASS PCs and lineinfo:
+Write:
 
 ```text
-dynamic NCU or memory difference
-  -> contributing SASS PC(s) and instruction(s)
-  -> generated/source file:line
-  -> originating TIRx operation and source-kernel operation
-  -> one focused candidate change
+${PORT_DIR}/perf_gate/preparation_report.md
 ```
 
-Build with line information and retain generated TIRx, CUDA, PTX, and SASS needed
-for the trace. `TVM_KERNEL_DUMP=<absolute-directory>` may be used for this. Make
-one change intended to close the selected metric, then return the candidate and
-the paired reports, exported tables, source map, and hypothesis. `SYNC` and
-`NANOSLEEP` commonly originate from `mbarrier.wait` busy-wait loops and are not
-standalone targets unless evidence shows a controllable protocol difference.
+The report must contain:
 
-### Strategy 2: Codegen database
+- the initial complete bench-suite matrix;
+- the selected worst-performing configs and selection rationale;
+- the exact source and TIRx identities being compared;
+- the exact profiling commands and measurement scope;
+- paths to every paired source and TIRx NCU report;
+- the paired times and ratio for every selected config;
+- an initial comparison of memory behavior and dynamic SASS opcodes;
+- immediately visible source, PTX, or SASS differences.
 
-Follow the target checkout's repo-local `tirx-codegen-diagnostics` skill. Search only
-the `**Symptoms:**` rows in its `references/db/`, match the selected parent's
-observed symptom, and read every matching entry in full. Select one applicable
-codegen-database intervention, state why its preconditions match, and make one
-focused candidate change. Return the candidate, selected database entry, observed
-symptom, expected generated-code effect, and resulting generated-code evidence.
-If no entry applies, return a recorded no-change result instead of inventing a
-database rule or silently switching strategies.
+This report is a hard gate. Missing, unmatched, contaminated, or
+non-reproducible paired reports do not pass preparation. Do not enter the
+optimization loop or claim performance PASS until the report is complete.
 
-### Strategy 3: Free exploration
+## 2. Performance Investigation Loop
 
-Independently inspect the parent implementation, source, generated code, benchmark
-shape behavior, and existing evidence. Form one concrete performance hypothesis
-and make one focused change. This strategy is not required to use NCU or the codegen
-database, but it must preserve correctness and return a reproducible candidate,
-the hypothesis, and the expected mechanism. Do not combine several unrelated
-optimizations into one child.
+After preparation passes, run an evidence-driven optimization loop:
 
-## Candidate Evaluation
+1. Review the current benchmark results, preparation report, ledger, source,
+   implementation, generated code, and other available evidence.
+2. Choose one promising performance direction and the configs that expose it.
+3. Investigate that direction deeply enough to form or reject a concrete
+   hypothesis. An investigation does not have to produce a code change.
+4. When the evidence supports a change, make one focused experiment whose result
+   can be interpreted independently of unrelated optimizations.
+5. Check correctness and measure the affected configs with the bench-suite.
+6. Append the evidence, change, measurements, and conclusion to the ledger.
+7. Continue the same direction while it remains productive. Otherwise choose a
+   new direction from the accumulated evidence. Periodically rerun the complete
+   required-shape matrix to detect cross-shape regressions.
 
-Diagnostic evidence explains a child; bench-suite timing judges it. Validation
-has exactly two levels.
+Use engineering judgment to choose the next investigation. Disproved hypotheses,
+no-change conclusions, compile failures, correctness failures, and performance
+regressions are useful results and must be recorded.
 
-### Quick validation for every child
+## Strongly Recommended Investigation Directions
 
-Run only the commands frozen in the manifest for:
+The following directions often expose performance gaps between a source kernel
+and its TIRx port. They are strongly recommended, but they are not an exhaustive
+checklist and need not be investigated in a fixed order.
 
-1. compilation;
-2. correctness on the affected or target config plus predefined guard configs;
-3. targeted bench-suite workloads for the target and guard shapes;
-4. contamination and timing-scope checks.
+### 1. Memory behavior
 
-A unique child that passes this level is `provisional` and may enter the eligible
-pool or become a parent. Retain slower provisional children so the energy policy
-can explore through a temporary regression. Do not run all correctness configs or
-the complete performance matrix merely to register an ordinary child.
+Use paired `MemoryWorkloadAnalysis_Tables`, SASS, and lineinfo to compare the
+complete memory behavior of the source and TIRx kernels.
 
-### Full validation for selected candidates
+#### Local memory and register spills
 
-Run the manifest's complete correctness set and complete required-shape
-bench-suite matrix only when:
+Investigate:
 
-- a provisional child is being promoted to replace the current champion;
-- the recorded periodic checkpoint is due; or
-- the writer is preparing to claim final PASS.
+- local-memory load and store traffic;
+- dynamic `LDL` and `STL` instructions;
+- spill load/store bytes and transactions;
+- ptxas spill warnings, register count, and live ranges;
+- whether wide or long-lived values caused spilling;
+- the SASS PCs and originating TIRx operations responsible for the traffic.
 
-A candidate that passes both becomes `fully_validated`. If it fails, record the
-failure and mark that variant ineligible; continue the search. Full validation
-means executing the frozen commands, not rereading gate documents, rescanning the
-repository for validation scope, or starting a reviewer.
+Do not infer spills from register count alone. Confirm them using local-memory
+traffic, compiler evidence, or generated instructions.
 
-A diagnostic improvement without a bench-suite improvement is not a performance
-win, but the child remains part of the ledger. Final PASS still requires the
-latest complete required-shape matrix, not a strategy-local or targeted
-measurement.
+#### Global memory and L2
+
+Investigate:
+
+- total global/device-memory read and write instructions, bytes, and transactions;
+- L2 read/write sectors and meaningful hit or miss behavior;
+- unexpected repeated loads or stores;
+- access width, vectorization, coalescing, and transaction amplification;
+- cache policies and cache-hint differences;
+- where the source retains or reuses data that TIRx reloads or rewrites.
+
+Compare whole-kernel traffic, not only one selected instruction. Trace important
+differences to contributing SASS PCs and source/TIRx operations.
+
+#### Shared-memory traffic
+
+Investigate:
+
+- total shared-memory load and store operations;
+- requests, bytes, transactions, sectors, or wavefronts;
+- repeated or redundant shared-memory accesses;
+- access-width differences;
+- differences in staging, fragment movement, and reuse.
+
+A larger shared-memory allocation is not by itself evidence of a problem. Focus
+on executed traffic and its role in the kernel.
+
+#### Shared-memory bank conflicts
+
+Investigate:
+
+- bank conflicts reported for shared loads and stores;
+- ideal versus actual shared-memory wavefronts or transactions;
+- instruction PCs that produce excessive wavefronts;
+- the explicit address arithmetic and source swizzle responsible for the access;
+- whether the TIRx mapping reproduces the source kernel's bank behavior.
+
+Trace a bank-conflict observation through SASS and lineinfo before changing the
+address mapping.
+
+### 2. Dynamic SASS opcode statistics
+
+Compare the complete union of dynamic opcode counts from the paired source and
+TIRx reports, including:
+
+- warp-level `sass__inst_executed_per_opcode`;
+- predicated-on thread-level
+  `sass__thread_inst_executed_true_per_opcode`.
+
+Rank the opcodes for which TIRx executes more instructions than the source, then
+investigate the largest actionable differences. For each selected opcode, trace:
+
+```text
+dynamic opcode difference
+  -> contributing SASS PCs
+  -> generated source/PTX/SASS line
+  -> originating TIRx operation
+  -> corresponding source-kernel operation
+  -> concrete explanation or focused candidate change
+```
+
+Exclude `SYNC` and `NANOSLEEP` (including `NANOSLEEP.SYNCS` forms) from the
+initial excess-opcode ranking. Their dynamic counts commonly differ because
+`mbarrier.wait` is implemented as a runtime polling loop whose iteration count
+varies between executions.
+
+Do not permanently ignore them. Investigate `SYNC` or `NANOSLEEP` when evidence
+shows that the synchronization protocol, wait construction, pipeline timing, or
+backoff behavior itself differs from the source. Do not assume every extra opcode
+is harmful; establish why the direction and magnitude matter to measured runtime.
+
+### 3. Launch, resource-constraint, and ptxas configuration sweep
+
+Systematically sweep the kernel's legal launch constraints, register controls,
+and ptxas configuration. These settings can change register allocation, spilling,
+occupancy, instruction scheduling, and generated SASS even when the kernel body
+is unchanged. This sweep is strongly recommended early in the investigation
+loop, especially when source and TIRx have similar structure but different
+register counts, local-memory traffic, occupancy, or instruction sequences.
+
+#### Launch and kernel-entry controls
+
+Sweep the applicable presence and values of:
+
+- cluster launch configuration, including the target interface's no-cluster mode
+  versus a one-CTA cluster (`cluster_size=0` versus `cluster_size=1` where those
+  are the exposed settings), other source-compatible cluster shapes, and
+  preferred cluster dimensions;
+- thread-block dimensions and warp count when configurable without changing the
+  source implementation's thread-role decomposition;
+- `__launch_bounds__` constraints: maximum threads per block, minimum blocks per
+  SM, and maximum blocks per cluster;
+- the CUDA 13 `__maxnreg__(N)` qualifier, represented by
+  `tirx.max_registers`;
+- the CUDA 13 `__block_size__` exact block/cluster contract, represented by
+  `tirx.required_block_size=1`;
+- dynamic shared-memory size and applicable launch-time shared-memory settings;
+- other source-relevant launch attributes, such as cooperative or
+  programmatic-dependent launch.
+
+Distinguish the entry-level `__maxnreg__` constraint from PTX `setmaxnreg`.
+`setmaxnreg` changes register budgets dynamically for warpgroup roles and must
+preserve the source kernel's role structure and collective requirements.
+
+Do not combine incompatible controls. In this checkout,
+`tirx.max_registers` is mutually exclusive with the launch-bounds attributes and
+with `tirx.required_block_size`. Changing the actual CTA or cluster decomposition
+is allowed only when it remains compatible with the source algorithm,
+synchronization protocol, and thread roles.
+
+#### ptxas register optimization and related controls
+
+Sweep:
+
+```text
+--register-usage-level=0..10
+```
+
+In this checkout it is forwarded through:
+
+```bash
+TVM_CUDA_PTXAS_REG_LEVEL=<0..10>
+```
+
+The checkout currently passes `10` when no override is provided, while native
+ptxas defaults to `5`. Higher values permit optimizations that may consume more
+registers; lower values inhibit register-increasing optimizations. Neither
+direction is universally faster. This is a beta ptxas option whose behavior may
+change between toolkit versions, so record the CUDA toolkit and ptxas version.
+
+Also consider source-relevant controls such as:
+
+- `--maxrregcount`;
+- ptxas optimization level;
+- `--allow-expensive-optimizations=true|false`;
+- load/store cache-policy options;
+- other ptxas options used by the source build.
+
+Use `TVM_CUDA_PTXAS_EXTRA_OPTS` when that is the checkout's supported forwarding
+mechanism.
+
+Do not require a full Cartesian product of every knob. Start with
+one-dimensional or small structured sweeps, identify sensitive regions, and
+refine promising combinations. For every tested configuration, record:
+
+- the complete launch and compiler configuration;
+- environment variables, exact compiler flags, toolkit version, and ptxas version;
+- compile status and compiler warnings;
+- registers per thread, spill traffic, and local-memory traffic;
+- shared-memory use and resulting occupancy;
+- relevant generated PTX/SASS differences;
+- correctness results and per-config bench-suite timings.
+
+Reduced register count or higher theoretical occupancy alone is not a performance
+improvement; bench-suite timing must confirm it.
+
+### 4. Other evidence-driven directions
+
+Other useful directions may include:
+
+- comparing the source code and TIRx implementation structure;
+- comparing generated source, PTX, and SASS;
+- matching an observed symptom against the repo-local codegen database;
+- instruction selection, instruction width, address calculation, or integer work;
+- predication, uniformity, dependency chains, or instruction scheduling;
+- register lifetime, occupancy, pipeline depth, or producer/consumer overlap;
+- synchronization, barrier protocols, launch specialization, or shape-dependent
+  behavior.
+
+These are examples, not a fixed strategy list. Follow whichever evidence most
+plausibly explains the current performance gap. When using the codegen database,
+search its `**Symptoms:**` rows, read matching entries in full, and apply an entry
+only when its preconditions match the observed symptom.
+
+## Investigation Ledger
+
+Maintain:
+
+```text
+${PORT_DIR}/perf_gate/ledger.jsonl
+```
+
+Initialize it with the preparation work, then append an entry for every meaningful
+investigation or experiment. Each entry must contain enough information to
+understand and reproduce the work, including:
+
+- a stable iteration or investigation ID and implementation identity;
+- configs under investigation;
+- selected direction and reason for selecting it;
+- concrete hypothesis;
+- NCU, benchmark, source, PTX, SASS, or database evidence;
+- relevant artifact paths;
+- focused code change or reason no change was made;
+- compile and correctness commands and results;
+- bench-suite commands, per-config times, and ratios;
+- conclusion: improved, regressed, neutral, disproved, or inconclusive;
+- recommended next step.
+
+Record failed compilation, failed correctness, performance regressions, and
+disproved hypotheses. Do not keep only successful optimizations. The ledger
+documents the optimization history; it does not rank candidates or prescribe the
+next investigation.
+
+Only the main writer performs the optimization loop, changes the target
+implementation, and appends the canonical ledger entries. Do not start another
+reviewer during this stage.
+
+## Validation and Measurement
+
+Use the repository's normal correctness commands after implementation changes.
+Targeted correctness and targeted bench-suite workloads may be used while
+investigating a direction. Run broader validation in proportion to the scope and
+risk of the change, and periodically run the complete required-shape matrix to
+catch cross-shape regressions.
+
+Diagnostic evidence explains a change; bench-suite timing judges it. A generated-
+code, profiler, register-count, or occupancy improvement without a bench-suite
+improvement is not a performance win.
+
+Before claiming PASS:
+
+1. run the complete required correctness set;
+2. run the complete required-shape bench-suite matrix;
+3. confirm that the measured implementation is the implementation in the main
+   working tree;
+4. append the final commands, results, implementation identity, and artifact
+   paths to the ledger.
 
 ## Stage Boundary
 
-The initial sketch review is complete before this stage. Treat that sketch as a
-completed initial design artifact. Do not edit it, return to the sketch stage,
-or start another reviewer. Correctness was established by the preceding gate
-and remains a prerequisite for retaining implementation changes, but it is not
-an additional performance metric.
+The approved sketch and both reviewer gates are closed before this stage. Do not
+edit the sketch, return to an earlier stage, or restart either reviewer.
 
-## Must Not
-
-- Do not use `tirx_kernels.bench` for final performance acceptance.
-- Do not stop on a partial matrix or an average above `0.99`.
-- Do not pass when even one required shape is `<= 0.99x` source.
-- Do not compare timings from different scopes or setup boundaries.
-- Do not edit the approved sketch or start another sketch reviewer.
-- Do not introduce any first-class layout or any non-linear/multidimensional SMEM
-  tensor in a performance variant. Every variant must retain one-dimensional
-  linear SMEM and explicit scalar offset/index arithmetic.
-- Do not reread correctness/performance gate documents or rescan validation scope
-  during each expansion; execute the frozen validation manifest.
-- Do not run full correctness and the complete performance matrix for every
-  ordinary child.
-- Do not call a generated-code or profiler difference a performance improvement
-  unless bench-suite measurements improve.
+Every performance change must preserve the porting contract, including the
+source implementation structure, one-dimensional linear shared-memory storage,
+explicit scalar address arithmetic, and the prohibition on first-class layouts
+and tile primitives.
 
 ## PASS Checklist
 
 The performance gate is PASS only when all are true:
 
+- the mandatory preparation report contains valid paired source/TIRx NCU reports
+  for the selected worst-performing configs;
+- the ledger records the preparation and performance-investigation history;
 - the latest complete `tirx_kernels.bench_suite` matrix contains every required
   shape;
 - every required shape has `source_time / tirx_time > 0.99`;
-- the winning variant and its complete matrix are present in the global ledger;
-- the winning variant is marked `fully_validated`;
-- the target implementation in the main working tree is byte-identical to the
-  recorded winning variant and still passes required correctness checks.
+- the final implementation passes the required correctness checks;
+- the measured final implementation is the implementation in the main working
+  tree.
