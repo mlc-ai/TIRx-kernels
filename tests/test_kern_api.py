@@ -141,9 +141,7 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
 def test_specialize_register_targets_require_min_blocks_per_sm():
     import pytest
 
-    from tirx_kernels.kern.low_level_ir import LowLevelIRContractError
-
-    with pytest.raises(LowLevelIRContractError, match="setmaxnreg_without_min_blocks_per_sm"):
+    with pytest.raises(ValueError, match=r"setmaxnreg requires K\.kernel"):
 
         @K.kernel(warps=4, arch="sm_100a", grid=False)
         def probe():
@@ -151,6 +149,13 @@ def test_specialize_register_targets_require_min_blocks_per_sm():
             compute = sp.role("compute", range(4), regs=64)
             with compute:
                 pass
+
+    @K.kernel(warps=4, arch="sm_100a", grid=False)
+    def unpinned_partition_without_register_targets():
+        sp = K.specialize()
+        compute = sp.role("compute", range(4))
+        with compute:
+            pass
 
 
 def test_unsupported_tmem_buffer_scope_is_rejected():

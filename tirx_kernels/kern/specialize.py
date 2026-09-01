@@ -21,7 +21,7 @@ _REGS_MAX = 256
 _REGS_GRANULARITY = 8
 
 
-def _validate_register_target(kind, name, regs):
+def _validate_register_target(session, kind, name, regs):
     if regs is None:
         return
     if regs % _REGS_GRANULARITY:
@@ -30,6 +30,11 @@ def _validate_register_target(kind, name, regs):
         raise ValueError(
             f"{kind} {name!r} regs={regs} is outside the setmaxnreg range "
             f"[{_REGS_MIN}, {_REGS_MAX}]"
+        )
+    if session.min_blocks_per_sm is None:
+        raise ValueError(
+            f"{kind} {name!r} asks for regs={regs}, but setmaxnreg requires "
+            "K.kernel(..., min_blocks_per_sm=...) to pin the entry allocation"
         )
 
 
@@ -209,7 +214,7 @@ class Specialize:
                 )
             regs = register_scope.regs
         else:
-            _validate_register_target("role", name, regs)
+            _validate_register_target(self.session, "role", name, regs)
         if warps != list(range(warps[0], warps[-1] + 1)):
             raise ValueError(
                 f"role {name!r} warps={warps} are not contiguous; a role is one "
@@ -240,7 +245,7 @@ class Specialize:
             raise ValueError(f"warpgroup {name!r} must own four contiguous warps")
         if warps[0] % 4:
             raise ValueError(f"warpgroup {name!r} must start at a multiple of four")
-        _validate_register_target("warpgroup", name, regs)
+        _validate_register_target(self.session, "warpgroup", name, regs)
         for other in self.groups:
             overlap = sorted(set(warps) & set(other.warps))
             if overlap:
@@ -267,7 +272,7 @@ class Specialize:
             raise ValueError(
                 f"register scope {name!r} must own a warpgroup-aligned multiple of four warps"
             )
-        _validate_register_target("register scope", name, regs)
+        _validate_register_target(self.session, "register scope", name, regs)
         if regs is None:
             raise ValueError(f"register scope {name!r} requires regs")
         scope = RegisterScope(self, name, warps, regs)
@@ -424,14 +429,8 @@ class Specialize:
                     register_targets[warp] = scope.regs
                     register_owners[warp] = scope
 
-            budget = sum(register_targets) * 32
-            if self.session.min_blocks_per_sm is None:
-                # Without a pinned launch bound, trace time does not know the
-                # entry allocation selected by ptxas. Keep only the physical
-                # one-CTA ceiling here; Synccheck validates the compiled entry.
-                ceiling = _entry.REGS_PER_CTA
-                available = f"{ceiling} registers physically available to one CTA"
-            else:
+            if any(scope.regs is not None for scope in scopes):
+                budget = sum(register_targets) * 32
                 # The CTA pool follows the resident-warpgroup share rounded to
                 # setmaxnreg's 8-register granularity. Do not apply the
                 # separate 255-register entry-usage cap: setmaxnreg may claim
@@ -441,10 +440,11 @@ class Specialize:
                     f"{ceiling}-register CTA pool "
                     f"at min_blocks_per_sm={self.session.min_blocks_per_sm}"
                 )
-            if budget > ceiling:
-                raise ValueError(
-                    f"{state_name} budget {budget} exceeds the {available}; regs*32*warps must fit"
-                )
+                if budget > ceiling:
+                    raise ValueError(
+                        f"{state_name} budget {budget} exceeds the {available}; "
+                        "regs*32*warps must fit"
+                    )
 
             # setmaxnreg is warpgroup-collective: every warp of a warpgroup
             # reaches the same instruction with the same operand.
