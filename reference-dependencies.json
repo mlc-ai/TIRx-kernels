@@ -78,6 +78,13 @@
       "install_subdirectory": "."
     },
     {
+      "name": "flash-linear-attention",
+      "import_name": "fla",
+      "url": "https://github.com/fla-org/flash-linear-attention.git",
+      "revision": "9c8e42e762fce087c27b673af4922795d9edb85e",
+      "install_subdirectory": "."
+    },
+    {
       "name": "msa",
       "import_name": "fmha_sm100",
       "url": "https://github.com/MiniMax-AI/MSA.git",
