@@ -40,8 +40,12 @@ class MBarrier(_MBarrier):
     def _wait(self, stage, phase):
         K.cuda.mbarrier_wait(self.buf.ptr_to([stage]), phase ^ self.phase_offset)
 
-    def _arrive(self, bar):
-        K.ptx.mbarrier.arrive.shared.b64(bar, K.uint32(1))
+    def _arrive(self, bar, pred=None, count=None):
+        count = K.uint32(1 if count is None else count)
+        if pred is None:
+            K.ptx.mbarrier.arrive.shared.b64(bar, count)
+        else:
+            K.ptx.mbarrier.arrive.shared.b64(bar, count, pred=pred)
 
 
 class TMABar(MBarrier):

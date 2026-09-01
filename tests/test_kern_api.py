@@ -65,6 +65,32 @@ def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
     assert scanner.ptx_calls == ["tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"]
 
 
+def test_mbarrier_arrive_forwards_count_and_predicate():
+    class Scanner(StmtExprVisitor):
+        def __init__(self):
+            super().__init__()
+            self.arrives = []
+
+        def visit_call_(self, op):
+            if getattr(op.op, "name", "") == "tirx.ptx.mbarrier_arrive":
+                self.arrives.append(op)
+            super().visit_call_(op)
+
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr(K.f32)):
+        smem = K.smem_pool()
+        barrier = K.MBarrier(smem, 1)
+        barrier.init(1)
+        barrier.arrive(0)
+        barrier.arrive(0, pred=K.cuda.elect_sync(), count=2)
+        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    scanner = Scanner()
+    scanner(probe.func.body)
+    assert [int(call.args[1]) for call in scanner.arrives] == [1, 2]
+    assert [call.args[-1].value for call in scanner.arrives] == ["", "pred"]
+
+
 def test_stack_alloca_is_bound_exactly_once():
     class Scanner(StmtExprVisitor):
         def __init__(self):
