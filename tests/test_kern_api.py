@@ -48,21 +48,39 @@ def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
         def __init__(self):
             super().__init__()
             self.ptx_calls = []
+            self.tanh_inputs = []
 
         def visit_call_(self, op):
             name = getattr(op.op, "name", "")
             if name.startswith("tirx.ptx."):
                 self.ptx_calls.append(name)
+            if name == "tirx.ptx.tanh":
+                self.tanh_inputs.append(float(op.args[1]))
             super().visit_call_(op)
 
     @K.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: K.gptr("float32")):
-        result = K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0))
-        K.ptx.st.global_.f32(out.ptr_to([0]), result)
+        value_result = K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0))
+        half_result = K.idioms.sigmoid_tanh_approx_f32(half_input=K.float32(0.25))
+        K.ptx.st.global_.f32(out.ptr_to([0]), value_result + half_result)
 
     scanner = Scanner()
     scanner(probe.func.body)
-    assert scanner.ptx_calls == ["tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"]
+    assert scanner.ptx_calls == [
+        "tirx.ptx.tanh",
+        "tirx.ptx.fma",
+        "tirx.ptx.tanh",
+        "tirx.ptx.fma",
+        "tirx.ptx.st",
+    ]
+    assert scanner.tanh_inputs == [0.5, 0.25]
+
+    import pytest
+
+    with pytest.raises(ValueError, match="exactly one"):
+        K.idioms.sigmoid_tanh_approx_f32()
+    with pytest.raises(ValueError, match="exactly one"):
+        K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0), half_input=K.float32(0.5))
 
 
 def test_mbarrier_arrive_forwards_count_and_predicate():
