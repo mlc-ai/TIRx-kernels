@@ -369,9 +369,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     for j in range(4):
                         wj = gw[2 * i] if j < 2 else gw[2 * i + 1]
                         gv = bf16_lo(wj) if j % 2 == 0 else bf16_hi(wj)
-                        th = K.local_scalar("float32")
-                        K.ptx.tanh.approx.f32(th, gv * hea + biash[j])
-                        sg = K.local_scalar("float32", init=th * K.float32(0.5) + K.float32(0.5))
+                        sg = K.idioms.sigmoid_tanh_approx_f32(
+                            half_input=gv * hea + biash[j]
+                        )
                         if i == 0:
                             K.assign(G[j], sg * K.float32(NEG5LOG2E))
                         else:
@@ -1399,9 +1399,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                                 beta.ptr_to([(K.Cast("int64", tok0) + K.Cast("int64", t)) * K.int64(H) + K.Cast("int64", h_idx)]),
                             )
                             bfv = K.reinterpret("float32", K.Cast("uint32", bu) << K.uint32(16))
-                            th = K.local_scalar("float32")
-                            K.ptx.tanh.approx.f32(th, bfv * K.float32(0.5))
-                            sg = K.local_scalar("float32", init=th * K.float32(0.5) + K.float32(0.5))
+                            sg = K.idioms.sigmoid_tanh_approx_f32(bfv)
                             K.ptx.st.shared.f32(K.address_of(s_beta[st_beta.stage, t]), sg)
                         p_beta.full.arrive(st_beta.stage)
                         st_beta.advance()
