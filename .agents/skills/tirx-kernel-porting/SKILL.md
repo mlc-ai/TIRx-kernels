@@ -48,9 +48,10 @@ You should exactly follow the following stages in order:
 
 For kernels under `tirx-kernels`, also use the TIRx kernel integration skill:
 [../tirx-kernel-integration/SKILL.md](../tirx-kernel-integration/SKILL.md).
-At the start of the performance gate, read and follow the target checkout's
-repo-local `.agents/skills/tirx-codegen-diagnostics/SKILL.md`. Treat that checkout as
-authoritative; do not substitute a copied or cached version of the codegen skill.
+During the performance gate, obey the target checkout's repo-local instructions.
+Before making the kinds of low-level performance changes they route to
+`.agents/skills/tirx-codegen-diagnostics/SKILL.md`, read and apply that checkout's
+copy; do not substitute a copied or cached version.
 
 Before starting agents, identify `TARGET_REPO_ROOT` as the absolute path of the repo that will receive the target implementation. Choose one fixed absolute `PORT_DIR` under that repo root:
 
@@ -142,14 +143,14 @@ flowchart LR
    required numerical correctness case pass. Do not edit or re-review the approved
    sketch itself.
 5. **Performance gate**: Read and follow
-   [perf_gate.md](references/perf_gate.md). Run its global energy-guided variant
-   search: maintain the global variant ledger, select one eligible parent, select
-   one of the NCU, codegen-database, and free-exploration strategies, and execute
-   that strategy directly in the main writer session to produce one child. A valid
-   parent remains selectable after any number of prior expansions. Measure and
-   register the child before the next expansion. Bench-suite results remain the
-   only performance metric. For a
-   `tirx-kernels` target, first read and follow the checkout's repo-local
-   `.agents/skills/tirx-codegen-diagnostics/SKILL.md`. The correctness reviewer is
-   closed and must not be rerun during this stage. Only a complete bench-suite run
-   with every shape above `0.99x` source passes.
+   [perf_gate.md](references/perf_gate.md). First complete its mandatory
+   preparation report with paired source/TIRx NCU reports for several of the
+   worst-performing required configs. Then run an evidence-driven investigation
+   loop: choose a promising direction, investigate it deeply, make focused
+   changes, measure them with the bench-suite, and record every result in the
+   global ledger. Memory behavior, dynamic SASS opcode differences, and launch,
+   resource-constraint, and ptxas configuration sweeps are the strongly
+   recommended starting points; NCU, the repo-local codegen database, and
+   source/PTX/SASS comparisons may guide further work. The correctness reviewer
+   is closed and must not be rerun during this stage. Only a complete bench-suite
+   run with every shape above `0.99x` source passes.
