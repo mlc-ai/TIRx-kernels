@@ -18,6 +18,19 @@ def _tir(build_body):
     return probe.func.script()
 
 
+def _calls_named(func, name):
+    calls = []
+
+    class Scanner(StmtExprVisitor):
+        def visit_call_(self, op):
+            if getattr(op.op, "name", "") == name:
+                calls.append(op)
+            super().visit_call_(op)
+
+    Scanner()(func.body)
+    return calls
+
+
 def test_local_scalar_init_matches_declare_then_assign():
     def two_statement(out):
         x = K.local_scalar("float32")
@@ -63,6 +76,30 @@ def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
     scanner = Scanner()
     scanner(probe.func.body)
     assert scanner.ptx_calls == ["tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"]
+
+
+def test_sigmoid_tanh_approx_f32_preserves_tanh_input():
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr("float32")):
+        result = K.idioms.sigmoid_tanh_approx_f32(tanh_input=K.float32(0.25))
+        K.ptx.st.global_.f32(out.ptr_to([0]), result)
+
+    (tanh,) = _calls_named(probe.func, "tirx.ptx.tanh")
+    assert float(tanh.args[1]) == 0.25
+
+
+def test_mbarrier_arrive_forwards_count_and_predicate():
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr("float32")):
+        barrier = K.MBarrier(K.smem_pool(), 1)
+        barrier.init(1)
+        barrier.arrive(0, pred=K.cuda.elect_sync(), count=2)
+        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    (arrive,) = _calls_named(probe.func, "tirx.ptx.mbarrier_arrive")
+    assert int(arrive.args[1]) == 2
+    assert getattr(arrive.args[2].op, "name", "") == "tirx.cuda.elect_sync"
+    assert arrive.args[-1].value == "pred"
 
 
 def test_stack_alloca_is_bound_exactly_once():
