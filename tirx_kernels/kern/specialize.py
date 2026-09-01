@@ -21,25 +21,9 @@ _REGS_MAX = 256
 _REGS_GRANULARITY = 8
 
 
-def _validate_register_target(session, kind, name, regs, direction):
-    if direction not in (None, "inc", "dec"):
-        raise ValueError(f"{kind} {name!r} has invalid direction={direction!r}")
+def _validate_register_target(session, kind, name, regs):
     if regs is None:
-        if direction is not None:
-            raise ValueError(f"{kind} {name!r} gives direction={direction!r} without regs")
         return
-    if session.min_blocks_per_sm is None and direction is None:
-        raise ValueError(
-            f"{kind} {name!r} asks for regs={regs}, but the kernel was declared "
-            "with min_blocks_per_sm=None. setmaxnreg is an absolute target and "
-            "its direction cannot be inferred from an unpinned entry; supply "
-            "the original's explicit direction="
-        )
-    if session.min_blocks_per_sm is not None and direction is not None:
-        raise ValueError(
-            f"{kind} {name!r} pins the entry and also gives direction={direction!r}; "
-            "the pinned entry allocation already owns that decision"
-        )
     if regs % _REGS_GRANULARITY:
         raise ValueError(f"{kind} {name!r} regs={regs} is not a multiple of {_REGS_GRANULARITY}")
     if not _REGS_MIN <= regs <= _REGS_MAX:
@@ -47,25 +31,27 @@ def _validate_register_target(session, kind, name, regs, direction):
             f"{kind} {name!r} regs={regs} is outside the setmaxnreg range "
             f"[{_REGS_MIN}, {_REGS_MAX}]"
         )
+    if session.min_blocks_per_sm is None:
+        raise ValueError(
+            f"{kind} {name!r} asks for regs={regs}, but setmaxnreg requires "
+            "K.kernel(..., min_blocks_per_sm=...) to pin the entry allocation"
+        )
 
 
 class RegisterScope:
     """One warpgroup-aligned register transition with caller-owned timing."""
 
-    def __init__(self, owner, name, warps, regs, direction):
+    def __init__(self, owner, name, warps, regs):
         self.owner = owner
         self.name = name
         self.warps = list(warps)
         self.regs = regs
-        self.direction = direction
         self.emissions = 0
 
     def emit(self):
         """Emit the transition at the caller's current predicate and position."""
         self.emissions += 1
-        direction = self.direction or (
-            "inc" if self.regs > self.owner.session.entry_regs else "dec"
-        )
+        direction = "inc" if self.regs > self.owner.session.entry_regs else "dec"
         T.evaluate(T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs))
 
     def __repr__(self):
@@ -75,12 +61,11 @@ class RegisterScope:
 class WarpGroup:
     """One four-warp convergence/register scope containing narrower roles."""
 
-    def __init__(self, owner, name, warps, regs, direction):
+    def __init__(self, owner, name, warps, regs):
         self.owner = owner
         self.name = name
         self.warps = list(warps)
         self.regs = regs
-        self.direction = direction
         self.first_warp = self.warps[0]
         self.n_warps = len(self.warps)
         self._frames = None
@@ -95,9 +80,7 @@ class WarpGroup:
         for frame in self._frames:
             frame.__enter__()
         if self.regs is not None:
-            direction = self.direction or (
-                "inc" if self.regs > self.owner.session.entry_regs else "dec"
-            )
+            direction = "inc" if self.regs > self.owner.session.entry_regs else "dec"
             T.evaluate(T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs))
         self.owner.active_group = self
         return self
@@ -116,12 +99,11 @@ class WarpGroup:
 class Role:
     """One warp role. Use as a context manager: ``with role:``."""
 
-    def __init__(self, owner, name, warps, regs, direction, when, group, register_scope):
+    def __init__(self, owner, name, warps, regs, when, group, register_scope):
         self.owner = owner
         self.name = name
         self.warps = list(warps)
         self.regs = regs
-        self.direction = direction
         self.when = when
         self.group = group
         self.register_scope = register_scope
@@ -169,9 +151,7 @@ class Role:
         for frame in self._frames:
             frame.__enter__()
         if self.regs is not None and self.register_scope is None:
-            direction = self.direction or (
-                "inc" if self.regs > self.owner.session.entry_regs else "dec"
-            )
+            direction = "inc" if self.regs > self.owner.session.entry_regs else "dec"
             T.evaluate(T.ptx[f"setmaxnreg.{direction}.sync.aligned.u32"](self.regs))
         self.owner.active = self
         return self
@@ -204,27 +184,25 @@ class Specialize:
         # order. Consumed by chain_dispatch once the body is built.
         self.dispatch = []
 
-    def role(
-        self, name, warps, regs=None, direction=None, when=None, group=None, register_scope=None
-    ):
+    def role(self, name, warps, regs=None, when=None, group=None, register_scope=None):
         """Declare a role and, optionally, its absolute register target.
 
-        An unpinned entry cannot derive whether an absolute target is an
-        increase or decrease, so such kernels must state ``direction=``.
-        Pinned entries keep direction inference as their single source of
-        truth. ``when=`` adds a CTA-uniform participation condition to the
-        role's dispatch guard instead of nesting a second predicate inside it.
-        ``register_scope=`` inherits that scope's target for budget validation
-        without re-emitting its transition inside the functional role.
+        A ``regs=`` target requires the kernel to set ``min_blocks_per_sm``;
+        that pinned entry allocation is the single source of truth for whether
+        the transition increases or decreases registers. ``when=`` adds a
+        CTA-uniform participation condition to the role's dispatch guard
+        instead of nesting a second predicate inside it. ``register_scope=``
+        inherits that scope's target for budget validation without re-emitting
+        its transition inside the functional role.
         """
         warps = sorted(set(warps)) if not isinstance(warps, int) else [warps]
         if not warps:
             raise ValueError(f"role {name!r} owns no warps")
         if register_scope is not None:
-            if regs is not None or direction is not None:
+            if regs is not None:
                 raise ValueError(
                     f"role {name!r} inherits register scope {register_scope.name!r}; "
-                    "do not repeat regs= or direction="
+                    "do not repeat regs="
                 )
             if register_scope not in self.register_scopes:
                 raise ValueError(f"role {name!r} references a foreign register scope")
@@ -236,7 +214,7 @@ class Specialize:
                 )
             regs = register_scope.regs
         else:
-            _validate_register_target(self.session, "role", name, regs, direction)
+            _validate_register_target(self.session, "role", name, regs)
         if warps != list(range(warps[0], warps[-1] + 1)):
             raise ValueError(
                 f"role {name!r} warps={warps} are not contiguous; a role is one "
@@ -256,29 +234,29 @@ class Specialize:
                 raise ValueError(
                     f"role {name!r} and role {other.name!r} both claim warp(s) {overlap}"
                 )
-        role = Role(self, name, warps, regs, direction, when, group, register_scope)
+        role = Role(self, name, warps, regs, when, group, register_scope)
         self.roles.append(role)
         return role
 
-    def warpgroup(self, name, warps, regs=None, direction=None):
+    def warpgroup(self, name, warps, regs=None):
         """Declare one aligned four-warp scope shared by narrower roles."""
         warps = sorted(set(warps)) if not isinstance(warps, int) else [warps]
         if len(warps) != 4 or warps != list(range(warps[0], warps[0] + 4)):
             raise ValueError(f"warpgroup {name!r} must own four contiguous warps")
         if warps[0] % 4:
             raise ValueError(f"warpgroup {name!r} must start at a multiple of four")
-        _validate_register_target(self.session, "warpgroup", name, regs, direction)
+        _validate_register_target(self.session, "warpgroup", name, regs)
         for other in self.groups:
             overlap = sorted(set(warps) & set(other.warps))
             if overlap:
                 raise ValueError(
                     f"warpgroup {name!r} and {other.name!r} both claim warp(s) {overlap}"
                 )
-        group = WarpGroup(self, name, warps, regs, direction)
+        group = WarpGroup(self, name, warps, regs)
         self.groups.append(group)
         return group
 
-    def register_scope(self, name, warps, regs, direction=None):
+    def register_scope(self, name, warps, regs):
         """Declare a register transition without owning functional dispatch.
 
         The caller emits the scope at the original temporal point and under
@@ -294,10 +272,10 @@ class Specialize:
             raise ValueError(
                 f"register scope {name!r} must own a warpgroup-aligned multiple of four warps"
             )
-        _validate_register_target(self.session, "register scope", name, regs, direction)
+        _validate_register_target(self.session, "register scope", name, regs)
         if regs is None:
             raise ValueError(f"register scope {name!r} requires regs")
-        scope = RegisterScope(self, name, warps, regs, direction)
+        scope = RegisterScope(self, name, warps, regs)
         self.register_scopes.append(scope)
         return scope
 
@@ -451,17 +429,22 @@ class Specialize:
                     register_targets[warp] = scope.regs
                     register_owners[warp] = scope
 
-            budget = sum(register_targets) * 32
-            # A CTA's share of the file is the whole file only at one block per
-            # SM. Promising m resident CTAs divides it by m.
-            blocks = self.session.blocks_per_sm
-            ceiling = _entry.REGS_PER_CTA // blocks
-            if budget > ceiling:
-                per_sm = "" if blocks == 1 else f" ({_entry.REGS_PER_CTA} // {blocks} blocks/SM)"
-                raise ValueError(
-                    f"{state_name} budget {budget} exceeds the {ceiling} available "
-                    f"to one CTA{per_sm}; regs*32*warps must fit"
+            if any(scope.regs is not None for scope in scopes):
+                budget = sum(register_targets) * 32
+                # The CTA pool follows the resident-warpgroup share rounded to
+                # setmaxnreg's 8-register granularity. Do not apply the
+                # separate 255-register entry-usage cap: setmaxnreg may claim
+                # the legal 256-register ownership target from this pool.
+                ceiling = _entry.cta_register_pool(total, self.session.min_blocks_per_sm)
+                available = (
+                    f"{ceiling}-register CTA pool "
+                    f"at min_blocks_per_sm={self.session.min_blocks_per_sm}"
                 )
+                if budget > ceiling:
+                    raise ValueError(
+                        f"{state_name} budget {budget} exceeds the {available}; "
+                        "regs*32*warps must fit"
+                    )
 
             # setmaxnreg is warpgroup-collective: every warp of a warpgroup
             # reaches the same instruction with the same operand.

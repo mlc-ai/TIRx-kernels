@@ -43,6 +43,28 @@ def test_local_scalar_accepts_explicit_trace_name():
     assert seen == ["counter"]
 
 
+def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
+    class Scanner(StmtExprVisitor):
+        def __init__(self):
+            super().__init__()
+            self.ptx_calls = []
+
+        def visit_call_(self, op):
+            name = getattr(op.op, "name", "")
+            if name.startswith("tirx.ptx."):
+                self.ptx_calls.append(name)
+            super().visit_call_(op)
+
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr("float32")):
+        result = K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0))
+        K.ptx.st.global_.f32(out.ptr_to([0]), result)
+
+    scanner = Scanner()
+    scanner(probe.func.body)
+    assert scanner.ptx_calls == ["tirx.ptx.tanh", "tirx.ptx.fma", "tirx.ptx.st"]
+
+
 def test_stack_alloca_is_bound_exactly_once():
     class Scanner(StmtExprVisitor):
         def __init__(self):
@@ -116,6 +138,26 @@ def test_kernel_build_runs_low_level_ir_check_by_default():
     build(check_ir=False)  # explicit opt-out still traces
 
 
+def test_specialize_register_targets_require_min_blocks_per_sm():
+    import pytest
+
+    with pytest.raises(ValueError, match=r"setmaxnreg requires K\.kernel"):
+
+        @K.kernel(warps=4, arch="sm_100a", grid=False)
+        def probe():
+            sp = K.specialize()
+            compute = sp.role("compute", range(4), regs=64)
+            with compute:
+                pass
+
+    @K.kernel(warps=4, arch="sm_100a", grid=False)
+    def unpinned_partition_without_register_targets():
+        sp = K.specialize()
+        compute = sp.role("compute", range(4))
+        with compute:
+            pass
+
+
 def test_unsupported_tmem_buffer_scope_is_rejected():
     import pytest
 
@@ -150,6 +192,63 @@ def test_thread_layout_is_not_a_kernel_entry_option():
 
     with pytest.raises(TypeError):
         K.thread_id([32])
+
+
+def test_entry_usage_cap_does_not_shrink_cta_register_pool():
+    from tirx_kernels.kern.entry import cta_register_pool, entry_regs
+
+    class Scanner(StmtExprVisitor):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def visit_call_(self, op):
+            if getattr(op.op, "name", "") == "tirx.ptx.setmaxnreg":
+                self.calls.append((int(op.args[0]), op.args[1].value))
+            super().visit_call_(op)
+
+    assert entry_regs(warps=4, min_blocks_per_sm=2) == 255
+    assert cta_register_pool(warps=4, min_blocks_per_sm=2) == 32768
+
+    @K.kernel(warps=4, arch="sm_100a", min_blocks_per_sm=2, grid=False)
+    def probe(out: K.gptr(K.f32)):
+        sp = K.specialize()
+        compute = sp.role("compute", range(4), regs=256)
+        with compute:
+            K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+
+    scanner = Scanner()
+    scanner(probe.func.body)
+    assert scanner.calls == [(256, "inc")]
+
+
+def test_specialize_uses_rounded_cta_register_pool_as_ceiling():
+    import pytest
+
+    def build(aux_regs):
+        @K.kernel(warps=20, arch="sm_100a", min_blocks_per_sm=1, grid=False)
+        def probe(out: K.gptr(K.f32)):
+            sp = K.specialize()
+            producer = sp.role("producer", range(0, 8), regs=104)
+            consumer0 = sp.role("consumer0", range(8, 12), regs=120)
+            consumer1 = sp.role("consumer1", range(12, 16), regs=112)
+            auxiliary = sp.role("auxiliary", range(16, 20), regs=aux_regs)
+            with producer:
+                K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(0))
+            with consumer0:
+                pass
+            with consumer1:
+                pass
+            with auxiliary:
+                pass
+
+        return probe
+
+    build(40)  # 61,440 registers: exactly the rounded CTA pool.
+    with pytest.raises(
+        ValueError, match=r"budget 65536 exceeds the 61440-register CTA pool at min_blocks_per_sm=1"
+    ):
+        build(72)  # 65,536 fits the file, but not its rounded warpgroup shares.
 
 
 def test_gptr_shape_reuses_entry_scalar_parameters():

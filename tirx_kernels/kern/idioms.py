@@ -21,6 +21,12 @@ chains, f16x2 packing, division by a constant — and live as closures in the on
 kernel that uses them, with their evidence in the comment beside them. What
 survived is the short list above.
 
+The one value-level operation here, :func:`sigmoid_tanh_approx_f32`, earns its
+place by naming an explicit **approximate numerical contract** and
+materialization boundary, not by renaming ``tanh``. Its result is deliberately
+written before it is returned so a caller's scale cannot reassociate through
+the sigmoid and silently select a different instruction schedule.
+
 The one shape that turned out to need neither a wrapper nor a doc note is
 ``cp.async``: its three spellings differ in what a *skipped* lane's destination
 holds, so instead of a wrapper the ``K.ptx`` proxy makes the distinguishing
@@ -677,7 +683,7 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
     # caller-spelled disjunction cannot be detected here and would double the
     # condition. A Python bool keeps the int() constant path byte-for-byte; a
     # traced expression rides the operand as-is (T.ptx.pred takes either).
-    acc0 = int(accumulate) if isinstance(accumulate, (bool, int)) else accumulate
+    acc0 = int(accumulate) if isinstance(accumulate, bool | int) else accumulate
 
     def _emit(issue_pred):
         for kp in range(n_k):
@@ -706,6 +712,42 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
             _emit(None)
     else:
         _emit(pred)
+
+
+# ---------------------------------------------------------------------------
+# approximate sigmoid
+# ---------------------------------------------------------------------------
+
+
+def sigmoid_tanh_approx_f32(value):
+    """Return materialized ``0.5 * tanh.approx(value * 0.5) + 0.5`` in f32.
+
+    Expansion -- two explicit DPS PTX calls and two local f32 values; the
+    input half-scale remains an ordinary f32 expression::
+
+        tanh_value = K.local_scalar("float32")
+        result = K.local_scalar("float32")
+        K.ptx.tanh.approx.f32(tanh_value, value * 0.5)
+        K.ptx.fma.rn.f32(result, tanh_value, 0.5, 0.5)
+
+    This is an opt-in approximation, not an implementation of an exact math
+    ``sigmoid``. The name exposes both the tanh realization and its f32
+    precision so a call site states the numerical contract it accepts.
+
+    Why this form
+    -------------
+    KDA forward v39 replaced ``ex2.approx`` + ``rcp.approx`` with this identity:
+    pass 1 fell from about 0.72 us to 0.41 us and paired official runs retained
+    a small end-to-end win on B200. The result is materialized on purpose. A
+    later form that folded a caller-provided scale through the sigmoid removed
+    instructions but lost 0.56% in a controlled A-B-A run, so scaling remains
+    at the call site after this function returns.
+    """
+    tanh_value = T.alloc_local([1], "float32")
+    result = T.alloc_local([1], "float32")
+    T.evaluate(T.ptx.tanh.approx.f32(tanh_value[0], value * T.float32(0.5)))
+    T.evaluate(T.ptx.fma.rn.f32(result[0], tanh_value[0], T.float32(0.5), T.float32(0.5)))
+    return result[0]
 
 
 # ---------------------------------------------------------------------------
@@ -835,4 +877,10 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
             _I.buffer_store(vals, vals[i] + carry[0], [i])
 
 
-__all__ = ["cast_f16x2_to_f32x2", "decode_instr_descriptor", "mma_chain", "warp_scan_add"]
+__all__ = [
+    "cast_f16x2_to_f32x2",
+    "decode_instr_descriptor",
+    "mma_chain",
+    "sigmoid_tanh_approx_f32",
+    "warp_scan_add",
+]

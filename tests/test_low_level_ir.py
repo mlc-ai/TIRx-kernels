@@ -40,6 +40,26 @@ def test_only_exact_kernel_local_helpers_are_exempt():
         )
 
 
+def test_setmaxnreg_requires_pinned_entry_allocation():
+    def build(min_blocks_per_sm):
+        @K.kernel(
+            warps=4, arch="sm_100a", min_blocks_per_sm=min_blocks_per_sm, grid=False, check_ir=False
+        )
+        def probe():
+            K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(64))
+
+        return probe.func
+
+    with pytest.raises(LowLevelIRContractError) as error:
+        check_low_level_ir(build(None))
+    assert [finding.kind for finding in error.value.report.violations] == [
+        "setmaxnreg_without_min_blocks_per_sm"
+    ]
+    assert "setmaxnreg_without_min_blocks_per_sm" in str(error.value)
+
+    assert check_low_level_ir(build(1)).ok
+
+
 def test_correctness_runner_does_not_rebuild_an_already_checked_kernel():
     class KernelModule:
         @staticmethod

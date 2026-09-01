@@ -649,12 +649,8 @@ def _make_device_kernel():
         sp.role("idle", warps=[10], regs=None)
         tma_scheduler_role = sp.role("tma_scheduler", warps=[11], regs=None)
         consumer = sp.role("consumer", warps=[0, 1, 2, 3, 4, 5, 6, 7], regs=None)
-        producer_regs = sp.register_scope(
-            "producer_regs", warps=range(8, 12), regs=56, direction="dec"
-        )
-        consumer_regs = sp.register_scope(
-            "consumer_regs", warps=range(8), regs=224, direction="inc"
-        )
+        producer_regs = sp.register_scope("producer_regs", warps=range(8, 12), regs=56)
+        consumer_regs = sp.register_scope("consumer_regs", warps=range(8), regs=224)
 
         def fetch_next():
             with tma_scheduler_role:
@@ -982,7 +978,7 @@ def _make_device_kernel():
                 )
 
     return Kern.kernel(
-        warps=12, arch="sm_100a", min_blocks_per_sm=None, grid=SM_NUMBER, host_prelude=_host_prelude
+        warps=12, arch="sm_100a", min_blocks_per_sm=1, grid=SM_NUMBER, host_prelude=_host_prelude
     )(test_mma_ss_tma_2sm_persistent)
 
 

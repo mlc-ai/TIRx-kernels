@@ -447,10 +447,8 @@ def get_kernel(**kwargs: Any):
     TCGEN05_CP = "tcgen05.cp.cta_group::1.32x128b.warpx4"
     TCGEN05_MMA = "tcgen05.mma.cta_group::1.kind::mxf4.block_scale.scale_vec::2X"
     TCGEN05_LD_X32 = "tcgen05.ld.sync.aligned.32x32b.x32.b32"
-    # `__launch_bounds__(kNumThreads, 1)`: without .minnctapersm ptxas ignores
-    # the setmaxnreg 56/224 budget (C7508); bf16 runs faster without it. The
-    # original attaches this attribute for float32 only (orig:L552-555).
-    min_blocks = 1 if config.logits_dtype == "float32" else None
+    # setmaxnreg requires the entry allocation fixed by .minnctapersm.
+    min_blocks = 1
 
     @K.kernel(warps=num_warps, arch="sm_100a", min_blocks_per_sm=min_blocks, grid=config.num_sms)
     def sm100_fp4_mqa_logits(
@@ -621,17 +619,12 @@ def get_kernel(**kwargs: Any):
 
         # ---------------- roles ----------------------------------------
         #
-        # The entry is deliberately unpinned, so each role states the original
-        # setmaxnreg direction explicitly instead of fabricating an entry
-        # allocation from a launch bound the kernel does not have.
         sp = K.specialize()
-        producer_regs = {"regs": 56} if min_blocks is not None else {"regs": 56, "direction": "dec"}
-        math_regs = {"regs": 224} if min_blocks is not None else {"regs": 224, "direction": "inc"}
-        q_tma = sp.role("q_tma", warps=[spec_warp_start], **producer_regs)
-        kv_tma = sp.role("kv_tma", warps=[spec_warp_start + 1], **producer_regs)
-        mma = sp.role("mma", warps=[spec_warp_start + 2], **producer_regs)
-        sf_transpose = sp.role("sf_transpose", warps=[spec_warp_start + 3], **producer_regs)
-        math = sp.role("math", warps=list(range(spec_warp_start)), **math_regs)
+        q_tma = sp.role("q_tma", warps=[spec_warp_start], regs=56)
+        kv_tma = sp.role("kv_tma", warps=[spec_warp_start + 1], regs=56)
+        mma = sp.role("mma", warps=[spec_warp_start + 2], regs=56)
+        sf_transpose = sp.role("sf_transpose", warps=[spec_warp_start + 3], regs=56)
+        math = sp.role("math", warps=list(range(spec_warp_start)), regs=224)
 
         # ---------------- warp 8: Q + SFQ + weights ---------------------
         with q_tma:
