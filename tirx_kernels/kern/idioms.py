@@ -719,7 +719,7 @@ def mma_chain(mma, d, *, a, b, idesc, pred, accumulate, guard, dol=None, k_range
 # ---------------------------------------------------------------------------
 
 
-def sigmoid_tanh_approx_f32(value):
+def sigmoid_tanh_approx_f32(value=None, *, tanh_input=None):
     """Return materialized ``0.5 * tanh.approx(value * 0.5) + 0.5`` in f32.
 
     Expansion -- two explicit DPS PTX calls and two local f32 values; the
@@ -729,6 +729,11 @@ def sigmoid_tanh_approx_f32(value):
         result = K.local_scalar("float32")
         K.ptx.tanh.approx.f32(tanh_value, value * 0.5)
         K.ptx.fma.rn.f32(result, tanh_value, 0.5, 0.5)
+
+    Pass ``tanh_input=`` instead of ``value`` when the caller already has the
+    ``value * 0.5`` operand consumed by ``tanh.approx``. This preserves
+    schedules that precompute a shared scale so each sigmoid input remains one
+    FMA; exactly one input is required.
 
     This is an opt-in approximation, not an implementation of an exact math
     ``sigmoid``. The name exposes both the tanh realization and its f32
@@ -743,9 +748,13 @@ def sigmoid_tanh_approx_f32(value):
     instructions but lost 0.56% in a controlled A-B-A run, so scaling remains
     at the call site after this function returns.
     """
+    if (value is None) == (tanh_input is None):
+        raise ValueError("pass exactly one of value or tanh_input")
+    if tanh_input is None:
+        tanh_input = value * T.float32(0.5)
     tanh_value = T.alloc_local([1], "float32")
     result = T.alloc_local([1], "float32")
-    T.evaluate(T.ptx.tanh.approx.f32(tanh_value[0], value * T.float32(0.5)))
+    T.evaluate(T.ptx.tanh.approx.f32(tanh_value[0], tanh_input))
     T.evaluate(T.ptx.fma.rn.f32(result[0], tanh_value[0], T.float32(0.5), T.float32(0.5)))
     return result[0]
 
