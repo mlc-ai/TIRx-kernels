@@ -11,7 +11,7 @@ traffic is a device-scope atomic, a warp broadcast and a CTA barrier. Each
 helper below is one PTX instruction of the family the source export uses.
 
 Both scopes go through ``K.ptx.*`` on ``ptr_to`` rather than a native
-``BufferLoad``/``BufferStore``: the repository's low-level IR contract
+``TensorLoad``/``BufferStore``: the repository's low-level IR contract
 (:mod:`tirx_kernels.kern.low_level_ir`) rejects the native form for ``global`` and
 ``shared`` alike.
 

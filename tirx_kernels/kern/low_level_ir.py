@@ -142,18 +142,12 @@ class _LowLevelIRVisitor(StmtExprVisitor):
             self.has_min_blocks_per_sm = True
         super().visit_attr_(op)
 
-    def visit_buffer_load_(self, op: tirx.BufferLoad) -> None:
-        scope = str(op.buffer.scope())
+    def visit_buffer_load_(self, op: tvm.ir.TensorLoad) -> None:
+        scope = str(op.source.scope())
         if _is_forbidden_scope(scope):
             self.violations.append(self._finding(op, "buffer_load", scope))
-        # The fixed TIRx visitor only walks BufferLoad.indices.  A predicated
-        # load can itself contain loads, and those are real accesses even when
-        # the outer load is in an allowed scope.
         for index in op.indices:
             self.visit_expr(index)
-        predicate = getattr(op, "predicate", None)
-        if predicate is not None:
-            self.visit_expr(predicate)
 
     def visit_buffer_store_(self, op: tirx.BufferStore) -> None:
         scope = str(op.buffer.scope())
@@ -162,9 +156,6 @@ class _LowLevelIRVisitor(StmtExprVisitor):
         self.visit_expr(op.value)
         for index in op.indices:
             self.visit_expr(index)
-        predicate = getattr(op, "predicate", None)
-        if predicate is not None:
-            self.visit_expr(predicate)
 
     def visit_call_(self, op: tvm.ir.Call) -> None:
         op_name = getattr(op.op, "name", None)
@@ -178,20 +169,17 @@ class _LowLevelIRVisitor(StmtExprVisitor):
                 self.violations.append(finding)
         if op_name == _ADDRESS_OF_OP and len(op.args) == 1:
             addressed = op.args[0]
-            if isinstance(addressed, tirx.BufferLoad):
-                scope = str(addressed.buffer.scope())
+            if isinstance(addressed, tvm.ir.TensorLoad):
+                scope = str(addressed.source.scope())
                 if _is_forbidden_scope(scope):
                     self.address_only_loads.append(
                         self._finding(addressed, "address_only_buffer_load", scope)
                     )
-                # The BufferLoad is pointer syntax rather than a memory read.  Its
+                # The TensorLoad is pointer syntax rather than a memory read.  Its
                 # indices are still expressions, and any loads inside them remain
                 # real accesses that must be checked normally.
                 for index in addressed.indices:
                     self.visit_expr(index)
-                predicate = getattr(addressed, "predicate", None)
-                if predicate is not None:
-                    self.visit_expr(predicate)
                 return
         super().visit_call_(op)
 
