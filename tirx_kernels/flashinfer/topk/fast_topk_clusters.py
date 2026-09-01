@@ -147,7 +147,7 @@ def clusters_for(batch_size: int, seq_len: int) -> int:
     return 1
 
 
-# Global memory goes through raw PTX, never BufferLoad/BufferStore: the repo's
+# Global memory goes through raw PTX, never TensorLoad/BufferStore: the repo's
 # low-level IR contract rejects the latter outright (db entry
 # `express-low-level-memory-access-through-raw-ptx`).
 def _ld_nc32(buf, index):

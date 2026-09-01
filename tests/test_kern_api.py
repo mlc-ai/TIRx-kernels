@@ -36,7 +36,7 @@ def test_local_scalar_accepts_explicit_trace_name():
 
     def build(out):
         counter = K.local_scalar("int32", init=K.int32(3), name="counter")
-        seen.append(counter.buffer.name)
+        seen.append(counter.source.name)
         K.ptx.st.global_.b32(out.ptr_to([0]), counter)
 
     _tir(build)

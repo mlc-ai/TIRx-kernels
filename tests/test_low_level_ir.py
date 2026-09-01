@@ -8,12 +8,62 @@ from tirx_kernels.kern.low_level_ir import LowLevelIRContractError, check_low_le
 from tirx_kernels.runner import run_kernel_test
 
 
+def _build_kernel_with_buffer_access(scope: str, access: str):
+    @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=True)
+    def probe(global_buffer: K.gptr("float32")):
+        buffer = (
+            global_buffer if scope == "global" else K.alloc_buffer([1], "float32", scope="shared")
+        )
+        if access == "load":
+            local = K.alloc_local([1], "float32")
+            K.buffer_store(local, buffer[0], [0])
+        elif access == "store":
+            K.buffer_store(buffer, K.float32(1), [0])
+        else:
+            K.keep_alive(K.address_of(buffer[0]))
+
+    return probe
+
+
 def _kernel_with_func_call(callee: str):
     @K.kernel(warps=1, arch="sm_100a", grid=False, check_ir=False)
     def main():
         K.cuda.func_call(callee, source_code="__device__ void ignored() {}")
 
     return main.func
+
+
+@pytest.mark.parametrize("scope", ["global", "shared"])
+def test_forbidden_tensor_load_is_reported(scope):
+    with pytest.raises(LowLevelIRContractError) as error:
+        _build_kernel_with_buffer_access(scope, "load")
+
+    assert [
+        (finding.kind, finding.node_type, finding.scope)
+        for finding in error.value.report.violations
+    ] == [("buffer_load", "TensorLoad", scope)]
+
+
+@pytest.mark.parametrize("scope", ["global", "shared"])
+def test_forbidden_buffer_store_is_reported(scope):
+    with pytest.raises(LowLevelIRContractError) as error:
+        _build_kernel_with_buffer_access(scope, "store")
+
+    assert [
+        (finding.kind, finding.node_type, finding.scope)
+        for finding in error.value.report.violations
+    ] == [("buffer_store", "BufferStore", scope)]
+
+
+@pytest.mark.parametrize("scope", ["global", "shared"])
+def test_address_of_tensor_load_is_not_a_memory_read(scope):
+    kernel = _build_kernel_with_buffer_access(scope, "address")
+    report = check_low_level_ir(kernel.func)
+
+    assert report.ok
+    assert [
+        (finding.kind, finding.node_type, finding.scope) for finding in report.address_only_loads
+    ] == [("address_only_buffer_load", "TensorLoad", scope)]
 
 
 def test_func_call_is_rejected_by_default_and_reports_callee():

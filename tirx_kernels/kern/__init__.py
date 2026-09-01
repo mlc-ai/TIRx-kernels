@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import tvm
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode
+from tvm.ir.expr import _realize_operand
 from tvm.script import tirx as _T
 from tvm.script.ir_builder import IRBuilder
 from tvm.tirx.script.builder import ir as _I
@@ -362,11 +363,11 @@ def local_scalar(dtype="float32", init=None, *, name=None):
     assignment target; tracing cannot recover that name on its own.
     """
     if name is None:
-        element = alloc_local([1], dtype)[0]
+        element = _realize_operand(alloc_local([1], dtype)[0])
     else:
         buffer = tvm.tirx.decl_buffer([1], dtype, name=name, scope="local")
         _I.add_to_parent(tvm.tirx.AllocBuffer(buffer))
-        element = buffer[0]
+        element = _realize_operand(buffer[0])
     if init is not None:
         assign(element, init)
     return element
@@ -384,11 +385,12 @@ def stack_alloca(kind, size=1):
 
 def assign(dst, value):
     """Store into one writable scalar element of a local register tensor."""
-    if not isinstance(dst, tvm.tirx.BufferLoad):
+    dst = _realize_operand(dst)
+    if not isinstance(dst, tvm.ir.TensorLoad):
         raise TypeError(f"K.assign destination must be a writable scalar, got {type(dst).__name__}")
-    if dst.buffer.scope() != "local":
+    if not isinstance(dst.source, tvm.tirx.Buffer) or dst.source.scope() != "local":
         raise TypeError("K.assign destination must be a local scalar element")
-    return _I.buffer_store(dst.buffer, value, list(dst.indices))
+    return _I.buffer_store(dst.source, value, list(dst.indices))
 
 
 # ---------------------------------------------------------------------------

@@ -689,7 +689,7 @@ def make_kernel(
                             K.ptx["tcgen05.fence::after_thread_sync"]()
                             cp_desc = K.local_scalar("uint64")
                             K.cuda.tcgen05.encode_matrix_descriptor(
-                                cp_desc.buffer.data,
+                                cp_desc.source.data,
                                 K.reinterpret(K.handle().ty, K.uint64(0)),
                                 1,
                                 64,
