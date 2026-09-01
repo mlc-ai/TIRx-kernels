@@ -61,8 +61,10 @@ def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
     @K.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: K.gptr("float32")):
         value_result = K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0))
-        half_result = K.idioms.sigmoid_tanh_approx_f32(half_input=K.float32(0.25))
-        K.ptx.st.global_.f32(out.ptr_to([0]), value_result + half_result)
+        tanh_input_result = K.idioms.sigmoid_tanh_approx_f32(
+            tanh_input=K.float32(0.25)
+        )
+        K.ptx.st.global_.f32(out.ptr_to([0]), value_result + tanh_input_result)
 
     scanner = Scanner()
     scanner(probe.func.body)
@@ -80,7 +82,7 @@ def test_sigmoid_tanh_approx_f32_has_materialized_ptx_call_contract():
     with pytest.raises(ValueError, match="exactly one"):
         K.idioms.sigmoid_tanh_approx_f32()
     with pytest.raises(ValueError, match="exactly one"):
-        K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0), half_input=K.float32(0.5))
+        K.idioms.sigmoid_tanh_approx_f32(K.float32(1.0), tanh_input=K.float32(0.5))
 
 
 def test_mbarrier_arrive_forwards_count_and_predicate():

@@ -370,7 +370,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         wj = gw[2 * i] if j < 2 else gw[2 * i + 1]
                         gv = bf16_lo(wj) if j % 2 == 0 else bf16_hi(wj)
                         sg = K.idioms.sigmoid_tanh_approx_f32(
-                            half_input=gv * hea + biash[j]
+                            tanh_input=gv * hea + biash[j]
                         )
                         if i == 0:
                             K.assign(G[j], sg * K.float32(NEG5LOG2E))
