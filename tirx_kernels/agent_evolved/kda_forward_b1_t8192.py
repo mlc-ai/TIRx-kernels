@@ -2423,7 +2423,7 @@ CONFIGS = [
 KERNEL_META = {
     "name": "agent_evolved_kda_forward_b1_t8192",
     "category": "agent_evolved",
-    "runtime_cuda_archs": ["sm_100a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "reference_requirements": (
         {
             "package": "flash-linear-attention",
@@ -2592,13 +2592,15 @@ def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _assert_sm100() -> None:
+def _assert_supported_arch() -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for agent-evolved KDA forward")
     capability = torch.cuda.get_device_capability()
-    if capability != (10, 0):
+    runtime_arch = f"sm_{capability[0]}{capability[1]}a"
+    if runtime_arch not in KERNEL_META["runtime_cuda_archs"]:
         raise SkipTest(
-            f"agent-evolved KDA forward requires compute capability 10.0, got {capability}"
+            "agent-evolved KDA forward requires one of "
+            f"{KERNEL_META['runtime_cuda_archs']}, got {runtime_arch}"
         )
 
 
@@ -2668,7 +2670,7 @@ def check_correctness(outputs: dict[str, Any], **kwargs: Any) -> None:
 
 
 def run_test(**kwargs: Any) -> None:
-    _assert_sm100()
+    _assert_supported_arch()
     from tirx_kernels.runner import compile_kernel
 
     case = prepare_data(**kwargs)
@@ -2703,7 +2705,7 @@ def run_gpu(
     timer: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    _assert_sm100()
+    _assert_supported_arch()
     config = dict(prepared["config"])
     config.update(kwargs)
     rounds = config.pop("rounds", 5)
