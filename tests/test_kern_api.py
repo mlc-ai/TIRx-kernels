@@ -7,6 +7,7 @@
 # decoration time and need live annotation objects (PEP 563 breaks them).
 
 import tirx_kernels.kern as K
+import tvm
 from tvm.tirx.stmt_functor import StmtExprVisitor
 
 
@@ -101,6 +102,40 @@ def test_sigmoid_tanh_approx_f32_preserves_tanh_input():
 
     (tanh,) = _calls_named(probe.func, "tirx.ptx.tanh")
     assert float(tanh.args[1]) == 0.25
+
+
+def test_pipeline_cursor_derives_pipeline_state_without_mutable_locals():
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr("int32"), iteration: K.i32):
+        stage1, phase1 = K.idioms.pipeline_cursor(iteration, 1, phase=1)
+        stage4, phase4 = K.idioms.pipeline_cursor(iteration, 4)
+        K.ptx.st.global_.b32(out.ptr_to([0]), stage1)
+        K.ptx.st.global_.b32(out.ptr_to([1]), phase1)
+        K.ptx.st.global_.b32(out.ptr_to([2]), stage4)
+        K.ptx.st.global_.b32(out.ptr_to([3]), phase4)
+
+    stores = _calls_named(probe.func, "tirx.ptx.st")
+    iteration = probe.func.params[1]
+    expected = (
+        K.int32(0),
+        (iteration & K.int32(1)) ^ K.int32(1),
+        iteration & K.int32(3),
+        (iteration >> 2) & K.int32(1),
+    )
+    assert len(stores) == len(expected)
+    for store, value in zip(stores, expected, strict=True):
+        tvm.ir.assert_structural_equal(store.args[1], value)
+
+
+def test_pipeline_cursor_rejects_unmeasured_or_ambiguous_contracts():
+    import pytest
+
+    for depth in (0, -1, 3, True):
+        with pytest.raises(ValueError, match="depth"):
+            K.idioms.pipeline_cursor(K.int32(0), depth)
+    for phase in (-1, 2, False):
+        with pytest.raises(ValueError, match="phase"):
+            K.idioms.pipeline_cursor(K.int32(0), 2, phase=phase)
 
 
 def test_mbarrier_arrive_forwards_count_and_predicate():

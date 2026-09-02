@@ -13,7 +13,9 @@ instructions 1:1 without opening this file.
 to: a function belongs here only when the *structure* is what is hard — a walk
 derived from a tile's layout rather than from any value in a register
 (:func:`mma_chain`), a warp-collective whose placement relative to a guard is
-the difference between working and deadlocking (:func:`warp_scan_add`). A
+the difference between working and deadlocking (:func:`warp_scan_add`), or a
+pipeline cursor derived from an existing loop ordinal instead of independently
+materialized mutable state (:func:`pipeline_cursor`). A
 sequence that is merely *worth knowing how to spell* is not an idiom: that
 knowledge belongs in a doc note and the spelling belongs at the call site.
 Several functions were removed on exactly that test — packed-f32x2 multiply
@@ -803,6 +805,67 @@ def cast_f16x2_to_f32x2(dst, i, word):
 
 
 # ---------------------------------------------------------------------------
+# derived pipeline cursor
+# ---------------------------------------------------------------------------
+
+
+def pipeline_cursor(iteration, depth, *, phase=0):
+    """Derive a power-of-two pipeline's ``(stage, phase)`` from *iteration*.
+
+    ``iteration`` is a non-negative runtime loop ordinal. ``depth`` and the
+    initial ``phase`` are trace-time Python integers. The expansion is pure --
+    it allocates no locals and emits no statements::
+
+        stage = 0                         # depth == 1
+        stage = iteration & (depth - 1)  # depth > 1
+        epoch = (iteration >> log2(depth)) & 1
+        current_phase = epoch             # phase == 0
+        current_phase = epoch ^ 1         # phase == 1
+
+    This is exactly the state reached after ``iteration`` calls to
+    ``K.PipelineState(depth, phase).advance()``. Use it when one existing
+    ordinal already advances once for every use of the derived cursor. Keep an
+    owned ``PipelineState`` when a role can skip, repeat, drain, or otherwise
+    advance independently: sharing an ordinal in those cases changes barrier
+    semantics rather than merely changing representation.
+
+    Why this form
+    -------------
+    The 2026-09-01 KDA-forward evolution run first derived cg0's depth-1/2
+    barrier cursors from its existing chunk ordinal: the locked H96-mixed
+    latency fell 2.29% (0.317572 to 0.310293 ms), with IKET span 401.7 to
+    396.7 us and NCU duration 335.104 to 325.408 us. Selectively deriving
+    cg1's V1 and O phases then cut recurring local loads/stores by 25% and
+    reproduced a further 0.595-0.72% target gain. Reusing the same structure
+    for H64 uniform cut local operations from 407,552 to 216,064 and reproduced
+    a 0.603% locked target gain.
+
+    Deriving *every* cg1 cursor was the losing control: it more than doubled
+    local operations and regressed the target 3.27%, because additional values
+    became live inside the state-pass loop. The idiom therefore owns only the
+    cursor formula; the caller still chooses, from its schedule, which cursors
+    are provably lockstep and profitable to derive.
+
+    Only power-of-two depths are accepted. The winning cases used that family,
+    which lowers to shifts/masks; accepting arbitrary depths would silently
+    replace a cheap mutable cursor with division/remainder work that this
+    evidence does not justify. Use ``PipelineState`` for other depths.
+    """
+    if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
+        raise ValueError(f"depth must be a positive Python int, got {depth!r}")
+    if depth & (depth - 1):
+        raise ValueError(
+            f"depth must be a power of two, got {depth}; use PipelineState for other depths"
+        )
+    if isinstance(phase, bool) or not isinstance(phase, int) or phase not in (0, 1):
+        raise ValueError(f"phase must be the Python int 0 or 1, got {phase!r}")
+
+    stage = T.int32(0) if depth == 1 else iteration & T.int32(depth - 1)
+    epoch = (iteration >> (depth.bit_length() - 1)) & T.int32(1)
+    return stage, epoch if phase == 0 else epoch ^ T.int32(1)
+
+
+# ---------------------------------------------------------------------------
 # warp scan
 # ---------------------------------------------------------------------------
 
@@ -890,6 +953,7 @@ __all__ = [
     "cast_f16x2_to_f32x2",
     "decode_instr_descriptor",
     "mma_chain",
+    "pipeline_cursor",
     "sigmoid_tanh_approx_f32",
     "warp_scan_add",
 ]
