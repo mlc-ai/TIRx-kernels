@@ -4128,14 +4128,17 @@ def get_kernel(**kwargs: Any) -> dict[str, Any]:
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Allocate a deterministic CP chain and all persistent workspaces."""
+    from tirx_kernels.target import supports_sm100_kernel
+
     cfg = _cfg(**kwargs)
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for GDN CP prefill SM100")
     capability = torch.cuda.get_device_capability(device)
-    if capability not in {(10, 0), (10, 3), (10, 7)}:
+    if not supports_sm100_kernel(capability):
         raise SkipTest(
-            f"GDN CP prefill requires compute capability 10.0, 10.3, or 10.7, got {capability}"
+            "GDN CP prefill requires SM100, SM103, SM107, or explicitly prepared Thor, "
+            f"got {capability}"
         )
 
     spec = _specialization(cfg, device)

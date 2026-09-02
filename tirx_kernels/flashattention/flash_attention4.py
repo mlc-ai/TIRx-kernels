@@ -1662,6 +1662,8 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
         args.head_dim,
         is_causal=args.causal,
     )
+    from tirx_kernels.runner import cuda_target
+
     executable = IketProfiler().compile(
         tvm.IRModule({"main": func}), target=cuda_target(), tir_pipeline="tirx"
     )

@@ -270,7 +270,9 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
     if args.repeat <= 0:
         raise ValueError("--repeat must be positive")
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    from tirx_kernels.runner import cuda_target
+
+    target = cuda_target(arch="sm_100a")
     launches = []
     for _name, config in _iket_configs(args):
         executable = iket.IketProfiler().compile(

@@ -28,11 +28,12 @@ from types import ModuleType
 from typing import Any, Protocol, runtime_checkable
 
 import tvm
+from tirx_kernels.target import PREPARE_CUDA_ARCH_ENV as PREPARE_CUDA_ARCH_ENV
+from tirx_kernels.target import prepare_cuda_arch
 
 DEFAULT_BENCH_ROUNDS = 5
 DEFAULT_BENCH_COOLDOWN_S = 0.0
 PREPARE_NUM_SMS_ENV = "TIRX_PREPARE_NUM_SMS"
-PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
 TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
 TVM_COMPILE_FORCE_FALLBACK_ENV = "TVM_COMPILE_FORCE_FALLBACK"
 TVM_CUDA_COMPILE_MODE_ENV = "TVM_CUDA_COMPILE_MODE"
@@ -334,10 +335,8 @@ def hardware_num_sms(default: int = 148) -> int:
 
 def cuda_target(*, arch: str | None = None) -> tvm.target.Target:
     """Construct CUDA target metadata without querying a late-bound device."""
-    configured = arch or os.environ.get(PREPARE_CUDA_ARCH_ENV)
+    configured = prepare_cuda_arch(arch)
     if configured is not None:
-        if not configured.startswith("sm_"):
-            raise ValueError(f"{PREPARE_CUDA_ARCH_ENV} must start with 'sm_', got {configured!r}")
         return tvm.target.Target({"kind": "cuda", "arch": configured})
     return tvm.target.Target("cuda")
 

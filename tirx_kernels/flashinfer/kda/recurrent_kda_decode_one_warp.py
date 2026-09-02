@@ -780,13 +780,15 @@ def get_kernel(**kwargs: Any):
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Build one deterministic case with independent TIRx / reference state."""
+    from tirx_kernels.target import supports_sm100_kernel
+
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for recurrent-KDA one-warp decode")
     capability = torch.cuda.get_device_capability(device)
-    if capability[0] != 10:
+    if not supports_sm100_kernel(capability):
         raise SkipTest(
-            f"recurrent-KDA one-warp decode targets compute capability 10.x, got {capability}"
+            f"recurrent-KDA one-warp decode requires SM100 or prepared Thor, got {capability}"
         )
 
     spec = _specialization(kwargs)

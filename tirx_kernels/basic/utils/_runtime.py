@@ -128,6 +128,8 @@ class PreparedDistributedBench:
 def require_sm100(device_indices: Sequence[int]) -> None:
     """Reject unsupported hosts before compiling or spawning workers."""
 
+    from tirx_kernels.target import supports_sm100_kernel
+
     indices = tuple(int(index) for index in device_indices)
     if not indices or len(set(indices)) != len(indices):
         raise ValueError("device_indices must be a non-empty set of physical ordinals")
@@ -135,9 +137,11 @@ def require_sm100(device_indices: Sequence[int]) -> None:
     if any(device_id < 0 or device_id >= device_count for device_id in indices):
         raise SkipTest(f"assigned CUDA devices {indices} are outside visible count {device_count}")
     for device_id in indices:
-        major, _minor = torch.cuda.get_device_capability(device_id)
-        if major != 10:
-            raise SkipTest(f"device {device_id} has compute capability {major}, expected SM100")
+        capability = torch.cuda.get_device_capability(device_id)
+        if not supports_sm100_kernel(capability):
+            raise SkipTest(
+                f"device {device_id} has compute capability {capability}, expected SM100 or prepared Thor"
+            )
 
 
 def symmetric_empty(runtime: DistributedRuntime, shape: Sequence[int], dtype: str):

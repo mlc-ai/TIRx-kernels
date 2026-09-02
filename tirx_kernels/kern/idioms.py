@@ -803,6 +803,77 @@ def cast_f16x2_to_f32x2(dst, i, word):
 
 
 # ---------------------------------------------------------------------------
+# low-precision conversion compatibility
+# ---------------------------------------------------------------------------
+
+
+def cvt_e4m3x2_to_bf16x2(dst, value):
+    """Convert two packed E4M3 values to a packed BF16 pair.
+
+    SM100a accepts the direct ``cvt.rn.bf16x2.e4m3x2`` spelling, while CUDA
+    13.1 rejects that type pair for ``sm_110a``.  The fallback widens through
+    f16 and f32 before repacking BF16.  E4M3 values are exactly representable
+    in both intermediate formats, so the sequence preserves the native
+    conversion's result.
+    """
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch("sm_100a") == "sm_100a":
+        T.evaluate(T.ptx.cvt.rn.bf16x2.e4m3x2(dst, value))
+        return
+
+    f16_pair = T.alloc_local([1], "uint32")
+    halves = T.alloc_local([2], "uint16")
+    lo = T.alloc_local([1], "float32")
+    hi = T.alloc_local([1], "float32")
+    T.evaluate(T.ptx.cvt.rn.f16x2.e4m3x2(f16_pair[0], value))
+    T.evaluate(T.ptx.mov.b32(halves[0], halves[1], f16_pair[0]))
+    T.evaluate(T.ptx.cvt.f32.f16(lo[0], halves[0]))
+    T.evaluate(T.ptx.cvt.f32.f16(hi[0], halves[1]))
+    T.evaluate(T.ptx.cvt.rn.bf16x2.f32(dst, hi[0], lo[0]))
+
+
+# ---------------------------------------------------------------------------
+# warp reduction
+# ---------------------------------------------------------------------------
+
+
+def warp_reduce_max_nan_f32(dst, value, membermask=FULL_MASK):
+    """Reduce one f32 maximum across a warp while propagating NaNs.
+
+    SM100a has a native ``redux.sync.max.NaN.f32`` instruction.  That spelling
+    is architecture-certified rather than forward-compatible: CUDA 13.1
+    rejects it for Thor's ``sm_110a`` target.  Preserve the one-instruction
+    SM100a path and expand every other explicitly prepared target to five
+    ``shfl.sync.bfly.b32`` + ``max.NaN.f32`` pairs.
+
+    ``dst`` is destination-passing so each collective remains pinned to this
+    convergent call site.  The expansion assumes a full 32-lane warp, matching
+    the native instruction and all current callers.
+    """
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch("sm_100a") == "sm_100a":
+        T.evaluate(T.ptx.redux_sync.max.NaN.f32(dst, value, T.uint32(membermask)))
+        return
+
+    peer = T.alloc_local([1], "uint32")
+    running = value
+    for delta in (16, 8, 4, 2, 1):
+        T.evaluate(
+            T.ptx.shfl_sync.bfly.b32(
+                peer[0],
+                T.reinterpret("uint32", running),
+                T.uint32(delta),
+                T.uint32(31),
+                T.uint32(membermask),
+            )
+        )
+        T.evaluate(T.ptx.max.NaN.f32(dst, running, T.reinterpret("float32", peer[0])))
+        running = dst
+
+
+# ---------------------------------------------------------------------------
 # warp scan
 # ---------------------------------------------------------------------------
 
@@ -888,8 +959,10 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
 
 __all__ = [
     "cast_f16x2_to_f32x2",
+    "cvt_e4m3x2_to_bf16x2",
     "decode_instr_descriptor",
     "mma_chain",
     "sigmoid_tanh_approx_f32",
+    "warp_reduce_max_nan_f32",
     "warp_scan_add",
 ]

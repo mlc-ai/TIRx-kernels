@@ -819,8 +819,9 @@ def _compile_tirx_mqa_for_config(
     logits_stride_override: int | None,
 ) -> Any:
     import tvm
+    from tirx_kernels.runner import cuda_target
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
+    target = cuda_target(arch="sm_100f")
     kernel = get_kernel(
         seq_len=seq_len,
         seq_len_kv=seq_len_kv,

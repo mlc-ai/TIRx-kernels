@@ -1122,9 +1122,11 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for FlashKDA cake T=6 decode")
+    from tirx_kernels.target import supports_sm100_kernel
+
     capability = torch.cuda.get_device_capability(device)
-    if capability[0] != 10:
-        raise SkipTest(f"FlashKDA cake decode targets compute capability 10.x, got {capability}")
+    if not supports_sm100_kernel(capability):
+        raise SkipTest(f"FlashKDA cake decode requires SM100 or prepared Thor, got {capability}")
 
     spec = _specialization({**kwargs, "device": device})
     num_seqs = spec["NUM_SEQS"]

@@ -1410,8 +1410,9 @@ def _compile_tirx_paged_mqa_for_config(
     indices_pair_stride: int,
 ) -> Any:
     import tvm
+    from tirx_kernels.runner import cuda_target
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100f"})
+    target = cuda_target(arch="sm_100f")
     kernel = get_kernel(
         batch_size=batch_size,
         next_n=next_n,

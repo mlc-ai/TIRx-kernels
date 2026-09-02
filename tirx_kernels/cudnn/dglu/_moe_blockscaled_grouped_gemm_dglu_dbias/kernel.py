@@ -1949,9 +1949,7 @@ def _make_kernel(
                 for group in range(8):
                     for j in range(4):
                         K.ptx["abs.f32"](magnitude, fragment[4 * group + j])
-                        K.ptx["redux_sync.max.NaN.f32"](
-                            column_max[j], magnitude, K.uint32(0xFFFFFFFF)
-                        )
+                        K.idioms.warp_reduce_max_nan_f32(column_max[j], magnitude)
                     for j in range(0, 4, 2):
                         ops["product"](
                             (column_scale[j], column_scale[j + 1]),
@@ -2617,7 +2615,7 @@ def _make_kernel(
                     other_max = K.local_scalar("float32")
                     block_bits = K.local_scalar("int32")
                     for index, running in ((0, amax_gate), (1, amax_up)):
-                        K.ptx["redux_sync.max.NaN.f32"](warp_max, running, K.uint32(0xFFFFFFFF))
+                        K.idioms.warp_reduce_max_nan_f32(warp_max, running)
                         with K.If(epi_lane == K.int32(0)), K.Then():
                             K.ptx.st.shared.b32(
                                 smem.ptr_to([offsets["sAmax"] + epi_warp * K.int32(4)]), warp_max

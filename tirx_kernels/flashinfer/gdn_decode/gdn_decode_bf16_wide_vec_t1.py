@@ -769,14 +769,16 @@ def _make_qkv(
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Create deterministic independent mutable TIRx and FlashInfer cases."""
+    from tirx_kernels.target import supports_sm100_kernel
+
     config = dict(kwargs)
     _require_supported_config(config)
     device = config.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for BF16 wide-vector GDN decode")
     capability = torch.cuda.get_device_capability(device)
-    if capability[0] != 10:
-        raise SkipTest(f"BF16 wide-vector GDN decode requires SM100, got {capability}")
+    if not supports_sm100_kernel(capability):
+        raise SkipTest(f"BF16 wide-vector GDN decode requires SM100 or prepared Thor, got {capability}")
 
     batch = int(config["batch"])
     num_heads = int(config["num_heads"])

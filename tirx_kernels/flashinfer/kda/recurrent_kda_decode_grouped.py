@@ -826,13 +826,15 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
       ``[N, T]`` matrix ``base_rows * scratch_steps + arange(T)`` (``:293-296``),
       so its stride is the *allocated* step count, which may exceed ``T``.
     """
+    from tirx_kernels.target import supports_sm100_kernel
+
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for grouped recurrent-KDA decode")
     capability = torch.cuda.get_device_capability(device)
-    if capability[0] != 10:
+    if not supports_sm100_kernel(capability):
         raise SkipTest(
-            f"grouped recurrent-KDA decode targets compute capability 10.x, got {capability}"
+            f"grouped recurrent-KDA decode requires SM100 or prepared Thor, got {capability}"
         )
 
     spec = _specialization(kwargs)

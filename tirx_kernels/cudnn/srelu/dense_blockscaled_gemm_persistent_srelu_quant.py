@@ -2898,7 +2898,7 @@ def _make_kernel(
                     K.ptx.bar.sync(K.uint32(1), K.uint32(128))
                     K.assign(subtile, subtile + 1)
 
-                K.ptx.redux_sync.max.NaN.f32(warp_amax, tile_amax, K.uint32(0xFFFFFFFF))
+                K.idioms.warp_reduce_max_nan_f32(warp_amax, tile_amax)
                 with K.If(lane == 0):
                     with K.Then():
                         K.ptx.st.shared.b32(smem.ptr_to([amax_offset + warp * 4]), warp_amax)

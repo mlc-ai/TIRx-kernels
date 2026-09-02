@@ -15,6 +15,24 @@ class _Interrupted(BaseException):
     pass
 
 
+def test_prepare_arch_overrides_declared_cuda_arch(monkeypatch):
+    monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, "sm_110a")
+    assert runner.cuda_target(arch="sm_100a").arch == "sm_110a"
+
+
+def test_thor_sm100_compatibility_requires_explicit_sm110a_prepare(monkeypatch):
+    from tirx_kernels.target import supports_sm100_kernel
+
+    monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)
+    assert supports_sm100_kernel((10, 0))
+    assert not supports_sm100_kernel((11, 0))
+    assert not supports_sm100_kernel((12, 0))
+
+    monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, "sm_110a")
+    assert supports_sm100_kernel((11, 0))
+    assert not supports_sm100_kernel((12, 0))
+
+
 @pytest.fixture
 def bench_child_handler():
     """Install the bench child's SIGUSR1 handler shape for the test's duration."""

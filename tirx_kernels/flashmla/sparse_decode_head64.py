@@ -515,7 +515,7 @@ def make_main_kernel(model_type, presence, use_pdl=False):
             with K.unroll(4) as pair_i:
                 raw_pair = K.cast(K.shift_right(raw, K.cast(pair_i * 16, "uint64")), "uint16")
                 rounded_bits = K.local_scalar("uint32")
-                K.ptx.cvt.rn.bf16x2.e4m3x2(rounded_bits, raw_pair)
+                K.idioms.cvt_e4m3x2_to_bf16x2(rounded_bits, raw_pair)
                 rounded = K.reinterpret("bfloat16x2", rounded_bits)
                 scaled_lo = K.Shuffle([rounded], [0]) * scale
                 scaled_hi = K.Shuffle([rounded], [1]) * scale
@@ -2337,6 +2337,8 @@ def get_kernel(**kwargs: Any):
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
+    from tirx_kernels.target import supports_sm100_kernel
+
     cfg = _cfg(**kwargs)
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA decode")
@@ -2344,8 +2346,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     props = torch.cuda.get_device_properties(
         device.index if device.index is not None else torch.cuda.current_device()
     )
-    if props.major != 10:
-        raise SkipTest(f"SM100f is required, got compute capability {props.major}.{props.minor}")
+    capability = (props.major, props.minor)
+    if not supports_sm100_kernel(capability):
+        raise SkipTest(f"SM100f or prepared Thor is required, got compute capability {props.major}.{props.minor}")
 
     device_generator = torch.Generator(device=device)
     device_generator.manual_seed(cfg.seed)

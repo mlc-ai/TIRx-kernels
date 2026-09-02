@@ -37,11 +37,13 @@ def require_sm100() -> None:
 
     import torch
 
+    from tirx_kernels.target import supports_sm100_kernel
+
     if not torch.cuda.is_available():
         raise SkipTest("no CUDA device")
-    if torch.cuda.get_device_capability()[0] != 10:
+    if not supports_sm100_kernel(torch.cuda.get_device_capability()):
         raise SkipTest(
-            f"needs SM100, got sm_{''.join(map(str, torch.cuda.get_device_capability()))}"
+            f"needs SM100 or prepared Thor, got sm_{''.join(map(str, torch.cuda.get_device_capability()))}"
         )
 
 

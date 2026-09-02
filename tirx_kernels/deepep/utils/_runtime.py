@@ -61,15 +61,19 @@ class DistributedRuntime:
 def require_sm100(world_size: int) -> None:
     """Reject unsupported hosts before compiling or spawning workers."""
 
+    from tirx_kernels.target import supports_sm100_kernel
+
     if not isinstance(world_size, int) or isinstance(world_size, bool) or world_size <= 0:
         raise ValueError("world_size must be a positive integer")
     device_count = torch.cuda.device_count()
     if device_count < world_size:
         raise SkipTest(f"requires {world_size} CUDA devices, found {device_count}")
     for device_id in range(world_size):
-        major, _minor = torch.cuda.get_device_capability(device_id)
-        if major != 10:
-            raise SkipTest(f"device {device_id} has compute capability {major}, expected SM100")
+        capability = torch.cuda.get_device_capability(device_id)
+        if not supports_sm100_kernel(capability):
+            raise SkipTest(
+                f"device {device_id} has compute capability {capability}, expected SM100 or prepared Thor"
+            )
 
 
 def _create_runtime(rank: int, world_size: int) -> DistributedRuntime:

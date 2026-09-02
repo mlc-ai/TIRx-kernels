@@ -76,12 +76,14 @@ def _validate_problem(B: int, O: int, K: int) -> None:
 
 
 def _require_supported_arch() -> None:
+    from tirx_kernels.target import supports_sm100_kernel
+
     if not torch.cuda.is_available():
         raise SkipTest("TinyGEMM2 SM100 requires CUDA")
     capability = torch.cuda.get_device_capability()
-    if capability not in {(10, 0), (10, 3), (10, 7)}:
+    if not supports_sm100_kernel(capability):
         raise SkipTest(
-            "TinyGEMM2 requires SM100/B200, SM103/GB300, or SM107, "
+            "TinyGEMM2 requires SM100, SM103, SM107, or explicitly prepared Thor, "
             f"got sm_{capability[0]}{capability[1]}"
         )
 

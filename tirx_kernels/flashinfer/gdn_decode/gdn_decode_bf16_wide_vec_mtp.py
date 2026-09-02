@@ -1073,6 +1073,8 @@ def _make_qkv(
 
 
 def _device_from_config(config: dict[str, Any]) -> torch.device:
+    from tirx_kernels.target import supports_sm100_kernel
+
     configured_device = config.get("device")
     device = (
         torch.device(configured_device)
@@ -1082,8 +1084,8 @@ def _device_from_config(config: dict[str, Any]) -> torch.device:
     if device.type != "cuda" or not torch.cuda.is_available():
         raise SkipTest("CUDA is required for BF16 wide-vector GDN MTP decode")
     capability = torch.cuda.get_device_capability(device)
-    if capability[0] != 10:
-        raise SkipTest(f"BF16 wide-vector GDN MTP decode requires SM100, got {capability}")
+    if not supports_sm100_kernel(capability):
+        raise SkipTest(f"BF16 wide-vector GDN MTP decode requires SM100 or prepared Thor, got {capability}")
     return device
 
 

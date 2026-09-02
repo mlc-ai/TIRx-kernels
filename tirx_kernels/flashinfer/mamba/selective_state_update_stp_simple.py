@@ -1073,12 +1073,14 @@ def _index_tensor(
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     """Create independent mutable TIRx/source cases for one specialization."""
+    from tirx_kernels.target import supports_sm100_kernel
+
     device = kwargs.get("device", "cuda")
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for selective-state-update STP simple")
     capability = torch.cuda.get_device_capability(device)
-    if capability[0] != 10:
-        raise SkipTest(f"STP simple SM100 requires compute capability 10.x, got {capability}")
+    if not supports_sm100_kernel(capability):
+        raise SkipTest(f"STP simple requires SM100 or prepared Thor, got {capability}")
 
     spec = _specialization(kwargs)
     batch = spec["BATCH"]
