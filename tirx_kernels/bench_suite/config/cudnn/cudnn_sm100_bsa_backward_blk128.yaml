@@ -1,0 +1,16 @@
+kernel: cudnn_sm100_bsa_backward_blk128
+selection_rationale: The curated rows span the smallest D64 direct launch, a production multi-head D128 direct case, and the largest multi-group Q workload; all other required porting-gate rows remain explicitly benchable.
+configs:
+  - {config: p00_b1_h1_d64_sq128_skv4096_kv16, default: true, selection_role: small}
+  - {config: p01_b1_h1_d128_sq512_skv4096_kv16, default: false}
+  - {config: p02_b2_h8_d128_sq4096_skv8191_kv32, default: true, selection_role: medium}
+  - {config: p03_b1_h8_d64_sq4097_skv8191_maxkv32_var, default: false}
+  - {config: p04_b2_h4_d128_sq4097_skv8191_maxkv32_empty, default: false}
+  - {config: p05_b1_h4_d64_sq1024_skv32768_kv128, default: false}
+  - {config: p06_b1_h8_d128_sq2048_skv65536_kv256, default: false}
+  - {config: p07_b1_h4_d128_sq49152_skv8192_kv32_qb384_g1, default: false}
+  - {config: p08_b1_h4_d128_sq49153_skv8191_maxkv32_var_qb385_g2, default: false}
+  - {config: p09_b1_h2_d64_sq262144_skv8192_kv32_qb2048_g4, default: false}
+  - {config: p10_b1_h1_d128_sq524288_skv8192_maxkv32_var_qb4096_g16_i64kv, default: false}
+  - {config: p11_b1_h2_d128_sq524288_skv8192_kv32_qb4096_g8, default: true, selection_role: large}
+  - {config: p12_b1_h4_d128_sq8192_skv4096_kv16_bshd_scale0125, default: false}

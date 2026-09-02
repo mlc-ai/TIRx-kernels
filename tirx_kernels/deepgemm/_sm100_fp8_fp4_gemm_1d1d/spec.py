@@ -1102,9 +1102,7 @@ def _compile_spec_cached(spec: GemmSpec):
         tags.append("clusterCtaIdx.x")
     tags += ["threadIdx.x", "tirx.use_dyn_shared_memory"]
     func = build_kernel(spec).with_attr("tirx.kernel_launch_params", tags)
-    return tvm.compile(
-        tvm.IRModule({"main": func}), target=cuda_target(arch="sm_100a"), tir_pipeline="tirx"
-    )
+    return tvm.compile(tvm.IRModule({"main": func}), target=cuda_target(), tir_pipeline="tirx")
 
 
 def compile_spec(spec: GemmSpec):

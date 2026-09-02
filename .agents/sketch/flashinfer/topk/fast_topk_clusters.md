@@ -881,7 +881,7 @@ calls the source's launcher makes (`:557-558`).
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "fast_topk_clusters", "category": "flashinfer",
-  "compute_capability": 10}`; device symbol `fast_topk_clusters_kernel`.
+  "runtime_cuda_archs": ["sm_100a"]}`; device symbol `fast_topk_clusters_kernel`.
 - Plain TIRx only: a dynamic shared allocation carved by explicit views, explicit
   loops, and native `T.ptx.*` forms for every key operation. Global and shared
   memory are reached exclusively through `T.ptx.ld/st.*` on

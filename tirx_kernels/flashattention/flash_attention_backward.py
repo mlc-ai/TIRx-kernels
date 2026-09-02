@@ -1393,7 +1393,18 @@ def setup(data, B, H, S, D, *, executables=None):
 KERNEL_META = {
     "name": "flash_attention_backward_sm100",
     "category": "flashattention",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flash-attn-4",
+            "git": {
+                "url": "https://github.com/Dao-AILab/flash-attention.git",
+                "commit": "0251105a2fb19d2957484b7f023cd8c115286ced",
+            },
+            "import": "flash_attn.cute",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
 }
 
 CONFIGS = [

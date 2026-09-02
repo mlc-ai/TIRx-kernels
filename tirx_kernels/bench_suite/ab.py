@@ -407,6 +407,30 @@ def run_ab(
         util_threshold=util_threshold,
         mem_threshold=mem_threshold,
     )
+    from tirx_kernels.bench_suite.run import (
+        gpu_compile_profile,
+        partition_workloads_by_arch,
+        validate_workload_archs,
+    )
+
+    cuda_arch = gpu_compile_profile({index for index, _uuid in gpu_rows})["cuda_arch"]
+    selection = copy.deepcopy(selection)
+    if selection["mode"] == "default":
+        workloads, incompatible_workloads = partition_workloads_by_arch(workloads, cuda_arch)
+        if not workloads:
+            raise ValueError(f"default roster has no workloads for {cuda_arch}")
+        if incompatible_workloads:
+            incompatible_kernels = {workload["kernel"] for workload in incompatible_workloads}
+            print(
+                f"[bench-suite ab] selected {len(workloads)} {cuda_arch} default workload(s); "
+                f"excluded {len(incompatible_workloads)} workload(s) across "
+                f"{len(incompatible_kernels)} incompatible kernel(s)"
+            )
+    else:
+        validate_workload_archs(workloads, cuda_arch)
+    selection["cuda_arch"] = cuda_arch
+    selection["keys"] = [[workload["kernel"], workload["config"]] for workload in workloads]
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     raw_campaign_name = label or f"{before_revision[:8]}-{after_revision[:8]}"
     campaign_name = "".join(

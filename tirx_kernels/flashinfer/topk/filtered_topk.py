@@ -103,8 +103,22 @@ _OVERFLOW_PATTERNS = ("tie_heavy", "quantized")
 # fallback to be reachable at all, so the overflow patterns get a long row.
 _OVERFLOW_LENGTH = 131072
 
-KERNEL_META = {"name": "filtered_topk", "category": "flashinfer", "compute_capability": 10}
-
+KERNEL_META = {
+    "name": "filtered_topk",
+    "category": "flashinfer",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 # The unified kernel takes the 128 KiB candidate arena as dynamic shared memory;
 # the finalize kernel's BlockRadixSort scratch is static-sized per (BT, IPT).
 LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")

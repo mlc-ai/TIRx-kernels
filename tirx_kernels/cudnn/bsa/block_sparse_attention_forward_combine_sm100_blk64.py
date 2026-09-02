@@ -49,7 +49,18 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "cudnn_sm100_bsa_forward_combine_blk64",
     "category": "cudnn",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "nvidia-cudnn-frontend",
+            "git": {
+                "url": "https://github.com/NVIDIA/cudnn-frontend.git",
+                "commit": "aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5",
+            },
+            "import": "cudnn",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
 }
 
 _HEAD_DIM = 128

@@ -14,6 +14,7 @@ TMEM, and assigns one work item to each (batch, head).  Evolution history and
 measurement artifacts remain in the run tree rather than becoming a second
 source of truth here.
 """
+
 import ctypes
 import math
 import os
@@ -136,21 +137,43 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         smem = K.smem_pool()
         s_tmem_addr = smem.alloc((1,), K.i32, align=4)
         # ---- pipelines / barriers ---------------------------------------
-        p_stage = K.Pipeline(smem, 2, full="tma", empty="tcgen05", init_empty=2)  # loader -> prep ; G1_0 (mma0) + V1 (after G5, mma1) -> loader
+        p_stage = K.Pipeline(
+            smem, 2, full="tma", empty="tcgen05", init_empty=2
+        )  # loader -> prep ; G1_0 (mma0) + V1 (after G5, mma1) -> loader
         p_v = K.Pipeline(smem, 1, full="tma", empty="tcgen05")  # loader -> mma(G3) ; G3 -> loader
-        p_prep = K.Pipeline(smem, 2, full="mbar", empty="tcgen05", init_full=256)  # prep(8 warps) -> mma ; G7 -> prep (KG)
-        p_j1 = K.Pipeline(smem, 1, full="mbar", empty="tcgen05", init_full=256)  # prep(8 warps) -> mma ; G1_1 -> prep
-        p_beta = K.Pipeline(smem, 2, full="mbar", empty="mbar", init_full=32, init_empty=128)  # loader -> cg0
-        p_g1 = K.Pipeline(smem, 2, full="tcgen05", empty="mbar", init_empty=128)  # G1_0 (D0, two TMEM buffers) -> cg0 ; cg0 (D0 read) -> mma0
+        p_prep = K.Pipeline(
+            smem, 2, full="mbar", empty="tcgen05", init_full=256
+        )  # prep(8 warps) -> mma ; G7 -> prep (KG)
+        p_j1 = K.Pipeline(
+            smem, 1, full="mbar", empty="tcgen05", init_full=256
+        )  # prep(8 warps) -> mma ; G1_1 -> prep
+        p_beta = K.Pipeline(
+            smem, 2, full="mbar", empty="mbar", init_full=32, init_empty=128
+        )  # loader -> cg0
+        p_g1 = K.Pipeline(
+            smem, 2, full="tcgen05", empty="mbar", init_empty=128
+        )  # G1_0 (D0, two TMEM buffers) -> cg0 ; cg0 (D0 read) -> mma0
         m_g1b = K.TCGen05Bar(smem, 1)  # G1_1 (D1) done -> cg0
         m_g1b.init(1)
-        p_g1b = K.MBarrier(smem, 1)  # D1 consumed by cg0 (Akk and Aqk halves) -> mma1 may overwrite it with the next G1_1
+        p_g1b = K.MBarrier(
+            smem, 1
+        )  # D1 consumed by cg0 (Akk and Aqk halves) -> mma1 may overwrite it with the next G1_1
         p_g1b.init(128)
-        p_t = K.Pipeline(smem, 1, full="mbar", empty="tcgen05", init_full=128)  # cg0 -> mma ; G4'' (mma1, after G3) -> cg0
-        p_aqk = K.Pipeline(smem, 1, full="mbar", empty="tcgen05", init_full=64)  # cg0 warps 2/3 -> mma1 (Aqk rows in the stage Y region; the region is recycled by prep after G7)
-        p_u = K.Pipeline(smem, 1, full="tcgen05", empty="mbar", init_empty=128)  # G4 -> cg1 ; cg1 -> mma(G3)
-        p_o = K.Pipeline(smem, 1, full="tcgen05", empty="mbar", init_empty=128)  # G6 -> cg1 ; cg1 -> mma(G5)
-        p_osm = K.Pipeline(smem, 1, full="mbar", empty="mbar", init_full=128, init_empty=1)  # cg1 -> storer -> cg1
+        p_t = K.Pipeline(
+            smem, 1, full="mbar", empty="tcgen05", init_full=128
+        )  # cg0 -> mma ; G4'' (mma1, after G3) -> cg0
+        p_aqk = K.Pipeline(
+            smem, 1, full="mbar", empty="tcgen05", init_full=64
+        )  # cg0 warps 2/3 -> mma1 (Aqk rows in the stage Y region; the region is recycled by prep after G7)
+        p_u = K.Pipeline(
+            smem, 1, full="tcgen05", empty="mbar", init_empty=128
+        )  # G4 -> cg1 ; cg1 -> mma(G3)
+        p_o = K.Pipeline(
+            smem, 1, full="tcgen05", empty="mbar", init_empty=128
+        )  # G6 -> cg1 ; cg1 -> mma(G5)
+        p_osm = K.Pipeline(
+            smem, 1, full="mbar", empty="mbar", init_full=128, init_empty=1
+        )  # cg1 -> storer -> cg1
         m_v1 = K.TCGen05Bar(smem, 1)  # V1 done (mma1) -> cg1
         m_v1.init(1)
         m_v1b = K.MBarrier(smem, 1)  # V1 bf16 copy in TM_UB ready (cg1) -> mma1 (G4'')
@@ -180,8 +203,12 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         # destination precision.  End-of-chunk decay still uses fp32 factors and fp32 state.
         s_gate_r = smem.alloc((4, D_HEAD), K.bf16, align=16)  # [chunk&3]=bf16(2^R0)
         s_gate_e = smem.alloc((4, D_HEAD), K.f32, align=16)  # [chunk&3]=2^G2_63
-        s_part = smem.alloc((2, 8, D_HEAD), K.f32, align=16)  # gate-scan partial totals, [chunk&1][group]
-        s_norm = smem.alloc((2, 2, CHUNK), K.f32, align=16)  # [stage][0]=rstd_k[t], [1]=rstd_q[t]*scale (prep-private per warp)
+        s_part = smem.alloc(
+            (2, 8, D_HEAD), K.f32, align=16
+        )  # gate-scan partial totals, [chunk&1][group]
+        s_norm = smem.alloc(
+            (2, 2, CHUNK), K.f32, align=16
+        )  # [stage][0]=rstd_k[t], [1]=rstd_q[t]*scale (prep-private per warp)
 
         # The inverse never writes TB's strictly-upper 32x32 block; zero s_T once
         # so that block stays the required zero operand in every chunk.
@@ -190,7 +217,11 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             for i in range(4):
                 K.assign(zpad[i], K.uint32(0))
             K.ptx["st.shared.v4.b32"](
-                s_T.ptr_to(K.thread_id() >> 3, (K.thread_id() & 7) * 8), zpad[0], zpad[1], zpad[2], zpad[3]
+                s_T.ptr_to(K.thread_id() >> 3, (K.thread_id() & 7) * 8),
+                zpad[0],
+                zpad[1],
+                zpad[2],
+                zpad[3],
             )
         K.ptx[FENCE_ASYNC]()
         with K.If(K.thread_id() == 0), K.Then():
@@ -258,12 +289,20 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
 
         def lds128(view, row, col, words, base):
             K.ptx["ld.shared.v4.b32"](
-                words[base], words[base + 1], words[base + 2], words[base + 3], view.ptr_to(row, col)
+                words[base],
+                words[base + 1],
+                words[base + 2],
+                words[base + 3],
+                view.ptr_to(row, col),
             )
 
         def sts128(view, row, col, words, base):
             K.ptx["st.shared.v4.b32"](
-                view.ptr_to(row, col), words[base], words[base + 1], words[base + 2], words[base + 3]
+                view.ptr_to(row, col),
+                words[base],
+                words[base + 1],
+                words[base + 2],
+                words[base + 3],
             )
 
         def f2(a, b):
@@ -283,7 +322,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             st_prep = K.PipelineState(2, phase=1)  # producer of p_prep
             st_j1 = K.PipelineState(1, phase=1)  # producer of p_j1
             lane = K.lane_id()
-            r_grp = K.local_scalar("int32", init=K.warp_id_in_role())  # token group 0..7 (one warp each)
+            r_grp = K.local_scalar(
+                "int32", init=K.warp_id_in_role()
+            )  # token group 0..7 (one warp each)
             col0 = lane * 4  # channels 4*lane .. 4*lane+3
             hi_block = K.local_scalar("int32", init=K.Cast("int32", (K.warp_id_in_role() >= 4)))
             work = K.local_scalar("int32", init=K.cta_id())
@@ -304,13 +345,17 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 return offs
 
             xo_stage = row_offsets(STAGE_ROWS)
-            xo_adj = (lane >> 4) * ((STAGE_ROWS - CHUNK) * 128)  # xo_64[i] == xo_stage[i] - xo_adj (64-row tiles)
+            xo_adj = (lane >> 4) * (
+                (STAGE_ROWS - CHUNK) * 128
+            )  # xo_64[i] == xo_stage[i] - xo_adj (64-row tiles)
             # row norms: lanes 0..15 own this warp's eight k rows, lanes 16..31 its eight q rows, two lanes per
             # row, each lane one 64-column swizzle atom.  The atom's eight 16-byte chunks are summed in the
             # order j ^ (row & 7) ^ (atom << 2) (the sum does not care), which keeps the eight lanes of a
             # quarter-warp (four rows x two atoms) on eight distinct chunk positions: conflict-free LDS.128.
             norm_row = (lane >> 4) * CHUNK + r_grp * 8 + ((lane & 15) >> 1)
-            norm_off = K.local_scalar("int32", init=(lane & 1) * (STAGE_ROWS * 128) + norm_row * 128)
+            norm_off = K.local_scalar(
+                "int32", init=(lane & 1) * (STAGE_ROWS * 128) + norm_row * 128
+            )
             norm_x = K.local_scalar("int32", init=((norm_row & 7) ^ ((lane & 1) << 2)) << 4)
             norm_is_q = lane >= 16
             norm_wr = (lane & 1) == 0
@@ -330,11 +375,15 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 K.ptx.ld.global_.f32(ea, a_log.ptr_to([h_idx]))
                 ea_l2 = K.local_scalar("float32")
                 K.ptx.ex2.approx.ftz.f32(ea_l2, ea * K.float32(LOG2E))  # exp(A_log)
-                hea = K.local_scalar("float32", init=ea_l2 * K.float32(0.5))  # exp(A_log)/2 for tanh sigmoid
+                hea = K.local_scalar(
+                    "float32", init=ea_l2 * K.float32(0.5)
+                )  # exp(A_log)/2 for tanh sigmoid
                 bias = K.alloc_local([4], "float32")
                 bw = K.alloc_local([4], "uint32")
                 K.ptx[LDG_V4](bw[0], bw[1], bw[2], bw[3], dt_bias.ptr_to([h_idx * D_HEAD + col0]))
-                biash = K.alloc_local([4], "float32")  # bias * exp(A_log)/2: the tanh argument is one fma
+                biash = K.alloc_local(
+                    [4], "float32"
+                )  # bias * exp(A_log)/2: the tanh argument is one fma
                 for j in range(4):
                     K.assign(bias[j], K.reinterpret("float32", bw[j]))
                     K.assign(biash[j], bias[j] * hea)
@@ -343,7 +392,8 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 gw = K.alloc_local([16], "uint32")
                 g_base = K.local_scalar(
                     "int64",
-                    init=(K.Cast("int64", b_idx) * K.int64(T) * K.int64(H) + K.Cast("int64", h_idx)) * K.int64(D_HEAD)
+                    init=(K.Cast("int64", b_idx) * K.int64(T) * K.int64(H) + K.Cast("int64", h_idx))
+                    * K.int64(D_HEAD)
                     + K.Cast("int64", col0),
                 )
 
@@ -351,14 +401,16 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     for i in range(8):
                         t = r_grp * 8 + i
                         K.ptx["ld.global.L1::no_allocate.v2.b32"](
-                            gw[2 * i], gw[2 * i + 1],
+                            gw[2 * i],
+                            gw[2 * i + 1],
                             g.ptr_to([g_base + K.Cast("int64", nn * CHUNK + t) * K.int64(HK)]),
                         )
 
                 def issue_g_load_token(nn, i):
                     t = r_grp * 8 + i
                     K.ptx["ld.global.L1::no_allocate.v2.b32"](
-                        gw[2 * i], gw[2 * i + 1],
+                        gw[2 * i],
+                        gw[2 * i + 1],
                         g.ptr_to([g_base + K.Cast("int64", nn * CHUNK + t) * K.int64(HK)]),
                     )
 
@@ -369,9 +421,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     for j in range(4):
                         wj = gw[2 * i] if j < 2 else gw[2 * i + 1]
                         gv = bf16_lo(wj) if j % 2 == 0 else bf16_hi(wj)
-                        sg = K.idioms.sigmoid_tanh_approx_f32(
-                            tanh_input=gv * hea + biash[j]
-                        )
+                        sg = K.idioms.sigmoid_tanh_approx_f32(tanh_input=gv * hea + biash[j])
                         if i == 0:
                             K.assign(G[j], sg * K.float32(NEG5LOG2E))
                         else:
@@ -396,7 +446,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     # (pass 1 of this chunk already ran, fused into the previous chunk's pass 2: G = cumsum)
                     _t = rng("P.scan_a")
                     # block totals -> smem partials [r][k]
-                    K.ptx["st.shared.v4.f32"](K.address_of(s_part[n & 1, r_grp, col0]), G[28], G[29], G[30], G[31])
+                    K.ptx["st.shared.v4.f32"](
+                        K.address_of(s_part[n & 1, r_grp, col0]), G[28], G[29], G[30], G[31]
+                    )
                     rng_end(_t)
                     _t = rng("P.scan_bar1")
                     K.ptx.bar.sync(K.uint32(BAR_PREP), K.uint32(BAR_PREP_N))
@@ -412,7 +464,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         K.assign(E63[j], K.float32(0.0))
                     pw = K.alloc_local([4], "float32")
                     for rr in range(8):
-                        K.ptx["ld.shared.v4.f32"](pw[0], pw[1], pw[2], pw[3], K.address_of(s_part[n & 1, rr, col0]))
+                        K.ptx["ld.shared.v4.f32"](
+                            pw[0], pw[1], pw[2], pw[3], K.address_of(s_part[n & 1, rr, col0])
+                        )
                         if rr == 2:
                             for j in range(4):
                                 K.assign(R0[j], E63[j])
@@ -437,7 +491,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         gvr = K.alloc_local([2], "uint32")
                         pack_bf16x2(gvr[0], gv8[0], gv8[1])
                         pack_bf16x2(gvr[1], gv8[2], gv8[3])
-                        K.ptx["st.shared.v2.b32"](K.address_of(s_gate_r[n & 3, col0]), gvr[0], gvr[1])
+                        K.ptx["st.shared.v2.b32"](
+                            K.address_of(s_gate_r[n & 3, col0]), gvr[0], gvr[1]
+                        )
                         K.ptx["st.shared.v4.f32"](
                             K.address_of(s_gate_e[n & 3, col0]), gv8[4], gv8[5], gv8[6], gv8[7]
                         )
@@ -448,8 +504,15 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     for j in range(4):
                         K.assign(Rsel[j], K.Select(hi_block != 0, R1[j], R0[j]))
                         K.ptx.ex2.approx.ftz.f32(fpr[j], E63[j] - Rsel[j])
-                    for j in range(4):  # lo threads: f10 = 1 (their "own-reference" tile is the stage tile)
-                        K.ptx.ex2.approx.ftz.f32(f10[j], K.Select(hi_block != 0, (R1[j] - R0[j]) * K.float32(0.5), K.float32(0.0)))
+                    for j in range(
+                        4
+                    ):  # lo threads: f10 = 1 (their "own-reference" tile is the stage tile)
+                        K.ptx.ex2.approx.ftz.f32(
+                            f10[j],
+                            K.Select(
+                                hi_block != 0, (R1[j] - R0[j]) * K.float32(0.5), K.float32(0.0)
+                            ),
+                        )
                         K.assign(f10[j], f10[j] * f10[j])
                     fprb = K.alloc_local([2], "uint32")
                     f10b = K.alloc_local([2], "uint32")
@@ -476,7 +539,11 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     nw = K.alloc_local([4], "uint32")
                     for j in range(8):
                         K.ptx["ld.shared.v4.b32"](
-                            nw[0], nw[1], nw[2], nw[3], K.ptx.addr(base_k, norm_off + (K.int32(16 * j) ^ norm_x))
+                            nw[0],
+                            nw[1],
+                            nw[2],
+                            nw[3],
+                            K.ptx.addr(base_k, norm_off + (K.int32(16 * j) ^ norm_x)),
                         )
                         for pp in range(4):
                             xv = f2(bf16_lo(nw[pp]), bf16_hi(nw[pp]))
@@ -490,29 +557,64 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     )
                     nother = K.local_scalar("uint32")
                     K.ptx.shfl_sync.bfly.b32(
-                        nother, K.reinterpret("uint32", nhalf), K.uint32(1), K.uint32(0x1F), K.uint32(0xFFFFFFFF)
+                        nother,
+                        K.reinterpret("uint32", nhalf),
+                        K.uint32(1),
+                        K.uint32(0x1F),
+                        K.uint32(0xFFFFFFFF),
                     )
                     nr = K.local_scalar("float32")
-                    K.ptx.rsqrt.approx.ftz.f32(nr, (nhalf + K.reinterpret("float32", nother)) + K.float32(1e-6))
+                    K.ptx.rsqrt.approx.ftz.f32(
+                        nr, (nhalf + K.reinterpret("float32", nother)) + K.float32(1e-6)
+                    )
                     with K.If(norm_is_q), K.Then():
                         K.assign(nr, nr * scale)
                     with K.If(norm_wr), K.Then():
                         K.ptx.st.shared.f32(
-                            K.address_of(s_norm[st_stage.stage, lane >> 4, r_grp * 8 + ((lane & 15) >> 1)]), nr
+                            K.address_of(
+                                s_norm[st_stage.stage, lane >> 4, r_grp * 8 + ((lane & 15) >> 1)]
+                            ),
+                            nr,
                         )
                     K.ptx["bar.warp.sync"](K.uint32(0xFFFFFFFF))
                     rq = K.alloc_local([8], "float32")
                     rk = K.alloc_local([8], "float32")
-                    K.ptx["ld.shared.v4.f32"](rk[0], rk[1], rk[2], rk[3], K.address_of(s_norm[st_stage.stage, 0, r_grp * 8]))
-                    K.ptx["ld.shared.v4.f32"](rk[4], rk[5], rk[6], rk[7], K.address_of(s_norm[st_stage.stage, 0, r_grp * 8 + 4]))
-                    K.ptx["ld.shared.v4.f32"](rq[0], rq[1], rq[2], rq[3], K.address_of(s_norm[st_stage.stage, 1, r_grp * 8]))
-                    K.ptx["ld.shared.v4.f32"](rq[4], rq[5], rq[6], rq[7], K.address_of(s_norm[st_stage.stage, 1, r_grp * 8 + 4]))
+                    K.ptx["ld.shared.v4.f32"](
+                        rk[0],
+                        rk[1],
+                        rk[2],
+                        rk[3],
+                        K.address_of(s_norm[st_stage.stage, 0, r_grp * 8]),
+                    )
+                    K.ptx["ld.shared.v4.f32"](
+                        rk[4],
+                        rk[5],
+                        rk[6],
+                        rk[7],
+                        K.address_of(s_norm[st_stage.stage, 0, r_grp * 8 + 4]),
+                    )
+                    K.ptx["ld.shared.v4.f32"](
+                        rq[0],
+                        rq[1],
+                        rq[2],
+                        rq[3],
+                        K.address_of(s_norm[st_stage.stage, 1, r_grp * 8]),
+                    )
+                    K.ptx["ld.shared.v4.f32"](
+                        rq[4],
+                        rq[5],
+                        rq[6],
+                        rq[7],
+                        K.address_of(s_norm[st_stage.stage, 1, r_grp * 8 + 4]),
+                    )
                     rng_end(_t)
                     _t = rng("P.wait_bufs")
                     # buffers this chunk writes: KG[stage] (after G7 two chunks ago), J1 (after G1_1 last chunk)
                     p_prep.empty.wait(st_prep.stage, st_prep.phase)
                     p_j1.empty.wait(st_j1.stage, st_j1.phase)
-                    K.ptx[FENCE_ASYNC]()  # async-proxy (MMA) reads of those tiles precede our generic writes
+                    K.ptx[
+                        FENCE_ASYNC
+                    ]()  # async-proxy (MMA) reads of those tiles precede our generic writes
                     rng_end(_t)
                     _t = rng("P.pass2")
                     # ---------------- pass 2: gated operand tiles ---------------
@@ -583,11 +685,15 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         # CG0: Akk epilogue, hierarchical inverse (-> TB bf16), G3 issue.      warps 8-11
         # =====================================================================
         with cg0:
-            st_g1 = K.PipelineState(2, phase=0)  # consumer p_g1.full ; producer p_g1.empty (same index)
+            st_g1 = K.PipelineState(
+                2, phase=0
+            )  # consumer p_g1.full ; producer p_g1.empty (same index)
             st_g1b = K.PipelineState(1, phase=0)  # consumer of m_g1b (D1 done)
             st_t = K.PipelineState(1, phase=1)  # producer p_t
             st_beta = K.PipelineState(2, phase=0)  # consumer p_beta
-            st_tc = K.PipelineState(1, phase=0)  # consumer of p_t.full (this warpgroup's own T, all 128 arrivals)
+            st_tc = K.PipelineState(
+                1, phase=0
+            )  # consumer of p_t.full (this warpgroup's own T, all 128 arrivals)
             st_v = K.PipelineState(1, phase=0)  # consumer of p_v.full (G3)
             st_ue = K.PipelineState(1, phase=1)  # waits p_u.empty before G3 overwrites U^T
             st_aqk0 = K.PipelineState(1, phase=1)  # producer of p_aqk (warps 2/3)
@@ -610,6 +716,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             K.uint32(0),
                             K.ptx.pred(K.uint32(1) if (accumulate or kp != 0) else K.uint32(0)),
                         )
+
             tmem = tmem_preamble()
             tid1 = K.tid_in_role()
             lane = K.lane_id()
@@ -683,7 +790,14 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             def mma_k16(acc, a, b, acc_off, b_off, accumulate):
                 c = [acc[acc_off + i] for i in range(4)] if accumulate else [K.float32(0.0)] * 4
                 K.ptx[MMA_K16](
-                    *(acc[acc_off + i] for i in range(4)), a[0], a[1], a[2], a[3], b[b_off], b[b_off + 1], *c
+                    *(acc[acc_off + i] for i in range(4)),
+                    a[0],
+                    a[1],
+                    a[2],
+                    a[3],
+                    b[b_off],
+                    b[b_off + 1],
+                    *c,
                 )
 
             def inverse_8_to_16(av, b16):
@@ -771,7 +885,11 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 # accumulator pair (acc[2pp], acc[2pp+1]) sits at column 8*(pp>>1) + 2*(lane&3) + {0,1}
                 bq = K.alloc_local([8], "float32")
                 for qq in range(4):
-                    K.ptx["ld.shared.v2.f32"](bq[2 * qq], bq[2 * qq + 1], K.address_of(s_beta[stg, 8 * qq + 2 * (lane & 3)]))
+                    K.ptx["ld.shared.v2.f32"](
+                        bq[2 * qq],
+                        bq[2 * qq + 1],
+                        K.address_of(s_beta[stg, 8 * qq + 2 * (lane & 3)]),
+                    )
                 scaled = K.local_scalar("uint64")
                 for p in range(4):
                     q0 = 2 * (p >> 1)
@@ -805,7 +923,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             bcol[2 * p],
                             bcol[2 * p + 1],
                         )
-                        pack_bf16x2(wds[2 * m + p], K.cuda.float2_x(scaled), K.cuda.float2_y(scaled))
+                        pack_bf16x2(
+                            wds[2 * m + p], K.cuda.float2_x(scaled), K.cuda.float2_y(scaled)
+                        )
                 for m in range(4):
                     sts128(s_T, trow, tc0 + 8 * m, wds, 4 * m)
 
@@ -822,7 +942,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             bar_inv()
 
             acc32 = K.alloc_local([32], "float32")
-            wds = K.alloc_local([32], "uint32")  # [0..15] Akk/TB/W words, [16..31] Aqk D1 words (warps 2/3)
+            wds = K.alloc_local(
+                [32], "uint32"
+            )  # [0..15] Akk/TB/W words, [16..31] Aqk D1 words (warps 2/3)
             work = K.local_scalar("int32", init=K.cta_id())
             with K.While(work < num_work):
                 with K.serial(NCH) as n:
@@ -841,7 +963,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     acc_b = K.alloc_local([32], "float32")
                     ld32(acc32, TM_D0 + stg * 64)
                     K.ptx[WAIT_LD]()
-                    p_g1.empty.arrive(st_g1.stage)  # D0 buffer consumed: mma0 may run G1_0 of chunk n+2 into it
+                    p_g1.empty.arrive(
+                        st_g1.stage
+                    )  # D0 buffer consumed: mma0 may run G1_0 of chunk n+2 into it
                     st_g1.advance()
 
                     def akk_rows(acc, row_base, col_base, diag_shift):
@@ -897,7 +1021,10 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             with K.If(lane < 16), K.Then():
                                 dshift = K.Select(lw == 2, K.int32(0), K.int32(16))
                                 for j in range(32):
-                                    K.assign(acc_b[j], K.Select(j <= lane + dshift, acc_b[j], K.float32(0.0)))
+                                    K.assign(
+                                        acc_b[j],
+                                        K.Select(j <= lane + dshift, acc_b[j], K.float32(0.0)),
+                                    )
                                 for p in range(16):
                                     pack_bf16x2(wds[16 + p], acc_b[2 * p], acc_b[2 * p + 1])
                             p_g1b.arrive(0)  # Aqk half of D1 consumed
@@ -933,7 +1060,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     _t = rng("C0.t64")
                     # ---- last merge writes TB = T * beta_j (bf16) straight into s_T: warps 0/1 compute
                     # T21 with mma.sync, warps 2/3 convert the diagonal blocks T11 / T22 meanwhile ----
-                    p_t.empty.wait(st_t.stage, st_t.phase)  # G3 of the previous chunk finished reading s_T
+                    p_t.empty.wait(
+                        st_t.stage, st_t.phase
+                    )  # G3 of the previous chunk finished reading s_T
                     K.ptx[FENCE_ASYNC]()
                     with K.If(lw < 2):
                         with K.Then():
@@ -949,7 +1078,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     # ---- G3: U^T = V^T TB^T, issued here by warp 0 (no handoff); TB is released by G4'' ----
                     _t = rng("C0.g3")
                     with K.If(lw == 0), K.Then():
-                        p_t.full.wait(st_tc.stage, st_tc.phase)  # every cg0 thread's TB stores are published
+                        p_t.full.wait(
+                            st_tc.stage, st_tc.phase
+                        )  # every cg0 thread's TB stores are published
                         st_tc.advance()
                         p_v.full.wait(st_v.stage, st_v.phase)
                         p_u.empty.wait(st_ue.stage, st_ue.phase)
@@ -1099,7 +1230,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             hc = half * 64
                             hs = half * 32
                             ld32b(fr, TM_S + hc)
-                            K.ptx[TC_LD32](*(fr[32 + i] for i in range(32)), tmem_at2(TM_S + hc + 32))
+                            K.ptx[TC_LD32](
+                                *(fr[32 + i] for i in range(32)), tmem_at2(TM_S + hc + 32)
+                            )
                             K.ptx[WAIT_LD]()
                             for sub in range(2):
                                 qc = hc + 32 * sub
@@ -1108,13 +1241,25 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                                 # supply the eight resident-state decay factors.
                                 for m in range(4):
                                     K.ptx["ld.shared.v4.b32"](
-                                        bfac[0], bfac[1], bfac[2], bfac[3], K.address_of(s_gate_r[nstg, qc + 8 * m])
+                                        bfac[0],
+                                        bfac[1],
+                                        bfac[2],
+                                        bfac[3],
+                                        K.address_of(s_gate_r[nstg, qc + 8 * m]),
                                     )
                                     K.ptx["ld.shared.v4.f32"](
-                                        fac[0], fac[1], fac[2], fac[3], K.address_of(s_gate_e[nstg, qc + 8 * m])
+                                        fac[0],
+                                        fac[1],
+                                        fac[2],
+                                        fac[3],
+                                        K.address_of(s_gate_e[nstg, qc + 8 * m]),
                                     )
                                     K.ptx["ld.shared.v4.f32"](
-                                        fac[4], fac[5], fac[6], fac[7], K.address_of(s_gate_e[nstg, qc + 8 * m + 4])
+                                        fac[4],
+                                        fac[5],
+                                        fac[6],
+                                        fac[7],
+                                        K.address_of(s_gate_e[nstg, qc + 8 * m + 4]),
                                     )
                                     for p in range(4):
                                         pack_bf16x2(
@@ -1122,11 +1267,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                                             fr[fb + 8 * m + 2 * p],
                                             fr[fb + 8 * m + 2 * p + 1],
                                         )
-                                        K.ptx.mul.rn.bf16x2(
-                                            wds[4 * m + p],
-                                            wds[4 * m + p],
-                                            bfac[p],
-                                        )
+                                        K.ptx.mul.rn.bf16x2(wds[4 * m + p], wds[4 * m + p], bfac[p])
                                         mul2(
                                             state_pair,
                                             fr[fb + 8 * m + 2 * p],
@@ -1134,11 +1275,19 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                                             fac[2 * p],
                                             fac[2 * p + 1],
                                         )
-                                        K.assign(fr[fb + 8 * m + 2 * p], K.cuda.float2_x(state_pair))
-                                        K.assign(fr[fb + 8 * m + 2 * p + 1], K.cuda.float2_y(state_pair))
-                                K.ptx[TC_ST16](tmem_at2(TM_ST + hs + 16 * sub), *(wds[i] for i in range(16)))
+                                        K.assign(
+                                            fr[fb + 8 * m + 2 * p], K.cuda.float2_x(state_pair)
+                                        )
+                                        K.assign(
+                                            fr[fb + 8 * m + 2 * p + 1], K.cuda.float2_y(state_pair)
+                                        )
+                                K.ptx[TC_ST16](
+                                    tmem_at2(TM_ST + hs + 16 * sub), *(wds[i] for i in range(16))
+                                )
                             st32b(TM_S + hc, fr)
-                            K.ptx[TC_ST32](tmem_at2(TM_S + hc + 32), *(fr[32 + i] for i in range(32)))
+                            K.ptx[TC_ST32](
+                                tmem_at2(TM_S + hc + 32), *(fr[32 + i] for i in range(32))
+                            )
                         K.ptx[WAIT_ST]()
                         m_s.arrive(0)
                     st_pn.advance()
@@ -1160,7 +1309,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 # G1_0 of every chunk, issued as soon as prep publishes the chunk (double-buffered D0)
                 st_prep = K.PipelineState(2, phase=0)
                 st_g1 = K.PipelineState(2, phase=1)  # producer p_g1
-                st_stg = K.PipelineState(2, phase=0)  # ledger for p_stage.empty commits (G1_0 reads X0/Q0 rows)
+                st_stg = K.PipelineState(
+                    2, phase=0
+                )  # ledger for p_stage.empty commits (G1_0 reads X0/Q0 rows)
                 tmem = tmem_preamble()
 
                 def mma_ss(dcol, a_desc, a_off, b_desc, b_off, n_k, idesc, accumulate):
@@ -1195,11 +1346,15 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         st_prep.advance()
                         rng_end(_t)
                         _t = rng("M0.g1")
-                        mma_ss(TM_D0 + stg * 64, dA, offA, dA, shifted(offA, OFF_Y0), 8, ID_G1, False)
+                        mma_ss(
+                            TM_D0 + stg * 64, dA, offA, dA, shifted(offA, OFF_Y0), 8, ID_G1, False
+                        )
                         pr = elect_local()
                         p_g1.full.arrive(st_g1.stage, pred=pr)  # D0 done (G1_0)
                         st_g1.advance()
-                        p_stage.empty.arrive(st_stg.stage, pred=pr)  # G1_0 finished reading the stage's X0/Q0 rows
+                        p_stage.empty.arrive(
+                            st_stg.stage, pred=pr
+                        )  # G1_0 finished reading the stage's X0/Q0 rows
                         st_stg.advance()
                         rng_end(_t)
                     K.assign(work, work + num_ctas)
@@ -1213,7 +1368,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 st_j1 = K.PipelineState(1, phase=0)
                 st_g1b_e = K.PipelineState(1, phase=1)  # producer-side wait on p_g1b (D1 consumed)
                 st_v1b = K.PipelineState(1, phase=0)  # consumer of m_v1b (V1 bf16 copy ready)
-                st_t1 = K.PipelineState(1, phase=0)  # ledger for p_t.empty commits (G4'' is TB's last reader)
+                st_t1 = K.PipelineState(
+                    1, phase=0
+                )  # ledger for p_t.empty commits (G4'' is TB's last reader)
                 st_aqk = K.PipelineState(1, phase=0)
                 st_u = K.PipelineState(1, phase=1)  # producer p_u.full
                 st_o = K.PipelineState(1, phase=1)  # producer p_o
@@ -1292,7 +1449,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         _t = rng("M1.wait_g5")
                         m_s.wait(0, st_s.phase)
                         st_s.advance()
-                        p_prep.full.wait(st_prep.stage, st_prep.phase)  # Q0/X0 rows of this chunk published
+                        p_prep.full.wait(
+                            st_prep.stage, st_prep.phase
+                        )  # Q0/X0 rows of this chunk published
                         p_o.empty.wait(st_o.stage, st_o.phase)
                         rng_end(_t)
                         _t = rng("M1.g5")
@@ -1301,7 +1460,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         mma_ts(TM_V1, TM_ST, dA, offA, 8, ID_G56, False)
                         pr = elect_local()
                         m_v1.arrive(0, pred=pr)  # V1 done -> cg1 converts it
-                        p_stage.empty.arrive(st_stage.stage, pred=pr)  # stage fully consumed (G5 + V1)
+                        p_stage.empty.arrive(
+                            st_stage.stage, pred=pr
+                        )  # stage fully consumed (G5 + V1)
                         st_stage.advance()
                         rng_end(_t)
                         # ---- G4'': U^T -= V1b TB^T (after G3 landed in U^T and cg1 published V1b) --------
@@ -1366,7 +1527,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         _t = rng("L.issue")
                         with K.If(elected()), K.Then():
                             p_stage.full.arrive(st_stage.stage, tx_count=KQ_BYTES)
-                            mb = K.cuda.cvta_generic_to_shared(p_stage.full.ptr_to([st_stage.stage]))
+                            mb = K.cuda.cvta_generic_to_shared(
+                                p_stage.full.ptr_to([st_stage.stage])
+                            )
                             for tmap, row0 in ((k_map, 0), (q_map, 64)):
                                 for d0 in (0, 64):
                                     K.ptx[TMA_LD](
@@ -1396,7 +1559,12 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             bu = K.local_scalar("uint16")
                             K.ptx.ld.global_.nc.u16(
                                 bu,
-                                beta.ptr_to([(K.Cast("int64", tok0) + K.Cast("int64", t)) * K.int64(H) + K.Cast("int64", h_idx)]),
+                                beta.ptr_to(
+                                    [
+                                        (K.Cast("int64", tok0) + K.Cast("int64", t)) * K.int64(H)
+                                        + K.Cast("int64", h_idx)
+                                    ]
+                                ),
                             )
                             bfv = K.reinterpret("float32", K.Cast("uint32", bu) << K.uint32(16))
                             sg = K.idioms.sigmoid_tanh_approx_f32(bfv)
@@ -1415,9 +1583,12 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     K.ptx.prefetch.tensormap(K.address_of(o_map))
                     K.ptx.prefetch.tensormap(K.address_of(v_map))
                 work = K.local_scalar("int32", init=K.cta_id())
+
                 def issue_v(tok0, h_idx):
                     _t = rng("L.wait_v")
-                    p_v.empty.wait(st_v.stage, st_v.phase)  # single v stage: free once G3 of the previous chunk completed
+                    p_v.empty.wait(
+                        st_v.stage, st_v.phase
+                    )  # single v stage: free once G3 of the previous chunk completed
                     rng_end(_t)
                     with K.If(elected()), K.Then():
                         p_v.full.arrive(st_v.stage, tx_count=V_BYTES)
@@ -1570,14 +1741,22 @@ class KDAForwardConfig:
 
 
 _EVOLVE_CONFIG = KDAForwardConfig()
-CONFIGS = [
-    {field.name: getattr(_EVOLVE_CONFIG, field.name) for field in fields(KDAForwardConfig)}
-]
+CONFIGS = [{field.name: getattr(_EVOLVE_CONFIG, field.name) for field in fields(KDAForwardConfig)}]
 
 KERNEL_META = {
     "name": "agent_evolved_kda_forward_b1_t8192_h96",
     "category": "agent_evolved",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flash-linear-attention",
+            "git": {
+                "url": "https://github.com/fla-org/flash-linear-attention.git",
+                "commit": "9c8e42e762fce087c27b673af4922795d9edb85e",
+            },
+            "import": "fla",
+        },
+    ),
     "provenance": {
         "generator": "hmz",
         "run": "kda_forward_b1_t8192_h96-20260829-023306",
@@ -1602,12 +1781,7 @@ def _num_ctas(cfg: KDAForwardConfig) -> int:
 
 def get_kernel(**kwargs: Any):
     cfg = _cfg(**kwargs)
-    return make_kernel(
-        cfg.num_heads,
-        cfg.seq_len,
-        cfg.batch_size,
-        _num_ctas(cfg),
-    ).func
+    return make_kernel(cfg.num_heads, cfg.seq_len, cfg.batch_size, _num_ctas(cfg)).func
 
 
 def _gate_parameters(
@@ -1635,9 +1809,9 @@ def _gate_parameters(
 def _randn_bf16(
     shape: tuple[int, ...], *, device: torch.device, generator: torch.Generator
 ) -> torch.Tensor:
-    return (
-        torch.randn(shape, dtype=torch.float32, device=device, generator=generator) * 0.5
-    ).to(torch.bfloat16)
+    return (torch.randn(shape, dtype=torch.float32, device=device, generator=generator) * 0.5).to(
+        torch.bfloat16
+    )
 
 
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
@@ -1649,20 +1823,13 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     generator = torch.Generator(device=device)
     generator.manual_seed(cfg.seed)
     a_log, dt_bias = _gate_parameters(cfg, device=device, generator=generator)
-    vector_shape = (
-        cfg.batch_size,
-        cfg.seq_len,
-        cfg.num_heads,
-        cfg.key_head_dim,
-    )
+    vector_shape = (cfg.batch_size, cfg.seq_len, cfg.num_heads, cfg.key_head_dim)
     q = _randn_bf16(vector_shape, device=device, generator=generator)
     k = _randn_bf16(vector_shape, device=device, generator=generator)
     v = _randn_bf16(vector_shape, device=device, generator=generator)
     g = _randn_bf16(vector_shape, device=device, generator=generator)
     beta = _randn_bf16(
-        (cfg.batch_size, cfg.seq_len, cfg.num_heads),
-        device=device,
-        generator=generator,
+        (cfg.batch_size, cfg.seq_len, cfg.num_heads), device=device, generator=generator
     )
     out = torch.empty_like(v)
     tensors = {"q": q, "k": k, "v": v, "g": g, "out": out}
@@ -1708,7 +1875,9 @@ def _assert_sm100() -> None:
         raise SkipTest("CUDA is required for agent-evolved KDA forward")
     capability = torch.cuda.get_device_capability()
     if capability[0] != 10:
-        raise SkipTest(f"agent-evolved KDA forward requires compute capability 10.x, got {capability}")
+        raise SkipTest(
+            f"agent-evolved KDA forward requires compute capability 10.x, got {capability}"
+        )
 
 
 @contextmanager
@@ -1765,7 +1934,9 @@ def check_correctness(outputs: dict[str, Any], **kwargs: Any) -> None:
             raise AssertionError(f"{name} output contains non-finite values")
     if not torch.equal(first, actual):
         max_abs = float((first.float() - actual.float()).abs().max())
-        raise AssertionError(f"identical launches are not exactly repeatable; max abs diff={max_abs}")
+        raise AssertionError(
+            f"identical launches are not exactly repeatable; max abs diff={max_abs}"
+        )
     torch.testing.assert_close(actual, reference, atol=5e-2, rtol=5e-2)
     diff_rms = torch.sqrt(torch.mean((actual.float() - reference.float()).square()))
     reference_rms = torch.sqrt(torch.mean(reference.float().square()))
@@ -1794,10 +1965,7 @@ def run_test(**kwargs: Any) -> None:
 
     reference = _run_fla_reference(case)
     torch.cuda.synchronize()
-    check_correctness(
-        {"first": first, "actual": actual, "reference": reference},
-        **kwargs,
-    )
+    check_correctness({"first": first, "actual": actual, "reference": reference}, **kwargs)
 
 
 def prepare_bench(**kwargs: Any):

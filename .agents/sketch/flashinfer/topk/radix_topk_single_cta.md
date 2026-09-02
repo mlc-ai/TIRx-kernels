@@ -810,7 +810,7 @@ def EMIT_RaggedTransform(i, key, pos):   # `offset` was loaded once per row in S
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "radix_topk_single_cta", "category": "flashinfer",
-  "compute_capability": 10}`.
+  "runtime_cuda_archs": ["sm_100a"]}`.
 - The kernel is expressed entirely in plain TIRx: `T.SMEMPool` arena with the
   source's byte offsets, explicit `while` block-strided loops, register
   buffers, and native `T.ptx.*` forms for the key operations

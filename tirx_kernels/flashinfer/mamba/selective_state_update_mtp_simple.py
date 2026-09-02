@@ -19,7 +19,18 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "selective_state_update_mtp_simple",
     "category": "flashinfer",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
 }
 
 _LOG2_E = 1.4426950408889634
@@ -465,11 +476,7 @@ def get_kernel(**kwargs: Any):
     STATE_STAGES = spec["STATE_STAGES"]
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
 
-    @K.kernel(
-        warps=4,
-        arch="sm_100a",
-        grid=(spec["BATCH"], spec["NHEADS"], spec["CTAS_PER_HEAD"]),
-    )
+    @K.kernel(warps=4, arch="sm_100a", grid=(spec["BATCH"], spec["NHEADS"], spec["CTAS_PER_HEAD"]))
     def selective_state_update_mtp_simple(
         state: K.gptr[spec["STATE_DTYPE"]],
         state_scale: K.gptr[K.f32],

@@ -15,7 +15,11 @@ replace the direct verdict. The same flag exists on
 registered kernel has one file. Files with `default_suite: true` select one to
 three representative single-GPU rows with `default: true`; curated three-row
 files label them `small`, `medium`, and `large`. The current default roster is
-191 rows across 65 device kernels.
+263 rows across 90 device kernels: 260 rows from 89 kernels validated on
+`sm_100a`, `sm_103a`, and `sm_107a`, plus 3 rows from the `sm_107a`-only Rubin
+BMM. Thus an SM107 run selects all 263 rows, while SM100 and SM103 runs retain
+the 260-row subset.
+GPU runs retain only rows registered for the pool's exact architecture.
 
 With no `--workloads`, the suite writes the selected rows to
 `.bench-suite/workloads.generated.yaml`. Inspect that file before freezing a
@@ -25,7 +29,9 @@ baseline.
 python -m tirx_kernels.bench_suite --check-imports
 ```
 
-The import check resolves selected kernels without compiling or using a GPU.
+The import check resolves every selected kernel across architectures without
+compiling or using a GPU; execution filters the default roster to the exact GPU
+architecture.
 
 ## Environment
 
@@ -92,9 +98,10 @@ otherwise incomparable rows fail. A complete matrix discovers crossings;
 after that, rerun only configs that are missing, changed, failed, or polluted.
 An explicit workload file or filter records a targeted selection, so the gate
 requires exactly those after rows while still requiring the immutable before
-baseline to contain the complete 191-row roster. Do not rerun clean passing rows
-or splice selected samples into the baseline. Byte-identical CUDA, fatbin, and
-final SASS already establish implementation alignment.
+baseline to contain the complete roster for the run's exact CUDA architecture.
+Do not rerun clean passing rows or splice selected samples into the baseline.
+Byte-identical CUDA, fatbin, and final SASS already establish implementation
+alignment.
 
 ## Run a same-GPU paired A/B
 

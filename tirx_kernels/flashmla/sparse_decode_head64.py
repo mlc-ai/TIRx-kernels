@@ -263,7 +263,17 @@ CONFIGS = [
 KERNEL_META = {
     "name": "sparse_flashmla_decode_head64",
     "category": "flashmla",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flash-mla",
+            "git": {
+                "url": "https://github.com/deepseek-ai/FlashMLA.git",
+                "commit": "9241ae3ef9bac614dd25e45e507e089f888280e0",
+            },
+            "import": "flash_mla",
+        },
+    ),
 }
 
 

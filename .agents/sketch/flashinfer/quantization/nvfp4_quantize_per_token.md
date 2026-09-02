@@ -327,7 +327,7 @@ def prepare_data(dtype, m, k, sf_layout, zero_row):
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "nvfp4_quantize_per_token", "category": "flashinfer",
-  "compute_capability": 10}`.
+  "runtime_cuda_archs": ["sm_100a"]}`.
 - The executable kernel is expressed entirely in plain TIRx: explicit `while`
   column-stride loops, runtime scalar ABI, register tiles, one static 16-byte
   smem buffer, `bar.sync` barriers, and native `T.ptx.*` forms for every

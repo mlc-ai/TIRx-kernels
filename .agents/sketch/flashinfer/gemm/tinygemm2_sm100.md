@@ -615,7 +615,7 @@ use automatic stage and `USE_PDL=False`.
 ## TIRx module and validation contract
 
 - `KERNEL_META = {"name": "tinygemm2_sm100", "category": "flashinfer",
-  "compute_capability": 10}`.
+  "runtime_cuda_archs": ["sm_100a"]}`.
 - The executable kernel is expressed entirely in TIRx: warp uniformization uses
   a u32 `T.thread_id` plus one shared i32 view, followed by
   `T.cuda._shfl_sync`; election uses the pred-only lowering of

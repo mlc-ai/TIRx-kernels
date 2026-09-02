@@ -1191,10 +1191,7 @@ def build_kernel(spec: GemmSpec):
                                                         ),
                                                     )
                                                     K.ptx[utccp_chain](
-                                                        K.cast(
-                                                            sfa_tmem_col + c * 4,
-                                                            "uint32",
-                                                        ),
+                                                        K.cast(sfa_tmem_col + c * 4, "uint32"),
                                                         desc_sf,
                                                         pred=mma_elected,
                                                     )
@@ -1216,10 +1213,7 @@ def build_kernel(spec: GemmSpec):
                                                         ),
                                                     )
                                                     K.ptx[utccp_chain](
-                                                        K.cast(
-                                                            sfb_tmem_col + c * 4,
-                                                            "uint32",
-                                                        ),
+                                                        K.cast(sfb_tmem_col + c * 4, "uint32"),
                                                         desc_sf,
                                                         pred=mma_elected,
                                                     )

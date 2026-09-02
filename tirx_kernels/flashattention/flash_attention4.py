@@ -26,7 +26,7 @@ import torch
 import tirx_kernels.kern as K
 import tvm
 import tvm.testing
-from tirx_kernels.runner import bench
+from tirx_kernels.runner import bench, cuda_target
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
 
@@ -1314,7 +1314,22 @@ def prepare_data(batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, 
     return q, k, v, out
 
 
-KERNEL_META = {"name": "flash_attention4", "category": "flashattention", "compute_capability": 10}
+KERNEL_META = {
+    "name": "flash_attention4",
+    "category": "flashattention",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flash-attn-4",
+            "git": {
+                "url": "https://github.com/Dao-AILab/flash-attention.git",
+                "commit": "0251105a2fb19d2957484b7f023cd8c115286ced",
+            },
+            "import": "flash_attn.cute",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 CONFIGS = [
     {
         "batch_size": 1,
@@ -1648,9 +1663,7 @@ def _profile_iket_workload(args: argparse.Namespace) -> None:
         is_causal=args.causal,
     )
     executable = IketProfiler().compile(
-        tvm.IRModule({"main": func}),
-        target=tvm.target.Target({"kind": "cuda", "arch": "sm_100a"}),
-        tir_pipeline="tirx",
+        tvm.IRModule({"main": func}), target=cuda_target(), tir_pipeline="tirx"
     )
 
     q, k, v, _ = prepare_data(

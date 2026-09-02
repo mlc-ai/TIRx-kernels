@@ -623,7 +623,7 @@ race past the acquire before thread 0 published the phase bump.
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "radix_topk_multi_cta", "category": "flashinfer",
-  "compute_capability": 10}`.
+  "runtime_cuda_archs": ["sm_100a"]}`.
 - Plain TIRx only: a `T.SMEMPool` arena at the source's byte offsets, explicit
   `while`/stepped `T.serial` loops, and native `T.ptx.*` forms for every key
   operation. Global and shared memory are reached exclusively through

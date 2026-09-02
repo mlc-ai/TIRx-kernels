@@ -1343,9 +1343,10 @@ def _compile_tirx_mega_moe_for_config(
         emit_nvl_barrier_timeout_printf=emit_nvl_barrier_timeout_printf,
     )
     # The block-scale tcgen05 MMA below uses ``scale_vec::1X``, which ptxas
-    # rejects for the family-only sm_100f target. It requires the
-    # architecture-specific Blackwell target used by the B200 compile profile.
-    target = cuda_target(arch="sm_100a")
+    # rejects for a family-only target. The prepared compile profile therefore
+    # supplies the exact architecture-specific target validated for the runtime
+    # GPU (currently sm_100a, sm_103a, or sm_107a).
+    target = cuda_target()
     mod = tvm.IRModule({"main": kernel})
     with _cuda_compile_mode(cuda_compile_mode):
         return tvm.compile(mod, target=target, tir_pipeline="tirx")

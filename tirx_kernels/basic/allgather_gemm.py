@@ -982,8 +982,7 @@ def _make_device_kernel():
     )(test_mma_ss_tma_2sm_persistent)
 
 
-KERNEL_META = {"name": "allgather_gemm", "category": "basic", "compute_capability": 10}
-
+KERNEL_META = {"name": "allgather_gemm", "category": "basic", "runtime_cuda_archs": ["sm_100a"]}
 CONFIGS = make_configs(ALLGATHER_GEMM_MODEL_SHAPES)
 
 

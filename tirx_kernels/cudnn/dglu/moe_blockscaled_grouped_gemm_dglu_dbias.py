@@ -23,7 +23,18 @@ from ._moe_blockscaled_grouped_gemm_dglu_dbias import spec as _spec
 KERNEL_META = {
     "name": "cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias",
     "category": "cudnn",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "nvidia-cudnn-frontend",
+            "git": {
+                "url": "https://github.com/NVIDIA/cudnn-frontend.git",
+                "commit": "aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5",
+            },
+            "import": "cudnn",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
 }
 
 CONFIGS = _spec.correctness_configs()

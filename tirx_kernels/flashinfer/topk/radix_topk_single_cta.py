@@ -67,8 +67,22 @@ from tirx_kernels.flashinfer.utils.topk_radix import (
 )
 from tirx_kernels.runner import bench
 
-KERNEL_META = {"name": "radix_topk_single_cta", "category": "flashinfer", "compute_capability": 10}
-
+KERNEL_META = {
+    "name": "radix_topk_single_cta",
+    "category": "flashinfer",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 LAUNCH_TAGS = ("blockIdx.x", "threadIdx.x", "tirx.use_dyn_shared_memory")
 
 # ---------------------------------------------------------------------------

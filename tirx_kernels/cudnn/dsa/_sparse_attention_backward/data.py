@@ -351,14 +351,16 @@ def compile_reference(data):
     return launch
 
 
-def tirx_launch(executables, data):
+def tirx_launch(executables, data, *, synchronize_stages=False):
     """Return a no-argument closure that runs the four TIRx kernels on ``data``.
 
     The zeroing is part of the closure, not of setup: ``dkv``, ``d_sink`` and both
     workspaces are accumulated into, so every repetition needs them clean. The
     upstream wrapper does the same zeroing inside its own timed call
     (``_interface_sm100.py:105-162``), which is what keeps the two timing scopes
-    comparable.
+    comparable. Correctness callers may synchronize after each device function
+    to attribute an asynchronous CUDA failure to the exact stage; benchmark
+    callers leave this disabled so the launch sequence remains unchanged.
     """
     import math
 
@@ -396,6 +398,16 @@ def tirx_launch(executables, data):
         inputs["topk_length"].reshape(-1) if inputs["topk_length"] is not None else topk_idxs
     )
 
+    def synchronize(stage):
+        if not synchronize_stages:
+            return
+        try:
+            torch.cuda.synchronize()
+        except RuntimeError as error:
+            raise RuntimeError(
+                f"TIRx DSA {stage} stage failed during CUDA synchronization"
+            ) from error
+
     def launch():
         out["dkv"].zero_()
         out["d_sink"].zero_()
@@ -412,6 +424,7 @@ def tirx_launch(executables, data):
             -1.0,
             neg_log2_e,
         )
+        synchronize("sum_odo")
         bwd(
             maps["q"].ptr,
             maps["do"].ptr,
@@ -427,10 +440,13 @@ def tirx_launch(executables, data):
             plane,
             scale,
         )
+        synchronize("bwd")
         convert(ws_dkv, out["dkv"].reshape(-1), seqlen_kv)
+        synchronize("convert")
         sum_dsink(
             ws_lse_odo, inputs["attn_sink"].reshape(-1), out["d_sink"].reshape(-1), seqlen_q, plane
         )
+        synchronize("sum_dsink")
 
     return launch
 

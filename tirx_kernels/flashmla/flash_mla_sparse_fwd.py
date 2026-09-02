@@ -31,8 +31,11 @@ from tirx_kernels.flashmla import sparse_prefill_head128_phase1 as _head128
 from tirx_kernels.flashmla import sparse_prefill_head128_small_topk_phase1 as _small_topk
 from tvm.tirx.cuda import iket
 
-KERNEL_META = {"name": "flash_mla_sparse_fwd", "category": "flashmla", "compute_capability": 10}
-
+KERNEL_META = {
+    "name": "flash_mla_sparse_fwd",
+    "category": "flashmla",
+    "runtime_cuda_archs": ["sm_100a"],
+}
 _HEAD64_NAME = _head64.KERNEL_META["name"]
 _HEAD128_NAME = _head128.KERNEL_META["name"]
 _SMALL_TOPK_NAME = _small_topk.KERNEL_META["name"]

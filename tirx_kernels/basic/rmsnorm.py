@@ -28,7 +28,22 @@ def prepare_data(batch_size, dim):
     )
 
 
-KERNEL_META = {"name": "rmsnorm", "category": "basic", "compute_capability": 10}
+KERNEL_META = {
+    "name": "rmsnorm",
+    "category": "basic",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 CONFIGS = [
     {"hidden_size": hs, "batch_size": bs, "label": f"hs{hs}_bs{bs}"}
     for hs in [128, 4096, 5120, 8192]

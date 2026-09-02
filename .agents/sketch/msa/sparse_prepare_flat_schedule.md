@@ -445,7 +445,7 @@ emission tail is one atomic plus six stores per work item.
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "msa_sparse_prepare_flat_schedule_sm100", "category":
-  "msa", "compute_capability": 10}`.
+  "msa", "runtime_cuda_archs": ["sm_100a"]}`.
 - Plain TIRx only: explicit loops, scalar registers via `T.alloc_local`, and
   native `T.ptx.*` forms for every key operation. Global memory is reached
   exclusively through `T.ptx.ld/st.*` on `buffer.ptr_to([...])`, never a native

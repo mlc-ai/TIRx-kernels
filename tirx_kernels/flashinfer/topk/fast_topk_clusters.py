@@ -60,7 +60,22 @@ from tirx_kernels.flashinfer.utils.filtered_topk_ops import st_global_bits
 from tirx_kernels.flashinfer.utils.topk_harness import source_module, torch_dtype
 from tirx_kernels.runner import bench
 
-KERNEL_META = {"name": "fast_topk_clusters", "category": "flashinfer", "compute_capability": 10}
+KERNEL_META = {
+    "name": "fast_topk_clusters",
+    "category": "flashinfer",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 
 
 # `clusterCtaIdx.x` is requested only when the cluster is real; a one-CTA cluster

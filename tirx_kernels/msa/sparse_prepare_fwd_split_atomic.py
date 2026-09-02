@@ -50,7 +50,19 @@ from tirx_kernels.msa.utils._scalar_ops import (
 KERNEL_META = {
     "name": "msa_sparse_prepare_fwd_split_atomic_sm100",
     "category": "msa",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "msa",
+            "git": {
+                "url": "https://github.com/MiniMax-AI/MSA.git",
+                "commit": "80434d7f67877c6570ca19cac444b84bc9855dac",
+            },
+            "import": "fmha_sm100",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.5.3", "import": "cutlass"},
+        {"package": "quack-kernels", "specifier": "==0.5.0", "import": "quack"},
+    ),
 }
 
 # `__init__(num_threads=256)` (:351-358); validated a multiple of 32.

@@ -324,7 +324,7 @@ module bakes the same values per config.
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "act_and_mul", "category": "flashinfer",
-  "compute_capability": 10}`.
+  "runtime_cuda_archs": ["sm_100a"]}`.
 - The executable kernel is expressed entirely in plain TIRx: explicit
   `while` grid-stride loops, scalar/vector register buffers, explicit
   global loads/stores, and native `T.ptx.*` forms for every non-trivial

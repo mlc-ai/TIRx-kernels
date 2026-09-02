@@ -29,7 +29,17 @@ from ._sm100_fp8_fp4_gemm_1d1d import (
 KERNEL_META = {
     "name": "deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
     "category": "deepgemm",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "deep-gemm",
+            "git": {
+                "url": "https://github.com/deepseek-ai/DeepGEMM.git",
+                "commit": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+            },
+            "import": "deep_gemm",
+        },
+    ),
 }
 
 #: `tests/generators.py::enumerate_k_grouped_contiguous`; the first entry has

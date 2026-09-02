@@ -3366,9 +3366,7 @@ def get_kernel(
                                             ),
                                         ),
                                     )
-                                    utccp_copy(
-                                        sfa_tmem_col + sfa_chunk_idx * 4, desc_sf
-                                    )
+                                    utccp_copy(sfa_tmem_col + sfa_chunk_idx * 4, desc_sf)
                                 with K.unroll(0, num_sfb_utccp_chunks) as sfb_chunk_idx:
                                     K.assign(
                                         desc_sf,
@@ -3383,9 +3381,7 @@ def get_kernel(
                                             ),
                                         ),
                                     )
-                                    utccp_copy(
-                                        sfb_tmem_col + sfb_chunk_idx * 4, desc_sf
-                                    )
+                                    utccp_copy(sfb_tmem_col + sfb_chunk_idx * 4, desc_sf)
                                 with K.unroll(0, umma_block_k // umma_k) as k_idx:
                                     K.assign(
                                         runtime_desc_i,

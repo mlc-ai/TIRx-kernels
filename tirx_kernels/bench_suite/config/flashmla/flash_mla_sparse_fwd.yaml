@@ -1,3 +1,6 @@
+# Dispatcher alias over the three sparse_flashmla_prefill_* TIRx device kernels,
+# which own the default measured rows. Keep this alias explicit-only to avoid
+# measuring the same device kernels twice; external FlashMLA remains the reference.
 kernel: flash_mla_sparse_fwd
 default_suite: false
 configs:

@@ -16,6 +16,7 @@ import importlib
 import io
 import logging
 import pkgutil
+import re
 import tokenize
 from dataclasses import dataclass
 from functools import lru_cache
@@ -23,6 +24,10 @@ from pathlib import Path
 from types import ModuleType
 
 import tirx_kernels
+from tirx_kernels.reference_requirements import ReferenceRequirement, parse_reference_requirements
+from tirx_kernels.reference_requirements import (
+    unmet_reference_requirements as _unmet_reference_requirements,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -32,7 +37,8 @@ _SKIP_CATEGORIES = frozenset({"bench", "test", "bench_suite", "experimental"})
 # Shared-helper subpackages inside a category — they hold no kernel modules.
 _SKIP_SUBPACKAGES = frozenset({"utils"})
 
-_REQUIRED_META_TYPES = {"name": str, "category": str, "compute_capability": int}
+_REQUIRED_META_TYPES = {"name": str, "category": str, "runtime_cuda_archs": list}
+_CUDA_ARCH_PATTERN = re.compile(r"sm_[1-9][0-9]*(?:a|f)?")
 
 
 @dataclass(frozen=True)
@@ -41,7 +47,8 @@ class KernelRecord:
 
     name: str
     category: str
-    compute_capability: int
+    runtime_cuda_archs: tuple[str, ...]
+    reference_requirements: tuple[ReferenceRequirement, ...]
     module_name: str
     source_path: Path
 
@@ -146,6 +153,27 @@ def _validate_meta(meta: object, *, category: str, owner: str) -> list[str]:
         errors.append(
             f"'category' is {meta.get('category')!r}, expected containing category {category!r}"
         )
+    if isinstance(meta.get("runtime_cuda_archs"), list):
+        runtime_cuda_archs = meta["runtime_cuda_archs"]
+        if not runtime_cuda_archs:
+            errors.append("'runtime_cuda_archs' must not be empty")
+        elif not all(isinstance(arch, str) for arch in runtime_cuda_archs):
+            errors.append("'runtime_cuda_archs' entries must be strings")
+        else:
+            invalid = [
+                arch for arch in runtime_cuda_archs if _CUDA_ARCH_PATTERN.fullmatch(arch) is None
+            ]
+            if invalid:
+                errors.append(
+                    "'runtime_cuda_archs' entries must be canonical sm_* strings: "
+                    + ", ".join(repr(arch) for arch in invalid)
+                )
+            if len(runtime_cuda_archs) != len(set(runtime_cuda_archs)):
+                errors.append("'runtime_cuda_archs' entries must be unique")
+    _requirements, requirement_errors = parse_reference_requirements(
+        meta.get("reference_requirements")
+    )
+    errors.extend(requirement_errors)
     return errors
 
 
@@ -184,7 +212,10 @@ def _build_kernel_index(
         record = KernelRecord(
             name=name,
             category=category,
-            compute_capability=meta["compute_capability"],
+            runtime_cuda_archs=tuple(meta.get("runtime_cuda_archs", ())),
+            reference_requirements=parse_reference_requirements(meta.get("reference_requirements"))[
+                0
+            ],
             module_name=module_name,
             source_path=path,
         )
@@ -224,11 +255,20 @@ def _import_record(record: KernelRecord, *, strict: bool) -> ModuleType | None:
             errors.append(
                 f"runtime name {meta.get('name')!r} does not match source index {record.name!r}"
             )
-        if meta.get("compute_capability") != record.compute_capability:
+        runtime_cuda_archs_value = meta.get("runtime_cuda_archs", ())
+        runtime_cuda_archs = (
+            tuple(runtime_cuda_archs_value) if isinstance(runtime_cuda_archs_value, list) else ()
+        )
+        if runtime_cuda_archs != record.runtime_cuda_archs:
             errors.append(
-                "runtime compute_capability "
-                f"{meta.get('compute_capability')!r} does not match source index "
-                f"{record.compute_capability!r}"
+                f"runtime runtime_cuda_archs {runtime_cuda_archs!r} does not match source index "
+                f"{record.runtime_cuda_archs!r}"
+            )
+        runtime_requirements = parse_reference_requirements(meta.get("reference_requirements"))[0]
+        if runtime_requirements != record.reference_requirements:
+            errors.append(
+                f"runtime reference_requirements {runtime_requirements!r} does not match "
+                f"source index {record.reference_requirements!r}"
             )
     if errors:
         message = f"{record.module_name} has invalid runtime KERNEL_META: " + "; ".join(errors)
@@ -264,23 +304,27 @@ def check_workload_imports(workloads: list[dict], *, strict: bool = True) -> lis
 
 
 def discover_kernels(
-    *, min_compute_capability: int | None = None, category: str | None = None, strict: bool = False
+    *, cuda_arch: str | None = None, category: str | None = None, strict: bool = False
 ) -> dict[str, ModuleType]:
     """Return ``{public_name: module}`` for all matching registered kernels."""
+    if cuda_arch is not None and _CUDA_ARCH_PATTERN.fullmatch(cuda_arch) is None:
+        raise ValueError(f"invalid exact CUDA architecture {cuda_arch!r}")
     records = kernel_index(strict=strict)
     result: dict[str, ModuleType] = {}
     for name, record in records.items():
         if category is not None and record.category != category:
             continue
-        if (
-            min_compute_capability is not None
-            and record.compute_capability != min_compute_capability
-        ):
+        if cuda_arch is not None and cuda_arch not in record.runtime_cuda_archs:
             continue
         module = _import_record(record, strict=strict)
         if module is not None:
             result[name] = module
     return result
+
+
+def unmet_reference_requirements(value: object) -> tuple[str, ...]:
+    """Public resolver for a literal ``KERNEL_META`` requirement tuple."""
+    return _unmet_reference_requirements(value)
 
 
 if __name__ == "__main__":
@@ -293,7 +337,7 @@ if __name__ == "__main__":
         "--format", choices=["text", "json", "benchrun"], default="text", help="Output format"
     )
     parser.add_argument("--category", type=str, default=None)
-    parser.add_argument("--cc", type=int, default=None, help="Compute capability filter")
+    parser.add_argument("--arch", type=str, default=None, help="Exact CUDA architecture filter")
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -301,9 +345,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    all_kernels = discover_kernels(
-        min_compute_capability=args.cc, category=args.category, strict=args.strict
-    )
+    if args.arch is not None and _CUDA_ARCH_PATTERN.fullmatch(args.arch) is None:
+        parser.error("--arch must be a canonical architecture such as sm_100a")
+    all_kernels = discover_kernels(cuda_arch=args.arch, category=args.category, strict=args.strict)
 
     if args.format == "json":
         out = []
@@ -325,5 +369,6 @@ if __name__ == "__main__":
             n_configs = len(getattr(mod, "CONFIGS", []))
             print(
                 f"  {name:30s}  {meta.get('category', '?'):12s}  "
-                f"sm{meta.get('compute_capability', '?') * 10}  ({n_configs} configs)"
+                f"{','.join(meta.get('runtime_cuda_archs', ())) or '?':16s}  "
+                f"({n_configs} configs)"
             )

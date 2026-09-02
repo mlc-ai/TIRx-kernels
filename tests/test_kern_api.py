@@ -10,6 +10,21 @@ import tirx_kernels.kern as K
 from tvm.tirx.stmt_functor import StmtExprVisitor
 
 
+def test_kernel_target_honors_prepared_compile_arch(monkeypatch):
+    @K.kernel(warps=1, arch="sm_100a", grid=False)
+    def probe(out: K.gptr("float32")):
+        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(1.0))
+
+    monkeypatch.delenv("TIRX_PREPARE_CUDA_ARCH", raising=False)
+    assert probe.target().arch == "sm_100a"
+
+    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_103a")
+    assert probe.target().arch == "sm_103a"
+
+    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_107a")
+    assert probe.target().arch == "sm_107a"
+
+
 def _tir(build_body):
     @K.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: K.gptr("float32")):

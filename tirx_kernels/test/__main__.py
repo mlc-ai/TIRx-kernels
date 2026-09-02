@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--kernel", type=str, default=None, help="Run only this kernel")
     parser.add_argument("--config", type=str, default=None, help="Run only this config label")
     parser.add_argument("--json", action="store_true", help="Output JSON results")
-    parser.add_argument("--cc", type=int, default=None, help="Compute capability filter")
+    parser.add_argument("--arch", type=str, default=None, help="Exact CUDA architecture filter")
     parser.add_argument(
         "--num-gpus",
         type=int,
@@ -52,7 +52,7 @@ def main():
     if args.num_gpus is not None and args.num_gpus < 1:
         parser.error("--num-gpus must be positive")
 
-    all_kernels = discover_kernels(min_compute_capability=args.cc)
+    all_kernels = discover_kernels(cuda_arch=args.arch)
 
     if args.kernel:
         if args.kernel not in all_kernels:

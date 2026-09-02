@@ -23,7 +23,18 @@ from .selective_state_update_mtp_simple import _case, _shfl_down_f32
 KERNEL_META = {
     "name": "selective_state_update_mtp_horizontal",
     "category": "flashinfer",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
 }
 
 
@@ -309,12 +320,7 @@ def get_kernel(**kwargs: Any):
     WEIGHT_DTYPE = spec["WEIGHT_DTYPE"]
     INDEX_DTYPE = spec["INDEX_DTYPE"]
 
-    @K.kernel(
-        warps=5,
-        arch="sm_100a",
-        min_blocks_per_sm=7,
-        grid=(spec["BATCH"], spec["NHEADS"]),
-    )
+    @K.kernel(warps=5, arch="sm_100a", min_blocks_per_sm=7, grid=(spec["BATCH"], spec["NHEADS"]))
     def selective_state_update_mtp_horizontal(
         tensor_state: K.TensorMap,
         tensor_b: K.TensorMap,

@@ -647,7 +647,11 @@ def make_kernel(dtype: str, M: int, N: int, Kdim: int):
     return _make_device_kernel(dtype, M, N, Kdim).func
 
 
-KERNEL_META = {"name": "fp16_bf16_gemm", "category": "basic", "compute_capability": 10}
+KERNEL_META = {
+    "name": "fp16_bf16_gemm",
+    "category": "basic",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+}
 CONFIGS = [
     {"dtype": d, "M": s, "N": s, "K": s, "label": f"{d}_{s}x{s}x{s}"}
     for d in ["fp16", "bf16"]

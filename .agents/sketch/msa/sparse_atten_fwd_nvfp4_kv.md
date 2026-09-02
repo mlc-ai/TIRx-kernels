@@ -1830,7 +1830,7 @@ epilogue decode), `tok_idx < q_tokens_per_group` (the TMA per-warp partition),
 ## TIRx module and benchmark contract
 
 `KERNEL_META["name"] = "msa_sparse_atten_fwd_nvfp4_kv_sm100"`, category `msa`,
-`compute_capability = 10`.
+`runtime_cuda_archs = ["sm_100a"]`.
 
 `prepare_data` builds packed FP4 K/V, random E4M3 scale bytes in a positive
 finite band, the CSR payload, the work list and a frozen qsplit assignment, and

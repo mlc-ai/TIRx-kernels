@@ -634,7 +634,7 @@ and why SM89/SM120 cannot run this path at all.
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "filtered_topk", "category": "flashinfer",
-  "compute_capability": 10}`; device symbols `filtered_topk` and
+  "runtime_cuda_archs": ["sm_100a"]}`; device symbols `filtered_topk` and
   `filtered_topk_finalize`.
 - Plain TIRx only: a `T.SMEMPool` arena at the source's byte offsets, explicit
   loops, and native `T.ptx.*` forms for every key operation. Global and shared

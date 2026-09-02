@@ -20,7 +20,18 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "cudnn_sm100_gdn_recompute_f16",
     "category": "cudnn",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "nvidia-cudnn-frontend",
+            "git": {
+                "url": "https://github.com/NVIDIA/cudnn-frontend.git",
+                "commit": "aded9909c3c2a897fdbc7b5fd79fa53bc915f4f5",
+            },
+            "import": "cudnn",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
 }
 
 # Deterministic pairwise cover of the frozen legal capability set.  Ragged
@@ -874,10 +885,7 @@ def _blockwise_32_to_64(arena, tinv_byte_base, band, lane, io_dtype, store_resul
         )
         _stmatrix_x4(
             arena.ptr_to(
-                [
-                    tinv_byte_base
-                    + _swizzle_lin_128b((32 + band * 16) * 64 + 16 + lane_off) * 2
-                ]
+                [tinv_byte_base + _swizzle_lin_128b((32 + band * 16) * 64 + 16 + lane_off) * 2]
             ),
             [o_pack[4], o_pack[5], o_pack[6], o_pack[7]],
         )
@@ -1463,9 +1471,7 @@ def _make_main(
                     with K.If(do_inv), K.Then():
                         _blockwise_16_to_32(arena, inv_byte_base, inv_warp * 32, lane, io_dtype)
                     K.ptx.bar.sync(K.uint32(2), K.uint32(128))
-                    _blockwise_32_to_64(
-                        arena, inv_byte_base, inv_warp, lane, io_dtype, do_inv
-                    )
+                    _blockwise_32_to_64(arena, inv_byte_base, inv_warp, lane, io_dtype, do_inv)
                     K.ptx.bar.sync(K.uint32(2), K.uint32(128))
 
                     # ---- post-inverse beta column scaling + publish --------

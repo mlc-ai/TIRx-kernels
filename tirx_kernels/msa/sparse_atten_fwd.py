@@ -32,8 +32,23 @@ from tirx_kernels.msa.utils._scalar_ops import (
     udiv_i32,
 )
 
-KERNEL_META = {"name": "msa_sparse_atten_fwd_sm100", "category": "msa", "compute_capability": 10}
-
+KERNEL_META = {
+    "name": "msa_sparse_atten_fwd_sm100",
+    "category": "msa",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "msa",
+            "git": {
+                "url": "https://github.com/MiniMax-AI/MSA.git",
+                "commit": "80434d7f67877c6570ca19cac444b84bc9855dac",
+            },
+            "import": "fmha_sm100",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.5.3", "import": "cutlass"},
+        {"package": "quack-kernels", "specifier": "==0.5.0", "import": "quack"},
+    ),
+}
 # `__init__` restricts both to a single supported value (:75-79, :99-107).
 HEAD_DIM = 128
 BLK_KV = 128
@@ -2263,9 +2278,7 @@ def _make_kernel(**config):
             # ``tidx - stage * 128`` it also makes the 0..127 range explicit to
             # unsigned quotient lowering without relying on a separate warp-id
             # predicate to constrain ``tidx``.
-            group_tidx = K.local_scalar(
-                "int32", init=K.bitwise_and(tidx, SOFTMAX_THREADS - 1)
-            )
+            group_tidx = K.local_scalar("int32", init=K.bitwise_and(tidx, SOFTMAX_THREADS - 1))
             kv_block_sm = ld_shared_i32(s_row_meta, 1)
             count_raw_sm = ld_shared_i32(s_row_meta, 3)
             kv_valid_cols = ld_shared_i32(s_row_meta, 4)
@@ -2379,13 +2392,9 @@ def _make_kernel(**config):
                                 # an int32 literal and stays one `and.b32` with an
                                 # immediate rather than a shift plus a test.
                                 imm = K.local_scalar(
-                                    "int32",
-                                    init=K.int32((1 << i) if i < 31 else -(1 << 31)),
+                                    "int32", init=K.int32((1 << i) if i < 31 else -(1 << 31))
                                 )
-                                with (
-                                    K.If(K.bitwise_and(signed_bits, imm) == K.int32(0)),
-                                    K.Then(),
-                                ):
+                                with K.If(K.bitwise_and(signed_bits, imm) == K.int32(0)), K.Then():
                                     K.assign(s_regs[chunk * MASK_R2P_CHUNK + i], NEG_INF)
 
                     # One KV block per Q group, so this is always the first and

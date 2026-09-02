@@ -366,7 +366,7 @@ def main():
         default=None,
         help="Write JSON results to this file instead of stdout",
     )
-    parser.add_argument("--cc", type=int, default=None, help="Compute capability filter")
+    parser.add_argument("--arch", type=str, default=None, help="Exact CUDA architecture filter")
     parser.add_argument(
         "--warmup",
         type=int,
@@ -444,16 +444,17 @@ def main():
         except KeyError:
             print(f"ERROR: kernel '{args.kernel}' not found.", file=sys.stderr)
             sys.exit(1)
-        if args.cc is not None and mod.KERNEL_META.get("compute_capability") != args.cc:
+        runtime_cuda_archs = tuple(mod.KERNEL_META.get("runtime_cuda_archs", ()))
+        if args.arch is not None and args.arch not in runtime_cuda_archs:
             print(
-                f"ERROR: kernel '{args.kernel}' compute_capability="
-                f"{mod.KERNEL_META.get('compute_capability')} != filter {args.cc}",
+                f"ERROR: kernel '{args.kernel}' runtime_cuda_archs={runtime_cuda_archs!r} "
+                f"does not include filter {args.arch!r}",
                 file=sys.stderr,
             )
             sys.exit(1)
         all_kernels = {args.kernel: mod}
     else:
-        all_kernels = discover_kernels(min_compute_capability=args.cc)
+        all_kernels = discover_kernels(cuda_arch=args.arch)
 
     # Each kernel's run_bench() manages its own Proton session via bench(timer=...).
     # No global proton session needed.

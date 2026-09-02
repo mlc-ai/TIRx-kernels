@@ -27,7 +27,19 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "msa_sparse_atten_fwd_combine_sm100",
     "category": "msa",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "msa",
+            "git": {
+                "url": "https://github.com/MiniMax-AI/MSA.git",
+                "commit": "80434d7f67877c6570ca19cac444b84bc9855dac",
+            },
+            "import": "fmha_sm100",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.5.3", "import": "cutlass"},
+        {"package": "quack-kernels", "specifier": "==0.5.0", "import": "quack"},
+    ),
 }
 
 # The host entry fixes every one of these for the production dispatch domain:
@@ -185,12 +197,7 @@ def make_kernel(
     NUM_ROWS, OUT_ROWS, SPLITS_PT = o_rows, out_rows, splits_pt
     NUM_VALS = o_elems
 
-    @K.kernel(
-        warps=WARPS,
-        arch="sm_100a",
-        min_blocks_per_sm=min_blocks_per_sm,
-        grid=False,
-    )
+    @K.kernel(warps=WARPS, arch="sm_100a", min_blocks_per_sm=min_blocks_per_sm, grid=False)
     def msa_sparse_atten_fwd_combine(
         o_partial: K.gptr[partial_ty],
         lse_partial: K.gptr[K.f32],
