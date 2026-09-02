@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Agent-evolved SM100a KDA forward kernel for the Kimi K3 TP1 prefill shape.
+"""Agent-evolved SM100a KDA forward for the Kimi K3 prefill workloads.
 
-This canonical module intentionally exposes only its measured workload:
-B=1, T=8192, H=96, K=V=128, BF16 inputs/output, FP32 gate parameters, zero
-initial state, and no final-state output. The registry metadata records the
-evolution run and selected candidate.
+The supported contract is B=1, 8192 total tokens, H in {64, 96}, K=V=128,
+BF16 q/k/v/g/beta and output, FP32 gate parameters and per-sequence V-first
+initial state, and either one fixed sequence, six mixed-length sequences, or
+eight 1024-token sequences. No final state is produced.
 
-The device body is preserved from the selected result.  It processes 64-token
-chunks in one fused persistent kernel, keeps the transposed recurrent state in
-TMEM, and assigns one work item to each (batch, head).  Evolution history and
-measurement artifacts remain in the run tree rather than becoming a second
-source of truth here.
+The selected kernel is candidate v68 from the 2026-09-01 KDA-forward evolution
+run. It is a fused persistent tcgen05 implementation with device-side dynamic
+LPT work assignment, TMEM recurrent state, shape-specific compact paths, and
+tail-safe packed sequence handling. Evolution records and profiler artifacts
+remain in the run tree; this module owns the supported implementation and
+registry interface.
 """
 
 import ctypes
@@ -76,12 +77,15 @@ FENCE_ASYNC = "fence.proxy.async.shared::cta"
 BULK_COMMIT = "cp.async.bulk.commit_group"
 BULK_WAIT_READ = "cp.async.bulk.wait_group.read"
 BULK_WAIT = "cp.async.bulk.wait_group"
+BULK_S2C = "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"
 LDG_V4 = "ld.global.L1::no_allocate.v4.b32"
 
 BAR_INV, BAR_INV_N = 2, 128  # cg0 inverse stages
 BAR_PREP, BAR_PREP_N = 3, 256  # prep gate-scan exchange (8 warps)
 BAR_CG1, BAR_CG1_N = 4, 128  # cg1 tmem dealloc rendezvous
 BAR_INV2, BAR_INV2_N = 5, 64  # cg0 32->64 merge (warps 0,1)
+BAR_RNORM, BAR_RNORM_N = 6, 256  # chain prep: all remote norm reads completed
+BAR_HELP, BAR_HELP_N = 7, 512  # helper: both eight-warp norm teams
 
 STAGE_ROWS = 3 * CHUNK  # k rows 0..63, q rows 64..127, g rows 128..191
 STAGE_UNITS = STAGE_ROWS * D_HEAD * 2 // 16  # one stage in 16-byte descriptor units
@@ -89,15 +93,44 @@ KG_UNITS = CHUNK * D_HEAD * 2 // 16
 STAGE_BYTES = STAGE_ROWS * D_HEAD * 2
 KQ_BYTES = 2 * CHUNK * D_HEAD * 2  # TMA bytes per stage: k and q rows only (g comes from global)
 V_BYTES = CHUNK * D_HEAD * 2
+NORM_BYTES = 2 * CHUNK * 4
+BETA_BYTES = CHUNK * 4
 
 
-def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
-    """Trace the kernel for one (H, T, B, grid) specialization (iket=True adds timeline ranges)."""
-    NCH = T // CHUNK
-    assert T % CHUNK == 0 and NCH >= 1
+MAX_ORDER = 512  # sequences beyond this count are dispatched in natural order
+WORK_RING = (
+    16  # work-id ring depth (loader fetches ahead of the slowest role by at most this many items)
+)
+
+
+def make_kernel(
+    H: int,
+    iket: bool = False,
+    static_grid: int | None = None,
+    compact: bool = False,
+    fixed: bool = False,
+    cluster_norm: bool = False,
+    packed_tail_hoist: bool = False,
+    uniform: bool = False,
+    mixed: bool = False,
+):
+    """Trace the packed-varlen KDA forward kernel for one head count (iket=True adds timeline ranges;
+    static_grid pins the CTA count for CPU analysis tools that need a static launch extent; compact=True
+    selects the smaller-code variant used by the high-CTA-count configs)."""
+    if cluster_norm and not fixed:
+        raise ValueError("cluster_norm requires the fixed single-sequence specialization")
+    if uniform and fixed:
+        raise ValueError("uniform specialization requires packed input")
+    mixed = mixed and H == 96 and not fixed and not uniform
+    derive_cg1_vo = mixed or (uniform and H == 64)
     HK = H * D_HEAD
 
-    @K.kernel(warps=20, arch="sm_100a", min_blocks_per_sm=1, grid=num_ctas)
+    @K.kernel(
+        warps=20,
+        arch="sm_100a",
+        min_blocks_per_sm=1,
+        grid="num_ctas" if static_grid is None else static_grid,
+    )
     def kda_fwd(
         q: K.gptr[K.bf16],
         k: K.gptr[K.bf16],
@@ -106,6 +139,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         beta: K.gptr[K.bf16],
         a_log: K.gptr[K.f32],
         dt_bias: K.gptr[K.f32],
+        h0: K.gptr[K.f32],
+        cu_seqlens: K.gptr[K.i64],
+        sched: K.gptr[K.i32],
         o: K.gptr[K.bf16],
         q_map: K.TensorMap,
         k_map: K.TensorMap,
@@ -113,14 +149,20 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         g_map: K.TensorMap,
         o_map: K.TensorMap,
         scale: K.f32,
-        num_work: K.i32,
+        num_seqs: K.i32,
+        total_tokens: K.i32,
+        num_ctas: K.i32,
     ):
-        # q/k/v/g/o are only reached through the tensor maps.
+        # q/k/v/o are only reached through the tensor maps.
         K.keep_alive(q.data)
         K.keep_alive(k.data)
         K.keep_alive(v.data)
         K.keep_alive(g.data)
         K.keep_alive(o.data)
+        num_work = H if fixed else (8 * H if uniform else num_seqs * H)
+        HK64 = K.int64(HK)
+        cluster_rank = K.cta_id_in_cluster([3], preferred=[3]) if cluster_norm else K.int32(0)
+        is_chain = cluster_rank < K.int32(2) if cluster_norm else K.bool(True)
 
         sp = K.specialize()
         # setmaxnreg redistributes the LAUNCH allocation (96 regs x 640 threads = 61440), not the
@@ -148,8 +190,8 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             smem, 1, full="mbar", empty="tcgen05", init_full=256
         )  # prep(8 warps) -> mma ; G1_1 -> prep
         p_beta = K.Pipeline(
-            smem, 2, full="mbar", empty="mbar", init_full=32, init_empty=128
-        )  # loader -> cg0
+            smem, 2, full="mbar", empty="mbar", init_full=1 if cluster_norm else 32, init_empty=128
+        )  # loader/helper -> cg0
         p_g1 = K.Pipeline(
             smem, 2, full="tcgen05", empty="mbar", init_empty=128
         )  # G1_0 (D0, two TMEM buffers) -> cg0 ; cg0 (D0 read) -> mma0
@@ -196,6 +238,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         s_A = smem.alloc((CHUNK, CHUNK), K.f16, swizzle=K.SW128B)  # 8 KB inverse workspace
         s_o = smem.alloc((CHUNK, D_HEAD), K.bf16, swizzle=K.SW128B)  # 16 KB O [t][v]
         s_beta = smem.alloc((2, CHUNK), K.f32, align=16)
+        s_hbeta = smem.alloc((2, 2, CHUNK), K.f32, align=16) if cluster_norm else None
         # 4-deep ring: chunk n's vectors live in slot n&3; prep(n) writes it after the stage n-1 TMA, which
         # the loader issued only after G5(n-3), i.e. after cg1's state epilogue n-4 consumed chunk n-3's
         # vectors and (in program order) epilogue n-5 consumed chunk n-4's, the slot's previous tenant.
@@ -209,7 +252,74 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         s_norm = smem.alloc(
             (2, 2, CHUNK), K.f32, align=16
         )  # [stage][0]=rstd_k[t], [1]=rstd_q[t]*scale (prep-private per warp)
+        s_order = (
+            None if uniform else smem.alloc((MAX_ORDER,), K.i32, align=16)
+        )  # sequence index by descending-length rank
+        s_work = smem.alloc(
+            (WORK_RING,), K.i32, align=16
+        )  # work-id ring: loader -> every other warp
+        s_cu = (
+            None if uniform else smem.alloc((MAX_ORDER + 1,), K.i64, align=16)
+        )  # cu_seqlens copy (num_seqs <= MAX_ORDER)
+        # full: the loader's lane 0 publishes one id; empty: all 32 lanes of the 19 consumer warps
+        p_work = (
+            None
+            if fixed
+            else K.Pipeline(
+                smem, WORK_RING, full="mbar", empty="mbar", init_full=1, init_empty=19 * 32
+            )
+        )
+        if cluster_norm:
+            # One private q/k stage per helper team.  Eight norm warps release each stage.
+            p_hstage0 = K.Pipeline(smem, 1, full="tma", empty="mbar", init_empty=8 * 32)
+            p_hstage1 = K.Pipeline(smem, 1, full="tma", empty="mbar", init_empty=8 * 32)
+            # Helper bulk copies complete on the owning chain's local barrier.  The chain then
+            # remotely releases that team's single local norm source after all eight warps read it.
+            rnorm_full = K.MBarrier(smem, 2)
+            rnorm_full.init(1)
+            helper_release = K.MBarrier(smem, 2)
+            helper_release.init(1)
+            # Per-team, per-destination-stage acknowledgement after warp 0 observes
+            # p_t.full, which proves that all 128 cg0 threads completed their beta reads.
+            helper_beta_release = K.MBarrier(smem, 4)
+            helper_beta_release.init(1)
+        else:
+            p_hstage0 = p_hstage1 = rnorm_full = helper_release = helper_beta_release = None
 
+        # Item order: sequences by descending length (ties by index) so the longest items
+        # are dispatched first.  Natural order beyond MAX_ORDER sequences.
+        if not uniform:
+            tid0 = K.thread_id()
+            with K.If(num_seqs <= MAX_ORDER), K.Then():
+                with K.If(tid0 <= num_seqs), K.Then():
+                    cuv = K.local_scalar("int64")
+                    K.ptx.ld.global_.s64(cuv, cu_seqlens.ptr_to([tid0]))
+                    K.ptx.st.shared.s64(K.address_of(s_cu[tid0]), cuv)
+                with K.If(tid0 < num_seqs), K.Then():
+                    cs0 = K.alloc_local([2], "int64")
+                    K.ptx.ld.global_.s64(cs0[0], cu_seqlens.ptr_to([tid0]))
+                    K.ptx.ld.global_.s64(cs0[1], cu_seqlens.ptr_to([tid0 + 1]))
+                    len_i = K.local_scalar("int64", init=cs0[1] - cs0[0])
+                    rank = K.local_scalar("int32", init=K.int32(0))
+                    with K.serial(num_seqs) as j:
+                        cs1 = K.alloc_local([2], "int64")
+                        K.ptx.ld.global_.s64(cs1[0], cu_seqlens.ptr_to([j]))
+                        K.ptx.ld.global_.s64(cs1[1], cu_seqlens.ptr_to([j + 1]))
+                        len_j = K.local_scalar("int64", init=cs1[1] - cs1[0])
+                        K.assign(
+                            rank,
+                            rank
+                            + K.Select(
+                                len_j > len_i,
+                                K.int32(1),
+                                K.Select(
+                                    len_j == len_i,
+                                    K.Select(j < tid0, K.int32(1), K.int32(0)),
+                                    K.int32(0),
+                                ),
+                            ),
+                        )
+                    K.ptx.st.shared.s32(K.address_of(s_order[rank]), tid0)
         # The inverse never writes TB's strictly-upper 32x32 block; zero s_T once
         # so that block stays the required zero operand in every chunk.
         with K.If(K.thread_id() < 512), K.Then():
@@ -227,11 +337,18 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         with K.If(K.thread_id() == 0), K.Then():
             K.ptx.fence.mbarrier_init.release.cluster()
         K.cuda.cta_sync()
+        if cluster_norm:
+            K.ptx.barrier.cluster.arrive.release.aligned()
+            K.ptx.barrier.cluster.wait.acquire()
         # TMEM allocation by warp 8 (cg1 warp 0); the address is read by all after cta_sync.
-        with K.If(K.warp_id() == 12), K.Then():
-            K.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
-                K.address_of(s_tmem_addr[0]), K.uint32(TMEM_COLS)
-            )
+        with K.If(is_chain), K.Then():
+            with K.If(K.warp_id() == 12), K.Then():
+                K.ptx["tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"](
+                    K.address_of(s_tmem_addr[0]), K.uint32(TMEM_COLS)
+                )
+        if cluster_norm:
+            with K.If((cluster_rank == K.int32(2)) & (K.thread_id() == 0)), K.Then():
+                K.ptx.st.shared.s32(K.address_of(s_tmem_addr[0]), K.int32(0))
         K.cuda.cta_sync()
 
         # ---- trace-time layout facts ------------------------------------
@@ -308,11 +425,337 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
         def f2(a, b):
             return K.cuda.make_float2(a, b)
 
+        def runtime_off(off_fn, n_k):
+            """Runtime 16B-unit descriptor offset of k-tile kp: the trace-time offset table is either
+            linear or two linear runs (one per 64-column swizzle atom)."""
+            offs = [int(off_fn(k)) for k in range(n_k)]
+            if n_k == 1:
+                return lambda kp: K.uint64(0)
+            d1 = offs[1] - offs[0]
+            if all(offs[k] == offs[0] + k * d1 for k in range(n_k)):
+                return lambda kp: K.Cast("uint64", kp) * K.uint64(d1) + K.uint64(offs[0])
+            half = n_k // 2
+            d_atom = offs[half] - offs[0]
+            assert half & (half - 1) == 0 and all(
+                offs[k] == offs[0] + (k // half) * d_atom + (k % half) * d1 for k in range(n_k)
+            ), offs
+            sh = half.bit_length() - 1
+            return lambda kp: (
+                K.Cast("uint64", kp >> sh) * K.uint64(d_atom)
+                + K.Cast("uint64", kp & (half - 1)) * K.uint64(d1)
+                + K.uint64(offs[0])
+            )
+
+        def mma_issue(dcol, a_of, b_base, b_off, n_k, idesc, accumulate, tmem):
+            """One tcgen05 k-chain from an elected lane. `a_of(kp)` yields the A operand (smem descriptor
+            or tmem address). Unrolled for the fast shape; a rolled loop for the compact shape."""
+
+            def one(kp, acc_pred):
+                K.ptx[MMA_SS](
+                    K.Cast("uint32", tmem[0] + dcol),
+                    a_of(kp),
+                    b_base + b_off(kp),
+                    K.uint32(idesc),
+                    K.uint32(0),
+                    K.uint32(0),
+                    K.uint32(0),
+                    K.uint32(0),
+                    K.ptx.pred(acc_pred),
+                )
+
+            with K.If(elected()), K.Then():
+                if compact:
+                    with K.serial(n_k, unroll=False) as kp:
+                        one(kp, K.uint32(1) if accumulate else K.Cast("uint32", kp != 0))
+                else:
+                    for kp in range(n_k):
+                        one(kp, K.uint32(1) if (accumulate or kp != 0) else K.uint32(0))
+
+        def consume_work(st):
+            """Next work id for a consumer role (waits for the loader's publication)."""
+            p_work.full.wait(st.stage, st.phase)
+            w = K.local_scalar("int32")
+            K.ptx.ld.shared.s32(w, K.address_of(s_work[st.stage]))
+            p_work.empty.arrive(st.stage)
+            st.advance()
+            return w
+
+        def prefetch_initial_state(h0_base):
+            for part in range(4):
+                K.ptx["cp.async.bulk.prefetch.L2.global"](
+                    h0.ptr_to([h0_base + K.int64(part * (D_HEAD * D_HEAD // 4))]),
+                    K.uint32(D_HEAD * D_HEAD),
+                )
+
+        def fetch_work(st):
+            """Loader only: grab the next work id from the global counter and publish it."""
+            p_work.empty.wait(st.stage, st.phase)
+            w = K.local_scalar("int32")
+            with K.If(K.lane_id() == 0), K.Then():
+                old = K.local_scalar("uint32")
+                K.ptx.atom.global_.add.u32(old, sched.ptr_to([0]), K.uint32(1))
+                published = K.local_scalar("int32", init=K.Cast("int32", old))
+                if uniform and H == 96 and static_grid is None:
+                    # Logical uniform work IDs are the flattened (sequence, head) state index.
+                    # Enqueue the state prefetch before publishing the ID to cg1.
+                    with K.If(K.Cast("int32", old) < K.int32(num_work)), K.Then():
+                        prefetch_initial_state(K.Cast("int64", old) * K.int64(D_HEAD * D_HEAD))
+                if uniform and H == 96:
+                    # Preserve the sequence-major scheduler order, but publish the valid work
+                    # item as (head << 3) | sequence.  One loader lane pays the /H conversion;
+                    # all 19 consumer warps recover the coordinates with a shift and mask.
+                    seq = K.local_scalar("int32", init=K.Cast("int32", old // K.uint32(H)))
+                    K.assign(
+                        published,
+                        K.Select(
+                            K.Cast("int32", old) < K.int32(num_work),
+                            (K.Cast("int32", old) - seq * K.int32(H)) * K.int32(8) + seq,
+                            K.int32(num_work),
+                        ),
+                    )
+                K.ptx.st.shared.s32(K.address_of(s_work[st.stage]), published)
+                p_work.full.arrive(st.stage)
+            K.ptx["bar.warp.sync"](K.uint32(0xFFFFFFFF))
+            K.ptx.ld.shared.s32(w, K.address_of(s_work[st.stage]))
+            st.advance()
+            return w
+
+        def begin_work(producer=False):
+            """Create one role's work cursor; the fixed shape maps CTA id directly to head."""
+            if fixed:
+                if cluster_norm:
+                    cid = K.Cast("int32", K.cta_id()) // K.int32(3)
+                    mapped = K.Select(is_chain, cid * K.int32(2) + cluster_rank, K.int32(H))
+                    return None, K.local_scalar("int32", init=mapped)
+                return None, K.local_scalar("int32", init=K.Cast("int32", K.cta_id()))
+            st = K.PipelineState(WORK_RING, phase=1 if producer else 0)
+            work = K.local_scalar("int32", init=K.int32(0))
+            K.assign(work, fetch_work(st) if producer else consume_work(st))
+            return st, work
+
+        def advance_work(work, st, producer=False):
+            if fixed:
+                K.assign(work, work + num_ctas)
+            else:
+                K.assign(work, fetch_work(st) if producer else consume_work(st))
+
         def work_coords(work):
+            """(seq, head, seq_start:int64, seq_len:int32, nch:int32) of work item `work`."""
+            if fixed:
+                return (
+                    K.int32(0),
+                    work,
+                    K.int64(0),
+                    total_tokens,
+                    (total_tokens + K.int32(CHUNK - 1)) >> 6,
+                )
+            if uniform:
+                wu = K.Cast("uint32", work)
+                if H == 96:
+                    r_idx = K.Cast("int32", wu & K.uint32(7))
+                    h_idx = K.Cast("int32", wu >> 3)
+                else:
+                    r_idx = K.Cast("int32", wu // K.uint32(H))
+                    h_idx = K.local_scalar("int32", init=work - r_idx * H)
+                return (
+                    r_idx,
+                    h_idx,
+                    K.Cast("int64", r_idx) * K.int64(1024),
+                    K.int32(1024),
+                    K.int32(16),
+                )
             wu = K.Cast("uint32", work)
-            b_idx = K.Cast("int32", wu // K.uint32(H))
-            h_idx = work - b_idx * H
-            return b_idx, h_idx
+            r_idx = K.Cast("int32", wu // K.uint32(H))
+            h_idx = K.local_scalar("int32", init=work - r_idx * H)
+            so = K.local_scalar("int32")
+            K.ptx.ld.shared.s32(so, K.address_of(s_order[K.min(r_idx, K.int32(MAX_ORDER - 1))]))
+            seq_idx = K.local_scalar("int32", init=K.Select(num_seqs <= MAX_ORDER, so, r_idx))
+            cs = K.alloc_local([2], "int64")
+            with K.If(num_seqs <= MAX_ORDER):
+                with K.Then():
+                    K.ptx.ld.shared.s64(cs[0], K.address_of(s_cu[seq_idx]))
+                    K.ptx.ld.shared.s64(cs[1], K.address_of(s_cu[seq_idx + 1]))
+                with K.Else():
+                    K.ptx.ld.global_.s64(cs[0], cu_seqlens.ptr_to([seq_idx]))
+                    K.ptx.ld.global_.s64(cs[1], cu_seqlens.ptr_to([seq_idx + 1]))
+            seq_start = K.local_scalar("int64", init=cs[0])
+            seq_len = K.local_scalar("int32", init=K.Cast("int32", cs[1] - cs[0]))
+            nch = K.local_scalar("int32", init=(seq_len + K.int32(CHUNK - 1)) >> 6)
+            return seq_idx, h_idx, seq_start, seq_len, nch
+
+        if cluster_norm:
+
+            def helper_load(team):
+                """One helper loader warp TMA-loads q/k and publishes beta for one chain."""
+                pipe = p_hstage0 if team == 0 else p_hstage1
+                st = K.PipelineState(1, phase=1)
+                cid = K.Cast("int32", K.cta_id()) // K.int32(3)
+                h_idx = cid * K.int32(2) + K.int32(team)
+                nch = (total_tokens + K.int32(CHUNK - 1)) >> 6
+                tok_last = total_tokens - K.int32(1)
+                with K.If(elected()), K.Then():
+                    K.ptx.prefetch.tensormap(K.address_of(k_map))
+                    K.ptx.prefetch.tensormap(K.address_of(q_map))
+                with K.serial(nch) as n:
+                    _t = rng(f"HL{team}.wait")
+                    pipe.empty.wait(st.stage, st.phase)
+                    rng_end(_t)
+                    _t = rng(f"HL{team}.issue")
+                    tok0 = n * CHUNK
+                    with K.If(elected()), K.Then():
+                        pipe.full.arrive(st.stage, tx_count=KQ_BYTES)
+                        mb = K.cuda.cvta_generic_to_shared(pipe.full.ptr_to([st.stage]))
+                        for tmap, row0 in ((k_map, 0), (q_map, 64)):
+                            for d0 in (0, 64):
+                                K.ptx[TMA_LD](
+                                    s_stage[team].ptr_to(row0, d0),
+                                    K.address_of(tmap),
+                                    K.int32(d0),
+                                    K.Cast("int32", tok0),
+                                    h_idx,
+                                    mb,
+                                )
+                    st.advance()
+                    rng_end(_t)
+                    # The source and destination are double-buffered.  Before reuse at n+2,
+                    # wait until all four cg0 warps have completed their reads of chunk n.
+                    bstage = n & 1
+                    with K.If(n >= 2), K.Then():
+                        K.cuda.mbarrier_wait_acquire_cluster(
+                            helper_beta_release.ptr_to([team * 2 + bstage]), ((n >> 1) - 1) & 1
+                        )
+                    _t = rng(f"HB{team}.calc")
+                    for i in range(2):
+                        t = K.lane_id() + 32 * i
+                        bu = K.local_scalar("uint16")
+                        tokc = K.min(tok0 + t, tok_last)
+                        K.ptx.ld.global_.nc.u16(
+                            bu,
+                            beta.ptr_to(
+                                [K.Cast("int64", tokc) * K.int64(H) + K.Cast("int64", h_idx)]
+                            ),
+                        )
+                        bfv = K.reinterpret("float32", K.Cast("uint32", bu) << K.uint32(16))
+                        sg = K.idioms.sigmoid_tanh_approx_f32(bfv)
+                        K.ptx.st.shared.f32(K.address_of(s_hbeta[team, bstage, t]), sg)
+                    K.ptx[FENCE_ASYNC]()
+                    with K.If(elected()), K.Then():
+                        rem_bar = K.local_scalar("uint32")
+                        rem_dst = K.local_scalar("uint32")
+                        K.ptx.mapa.shared__cluster.u32(
+                            rem_bar,
+                            K.cuda.cvta_generic_to_shared(p_beta.full.ptr_to([bstage])),
+                            K.uint32(team),
+                        )
+                        K.ptx.mapa.shared__cluster.u32(
+                            rem_dst,
+                            K.cuda.cvta_generic_to_shared(s_beta.ptr_to([bstage, 0])),
+                            K.uint32(team),
+                        )
+                        K.ptx["mbarrier.arrive.expect_tx.release.cluster.shared::cluster.b64"](
+                            rem_bar, K.uint32(BETA_BYTES)
+                        )
+                        K.ptx[BULK_S2C](
+                            rem_dst,
+                            s_hbeta.ptr_to([team, bstage, 0]),
+                            K.uint32(BETA_BYTES),
+                            rem_bar,
+                        )
+                    rng_end(_t)
+
+            def helper_norm(team, r_grp):
+                """Eight helper warps compute and publish one chain's 64 q/k row norms."""
+                pipe = p_hstage0 if team == 0 else p_hstage1
+                st = K.PipelineState(1, phase=0)
+                lane = K.lane_id()
+                base_k = s_stage[team].ptr_to(0, 0)
+                norm_row = (lane >> 4) * CHUNK + r_grp * 8 + ((lane & 15) >> 1)
+                norm_off = K.local_scalar(
+                    "int32", init=(lane & 1) * (STAGE_ROWS * 128) + norm_row * 128
+                )
+                norm_x = K.local_scalar("int32", init=((norm_row & 7) ^ ((lane & 1) << 2)) << 4)
+                norm_is_q = lane >= 16
+                norm_wr = (lane & 1) == 0
+                nch = (total_tokens + K.int32(CHUNK - 1)) >> 6
+                with K.serial(nch) as n:
+                    # The previous chain release proves both that the prior DSMEM copy read this
+                    # team's single local norm tile and that every chain warp finished reading it.
+                    with K.If(n > 0), K.Then():
+                        K.cuda.mbarrier_wait_acquire_cluster(
+                            helper_release.ptr_to([team]), (n - 1) & 1
+                        )
+                    _t = rng(f"HN{team}.wait")
+                    pipe.full.wait(st.stage, st.phase)
+                    rng_end(_t)
+                    _t = rng(f"HN{team}.norm")
+                    nacc = K.alloc_local([4], "uint64")
+                    for pp in range(4):
+                        K.assign(nacc[pp], f2(K.float32(0.0), K.float32(0.0)))
+                    nw = K.alloc_local([4], "uint32")
+                    for j in range(8):
+                        K.ptx["ld.shared.v4.b32"](
+                            nw[0],
+                            nw[1],
+                            nw[2],
+                            nw[3],
+                            K.ptx.addr(base_k, norm_off + (K.int32(16 * j) ^ norm_x)),
+                        )
+                        for pp in range(4):
+                            xv = f2(bf16_lo(nw[pp]), bf16_hi(nw[pp]))
+                            K.ptx.fma.rn.f32x2(nacc[pp], xv, xv, nacc[pp])
+                    nhalf = K.local_scalar(
+                        "float32",
+                        init=(K.cuda.float2_x(nacc[0]) + K.cuda.float2_y(nacc[0]))
+                        + (K.cuda.float2_x(nacc[1]) + K.cuda.float2_y(nacc[1]))
+                        + (K.cuda.float2_x(nacc[2]) + K.cuda.float2_y(nacc[2]))
+                        + (K.cuda.float2_x(nacc[3]) + K.cuda.float2_y(nacc[3])),
+                    )
+                    nother = K.local_scalar("uint32")
+                    K.ptx.shfl_sync.bfly.b32(
+                        nother,
+                        K.reinterpret("uint32", nhalf),
+                        K.uint32(1),
+                        K.uint32(0x1F),
+                        K.uint32(0xFFFFFFFF),
+                    )
+                    nr = K.local_scalar("float32")
+                    K.ptx.rsqrt.approx.ftz.f32(
+                        nr, (nhalf + K.reinterpret("float32", nother)) + K.float32(1e-6)
+                    )
+                    with K.If(norm_is_q), K.Then():
+                        K.assign(nr, nr * scale)
+                    with K.If(norm_wr), K.Then():
+                        K.ptx.st.shared.f32(
+                            K.address_of(s_norm[team, lane >> 4, r_grp * 8 + ((lane & 15) >> 1)]),
+                            nr,
+                        )
+                    K.ptx[FENCE_ASYNC]()
+                    rng_end(_t)
+                    K.ptx.bar.sync(K.uint32(BAR_HELP), K.uint32(BAR_HELP_N))
+                    with K.If(r_grp == 0), K.Then():
+                        with K.If(elected()), K.Then():
+                            dst_stage = n & 1
+                            rem_bar = K.local_scalar("uint32")
+                            rem_dst = K.local_scalar("uint32")
+                            K.ptx.mapa.shared__cluster.u32(
+                                rem_bar,
+                                K.cuda.cvta_generic_to_shared(rnorm_full.ptr_to([dst_stage])),
+                                K.uint32(team),
+                            )
+                            K.ptx.mapa.shared__cluster.u32(
+                                rem_dst,
+                                K.cuda.cvta_generic_to_shared(s_norm.ptr_to([dst_stage, 0, 0])),
+                                K.uint32(team),
+                            )
+                            K.ptx["mbarrier.arrive.expect_tx.release.cluster.shared::cluster.b64"](
+                                rem_bar, K.uint32(NORM_BYTES)
+                            )
+                            K.ptx[BULK_S2C](
+                                rem_dst, s_norm.ptr_to([team, 0, 0]), K.uint32(NORM_BYTES), rem_bar
+                            )
+                    K.ptx.bar.sync(K.uint32(BAR_HELP), K.uint32(BAR_HELP_N))
+                    pipe.empty.arrive(st.stage)
+                    st.advance()
 
         # =====================================================================
         # PREP: gates, norms, gated bf16 operand tiles.       warps 0-3
@@ -327,7 +770,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             )  # token group 0..7 (one warp each)
             col0 = lane * 4  # channels 4*lane .. 4*lane+3
             hi_block = K.local_scalar("int32", init=K.Cast("int32", (K.warp_id_in_role() >= 4)))
-            work = K.local_scalar("int32", init=K.cta_id())
+            st_w, work = begin_work()
 
             # Byte offsets of this thread's 8-byte cell in token row 8r+i of a SW128B bf16 tile with
             # `rows` rows: atom column (lane/16) * rows*128 + row*128 + ((chunk ^ i) << 4) + (lane&1)*8,
@@ -369,72 +812,93 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             def mul2(dst_pair, a0, a1, b0, b1):
                 K.ptx.mul.rn.f32x2(dst_pair, f2(a0, a1), f2(b0, b1))
 
+            cyc = K.local_scalar("int32", init=K.int32(0))  # running chunk counter (ring slots)
             with K.While(work < num_work):
-                b_idx, h_idx = work_coords(work)
+                seq_idx, h_idx, seq_start, seq_len, nch = work_coords(work)
+                # every per-item global load first (independent latencies overlap): gate parameters
+                # and, below, the first two chunks' gate rows
                 ea = K.local_scalar("float32")
                 K.ptx.ld.global_.f32(ea, a_log.ptr_to([h_idx]))
+                bw = K.alloc_local([4], "uint32")
+                K.ptx[LDG_V4](bw[0], bw[1], bw[2], bw[3], dt_bias.ptr_to([h_idx * D_HEAD + col0]))
+                # gate logits of this thread's 8 tokens x 4 channels, fetched from global one chunk
+                # ahead (they only feed pass 1, which therefore no longer waits for the TMA stage)
+                gw = K.alloc_local([16], "uint32")
+                g_hoff = K.local_scalar(
+                    "int64", init=K.Cast("int64", h_idx) * K.int64(D_HEAD) + K.Cast("int64", col0)
+                )
+                tok_last = K.local_scalar("int32", init=total_tokens - K.int32(1))
+                seq_start32 = K.local_scalar("int32", init=K.Cast("int32", seq_start))
+
+                def g_addr(nn, i):
+                    # token nn*64+t of this sequence; rows past the sequence end are masked later, the
+                    # clamp only keeps the address inside the packed buffer
+                    t = r_grp * 8 + i
+                    tok = (
+                        seq_start32 + (nn * CHUNK + t)
+                        if uniform
+                        else K.min(seq_start32 + (nn * CHUNK + t), tok_last)
+                    )
+                    return g.ptr_to([K.Cast("int64", tok) * HK64 + g_hoff])
+
+                def issue_g_loads(nn):
+                    for i in range(8):
+                        K.ptx["ld.global.L1::no_allocate.v2.b32"](
+                            gw[2 * i], gw[2 * i + 1], g_addr(nn, i)
+                        )
+
+                def issue_g_load_token(nn, i):
+                    K.ptx["ld.global.L1::no_allocate.v2.b32"](
+                        gw[2 * i], gw[2 * i + 1], g_addr(nn, i)
+                    )
+
+                # gate sigmoid + chunk-local cumsum of one token into G[4i..4i+3] (registers only)
+                G = K.alloc_local([32], "float32")
+
+                def pass1_token(nn, i):
+                    # tokens at or past the sequence end contribute no decay (their log-gate is 0)
+                    if uniform:
+                        tvalid = K.float32(NEG5LOG2E)
+                    else:
+                        tvalid = K.local_scalar(
+                            "float32",
+                            init=K.Select(
+                                nn * CHUNK + (r_grp * 8 + i) < seq_len,
+                                K.float32(NEG5LOG2E),
+                                K.float32(0.0),
+                            ),
+                        )
+                    for j in range(4):
+                        wj = gw[2 * i] if j < 2 else gw[2 * i + 1]
+                        gv = bf16_lo(wj) if j % 2 == 0 else bf16_hi(wj)
+                        sg = K.idioms.sigmoid_tanh_approx_f32(tanh_input=gv * hea + biash[j])
+                        if i == 0:
+                            K.assign(G[j], sg * tvalid)
+                        else:
+                            K.assign(G[i * 4 + j], G[(i - 1) * 4 + j] + sg * tvalid)
+
+                # chunk 0's pass 1 runs here; every later chunk's pass 1 is fused into the previous chunk's pass 2
+                with K.If(nch > 0), K.Then():
+                    issue_g_loads(0)
                 ea_l2 = K.local_scalar("float32")
                 K.ptx.ex2.approx.ftz.f32(ea_l2, ea * K.float32(LOG2E))  # exp(A_log)
                 hea = K.local_scalar(
                     "float32", init=ea_l2 * K.float32(0.5)
                 )  # exp(A_log)/2 for tanh sigmoid
                 bias = K.alloc_local([4], "float32")
-                bw = K.alloc_local([4], "uint32")
-                K.ptx[LDG_V4](bw[0], bw[1], bw[2], bw[3], dt_bias.ptr_to([h_idx * D_HEAD + col0]))
                 biash = K.alloc_local(
                     [4], "float32"
                 )  # bias * exp(A_log)/2: the tanh argument is one fma
                 for j in range(4):
                     K.assign(bias[j], K.reinterpret("float32", bw[j]))
                     K.assign(biash[j], bias[j] * hea)
-                # gate logits of this thread's 8 tokens x 4 channels, fetched from global one chunk
-                # ahead (they only feed pass 1, which therefore no longer waits for the TMA stage)
-                gw = K.alloc_local([16], "uint32")
-                g_base = K.local_scalar(
-                    "int64",
-                    init=(K.Cast("int64", b_idx) * K.int64(T) * K.int64(H) + K.Cast("int64", h_idx))
-                    * K.int64(D_HEAD)
-                    + K.Cast("int64", col0),
-                )
-
-                def issue_g_loads(nn):
+                with K.If(nch > 0), K.Then():
                     for i in range(8):
-                        t = r_grp * 8 + i
-                        K.ptx["ld.global.L1::no_allocate.v2.b32"](
-                            gw[2 * i],
-                            gw[2 * i + 1],
-                            g.ptr_to([g_base + K.Cast("int64", nn * CHUNK + t) * K.int64(HK)]),
-                        )
+                        pass1_token(K.int32(0), i)
+                    with K.If(nch > 1), K.Then():
+                        issue_g_loads(1)
 
-                def issue_g_load_token(nn, i):
-                    t = r_grp * 8 + i
-                    K.ptx["ld.global.L1::no_allocate.v2.b32"](
-                        gw[2 * i],
-                        gw[2 * i + 1],
-                        g.ptr_to([g_base + K.Cast("int64", nn * CHUNK + t) * K.int64(HK)]),
-                    )
-
-                # gate sigmoid + chunk-local cumsum of one token into G[4i..4i+3] (registers only)
-                G = K.alloc_local([32], "float32")
-
-                def pass1_token(i):
-                    for j in range(4):
-                        wj = gw[2 * i] if j < 2 else gw[2 * i + 1]
-                        gv = bf16_lo(wj) if j % 2 == 0 else bf16_hi(wj)
-                        sg = K.idioms.sigmoid_tanh_approx_f32(tanh_input=gv * hea + biash[j])
-                        if i == 0:
-                            K.assign(G[j], sg * K.float32(NEG5LOG2E))
-                        else:
-                            K.assign(G[i * 4 + j], G[(i - 1) * 4 + j] + sg * K.float32(NEG5LOG2E))
-
-                # chunk 0's pass 1 runs here; every later chunk's pass 1 is fused into the previous chunk's pass 2
-                issue_g_loads(0)
-                for i in range(8):
-                    pass1_token(i)
-                if NCH > 1:
-                    issue_g_loads(1)
-
-                with K.serial(NCH) as n:
+                with K.serial(nch) as n:
                     sv = s_stage[st_stage.stage]
                     base_k = sv.ptr_to(0, 0)  # rows 0..63 (k -> X0)
                     base_q = sv.ptr_to(64, 0)  # rows 64..127 (q -> Q0)
@@ -447,7 +911,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     _t = rng("P.scan_a")
                     # block totals -> smem partials [r][k]
                     K.ptx["st.shared.v4.f32"](
-                        K.address_of(s_part[n & 1, r_grp, col0]), G[28], G[29], G[30], G[31]
+                        K.address_of(s_part[cyc & 1, r_grp, col0]), G[28], G[29], G[30], G[31]
                     )
                     rng_end(_t)
                     _t = rng("P.scan_bar1")
@@ -465,7 +929,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     pw = K.alloc_local([4], "float32")
                     for rr in range(8):
                         K.ptx["ld.shared.v4.f32"](
-                            pw[0], pw[1], pw[2], pw[3], K.address_of(s_part[n & 1, rr, col0])
+                            pw[0], pw[1], pw[2], pw[3], K.address_of(s_part[cyc & 1, rr, col0])
                         )
                         if rr == 2:
                             for j in range(4):
@@ -492,10 +956,10 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         pack_bf16x2(gvr[0], gv8[0], gv8[1])
                         pack_bf16x2(gvr[1], gv8[2], gv8[3])
                         K.ptx["st.shared.v2.b32"](
-                            K.address_of(s_gate_r[n & 3, col0]), gvr[0], gvr[1]
+                            K.address_of(s_gate_r[cyc & 3, col0]), gvr[0], gvr[1]
                         )
                         K.ptx["st.shared.v4.f32"](
-                            K.address_of(s_gate_e[n & 3, col0]), gv8[4], gv8[5], gv8[6], gv8[7]
+                            K.address_of(s_gate_e[cyc & 3, col0]), gv8[4], gv8[5], gv8[6], gv8[7]
                         )
                     # per-thread block factors
                     Rsel = K.alloc_local([4], "float32")
@@ -532,51 +996,56 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     p_stage.full.wait(st_stage.stage, st_stage.phase)
                     rng_end(_t)
                     _t = rng("P.norm")
-                    # per-token 1/sqrt(sum x^2 + eps) of this warp's 8 k and 8 q rows (half a row per lane)
-                    nacc = K.alloc_local([4], "uint64")
-                    for pp in range(4):
-                        K.assign(nacc[pp], f2(K.float32(0.0), K.float32(0.0)))
-                    nw = K.alloc_local([4], "uint32")
-                    for j in range(8):
-                        K.ptx["ld.shared.v4.b32"](
-                            nw[0],
-                            nw[1],
-                            nw[2],
-                            nw[3],
-                            K.ptx.addr(base_k, norm_off + (K.int32(16 * j) ^ norm_x)),
+                    if cluster_norm:
+                        # Helper rank 2 publishes this chain rank's norm tile into the same two-stage
+                        # slots used by the local implementation.
+                        K.cuda.mbarrier_wait_acquire_cluster(
+                            rnorm_full.ptr_to([st_stage.stage]), (n >> 1) & 1
                         )
+                    else:
+                        # Per-token 1/sqrt(sum x^2 + eps) of this warp's eight k and eight q rows.
+                        nacc = K.alloc_local([4], "uint32")
                         for pp in range(4):
-                            xv = f2(bf16_lo(nw[pp]), bf16_hi(nw[pp]))
-                            K.ptx.fma.rn.f32x2(nacc[pp], xv, xv, nacc[pp])
-                    nhalf = K.local_scalar(
-                        "float32",
-                        init=(K.cuda.float2_x(nacc[0]) + K.cuda.float2_y(nacc[0]))
-                        + (K.cuda.float2_x(nacc[1]) + K.cuda.float2_y(nacc[1]))
-                        + (K.cuda.float2_x(nacc[2]) + K.cuda.float2_y(nacc[2]))
-                        + (K.cuda.float2_x(nacc[3]) + K.cuda.float2_y(nacc[3])),
-                    )
-                    nother = K.local_scalar("uint32")
-                    K.ptx.shfl_sync.bfly.b32(
-                        nother,
-                        K.reinterpret("uint32", nhalf),
-                        K.uint32(1),
-                        K.uint32(0x1F),
-                        K.uint32(0xFFFFFFFF),
-                    )
-                    nr = K.local_scalar("float32")
-                    K.ptx.rsqrt.approx.ftz.f32(
-                        nr, (nhalf + K.reinterpret("float32", nother)) + K.float32(1e-6)
-                    )
-                    with K.If(norm_is_q), K.Then():
-                        K.assign(nr, nr * scale)
-                    with K.If(norm_wr), K.Then():
-                        K.ptx.st.shared.f32(
-                            K.address_of(
-                                s_norm[st_stage.stage, lane >> 4, r_grp * 8 + ((lane & 15) >> 1)]
-                            ),
-                            nr,
+                            K.assign(nacc[pp], K.uint32(0))
+                        nw = K.alloc_local([4], "uint32")
+                        for j in range(8):
+                            K.ptx["ld.shared.v4.b32"](
+                                nw[0],
+                                nw[1],
+                                nw[2],
+                                nw[3],
+                                K.ptx.addr(base_k, norm_off + (K.int32(16 * j) ^ norm_x)),
+                            )
+                            for pp in range(4):
+                                K.ptx.fma.rn.bf16x2(nacc[pp], nw[pp], nw[pp], nacc[pp])
+                        K.ptx.add.rn.bf16x2(nacc[0], nacc[0], nacc[1])
+                        K.ptx.add.rn.bf16x2(nacc[2], nacc[2], nacc[3])
+                        K.ptx.add.rn.bf16x2(nacc[0], nacc[0], nacc[2])
+                        nhalf = K.local_scalar("float32", init=bf16_lo(nacc[0]) + bf16_hi(nacc[0]))
+                        nother = K.local_scalar("uint32")
+                        K.ptx.shfl_sync.bfly.b32(
+                            nother,
+                            K.reinterpret("uint32", nhalf),
+                            K.uint32(1),
+                            K.uint32(0x1F),
+                            K.uint32(0xFFFFFFFF),
                         )
-                    K.ptx["bar.warp.sync"](K.uint32(0xFFFFFFFF))
+                        nr = K.local_scalar("float32")
+                        K.ptx.rsqrt.approx.ftz.f32(
+                            nr, (nhalf + K.reinterpret("float32", nother)) + K.float32(1e-6)
+                        )
+                        with K.If(norm_is_q), K.Then():
+                            K.assign(nr, nr * scale)
+                        with K.If(norm_wr), K.Then():
+                            K.ptx.st.shared.f32(
+                                K.address_of(
+                                    s_norm[
+                                        st_stage.stage, lane >> 4, r_grp * 8 + ((lane & 15) >> 1)
+                                    ]
+                                ),
+                                nr,
+                            )
+                        K.ptx["bar.warp.sync"](K.uint32(0xFFFFFFFF))
                     rq = K.alloc_local([8], "float32")
                     rk = K.alloc_local([8], "float32")
                     K.ptx["ld.shared.v4.f32"](
@@ -607,6 +1076,39 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         rq[7],
                         K.address_of(s_norm[st_stage.stage, 1, r_grp * 8 + 4]),
                     )
+                    # rows past the sequence end: zero every derived operand tile row (X0/Q0/Y/KG/J1)
+                    if not fixed and not uniform:
+                        if packed_tail_hoist:
+                            # Only the final chunk can contain invalid rows.  H96 benefits from one
+                            # uniform guard in the eight-sequence dispatch; other packed shapes retain
+                            # the straight-line selects below because they did not reproduce a gain.
+                            with K.If((n + 1) * CHUNK > seq_len), K.Then():
+                                for i in range(8):
+                                    rvalid = n * CHUNK + (r_grp * 8 + i) < seq_len
+                                    K.assign(rk[i], K.Select(rvalid, rk[i], K.float32(0.0)))
+                                    K.assign(rq[i], K.Select(rvalid, rq[i], K.float32(0.0)))
+                        else:
+                            for i in range(8):
+                                rvalid = n * CHUNK + (r_grp * 8 + i) < seq_len
+                                K.assign(rk[i], K.Select(rvalid, rk[i], K.float32(0.0)))
+                                K.assign(rq[i], K.Select(rvalid, rq[i], K.float32(0.0)))
+                    if cluster_norm:
+                        # Do not release the helper's single local source until all eight chain
+                        # warps have materialized their row factors into registers.
+                        K.ptx.bar.sync(K.uint32(BAR_RNORM), K.uint32(BAR_RNORM_N))
+                        with K.If(r_grp == 0), K.Then():
+                            with K.If(elected()), K.Then():
+                                rem_release = K.local_scalar("uint32")
+                                K.ptx.mapa.shared__cluster.u32(
+                                    rem_release,
+                                    K.cuda.cvta_generic_to_shared(
+                                        helper_release.ptr_to([cluster_rank])
+                                    ),
+                                    K.uint32(2),
+                                )
+                                K.ptx["mbarrier.arrive.release.cluster.shared::cluster.b64"](
+                                    rem_release
+                                )
                     rng_end(_t)
                     _t = rng("P.wait_bufs")
                     # buffers this chunk writes: KG[stage] (after G7 two chunks ago), J1 (after G1_1 last chunk)
@@ -621,43 +1123,41 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     is_hi = hi_block != 0
                     ev = K.alloc_local([4], "float32")
                     eiv = K.alloc_local([4], "float32")
-                    pk = K.alloc_local([2], "uint64")  # kh pairs
-                    pq = K.alloc_local([2], "uint64")  # qh pairs
-                    px = K.alloc_local([2], "uint64")
-                    py = K.alloc_local([2], "uint64")
+                    sf = K.alloc_local([2], "uint64")  # combined norm/exponent scale pairs
                     ow = K.alloc_local([4], "uint32")
                     for i in range(8):
                         t = r_grp * 8 + i
                         for j in range(4):
                             K.ptx.ex2.approx.ftz.f32(ev[j], G[i * 4 + j])
                             K.ptx.ex2.approx.ftz.f32(eiv[j], K.float32(0.0) - G[i * 4 + j])
+                        # Round each combined row-normalization/exponent factor once, then scale the
+                        # original packed BF16 words.  This avoids widening q/k and keeps only one
+                        # pair of FP32x2 temporaries live across the three operand variants.
                         lds64(base_q, xo_stage[i], w0, w1)
-                        mul2(pq[0], bf16_lo(w0), bf16_hi(w0), rq[i], rq[i])
-                        mul2(pq[1], bf16_lo(w1), bf16_hi(w1), rq[i], rq[i])
+                        for p in range(2):
+                            mul2(sf[p], rq[i], rq[i], ev[2 * p], ev[2 * p + 1])
+                            pack_bf16x2(ow[2 + p], K.cuda.float2_x(sf[p]), K.cuda.float2_y(sf[p]))
+                            K.ptx.mul.rn.bf16x2(ow[2 + p], (w0, w1)[p], ow[2 + p])
                         lds64(base_k, xo_stage[i], w0, w1)
-                        mul2(pk[0], bf16_lo(w0), bf16_hi(w0), rk[i], rk[i])
-                        mul2(pk[1], bf16_lo(w1), bf16_hi(w1), rk[i], rk[i])
                         # Y = kh * einv -> g region row 128+t ; KG = Y * fpr -> s_kg[stage]
                         for p in range(2):
-                            K.ptx.mul.rn.f32x2(py[p], pk[p], f2(eiv[2 * p], eiv[2 * p + 1]))
-                            pack_bf16x2(ow[p], K.cuda.float2_x(py[p]), K.cuda.float2_y(py[p]))
+                            mul2(sf[p], rk[i], rk[i], eiv[2 * p], eiv[2 * p + 1])
+                            pack_bf16x2(ow[p], K.cuda.float2_x(sf[p]), K.cuda.float2_y(sf[p]))
+                            K.ptx.mul.rn.bf16x2(ow[p], (w0, w1)[p], ow[p])
                         sts64(base_g, xo_stage[i], ow[0], ow[1])
                         for p in range(2):
                             K.ptx.mul.rn.bf16x2(ow[p], ow[p], fprb[p])
                         sts64(base_kg, xo_stage[i] - xo_adj, ow[0], ow[1])
                         # X = kh * e ; Q = qh * e
                         for p in range(2):
-                            K.ptx.mul.rn.f32x2(px[p], pk[p], f2(ev[2 * p], ev[2 * p + 1]))
-                            K.ptx.mul.rn.f32x2(pq[p], pq[p], f2(ev[2 * p], ev[2 * p + 1]))
+                            mul2(sf[p], rk[i], rk[i], ev[2 * p], ev[2 * p + 1])
+                            pack_bf16x2(ow[p], K.cuda.float2_x(sf[p]), K.cuda.float2_y(sf[p]))
+                            K.ptx.mul.rn.bf16x2(ow[p], (w0, w1)[p], ow[p])
                         # one straight-line path for both sub-blocks: hi threads store their own-reference
                         # X1/Q1 to J1 (single predicated stores), then everybody applies f10 (= 1 for lo
                         # threads) and stores the R0-referenced X0/Q0 to the stage
-                        for p in range(2):
-                            pack_bf16x2(ow[p], K.cuda.float2_x(px[p]), K.cuda.float2_y(px[p]))
                         with K.If(is_hi), K.Then():
                             sts64(base_j1, xo_stage[i] - xo_adj - 32 * 128, ow[0], ow[1])
-                        for p in range(2):
-                            pack_bf16x2(ow[2 + p], K.cuda.float2_x(pq[p]), K.cuda.float2_y(pq[p]))
                         with K.If(is_hi), K.Then():
                             sts64(base_j1, xo_stage[i] - xo_adj, ow[2], ow[3])
                         for p in range(2):
@@ -669,8 +1169,8 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         # ---- pass 1 of chunk n+1 for this token: its gate sigmoids/cumsum go into the G slots
                         # freed by this token's exponents; then the token's gate logits of chunk n+2 are fetched
                         # into the freed gw words (for the last chunk this computes unused values) ----
-                        pass1_token(i)
-                        with K.If(n + 2 < NCH), K.Then():
+                        pass1_token(n + 1, i)
+                        with K.If(n + 2 < nch), K.Then():
                             issue_g_load_token(n + 2, i)
                     K.ptx[FENCE_ASYNC]()
                     rng_end(_t)
@@ -679,43 +1179,40 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     st_prep.advance()
                     st_j1.advance()
                     st_stage.advance()
-                K.assign(work, work + num_ctas)
+                    K.assign(cyc, cyc + K.int32(1))
+                advance_work(work, st_w)
+            if cluster_norm:
+                with K.If(cluster_rank == K.int32(2)), K.Then():
+                    helper_norm(0, r_grp)
 
         # =====================================================================
         # CG0: Akk epilogue, hierarchical inverse (-> TB bf16), G3 issue.      warps 8-11
         # =====================================================================
         with cg0:
-            st_g1 = K.PipelineState(
-                2, phase=0
-            )  # consumer p_g1.full ; producer p_g1.empty (same index)
-            st_g1b = K.PipelineState(1, phase=0)  # consumer of m_g1b (D1 done)
-            st_t = K.PipelineState(1, phase=1)  # producer p_t
-            st_beta = K.PipelineState(2, phase=0)  # consumer p_beta
-            st_tc = K.PipelineState(
-                1, phase=0
-            )  # consumer of p_t.full (this warpgroup's own T, all 128 arrivals)
-            st_v = K.PipelineState(1, phase=0)  # consumer of p_v.full (G3)
-            st_ue = K.PipelineState(1, phase=1)  # waits p_u.empty before G3 overwrites U^T
-            st_aqk0 = K.PipelineState(1, phase=1)  # producer of p_aqk (warps 2/3)
+            if not mixed:
+                st_g1 = K.PipelineState(
+                    2, phase=0
+                )  # consumer p_g1.full ; producer p_g1.empty (same index)
+                st_g1b = K.PipelineState(1, phase=0)  # consumer of m_g1b (D1 done)
+                st_t = K.PipelineState(1, phase=1)  # producer p_t
+                st_beta = K.PipelineState(2, phase=0)  # consumer p_beta
+                st_tc = K.PipelineState(
+                    1, phase=0
+                )  # consumer of p_t.full (this warpgroup's own T, all 128 arrivals)
+                st_v = K.PipelineState(1, phase=0)  # consumer of p_v.full (G3)
+                st_ue = K.PipelineState(1, phase=1)  # waits p_u.empty before G3 overwrites U^T
+                st_aqk0 = K.PipelineState(1, phase=1)  # producer of p_aqk (warps 2/3)
             dT0, offT0 = s_T.encode(major="k", mma_k=16)
             dV0, offV0 = s_v.encode(major="mn", mma_k=16)
 
             def mma_ss0(dcol, a_desc, a_off, b_desc, b_off, n_k, idesc, accumulate):
                 a_base = K.local_scalar("uint64", init=a_desc)
                 b_base = K.local_scalar("uint64", init=b_desc)
-                with K.If(elected()), K.Then():
-                    for kp in range(n_k):
-                        K.ptx[MMA_SS](
-                            K.Cast("uint32", tmem[0] + dcol),
-                            a_base + K.uint64(a_off(kp)),
-                            b_base + K.uint64(b_off(kp)),
-                            K.uint32(idesc),
-                            K.uint32(0),
-                            K.uint32(0),
-                            K.uint32(0),
-                            K.uint32(0),
-                            K.ptx.pred(K.uint32(1) if (accumulate or kp != 0) else K.uint32(0)),
-                        )
+                fa = runtime_off(a_off, n_k) if compact else (lambda kp: K.uint64(a_off(kp)))
+                fb = runtime_off(b_off, n_k) if compact else (lambda kp: K.uint64(b_off(kp)))
+                mma_issue(
+                    dcol, lambda kp: a_base + fa(kp), b_base, fb, n_k, idesc, accumulate, tmem
+                )
 
             tmem = tmem_preamble()
             tid1 = K.tid_in_role()
@@ -945,13 +1442,20 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             wds = K.alloc_local(
                 [32], "uint32"
             )  # [0..15] Akk/TB/W words, [16..31] Aqk D1 words (warps 2/3)
-            work = K.local_scalar("int32", init=K.cta_id())
+            st_w, work = begin_work()
+            cyc = K.local_scalar("int32", init=K.int32(0))
             with K.While(work < num_work):
-                with K.serial(NCH) as n:
-                    stg = n & 1
+                _sq, _h, _ss, _sl, nch = work_coords(work)
+                with K.serial(nch) as n:
+                    stg = cyc & 1
+                    ph2 = (cyc >> 1) & 1
                     _t = rng("C0.wait_g1")
-                    p_beta.full.wait(st_beta.stage, st_beta.phase)
-                    p_g1.full.wait(st_g1.stage, st_g1.phase)
+                    if mixed:
+                        p_beta.full.wait(stg, ph2)
+                        p_g1.full.wait(stg, ph2)
+                    else:
+                        p_beta.full.wait(st_beta.stage, st_beta.phase)
+                        p_g1.full.wait(st_g1.stage, st_g1.phase)
                     bar_inv()  # every warp finished reading s_A / s_T sources of the previous chunk
                     rng_end(_t)
                     _t = rng("C0.akk")
@@ -963,13 +1467,18 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     acc_b = K.alloc_local([32], "float32")
                     ld32(acc32, TM_D0 + stg * 64)
                     K.ptx[WAIT_LD]()
-                    p_g1.empty.arrive(
-                        st_g1.stage
-                    )  # D0 buffer consumed: mma0 may run G1_0 of chunk n+2 into it
-                    st_g1.advance()
+                    if mixed:
+                        p_g1.empty.arrive(stg)
+                    else:
+                        p_g1.empty.arrive(
+                            st_g1.stage
+                        )  # D0 buffer consumed: mma0 may run G1_0 of chunk n+2 into it
+                        st_g1.advance()
 
-                    def akk_rows(acc, row_base, col_base, diag_shift):
-                        """Scale one 32-column Akk row block; diag_shift=None means a full block."""
+                    def akk_rows(acc, row_base, col_base, diag_lim):
+                        """Scale one 32-column Akk row block into s_A; entries with column >= diag_lim are
+                        zeroed (diag_lim None: full block; an int: lane + shift; compact shape: a runtime
+                        limit shared by both warps)."""
                         t = row_base + lane
                         bt = K.local_scalar("float32")
                         K.ptx.ld.shared.f32(bt, K.address_of(s_beta[stg, t]))
@@ -978,17 +1487,25 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             mul2(scaled, acc[2 * p], acc[2 * p + 1], bt, bt)
                             lo = K.cuda.float2_x(scaled)
                             hi = K.cuda.float2_y(scaled)
-                            if diag_shift is not None:
-                                lo = K.Select(2 * p < lane + diag_shift, lo, K.float32(0.0))
-                                hi = K.Select(2 * p + 1 < lane + diag_shift, hi, K.float32(0.0))
+                            if diag_lim is not None:
+                                lim = lane + diag_lim if isinstance(diag_lim, int) else diag_lim
+                                lo = K.Select(K.int32(2 * p) < lim, lo, K.float32(0.0))
+                                hi = K.Select(K.int32(2 * p + 1) < lim, hi, K.float32(0.0))
                             pack_f16x2(wds[p], lo, hi)
                         for m in range(4):
                             sts128(s_A, t, col_base + 8 * m, wds, 4 * m)
 
-                    with K.If(lw == 0), K.Then():
-                        akk_rows(acc32, 0, 0, 0)
-                    with K.If(lw == 1), K.Then():
-                        akk_rows(acc32, 32, 0, None)
+                    if compact:
+                        with K.If(lw < 2), K.Then():
+                            # warp 0: rows 0..31 strictly lower (limit lane); warp 1: rows 32..63 full block
+                            akk_rows(
+                                acc32, lw * 32, K.int32(0), K.Select(lw == 0, lane, K.int32(64))
+                            )
+                    else:
+                        with K.If(lw == 0), K.Then():
+                            akk_rows(acc32, 0, 0, 0)
+                        with K.If(lw == 1), K.Then():
+                            akk_rows(acc32, 32, 0, None)
                     with K.If(lw >= 2), K.Then():
                         with K.If(lw == 2), K.Then():
                             for j in range(32):
@@ -996,15 +1513,19 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         for p in range(16):
                             pack_bf16x2(wds[p], acc32[2 * p], acc32[2 * p + 1])
                     with K.If(lw < 2), K.Then():
-                        m_g1b.wait(0, st_g1b.phase)
+                        m_g1b.wait(0, stg if mixed else st_g1b.phase)
                         ld32(acc_b, TM_D1)
                         K.ptx[WAIT_LD]()
                         with K.If(lane < 16), K.Then():
-                            with K.If(lw == 0):
-                                with K.Then():
-                                    akk_rows(acc_b, 32, 32, 0)
-                                with K.Else():
-                                    akk_rows(acc_b, 48, 32, 16)
+                            if compact:
+                                # D1 rows: warp 0 rows 32..47 (limit lane), warp 1 rows 48..63 (limit lane+16)
+                                akk_rows(acc_b, 32 + lw * 16, K.int32(32), lane + lw * 16)
+                            else:
+                                with K.If(lw == 0):
+                                    with K.Then():
+                                        akk_rows(acc_b, 32, 32, 0)
+                                    with K.Else():
+                                        akk_rows(acc_b, 48, 32, 16)
                         p_g1b.arrive(0)  # Akk half of D1 consumed
                     bar_inv()
                     rng_end(_t)
@@ -1015,7 +1536,7 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         with K.Then():
                             invert_diag_8x8(s_A, ((lw * 32 + lane) >> 3) * 8)
                         with K.Else():
-                            m_g1b.wait(0, st_g1b.phase)
+                            m_g1b.wait(0, stg if mixed else st_g1b.phase)
                             ld32(acc_b, TM_D1)
                             K.ptx[WAIT_LD]()
                             with K.If(lane < 16), K.Then():
@@ -1028,7 +1549,8 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                                 for p in range(16):
                                     pack_bf16x2(wds[16 + p], acc_b[2 * p], acc_b[2 * p + 1])
                             p_g1b.arrive(0)  # Aqk half of D1 consumed
-                    st_g1b.advance()
+                    if not mixed:
+                        st_g1b.advance()
                     bar_inv()
                     inverse_8_to_16(s_A, lw * 16)
                     bar_inv()
@@ -1053,16 +1575,20 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             sts128(svy, 128 + zr, zc, zw, 0)
                             sts128(svy, 128 + zr, zc + 8, zw, 0)
                             K.ptx[FENCE_ASYNC]()
-                            p_aqk.full.arrive(st_aqk0.stage)
-                    st_aqk0.advance()
+                            p_aqk.full.arrive(K.int32(0) if mixed else st_aqk0.stage)
+                    if not mixed:
+                        st_aqk0.advance()
                     bar_inv()
                     rng_end(_t)
                     _t = rng("C0.t64")
                     # ---- last merge writes TB = T * beta_j (bf16) straight into s_T: warps 0/1 compute
                     # T21 with mma.sync, warps 2/3 convert the diagonal blocks T11 / T22 meanwhile ----
-                    p_t.empty.wait(
-                        st_t.stage, st_t.phase
-                    )  # G3 of the previous chunk finished reading s_T
+                    if mixed:
+                        p_t.empty.wait(K.int32(0), stg ^ K.int32(1))
+                    else:
+                        p_t.empty.wait(
+                            st_t.stage, st_t.phase
+                        )  # G3 of the previous chunk finished reading s_T
                     K.ptx[FENCE_ASYNC]()
                     with K.If(lw < 2):
                         with K.Then():
@@ -1070,39 +1596,71 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         with K.Else():
                             diag_blocks_to_tb(stg)
                     K.ptx[FENCE_ASYNC]()
-                    p_t.full.arrive(st_t.stage)
-                    st_t.advance()
-                    p_beta.empty.arrive(st_beta.stage)  # last beta read of this chunk
-                    st_beta.advance()
+                    p_t.full.arrive(K.int32(0) if mixed else st_t.stage)
+                    if not mixed:
+                        st_t.advance()
+                    if not cluster_norm:
+                        p_beta.empty.arrive(
+                            stg if mixed else st_beta.stage
+                        )  # last beta read of this chunk
+                    if not mixed:
+                        st_beta.advance()
                     rng_end(_t)
                     # ---- G3: U^T = V^T TB^T, issued here by warp 0 (no handoff); TB is released by G4'' ----
                     _t = rng("C0.g3")
                     with K.If(lw == 0), K.Then():
-                        p_t.full.wait(
-                            st_tc.stage, st_tc.phase
-                        )  # every cg0 thread's TB stores are published
-                        st_tc.advance()
-                        p_v.full.wait(st_v.stage, st_v.phase)
-                        p_u.empty.wait(st_ue.stage, st_ue.phase)
-                        st_ue.advance()
+                        if mixed:
+                            p_t.full.wait(K.int32(0), stg)
+                        else:
+                            p_t.full.wait(
+                                st_tc.stage, st_tc.phase
+                            )  # every cg0 thread's TB stores are published
+                            st_tc.advance()
+                        if cluster_norm:
+                            with K.If(elected()), K.Then():
+                                rem_beta_release = K.local_scalar("uint32")
+                                K.ptx.mapa.shared__cluster.u32(
+                                    rem_beta_release,
+                                    K.cuda.cvta_generic_to_shared(
+                                        helper_beta_release.ptr_to([cluster_rank * 2 + stg])
+                                    ),
+                                    K.uint32(2),
+                                )
+                                K.ptx["mbarrier.arrive.release.cluster.shared::cluster.b64"](
+                                    rem_beta_release
+                                )
+                        if mixed:
+                            p_v.full.wait(K.int32(0), stg)
+                            p_u.empty.wait(K.int32(0), stg ^ K.int32(1))
+                        else:
+                            p_v.full.wait(st_v.stage, st_v.phase)
+                            p_u.empty.wait(st_ue.stage, st_ue.phase)
+                            st_ue.advance()
                         mma_ss0(TM_U, dV0.value, offV0, dT0.value, offT0, 4, ID_G23, False)
                         pr = elect_local()
-                        p_v.empty.arrive(st_v.stage, pred=pr)
-                        st_v.advance()
+                        p_v.empty.arrive(K.int32(0) if mixed else st_v.stage, pred=pr)
+                        if not mixed:
+                            st_v.advance()
                         m_g3.arrive(0, pred=pr)
                     rng_end(_t)
-                K.assign(work, work + num_ctas)
+                    K.assign(cyc, cyc + K.int32(1))
+                advance_work(work, st_w)
+            if cluster_norm:
+                with K.If(cluster_rank == K.int32(2)), K.Then():
+                    helper_norm(1, lw)
 
         # =====================================================================
         # CG1: U / O / state epilogues.                                 warps 12-15
         # =====================================================================
         with cg1:
             st_u = K.PipelineState(1, phase=0)
-            st_o = K.PipelineState(1, phase=0)
+            if not derive_cg1_vo:
+                st_o = K.PipelineState(1, phase=0)
             st_sacc = K.PipelineState(1, phase=0)
             st_osm = K.PipelineState(1, phase=1)  # producer of p_osm
             st_pn = K.PipelineState(2, phase=0)  # consumer of p_prep.full, one chunk ahead
-            st_v1 = K.PipelineState(1, phase=0)  # consumer of m_v1 (V1 done)
+            if not derive_cg1_vo:
+                st_v1 = K.PipelineState(1, phase=0)  # consumer of m_v1 (V1 done)
             tmem = tmem_preamble()
             tid2 = K.tid_in_role()
             lane = K.lane_id()
@@ -1118,32 +1676,121 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             def st32b(col, regs):
                 K.ptx[TC_ST32](tmem_at2(col), *(regs[i] for i in range(32)))
 
-            zero32 = K.alloc_local([32], "uint32")
-            for i in range(32):
-                K.assign(zero32[i], K.uint32(0))
             fr = K.alloc_local([64], "float32")
             fr2 = K.alloc_local([32], "float32")
             wds = K.alloc_local([32], "uint32")
             fac = K.alloc_local([8], "float32")
             bfac = K.alloc_local([4], "uint32")
 
-            work = K.local_scalar("int32", init=K.cta_id())
-            with K.While(work < num_work):
-                # zero S^T (f32) and S^T bf16 copy, publish S~ for chunk 0
-                for c in range(4):
-                    K.ptx[TC_ST32](tmem_at2(TM_S + 32 * c), *(zero32[i] for i in range(32)))
-                for c in range(2):
-                    K.ptx[TC_ST32](tmem_at2(TM_ST + 32 * c), *(zero32[i] for i in range(32)))
+            def state_pass(nstg, gbase):
+                """S~'(next) = bf16(S * 2^R0(next)) -> TM_ST ; S *= 2^(G2_63 of the next chunk) -> TM_S.
+
+                `nstg` selects the next chunk's gate vectors.  `gbase` None reads the resident fp32
+                state from TMEM; otherwise it is this lane's fp32 initial-state row (V-first layout:
+                row v = TMEM lane, 128 contiguous k) in global memory."""
+                state_pair = K.local_scalar("uint64")
+                # Two 64-column rounds: both 32-column loads of a round are in flight before the one
+                # wait::ld; each 32-column group is packed/scaled with only 16 packed words live.
+                with K.serial(2) as half:
+                    hc = half * 64
+                    hs = half * 32
+                    if gbase is None:
+                        ld32b(fr, TM_S + hc)
+                        K.ptx[TC_LD32](*(fr[32 + i] for i in range(32)), tmem_at2(TM_S + hc + 32))
+                        K.ptx[WAIT_LD]()
+                    else:
+                        # Issue each aligned 32-byte initial-state span with one v8.b32 load. These
+                        # rows are streaming, and the loader also issues L2 prefetches, so request
+                        # L1::no_allocate here.
+                        for m in range(8):
+                            K.ptx["ld.global.L1::no_allocate.v8.b32"](
+                                fr[8 * m],
+                                fr[8 * m + 1],
+                                fr[8 * m + 2],
+                                fr[8 * m + 3],
+                                fr[8 * m + 4],
+                                fr[8 * m + 5],
+                                fr[8 * m + 6],
+                                fr[8 * m + 7],
+                                h0.ptr_to([gbase + K.Cast("int64", hc + 8 * m)]),
+                            )
+                    for sub in range(2):
+                        qc = hc + 32 * sub
+                        fb = 32 * sub
+                        # One packed load supplies eight bf16 midpoint factors; two fp32 loads
+                        # supply the eight resident-state decay factors.
+                        for m in range(4):
+                            K.ptx["ld.shared.v4.b32"](
+                                bfac[0],
+                                bfac[1],
+                                bfac[2],
+                                bfac[3],
+                                K.address_of(s_gate_r[nstg, qc + 8 * m]),
+                            )
+                            K.ptx["ld.shared.v4.f32"](
+                                fac[0],
+                                fac[1],
+                                fac[2],
+                                fac[3],
+                                K.address_of(s_gate_e[nstg, qc + 8 * m]),
+                            )
+                            K.ptx["ld.shared.v4.f32"](
+                                fac[4],
+                                fac[5],
+                                fac[6],
+                                fac[7],
+                                K.address_of(s_gate_e[nstg, qc + 8 * m + 4]),
+                            )
+                            for p in range(4):
+                                pack_bf16x2(
+                                    wds[4 * m + p],
+                                    fr[fb + 8 * m + 2 * p],
+                                    fr[fb + 8 * m + 2 * p + 1],
+                                )
+                                K.ptx.mul.rn.bf16x2(wds[4 * m + p], wds[4 * m + p], bfac[p])
+                                mul2(
+                                    state_pair,
+                                    fr[fb + 8 * m + 2 * p],
+                                    fr[fb + 8 * m + 2 * p + 1],
+                                    fac[2 * p],
+                                    fac[2 * p + 1],
+                                )
+                                K.assign(fr[fb + 8 * m + 2 * p], K.cuda.float2_x(state_pair))
+                                K.assign(fr[fb + 8 * m + 2 * p + 1], K.cuda.float2_y(state_pair))
+                        K.ptx[TC_ST16](
+                            tmem_at2(TM_ST + hs + 16 * sub), *(wds[i] for i in range(16))
+                        )
+                    st32b(TM_S + hc, fr)
+                    K.ptx[TC_ST32](tmem_at2(TM_S + hc + 32), *(fr[32 + i] for i in range(32)))
                 K.ptx[WAIT_ST]()
                 m_s.arrive(0)
-                st_pn.advance()  # chunk 0 needs no decay (zero state); ledger starts at chunk 1
-                with K.serial(NCH) as n:
-                    stg = n & 1
+
+            st_w, work = begin_work()
+            cyc = K.local_scalar("int32", init=K.int32(0))
+            with K.While(work < num_work):
+                seq_idx, h_idx, seq_start, seq_len, nch = work_coords(work)
+                with K.If(nch > 0), K.Then():
+                    # initial state S0 (fp32, V-first) -> S~'(0) and the chunk-0-decayed resident state
+                    p_prep.full.wait(st_pn.stage, st_pn.phase)  # chunk 0's gate vectors
+                    gbase = K.local_scalar(
+                        "int64",
+                        init=(
+                            (K.Cast("int64", seq_idx) * K.int64(H) + K.Cast("int64", h_idx))
+                            * K.int64(D_HEAD)
+                            + K.Cast("int64", tid2)
+                        )
+                        * K.int64(D_HEAD),
+                    )
+                    state_pass(cyc & 3, gbase)
+                    st_pn.advance()
+                with K.serial(nch) as n:
+                    stg = cyc & 1
                     _t = rng("C1.wait_v1")
                     # ---- V1 = S~'^T X0^T f32 -> bf16 into the UB columns (A operand of G4''); UB(n-1) was
                     # consumed by G7(n-1), whose completion this warpgroup awaited before its state pass ----
-                    m_v1.wait(0, st_v1.phase)
-                    st_v1.advance()
+                    m_v1.wait(0, stg if derive_cg1_vo else st_v1.phase)
+                    if not derive_cg1_vo:
+                        st_v1.advance()
                     rng_end(_t)
                     _t = rng("C1.v1")
                     ld32b(fr, TM_V1)
@@ -1173,7 +1820,10 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     rng_end(_t)
                     _t = rng("C1.wait_o")
                     # ---- O^T f32 -> bf16 -> s_o[t][v] via stmatrix.trans ------------
-                    p_o.full.wait(st_o.stage, st_o.phase)
+                    if derive_cg1_vo:
+                        p_o.full.wait(0, stg)
+                    else:
+                        p_o.full.wait(st_o.stage, st_o.phase)
                     p_osm.empty.wait(st_osm.stage, st_osm.phase)
                     rng_end(_t)
                     _t = rng("C1.o")
@@ -1205,8 +1855,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             wds[16 * hh + 2 * ib + 3],
                         )
                     K.ptx[FENCE_ASYNC]()
-                    p_o.empty.arrive(st_o.stage)
-                    st_o.advance()
+                    p_o.empty.arrive(0 if derive_cg1_vo else st_o.stage)
+                    if not derive_cg1_vo:
+                        st_o.advance()
                     p_osm.full.arrive(st_osm.stage)
                     st_osm.advance()
                     rng_end(_t)
@@ -1217,89 +1868,27 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     #  makes G5's Q0 and G4's W' operands reference-free)
                     m_sacc.wait(0, st_sacc.phase)
                     st_sacc.advance()
-                    with K.If(n < NCH - 1), K.Then():
+                    with K.If(n + 1 < nch), K.Then():
                         p_prep.full.wait(st_pn.stage, st_pn.phase)  # chunk n+1's gate vectors
                     rng_end(_t)
                     _t = rng("C1.s")
-                    nstg = (n + 1) & 3  # chunk n+1's gate vectors
-                    with K.If(n < NCH - 1), K.Then():
-                        state_pair = K.local_scalar("uint64")
-                        # Two 64-column rounds: both 32-column loads of a round are in flight before the one
-                        # wait::ld; each 32-column group is packed/scaled with only 16 packed words live.
-                        with K.serial(2) as half:
-                            hc = half * 64
-                            hs = half * 32
-                            ld32b(fr, TM_S + hc)
-                            K.ptx[TC_LD32](
-                                *(fr[32 + i] for i in range(32)), tmem_at2(TM_S + hc + 32)
-                            )
-                            K.ptx[WAIT_LD]()
-                            for sub in range(2):
-                                qc = hc + 32 * sub
-                                fb = 32 * sub
-                                # One packed load supplies eight bf16 midpoint factors; two fp32 loads
-                                # supply the eight resident-state decay factors.
-                                for m in range(4):
-                                    K.ptx["ld.shared.v4.b32"](
-                                        bfac[0],
-                                        bfac[1],
-                                        bfac[2],
-                                        bfac[3],
-                                        K.address_of(s_gate_r[nstg, qc + 8 * m]),
-                                    )
-                                    K.ptx["ld.shared.v4.f32"](
-                                        fac[0],
-                                        fac[1],
-                                        fac[2],
-                                        fac[3],
-                                        K.address_of(s_gate_e[nstg, qc + 8 * m]),
-                                    )
-                                    K.ptx["ld.shared.v4.f32"](
-                                        fac[4],
-                                        fac[5],
-                                        fac[6],
-                                        fac[7],
-                                        K.address_of(s_gate_e[nstg, qc + 8 * m + 4]),
-                                    )
-                                    for p in range(4):
-                                        pack_bf16x2(
-                                            wds[4 * m + p],
-                                            fr[fb + 8 * m + 2 * p],
-                                            fr[fb + 8 * m + 2 * p + 1],
-                                        )
-                                        K.ptx.mul.rn.bf16x2(wds[4 * m + p], wds[4 * m + p], bfac[p])
-                                        mul2(
-                                            state_pair,
-                                            fr[fb + 8 * m + 2 * p],
-                                            fr[fb + 8 * m + 2 * p + 1],
-                                            fac[2 * p],
-                                            fac[2 * p + 1],
-                                        )
-                                        K.assign(
-                                            fr[fb + 8 * m + 2 * p], K.cuda.float2_x(state_pair)
-                                        )
-                                        K.assign(
-                                            fr[fb + 8 * m + 2 * p + 1], K.cuda.float2_y(state_pair)
-                                        )
-                                K.ptx[TC_ST16](
-                                    tmem_at2(TM_ST + hs + 16 * sub), *(wds[i] for i in range(16))
-                                )
-                            st32b(TM_S + hc, fr)
-                            K.ptx[TC_ST32](
-                                tmem_at2(TM_S + hc + 32), *(fr[32 + i] for i in range(32))
-                            )
-                        K.ptx[WAIT_ST]()
-                        m_s.arrive(0)
-                    st_pn.advance()
+                    with K.If(n + 1 < nch), K.Then():
+                        state_pass((cyc + 1) & 3, None)
+                        st_pn.advance()
+                    K.assign(cyc, cyc + K.int32(1))
                     rng_end(_t)
-                K.assign(work, work + num_ctas)
-            # tmem dealloc by the allocating warp once every cg1 warp is done
+                advance_work(work, st_w)
+            # TMEM belongs only to the two chain CTAs.  The helper's cg1 warps join
+            # this local rendezvous, then become norm-team lanes 4..7.
             K.ptx.bar.sync(K.uint32(BAR_CG1), K.uint32(BAR_CG1_N))
-            with K.If(lw == 0), K.Then():
+            with K.If(is_chain & (lw == 0)), K.Then():
                 K.ptx["tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"]()
                 K.ptx["tcgen05.dealloc.cta_group::1.sync.aligned.b32"](
                     K.Cast("uint32", tmem[0]), K.uint32(TMEM_COLS)
                 )
+            if cluster_norm:
+                with K.If(cluster_rank == K.int32(2)), K.Then():
+                    helper_norm(1, lw + K.int32(4))
 
         with auxg:
             # =====================================================================
@@ -1317,28 +1906,22 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 def mma_ss(dcol, a_desc, a_off, b_desc, b_off, n_k, idesc, accumulate):
                     a_base = K.local_scalar("uint64", init=a_desc)
                     b_base = K.local_scalar("uint64", init=b_desc)
-                    with K.If(elected()), K.Then():
-                        for kp in range(n_k):
-                            K.ptx[MMA_SS](
-                                K.Cast("uint32", tmem[0] + dcol),
-                                a_base + K.uint64(a_off(kp)),
-                                b_base + K.uint64(b_off(kp)),
-                                K.uint32(idesc),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.ptx.pred(K.uint32(1) if (accumulate or kp != 0) else K.uint32(0)),
-                            )
+                    fa = runtime_off(a_off, n_k) if compact else (lambda kp: K.uint64(a_off(kp)))
+                    fb = runtime_off(b_off, n_k) if compact else (lambda kp: K.uint64(b_off(kp)))
+                    mma_issue(
+                        dcol, lambda kp: a_base + fa(kp), b_base, fb, n_k, idesc, accumulate, tmem
+                    )
 
                 def shifted(off_fn, extra):
                     return lambda kp: off_fn(kp) + extra
 
                 dA0, offA = s_stage[0].encode(major="k", mma_k=16)
-                work = K.local_scalar("int32", init=K.cta_id())
+                st_w, work = begin_work()
+                cyc = K.local_scalar("int32", init=K.int32(0))
                 with K.While(work < num_work):
-                    with K.serial(NCH) as n:
-                        stg = n & 1
+                    _sq, _h, _ss, _sl, nch = work_coords(work)
+                    with K.serial(nch) as n:
+                        stg = cyc & 1
                         dA = dA0.value + K.Cast("uint64", stg) * K.uint64(STAGE_UNITS)
                         _t = rng("M0.wait_g1")
                         p_g1.empty.wait(st_g1.stage, st_g1.phase)
@@ -1357,7 +1940,8 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         )  # G1_0 finished reading the stage's X0/Q0 rows
                         st_stg.advance()
                         rng_end(_t)
-                    K.assign(work, work + num_ctas)
+                        K.assign(cyc, cyc + K.int32(1))
+                    advance_work(work, st_w)
 
             # =====================================================================
             # MMA issuer 1: G5 (O^T=S~Q~), V1 (S~X0), G4'' (U^T-=V1b TB^T), G1 of the next chunk, G6, G7.   warp 19
@@ -1381,38 +1965,28 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
 
                 def mma_ts(dcol, a_col, b_desc, b_off, n_k, idesc, accumulate):
                     b_base = K.local_scalar("uint64", init=b_desc)
-                    with K.If(elected()), K.Then():
-                        for kp in range(n_k):
-                            K.ptx[MMA_SS](
-                                K.Cast("uint32", tmem[0] + dcol),
-                                K.Cast("uint32", tmem[0] + a_col + kp * 8),
-                                b_base + K.uint64(b_off(kp)),
-                                K.uint32(idesc),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.ptx.pred(K.uint32(1) if (accumulate or kp != 0) else K.uint32(0)),
-                            )
+                    fb = runtime_off(b_off, n_k) if compact else (lambda kp: K.uint64(b_off(kp)))
+                    mma_issue(
+                        dcol,
+                        lambda kp: K.Cast("uint32", tmem[0] + a_col + kp * 8),
+                        b_base,
+                        fb,
+                        n_k,
+                        idesc,
+                        accumulate,
+                        tmem,
+                    )
 
                 def mma_ss(dcol, a_desc, a_off, b_desc, b_off, n_k, idesc, accumulate):
                     """SS-form chain issued by one elected lane; descriptor phases are plain 64-bit adds
                     (the 16B-unit offsets never carry out of the 14-bit start-address field)."""
                     a_base = K.local_scalar("uint64", init=a_desc)
                     b_base = K.local_scalar("uint64", init=b_desc)
-                    with K.If(elected()), K.Then():
-                        for kp in range(n_k):
-                            K.ptx[MMA_SS](
-                                K.Cast("uint32", tmem[0] + dcol),
-                                a_base + K.uint64(a_off(kp)),
-                                b_base + K.uint64(b_off(kp)),
-                                K.uint32(idesc),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.uint32(0),
-                                K.ptx.pred(K.uint32(1) if (accumulate or kp != 0) else K.uint32(0)),
-                            )
+                    fa = runtime_off(a_off, n_k) if compact else (lambda kp: K.uint64(a_off(kp)))
+                    fb = runtime_off(b_off, n_k) if compact else (lambda kp: K.uint64(b_off(kp)))
+                    mma_issue(
+                        dcol, lambda kp: a_base + fa(kp), b_base, fb, n_k, idesc, accumulate, tmem
+                    )
 
                 def shifted(off_fn, extra):
                     return lambda kp: off_fn(kp) + extra
@@ -1422,9 +1996,9 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 dA0, offA = s_stage[0].encode(major="k", mma_k=16)
                 dKG0, offKG = s_kg[0].encode(major="mn", mma_k=16)
 
-                def issue_g1(nn):
-                    """G1_1 of chunk nn: [Akk;Aqk] column block D1 (M64, J1 rows x Y1)."""
-                    dA1 = dA0.value + K.Cast("uint64", nn & 1) * K.uint64(STAGE_UNITS)
+                def issue_g1(cc):
+                    """G1_1 of the chunk with running index cc: [Akk;Aqk] column block D1 (M64, J1 rows x Y1)."""
+                    dA1 = dA0.value + K.Cast("uint64", cc & 1) * K.uint64(STAGE_UNITS)
                     _t = rng("M1.wait_g1")
                     p_g1b.wait(0, st_g1b_e.phase)  # cg0 consumed the previous D1
                     st_g1b_e.advance()
@@ -1438,11 +2012,14 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                     st_j1.advance()
                     rng_end(_t)
 
-                work = K.local_scalar("int32", init=K.cta_id())
+                st_w, work = begin_work()
+                cyc = K.local_scalar("int32", init=K.int32(0))
                 with K.While(work < num_work):
-                    issue_g1(K.int32(0))
-                    with K.serial(NCH) as n:
-                        stg = n & 1
+                    _sq, _h, _ss, _sl, nch = work_coords(work)
+                    with K.If(nch > 0), K.Then():
+                        issue_g1(cyc)
+                    with K.serial(nch) as n:
+                        stg = cyc & 1
                         dA = dA0.value + K.Cast("uint64", stg) * K.uint64(STAGE_UNITS)
                         dKG = dKG0.value + K.Cast("uint64", stg) * K.uint64(KG_UNITS)
                         # ---- G5: O^T = S~'^T Q0^T, then V1 = S~'^T X0^T (V1 releases the stage) -------
@@ -1484,8 +2061,8 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         # cg0's Aqk(n+1) arrival from ever running a phase ahead of this wait.
                         p_aqk.full.wait(st_aqk.stage, st_aqk.phase)
                         # ---- G1 of the next chunk sits between G4 and G6 in tensor-pipe order ----
-                        with K.If(n + 1 < NCH), K.Then():
-                            issue_g1(n + 1)
+                        with K.If(n + 1 < nch), K.Then():
+                            issue_g1(cyc + 1)
                         # ---- G6: O^T += U^T Aqk^T ; G7: S^T += U^T KG ----------------------
                         _t = rng("M1.wait_g6")
                         m_ub.wait(0, st_ub.phase)
@@ -1503,7 +2080,8 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                         p_prep.empty.arrive(st_prep.stage, pred=pr)
                         st_prep.advance()
                         rng_end(_t)
-                    K.assign(work, work + num_ctas)
+                        K.assign(cyc, cyc + K.int32(1))
+                    advance_work(work, st_w)
 
             # =====================================================================
             # TMA loader: q/k/g stages only (runs two chunks ahead).            warp 17
@@ -1515,11 +2093,25 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                 with K.If(elected()), K.Then():
                     for m in (q_map, k_map, g_map):
                         K.ptx.prefetch.tensormap(K.address_of(m))
-                work = K.local_scalar("int32", init=K.cta_id())
+                st_wp, work = begin_work(producer=True)
                 with K.While(work < num_work):
-                    b_idx, h_idx = work_coords(work)
-                    with K.serial(NCH) as n:
-                        tok0 = b_idx * T + n * CHUNK
+                    seq_idx, h_idx, seq_start, seq_len, nch = work_coords(work)
+                    seq_start32 = K.local_scalar("int32", init=K.Cast("int32", seq_start))
+                    tok_last = K.local_scalar("int32", init=total_tokens - K.int32(1))
+                    # This performance-only hint is omitted from static-grid analysis specializations:
+                    # NumSim does not yet model it, and it has no synchronization role.
+                    if static_grid is None and not (uniform and H == 96):
+                        with K.If(elected()), K.Then():
+                            h0_base = K.local_scalar(
+                                "int64",
+                                init=(
+                                    K.Cast("int64", seq_idx) * K.int64(H) + K.Cast("int64", h_idx)
+                                )
+                                * K.int64(D_HEAD * D_HEAD),
+                            )
+                            prefetch_initial_state(h0_base)
+                    with K.serial(nch) as n:
+                        tok0 = seq_start32 + n * CHUNK
                         sv = s_stage[st_stage.stage]
                         _t = rng("L.wait_stage")
                         p_stage.empty.wait(st_stage.stage, st_stage.phase)
@@ -1540,8 +2132,8 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                                         K.Cast("int32", h_idx),
                                         mb,
                                     )
-                            # next chunk's k/q/g boxes into L2 so that TMA/direct gate loads land from L2
-                            with K.If(n + 1 < NCH), K.Then():
+                            # Request L2 prefetches for the next chunk's k/q/g boxes.
+                            with K.If(n + 1 < nch), K.Then():
                                 for tmap in (k_map, q_map, g_map):
                                     for d0 in (0, 64):
                                         K.ptx[TMA_PREFETCH](
@@ -1552,26 +2144,48 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                                         )
                         st_stage.advance()
                         rng_end(_t)
-                        # beta: sigmoid(bf16 logits) for the 64 tokens of this chunk
-                        p_beta.empty.wait(st_beta.stage, st_beta.phase)
-                        for i in range(2):
-                            t = lane + 32 * i
-                            bu = K.local_scalar("uint16")
-                            K.ptx.ld.global_.nc.u16(
-                                bu,
-                                beta.ptr_to(
-                                    [
-                                        (K.Cast("int64", tok0) + K.Cast("int64", t)) * K.int64(H)
-                                        + K.Cast("int64", h_idx)
-                                    ]
-                                ),
-                            )
-                            bfv = K.reinterpret("float32", K.Cast("uint32", bu) << K.uint32(16))
-                            sg = K.idioms.sigmoid_tanh_approx_f32(bfv)
-                            K.ptx.st.shared.f32(K.address_of(s_beta[st_beta.stage, t]), sg)
-                        p_beta.full.arrive(st_beta.stage)
-                        st_beta.advance()
-                    K.assign(work, work + num_ctas)
+                        if not cluster_norm:
+                            # beta: sigmoid(bf16 logits) for the 64 tokens of this chunk
+                            p_beta.empty.wait(st_beta.stage, st_beta.phase)
+                            for i in range(2):
+                                t = lane + 32 * i
+                                bu = K.local_scalar("uint16")
+                                tokc = tok0 + t if uniform else K.min(tok0 + t, tok_last)
+                                K.ptx.ld.global_.nc.u16(
+                                    bu,
+                                    beta.ptr_to(
+                                        [
+                                            K.Cast("int64", tokc) * K.int64(H)
+                                            + K.Cast("int64", h_idx)
+                                        ]
+                                    ),
+                                )
+                                bfv = K.reinterpret("float32", K.Cast("uint32", bu) << K.uint32(16))
+                                sg = K.idioms.sigmoid_tanh_approx_f32(bfv)
+                                K.ptx.st.shared.f32(K.address_of(s_beta[st_beta.stage, t]), sg)
+                            p_beta.full.arrive(st_beta.stage)
+                            st_beta.advance()
+                    advance_work(work, st_wp, producer=True)
+                if not fixed:
+                    # Every CTA fetched its terminal id; the last CTA to get here resets both counters
+                    # for the next launch.
+                    with K.If(K.lane_id() == 0), K.Then():
+                        K.ptx[
+                            "fence.acq_rel.gpu"
+                        ]()  # release: our fetches precede our done increment
+                        done = K.local_scalar("uint32")
+                        K.ptx["atom.acq_rel.gpu.global.add.u32"](
+                            done, sched.ptr_to([1]), K.uint32(1)
+                        )
+                        with K.If(K.Cast("int32", done) == num_ctas - K.int32(1)), K.Then():
+                            K.ptx[
+                                "fence.acq_rel.gpu"
+                            ]()  # acquire: every CTA's fetches/increments precede reset
+                            K.ptx.st.global_.s32(sched.ptr_to([0]), K.int32(0))
+                            K.ptx.st.global_.s32(sched.ptr_to([1]), K.int32(0))
+                if cluster_norm:
+                    with K.If(cluster_rank == K.int32(2)), K.Then():
+                        helper_load(0)
 
             # =====================================================================
             # v loads (one chunk ahead of the O store) + TMA store of O.        warp 18
@@ -1579,10 +2193,10 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
             with storer:
                 st_osm = K.PipelineState(1, phase=0)
                 st_v = K.PipelineState(1, phase=1)
+                lane = K.lane_id()
                 with K.If(elected()), K.Then():
                     K.ptx.prefetch.tensormap(K.address_of(o_map))
                     K.ptx.prefetch.tensormap(K.address_of(v_map))
-                work = K.local_scalar("int32", init=K.cta_id())
 
                 def issue_v(tok0, h_idx):
                     _t = rng("L.wait_v")
@@ -1611,37 +2225,98 @@ def make_kernel(H: int, T: int, B: int, num_ctas: int, iket: bool = False):
                             )
                     st_v.advance()
 
-                work = K.local_scalar("int32", init=K.cta_id())
+                st_w, work = begin_work()
                 with K.While(work < num_work):
-                    b_idx, h_idx = work_coords(work)
-                    issue_v(b_idx * T, h_idx)  # v(0)
-                    with K.serial(NCH) as n:
-                        tok0 = b_idx * T + n * CHUNK
-                        with K.If(n < NCH - 1), K.Then():
+                    seq_idx, h_idx, seq_start, seq_len, nch = work_coords(work)
+                    seq_start32 = K.local_scalar("int32", init=K.Cast("int32", seq_start))
+                    with K.If(nch > 0), K.Then():
+                        issue_v(seq_start32, h_idx)  # v(0)
+                    with K.serial(nch) as n:
+                        tok0 = seq_start32 + n * CHUNK
+                        with K.If(n + 1 < nch), K.Then():
                             issue_v(tok0 + CHUNK, h_idx)  # v(n+1) ahead of the O(n) store
                         # O(n) store
                         _t = rng("S.wait")
                         p_osm.full.wait(st_osm.stage, st_osm.phase)
                         rng_end(_t)
                         _t = rng("S.store")
-                        with K.If(elected()), K.Then():
-                            K.ptx[FENCE_ASYNC]()
-                            for d0 in (0, 64):
-                                K.ptx[TMA_ST](
-                                    K.address_of(o_map),
-                                    K.int32(d0),
-                                    K.Cast("int32", tok0),
-                                    K.Cast("int32", h_idx),
-                                    s_o.ptr_to(0, d0),
-                                )
-                            K.ptx[BULK_COMMIT]()
-                            K.ptx[BULK_WAIT_READ](0)
-                            p_osm.empty.arrive(st_osm.stage)
+                        if uniform:
+                            with K.If(elected()), K.Then():
+                                K.ptx[FENCE_ASYNC]()
+                                for d0 in (0, 64):
+                                    K.ptx[TMA_ST](
+                                        K.address_of(o_map),
+                                        K.int32(d0),
+                                        K.Cast("int32", tok0),
+                                        K.Cast("int32", h_idx),
+                                        s_o.ptr_to(0, d0),
+                                    )
+                                K.ptx[BULK_COMMIT]()
+                                K.ptx[BULK_WAIT_READ](0)
+                                p_osm.empty.arrive(st_osm.stage)
+                        else:
+                            n_valid = K.local_scalar(
+                                "int32", init=K.min(seq_len - n * CHUNK, K.int32(CHUNK))
+                            )
+                            with K.If(n_valid == CHUNK):
+                                with K.Then():
+                                    with K.If(elected()), K.Then():
+                                        K.ptx[FENCE_ASYNC]()
+                                        for d0 in (0, 64):
+                                            K.ptx[TMA_ST](
+                                                K.address_of(o_map),
+                                                K.int32(d0),
+                                                K.Cast("int32", tok0),
+                                                K.Cast("int32", h_idx),
+                                                s_o.ptr_to(0, d0),
+                                            )
+                                        K.ptx[BULK_COMMIT]()
+                                        K.ptx[BULK_WAIT_READ](0)
+                                        p_osm.empty.arrive(st_osm.stage)
+                                with K.Else():
+                                    # Partial tail chunk: copy exactly the valid rows with generic stores.
+                                    trow = K.local_scalar(
+                                        "int64",
+                                        init=(K.Cast("int64", tok0) + K.Cast("int64", lane >> 4))
+                                        * HK64
+                                        + K.Cast("int64", h_idx) * K.int64(D_HEAD)
+                                        + K.Cast("int64", (lane & 15) * 8),
+                                    )
+                                    ow = K.alloc_local([4], "uint32")
+                                    with K.serial((n_valid + 1) >> 1) as i2:
+                                        r = i2 * 2 + (lane >> 4)
+                                        with K.If(r < n_valid), K.Then():
+                                            K.ptx["ld.shared.v4.b32"](
+                                                ow[0],
+                                                ow[1],
+                                                ow[2],
+                                                ow[3],
+                                                s_o.ptr_to(r, (lane & 15) * 8),
+                                            )
+                                            K.ptx["st.global.v4.b32"](
+                                                o.ptr_to([trow + K.Cast("int64", i2 * 2) * HK64]),
+                                                ow[0],
+                                                ow[1],
+                                                ow[2],
+                                                ow[3],
+                                            )
+                                    K.ptx["bar.warp.sync"](K.uint32(0xFFFFFFFF))
+                                    with K.If(elected()), K.Then():
+                                        p_osm.empty.arrive(st_osm.stage)
                         st_osm.advance()
                         rng_end(_t)
-                    K.assign(work, work + num_ctas)
+                    advance_work(work, st_w)
                 with K.If(elected()), K.Then():
                     K.ptx[BULK_WAIT](0)
+                if cluster_norm:
+                    with K.If(cluster_rank == K.int32(2)), K.Then():
+                        helper_load(1)
+
+        if cluster_norm:
+            # Keeps every DSMEM source/destination live until both chains and the helper
+            # have completed the final publish/release handshake.
+            K.ptx.barrier.cluster.arrive.release.aligned()
+            K.ptx.barrier.cluster.wait.acquire()
 
     return kda_fwd
 
@@ -1658,7 +2333,7 @@ class _AlignedTensorMap:
         self.ptr = ctypes.c_void_p((base + 63) & ~63)
 
 
-def _encode_map(tensor, T_total, H):
+def _encode_map(tensor, T_total, H, box_rows=64):
     desc = _AlignedTensorMap()
     encode = tvm.get_global_func("runtime.cuTensorMapEncodeTiled")
     encode(
@@ -1668,7 +2343,7 @@ def _encode_map(tensor, T_total, H):
         ctypes.c_void_p(int(tensor.data_ptr())),
         D_HEAD, T_total, H,  # dims (innermost first)
         2 * D_HEAD * H, 2 * D_HEAD,  # strides in bytes (dims 1, 2)
-        64, 64, 1,  # box
+        64, box_rows, 1,  # box
         1, 1, 1,  # element strides
         0,  # interleave none
         3,  # swizzle 128B
@@ -1678,75 +2353,77 @@ def _encode_map(tensor, T_total, H):
     return desc
 
 
+COMPACT_MIN_CTAS = 128
+
+
+_FIXED_SEQ_LENS = (8192,)
+_MIXED_SEQ_LENS = (1300, 547, 2048, 963, 271, 3063)
+_UNIFORM_SEQ_LENS = (1024,) * 8
+_SUPPORTED_SEQ_LENS = {_FIXED_SEQ_LENS, _MIXED_SEQ_LENS, _UNIFORM_SEQ_LENS}
+
+
 @dataclass(frozen=True, slots=True)
 class KDAForwardConfig:
-    label: str = "b1_t8192_h96_k128_v128_bf16"
-    batch_size: int = 1
-    seq_len: int = 8192
-    num_qk_heads: int = 96
-    num_v_heads: int = 96
-    key_head_dim: int = D_HEAD
-    value_head_dim: int = D_HEAD
-    seed: int = 2858210354
+    label: str
+    num_heads: int
+    seq_lens: tuple[int, ...]
+    seed: int = 0
     scale: float = 1.0 / math.sqrt(D_HEAD)
     lower_bound: float = -5.0
 
     def validate(self) -> None:
-        shape = (
-            self.batch_size,
-            self.seq_len,
-            self.num_qk_heads,
-            self.num_v_heads,
-            self.key_head_dim,
-            self.value_head_dim,
-        )
-        if shape != (1, 8192, 96, 96, 128, 128):
-            raise ValueError(f"unsupported agent-evolved KDA workload {shape}")
+        if self.num_heads not in (64, 96):
+            raise ValueError(f"num_heads must be 64 or 96, got {self.num_heads}")
+        if self.seq_lens not in _SUPPORTED_SEQ_LENS:
+            raise ValueError(f"unsupported KDA sequence layout {self.seq_lens}")
+        if sum(self.seq_lens) != 8192:
+            raise ValueError(f"total tokens must be 8192, got {sum(self.seq_lens)}")
         if not math.isclose(self.scale, 1.0 / math.sqrt(D_HEAD), rel_tol=0.0, abs_tol=1e-15):
             raise ValueError(f"scale must be 1/sqrt({D_HEAD}), got {self.scale}")
         if self.lower_bound != -5.0:
             raise ValueError(f"lower_bound must be -5.0, got {self.lower_bound}")
 
     @property
-    def num_heads(self) -> int:
-        return self.num_qk_heads
-
-    @property
-    def num_work(self) -> int:
-        return self.batch_size * self.num_heads
+    def batch_size(self) -> int:
+        return 1
 
     @property
     def num_seqs(self) -> int:
-        return self.batch_size
+        return len(self.seq_lens)
 
     @property
     def total_tokens(self) -> int:
-        return self.batch_size * self.seq_len
-
-    @property
-    def seq_lens(self) -> tuple[int, ...]:
-        return (self.seq_len,) * self.batch_size
+        return sum(self.seq_lens)
 
     @property
     def packed(self) -> bool:
-        return False
+        return self.num_seqs > 1
 
     @property
     def use_initial_state(self) -> bool:
-        return False
+        return True
 
     @property
     def store_final_state(self) -> bool:
         return False
 
 
-_EVOLVE_CONFIG = KDAForwardConfig()
-CONFIGS = [{field.name: getattr(_EVOLVE_CONFIG, field.name) for field in fields(KDAForwardConfig)}]
+CONFIGS = [
+    {"label": f"h{heads}_{layout}", "num_heads": heads, "seq_lens": seq_lens, "seed": seed}
+    for heads, layout, seq_lens, seed in (
+        (96, "fixed", _FIXED_SEQ_LENS, 2858210354),
+        (96, "mixed", _MIXED_SEQ_LENS, 2858210355),
+        (96, "uniform", _UNIFORM_SEQ_LENS, 2858210356),
+        (64, "fixed", _FIXED_SEQ_LENS, 2858210357),
+        (64, "mixed", _MIXED_SEQ_LENS, 2858210358),
+        (64, "uniform", _UNIFORM_SEQ_LENS, 2858210359),
+    )
+]
 
 KERNEL_META = {
-    "name": "agent_evolved_kda_forward_b1_t8192_h96",
+    "name": "agent_evolved_kda_forward_b1_t8192",
     "category": "agent_evolved",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a"],
     "reference_requirements": (
         {
             "package": "flash-linear-attention",
@@ -1759,8 +2436,8 @@ KERNEL_META = {
     ),
     "provenance": {
         "generator": "hmz",
-        "run": "kda_forward_b1_t8192_h96-20260829-023306",
-        "selected_version": "v188",
+        "run": "kda_forward-20260901-235533",
+        "selected_version": "v68",
     },
 }
 
@@ -1768,20 +2445,41 @@ KERNEL_META = {
 def _cfg(**kwargs: Any) -> KDAForwardConfig:
     names = {field.name for field in fields(KDAForwardConfig)}
     values = {name: value for name, value in kwargs.items() if name in names}
+    if "seq_lens" in values:
+        values["seq_lens"] = tuple(int(length) for length in values["seq_lens"])
+    values.setdefault("label", "custom")
     cfg = KDAForwardConfig(**values)
     cfg.validate()
     return cfg
 
 
-def _num_ctas(cfg: KDAForwardConfig) -> int:
+def _kernel_traits(cfg: KDAForwardConfig) -> dict[str, Any]:
     from tirx_kernels.runner import hardware_num_sms
 
-    return min(cfg.num_work, hardware_num_sms())
+    fixed = not cfg.packed
+    uniform = cfg.seq_lens == _UNIFORM_SEQ_LENS
+    mixed = cfg.num_heads == 96 and cfg.seq_lens == _MIXED_SEQ_LENS
+    cluster_norm = fixed and cfg.num_heads == 64
+    if cluster_norm:
+        num_ctas = 3 * (cfg.num_heads // 2)
+    elif uniform and cfg.num_heads == 64:
+        num_ctas = 128
+    else:
+        num_ctas = min(cfg.num_seqs * cfg.num_heads, hardware_num_sms())
+    return {
+        "static_grid": num_ctas,
+        "compact": num_ctas >= COMPACT_MIN_CTAS,
+        "fixed": fixed,
+        "cluster_norm": cluster_norm,
+        "packed_tail_hoist": False,
+        "uniform": uniform,
+        "mixed": mixed,
+    }
 
 
 def get_kernel(**kwargs: Any):
     cfg = _cfg(**kwargs)
-    return make_kernel(cfg.num_heads, cfg.seq_len, cfg.batch_size, _num_ctas(cfg)).func
+    return make_kernel(cfg.num_heads, **_kernel_traits(cfg)).func
 
 
 def _gate_parameters(
@@ -1793,24 +2491,23 @@ def _gate_parameters(
         )
     )
     dt = torch.exp(
-        torch.rand(
-            cfg.num_heads * cfg.key_head_dim,
-            dtype=torch.float32,
-            device=device,
-            generator=generator,
-        )
+        torch.rand(cfg.num_heads * D_HEAD, dtype=torch.float32, device=device, generator=generator)
         * (math.log(0.1) - math.log(0.001))
         + math.log(0.001)
     ).clamp_(min=1e-4)
-    dt_bias = dt + torch.log(-torch.expm1(-dt))
-    return a_log, dt_bias
+    return a_log, dt + torch.log(-torch.expm1(-dt))
 
 
-def _randn_bf16(
-    shape: tuple[int, ...], *, device: torch.device, generator: torch.Generator
+def _randn(
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    *,
+    device: torch.device,
+    generator: torch.Generator,
+    scale: float,
 ) -> torch.Tensor:
-    return (torch.randn(shape, dtype=torch.float32, device=device, generator=generator) * 0.5).to(
-        torch.bfloat16
+    return (torch.randn(shape, dtype=torch.float32, device=device, generator=generator) * scale).to(
+        dtype
     )
 
 
@@ -1823,14 +2520,30 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     generator = torch.Generator(device=device)
     generator.manual_seed(cfg.seed)
     a_log, dt_bias = _gate_parameters(cfg, device=device, generator=generator)
-    vector_shape = (cfg.batch_size, cfg.seq_len, cfg.num_heads, cfg.key_head_dim)
-    q = _randn_bf16(vector_shape, device=device, generator=generator)
-    k = _randn_bf16(vector_shape, device=device, generator=generator)
-    v = _randn_bf16(vector_shape, device=device, generator=generator)
-    g = _randn_bf16(vector_shape, device=device, generator=generator)
-    beta = _randn_bf16(
-        (cfg.batch_size, cfg.seq_len, cfg.num_heads), device=device, generator=generator
+    vector_shape = (1, cfg.total_tokens, cfg.num_heads, D_HEAD)
+    q = _randn(vector_shape, torch.bfloat16, device=device, generator=generator, scale=0.5)
+    k = _randn(vector_shape, torch.bfloat16, device=device, generator=generator, scale=0.5)
+    v = _randn(vector_shape, torch.bfloat16, device=device, generator=generator, scale=0.5)
+    g = _randn(vector_shape, torch.bfloat16, device=device, generator=generator, scale=0.5)
+    beta = _randn(
+        (1, cfg.total_tokens, cfg.num_heads),
+        torch.bfloat16,
+        device=device,
+        generator=generator,
+        scale=0.5,
     )
+    initial_state = _randn(
+        (cfg.num_seqs, cfg.num_heads, D_HEAD, D_HEAD),
+        torch.float32,
+        device=device,
+        generator=generator,
+        scale=0.25,
+    )
+    offsets = [0]
+    for length in cfg.seq_lens:
+        offsets.append(offsets[-1] + length)
+    cu_seqlens = torch.tensor(offsets, dtype=torch.int64, device=device)
+    sched = torch.zeros(2, dtype=torch.int32, device=device)
     out = torch.empty_like(v)
     tensors = {"q": q, "k": k, "v": v, "g": g, "out": out}
     tensor_maps = {
@@ -1843,6 +2556,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         "beta": beta,
         "A_log": a_log,
         "dt_bias": dt_bias,
+        "initial_state": initial_state,
+        "cu_seqlens": cu_seqlens,
+        "sched": sched,
         "scale": cfg.scale,
         "tensor_maps": tensor_maps,
     }
@@ -1851,22 +2567,28 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
     cfg: KDAForwardConfig = case["config"]
     maps = case["tensor_maps"]
+    num_ctas = _kernel_traits(cfg)["static_grid"]
     return (
         case["q"].view(-1),
         case["k"].view(-1),
         case["v"].view(-1),
         case["g"].view(-1),
         case["beta"].view(-1),
-        case["A_log"].contiguous().float(),
-        case["dt_bias"].contiguous().float(),
+        case["A_log"],
+        case["dt_bias"],
+        case["initial_state"].view(-1),
+        case["cu_seqlens"],
+        case["sched"],
         case["out"].view(-1),
         maps["q"].ptr,
         maps["k"].ptr,
         maps["v"].ptr,
         maps["g"].ptr,
         maps["out"].ptr,
-        case["scale"],
-        cfg.num_work,
+        cfg.scale,
+        cfg.num_seqs,
+        cfg.total_tokens,
+        num_ctas,
     )
 
 
@@ -1874,9 +2596,9 @@ def _assert_sm100() -> None:
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for agent-evolved KDA forward")
     capability = torch.cuda.get_device_capability()
-    if capability[0] != 10:
+    if capability != (10, 0):
         raise SkipTest(
-            f"agent-evolved KDA forward requires compute capability 10.x, got {capability}"
+            f"agent-evolved KDA forward requires compute capability 10.0, got {capability}"
         )
 
 
@@ -1920,15 +2642,15 @@ def _run_fla_reference(case: dict[str, Any]) -> torch.Tensor:
             lower_bound=cfg.lower_bound,
             A_log=case["A_log"],
             dt_bias=case["dt_bias"],
+            initial_state=case["initial_state"],
+            cu_seqlens=case["cu_seqlens"] if cfg.packed else None,
         )
     return output
 
 
 def check_correctness(outputs: dict[str, Any], **kwargs: Any) -> None:
     _cfg(**kwargs)
-    first = outputs["first"]
-    actual = outputs["actual"]
-    reference = outputs["reference"]
+    first, actual, reference = outputs["first"], outputs["actual"], outputs["reference"]
     for name, tensor in (("first", first), ("actual", actual), ("reference", reference)):
         if not torch.isfinite(tensor).all():
             raise AssertionError(f"{name} output contains non-finite values")
@@ -1952,17 +2674,14 @@ def run_test(**kwargs: Any) -> None:
     case = prepare_data(**kwargs)
     executable = compile_kernel(get_kernel(**kwargs))
     args = _tirx_args(case)
-
     case["out"].fill_(float("nan"))
     executable(*args)
     torch.cuda.synchronize()
     first = case["out"].clone()
-
     case["out"].fill_(42.0)
     executable(*args)
     torch.cuda.synchronize()
     actual = case["out"].clone()
-
     reference = _run_fla_reference(case)
     torch.cuda.synchronize()
     check_correctness({"first": first, "actual": actual, "reference": reference}, **kwargs)
@@ -1992,7 +2711,6 @@ def run_gpu(
     case = prepare_data(**config)
     executable = prepared["executable"]
     args = _tirx_args(case)
-
     executable(*args)
     torch.cuda.synchronize()
 
@@ -2000,8 +2718,7 @@ def run_gpu(
         from tirx_kernels.flashinfer.utils._flashkda_bench import prepare_flashkda_raw_reference
 
         reference_case = dict(case)
-        cfg: KDAForwardConfig = case["config"]
-        reference_case["dt_bias"] = case["dt_bias"].view(cfg.num_heads, cfg.key_head_dim)
+        reference_case["dt_bias"] = case["dt_bias"].view(case["config"].num_heads, D_HEAD)
         return prepare_flashkda_raw_reference(reference_case).launch
 
     from tirx_kernels.runner import bench

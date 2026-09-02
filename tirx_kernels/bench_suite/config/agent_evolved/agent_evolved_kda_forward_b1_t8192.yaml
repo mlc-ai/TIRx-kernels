@@ -1,0 +1,8 @@
+kernel: agent_evolved_kda_forward_b1_t8192
+configs:
+  - {config: h96_fixed, default: true, timer: proton}
+  - {config: h96_mixed, timer: proton}
+  - {config: h96_uniform, default: true, timer: proton}
+  - {config: h64_fixed, timer: proton}
+  - {config: h64_mixed, timer: proton}
+  - {config: h64_uniform, default: true, timer: proton}
