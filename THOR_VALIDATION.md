@@ -24,6 +24,24 @@ kernels require NVSHMEM, two DeepEP kernels require eight GPUs, and the
 agent-evolved KDA kernel remains conservatively disabled after an earlier
 long-running Thor launch.
 
+## Performance baseline
+
+The 19 fully validated kernels also completed all 57 representative benchmark
+rows on Thor: 57 passed, 0 failed, and 0 interference retries.  The final run
+uses the same Proton timer, 25 ms warmup budget, 100 ms repeat budget, five
+independent rounds, and arithmetic-mean aggregation as the repository's
+historical SM100/B200 baseline.
+
+See [THOR_B200_PERFORMANCE.md](THOR_B200_PERFORMANCE.md) for the complete table,
+per-kernel summaries, GEMM effective throughput, round variability, provenance,
+and comparison limitations.  Generate it from the raw JSON with
+`scripts/report_thor_b200.py`.
+
+On this Thor environment, set
+`TRITON_CUPTI_LIB_PATH=/usr/local/cuda-13.1/extras/CUPTI/lib64` before running
+Proton.  Triton 3.5.1 otherwise selects its bundled CUDA 12.8 CUPTI, whose
+`cuptiSubscribe` cannot initialize against the CUDA 13.1 driver stack.
+
 ## BSA forward-combine observation
 
 `cudnn_sm100_bsa_forward_combine_blk64` passes 8 of its 9 correctness
