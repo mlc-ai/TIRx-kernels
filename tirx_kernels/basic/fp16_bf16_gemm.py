@@ -650,7 +650,7 @@ def make_kernel(dtype: str, M: int, N: int, Kdim: int):
 KERNEL_META = {
     "name": "fp16_bf16_gemm",
     "category": "basic",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
 }
 CONFIGS = [
     {"dtype": d, "M": s, "N": s, "K": s, "label": f"{d}_{s}x{s}x{s}"}

@@ -49,13 +49,20 @@ def test_exact_architectures_are_stored_in_source_index():
     assert index["dense_blockscaled_gemm_sm107"].runtime_cuda_archs == ("sm_107a",)
     counts = {
         archs: sum(record.runtime_cuda_archs == archs for record in index.values())
-        for archs in (("sm_100a",), ("sm_103a",), ("sm_107a",), ("sm_100a", "sm_103a", "sm_107a"))
+        for archs in (
+            ("sm_100a",),
+            ("sm_103a",),
+            ("sm_107a",),
+            ("sm_100a", "sm_103a", "sm_107a"),
+            ("sm_100a", "sm_103a", "sm_107a", "sm_110a"),
+        )
     }
     assert counts == {
         ("sm_100a",): 11,
         ("sm_103a",): 6,
         ("sm_107a",): 4,
-        ("sm_100a", "sm_103a", "sm_107a"): 90,
+        ("sm_100a", "sm_103a", "sm_107a"): 89,
+        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 1,
     }
 
 
