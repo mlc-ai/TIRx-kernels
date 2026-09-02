@@ -48,17 +48,9 @@ def test_exact_architectures_are_stored_in_source_index():
     assert index["bmm_fp8_rubin"].runtime_cuda_archs == ("sm_107a",)
     counts = {
         archs: sum(record.runtime_cuda_archs == archs for record in index.values())
-        for archs in (
-            ("sm_100a",),
-            ("sm_107a",),
-            ("sm_100a", "sm_103a", "sm_107a"),
-        )
+        for archs in (("sm_100a",), ("sm_107a",), ("sm_100a", "sm_103a", "sm_107a"))
     }
-    assert counts == {
-        ("sm_100a",): 6,
-        ("sm_107a",): 1,
-        ("sm_100a", "sm_103a", "sm_107a"): 89,
-    }
+    assert counts == {("sm_100a",): 6, ("sm_107a",): 1, ("sm_100a", "sm_103a", "sm_107a"): 89}
 
 
 def test_reference_requirements_are_stored_in_source_index():
@@ -98,7 +90,7 @@ def test_reference_requirements_are_stored_in_source_index():
         "sparse_flashmla_prefill_head64_phase1": (),
     }
 
-    fla = index["agent_evolved_kda_forward_b1_t8192_h96"].reference_requirements
+    fla = index["agent_evolved_kda_forward_b1_t8192"].reference_requirements
     assert [(item.package, item.import_name) for item in fla] == [("flash-linear-attention", "fla")]
     assert fla[0].git.commit == "9c8e42e762fce087c27b673af4922795d9edb85e"
 

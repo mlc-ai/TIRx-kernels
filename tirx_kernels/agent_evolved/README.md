@@ -31,7 +31,12 @@ comparisons.
 
 | Kernel | Config | GPU | Timer | TIRx (us) | Reference | Reference (us) | Speedup | Evidence |
 |---|---|---|---|---:|---|---:|---:|---|
-| [`agent_evolved_kda_forward_b1_t8192_h96`](kda_forward_b1_t8192_h96.py) | `b1_t8192_h96_k128_v128_bf16` | B200 | Proton | 367.233 | FlashKDA | 1048.596 | 2.855x | [PR #138](https://github.com/mlc-ai/TIRx-kernels/pull/138) |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_fixed` | B200 | Proton | 367.937 | FlashKDA | 1048.609 | 2.850x | `kda_forward-20260901-235533` v68 promotion rerun |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_mixed` | B200 | Proton | 315.741 | FlashKDA | 889.884 | 2.818x | `kda_forward-20260901-235533` v68 promotion rerun |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h96_uniform` | B200 | Proton | 313.221 | FlashKDA | 714.718 | 2.282x | `kda_forward-20260901-235533` v68 promotion rerun |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_fixed` | B200 | Proton | 372.790 | FlashKDA | 956.330 | 2.565x | `kda_forward-20260901-235533` v68 promotion rerun |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_mixed` | B200 | Proton | 225.736 | FlashKDA | 670.399 | 2.970x | `kda_forward-20260901-235533` v68 promotion rerun |
+| [`agent_evolved_kda_forward_b1_t8192`](kda_forward_b1_t8192.py) | `h64_uniform` | B200 | Proton | 212.998 | FlashKDA | 484.290 | 2.274x | `kda_forward-20260901-235533` v68 promotion rerun |
 
 ## Updating the table
 
