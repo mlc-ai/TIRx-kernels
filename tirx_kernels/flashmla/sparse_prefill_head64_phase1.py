@@ -110,7 +110,7 @@ CONFIGS = [
 KERNEL_META = {
     "name": "sparse_flashmla_prefill_head64_phase1",
     "category": "flashmla",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
 }
 
 

@@ -1393,7 +1393,7 @@ def setup(data, B, H, S, D, *, executables=None):
 KERNEL_META = {
     "name": "flash_attention_backward_sm100",
     "category": "flashattention",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flash-attn-4",
