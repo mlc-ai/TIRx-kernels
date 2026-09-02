@@ -655,6 +655,9 @@ def gpu_compile_profile(indices: set[str]) -> dict:
             elif compute_capability == (10, 7):
                 cores_per_sm = 128
                 cuda_arch = "sm_107a"
+            elif compute_capability == (11, 0):
+                cores_per_sm = 128
+                cuda_arch = "sm_110a"
             else:
                 raise ValueError(
                     f"GPU {index} {name!r} has unsupported compile profile "

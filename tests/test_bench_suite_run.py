@@ -108,6 +108,25 @@ def test_gpu_compile_profile_supports_sm103(monkeypatch):
     }
 
 
+def test_gpu_compile_profile_supports_sm110(monkeypatch):
+    fake_nvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: None,
+        nvmlDeviceGetHandleByIndex=lambda index: index,
+        nvmlDeviceGetName=lambda _handle: "NVIDIA Thor",
+        nvmlDeviceGetCudaComputeCapability=lambda _handle: (11, 0),
+        nvmlDeviceGetNumGpuCores=lambda _handle: 20 * 128,
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml)
+
+    assert bench_run.gpu_compile_profile({"0"}) == {
+        "name": "NVIDIA Thor",
+        "compute_capability": [11, 0],
+        "cuda_arch": "sm_110a",
+        "num_sms": 20,
+    }
+
+
 def test_gpu_compile_profile_rejects_mixed_arch_pool(monkeypatch):
     fake_nvml = SimpleNamespace(
         nvmlInit=lambda: None,
