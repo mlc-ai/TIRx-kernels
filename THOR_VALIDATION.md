@@ -26,8 +26,8 @@ long-running Thor launch.
 
 ## Performance baseline
 
-The first 19 fully validated kernels also completed all 57 representative
-benchmark rows on Thor: 57 passed, 0 failed, and 0 interference retries.  The
+The 23 fully validated kernels also completed all 69 representative benchmark
+rows on Thor: 69 passed, 0 failed, and 0 interference retries.  The
 final run uses the same Proton timer, 25 ms warmup budget, 100 ms repeat budget,
 five independent rounds, and arithmetic-mean aggregation as the repository's
 historical SM100/B200 baseline.
