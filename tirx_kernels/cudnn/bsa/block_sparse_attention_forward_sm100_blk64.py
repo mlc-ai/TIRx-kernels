@@ -20,7 +20,7 @@ from ._block_sparse_attention_forward_sm100_blk64 import spec as _spec
 KERNEL_META = {
     "name": "cudnn_sm100_bsa_forward_blk64",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
