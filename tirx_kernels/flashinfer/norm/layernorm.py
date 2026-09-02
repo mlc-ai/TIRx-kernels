@@ -19,7 +19,7 @@ from tirx_kernels.runner import bench
 KERNEL_META = {
     "name": "flashinfer_layernorm",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",

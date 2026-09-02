@@ -26,7 +26,7 @@ import torch
 import tirx_kernels.kern as K
 import tvm
 import tvm.testing
-from tirx_kernels.runner import bench, cuda_target
+from tirx_kernels.runner import bench
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
 
@@ -1317,7 +1317,7 @@ def prepare_data(batch_size, seq_len_q, seq_len_kv, num_qo_heads, num_kv_heads, 
 KERNEL_META = {
     "name": "flash_attention4",
     "category": "flashattention",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flash-attn-4",

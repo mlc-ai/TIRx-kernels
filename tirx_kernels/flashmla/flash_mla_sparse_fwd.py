@@ -34,7 +34,7 @@ from tvm.tirx.cuda import iket
 KERNEL_META = {
     "name": "flash_mla_sparse_fwd",
     "category": "flashmla",
-    "runtime_cuda_archs": ["sm_100a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_110a"],
 }
 _HEAD64_NAME = _head64.KERNEL_META["name"]
 _HEAD128_NAME = _head128.KERNEL_META["name"]
