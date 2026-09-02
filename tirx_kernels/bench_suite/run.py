@@ -2257,6 +2257,15 @@ def main() -> None:
         help=f"Seconds to sleep before every implementation (default {DEFAULT_COOLDOWN_S:g}).",
     )
     ap.add_argument(
+        "--timer",
+        choices=("event", "proton", "cudagraph_proton", "kineto", "megamoe", "e2e"),
+        default=None,
+        help=(
+            "Override every selected workload's timer. This is useful on platforms "
+            "where the default Proton/CUPTI timer is unavailable."
+        ),
+    )
+    ap.add_argument(
         "--max-prepare-processes",
         type=int,
         default=None,
@@ -2318,6 +2327,8 @@ def main() -> None:
     workloads = load_workloads(workloads_path)
     if args.filter:
         workloads = [w for w in workloads if args.filter in w["kernel"]]
+    if args.timer is not None:
+        workloads = [{**workload, "timer": args.timer} for workload in workloads]
     if not workloads:
         print("[bench-suite] no workloads to run.", file=sys.stderr)
         sys.exit(2)
@@ -2326,6 +2337,8 @@ def main() -> None:
         "mode": "default" if args.workloads is None and args.filter is None else "targeted",
         "keys": [[workload["kernel"], workload["config"]] for workload in workloads],
     }
+    if args.timer is not None:
+        selection["timer_override"] = args.timer
 
     if args.check_imports:
         if args.ab_before:

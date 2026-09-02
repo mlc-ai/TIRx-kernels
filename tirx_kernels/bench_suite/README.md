@@ -149,6 +149,7 @@ Useful options:
 | `--filter TEXT` | Keep selected kernel names containing `TEXT` |
 | `--rounds N` | Independent standard-timer samples |
 | `--cooldown S` | Delay before each implementation |
+| `--timer NAME` | Override every selected workload timer (for example, `event` when Proton/CUPTI is unavailable) |
 | `--threshold PCT` | Report threshold; the direct gate remains fixed at 1% |
 | `--out-dir PATH` | Artifact root |
 | `--check-imports` | Resolve selected imports and exit |
