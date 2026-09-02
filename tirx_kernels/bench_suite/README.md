@@ -22,6 +22,8 @@ GEMM, the `sm_100a`-only Cake VSA blk128/longseq/ultrasparse ports, and the
 `sm_103a`-only Cake VSA longseq, fast.cu NVFP4 GEMM, and FP4 FA4 forward). Thus
 an SM107 run selects 266 rows while SM100 and SM103 runs select 269.
 GPU runs retain only rows registered for the pool's exact architecture.
+The current exact `sm_110a` roster contains 69 rows across 23 fully validated
+Thor kernels.
 
 With no `--workloads`, the suite writes the selected rows to
 `.bench-suite/workloads.generated.yaml`. Inspect that file before freezing a

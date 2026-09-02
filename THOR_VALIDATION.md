@@ -13,7 +13,7 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 19 kernels and 316 configurations
+- Fully validated: 23 kernels and 485 configurations
 
 The operator-level smoke sweep currently reports 56 numerical passes, 30
 failures, and 9 skips.  Follow-up launch-only checks show that 27 more kernels
@@ -26,10 +26,10 @@ long-running Thor launch.
 
 ## Performance baseline
 
-The 19 fully validated kernels also completed all 57 representative benchmark
-rows on Thor: 57 passed, 0 failed, and 0 interference retries.  The final run
-uses the same Proton timer, 25 ms warmup budget, 100 ms repeat budget, five
-independent rounds, and arithmetic-mean aggregation as the repository's
+The first 19 fully validated kernels also completed all 57 representative
+benchmark rows on Thor: 57 passed, 0 failed, and 0 interference retries.  The
+final run uses the same Proton timer, 25 ms warmup budget, 100 ms repeat budget,
+five independent rounds, and arithmetic-mean aggregation as the repository's
 historical SM100/B200 baseline.
 
 See [THOR_B200_PERFORMANCE.md](THOR_B200_PERFORMANCE.md) for the complete table,
@@ -75,6 +75,7 @@ The resumable local JSONL runs are kept outside the repository under `/tmp`:
 - `tirx-thor-main-0512291-batch3-quant-full.jsonl`
 - `tirx-thor-main-0512291-batch4-kda-rms-full.jsonl`
 - `tirx-thor-main-0512291-batch5-bsa-full.jsonl`
+- `tirx-thor-main-0512291-batch6-gdn-decode-full.jsonl`
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only
