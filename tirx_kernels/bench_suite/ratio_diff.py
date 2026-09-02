@@ -77,11 +77,18 @@ def _key(row: dict, *, location: str) -> tuple[str, str]:
     return kernel, config
 
 
-def _expected_keys() -> tuple[set[tuple[str, str]], list[str]]:
+def _expected_keys(cuda_arch: str | None = None) -> tuple[set[tuple[str, str]], list[str]]:
     selected: list[tuple[str, str]] = []
     errors: list[str] = []
     try:
         workloads = _load_config_dir()
+        if cuda_arch is not None:
+            try:
+                from tirx_kernels.bench_suite.run import partition_workloads_by_arch
+            except ModuleNotFoundError:  # Support direct script execution.
+                from run import partition_workloads_by_arch
+
+            workloads, _incompatible = partition_workloads_by_arch(workloads, cuda_arch)
     except Exception as error:
         return set(), [f"default workload discovery failed: {error}"]
     for index, workload in enumerate(workloads):
@@ -219,7 +226,11 @@ def _records(payload: Any, label: str) -> tuple[dict[tuple[str, str], list[dict]
 
 
 def _validate_record_set(
-    records: dict[tuple[str, str], list[dict]], expected: set[tuple[str, str]], label: str
+    records: dict[tuple[str, str], list[dict]],
+    expected: set[tuple[str, str]],
+    label: str,
+    *,
+    allow_unexpected: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     for kernel, config in sorted(expected):
@@ -227,8 +238,9 @@ def _validate_record_set(
         if len(matches) != 1:
             detail = "missing" if not matches else f"duplicate ({len(matches)})"
             errors.append(f"{kernel}/{config}: {label} result is {detail}")
-    for kernel, config in sorted(set(records) - expected):
-        errors.append(f"{kernel}/{config}: {label} result is unexpected")
+    if not allow_unexpected:
+        for kernel, config in sorted(set(records) - expected):
+            errors.append(f"{kernel}/{config}: {label} result is unexpected")
     return errors
 
 
@@ -396,12 +408,7 @@ def _compare_run_provenance(
         errors.append("provenance: references_enabled differs between before and after")
     else:
         errors.extend(
-            _compare_mapping(
-                before,
-                after,
-                "baselines",
-                allow_empty=not before_references,
-            )
+            _compare_mapping(before, after, "baselines", allow_empty=not before_references)
         )
 
     before_pipeline = before.get("pipeline")
@@ -513,11 +520,23 @@ def build_report(
     before_payload, before_label = _load_payload(baseline_path)
     after_payload, after_label = _load_payload(current)
     default_keys: set[tuple[str, str]] = set()
+    cuda_arch: str | None = None
     if paired:
         expected, failures = _paired_expected_keys(before_payload, after_payload)
         selection_mode = "paired"
     else:
-        default_keys, failures = _expected_keys()
+        selection = after_payload.get("selection")
+        raw_cuda_arch = selection.get("cuda_arch") if isinstance(selection, dict) else None
+        selection_arch_errors: list[str] = []
+        if raw_cuda_arch is not None:
+            if not isinstance(raw_cuda_arch, str) or not raw_cuda_arch:
+                selection_arch_errors.append(
+                    "after: selection.cuda_arch must be a non-empty string"
+                )
+            else:
+                cuda_arch = raw_cuda_arch
+        default_keys, failures = _expected_keys(cuda_arch)
+        failures.extend(selection_arch_errors)
         expected, selection_mode, selection_errors = _selected_after_keys(
             after_payload, default_keys
         )
@@ -527,7 +546,12 @@ def build_report(
     failures.extend(before_errors)
     failures.extend(after_errors)
     failures.extend(
-        _validate_record_set(before_records, expected if paired else default_keys, "before")
+        _validate_record_set(
+            before_records,
+            expected if paired else default_keys,
+            "before",
+            allow_unexpected=not paired and cuda_arch is not None,
+        )
     )
     failures.extend(_validate_record_set(after_records, expected, "after"))
     failures.extend(

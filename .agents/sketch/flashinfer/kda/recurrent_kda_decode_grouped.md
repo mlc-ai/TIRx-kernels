@@ -616,7 +616,7 @@ if (n == 0) & (vz == 0) & (tid < D):
 ## TIRx module and benchmark contract
 
 * Module: `tirx_kernels/flashinfer/kda/recurrent_kda_decode_grouped.py`,
-  `KERNEL_META["name"] = "recurrent_kda_decode_grouped"`, `compute_capability = 10`.
+  `KERNEL_META["name"] = "recurrent_kda_decode_grouped"`, `runtime_cuda_archs = ["sm_100a"]`.
 * Helpers (`_ptx_*`, non-FTZ scalar math, BF16 pack/convert, shuffles, guarded
   stores) are imported from the one-warp sibling module rather than duplicated.
 * Every global **and shared** access must go through raw PTX with `ptr_to`:

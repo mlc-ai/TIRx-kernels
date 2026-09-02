@@ -1,23 +1,41 @@
-# The upstream benchmark sweep (benchmark/dsa/benchmark_dsa_sparse_attention_backward.py:
-# seqlens x topks, seqlen_kv == seqlen_q, bf16, sink on, full-length topk_length)
-# mirrored onto both compiled head-dim programs. This 16-row matrix is the
-# performance gate's required set.
+# Keep this kernel available for targeted development, but do not put it in the
+# default benchmark or registry-correctness roster. Its pinned cuDNN-frontend
+# reference, FlashAttentionDSABackwardSm100, has a deterministic device-memory
+# bug on sm_107a (CUDA 13.4 / PTX 9.4) that depends on prior kernels compiled in
+# the same process. The minimal known failing order is the three blockscaled
+# dGEMM/dGLU defaults, the first two non-blockscaled dGEMM/dGLU defaults, then
+# the three DSA defaults below. The final d576_h32_bf16_sq8192_t512_len launch
+# fails inside the external CuTe kernel; all four TIRx stages have synchronized
+# successfully before that reference launch.
+#
+# CUDA_LAUNCH_BLOCKING=1 attributes the failure to the call through
+# _interface_sm100.py:218. Compute Sanitizer reports 16 invalid 8-byte global
+# reads at FlashAttentionDSABackwardSm100+0x1e80: threads 560..575 of block 8191
+# read consecutively beyond an 807,403,520-byte allocation, beginning exactly
+# at its end. Running this DSA case alone can therefore look green merely
+# because the allocator/module history differs. Do not re-enable defaults
+# until the upstream reference is fixed and both the ordered reproducer and
+# Compute Sanitizer pass in one process.
+#
+# The full upstream benchmark sweep remains listed for explicit targeted runs:
+# seqlens x topks, seqlen_kv == seqlen_q, bf16, sink on, full-length topk_length,
+# mirrored onto both compiled head-dim programs.
 kernel: cudnn_sm100_dsa_sparse_attention_backward
-selection_rationale: d512/h64 and d576/h32 are separately compiled programs with different TMEM alias maps, tail MMAs and barrier assignments, so the defaults pair the source benchmark's lightest and heaviest d512 shapes with a mid-sweep d576 shape; the full 16-row matrix is that sweep on both programs and is what the port gate requires.
+default_suite: false
 configs:
-  - {config: d512_h64_bf16_sq4096_t128_len, default: true, selection_role: small}
+  - {config: d512_h64_bf16_sq4096_t128_len, default: false}
   - {config: d512_h64_bf16_sq4096_t512_len, default: false}
   - {config: d512_h64_bf16_sq4096_t1024_len, default: false}
   - {config: d512_h64_bf16_sq4096_t2048_len, default: false}
   - {config: d512_h64_bf16_sq8192_t128_len, default: false}
   - {config: d512_h64_bf16_sq8192_t512_len, default: false}
   - {config: d512_h64_bf16_sq8192_t1024_len, default: false}
-  - {config: d512_h64_bf16_sq8192_t2048_len, default: true, selection_role: large}
+  - {config: d512_h64_bf16_sq8192_t2048_len, default: false}
   - {config: d576_h32_bf16_sq4096_t128_len, default: false}
   - {config: d576_h32_bf16_sq4096_t512_len, default: false}
   - {config: d576_h32_bf16_sq4096_t1024_len, default: false}
   - {config: d576_h32_bf16_sq4096_t2048_len, default: false}
   - {config: d576_h32_bf16_sq8192_t128_len, default: false}
-  - {config: d576_h32_bf16_sq8192_t512_len, default: true, selection_role: medium}
+  - {config: d576_h32_bf16_sq8192_t512_len, default: false}
   - {config: d576_h32_bf16_sq8192_t1024_len, default: false}
   - {config: d576_h32_bf16_sq8192_t2048_len, default: false}

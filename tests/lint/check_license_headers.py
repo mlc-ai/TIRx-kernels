@@ -117,6 +117,13 @@ FILE_OVERRIDES = {
             'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
         ),
     },
+    "tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py": {
+        "spdx": "Apache-2.0 AND BSD-3-Clause",
+        "required_text": (
+            "Redistribution and use in source and binary forms",
+            'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+        ),
+    },
     # Transcribes cub::BlockRadixSort, which FlashInfer's topk kernels instantiate.
     "tirx_kernels/flashinfer/utils/block_radix_sort.py": {
         "spdx": "Apache-2.0 AND BSD-3-Clause",
@@ -238,6 +245,7 @@ def self_test() -> int:
     bsa_combine = "tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py"
     gdn = "tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py"
     gdn_cp = "tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py"
+    bmm_fp8_rubin = "tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py"
     bsd_port = (
         "# Copyright (c) 2025 Upstream\n"
         "# Redistribution and use in source and binary forms\n"
@@ -306,6 +314,27 @@ def self_test() -> int:
             gdn_cp,
             bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fi),
             False,
+        ),
+        (
+            "valid bmm_fp8_rubin BSD port",
+            bmm_fp8_rubin,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fi),
+            False,
+        ),
+        (
+            "bmm_fp8_rubin tagged plain Apache-2.0",
+            bmm_fp8_rubin,
+            bsd_port.format(spdx="Apache-2.0", **fi),
+            True,
+        ),
+        (
+            "bmm_fp8_rubin missing BSD disclaimer",
+            bmm_fp8_rubin,
+            bsd_port.format(spdx="Apache-2.0 AND BSD-3-Clause", **fi).replace(
+                'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"',
+                "missing disclaimer",
+            ),
+            True,
         ),
         (
             "deepgemm tagged plain Apache-2.0",

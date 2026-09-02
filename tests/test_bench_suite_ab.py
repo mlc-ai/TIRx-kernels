@@ -95,9 +95,7 @@ def test_paired_report_allows_different_gpus_across_workloads() -> None:
 
 
 def test_paired_report_allows_empty_baselines_when_references_are_disabled() -> None:
-    before = _payload(
-        "before", "before-rev", [_row("kernel", "config", "GPU-a", [10.0, 10.0])]
-    )
+    before = _payload("before", "before-rev", [_row("kernel", "config", "GPU-a", [10.0, 10.0])])
     after = copy.deepcopy(before)
     after["label"] = "after"
     after["git"]["tirx-kernels"] = "after-rev"
@@ -221,9 +219,7 @@ def test_current_contract_uses_after_kern_without_rebinding_before_kern(monkeypa
     kern_root.mkdir(parents=True)
     (kern_root / "__init__.py").write_text("MARKER = 'after'\n")
     (package_root / "ab_kern_isolation.py").write_text(
-        "import tirx_kernels.kern as K\n"
-        "KERN_MARKER = K.MARKER\n"
-        "CONFIGS = [{'label': 'same'}]\n"
+        "import tirx_kernels.kern as K\nKERN_MARKER = K.MARKER\nCONFIGS = [{'label': 'same'}]\n"
     )
 
     before_kern = ModuleType("tirx_kernels.kern")

@@ -989,7 +989,22 @@ class _Runner:
         self.lib(*[descriptor.ptr for descriptor in self._maps], alpha.view(-1))
 
 
-KERNEL_META = {"name": "nvfp4_gemm", "category": "basic", "compute_capability": 10}
+KERNEL_META = {
+    "name": "nvfp4_gemm",
+    "category": "basic",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 CONFIGS = [
     {"M": s, "N": s, "K": s, "label": f"{s}x{s}x{s}"} for s in [1024, 2048, 4096, 8192, 16384]
 ]

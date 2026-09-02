@@ -18,7 +18,13 @@ KERNEL_META : dict
       buckets are named for their upstream project; ``basic`` holds native
       TIRx kernels, and ``agent_evolved`` holds curated kernels selected from
       measured agent-evolution runs.
-    - "compute_capability" (int): minimum SM version (e.g. 10 for sm100a)
+    - "runtime_cuda_archs" (list[str]): exact CUDA architectures on which the
+      kernel is allowed to compile and run (e.g. ["sm_100a"]).
+    Optional keys:
+    - "reference_requirements" (tuple[dict, ...]): correctness-only external
+      reference contracts. Each item has distribution "package", Python
+      "import", and at least one PEP 440 "specifier" or exact "git" identity
+      with a canonical URL and full commit SHA.
 
 CONFIGS : list[dict]
     Each dict has a "label" key (str) plus arbitrary kernel-specific

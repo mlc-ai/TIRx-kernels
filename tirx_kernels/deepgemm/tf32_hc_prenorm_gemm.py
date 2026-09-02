@@ -170,7 +170,17 @@ def _make_case(*, m: int, n: int, k: int, num_splits: int, seed: int) -> dict[st
 KERNEL_META = {
     "name": "deepgemm_sm100_tf32_hc_prenorm_gemm",
     "category": "deepgemm",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "deep-gemm",
+            "git": {
+                "url": "https://github.com/deepseek-ai/DeepGEMM.git",
+                "commit": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+            },
+            "import": "deep_gemm",
+        },
+    ),
 }
 
 DEEPGEMM_TEST_COVERAGE = [
@@ -953,7 +963,9 @@ def get_kernel(**kwargs: Any):
 def _compile_tirx_tf32_hc_for_config(
     *, m: int, n: int, k: int, num_splits: int, seed: int, num_sms: int
 ) -> Any:
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    from tirx_kernels.runner import cuda_target
+
+    target = cuda_target()
     kernel = get_kernel(m=m, n=n, k=k, num_splits=num_splits, seed=seed, num_sms=num_sms)
     with target:
         return tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")

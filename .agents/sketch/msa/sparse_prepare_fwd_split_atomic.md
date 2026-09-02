@@ -311,7 +311,7 @@ dominated instead by CTAs that take the first branch and retire.
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "msa_sparse_prepare_fwd_split_atomic_sm100", "category":
-  "msa", "compute_capability": 10}`.
+  "msa", "runtime_cuda_archs": ["sm_100a"]}`.
 - Plain TIRx only: a `T.SMEMPool()` arena for `sRow`, explicit loops, scalar
   registers via `T.alloc_local`, and native `T.ptx.*` forms for every key
   operation. Global **and shared** memory are reached exclusively through

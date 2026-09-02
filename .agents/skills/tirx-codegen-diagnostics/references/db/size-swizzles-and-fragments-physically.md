@@ -45,6 +45,15 @@ traffic. One kernel with zero shared allocation ran at nearly double the
 reference's conflict rate; removing the branch around a guarded store took its
 conflicts to zero against the reference's 612.
 
+In a measured attention-backward compute role, retaining one 64-value dP
+fragment across two publication stages produced a 24-byte stack and dynamic
+local traffic even though the role kept the reference's 136-register temporal
+budget. Restoring the reference's two stage-local 32-value fragments removed
+the stack and every static local load/store without changing the budget. All 18
+correctness configurations passed; the previously worst benchmark ratio moved
+from 0.960x to 1.022x, and the complete 13-row matrix passed at a 1.007x
+minimum.
+
 ## Boundary
 
 Smaller is not automatically better when it adds synchronization or breaks

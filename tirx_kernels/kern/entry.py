@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import linecache
+import os
 import sys
 import sysconfig
 import threading
@@ -331,7 +332,11 @@ class Kernel:
         return tvm.IRModule({"main": self.func})
 
     def target(self):
-        return tvm.target.Target({"kind": "cuda", "arch": self.arch})
+        # The decorator records the author's native/default target. Prepared
+        # runs compile for the GPU that will execute the kernel, including
+        # callers using Kernel.compile() instead of runner.compile_kernel().
+        arch = os.environ.get("TIRX_PREPARE_CUDA_ARCH", self.arch)
+        return tvm.target.Target({"kind": "cuda", "arch": arch})
 
     def compile(self, target=None):
         """Compile to a runnable module (``tir_pipeline="tirx"``)."""

@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = "Apache-2.0 AND BSD-3-Clause AND MIT"
 license-files = ["LICENSE", "NOTICE", "licenses/*.txt"]
 # tvm, torch, triton are runtime dependencies managed externally (not on PyPI)
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["packaging>=23.0", "pyyaml>=6.0"]
 
 [tool.pytest.ini_options]
 addopts = "-n 16"

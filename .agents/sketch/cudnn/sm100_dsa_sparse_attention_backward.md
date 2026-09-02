@@ -1611,7 +1611,7 @@ source's 7-tuple and one build serves every sequence length.
 ## TIRx module and benchmark contract
 
 - `KERNEL_META["name"] = "cudnn_sm100_dsa_sparse_attention_backward"`,
-  category `cudnn`, `compute_capability = 10`.
+  category `cudnn`, `runtime_cuda_archs = ["sm_100a"]`.
 - `get_kernel` returns the four device functions **in launch order**; the launch
   closure preserves that order on one stream.
 - `dkv`, `d_sink` and both workspaces are accumulated into, so the timed closure

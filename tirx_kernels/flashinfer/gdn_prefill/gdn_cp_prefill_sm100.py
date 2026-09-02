@@ -84,8 +84,22 @@ PREFILL_OPT_T_STORE_BARRIER = 2
 PREFILL_OPT_TMEM_DEALLOC_BARRIER = 3
 PREFILL_OPT_INITIAL_STATE_BARRIER = 4
 
-KERNEL_META = {"name": "gdn_cp_prefill_sm100", "category": "flashinfer", "compute_capability": 10}
-
+KERNEL_META = {
+    "name": "gdn_cp_prefill_sm100",
+    "category": "flashinfer",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 
 BENCH_CONFIGS = [
     {
@@ -4119,8 +4133,10 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     if not torch.cuda.is_available() or torch.device(device).type != "cuda":
         raise SkipTest("CUDA is required for GDN CP prefill SM100")
     capability = torch.cuda.get_device_capability(device)
-    if capability != (10, 0):
-        raise SkipTest(f"GDN CP prefill requires SM100/B200, got {capability}")
+    if capability not in {(10, 0), (10, 3), (10, 7)}:
+        raise SkipTest(
+            f"GDN CP prefill requires compute capability 10.0, 10.3, or 10.7, got {capability}"
+        )
 
     spec = _specialization(cfg, device)
     io_dtype = _TORCH_DTYPES[cfg.dtype]

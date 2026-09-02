@@ -1,0 +1,52 @@
+kernel: bmm_fp8_rubin
+default_suite: true
+selection_rationale: The selected rows grow total BxMxNxK work while covering both FP8 input formats, all three output dtypes, 2x1 and 2x2 clusters, and both M-major and N-major raster orders.
+configs:
+  - {config: bench_t0_e4m3_bf16_b1_m256_n10304_k2688, default: false}
+  - {config: bench_t0_e4m3_fp16_b1_m256_n10304_k2688, default: false}
+  - {config: bench_t0_e4m3_fp32_b1_m256_n10304_k2688, default: false}
+  - {config: bench_t0_e5m2_bf16_b1_m256_n10304_k2688, default: false}
+  - {config: bench_t0_e5m2_fp16_b1_m256_n10304_k2688, default: false}
+  - {config: bench_t0_e5m2_fp32_b1_m256_n10304_k2688, default: false}
+  - {config: bench_t1_e4m3_bf16_b4_m256_n4096_k2688, default: false}
+  - {config: bench_t1_e4m3_fp16_b4_m256_n4096_k2688, default: false}
+  - {config: bench_t1_e4m3_fp32_b4_m256_n4096_k2688, default: false}
+  - {config: bench_t1_e5m2_bf16_b4_m256_n4096_k2688, default: false}
+  - {config: bench_t1_e5m2_fp16_b4_m256_n4096_k2688, default: false}
+  - {config: bench_t1_e5m2_fp32_b4_m256_n4096_k2688, default: false}
+  - {config: bench_t2_e4m3_bf16_b1_m512_n4096_k2720, default: true, selection_role: small}
+  - {config: bench_t2_e4m3_fp16_b1_m512_n4096_k2720, default: false}
+  - {config: bench_t2_e4m3_fp32_b1_m512_n4096_k2720, default: false}
+  - {config: bench_t2_e5m2_bf16_b1_m512_n4096_k2720, default: false}
+  - {config: bench_t2_e5m2_fp16_b1_m512_n4096_k2720, default: false}
+  - {config: bench_t2_e5m2_fp32_b1_m512_n4096_k2720, default: false}
+  - {config: bench_t3_e4m3_bf16_b2_m512_n4096_k2688, default: false}
+  - {config: bench_t3_e4m3_fp16_b2_m512_n4096_k2688, default: false}
+  - {config: bench_t3_e4m3_fp32_b2_m512_n4096_k2688, default: false}
+  - {config: bench_t3_e5m2_bf16_b2_m512_n4096_k2688, default: false}
+  - {config: bench_t3_e5m2_fp16_b2_m512_n4096_k2688, default: false}
+  - {config: bench_t3_e5m2_fp32_b2_m512_n4096_k2688, default: false}
+  - {config: bench_t4_e4m3_bf16_b1_m1024_n4096_k3072, default: false}
+  - {config: bench_t4_e4m3_fp16_b1_m1024_n4096_k3072, default: false}
+  - {config: bench_t4_e4m3_fp32_b1_m1024_n4096_k3072, default: false}
+  - {config: bench_t4_e5m2_bf16_b1_m1024_n4096_k3072, default: false}
+  - {config: bench_t4_e5m2_fp16_b1_m1024_n4096_k3072, default: true, selection_role: medium}
+  - {config: bench_t4_e5m2_fp32_b1_m1024_n4096_k3072, default: false}
+  - {config: bench_t5_e4m3_bf16_b1_m2048_n4096_k3072, default: false}
+  - {config: bench_t5_e4m3_fp16_b1_m2048_n4096_k3072, default: false}
+  - {config: bench_t5_e4m3_fp32_b1_m2048_n4096_k3072, default: false}
+  - {config: bench_t5_e5m2_bf16_b1_m2048_n4096_k3072, default: false}
+  - {config: bench_t5_e5m2_fp16_b1_m2048_n4096_k3072, default: false}
+  - {config: bench_t5_e5m2_fp32_b1_m2048_n4096_k3072, default: false}
+  - {config: bench_t6_e4m3_bf16_b1_m4096_n1024_k3072, default: false}
+  - {config: bench_t6_e4m3_fp16_b1_m4096_n1024_k3072, default: false}
+  - {config: bench_t6_e4m3_fp32_b1_m4096_n1024_k3072, default: false}
+  - {config: bench_t6_e5m2_bf16_b1_m4096_n1024_k3072, default: false}
+  - {config: bench_t6_e5m2_fp16_b1_m4096_n1024_k3072, default: false}
+  - {config: bench_t6_e5m2_fp32_b1_m4096_n1024_k3072, default: false}
+  - {config: bench_t7_e4m3_bf16_b2_m4096_n1024_k3072, default: false}
+  - {config: bench_t7_e4m3_fp16_b2_m4096_n1024_k3072, default: false}
+  - {config: bench_t7_e4m3_fp32_b2_m4096_n1024_k3072, default: true, selection_role: large}
+  - {config: bench_t7_e5m2_bf16_b2_m4096_n1024_k3072, default: false}
+  - {config: bench_t7_e5m2_fp16_b2_m4096_n1024_k3072, default: false}
+  - {config: bench_t7_e5m2_fp32_b2_m4096_n1024_k3072, default: false}

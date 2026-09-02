@@ -38,7 +38,21 @@ from ._sm100_fp8_fp4_mega_moe.spec import (
     prepare_tirx_fp8_fp4_mega_moe as prepare_tirx_fp8_fp4_mega_moe,
 )
 
-KERNEL_META = {"name": "sm100_fp8_fp4_mega_moe", "category": "deepgemm", "compute_capability": 10}
+KERNEL_META = {
+    "name": "sm100_fp8_fp4_mega_moe",
+    "category": "deepgemm",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "deep-gemm",
+            "git": {
+                "url": "https://github.com/deepseek-ai/DeepGEMM.git",
+                "commit": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+            },
+            "import": "deep_gemm",
+        },
+    ),
+}
 
 
 @dataclass

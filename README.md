@@ -51,7 +51,8 @@ contract and results.
   [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py),
   [`cudnn_sm100_gdn_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn_recompute_f16.py),
   [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py),
-  [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py)
+  [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py),
+  [`cudnn_sm100_gdn_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py)
 - **CSA compression:**
   [`cudnn_sm100_csa_compressor_fwd`](tirx_kernels/cudnn/csa/compressor_fwd_sm100.py)
 - **Sparse attention:**
@@ -59,6 +60,7 @@ contract and results.
   [`cudnn_sm100_bsa_forward_blk128`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk128.py),
   [`cudnn_sm100_bsa_forward_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_sm100_blk64.py),
   [`cudnn_sm100_bsa_forward_combine_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py),
+  [`cudnn_sm100_bsa_backward_blk128`](tirx_kernels/cudnn/bsa/block_sparse_attention_backward_sm100_blk128.py),
   [`cudnn_sm100_bsa_backward_blk64`](tirx_kernels/cudnn/bsa/block_sparse_attention_backward_sm100_blk64.py)
 
 ### FlashAttention ports
@@ -116,7 +118,8 @@ Grouped by the FlashInfer Python entry point each port backs.
   [`gdn_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py),
   [`gdn_cp_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py)
 - **`flashinfer.gemm`:**
-  [`tinygemm2_sm100`](tirx_kernels/flashinfer/gemm/tinygemm2_sm100.py)
+  [`tinygemm2_sm100`](tirx_kernels/flashinfer/gemm/tinygemm2_sm100.py),
+  [`bmm_fp8_rubin`](tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py)
 - **`flashinfer.topk`:**
   [`fast_topk_clusters`](tirx_kernels/flashinfer/topk/fast_topk_clusters.py),
   [`filtered_topk`](tirx_kernels/flashinfer/topk/filtered_topk.py),
@@ -259,8 +262,11 @@ mod.run_bench(M=1024, N=1024, K=1024) # profile (needs a GPU)
 func = mod.get_kernel(M=1024, N=1024, K=1024)  # the TIRx PrimFunc
 ```
 
-Each module also provides `KERNEL_META` (name / category / `compute_capability`)
-and `CONFIGS` (the test/bench parameter sweeps) that the registry and CLI use.
+Each module also provides `KERNEL_META`: its name, category, exact
+`runtime_cuda_archs`, and optional correctness-only `reference_requirements`.
+The registry and test harness reject unsupported architectures before compile,
+and skip correctness before GPU work when a declared reference package, version,
+or Git source identity is unavailable. `CONFIGS` contains the test parameter sweep.
 
 ## License
 

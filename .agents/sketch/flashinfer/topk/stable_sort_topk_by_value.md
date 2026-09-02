@@ -352,7 +352,7 @@ finalize kernel already carries. The byte total must match the column above.
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "stable_sort_topk_by_value", "category": "flashinfer",
-  "compute_capability": 10}`; device symbol `stable_sort_topk_by_value`.
+  "runtime_cuda_archs": ["sm_100a"]}`; device symbol `stable_sort_topk_by_value`.
 - Plain TIRx only: a `T.SMEMPool` arena, explicit loops, and native `T.ptx.*`
   forms for every key operation. Global and shared memory are reached exclusively
   through `T.ptx.ld/st.*` on `buffer.ptr_to([...])` — never a native

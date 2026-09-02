@@ -35,6 +35,8 @@ PREPARE_NUM_SMS_ENV = "TIRX_PREPARE_NUM_SMS"
 PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
 TVM_FFI_DISABLE_TORCH_C_DLPACK_ENV = "TVM_FFI_DISABLE_TORCH_C_DLPACK"
 TVM_COMPILE_FORCE_FALLBACK_ENV = "TVM_COMPILE_FORCE_FALLBACK"
+TVM_CUDA_COMPILE_MODE_ENV = "TVM_CUDA_COMPILE_MODE"
+TVM_CUDA_NVRTC_EXTRA_OPTS_ENV = "TVM_CUDA_NVRTC_EXTRA_OPTS"
 _EXTERNAL_REFERENCES_ENV = "TIRX_INTERNAL_BENCH_REFERENCES"
 AB_CURRENT_BENCHMARK_ROOT_ENV = "TIRX_INTERNAL_AB_CURRENT_BENCHMARK_ROOT"
 _AB_CURRENT_MODULES: dict[tuple[Path, str], ModuleType] = {}
@@ -569,6 +571,24 @@ def _offline_nvcc_arch(arch: str) -> str | list[str]:
     return arch
 
 
+def _offline_cuda_compile_parameters(arch: str) -> dict[str, Any]:
+    """Select the same default CUDA compiler as TVM without initializing CUDA."""
+    compiler = os.environ.get(TVM_CUDA_COMPILE_MODE_ENV, "nvrtc").lower()
+    if compiler == "nvrtc":
+        return {"target_format": "cubin", "arch": arch, "options": None, "compiler": compiler}
+    if compiler == "nvcc":
+        options = shlex.split(os.environ.get(TVM_CUDA_NVRTC_EXTRA_OPTS_ENV, ""))
+        return {
+            "target_format": "fatbin",
+            "arch": _offline_nvcc_arch(arch),
+            "options": options or None,
+            "compiler": compiler,
+        }
+    raise ValueError(
+        f"Invalid {TVM_CUDA_COMPILE_MODE_ENV}: {compiler}. Expected 'nvcc' or 'nvrtc'."
+    )
+
+
 def _materialize_cuda_import(module: Any, target: tvm.target.Target) -> Any:
     """Compile one fallback CUDA source offline and rebuild a lazy runtime module."""
     if module.kind != "cuda" or module.is_runnable():
@@ -583,15 +603,8 @@ def _materialize_cuda_import(module: Any, target: tvm.target.Target) -> Any:
 
     from tvm.support.nvcc import compile_cuda
 
-    nvcc_options = shlex.split(os.environ.get("TVM_CUDA_NVRTC_EXTRA_OPTS", ""))
     with target:
-        compiled = compile_cuda(
-            source,
-            target_format="fatbin",
-            arch=_offline_nvcc_arch(target.arch),
-            options=nvcc_options or None,
-            compiler="nvcc",
-        )
+        compiled = compile_cuda(source, **_offline_cuda_compile_parameters(target.arch))
     serialized = tvm.ir.save_json(module)
     previous_callback = tvm.get_global_func("tvm_callback_cuda_compile")
 
@@ -739,12 +752,21 @@ def compile_kernel(func, *, arch: str | None = None, cuda_compile_mode: str | No
 
 def run_kernel_test(kernel_name: str, config: dict[str, Any], *, registry=None):
     """Delegate to a kernel's correctness test."""
+    from unittest import SkipTest
+
+    from tirx_kernels.reference_requirements import unmet_reference_requirements
+
     if registry is None:
         from tirx_kernels.registry import discover_kernels
 
         registry = discover_kernels()
 
     mod = registry[kernel_name]
+    unmet = unmet_reference_requirements(
+        getattr(mod, "KERNEL_META", {}).get("reference_requirements")
+    )
+    if unmet:
+        raise SkipTest("unsatisfied reference requirements: " + "; ".join(unmet))
     params = {k: v for k, v in config.items() if k != "label"}
     mod.run_test(**params)
 

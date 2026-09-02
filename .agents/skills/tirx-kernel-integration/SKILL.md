@@ -47,7 +47,22 @@ A discoverable module under `tirx_kernels/<category>/` should normally expose:
 KERNEL_META = {
     "name": "kernel_name",
     "category": "gemm",
-    "compute_capability": 10,
+    "runtime_cuda_archs": ["sm_100a"],
+    "reference_requirements": (
+        {
+            "package": "upstream-reference",
+            "git": {
+                "url": "https://github.com/example/upstream-reference.git",
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+            },
+            "import": "upstream_reference",
+        },
+        {
+            "package": "nvidia-cutlass-dsl",
+            "specifier": ">=4.8.0.dev0,<4.9",
+            "import": "cutlass",
+        },
+    ),
 }
 
 CONFIGS = [
@@ -80,7 +95,20 @@ def run_bench(
 
 Important:
 
-- `compute_capability=10` means SM100. Do not write `100`.
+- `runtime_cuda_archs` is an exact allowlist, not a minimum or architecture
+  family. List every architecture actually supported; never fall through from
+  `sm_100a` to `sm_103a` or `sm_107a`.
+- Omit `reference_requirements` when correctness uses only in-repo or framework
+  oracles. Do not declare a dependency used only by `run_bench`.
+- In each reference requirement, `package` is the install/distribution name and
+  `import` is the Python import name. At least one of `specifier` or `git` is
+  required. Specifiers use PEP 440 (`==`, `>=`, `<`; never bare `=`), and Git
+  commits are full lowercase SHAs. When both are present, both must match.
+- `reference-dependencies.json` is an installation recipe, not kernel metadata
+  authority. Correctness run/skip decisions come only from `KERNEL_META`.
+- A missing import/distribution, version mismatch, or unverifiable/mismatched Git
+  identity skips correctness before GPU compile/run. Once metadata is satisfied,
+  reference import or runtime failures are test failures, not skips.
 - `KERNEL_META["name"]` must be globally unique and is the CLI kernel name.
 - `category` is discovered from package directories. A new category needs an
   `__init__.py`; registry infrastructure directories are intentionally skipped.
@@ -436,7 +464,9 @@ Both forms regenerate `baseline.md`. Never copy a run JSON over `baseline.json`.
 - For a new source family, are `LICENSE`, `NOTICE` when applicable, `licenses/`,
   `pyproject.toml`, README, and the path-bound license checker synchronized?
 - Do the license checker, its self-test, and the pre-commit license hook pass?
-- Is `compute_capability` encoded as `10` for SM100 rather than `100`?
+- Does `runtime_cuda_archs` enumerate only exact architectures actually supported?
+- Does `reference_requirements` include every correctness-only external dependency,
+  with no benchmark-only dependencies or coarse category-level assumptions?
 - Do optional dependencies remain lazy so import discovery succeeds?
 - Are `CONFIGS` and optional `BENCH_CONFIGS` serving their distinct purposes?
 - Does the bench-suite config reference valid labels and set `default` deliberately?

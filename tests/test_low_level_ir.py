@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
+from typing import ClassVar
+
 import pytest
 
 import tirx_kernels.kern as K
@@ -121,6 +123,47 @@ def test_correctness_runner_does_not_rebuild_an_already_checked_kernel():
             assert params == {"value": 3}
 
     run_kernel_test("probe", {"label": "case", "value": 3}, registry={"probe": KernelModule})
+
+
+def test_correctness_runner_skips_before_calling_kernel_when_reference_is_unmet(monkeypatch):
+    from unittest import SkipTest
+
+    from tirx_kernels import reference_requirements as refs
+
+    class KernelModule:
+        KERNEL_META: ClassVar[dict[str, object]] = {
+            "reference_requirements": (
+                {"package": "missing", "specifier": ">=1", "import": "missing"},
+            )
+        }
+
+        @staticmethod
+        def run_test(**_params):
+            raise AssertionError("kernel ran despite an unmet correctness reference")
+
+    refs.probe_reference_requirement.cache_clear()
+    monkeypatch.setattr(refs.importlib.util, "find_spec", lambda _name: None)
+    with pytest.raises(SkipTest, match="unsatisfied reference requirements"):
+        run_kernel_test("probe", {}, registry={"probe": KernelModule})
+
+
+def test_correctness_runner_does_not_hide_runtime_reference_errors(monkeypatch):
+    from tirx_kernels import reference_requirements as refs
+
+    class KernelModule:
+        KERNEL_META: ClassVar[dict[str, object]] = {
+            "reference_requirements": (
+                {"package": "example", "specifier": ">=1", "import": "example"},
+            )
+        }
+
+        @staticmethod
+        def run_test(**_params):
+            raise ImportError("reference import failed after metadata probe")
+
+    monkeypatch.setattr(refs, "unmet_reference_requirements", lambda _value: ())
+    with pytest.raises(ImportError, match="reference import failed"):
+        run_kernel_test("probe", {}, registry={"probe": KernelModule})
 
 
 def test_kern_smem_descriptor_uniformity_stays_in_low_level_contract():

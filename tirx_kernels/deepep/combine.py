@@ -25,8 +25,21 @@ import tirx_kernels.kern as K
 
 from .utils._buffer import get_theoretical_num_sms
 
-KERNEL_META = {"name": "deepep_combine", "category": "deepep", "compute_capability": 10}
-
+KERNEL_META = {
+    "name": "deepep_combine",
+    "category": "deepep",
+    "runtime_cuda_archs": ["sm_100a"],
+    "reference_requirements": (
+        {
+            "package": "deep-ep",
+            "git": {
+                "url": "https://github.com/deepseek-ai/DeepEP.git",
+                "commit": "01dc3aaac82068020353dce2c302e38153c0bfaa",
+            },
+            "import": "deep_ep",
+        },
+    ),
+}
 # Correctness matrix. Every config runs the same source specialization
 # (bf16, non-expanded, allow_multiple_reduction, no bias) on `world_size` ranks.
 CONFIGS = [

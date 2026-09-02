@@ -648,6 +648,13 @@ def gpu_compile_profile(indices: set[str]) -> dict:
             core_count = int(pynvml.nvmlDeviceGetNumGpuCores(handle))
             if compute_capability == (10, 0):
                 cores_per_sm = 128
+                cuda_arch = "sm_100a"
+            elif compute_capability == (10, 3):
+                cores_per_sm = 128
+                cuda_arch = "sm_103a"
+            elif compute_capability == (10, 7):
+                cores_per_sm = 128
+                cuda_arch = "sm_107a"
             else:
                 raise ValueError(
                     f"GPU {index} {name!r} has unsupported compile profile "
@@ -662,7 +669,7 @@ def gpu_compile_profile(indices: set[str]) -> dict:
                 {
                     "name": name,
                     "compute_capability": list(compute_capability),
-                    "cuda_arch": "sm_100a",
+                    "cuda_arch": cuda_arch,
                     "num_sms": core_count // cores_per_sm,
                 }
             )
@@ -679,6 +686,34 @@ def gpu_compile_profile(indices: set[str]) -> dict:
             f"one profile per prepared child, got {profiles}"
         )
     return first
+
+
+def partition_workloads_by_arch(
+    workloads: list[dict], cuda_arch: str
+) -> tuple[list[dict], list[dict]]:
+    """Partition workloads by an exact registered CUDA architecture."""
+    records = kernel_index(strict=True)
+    supported: list[dict] = []
+    incompatible: list[dict] = []
+    for workload in workloads:
+        destination = (
+            supported
+            if cuda_arch in records[workload["kernel"]].runtime_cuda_archs
+            else incompatible
+        )
+        destination.append(workload)
+    return supported, incompatible
+
+
+def validate_workload_archs(workloads: list[dict], cuda_arch: str) -> None:
+    """Reject workloads that are not registered for the selected exact architecture."""
+    _supported, incompatible_workloads = partition_workloads_by_arch(workloads, cuda_arch)
+    incompatible = sorted({workload["kernel"] for workload in incompatible_workloads})
+    if incompatible:
+        raise ValueError(
+            f"selected GPU architecture {cuda_arch} is unsupported by workload kernel(s): "
+            + ", ".join(incompatible)
+        )
 
 
 # ── Workload execution ───────────────────────────────────────────────────────
@@ -2419,6 +2454,36 @@ def main() -> None:
             print(f"[bench-suite]   gpu {idx}: {err}", file=sys.stderr)
         sys.exit(1)
 
+    pool = GpuPool(
+        allowed=usable, util_threshold=args.util_threshold, mem_threshold=args.mem_threshold
+    )
+    n_gpus = len(usable)
+    compile_profile = gpu_compile_profile(usable)
+    cuda_arch = compile_profile["cuda_arch"]
+    if selection["mode"] == "default":
+        workloads, incompatible_workloads = partition_workloads_by_arch(workloads, cuda_arch)
+        if not workloads:
+            print(
+                f"[bench-suite] default roster has no workloads for {cuda_arch}.", file=sys.stderr
+            )
+            sys.exit(2)
+        if incompatible_workloads:
+            incompatible_kernels = {workload["kernel"] for workload in incompatible_workloads}
+            print(
+                f"[bench-suite] selected {len(workloads)} {cuda_arch} default workload(s); "
+                f"excluded {len(incompatible_workloads)} workload(s) across "
+                f"{len(incompatible_kernels)} incompatible kernel(s)",
+                flush=True,
+            )
+    else:
+        try:
+            validate_workload_archs(workloads, cuda_arch)
+        except ValueError as error:
+            print(f"[bench-suite] incompatible workload architecture: {error}", file=sys.stderr)
+            sys.exit(2)
+    selection["cuda_arch"] = cuda_arch
+    selection["keys"] = [[workload["kernel"], workload["config"]] for workload in workloads]
+
     max_required_gpus = max(workload.get("num_gpus", 1) for workload in workloads)
     if max_required_gpus > len(usable):
         print(
@@ -2427,12 +2492,6 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-
-    pool = GpuPool(
-        allowed=usable, util_threshold=args.util_threshold, mem_threshold=args.mem_threshold
-    )
-    n_gpus = len(usable)
-    compile_profile = gpu_compile_profile(usable)
     _repo_git = collect_repo_git()
     label = args.label or _repo_git.get("tirx-kernels") or _repo_git.get("tir") or "local"
     agg_note = (

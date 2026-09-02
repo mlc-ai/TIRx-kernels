@@ -20,8 +20,22 @@ import torch
 
 import tirx_kernels.kern as K
 
-KERNEL_META = {"name": "tinygemm2_sm100", "category": "flashinfer", "compute_capability": 10}
-
+KERNEL_META = {
+    "name": "tinygemm2_sm100",
+    "category": "flashinfer",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 CONFIGS = [
     {"label": "b1_o128_k720", "B": 1, "O": 128, "K": 720},
     {"label": "b2_o16_k256", "B": 2, "O": 16, "K": 256},
@@ -63,13 +77,14 @@ def _validate_problem(B: int, O: int, K: int) -> None:
         raise ValueError("B, O, and K must fit signed int32")
 
 
-def _require_sm100() -> None:
+def _require_supported_arch() -> None:
     if not torch.cuda.is_available():
         raise SkipTest("TinyGEMM2 SM100 requires CUDA")
     capability = torch.cuda.get_device_capability()
-    if capability != (10, 0):
+    if capability not in {(10, 0), (10, 3), (10, 7)}:
         raise SkipTest(
-            f"TinyGEMM2 SM100 requires SM100/B200, got sm_{capability[0]}{capability[1]}"
+            "TinyGEMM2 requires SM100/B200, SM103/GB300, or SM107, "
+            f"got sm_{capability[0]}{capability[1]}"
         )
 
 
@@ -542,7 +557,7 @@ def _run_flashinfer(case: dict[str, Any], stage: int, use_pdl: bool, output: tor
 
 
 def run_test(B: int, O: int, K: int) -> None:
-    _require_sm100()
+    _require_supported_arch()
     case = prepare_data(B, O, K)
     num_sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
     stage = _select_stage(B, O, K, num_sms)
@@ -587,7 +602,7 @@ def run_gpu(
     rounds: int = 5,
     cooldown_s: float = 1.0,
 ) -> dict[str, Any]:
-    _require_sm100()
+    _require_supported_arch()
     from tirx_kernels.runner import bench, external_references_enabled
 
     B, O, K = prepared["B"], prepared["O"], prepared["K"]

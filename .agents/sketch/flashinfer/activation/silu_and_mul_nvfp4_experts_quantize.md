@@ -416,7 +416,7 @@ def prepare_data(dtype, n_experts, m, k, mask_mode):
 ## TIRx module and benchmark contract
 
 - `KERNEL_META = {"name": "silu_and_mul_nvfp4_experts_quantize", "category":
-  "flashinfer", "compute_capability": 10}`.
+  "flashinfer", "runtime_cuda_archs": ["sm_100a"]}`.
 - The executable kernel is expressed entirely in plain TIRx: explicit `while`
   grid-stride loop, runtime-shape scalar ABI, register tiles, and native
   `T.ptx.*` forms for every non-trivial instruction (`ld.global.v4.b64`,

@@ -18,8 +18,22 @@ import torch
 import tirx_kernels.kern as TK
 from tirx_kernels.runner import bench
 
-KERNEL_META = {"name": "gdn_decode_bf16_ilp4", "category": "flashinfer", "compute_capability": 10}
-
+KERNEL_META = {
+    "name": "gdn_decode_bf16_ilp4",
+    "category": "flashinfer",
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "reference_requirements": (
+        {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {"package": "nvidia-cutlass-dsl", "specifier": "==4.8.0.dev0", "import": "cutlass"},
+    ),
+}
 
 K = 128
 V = 128
@@ -329,9 +343,7 @@ def _make_gdn_decode_bf16_ilp4(
     PER_TOKEN_POOL_SCATTER,
     PER_TOKEN_POOL_SCATTER_FLAT,
 ):
-    @TK.kernel(
-        warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=8, grid=False
-    )
+    @TK.kernel(warps=NUM_WARPS, arch="sm_100a", min_blocks_per_sm=8, grid=False)
     def gdn_decode_bf16_ilp4(
         state: TK.gptr[TK.bf16],
         intermediate: TK.gptr[TK.bf16],

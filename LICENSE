@@ -214,7 +214,7 @@ tirx_kernels/cudnn/ (ports of NVIDIA/cudnn-frontend kernels; the upstream
                      licenses/LICENSE.cudnn-frontend.txt)
 tirx_kernels/flashinfer/ (ports of flashinfer-ai/flashinfer kernels, including
                           kernels FlashInfer itself derived from NVIDIA
-                          TensorRT-LLM; except the BSD-3 file listed below)
+                          TensorRT-LLM; except the BSD-3 files listed below)
 
 
 MIT License
@@ -236,5 +236,7 @@ tirx_kernels/flashattention/ (ports of Dao-AILab/flash-attention kernels; the
                               licenses/AUTHORS.flash-attention.txt)
 tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py (full license text is
                               reproduced in the file header)
+tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py (full license text is reproduced
+                              in the file header)
 tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py
                              (full license text is reproduced in the file header)

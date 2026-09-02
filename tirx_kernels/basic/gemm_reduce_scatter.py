@@ -652,9 +652,7 @@ def _make_device_kernel(config: GemmRSConfig, *, chain_dispatch: bool = False):
         mma_role = specialization.role("mma", [8, 9], regs=None, when=cbx == 0)
         specialization.role("idle", [10], regs=None)
         tma_scheduler_role = specialization.role("tma_scheduler", [11], regs=None)
-        producer_regs = specialization.register_scope(
-            "producer_regs", warps=range(8, 12), regs=56
-        )
+        producer_regs = specialization.register_scope("producer_regs", warps=range(8, 12), regs=56)
         consumer_regs = specialization.register_scope("consumer_regs", warps=range(8), regs=224)
 
         def fetch_next():
@@ -993,7 +991,11 @@ def build_kernel(config: GemmRSConfig | None = None) -> tvm.IRModule:
     return tvm.IRModule({FUSED_DEVICE_ENTRYPOINT: device.func})
 
 
-KERNEL_META = {"name": "gemm_reduce_scatter", "category": "basic", "compute_capability": 10}
+KERNEL_META = {
+    "name": "gemm_reduce_scatter",
+    "category": "basic",
+    "runtime_cuda_archs": ["sm_100a"],
+}
 _RELAUNCH_COUNT = 20
 
 CONFIGS = make_configs(GEMM_RS_MODEL_SHAPES)
