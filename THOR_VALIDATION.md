@@ -13,7 +13,7 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 23 kernels and 485 configurations
+- Fully validated: 24 kernels and 605 configurations
 
 The operator-level smoke sweep currently reports 56 numerical passes, 30
 failures, and 9 skips.  Follow-up launch-only checks show that 27 more kernels
@@ -76,6 +76,7 @@ The resumable local JSONL runs are kept outside the repository under `/tmp`:
 - `tirx-thor-main-0512291-batch4-kda-rms-full.jsonl`
 - `tirx-thor-main-0512291-batch5-bsa-full.jsonl`
 - `tirx-thor-main-0512291-batch6-gdn-decode-full.jsonl`
+- `tirx-thor-main-0512291-batch7-gdn-prefill-full.jsonl`
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only

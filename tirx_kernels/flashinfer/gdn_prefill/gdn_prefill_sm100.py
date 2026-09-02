@@ -1641,7 +1641,7 @@ CONFIGS = [
 KERNEL_META = {
     "name": "gdn_prefill_sm100",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
