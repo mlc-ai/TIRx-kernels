@@ -17,12 +17,25 @@ def test_kernel_target_honors_prepared_compile_arch(monkeypatch):
 
     monkeypatch.delenv("TIRX_PREPARE_CUDA_ARCH", raising=False)
     assert probe.target().arch == "sm_100a"
+    assert probe.func.attrs["tirx.cuda_arch"] == "sm_100a"
 
     monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_103a")
     assert probe.target().arch == "sm_103a"
 
     monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_107a")
     assert probe.target().arch == "sm_107a"
+    # The override selects a compile target; it must not rewrite the authored
+    # architecture retained in the immutable PrimFunc.
+    assert probe.func.attrs["tirx.cuda_arch"] == "sm_100a"
+
+
+def test_kernel_primfunc_preserves_sm107_architecture():
+    @K.kernel(warps=1, arch="sm_107a", grid=False)
+    def probe(out: K.gptr("float32")):
+        K.ptx.st.global_.f32(out.ptr_to([0]), K.float32(1.0))
+
+    assert probe.arch == "sm_107a"
+    assert probe.func.attrs["tirx.cuda_arch"] == "sm_107a"
 
 
 def _tir(build_body):
