@@ -42,6 +42,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
+from tirx_kernels.target import prepare_cuda_arch
 
 from . import flashkda_decode_t2_precomputed as _t2
 
@@ -338,7 +339,7 @@ CONFIGS = [dict(cfg) for cfg in BENCH_CONFIGS] + [
 KERNEL_META = {
     "name": "flashkda_decode_t6_gram",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -1270,6 +1271,14 @@ def _flashinfer_reference(case: dict[str, Any]) -> torch.Tensor:
     return reference_out
 
 
+def _validation_reference(case: dict[str, Any]) -> torch.Tensor:
+    if prepare_cuda_arch() == "sm_110a":
+        from ._reference import recurrent_kda_reference
+
+        return recurrent_kda_reference(case, num_tokens=NUM_TOKENS)
+    return _flashinfer_reference(case)
+
+
 # The port replicates the source's MMA chain, swizzle and association orders, so
 # it should agree with the frozen export to within bf16 rounding.
 _RTOL = 2.0**-8
@@ -1297,21 +1306,24 @@ def run_test(**kwargs: Any) -> None:
 
     tirx_out = case["tirx_out"]
     tirx_state = case["tirx_state_raw"].clone()
+    from ._reference import validation_tolerances
+
+    validation_rtol, validation_atol = validation_tolerances(_RTOL, _ATOL)
 
     # 1. the frozen cake export (the arbiter) itself, on an independent state pool
-    reference_out = _flashinfer_reference(case)
+    reference_out = _validation_reference(case)
     torch.testing.assert_close(
         tirx_out.float(),
         reference_out.float(),
-        rtol=_RTOL,
-        atol=_ATOL,
+        rtol=validation_rtol,
+        atol=validation_atol,
         msg=lambda m: f"output vs flashinfer cake export (split {spec['VALUE_SPLIT']})\n{m}",
     )
     torch.testing.assert_close(
         tirx_state.float(),
         case["reference_state_raw"].float(),
-        rtol=_RTOL,
-        atol=_ATOL,
+        rtol=validation_rtol,
+        atol=validation_atol,
         msg=lambda m: f"state vs flashinfer cake export (split {spec['VALUE_SPLIT']})\n{m}",
     )
 
@@ -1370,6 +1382,25 @@ def run_gpu(
 
     case = prepare_data(**kwargs)
     args = _tirx_args(case)
+
+    if prepare_cuda_arch() == "sm_110a":
+        from ._reference import benchmark_tirx_with_oracle, validation_tolerances
+
+        validation_rtol, validation_atol = validation_tolerances(_RTOL, _ATOL)
+
+        return benchmark_tirx_with_oracle(
+            executable,
+            args,
+            case,
+            _validation_reference,
+            rtol=validation_rtol,
+            atol=validation_atol,
+            warmup=warmup,
+            repeat=repeat,
+            timer=timer,
+            rounds=rounds,
+            cooldown_s=cooldown_s,
+        )
 
     def flashinfer_builder():
         # Validate once outside the timed region. Both sides mutate independent state pools.

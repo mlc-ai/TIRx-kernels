@@ -23,6 +23,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
+from tirx_kernels.target import prepare_cuda_arch
 
 D_HEAD = 128
 THREADS = 1024
@@ -507,7 +508,7 @@ BENCH_CONFIGS = [
 KERNEL_META = {
     "name": "flashkda_bf16_fused_m128",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -652,6 +653,43 @@ def _flashinfer_cuda_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torc
         seq_order=case["seq_order"] if cfg.packed else None,
     )
     return ref_out.reshape(cfg.total_tokens, cfg.num_heads, D_HEAD), ref_state
+
+
+def _mathematical_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Independent structured-FP32 gated delta-rule recurrence."""
+    cfg: FlashKDABf16FusedM128Config = case["config"]
+    output = torch.empty_like(case["out"])
+    final_state = torch.empty_like(case["final_state"])
+    a = case["A_log"].exp()
+    dt_bias = case["dt_bias"]
+    scale = float(case["scale"])
+
+    token_base = 0
+    for seq, seq_len in enumerate(cfg.seq_lens):
+        if cfg.use_initial_state:
+            state = case["initial_state"][seq].float().clone()
+        else:
+            state = torch.zeros(
+                (cfg.num_heads, D_HEAD, D_HEAD), dtype=torch.float32, device=case["q"].device
+            )
+        for token in range(token_base, token_base + seq_len):
+            q = case["q"][token].float()
+            k = case["k"][token].float()
+            v = case["v"][token].float()
+            q = q * torch.rsqrt(q.square().sum(dim=-1, keepdim=True) + 1.0e-6) * scale
+            k = k * torch.rsqrt(k.square().sum(dim=-1, keepdim=True) + 1.0e-6)
+            decay = torch.exp(
+                cfg.lower_bound * torch.sigmoid(a[:, None] * (case["g"][token].float() + dt_bias))
+            )
+            state = state * decay[:, None, :]
+            prediction = torch.einsum("hvk,hk->hv", state, k)
+            beta = torch.sigmoid(case["beta"][token].float())
+            delta = (v - prediction) * beta[:, None]
+            state = state + delta[:, :, None] * k[:, None, :]
+            output[token] = torch.einsum("hvk,hk->hv", state, q).to(output.dtype)
+        final_state[seq] = state.to(final_state.dtype)
+        token_base += seq_len
+    return output, final_state
 
 
 def _tirx_args(case: dict[str, Any]) -> tuple[Any, ...]:
@@ -2500,7 +2538,10 @@ def run_test(**kwargs: Any) -> None:
     compile_kernel(bf16_fused_m128(**kwargs))(*_tirx_args(case))
     torch.cuda.synchronize()
 
-    flashinfer_out, flashinfer_state = _flashinfer_cuda_reference(case)
+    if prepare_cuda_arch() == "sm_110a":
+        flashinfer_out, flashinfer_state = _mathematical_reference(case)
+    else:
+        flashinfer_out, flashinfer_state = _flashinfer_cuda_reference(case)
     torch.testing.assert_close(case["out"], flashinfer_out, rtol=4.01 / 128, atol=5e-3)
     if cfg.store_final_state:
         # The state comparison must not silently vanish when the reference
@@ -2565,7 +2606,9 @@ def run_gpu(
         flashkda_peer["reference"] = peer
         return peer.launch
 
-    references = {"flashinfer_m128": _flashinfer_builder, "flashkda_raw": _flashkda_raw_builder}
+    references = None
+    if prepare_cuda_arch() != "sm_110a":
+        references = {"flashinfer_m128": _flashinfer_builder, "flashkda_raw": _flashkda_raw_builder}
 
     result = bench(
         funcs,
