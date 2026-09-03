@@ -45,6 +45,28 @@ def _gemm_dims(config: str) -> tuple[int, int, int]:
     return tuple(int(value) for value in shape.split("x"))
 
 
+def _category(kernel: str) -> str:
+    if "topk" in kernel or "sort" in kernel:
+        return "TopK / sorting"
+    if "rmsnorm" in kernel or "layernorm" in kernel:
+        return "Normalization"
+    if kernel.startswith(("flash_attention", "cudnn_sm100_bsa", "cudnn_sm100_csa")):
+        return "Attention"
+    if kernel.startswith(("msa_sparse", "sparse_flashmla")):
+        return "Attention"
+    if kernel.startswith(("gdn", "cudnn_sm100_gdn", "cudnn_sm100_kda")):
+        return "Recurrent / SSM"
+    if kernel.startswith(("flashkda", "recurrent_kda", "selective_state_update")):
+        return "Recurrent / SSM"
+    if kernel.startswith("agent_evolved_kda"):
+        return "Recurrent / SSM"
+    if "gemm" in kernel or "moe" in kernel:
+        return "GEMM / MoE"
+    if "quantize" in kernel or kernel == "act_and_mul":
+        return "Activation / quantization"
+    return "Other"
+
+
 def _markdown(
     thor: dict,
     b200: dict,
@@ -54,6 +76,7 @@ def _markdown(
     thor_device: str,
     thor_sms: int,
     b200_sms: int,
+    validated_kernels: int,
     validated_configs: int,
     prior_thor: dict | None,
     prior_thor_path: Path | None,
@@ -92,6 +115,38 @@ def _markdown(
     for row, *_rest in rows:
         thor_by_kernel[row["kernel"]] += 1
 
+    family_order = (
+        "GEMM / MoE",
+        "Attention",
+        "Normalization",
+        "Recurrent / SSM",
+        "TopK / sorting",
+        "Activation / quantization",
+        "Other",
+    )
+    family_stats: dict[str, dict] = {}
+    for row, _impl, _thor_us, _b200_us, ratio, _row_cv in rows:
+        family = _category(row["kernel"])
+        stats = family_stats.setdefault(family, {"kernels": set(), "rows": 0, "ratios": []})
+        stats["kernels"].add(row["kernel"])
+        stats["rows"] += 1
+        if ratio is not None:
+            stats["ratios"].append(ratio)
+
+    gemm_thor_tflops: dict[tuple[str, str], float] = {}
+    gemm_lines = []
+    for row, _impl, thor_us, b200_us, ratio, _row_cv in rows:
+        if row["kernel"] not in {"fp16_bf16_gemm", "nvfp4_gemm"} or b200_us is None:
+            continue
+        m, n, k = _gemm_dims(_config(row))
+        thor_tflops = 2 * m * n * k / thor_us / 1e6
+        b200_tflops = 2 * m * n * k / b200_us / 1e6
+        gemm_thor_tflops[(row["kernel"], _config(row))] = thor_tflops
+        gemm_lines.append(
+            f"| `{row['kernel']}` | `{_config(row)}` | {thor_us:.3f} | {b200_us:.3f} | "
+            f"{thor_tflops:.3f} | {b200_tflops:.3f} | {1 / ratio:.1%} |"
+        )
+
     session_comparison = None
     if prior_thor is not None:
         prior_rows = {(row["kernel"], _config(row)): _ours(row)[1] for row in prior_thor["results"]}
@@ -116,52 +171,111 @@ def _markdown(
         "",
         f"Measured on {date.today().isoformat()} using the default representative workload roster.",
         "",
-        "## Result",
+        "## At a glance",
         "",
-        f"- Thor completed **{statuses.get('ok', 0)}/{len(rows)}** workloads with "
-        f"**{pipeline.get('interference_retry_count', 0)} interference retries**.",
-        f"- **{len(matched)}** rows have a usable TIR/TIRx timing in the repository's historical "
-        f"SM100/B200 baseline; **{unusable_b200}** exact matched baseline rows failed, and "
-        f"**{missing_b200}** Thor workload rows are absent there.",
-        f"- Across the {len(matched)} matched rows, geometric-mean Thor/B200 latency is "
-        f"**{overall:.3f}x**; equivalently, Thor delivers **{1 / overall:.1%}** of B200's "
-        "throughput on this workload mix.",
-        f"- The median latency ratio is **{median:.3f}x** and the observed range is "
-        f"**{min(matched):.3f}x--{max(matched):.3f}x**.",
-        f"- Thor has {thor_sms} SMs versus {b200_sms} on B200; B200 has "
-        f"{b200_sms / thor_sms:.1f}x as many. The aggregate per-SM-normalized throughput is about "
-        f"**{(1 / overall) * (b200_sms / thor_sms):.1%}** of the B200 baseline, but this is "
-        "only a rough diagnostic because the table mixes compute-, bandwidth-, and latency-bound kernels.",
+        "| Question | Result | Interpretation |",
+        "|---|---:|---|",
+        f"| Does the admitted Thor set run correctly? | **{validated_kernels} kernels / "
+        f"{validated_configs:,} configs passed** | Every admitted config compiled, launched, and "
+        "passed its numerical oracle |",
+        f"| Did the performance suite finish? | **{statuses.get('ok', 0)}/{len(rows)} workloads** "
+        f"across {len(thor_by_kernel)} kernels | {pipeline.get('failure_count', 0)} failures; "
+        f"{pipeline.get('interference_retry_count', 0)} interference retries |",
+        f"| How much has an exact B200 comparison? | **{len(matched)}/{len(rows)} rows** | "
+        f"{unusable_b200} matching baseline rows failed and {missing_b200} rows are absent |",
+        f"| What is the aggregate absolute performance? | **{1 / overall:.1%} of B200 throughput** | "
+        f"Geometric-mean Thor/B200 latency is {overall:.3f}x; median is {median:.3f}x |",
+        f"| What is the rough per-SM efficiency? | **{(1 / overall) * (b200_sms / thor_sms):.1%} "
+        "of B200** | Normalized for 20 versus 148 SMs; not a hardware peak metric |",
         "",
-        "The geometric mean is a descriptive summary, not a model-level score. The detailed rows below "
-        "are the authoritative data.",
+        "## Bottom line",
         "",
-        "## Measurement provenance",
+        f"The admitted single-GPU Thor port is functionally complete: {validated_configs:,} numerical "
+        f"configurations and all {len(rows)} representative performance workloads pass. Absolute "
+        f"throughput averages {1 / overall:.1%} of the historical B200 baseline. Pure SM-count scaling "
+        f"would suggest {thor_sms / b200_sms:.1%}; the measured result therefore reaches roughly "
+        f"{(1 / overall) * (b200_sms / thor_sms):.1%} of that per-SM-normalized level on this mixed suite.",
         "",
-        "| Field | Thor | Repository SM100/B200 baseline |",
-        "|---|---|---|",
-        f"| GPU | {thor_device} | B200 attribution inferred from `sm_100a` and the suite's 148-SM B200 annotations; the JSON does not store a product name |",
-        f"| SM count | {thor_sms} | {b200_sms} |",
-        f"| CUDA architecture | `{selection.get('cuda_arch', 'sm_110a')}` | `sm_100a` |",
-        "| Power/clock state | `MAXN`; dynamic clocks (`jetson_clocks` was not locked) | Not recorded |",
-        f"| Timer | `{selection.get('timer_override', 'proton')}` | `proton` |",
-        f"| Rounds | {protocol.get('rounds', 5)}, arithmetic mean | 5, arithmetic mean |",
-        "| Warmup / repeat budget | 25 ms / 100 ms | 25 ms / 100 ms |",
-        f"| TVM/TIR revision | `{thor_git.get('tir', '-')}` | `{b200_git.get('tir', '-')}` |",
-        f"| TIRx-kernels revision | `{thor_git.get('tirx-kernels', '-')}` | `{b200_git.get('tirx-kernels', '-')}` |",
-        "| CUDA/PyTorch | CUDA 13.1 / PyTorch 2.9.1+cu130 | CUDA 13.2 / PyTorch 2.13.0+cu132 |",
+        "This says the port works, not that it is fully tuned. Large GEMMs and several attention/SSM "
+        "schedules remain the clearest 20-SM tuning targets. The geometric mean mixes compute-, "
+        "bandwidth-, and latency-bound kernels and is not a model-level or theoretical-peak score.",
         "",
-        "Thor's Triton 3.5.1 package bundles CUDA 12.8 CUPTI, which cannot initialize against this "
-        "CUDA 13.1 Thor stack. The run therefore set "
-        "`TRITON_CUPTI_LIB_PATH=/usr/local/cuda-13.1/extras/CUPTI/lib64`; both final columns still "
-        "use the same Proton timer protocol.",
+        "The unsupported boundary, including the single-GPU MegaMoE host-layout blocker, is documented "
+        "in [THOR_VALIDATION.md](THOR_VALIDATION.md).",
         "",
-        "This is a historical cross-machine comparison, not a controlled hardware-only A/B: the TVM, "
-        "TIRx, CUDA, PyTorch, and CUPTI revisions differ, and the repository baseline labels its "
-        "TIRx checkout as dirty. A publication-grade comparison requires rerunning this exact TIRx/TVM "
-        "revision on a B200.",
+        "## Performance by kernel family",
         "",
+        "Relative throughput is the reciprocal of the Thor/B200 latency ratio. The per-SM column "
+        "multiplies it by 148/20 and should be read only as a coarse scheduling diagnostic. Values "
+        "above 100% are expected for latency-bound small operations and do not imply a higher Thor "
+        "SM hardware peak.",
+        "",
+        "| Family | Thor kernels | Thor rows | B200 matches | Thor/B200 latency | Relative throughput | Per-SM normalized |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
+    for family in family_order:
+        stats = family_stats.get(family)
+        if stats is None:
+            continue
+        ratios = stats["ratios"]
+        if ratios:
+            family_geomean = _geomean(ratios)
+            lines.append(
+                f"| {family} | {len(stats['kernels'])} | {stats['rows']} | {len(ratios)} | "
+                f"{family_geomean:.3f}x | {1 / family_geomean:.1%} | "
+                f"{(1 / family_geomean) * (b200_sms / thor_sms):.1%} |"
+            )
+        else:
+            lines.append(
+                f"| {family} | {len(stats['kernels'])} | {stats['rows']} | 0 | — | — | — |"
+            )
+
+    lines.extend(
+        [
+            "",
+            "## Representative GEMM throughput",
+            "",
+            "Throughput uses the conventional `2*M*N*K` operation count. NVFP4 values are effective "
+            "throughput and include neither scale-processing operations nor any sparsity multiplier.",
+            "",
+            "| Kernel | Config | Thor µs | B200 µs | Thor effective TFLOP/s | B200 effective TFLOP/s | Thor/B200 throughput |",
+            "|---|---|---:|---:|---:|---:|---:|",
+            *gemm_lines,
+            "",
+            f"The FP16 16384³ row reaches only "
+            f"{gemm_thor_tflops[('fp16_bf16_gemm', 'fp16_16384x16384x16384')]:.2f} "
+            "effective TFLOP/s on Thor, below the 4096³ BF16 row's "
+            f"{gemm_thor_tflops[('fp16_bf16_gemm', 'bf16_4096x4096x4096')]:.2f} TFLOP/s. "
+            "That inversion is a concrete tuning target: the current B200-oriented schedule does not "
+            "scale well to Thor's 20-SM device at that shape.",
+            "",
+            "## Measurement provenance",
+            "",
+            "| Field | Thor | Repository SM100/B200 baseline |",
+            "|---|---|---|",
+            f"| GPU | {thor_device} | B200 attribution inferred from `sm_100a` and the suite's 148-SM B200 annotations; the JSON does not store a product name |",
+            f"| SM count | {thor_sms} | {b200_sms} |",
+            f"| CUDA architecture | `{selection.get('cuda_arch', 'sm_110a')}` | `sm_100a` |",
+            "| Power/clock state | `MAXN`; dynamic clocks (`jetson_clocks` was not locked) | Not recorded |",
+            f"| Timer | `{selection.get('timer_override', 'proton')}` | `proton` |",
+            f"| Rounds | {protocol.get('rounds', 5)}, arithmetic mean | 5, arithmetic mean |",
+            "| Warmup / repeat budget | 25 ms / 100 ms | 25 ms / 100 ms |",
+            f"| TVM/TIR revision | `{thor_git.get('tir', '-')}` | `{b200_git.get('tir', '-')}` |",
+            f"| TIRx-kernels revision | `{thor_git.get('tirx-kernels', '-')}` | `{b200_git.get('tirx-kernels', '-')}` |",
+            "| CUDA/PyTorch | CUDA 13.1 / PyTorch 2.9.1+cu130 | CUDA 13.2 / PyTorch 2.13.0+cu132 |",
+            "",
+            "Thor's Triton 3.5.1 package bundles CUDA 12.8 CUPTI, which cannot initialize against this "
+            "CUDA 13.1 Thor stack. The run therefore set "
+            "`TRITON_CUPTI_LIB_PATH=/usr/local/cuda-13.1/extras/CUPTI/lib64`; both final columns still "
+            "use the same Proton timer protocol.",
+            "",
+            "This is a historical cross-machine comparison, not a controlled hardware-only A/B: the TVM, "
+            "TIRx, CUDA, PyTorch, and CUPTI revisions differ, and the repository baseline labels its "
+            "TIRx checkout as dirty. A publication-grade comparison requires rerunning this exact TIRx/TVM "
+            "revision on a B200.",
+            "",
+        ]
+    )
     if session_comparison is not None:
         _largest_factor, largest_ratio, largest_key, largest_prior, largest_current = (
             session_comparison["largest"]
@@ -184,7 +298,7 @@ def _markdown(
         )
     lines.extend(
         [
-            "## Kernel summary",
+            "## Appendix A: per-kernel summary",
             "",
             "`Thor/B200 latency > 1` means Thor is slower. Relative throughput is its reciprocal.",
             "",
@@ -206,39 +320,7 @@ def _markdown(
     lines.extend(
         [
             "",
-            "## GEMM effective throughput",
-            "",
-            "Throughput uses the conventional `2*M*N*K` operation count. NVFP4 values are effective "
-            "throughput and include neither scale-processing operations nor any sparsity multiplier.",
-            "",
-            "| Kernel | Config | Thor µs | B200 µs | Thor effective TFLOP/s | B200 effective TFLOP/s | Thor/B200 throughput |",
-            "|---|---|---:|---:|---:|---:|---:|",
-        ]
-    )
-    gemm_thor_tflops: dict[tuple[str, str], float] = {}
-    for row, _impl, thor_us, b200_us, ratio, _row_cv in rows:
-        if row["kernel"] not in {"fp16_bf16_gemm", "nvfp4_gemm"} or b200_us is None:
-            continue
-        m, n, k = _gemm_dims(_config(row))
-        thor_tflops = 2 * m * n * k / thor_us / 1e6
-        b200_tflops = 2 * m * n * k / b200_us / 1e6
-        gemm_thor_tflops[(row["kernel"], _config(row))] = thor_tflops
-        lines.append(
-            f"| `{row['kernel']}` | `{_config(row)}` | {thor_us:.3f} | {b200_us:.3f} | "
-            f"{thor_tflops:.3f} | {b200_tflops:.3f} | {1 / ratio:.1%} |"
-        )
-
-    lines.extend(
-        [
-            "",
-            f"The FP16 16384³ row reaches only "
-            f"{gemm_thor_tflops[('fp16_bf16_gemm', 'fp16_16384x16384x16384')]:.2f} "
-            "effective TFLOP/s on Thor, below the 4096³ BF16 row's "
-            f"{gemm_thor_tflops[('fp16_bf16_gemm', 'bf16_4096x4096x4096')]:.2f} TFLOP/s. "
-            "That inversion is a concrete tuning target: the current "
-            "B200-oriented schedule does not scale well to Thor's 20-SM device at that shape.",
-            "",
-            "## Complete workload table",
+            "## Appendix B: complete workload results",
             "",
             f"Thor CV is the population coefficient of variation across five round means. **{noisy}** "
             "rows exceed 10% and are marked `†`; repeat those rows under locked clocks before using "
@@ -268,14 +350,6 @@ def _markdown(
     lines.extend(
         [
             "",
-            "## Correctness scope",
-            "",
-            f"The performance roster contains only the {len(thor_by_kernel)} kernels already admitted "
-            "for exact `sm_110a` runtime support after their complete correctness matrices passed: "
-            f"{validated_configs}/{validated_configs} configurations. The {len(rows)} timed rows are "
-            "the suite's selected representative performance shapes; they do not replace the "
-            "complete numerical validation matrices.",
-            "",
             "## Raw evidence",
             "",
             f"- Thor run: `{thor_path}`",
@@ -301,6 +375,12 @@ def main() -> None:
     parser.add_argument("--thor-sms", type=int, default=20)
     parser.add_argument("--b200-sms", type=int, default=148)
     parser.add_argument(
+        "--validated-kernels",
+        type=int,
+        required=True,
+        help="Number of kernels whose complete Thor correctness matrices passed",
+    )
+    parser.add_argument(
         "--validated-configs",
         type=int,
         required=True,
@@ -320,6 +400,7 @@ def main() -> None:
         thor_device=args.thor_device,
         thor_sms=args.thor_sms,
         b200_sms=args.b200_sms,
+        validated_kernels=args.validated_kernels,
         validated_configs=args.validated_configs,
         prior_thor=prior_thor,
         prior_thor_path=args.prior_thor.resolve() if args.prior_thor else None,

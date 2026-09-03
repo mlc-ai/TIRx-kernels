@@ -2,15 +2,51 @@
 
 Measured on 2026-09-03 using the default representative workload roster.
 
-## Result
+## At a glance
 
-- Thor completed **254/254** workloads with **0 interference retries**.
-- **183** rows have a usable TIR/TIRx timing in the repository's historical SM100/B200 baseline; **5** exact matched baseline rows failed, and **66** Thor workload rows are absent there.
-- Across the 183 matched rows, geometric-mean Thor/B200 latency is **10.433x**; equivalently, Thor delivers **9.6%** of B200's throughput on this workload mix.
-- The median latency ratio is **12.205x** and the observed range is **1.323x--58.829x**.
-- Thor has 20 SMs versus 148 on B200; B200 has 7.4x as many. The aggregate per-SM-normalized throughput is about **70.9%** of the B200 baseline, but this is only a rough diagnostic because the table mixes compute-, bandwidth-, and latency-bound kernels.
+| Question | Result | Interpretation |
+|---|---:|---|
+| Does the admitted Thor set run correctly? | **90 kernels / 9,204 configs passed** | Every admitted config compiled, launched, and passed its numerical oracle |
+| Did the performance suite finish? | **254/254 workloads** across 87 kernels | 0 failures; 0 interference retries |
+| How much has an exact B200 comparison? | **183/254 rows** | 5 matching baseline rows failed and 66 rows are absent |
+| What is the aggregate absolute performance? | **9.6% of B200 throughput** | Geometric-mean Thor/B200 latency is 10.433x; median is 12.205x |
+| What is the rough per-SM efficiency? | **70.9% of B200** | Normalized for 20 versus 148 SMs; not a hardware peak metric |
 
-The geometric mean is a descriptive summary, not a model-level score. The detailed rows below are the authoritative data.
+## Bottom line
+
+The admitted single-GPU Thor port is functionally complete: 9,204 numerical configurations and all 254 representative performance workloads pass. Absolute throughput averages 9.6% of the historical B200 baseline. Pure SM-count scaling would suggest 13.5%; the measured result therefore reaches roughly 70.9% of that per-SM-normalized level on this mixed suite.
+
+This says the port works, not that it is fully tuned. Large GEMMs and several attention/SSM schedules remain the clearest 20-SM tuning targets. The geometric mean mixes compute-, bandwidth-, and latency-bound kernels and is not a model-level or theoretical-peak score.
+
+The unsupported boundary, including the single-GPU MegaMoE host-layout blocker, is documented in [THOR_VALIDATION.md](THOR_VALIDATION.md).
+
+## Performance by kernel family
+
+Relative throughput is the reciprocal of the Thor/B200 latency ratio. The per-SM column multiplies it by 148/20 and should be read only as a coarse scheduling diagnostic. Values above 100% are expected for latency-bound small operations and do not imply a higher Thor SM hardware peak.
+
+| Family | Thor kernels | Thor rows | B200 matches | Thor/B200 latency | Relative throughput | Per-SM normalized |
+|---|---:|---:|---:|---:|---:|---:|
+| GEMM / MoE | 22 | 61 | 35 | 14.495x | 6.9% | 51.1% |
+| Attention | 16 | 48 | 27 | 11.831x | 8.5% | 62.5% |
+| Normalization | 9 | 27 | 27 | 4.493x | 22.3% | 164.7% |
+| Recurrent / SSM | 28 | 82 | 61 | 13.999x | 7.1% | 52.9% |
+| TopK / sorting | 6 | 18 | 15 | 4.737x | 21.1% | 156.2% |
+| Activation / quantization | 6 | 18 | 18 | 11.493x | 8.7% | 64.4% |
+
+## Representative GEMM throughput
+
+Throughput uses the conventional `2*M*N*K` operation count. NVFP4 values are effective throughput and include neither scale-processing operations nor any sparsity multiplier.
+
+| Kernel | Config | Thor µs | B200 µs | Thor effective TFLOP/s | B200 effective TFLOP/s | Thor/B200 throughput |
+|---|---|---:|---:|---:|---:|---:|
+| `fp16_bf16_gemm` | `bf16_4096x4096x4096` | 1251.646 | 92.495 | 109.807 | 1485.903 | 7.4% |
+| `fp16_bf16_gemm` | `fp16_1024x1024x1024` | 98.186 | 6.626 | 21.872 | 324.114 | 6.7% |
+| `fp16_bf16_gemm` | `fp16_16384x16384x16384` | 312464.042 | 5702.039 | 28.151 | 1542.622 | 1.8% |
+| `nvfp4_gemm` | `1024x1024x1024` | 51.733 | 5.211 | 41.511 | 412.138 | 10.1% |
+| `nvfp4_gemm` | `16384x16384x16384` | 36218.299 | 1528.963 | 242.863 | 5752.981 | 4.2% |
+| `nvfp4_gemm` | `4096x4096x4096` | 534.702 | 29.305 | 257.038 | 4690.013 | 5.5% |
+
+The FP16 16384³ row reaches only 28.15 effective TFLOP/s on Thor, below the 4096³ BF16 row's 109.81 TFLOP/s. That inversion is a concrete tuning target: the current B200-oriented schedule does not scale well to Thor's 20-SM device at that shape.
 
 ## Measurement provenance
 
@@ -37,7 +73,7 @@ Against the preceding same-protocol Thor run, 69 common rows have geometric-mean
 
 The aggregate is repeatable, but individual absolute times can move substantially between sessions under dynamic clocks. The complete table uses only the final, single-piece 254-row run; no samples were spliced from the earlier run.
 
-## Kernel summary
+## Appendix A: per-kernel summary
 
 `Thor/B200 latency > 1` means Thor is slower. Relative throughput is its reciprocal.
 
@@ -131,22 +167,7 @@ The aggregate is repeatable, but individual absolute times can move substantiall
 | `stable_sort_topk_by_value` | 3 | 0 | — | — |
 | `tinygemm2_sm100` | 3 | 3 | 11.719x | 8.5% |
 
-## GEMM effective throughput
-
-Throughput uses the conventional `2*M*N*K` operation count. NVFP4 values are effective throughput and include neither scale-processing operations nor any sparsity multiplier.
-
-| Kernel | Config | Thor µs | B200 µs | Thor effective TFLOP/s | B200 effective TFLOP/s | Thor/B200 throughput |
-|---|---|---:|---:|---:|---:|---:|
-| `fp16_bf16_gemm` | `bf16_4096x4096x4096` | 1251.646 | 92.495 | 109.807 | 1485.903 | 7.4% |
-| `fp16_bf16_gemm` | `fp16_1024x1024x1024` | 98.186 | 6.626 | 21.872 | 324.114 | 6.7% |
-| `fp16_bf16_gemm` | `fp16_16384x16384x16384` | 312464.042 | 5702.039 | 28.151 | 1542.622 | 1.8% |
-| `nvfp4_gemm` | `1024x1024x1024` | 51.733 | 5.211 | 41.511 | 412.138 | 10.1% |
-| `nvfp4_gemm` | `16384x16384x16384` | 36218.299 | 1528.963 | 242.863 | 5752.981 | 4.2% |
-| `nvfp4_gemm` | `4096x4096x4096` | 534.702 | 29.305 | 257.038 | 4690.013 | 5.5% |
-
-The FP16 16384³ row reaches only 28.15 effective TFLOP/s on Thor, below the 4096³ BF16 row's 109.81 TFLOP/s. That inversion is a concrete tuning target: the current B200-oriented schedule does not scale well to Thor's 20-SM device at that shape.
-
-## Complete workload table
+## Appendix B: complete workload results
 
 Thor CV is the population coefficient of variation across five round means. **60** rows exceed 10% and are marked `†`; repeat those rows under locked clocks before using small differences for tuning decisions.
 
@@ -406,10 +427,6 @@ Thor CV is the population coefficient of variation across five round means. **60
 | `tinygemm2_sm100` | `b16_o2880_k2880` | 262.040 | 0.4% | 7.936 | 33.019x | 3.0% |
 | `tinygemm2_sm100` | `b1_o128_k720` | 6.095 | 12.0% † | 2.956 | 2.062x | 48.5% |
 | `tinygemm2_sm100` | `b64_o4096_k3072` | 518.157 | 6.6% | 21.917 | 23.642x | 4.2% |
-
-## Correctness scope
-
-The performance roster contains only the 87 kernels already admitted for exact `sm_110a` runtime support after their complete correctness matrices passed: 9204/9204 configurations. The 254 timed rows are the suite's selected representative performance shapes; they do not replace the complete numerical validation matrices.
 
 ## Raw evidence
 
