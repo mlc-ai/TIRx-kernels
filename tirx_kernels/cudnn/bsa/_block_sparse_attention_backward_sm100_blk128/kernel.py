@@ -451,15 +451,16 @@ def get_kernel(**config):
         smem_base = K.local_scalar("uint32")
         K.assign(smem_base, K.cuda.cvta_generic_to_shared(arena.ptr_to([0])))
         sp = K.specialize(chain_dispatch=True)
-        r_load = sp.role("load", warps=[13])
-        r_mma = sp.role("mma", warps=[12])
-        r_compute = sp.role("compute", warps=list(range(4, 12)))
-        r_reduce = sp.role("reduce", warps=list(range(4)))
-        r_idle = sp.role("idle", warps=[14])
-        r_empty = sp.role("empty", warps=[15])
+        # Roles 12-15 share physical warpgroup 3, so all four must execute the
+        # collective setmaxnreg transition with the same target.
+        r_load = sp.role("load", warps=[13], regs=88)
+        r_mma = sp.role("mma", warps=[12], regs=88)
+        r_compute = sp.role("compute", warps=list(range(4, 12)), regs=136)
+        r_reduce = sp.role("reduce", warps=list(range(4)), regs=152)
+        r_idle = sp.role("idle", warps=[14], regs=88)
+        r_empty = sp.role("empty", warps=[15], regs=88)
 
         with r_load:
-            K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(88))
             leader = K.local_scalar("uint32", init=K.cuda.elect_sync())
             q_prod = K.PipelineState(2, phase=0)
             do_prod = K.PipelineState(1, phase=0)
@@ -572,7 +573,6 @@ def get_kernel(**config):
                 sum_pipe.empty.wait(do_prod.stage, do_prod.phase ^ 1)
 
         with r_mma:
-            K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(88))
             K.ptx[TMEM_ALLOC](
                 K.cuda.cvta_generic_to_shared(tmem_mailbox.ptr_to([0])), K.uint32(TMEM_COLUMNS)
             )
@@ -701,7 +701,6 @@ def get_kernel(**config):
             K.ptx.bar.sync(K.uint32(BAR_TMEM[0]), K.uint32(BAR_TMEM[1]))
             K.ptx[TMEM_DEALLOC](tcol, K.uint32(TMEM_COLUMNS))
         with r_compute:
-            K.ptx.setmaxnreg.inc.sync.aligned.u32(K.uint32(136))
             K.ptx.bar.sync(K.uint32(BAR_TMEM[0]), K.uint32(BAR_TMEM[1]))
             tcol = K.local_scalar("uint32")
             K.ptx.ld.shared.b32(tcol, tmem_mailbox.ptr_to([0]))
@@ -855,6 +854,10 @@ def get_kernel(**config):
                 bh = K.cast(batch_idx, "int64") * K.int64(heads) + K.cast(head, "int64")
                 for is_dk in (False, True):
                     dkdv_pipe.full.wait(dkdv_cons.stage, dkdv_cons.phase)
+                    # The completion wait orders TCGen's async shared-memory
+                    # reads.  Bridge that proxy before the compute warps reuse
+                    # the same Q/dO storage through generic shared stores.
+                    K.ptx.fence.proxy.async_.shared__cta()
                     tmem_offset = tmem_dk if is_dk else TMEM_DV
                     epi_base = off_sq if is_dk else off_sdo
                     if direct_dkv:
@@ -1008,7 +1011,6 @@ def get_kernel(**config):
                                 )
             K.ptx.bar.arrive(K.uint32(BAR_TMEM[0]), K.uint32(BAR_TMEM[1]))
         with r_reduce:
-            K.ptx.setmaxnreg.inc.sync.aligned.u32(K.uint32(152))
             K.ptx.bar.sync(K.uint32(BAR_TMEM[0]), K.uint32(BAR_TMEM[1]))
             tcol = K.local_scalar("uint32")
             K.ptx.ld.shared.b32(tcol, tmem_mailbox.ptr_to([0]))
@@ -1077,10 +1079,8 @@ def get_kernel(**config):
             K.ptx.bar.arrive(K.uint32(BAR_TMEM[0]), K.uint32(BAR_TMEM[1]))
 
         with r_idle:
-            K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(24))
             pass
         with r_empty:
-            K.ptx.setmaxnreg.dec.sync.aligned.u32(K.uint32(24))
             pass
 
         required_block_size.__exit__(None, None, None)

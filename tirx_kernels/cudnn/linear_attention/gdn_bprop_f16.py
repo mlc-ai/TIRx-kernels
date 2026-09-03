@@ -1538,6 +1538,7 @@ def _make_main(
                                 kk_pack[fragment * 4 + 3],
                             ],
                         )
+                    _tcgen_wait_load()
                     with K.If(reverse_index < cend - first_state_chunk), K.Then():
                         _arrive_barrier(arena, _BAR_KK_DONE)
 
@@ -1577,6 +1578,7 @@ def _make_main(
                                 a_pack[fragment * 4 + 3],
                             ],
                         )
+                    _tcgen_wait_load()
                     K.ptx.fence.proxy.async_.shared__cta()
                     _arrive_barrier(arena, _BAR_A_READY, a_stage)
 
@@ -1690,61 +1692,60 @@ def _make_main(
                         _tcgen_wait_store()
                         _arrive_barrier(arena, _BAR_DQ_SCALE_DONE)
 
+                    state_dot = K.local_scalar("float32", init=K.float32(0.0))
                     with K.If(have_dstate), K.Then():
                         _wait_barrier(arena, _BAR_DSTATE_SMEM_READY, 0, dstate_smem_cursor.phase)
                         dstate_smem_cursor.advance()
-                    state_dot_lo = K.alloc_local((4,), "float32")
-                    state_dot_hi = K.alloc_local((4,), "float32")
-                    for word in range(4):
-                        K.assign(state_dot_lo[word], _opaque_zero())
-                        K.assign(state_dot_hi[word], _opaque_zero())
-                    for octet in range(16):
-                        dstate_words = K.alloc_local((4,), "uint32")
-                        state_words = K.alloc_local((4,), "uint32")
-                        K.ptx.ld.shared.v4.b32(
-                            dstate_words[0],
-                            dstate_words[1],
-                            dstate_words[2],
-                            dstate_words[3],
-                            arena.ptr_to([_state_byte(_DSTATE_BASE, cg0_thread, octet * 8)]),
-                        )
-                        K.ptx.ld.shared.v4.b32(
-                            state_words[0],
-                            state_words[1],
-                            state_words[2],
-                            state_words[3],
-                            arena.ptr_to([_state_byte(_STATE_BASE, cg0_thread, octet * 8)]),
-                        )
+                        state_dot_lo = K.alloc_local((4,), "float32")
+                        state_dot_hi = K.alloc_local((4,), "float32")
                         for word in range(4):
-                            dstate_value0 = K.local_scalar("float32")
-                            dstate_value1 = K.local_scalar("float32")
-                            state0 = K.local_scalar("float32")
-                            state1 = K.local_scalar("float32")
-                            _unpack_io_pair(
-                                dstate_words[word], dstate_value0, dstate_value1, io_dtype
+                            K.assign(state_dot_lo[word], _opaque_zero())
+                            K.assign(state_dot_hi[word], _opaque_zero())
+                        for octet in range(16):
+                            dstate_words = K.alloc_local((4,), "uint32")
+                            state_words = K.alloc_local((4,), "uint32")
+                            K.ptx.ld.shared.v4.b32(
+                                dstate_words[0],
+                                dstate_words[1],
+                                dstate_words[2],
+                                dstate_words[3],
+                                arena.ptr_to([_state_byte(_DSTATE_BASE, cg0_thread, octet * 8)]),
                             )
-                            _unpack_io_pair(state_words[word], state0, state1, io_dtype)
-                            next0, next1 = _ffma2(
-                                dstate_value0,
-                                dstate_value1,
-                                state0,
-                                state1,
-                                state_dot_lo[word],
-                                state_dot_hi[word],
+                            K.ptx.ld.shared.v4.b32(
+                                state_words[0],
+                                state_words[1],
+                                state_words[2],
+                                state_words[3],
+                                arena.ptr_to([_state_byte(_STATE_BASE, cg0_thread, octet * 8)]),
                             )
-                            K.assign(state_dot_lo[word], next0)
-                            K.assign(state_dot_hi[word], next1)
-                    state_dot = K.local_scalar(
-                        "float32",
-                        init=(
+                            for word in range(4):
+                                dstate_value0 = K.local_scalar("float32")
+                                dstate_value1 = K.local_scalar("float32")
+                                state0 = K.local_scalar("float32")
+                                state1 = K.local_scalar("float32")
+                                _unpack_io_pair(
+                                    dstate_words[word], dstate_value0, dstate_value1, io_dtype
+                                )
+                                _unpack_io_pair(state_words[word], state0, state1, io_dtype)
+                                next0, next1 = _ffma2(
+                                    dstate_value0,
+                                    dstate_value1,
+                                    state0,
+                                    state1,
+                                    state_dot_lo[word],
+                                    state_dot_hi[word],
+                                )
+                                K.assign(state_dot_lo[word], next0)
+                                K.assign(state_dot_hi[word], next1)
+                        K.assign(
+                            state_dot,
                             (state_dot_lo[0] + state_dot_lo[1])
                             + (state_dot_lo[2] + state_dot_lo[3])
                             + (state_dot_hi[0] + state_dot_hi[1])
-                            + (state_dot_hi[2] + state_dot_hi[3])
-                        ),
-                    )
-                    for distance in (1, 2, 4, 8, 16):
-                        K.assign(state_dot, state_dot + _shfl_bfly_f32(state_dot, distance))
+                            + (state_dot_hi[2] + state_dot_hi[3]),
+                        )
+                        for distance in (1, 2, 4, 8, 16):
+                            K.assign(state_dot, state_dot + _shfl_bfly_f32(state_dot, distance))
                     _arrive_barrier(arena, _BAR_STATE_DOT_DONE)
 
                     k_stage = K.local_scalar("int32", init=k_cursor.stage)
@@ -2025,6 +2026,11 @@ def _make_main(
                         K.Then(),
                     ):
                         K.assign(dgate_last, dgate_last + cumprod_total * state_dot)
+                    # All four CG0 warps read the shared KK tile through
+                    # ldmatrix above.  Do not let a faster warp reuse that
+                    # storage for the dgate reduction until every peer has
+                    # finished its read.
+                    K.ptx.bar.sync(K.uint32(2), K.uint32(128))
                     token0 = (lane // 4) * 8 + (lane % 4) * 2
                     K.ptx.st.shared.f32(
                         arena.ptr_to([_KK_BASE + (warp_in_group * 64 + token0) * 4]), dgate0
@@ -2067,6 +2073,10 @@ def _make_main(
                             gate_partial + dgate_sum,
                         )
 
+                    # The next reverse iteration writes a new KK tile into the
+                    # same scratch.  Keep all CG0 writers behind the 64-thread
+                    # reduction above, even when its next input was prefetched.
+                    K.ptx.bar.sync(K.uint32(2), K.uint32(128))
                     _arrive_barrier(arena, _BAR_GATE_DONE, gate_stage)
                     _arrive_barrier(arena, _BAR_BETA_DONE, beta_stage)
                 sched_consume(sched_state, tile)
@@ -2421,6 +2431,7 @@ def _make_main(
                             + K.shift_left(warp_in_group * 32 + sub * 16, K.int32(16)),
                             packed,
                         )
+                    _tcgen_wait_load()
                     _tcgen_wait_store()
                     _arrive_barrier(arena, _BAR_DU_INP_READY)
 
@@ -2448,6 +2459,7 @@ def _make_main(
                                     ),
                                 )
                             store_col_fragment(_V_U_BASE, v_stage, sub, matrix_row, packed)
+                    _tcgen_wait_load()
                     K.ptx.fence.proxy.async_.shared__cta()
                     _arrive_barrier(arena, _BAR_U_READY)
 
@@ -2478,6 +2490,7 @@ def _make_main(
                             + K.shift_left(warp_in_group * 32 + sub * 16, K.int32(16)),
                             dyp_pack,
                         )
+                    _tcgen_wait_load()
                     _tcgen_wait_store()
                     _arrive_barrier(arena, _BAR_DYP_INP_READY)
 
@@ -2591,6 +2604,7 @@ def _make_main(
                             arena.ptr_to([_DQ_BASE + (256 + warp_in_group * 64 + token0 + 1) * 4]),
                             part_g1,
                         )
+                    _tcgen_wait_load()
                     K.ptx.bar.sync(K.uint32(5), K.uint32(128))
                     with K.If(cg1_thread < 64), K.Then():
                         ysum = K.local_scalar("float32", init=K.float32(0.0))
