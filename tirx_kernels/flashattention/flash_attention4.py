@@ -1320,6 +1320,14 @@ KERNEL_META = {
     "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
+            "package": "flashinfer-python",
+            "git": {
+                "url": "https://github.com/flashinfer-ai/flashinfer.git",
+                "commit": "f2e04400e330fb2debe0bf8730d9424a1d37927f",
+            },
+            "import": "flashinfer",
+        },
+        {
             "package": "flash-attn-4",
             "git": {
                 "url": "https://github.com/Dao-AILab/flash-attention.git",
@@ -1487,6 +1495,66 @@ def run_gpu(
     )
     funcs = {"tir": launch}
 
+    def _flashinfer_fa2():
+        # Use FlashInfer's prebuilt low-level launch so JIT, temporary/output
+        # allocation, and Python backend selection stay outside the timed
+        # region, matching the pure-launch TIRx measurement boundary.
+        import flashinfer.prefill as flashinfer_prefill
+        from flashinfer.utils import MaskMode, PosEncodingMode, TensorLayout
+
+        q_fi = Q_cuda.squeeze(0)
+        k_fi = K_cuda.squeeze(0)
+        v_fi = V_cuda.squeeze(0)
+        o_fi = torch.empty_like(q_fi)
+        tmp_fi = torch.empty(
+            flashinfer_prefill.SINGLE_KERNEL_TMP_SIZE, dtype=torch.uint8, device=q_fi.device
+        )
+        module = flashinfer_prefill.get_single_prefill_module(
+            "fa2",
+            q_fi.dtype,
+            k_fi.dtype,
+            o_fi.dtype,
+            head_dim,
+            head_dim,
+            PosEncodingMode.NONE.value,
+            False,  # sliding window
+            False,  # logits soft cap
+            False,  # FP16 QK reduction
+        )
+        mask_mode = MaskMode.CAUSAL.value if is_causal else MaskMode.NON_CAUSAL.value
+        softmax_scale = 1.0 / math.sqrt(head_dim)
+
+        def run():
+            module.run(
+                q_fi,
+                k_fi,
+                v_fi,
+                tmp_fi,
+                o_fi,
+                None,  # LSE
+                mask_mode,
+                TensorLayout.NHD.value,
+                -1,  # window left
+                None,  # packed custom mask
+                None,  # ALiBi slopes
+                0.0,  # logits soft cap
+                softmax_scale,
+                None,  # Q scale
+                None,  # K scale
+                None,  # V scale
+                1.0,  # RoPE scale
+                1e4,  # RoPE theta
+                None,  # K cache scale factors
+                None,  # V cache scale factors
+            )
+
+        launch()
+        run()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(O_tir, o_fi.unsqueeze(0), rtol=0.01, atol=0.01)
+        run._flashinfer_keep_alive = (q_fi, k_fi, v_fi, o_fi, tmp_fi, module)
+        return run
+
     def _flashattn_sm100():
         # Flash-Attention SM100 (CuTeDSL FA4) baseline.
         #
@@ -1584,14 +1652,16 @@ def run_gpu(
         run._fa_keep_alive = (q_th, k_th, v_th, o_th, Qf, Kf, Vf, Of)
         return run
 
-    return bench(
-        funcs,
-        warmup=warmup,
-        repeat=repeat,
-        timer=timer,
-        references={"flashattn_sm100": _flashattn_sm100},
-        **kwargs,
-    )
+    # The pinned FlashAttention CuTe-DSL adapter currently has no stable Thor
+    # package contract. Prefer FlashInfer FA2 as the native sm_110a baseline;
+    # retain the existing source comparison on its original architectures.
+    from tirx_kernels.target import prepare_cuda_arch
+
+    references = {"flashinfer_fa2": _flashinfer_fa2}
+    if prepare_cuda_arch() != "sm_110a":
+        references["flashattn_sm100"] = _flashattn_sm100
+
+    return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)
 
 
 def run_bench(
