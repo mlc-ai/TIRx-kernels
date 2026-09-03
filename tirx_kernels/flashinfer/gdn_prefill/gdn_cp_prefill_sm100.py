@@ -49,6 +49,7 @@ import torch
 import torch.nn.functional as F
 
 import tirx_kernels.kern as K
+from tirx_kernels.target import prepare_cuda_arch
 
 D_HEAD = 128
 T_BLOCK = 64
@@ -87,7 +88,7 @@ PREFILL_OPT_INITIAL_STATE_BARRIER = 4
 KERNEL_META = {
     "name": "gdn_cp_prefill_sm100",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -4308,9 +4309,20 @@ def _stage_args(case: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
 
 @lru_cache(maxsize=1)
 def _load_oracle():
-    from flashinfer.gdn_kernels.blackwell.gdn_cp_prefill import cp_delta_rule_dsl_sm100
+    from flashinfer.gdn_kernels.blackwell import gdn_cp_prefill as source
 
-    return cp_delta_rule_dsl_sm100
+    if prepare_cuda_arch() == "sm_110a":
+        # The pinned source's sole architecture guard predates Thor.  Its CuTe
+        # DSL bodies are the source of this port and accept an explicit GPUArch;
+        # compile that unchanged body for Thor instead of claiming an SM100
+        # binary is reusable there.
+        def thor_compile_options(device):
+            del device
+            return source.cute.EnableTVMFFI(True), source.cute.GPUArch("sm_110a")
+
+        source._blackwell_compile_options = thor_compile_options
+
+    return source.cp_delta_rule_dsl_sm100
 
 
 def _run_oracle(

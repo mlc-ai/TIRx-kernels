@@ -13,7 +13,7 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 52 kernels and 1,520 configurations
+- Fully validated: 56 kernels and 1,550 configurations
 
 The operator-level smoke sweep currently reports 56 numerical passes, 30
 failures, and 9 skips.  Follow-up launch-only checks show that 27 more kernels
@@ -99,6 +99,23 @@ FP16, ragged and empty rows, negative indices, sink folding, and no-sink
 execution.  The pinned DSA source has no compute-11 host dispatch, so it is not
 used as a Thor timing peer.
 
+## Retargeted source references and TinyGEMM2
+
+The FlashInfer GDN context-parallel prefill source has a single host-side
+compute-10.x guard; its pinned CuTe DSL bodies accept an explicit architecture.
+Compiling those unchanged bodies as `sm_110a` preserves the independent source
+comparison, and all 10/10 TIRx configurations pass it.
+
+Both cuDNN projection-plus-RoPE MXFP8 kernels pass 12/12 configurations after
+their pinned source adapters use the same byte-preserving FP8 DLPack bridge as
+the other cuDNN kernels.  This covers BF16 and MXFP8 inputs, both weight
+orientations, and token counts from 128 through 4096.
+
+TinyGEMM2 passes 8/8 problem shapes, with both normal and programmatic dependent
+launch paths checked per shape.  Because its frozen CUDA binary has no Thor
+target, correctness is measured against an independent FP32
+`input @ weight.T + bias` equation rounded to BF16.
+
 ## BSA forward-combine oracle
 
 `cudnn_sm100_bsa_forward_combine_blk64` retains a bitwise-exact comparison
@@ -134,6 +151,9 @@ The resumable local JSONL runs are kept outside the repository under `/tmp`:
 - `tirx-thor-main-0512291-batch15-swiglu-blockscaled-final.jsonl`
 - `tirx-thor-main-0512291-batch15-dglu-blockscaled.jsonl`
 - `tirx-thor-main-0512291-batch16-dsa-full.jsonl`
+- `tirx-thor-main-0512291-batch18-gdn-cp-full.jsonl`
+- `tirx-thor-main-0512291-batch19-proj-rope-full.jsonl`
+- `tirx-thor-main-0512291-batch20-tinygemm-full.jsonl`
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only

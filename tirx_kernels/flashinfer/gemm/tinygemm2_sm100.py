@@ -18,11 +18,12 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
+from tirx_kernels.target import prepare_cuda_arch
 
 KERNEL_META = {
     "name": "tinygemm2_sm100",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -549,6 +550,23 @@ def _run_flashinfer(case: dict[str, Any], stage: int, use_pdl: bool, output: tor
     _flashinfer_variant(stage, use_pdl)(case["input"], case["weight"], case["bias"], output)
 
 
+def _mathematical_reference(case: dict[str, Any]) -> torch.Tensor:
+    """Independent FP32 GEMM plus bias, rounded once to the BF16 output type."""
+    return (
+        case["input"].float() @ case["weight"].float().transpose(0, 1)
+        + case["bias"].float()
+    ).to(case["out"].dtype)
+
+
+def _validate_mathematical_reference(case: dict[str, Any], output: torch.Tensor) -> None:
+    torch.testing.assert_close(
+        output.float(),
+        _mathematical_reference(case).float(),
+        rtol=2.0**-7,
+        atol=2.0**-7,
+    )
+
+
 def run_test(B: int, O: int, K: int) -> None:
     _require_supported_arch()
     case = prepare_data(B, O, K)
@@ -557,18 +575,22 @@ def run_test(B: int, O: int, K: int) -> None:
 
     for use_pdl in (False, True):
         tirx_out = torch.zeros_like(case["out"])
-        flashinfer_out = torch.zeros_like(case["out"])
         _run_tirx(case, stage, use_pdl, tirx_out)
-        _run_flashinfer(case, stage, use_pdl, flashinfer_out)
-        torch.cuda.synchronize()
-        if not torch.equal(tirx_out, flashinfer_out):
-            differing = int((tirx_out != flashinfer_out).sum().item())
-            max_diff = float((tirx_out.float() - flashinfer_out.float()).abs().max().item())
-            raise AssertionError(
-                f"TinyGEMM2 bitwise mismatch for B={B}, O={O}, K={K}, "
-                f"stage={stage}, use_pdl={use_pdl}: {differing} elements, "
-                f"max_abs_diff={max_diff}"
-            )
+        if prepare_cuda_arch() == "sm_110a":
+            torch.cuda.synchronize()
+            _validate_mathematical_reference(case, tirx_out)
+        else:
+            flashinfer_out = torch.zeros_like(case["out"])
+            _run_flashinfer(case, stage, use_pdl, flashinfer_out)
+            torch.cuda.synchronize()
+            if not torch.equal(tirx_out, flashinfer_out):
+                differing = int((tirx_out != flashinfer_out).sum().item())
+                max_diff = float((tirx_out.float() - flashinfer_out.float()).abs().max().item())
+                raise AssertionError(
+                    f"TinyGEMM2 bitwise mismatch for B={B}, O={O}, K={K}, "
+                    f"stage={stage}, use_pdl={use_pdl}: {differing} elements, "
+                    f"max_abs_diff={max_diff}"
+                )
 
 
 def prepare_bench(B: int, O: int, K: int):
@@ -604,7 +626,11 @@ def run_gpu(
     case = prepare_data(B, O, K)
     args = _tirx_args(case)
 
-    if external_references_enabled():
+    if prepare_cuda_arch() == "sm_110a":
+        executable(*args)
+        torch.cuda.synchronize()
+        _validate_mathematical_reference(case, case["out"])
+    elif external_references_enabled():
         reference_out = torch.zeros_like(case["out"])
         _run_flashinfer(case, stage, False, reference_out)
         executable(*args)
@@ -623,12 +649,16 @@ def run_gpu(
 
         return launch
 
+    references = None
+    if prepare_cuda_arch() != "sm_110a":
+        references = {"flashinfer_sm100": _flashinfer_builder}
+
     return bench(
         {"tirx": lambda: executable(*args)},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references={"flashinfer_sm100": _flashinfer_builder},
+        references=references,
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
