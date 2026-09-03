@@ -13,7 +13,7 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 45 kernels and 1,254 configurations
+- Fully validated: 46 kernels and 1,263 configurations
 
 The operator-level smoke sweep currently reports 56 numerical passes, 30
 failures, and 9 skips.  Follow-up launch-only checks show that 27 more kernels
@@ -76,26 +76,15 @@ cases use the mathematical oracle; the other 73 retain the source comparison.
 Together with FastTopK, fused DiT LayerNorm, and stable-sort TopK, this batch
 passes 242/242 configurations on Thor.
 
-## BSA forward-combine observation
+## BSA forward-combine oracle
 
-`cudnn_sm100_bsa_forward_combine_blk64` passes 8 of its 9 correctness
-configurations.  The remaining configuration is
-`b1_h4_sq1024_s2` (seed 8606).
-
-For that configuration, the TIRx output and the pinned CUDA source output are
-bitwise identical for both O and LSE.  The subsequent, auxiliary comparison
-between the pinned source and the mathematical oracle rejects one BF16 element
-out of 524,288:
-
-- index: `(0, 232, 2, 5)`
-- absolute difference: `0.015625`
-- current absolute tolerance: `0.0078125`
-
-At the value's magnitude this is one BF16 representable step.  This is not
-evidence of a TVM or TIRx/source mismatch.  The follow-up is to make the
-secondary oracle comparison BF16-ULP-aware while preserving the existing
-bitwise TIRx-versus-pinned-source gate.  The kernel must not be added to the
-`sm_110a` allowlist until all nine `CONFIGS` pass the final check.
+`cudnn_sm100_bsa_forward_combine_blk64` retains a bitwise-exact comparison
+between TIRx and the pinned CUDA source for both O and LSE.  Its auxiliary BF16
+mathematical-oracle check now combines the existing `0.0078125` absolute floor
+with one representable BF16 step at the expected value's scale.  This accepts
+the single one-ULP reduction difference previously observed at larger
+magnitudes without weakening the primary source gate.  The complete matrix now
+passes 9/9 configurations.
 
 ## Validation artifacts
 
@@ -115,6 +104,7 @@ The resumable local JSONL runs are kept outside the repository under `/tmp`:
 - `tirx-thor-main-0512291-batch9-attention-norm-full.jsonl`
 - `tirx-thor-main-0512291-batch10-mamba-ssu-final.jsonl`
 - `tirx-thor-main-0512291-batch11-topk-norm-gemm-final.jsonl`
+- `tirx-thor-main-0512291-batch13-bsa-combine-final.jsonl`
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only
