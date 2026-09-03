@@ -203,7 +203,8 @@ def _render(representative: dict, additions: dict, paths: tuple[Path, Path]) -> 
             "",
             "Rows above 10% CV are retained and visibly flagged by their CV columns. In "
             "particular, the BF16 4096-cube GEMM switched between fast and slow clock regimes "
-            "within its five rounds. Its absolute mean and near-threshold ratio should be rerun with "
+            "within its five rounds. Its absolute mean and near-threshold ratio should be rerun "
+            "with "
             "`sudo jetson_clocks` before publication.",
             "",
             "## Raw evidence",
