@@ -36,10 +36,23 @@ def _implementations(row: dict) -> tuple[str, float, str, float]:
     references = [
         (name, float(value)) for name, value in implementations.items() if not _is_ours(name)
     ]
-    if len(ours) != 1 or len(references) != 1:
+    if len(ours) != 1:
         raise ValueError(
-            f"expected exactly one TIRx and one reference implementation for "
+            f"expected exactly one TIRx implementation for "
             f"{row.get('kernel')}/{_config(row)}, got {list(implementations)}"
+        )
+    if row.get("kernel") == "flash_attention4":
+        primary = "flashattn_fa4_cutedsl"
+        if primary not in implementations:
+            raise ValueError(
+                f"FA4 report requires the like-for-like {primary} baseline for "
+                f"{row.get('kernel')}/{_config(row)}, got {list(implementations)}"
+            )
+        return *ours[0], primary, float(implementations[primary])
+    if len(references) != 1:
+        raise ValueError(
+            f"expected one reference implementation for {row.get('kernel')}/{_config(row)}, "
+            f"got {list(implementations)}"
         )
     return *ours[0], *references[0]
 
@@ -73,7 +86,7 @@ def _verdict(speedup: float) -> str:
     if speedup > 1.05:
         return "TIRx faster"
     if speedup < 0.95:
-        return "FlashInfer faster"
+        return "Reference faster"
     return "within 5%"
 
 
@@ -128,14 +141,15 @@ def _markdown(run: dict, *, run_path: Path) -> str:
     git = run.get("git") or {}
     baselines = run.get("baselines") or {}
     flashinfer = baselines.get("flashinfer") or {}
+    flashattn = baselines.get("flash_attn") or {}
     noisy = sum(max(item["ours_cv"], item["reference_cv"]) > 10.0 for item in rows)
 
     lines = [
         "# NVIDIA Thor native-baseline performance",
         "",
         f"Measured on {measured_date} on one NVIDIA Jetson AGX Thor Developer Kit. "
-        "Every row compares TIRx with a FlashInfer implementation on the same GPU and exact input "
-        "shape.",
+        "Every row compares TIRx with a contract-matched implementation on the same GPU and exact "
+        "input shape. FA4 uses upstream FlashAttention-4 CuTeDSL as its primary baseline.",
         "",
         "## At a glance",
         "",
@@ -146,18 +160,18 @@ def _markdown(run: dict, *, run_path: Path) -> str:
         f"{pipeline.get('interference_retry_count', 0)} interference retries |",
         f"| TIRx faster by more than 5% | **{verdicts['TIRx faster']}/{len(rows)}** |",
         f"| Within 5% | **{verdicts['within 5%']}/{len(rows)}** |",
-        f"| FlashInfer faster by more than 5% | **{verdicts['FlashInfer faster']}/{len(rows)}** |",
+        f"| Reference faster by more than 5% | **{verdicts['Reference faster']}/{len(rows)}** |",
         f"| Geometric-mean TIRx speedup | **{overall:.3f}x** |",
         "",
-        "The mixed aggregate hides a wide spread: TIRx FlashAttention4 is "
-        f"{attention_speedup:.3f}x the throughput of FlashInfer FA2 at the selected "
-        "GQA-prefill shape, the plain RMSNorm and GELU activation paths favor FlashInfer, and "
-        "most other rows are close. Use the per-family and "
+        "The mixed aggregate hides a wide spread: at the selected GQA-prefill shape, the "
+        f"upstream FA4 CuTeDSL latency divided by TIRx latency is {attention_speedup:.3f}x. "
+        "The plain RMSNorm and GELU activation paths favor FlashInfer, and most other rows are "
+        "close. Use the per-family and "
         "per-kernel rows for tuning decisions rather than the single mixed-workload mean.",
         "",
         "## Results by family",
         "",
-        "Speedup is `FlashInfer latency / TIRx latency`; values above 1.0 favor TIRx.",
+        "Speedup is `primary-reference latency / TIRx latency`; values above 1.0 favor TIRx.",
         "",
         "| Family | Rows | Geomean TIRx speedup |",
         "|---|---:|---:|",
@@ -174,8 +188,8 @@ def _markdown(run: dict, *, run_path: Path) -> str:
             "",
             "The 5% band is descriptive, not a statistical significance test.",
             "",
-            "| Family | Kernel / config | TIRx µs | TIRx CV | FlashInfer "
-            "implementation | FlashInfer µs | FI CV | TIRx speedup | Result |",
+            "| Family | Kernel / config | TIRx µs | TIRx CV | Primary reference | "
+            "Reference µs | Ref CV | TIRx speedup | Result |",
             "|---|---|---:|---:|---|---:|---:|---:|---|",
         ]
     )
@@ -192,6 +206,28 @@ def _markdown(run: dict, *, run_path: Path) -> str:
             f"{item['verdict']} |"
         )
 
+    attention = next(item for item in rows if item["row"]["kernel"] == "flash_attention4")
+    attention_impls = attention["row"]["impls"]
+    secondary_attention = [
+        (name, float(attention_impls[name]), _cv(attention["row"], name))
+        for name in ("flashinfer_cutedsl", "flashinfer_fa2")
+        if name in attention_impls
+    ]
+    if secondary_attention:
+        lines.extend(
+            [
+                "",
+                "Attention secondary controls (same tensors and shape; not used in the aggregate):",
+                "",
+                "| Implementation | Latency µs | CV | latency / TIRx |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for name, latency, cv in secondary_attention:
+            lines.append(
+                f"| `{name}` | {latency:.3f} | {cv:.1f}% | {latency / attention['ours_us']:.3f}x |"
+            )
+
     lines.extend(
         [
             "",
@@ -203,17 +239,20 @@ def _markdown(run: dict, *, run_path: Path) -> str:
             "executes "
             "the same fused operation on the same generated inputs. The workload roster is "
             "[`scripts/thor_flashinfer_representative.yaml`](scripts/thor_flashinfer_representative.yaml).",
+            "The per-kernel source and upstream-benchmark decisions are documented in "
+            "[THOR_SOURCE_BENCHMARK_AUDIT.md](THOR_SOURCE_BENCHMARK_AUDIT.md).",
             "",
             "Because attention is the most prominent result, a separate complete 32-config "
             "sequence-length, GQA-ratio, and causal-mask sweep is reported in "
-            "[THOR_FLASHINFER_ATTENTION.md](THOR_FLASHINFER_ATTENTION.md). TIRx is faster in "
-            "all 32 rows, with a 2.187x geometric-mean speedup over FlashInfer FA2.",
+            "[THOR_FLASHINFER_ATTENTION.md](THOR_FLASHINFER_ATTENTION.md). That older sweep is "
+            "explicitly a secondary FA2 generation comparison, not the FA4 headline baseline.",
             "",
             "The GDN and grouped-KDA choices follow production dispatch shapes present in SGLang's "
-            "kernel configuration manifests. FlashInfer remains the timed implementation baseline; "
-            "SGLang supplies shape provenance rather than a second timing column. FlashInfer has "
-            "no FA3 binary for `sm_110a` in this environment, so the attention baseline is its "
-            "supported FA2 backend.",
+            "kernel configuration manifests. FlashInfer remains the timed implementation baseline "
+            "for those ported kernels; SGLang supplies shape provenance rather than a second "
+            "timing column. Attention is different: upstream FA4 CuTeDSL is primary, "
+            "FlashInfer's own "
+            "CuTeDSL path is a serving-library peer, and FA2 is retained only as a legacy control.",
             "",
             "This is a kernel-launch microbenchmark, not end-to-end request throughput. It does "
             "not measure scheduler, KV-cache management, batching policy, CPU work, or network "
@@ -236,6 +275,7 @@ def _markdown(run: dict, *, run_path: Path) -> str:
             f"| TIRx-kernels revision | `{git.get('tirx-kernels', '-')}` |",
             f"| FlashInfer version / revision | `{flashinfer.get('version', '-')}` / "
             f"`{flashinfer.get('git_sha', '-')}` |",
+            f"| FlashAttention-4 revision | `{flashattn.get('git_sha', '-')}` |",
             "| CUDA / PyTorch | CUDA 13.1 / PyTorch 2.9.1+cu130 |",
             "",
             f"The population coefficient of variation exceeded 10% for either implementation in "
@@ -250,7 +290,7 @@ def _markdown(run: dict, *, run_path: Path) -> str:
             "```bash",
             "python -m tirx_kernels.bench_suite \\",
             "  --workloads scripts/thor_flashinfer_representative.yaml \\",
-            "  --out-dir /home/tlopexh/thor-validation/flashinfer-native-final \\",
+            f"  --out-dir {run_path.parent.parent} \\",
             "  --with-references --timer proton --rounds 5 --cooldown 0 \\",
             "  --max-prepare-processes 1 --ready-backlog 1 --no-probe --no-report",
             "python scripts/report_thor_native.py \\",
@@ -264,8 +304,7 @@ def _markdown(run: dict, *, run_path: Path) -> str:
             "## Raw evidence",
             "",
             f"- Run JSON: `{run_path}`",
-            f"- Run status: {len(rows)} `ok`; every row contains five TIRx and five FlashInfer "
-            "round samples",
+            f"- Run status: {len(rows)} `ok`; every reported implementation has five round samples",
             "",
         ]
     )

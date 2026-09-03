@@ -57,6 +57,14 @@ def _geomean(values: list[float]) -> float:
 
 def _primary_reference(row: dict) -> tuple[str, float]:
     implementations = row["impls"]
+    if row["kernel"] == "flash_attention4":
+        name = "flashattn_fa4_cutedsl"
+        if name not in implementations:
+            raise ValueError(
+                f"FA4 report requires the like-for-like {name} baseline for "
+                f"{row['kernel']}/{row['config']}, got {list(implementations)}"
+            )
+        return name, float(implementations[name])
     if row["kernel"] == "nvfp4_gemm":
         return "flashinfer", float(implementations["flashinfer"])
     references = [
@@ -108,6 +116,7 @@ def _render(representative: dict, additions: dict, paths: tuple[Path, Path]) -> 
     additions_git = additions.get("git") or {}
     additions_protocol = additions["results"][0]["benchmark_protocol"]
     flashinfer = (additions.get("baselines") or {}).get("flashinfer") or {}
+    flashattn = (representative.get("baselines") or {}).get("flash_attn") or {}
 
     lines = [
         "# NVIDIA Thor classic-kernel same-device baselines",
@@ -130,6 +139,8 @@ def _render(representative: dict, additions: dict, paths: tuple[Path, Path]) -> 
         "",
         "The mixed geomean is descriptive only: it gives one vote to each selected workload, "
         "not to each model invocation. The per-row numbers are the result to use.",
+        "The source-to-benchmark mapping for every row is audited in "
+        "[THOR_SOURCE_BENCHMARK_AUDIT.md](THOR_SOURCE_BENCHMARK_AUDIT.md).",
         "",
         "## Complete numeric table",
         "",
@@ -155,6 +166,7 @@ def _render(representative: dict, additions: dict, paths: tuple[Path, Path]) -> 
     nvfp4 = next(item for item in rows if item["raw"]["kernel"] == "nvfp4_gemm")
     cublaslt_us = float(nvfp4["raw"]["impls"]["cublaslt_nvfp4"])
     cublaslt_cv = _cv(nvfp4["raw"], "cublaslt_nvfp4")
+    attention = next(item for item in rows if item["raw"]["kernel"] == "flash_attention4")
 
     lines.extend(
         [
@@ -163,6 +175,13 @@ def _render(representative: dict, additions: dict, paths: tuple[Path, Path]) -> 
             f"**{cublaslt_us:.3f} µs** (CV {cublaslt_cv:.1f}%), or "
             f"**{cublaslt_us / nvfp4['ours'][1]:.3f}x** relative to TIRx. FlashInfer is retained "
             "as that row's primary baseline to follow the requested priority.",
+            "",
+            "The attention row uses upstream FA4 CuTeDSL as its primary baseline. On the same "
+            "row, FlashInfer CuTeDSL measured "
+            f"**{float(attention['raw']['impls']['flashinfer_cutedsl']):.3f} µs** and the legacy "
+            "FlashInfer FA2 control measured "
+            f"**{float(attention['raw']['impls']['flashinfer_fa2']):.3f} µs**; neither secondary "
+            "control enters the geomean.",
             "",
             "## Main-family coverage without a publishable Thor number",
             "",
@@ -200,6 +219,7 @@ def _render(representative: dict, additions: dict, paths: tuple[Path, Path]) -> 
             f"| TIRx-kernels revision | `{additions_git.get('tirx-kernels', '-')}` |",
             f"| FlashInfer version / revision | `{flashinfer.get('version', '-')}` / "
             f"`{flashinfer.get('git_sha', '-')}` |",
+            f"| FlashAttention-4 revision | `{flashattn.get('git_sha', '-')}` |",
             "",
             "Rows above 10% CV are retained and visibly flagged by their CV columns. In "
             "particular, the BF16 4096-cube GEMM switched between fast and slow clock regimes "

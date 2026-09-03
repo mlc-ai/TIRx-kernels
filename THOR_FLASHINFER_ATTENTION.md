@@ -1,6 +1,8 @@
-# NVIDIA Thor FA4 versus FlashInfer FA2
+# NVIDIA Thor TIRx FA4 versus FlashInfer FA2 (legacy control)
 
 Measured on 2026-09-03 on one NVIDIA Jetson AGX Thor Developer Kit. This is the complete 32-config matrix exposed by the repository's `flash_attention4` module.
+
+**Scope warning:** FlashInfer FA2 is a previous-generation control, not the primary baseline for a FlashAttention-4 kernel. Use upstream FA4 CuTeDSL for the like-for-like headline comparison. These 32 rows remain useful only for showing the generation gap.
 
 ## At a glance
 
@@ -87,7 +89,7 @@ Both implementations receive the same FP16 Q, K, and V storage. Every row has ba
 
 JIT compilation, module lookup, temporary-buffer allocation, and output allocation are outside both timed regions. Proton measures GPU kernel time for pure launches. Each implementation receives a 1000 ms warmup and 100 ms repeat budget in each of 5 rounds; the table reports their arithmetic mean.
 
-FlashInfer FA3 has no loadable `sm_110a` kernel in the pinned package, so FA2 is the supported Thor baseline. This compares implementations of the same attention operation; it is a kernel microbenchmark, not end-to-end serving throughput.
+FlashInfer provides more than FA2: its API also exposes FA3, CUTLASS, and CuTeDSL attention backends. The pinned FA3 binary is not loadable for `sm_110a`, while its CuTeDSL path does run on Thor. FA2 is retained here solely because this historical sweep measured it; it is a kernel microbenchmark, not end-to-end serving throughput.
 
 ## Provenance
 

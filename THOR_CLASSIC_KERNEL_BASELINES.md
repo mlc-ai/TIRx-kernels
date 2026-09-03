@@ -47,7 +47,7 @@ run unmodified on Thor (`sm_110a`).  Architecture support must be probed next.
 | 3 | FP4/MXFP4/NVFP4 block-scaled GEMM | `nvfp4_gemm` and block-scaled cuDNN/DeepGEMM paths | **E** | **E** | **E** | FlashInfer block-scaled GEMM |
 | 4 | Grouped GEMM | cuDNN and DeepGEMM M/K-grouped variants | **E** | **E** | **E** | FlashInfer grouped GEMM, split into contiguous and masked contracts |
 | 5 | Fused MoE | `sm100_fp8_fp4_mega_moe` plus grouped-MoE building blocks | **E** | **E** | **E** | FlashInfer fused MoE; MegaMoE needs its exact FP8/FP4 contract |
-| 6 | Dense attention forward/prefill | `flash_attention4` | **E** | **A** inspected FA4 bench is FP8-specific | **A** inspected prefill bench delegates to FlashInfer/TRT-LLM | FlashInfer FA2 on Thor; FA3 has no loadable `sm_110a` image in the installed build |
+| 6 | Dense attention forward/prefill | `flash_attention4` | **E** Blackwell CUTLASS and CuTeDSL paths | **E** FA4 CuTe benchmark includes a BF16 baseline | **A** inspected prefill bench delegates to FlashInfer/TRT-LLM | Upstream FlashAttention-4 CuTeDSL; FlashInfer CuTeDSL as a serving peer; FA2 only as a legacy control |
 | 7 | Block-sparse / sparse-MLA attention forward | BSA, FlashMLA, and MSA forward paths | **E** | **E** | **A** implementations/tests found, no standalone sparse-attention bench found | FlashInfer, but benchmark BSA, sparse MLA, and MSA separately |
 | 8 | RMSNorm and fused-add/quantized RMSNorm | native RMSNorm plus FlashInfer norm ports | **E** | **E** | **E** | FlashInfer exact entry point for each fusion boundary |
 | 9 | LayerNorm / fused DiT LayerNorm | FlashInfer LayerNorm and fused DiT ports | **E** | **E** generic norm | **E** generic LayerNorm | FlashInfer for fused DiT; SGLang or vLLM for plain LayerNorm |
@@ -93,7 +93,9 @@ These should be reported as coverage gaps, not silently counted as passed.
   [`bench_cute_dsl_blockscaled_gemm.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_cute_dsl_blockscaled_gemm.py).
 - Grouped GEMM/MoE: [`bench_deepgemm_blackwell.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_deepgemm_blackwell.py) and
   [`bench_cutlass_fused_moe.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_cutlass_fused_moe.py).
-- Attention: [`bench_batch_attention.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_batch_attention.py),
+- Attention: [`bench_blackwell_attention_cutedsl.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_blackwell_attention_cutedsl.py),
+  [`bench_blackwell_attention.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_blackwell_attention.py),
+  [`bench_batch_attention.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_batch_attention.py),
   [`bench_batch_decode.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_batch_decode.py),
   [`bench_block_sparse_attention.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_block_sparse_attention.py), and
   [`bench_deepseek_mla.py`](https://github.com/flashinfer-ai/flashinfer/blob/f2e04400e330fb2debe0bf8730d9424a1d37927f/benchmarks/bench_deepseek_mla.py).

@@ -1555,111 +1555,77 @@ def run_gpu(
         run._flashinfer_keep_alive = (q_fi, k_fi, v_fi, o_fi, tmp_fi, module)
         return run
 
-    def _flashattn_sm100():
-        # Flash-Attention SM100 (CuTeDSL FA4) baseline.
-        #
-        # CUTe-DSL hard rule (discovered by experiment): every `cute_tensor_like`
-        # call must happen BEFORE `cute.compile`. Wrapping new tensors after
-        # compile poisons the host-side `cuTensorMapEncodeTiled` path (it starts
-        # failing ~hundreds of launches later anywhere in the process, including
-        # in unrelated TIR kernels). So we wrap one FA tensor set up-front, then
-        # compile exactly once using it.
-        import cutlass
-        import cutlass.cute as cute
-        import cutlass.torch as cutlass_torch
-        from flash_attn.cute.flash_fwd_sm100 import FlashAttentionForwardSm100
-        from flash_attn.cute.utils import AuxData
+    def _flashinfer_cutedsl():
+        # FlashInfer's Blackwell CuTe-DSL prefill backend is a separate serving
+        # implementation from Dao-AILab FA4.  Keep it as a library baseline,
+        # while the upstream FA4 adapter below remains the like-for-like one.
+        import flashinfer
 
-        Qi, Ki, Vi, _ = prepare_data(
-            batch_size, seq_len, seq_len, num_qo_heads, num_kv_heads, head_dim
+        q_fi = Q_cuda.squeeze(0)
+        k_fi = K_cuda.squeeze(0)
+        v_fi = V_cuda.squeeze(0)
+        o_fi = torch.empty_like(q_fi)
+        workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=q_fi.device)
+        indptr = torch.tensor([0, seq_len], dtype=torch.int32, device=q_fi.device)
+        wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+            workspace, kv_layout="NHD", backend="cute-dsl"
         )
-        Qf = Qi.cuda().contiguous()
-        Kf = Ki.cuda().contiguous()
-        Vf = Vi.cuda().contiguous()
-        Of = torch.zeros_like(Qf)
-        q_t, q_th = cutlass_torch.cute_tensor_like(
-            Qf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-        )
-        k_t, k_th = cutlass_torch.cute_tensor_like(
-            Kf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-        )
-        v_t, v_th = cutlass_torch.cute_tensor_like(
-            Vf, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-        )
-        o_t, o_th = cutlass_torch.cute_tensor_like(
-            Of, cutlass.Float16, is_dynamic_layout=True, assumed_align=16
-        )
-
-        fa_fwd = FlashAttentionForwardSm100(
-            head_dim=head_dim,
-            head_dim_v=head_dim,
-            qhead_per_kvhead=num_qo_heads // num_kv_heads,
-            is_causal=is_causal,
-            is_local=False,
-            pack_gqa=False,
-            m_block_size=128,
-            n_block_size=128,
-            is_persistent=True,
-        )
-        _stream_fa = cutlass_torch.default_stream()
-        _scale_fa = 1.0 / math.sqrt(head_dim)
-        compiled_fa = cute.compile(
-            fa_fwd,
-            q_t,
-            k_t,
-            v_t,
-            o_t,
-            None,  # mLSE
-            _scale_fa,  # softmax_scale
-            None,  # mCuSeqlensQ
-            None,  # mCuSeqlensK
-            None,  # mSeqUsedQ
-            None,  # mSeqUsedK
-            None,  # mPageTable
-            None,  # window_size_left
-            None,  # window_size_right
-            None,  # learnable_sink
-            None,  # descale_tensors
-            None,  # blocksparse_tensors
-            AuxData(),  # aux_data (FA4 takes an AuxData, not None)
-            _stream_fa,  # stream (FA4 sm100 keeps stream as the LAST positional)
+        wrapper.plan(
+            indptr,
+            indptr,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim_vo=head_dim,
+            causal=is_causal,
+            q_data_type=q_fi.dtype,
+            kv_data_type=k_fi.dtype,
         )
 
         def run():
-            compiled_fa(
-                q_t,
-                k_t,
-                v_t,
-                o_t,
-                None,  # mLSE
-                _scale_fa,
-                None,  # mCuSeqlensQ
-                None,  # mCuSeqlensK
-                None,  # mSeqUsedQ
-                None,  # mSeqUsedK
-                None,  # mPageTable
-                None,  # window_size_left
-                None,  # window_size_right
-                None,  # learnable_sink
-                None,  # descale_tensors
-                None,  # blocksparse_tensors
-                AuxData(),  # aux_data (FA4 takes an AuxData, not None)
-                _stream_fa,  # stream (FA4 sm100 keeps stream as the LAST positional)
-            )
+            wrapper.run(q_fi, k_fi, v_fi, out=o_fi)
 
-        # Keep the backing torch storage alive for the run's lifetime
-        # (the cute tensors alias it).
-        run._fa_keep_alive = (q_th, k_th, v_th, o_th, Qf, Kf, Vf, Of)
+        launch()
+        run()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(O_tir.squeeze(0), o_fi, rtol=0.01, atol=0.01)
+        run._flashinfer_keep_alive = (q_fi, k_fi, v_fi, o_fi, workspace, indptr, wrapper)
         return run
 
-    # The pinned FlashAttention CuTe-DSL adapter currently has no stable Thor
-    # package contract. Prefer FlashInfer FA2 as the native sm_110a baseline;
-    # retain the existing source comparison on its original architectures.
-    from tirx_kernels.target import prepare_cuda_arch
+    def _flashattn_fa4_cutedsl():
+        # Use the pinned upstream FA4 interface as the source-of-truth adapter.
+        # It owns the current CuTe-DSL compile ABI, selects SM110-family tuning,
+        # and caches compilation before timing begins.
+        from flash_attn.cute.interface import _flash_attn_fwd
 
-    references = {"flashinfer_fa2": _flashinfer_fa2}
-    if prepare_cuda_arch() != "sm_110a":
-        references["flashattn_sm100"] = _flashattn_sm100
+        out_fa4 = torch.empty_like(O_tir)
+        call_kwargs = {
+            "q": Q_cuda,
+            "k": K_cuda,
+            "v": V_cuda,
+            "out": out_fa4,
+            "softmax_scale": 1.0 / math.sqrt(head_dim),
+            "causal": is_causal,
+        }
+
+        def run():
+            _flash_attn_fwd(**call_kwargs)
+
+        launch()
+        run()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(O_tir, out_fa4, rtol=0.01, atol=0.01)
+        run._fa4_keep_alive = (out_fa4, call_kwargs)
+        return run
+
+    # Compare against both the previous-generation FlashInfer FA2 fallback and
+    # the like-for-like upstream FlashAttention-4 CuTe-DSL implementation.  The
+    # pinned FA4 source explicitly supports both SM100 and SM110 families.
+    references = {
+        "flashinfer_fa2": _flashinfer_fa2,
+        "flashinfer_cutedsl": _flashinfer_cutedsl,
+        "flashattn_fa4_cutedsl": _flashattn_fa4_cutedsl,
+    }
 
     return bench(funcs, warmup=warmup, repeat=repeat, timer=timer, references=references, **kwargs)
 
