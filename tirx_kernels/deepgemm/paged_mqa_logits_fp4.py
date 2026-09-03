@@ -171,7 +171,7 @@ def _make_case(
 KERNEL_META = {
     "name": "deepgemm_sm100_fp4_paged_mqa_logits",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -264,6 +264,16 @@ def _make_indices(config: PagedMQALogitsFP4Config) -> torch.Tensor | None:
     return indices.contiguous()
 
 
+def _make_schedule_meta(deep_gemm, context_lens, page_size: int, num_sms: int, indices=None):
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        from ._paged_mqa_schedule import make_schedule_metadata
+
+        return make_schedule_metadata(context_lens, num_sms, indices)
+    return deep_gemm.get_paged_mqa_logits_metadata(context_lens, page_size, num_sms, indices)
+
+
 def _make_fused_kv_cache(
     config: PagedMQALogitsFP4Config, deep_gemm: Any
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -334,8 +344,10 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     config = _make_config(**kwargs)
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for SM100 FP4 paged MQA logits")
-    if torch.cuda.get_device_capability()[0] < 10:
-        raise SkipTest("SM100 FP4 paged MQA logits requires compute capability 10.x")
+    from tirx_kernels.target import supports_sm100_kernel
+
+    if not supports_sm100_kernel(torch.cuda.get_device_capability()):
+        raise SkipTest("SM100 FP4 paged MQA logits requires SM100 or prepared Thor")
 
     torch.manual_seed(config.seed)
     runtime_config = PagedMQALogitsFP4Config(
@@ -370,15 +382,15 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     context_lens = _make_context_lens(config)
     block_table = _make_block_table(config)
     indices = _make_indices(config)
-    schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-        context_lens, config.page_size, runtime_config.num_sms, indices
+    schedule_meta = _make_schedule_meta(
+        deep_gemm, context_lens, config.page_size, runtime_config.num_sms, indices
     )
     tirx_schedule_meta = schedule_meta
     if not config.varlen and config.next_n >= 2:
         num_q_atoms = _align_up(config.next_n, 2) // 2
         atom_context_lens = context_lens[:, -1:].expand(config.batch_size, num_q_atoms).contiguous()
-        tirx_schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-            atom_context_lens, config.page_size, runtime_config.num_sms
+        tirx_schedule_meta = _make_schedule_meta(
+            deep_gemm, atom_context_lens, config.page_size, runtime_config.num_sms
         )
         expected_end = config.batch_size * num_q_atoms
         if int(tirx_schedule_meta[-1, 0]) != expected_end:
@@ -1800,14 +1812,16 @@ def _assert_correct(data: dict[str, Any], logits: torch.Tensor, *, name: str) ->
 
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
-    deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
-    # Library-anchored: the torch ref is a yardstick, not the arbiter --
-    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
-    deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
+    from tirx_kernels.target import prepare_cuda_arch
+
+    deepgemm_diff = None
+    if prepare_cuda_arch() != "sm_110a":
+        deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+        deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_paged_mqa(data)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
-    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
+    if deepgemm_diff is not None and tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
         raise AssertionError(
             f"TIRx diff {tirx_diff:.6g} is worse than DeepGEMM diff {deepgemm_diff:.6g}"
         )
@@ -1859,7 +1873,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         timer=timer,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
-        references={"deepgemm": _deepgemm},
+        references={"deepgemm": _deepgemm} if prepare_cuda_arch() != "sm_110a" else {},
     )
     result["max_diff"] = tirx_diff
     return result
