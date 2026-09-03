@@ -8,10 +8,10 @@ Measured on 2026-09-03 on one NVIDIA Jetson AGX Thor Developer Kit. The table co
 |---|---:|
 | Measured exact-shape rows | **20/20 passed** |
 | Main classic families with at least one numeric row | **12/17** |
-| TIRx faster by more than 5% | **4/20** |
-| Within 5% | **12/20** |
+| TIRx faster by more than 5% | **5/20** |
+| Within 5% | **11/20** |
 | Reference faster by more than 5% | **4/20** |
-| Geometric-mean TIRx speedup | **1.050x** |
+| Geometric-mean TIRx speedup | **1.059x** |
 | Rows with either CV above 10% | **8/20** |
 
 The mixed geomean is descriptive only: it gives one vote to each selected workload, not to each model invocation. The per-row numbers are the result to use.
@@ -20,14 +20,14 @@ The mixed geomean is descriptive only: it gives one vote to each selected worklo
 
 | Family | Kernel / config | TIRx µs | CV | Reference | Reference µs | CV | Speedup |
 |---|---|---:|---:|---|---:|---:|---:|
-| Dense GEMM | `fp16_bf16_gemm/bf16_4096x4096x4096` | 1176.022 | 27.3% | `torch-cublas` | 1231.584 | 0.8% | **1.047x** |
-| Dense GEMM | `fp16_bf16_gemm/fp16_4096x4096x4096` | 1205.268 | 27.5% | `torch-cublas` | 1219.785 | 0.4% | **1.012x** |
-| Quantized GEMM | `nvfp4_gemm/4096x4096x4096` | 384.989 | 7.8% | `flashinfer` | 353.804 | 7.0% | **0.919x** |
+| Dense GEMM | `fp16_bf16_gemm/bf16_4096x4096x4096` | 1346.893 | 28.8% | `torch-cublas` | 1358.055 | 16.7% | **1.008x** |
+| Dense GEMM | `fp16_bf16_gemm/fp16_4096x4096x4096` | 998.801 | 0.7% | `torch-cublas` | 1282.266 | 0.9% | **1.284x** |
+| Quantized GEMM | `nvfp4_gemm/4096x4096x4096` | 374.545 | 8.9% | `flashinfer` | 347.978 | 8.2% | **0.929x** |
 | Attention | `flash_attention4/s4096_h32kv4_causal` | 971.528 | 2.9% | `flashinfer_fa2` | 2943.756 | 0.1% | **3.030x** |
-| Normalization | `flashinfer_fused_add_rmsnorm/fused_bf16_m32_h4096_xc_rc_pdl1` | 17.154 | 16.1% | `flashinfer_cutedsl` | 15.028 | 4.2% | **0.876x** |
-| Normalization | `flashinfer_fused_dit_layernorm/grgb_bf16_b1_r1920` | 325.743 | 13.2% | `flashinfer_cuda` | 311.435 | 13.0% | **0.956x** |
-| Normalization | `flashinfer_layernorm/bf16_m128_h16384_xc_yc_pdl0_eps1e6` | 76.161 | 4.6% | `flashinfer_cutedsl` | 76.394 | 6.0% | **1.003x** |
-| Normalization | `flashinfer_qk_rmsnorm/rms_bf16_b32_n32_h128_xc_yc_pdl0` | 6.136 | 9.2% | `flashinfer_cutedsl` | 6.142 | 7.4% | **1.001x** |
+| Normalization | `flashinfer_fused_add_rmsnorm/fused_bf16_m32_h4096_xc_rc_pdl1` | 16.030 | 19.2% | `flashinfer_cutedsl` | 13.827 | 9.1% | **0.863x** |
+| Normalization | `flashinfer_fused_dit_layernorm/grgb_bf16_b1_r1920` | 334.494 | 11.2% | `flashinfer_cuda` | 325.428 | 10.3% | **0.973x** |
+| Normalization | `flashinfer_layernorm/bf16_m128_h16384_xc_yc_pdl0_eps1e6` | 79.794 | 7.2% | `flashinfer_cutedsl` | 78.551 | 7.0% | **0.984x** |
+| Normalization | `flashinfer_qk_rmsnorm/rms_bf16_b32_n32_h128_xc_yc_pdl0` | 7.001 | 12.9% | `flashinfer_cutedsl` | 6.856 | 7.9% | **0.979x** |
 | Normalization | `flashinfer_rmsnorm/rms_bf16_m32_h4096_xc_yc_pdl1` | 11.129 | 9.0% | `flashinfer_cutedsl` | 10.228 | 11.3% | **0.919x** |
 | Normalization | `flashinfer_rmsnorm_quant/bf16_e4m3_m64_h8192_xc_yc_pdl0_s1` | 18.377 | 4.3% | `flashinfer_cutedsl` | 17.728 | 8.2% | **0.965x** |
 | Activation / quantization | `act_and_mul/gelu_tanh_fp16_d11008_t8192` | 2434.706 | 11.1% | `flashinfer` | 2262.402 | 0.6% | **0.929x** |
@@ -41,7 +41,7 @@ The mixed geomean is descriptive only: it gives one vote to each selected worklo
 | Recurrent / SSM | `recurrent_kda_decode_grouped/ver_t8_hv12_b16` | 398.642 | 9.9% | `flashinfer_cutedsl` | 393.236 | 10.9% | **0.986x** |
 | Recurrent / SSM | `selective_state_update_mtp_horizontal/b512_h64_d64_s128_t6_r8_statebf16_official` | 3526.438 | 0.0% | `flashinfer_cuda` | 3829.149 | 0.0% | **1.086x** |
 
-The NVFP4 row also measured cuBLASLt at **349.897 µs** (CV 5.6%), or **0.909x** relative to TIRx. FlashInfer is retained as that row's primary baseline to follow the requested priority.
+The NVFP4 row also measured cuBLASLt at **360.902 µs** (CV 7.1%), or **0.964x** relative to TIRx. FlashInfer is retained as that row's primary baseline to follow the requested priority.
 
 ## Main-family coverage without a publishable Thor number
 
@@ -66,13 +66,13 @@ These are unavailable comparisons, not zero performance and not failed TIRx corr
 | Rounds / aggregation | 5 / arithmetic mean |
 | Warmup / repeat | 1000 ms / 100 ms per implementation per round |
 | TVM/TIR revision | `15b607d6` |
-| TIRx-kernels revision | `bb69d704-dirty` |
+| TIRx-kernels revision | `d3e698c7` |
 | FlashInfer version / revision | `0.6.18` / `f2e04400` |
 
-Rows above 10% CV are retained and visibly flagged by their CV columns. In particular, the two 4096-cube GEMMs saw a slow first TIRx round under dynamic Thor clocks. Their absolute means and near-threshold ratios should be rerun with `sudo jetson_clocks` before publication.
+Rows above 10% CV are retained and visibly flagged by their CV columns. In particular, the BF16 4096-cube GEMM switched between fast and slow clock regimes within its five rounds. Its absolute mean and near-threshold ratio should be rerun with `sudo jetson_clocks` before publication.
 
 ## Raw evidence
 
 - Original representative run: `/home/tlopexh/thor-validation/flashinfer-native-final/runs/2.json`
-- Classic additions run: `/home/tlopexh/thor-validation/classic-baseline-additions/runs/2.json`
+- Classic additions run: `/home/tlopexh/thor-validation/classic-baseline-additions/runs/3.json`
 - Both runs used five round samples per implementation and had no interference retries in the selected final artifacts.
