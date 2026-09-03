@@ -703,7 +703,13 @@ def run_gpu(prepared: PreparedBench, *, warmup=None, repeat=None, timer=None, **
         return lambda: torch.matmul(A, B.T, out=C_out)
 
     references = {"torch-cublas": _torch_cublas}
-    if prepared.dtype == "bf16":
+    # DeepGEMM's BF16 entry point rejects compute capability 11, while the
+    # cuBLAS path is architecture-generic and remains the exact Thor baseline.
+    # Keep the additional DeepGEMM diagnostics unchanged on their supported
+    # architectures instead of making an otherwise valid Thor comparison fail.
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepared.dtype == "bf16" and prepare_cuda_arch() != "sm_110a":
 
         def _deepgemm_cublaslt():
             import deep_gemm
