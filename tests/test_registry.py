@@ -62,8 +62,8 @@ def test_exact_architectures_are_stored_in_source_index():
         ("sm_100a",): 9,
         ("sm_103a",): 6,
         ("sm_107a",): 4,
-        ("sm_100a", "sm_103a", "sm_107a"): 23,
-        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 67,
+        ("sm_100a", "sm_103a", "sm_107a"): 2,
+        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 88,
         ("sm_100a", "sm_110a"): 2,
     }
 
@@ -78,7 +78,6 @@ def test_reference_requirements_are_stored_in_source_index():
         "cudnn": ("nvidia-cudnn-frontend", "nvidia-cutlass-dsl"),
         "deepep": ("deep-ep",),
         "deepgemm": ("deep-gemm",),
-        "flashattention": ("flash-attn-4", "nvidia-cutlass-dsl"),
         "flashinfer": ("flashinfer-python", "nvidia-cutlass-dsl"),
         "msa": ("msa", "nvidia-cutlass-dsl", "quack-kernels"),
     }
@@ -121,6 +120,18 @@ def test_reference_requirements_are_stored_in_source_index():
         "sparse_flashmla_prefill_head128_phase1": (),
         "sparse_flashmla_prefill_head128_small_topk_phase1": (),
         "sparse_flashmla_prefill_head64_phase1": (),
+    }
+    assert {
+        name: packages(name)
+        for name, record in index.items()
+        if record.category == "flashattention"
+    } == {
+        "flash_attention4": (
+            "flashinfer-python",
+            "flash-attn-4",
+            "nvidia-cutlass-dsl",
+        ),
+        "flash_attention_backward_sm100": ("flash-attn-4", "nvidia-cutlass-dsl"),
     }
 
     fla = index["agent_evolved_kda_forward_b1_t8192"].reference_requirements
