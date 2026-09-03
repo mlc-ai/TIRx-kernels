@@ -159,6 +159,32 @@ def test_e4m3x2_to_bf16x2_falls_back_off_sm100a(monkeypatch):
     assert len(_calls_named(fallback.func, "tirx.ptx.mov_unpack_b16x2")) == 1
 
 
+def test_stochastic_f16x2_conversion_falls_back_off_supported_arches(monkeypatch):
+    def build():
+        @K.kernel(warps=1, arch="sm_100a", grid=False)
+        def probe(out: K.gptr("uint32")):
+            result = K.local_scalar("uint32")
+            K.idioms.cvt_rs_f16x2_f32(
+                result, K.float32(1.0), K.float32(-1.0), K.uint32(0x12340567)
+            )
+            K.ptx.st.global_.b32(out.ptr_to([0]), result)
+
+        return probe
+
+    monkeypatch.delenv("TIRX_PREPARE_CUDA_ARCH", raising=False)
+    native = build()
+    assert len(_calls_named(native.func, "tirx.ptx.cvt_rs_f16x2_f32")) == 1
+
+    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_103a")
+    native_sm103 = build()
+    assert len(_calls_named(native_sm103.func, "tirx.ptx.cvt_rs_f16x2_f32")) == 1
+
+    monkeypatch.setenv("TIRX_PREPARE_CUDA_ARCH", "sm_110a")
+    fallback = build()
+    assert not _calls_named(fallback.func, "tirx.ptx.cvt_rs_f16x2_f32")
+    assert len(_calls_named(fallback.func, "tirx.ptx.mov")) == 1
+
+
 def test_mbarrier_arrive_forwards_count_and_predicate():
     @K.kernel(warps=1, arch="sm_100a", grid=False)
     def probe(out: K.gptr("float32")):

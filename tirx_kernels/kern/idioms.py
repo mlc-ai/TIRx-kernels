@@ -833,6 +833,64 @@ def cvt_e4m3x2_to_bf16x2(dst, value):
     T.evaluate(T.ptx.cvt.rn.bf16x2.f32(dst, hi[0], lo[0]))
 
 
+def cvt_rs_f16x2_f32(dst, a, b, rbits):
+    """Stochastically convert two f32 values to a packed f16 pair.
+
+    ``cvt.rs.f16x2.f32`` is architecture-specific: PTX exposes it on
+    ``sm_100a`` and ``sm_103a``, but CUDA 13.1 rejects it for Thor's
+    ``sm_110a``.  Preserve the native instruction on the two supported
+    targets and otherwise use FlashInfer's integer emulation: add each
+    13-bit random field to the discarded f32 mantissa bits, then truncate and
+    rebias the result to f16.
+
+    The operand and random-bit layout follows PTX directly: ``a`` becomes the
+    high half and consumes bits 28:16 of *rbits*; ``b`` becomes the low half
+    and consumes bits 12:0.
+    """
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch("sm_100a") in {"sm_100a", "sm_103a"}:
+        T.evaluate(T.ptx.cvt.rs.f16x2.f32(dst, a, b, rbits))
+        return
+
+    def cvt_rs_f16_sw(value, random13):
+        materialized = T.alloc_local([1], "float32")
+        _I.buffer_store(materialized, value, [0])
+        bits = T.reinterpret("uint32", materialized[0])
+        sign = T.bitwise_and(bits, T.uint32(0x80000000))
+        abs_bits = T.bitwise_and(bits, T.uint32(0x7FFFFFFF)) + T.bitwise_and(
+            random13, T.uint32(0x1FFF)
+        )
+        f32_exp = T.bitwise_and(
+            T.shift_right(abs_bits, T.uint32(23)), T.uint32(0xFF)
+        )
+        f32_mantissa = T.bitwise_and(abs_bits, T.uint32(0x7FFFFF))
+        normal = T.bitwise_or(
+            T.shift_left(f32_exp - T.uint32(112), T.uint32(10)),
+            T.shift_right(f32_mantissa, T.uint32(13)),
+        )
+        magnitude = T.if_then_else(
+            f32_exp == T.uint32(0xFF),
+            T.if_then_else(
+                f32_mantissa != T.uint32(0), T.uint32(0x7E00), T.uint32(0x7C00)
+            ),
+            T.if_then_else(
+                f32_exp > T.uint32(142),
+                T.uint32(0x7C00),
+                T.if_then_else(f32_exp < T.uint32(113), T.uint32(0), normal),
+            ),
+        )
+        return T.bitwise_or(T.shift_right(sign, T.uint32(16)), magnitude)
+
+    lo = cvt_rs_f16_sw(b, T.bitwise_and(rbits, T.uint32(0x1FFF)))
+    hi = cvt_rs_f16_sw(
+        a,
+        T.bitwise_and(T.shift_right(rbits, T.uint32(16)), T.uint32(0x1FFF)),
+    )
+    packed = T.bitwise_or(lo, T.shift_left(hi, T.uint32(16)))
+    T.evaluate(T.ptx.mov.b32(dst, packed))
+
+
 # ---------------------------------------------------------------------------
 # warp reduction
 # ---------------------------------------------------------------------------
@@ -960,6 +1018,7 @@ def warp_scan_add(vals, n, lane, *, width=32, chain=True):
 __all__ = [
     "cast_f16x2_to_f32x2",
     "cvt_e4m3x2_to_bf16x2",
+    "cvt_rs_f16x2_f32",
     "decode_instr_descriptor",
     "mma_chain",
     "sigmoid_tanh_approx_f32",

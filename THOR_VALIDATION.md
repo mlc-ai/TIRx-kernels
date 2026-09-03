@@ -13,7 +13,7 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 34 kernels and 776 configurations
+- Fully validated: 40 kernels and 1,012 configurations
 
 The operator-level smoke sweep currently reports 56 numerical passes, 30
 failures, and 9 skips.  Follow-up launch-only checks show that 27 more kernels
@@ -41,6 +41,20 @@ On this Thor environment, set
 `TRITON_CUPTI_LIB_PATH=/usr/local/cuda-13.1/extras/CUPTI/lib64` before running
 Proton.  Triton 3.5.1 otherwise selects its bundled CUDA 12.8 CUPTI, whose
 `cuptiSubscribe` cannot initialize against the CUDA 13.1 driver stack.
+
+## Mamba stochastic-rounding compatibility
+
+PTX exposes `cvt.rs.f16x2.f32` only on `sm_100a` and `sm_103a`; CUDA 13.1
+`ptxas` rejects that instruction for `sm_110a`.  The shared
+`K.idioms.cvt_rs_f16x2_f32` helper therefore keeps the native instruction on
+the two supported architectures and mirrors the pinned FlashInfer software
+path on Thor: add each supplied 13-bit random field to the discarded FP32
+mantissa bits, truncate, and rebias to FP16.
+
+All 12 Philox configurations across the six selective-state-update kernels
+initially reproduced the unsupported-instruction error.  After the fallback,
+the complete family passes 236/236 configurations, including STP/MTP,
+horizontal/vertical/simple, and intermediate-state variants.
 
 ## BSA forward-combine observation
 
@@ -79,6 +93,7 @@ The resumable local JSONL runs are kept outside the repository under `/tmp`:
 - `tirx-thor-main-0512291-batch7-gdn-prefill-full.jsonl`
 - `tirx-thor-main-0512291-batch8-linear-attention-full.jsonl`
 - `tirx-thor-main-0512291-batch9-attention-norm-full.jsonl`
+- `tirx-thor-main-0512291-batch10-mamba-ssu-final.jsonl`
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only

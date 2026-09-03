@@ -19,7 +19,7 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "selective_state_update_stp_simple",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -787,7 +787,7 @@ def get_kernel(**kwargs: Any):
                                 random13: K.uint32 = K.bitwise_and(
                                     random_words[e % 4], K.uint32(0x1FFF)
                                 )
-                                K.ptx.cvt.rs.f16x2.f32(
+                                K.idioms.cvt_rs_f16x2_f32(
                                     sr_raw[e], K.float32(0.0), new_state, random13
                                 )
                             elif STATE_BYTES == 2:

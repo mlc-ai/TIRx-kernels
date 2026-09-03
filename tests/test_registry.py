@@ -62,8 +62,8 @@ def test_exact_architectures_are_stored_in_source_index():
         ("sm_100a",): 10,
         ("sm_103a",): 6,
         ("sm_107a",): 4,
-        ("sm_100a", "sm_103a", "sm_107a"): 57,
-        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 33,
+        ("sm_100a", "sm_103a", "sm_107a"): 51,
+        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 39,
         ("sm_100a", "sm_110a"): 1,
     }
 
