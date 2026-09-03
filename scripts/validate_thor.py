@@ -115,6 +115,7 @@ def _parent(args: argparse.Namespace) -> int:
     kernel_filter = set(args.kernel) if args.kernel else None
     counts = {"PASS": 0, "LAUNCH_ONLY": 0, "FAIL": 0, "SKIP": 0, "TIMEOUT": 0}
     selected = list(_cases(smoke=args.smoke, kernel_filter=kernel_filter))
+    selected = selected[args.shard_index :: args.shard_count]
     print(
         f"selected={len(selected)} completed={len(completed)} "
         f"results={args.results}",
@@ -211,12 +212,22 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=900, help="per-config timeout in seconds")
     parser.add_argument("--available-gpus", type=int, default=1)
     parser.add_argument(
+        "--shard-count", type=int, default=1, help="split the stable selected case list"
+    )
+    parser.add_argument(
+        "--shard-index", type=int, default=0, help="zero-based shard of the selected case list"
+    )
+    parser.add_argument(
         "--launch-only",
         action="store_true",
         help="compile and launch without a correctness oracle; reports LAUNCH_ONLY, never PASS",
     )
     parser.add_argument("--worker", nargs=2, metavar=("KERNEL", "CONFIG"), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.shard_count < 1:
+        parser.error("--shard-count must be positive")
+    if not 0 <= args.shard_index < args.shard_count:
+        parser.error("--shard-index must be in [0, --shard-count)")
     if args.worker:
         return _worker(*args.worker, launch_only=args.launch_only)
     return _parent(args)
