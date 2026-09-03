@@ -19,6 +19,7 @@ from tirx_kernels.flashinfer.norm._kern_helpers import _cvt_from_f32, _cvt_pair_
 from tirx_kernels.flashinfer.norm.rmsnorm_fp4quant import (
     _add_f32,
     _add_s32,
+    _assert_streaming_math,
     _butterfly_sum_f32,
     _ceil_div,
     _cluster_mbarrier_wait,
@@ -38,12 +39,14 @@ from tirx_kernels.flashinfer.norm.rmsnorm_fp4quant import (
     _rsqrt_approx_ftz,
     _scale_offset,
     _store_global_u64,
+    _thor_source_cluster_limit,
     _threads_per_row,
     _ue8m0_to_output_scale,
     _widen_and_scale_16,
 )
 from tirx_kernels.flashinfer.utils.fp_quant import absmax_8, hmax2
 from tirx_kernels.runner import bench
+from tirx_kernels.target import prepare_cluster_shape
 
 KERNEL_META = {
     "name": "flashinfer_add_rmsnorm_fp4quant",
@@ -353,15 +356,26 @@ def _estimate_smem(H: int, cluster_n: int) -> int:
     return 2 * source["tile_bytes"] + reduction * cluster_n + 8
 
 
-def _source_config(H: int) -> dict[str, int]:
+def _source_cluster_n(H: int) -> int:
     cluster_n = 16
     for candidate in (1, 2, 4, 8, 16):
         if H % candidate == 0 and _estimate_smem(H, candidate) <= _OPTIN_SMEM_BYTES:
             cluster_n = candidate
             break
+    return cluster_n
+
+
+def _source_config(H: int) -> dict[str, int]:
+    cluster_n = prepare_cluster_shape((1, _source_cluster_n(H)))[1]
     source = _derived_config(H, cluster_n)
+    use_async = _estimate_smem(H, cluster_n) <= _OPTIN_SMEM_BYTES
     source["cluster_n"] = cluster_n
-    source["smem_bytes"] = _estimate_smem(H, cluster_n)
+    source["use_async"] = use_async
+    source["smem_bytes"] = (
+        ((4 if cluster_n == 1 else 2) * source["tile_bytes"] if use_async else 0)
+        + source["rows"] * source["warps_per_row"] * cluster_n * 4
+        + (8 if cluster_n > 1 else 0)
+    )
     return source
 
 
@@ -807,10 +821,11 @@ def get_kernel(**config: Any):
     vec_blocks = int(source["vec_blocks"])
     cols = int(source["cols"])
     tile_bytes = int(source["tile_bytes"])
+    use_async = bool(source["use_async"])
     smem_bytes = int(source["smem_bytes"])
     total_values = 8 * vec_blocks
     packed_pairs = 4 * vec_blocks
-    reduce_base = (4 if cluster_n == 1 else 2) * tile_bytes
+    reduce_base = (4 if cluster_n == 1 else 2) * tile_bytes if use_async else 0
     reduce_count = rows * warps_per_row * cluster_n
     mbar_offset = reduce_base + reduce_count * 4
     expected_bytes = reduce_count * 4
@@ -872,57 +887,78 @@ def get_kernel(**config: Any):
             K.ptx.barrier.cluster.arrive.relaxed()
             K.ptx.barrier.cluster.wait()
 
-        for vb in range(vec_blocks):
-            local_col: K.int32 = (thread_in_row + vb * tpr) * 8
-            absolute_col: K.int32 = block_y * cols + local_col
-            col_valid: K.bool = absolute_col < H
-            source_bytes: K.uint32 = K.uint32(16)
-            if not full_columns:
-                source_bytes = K.cast(K.if_then_else(col_valid, 16, 0), "uint32")
-            with K.If(row_valid), K.Then():
-                x_offset: K.int64 = K.cast(actual_row, "int64") * K.int64(H) + K.cast(
-                    absolute_col, "int64"
-                )
-                K.ptx["cp.async.ca.shared.global"](
-                    shared_raw.ptr_to([(row_in_cta * cols + local_col) * 2]),
-                    x.ptr_to([x_offset]),
-                    16,
-                    source_bytes,
-                )
-                K.ptx["cp.async.ca.shared.global"](
-                    shared_raw.ptr_to([tile_bytes + (row_in_cta * cols + local_col) * 2]),
-                    residual.ptr_to([x_offset]),
-                    16,
-                    source_bytes,
-                )
-            if cluster_n == 1:
-                K.ptx["cp.async.ca.shared.global"](
-                    shared_raw.ptr_to([2 * tile_bytes + (row_in_cta * cols + local_col) * 2]),
-                    weight.ptr_to([absolute_col]),
-                    16,
-                    source_bytes,
-                )
-        K.ptx.cp.async_.commit_group()
-        K.ptx.cp.async_.wait_group(0)
+        if use_async:
+            for vb in range(vec_blocks):
+                local_col: K.int32 = (thread_in_row + vb * tpr) * 8
+                absolute_col: K.int32 = block_y * cols + local_col
+                col_valid: K.bool = absolute_col < H
+                source_bytes: K.uint32 = K.uint32(16)
+                if not full_columns:
+                    source_bytes = K.cast(K.if_then_else(col_valid, 16, 0), "uint32")
+                with K.If(row_valid), K.Then():
+                    x_offset: K.int64 = K.cast(actual_row, "int64") * K.int64(H) + K.cast(
+                        absolute_col, "int64"
+                    )
+                    K.ptx["cp.async.ca.shared.global"](
+                        shared_raw.ptr_to([(row_in_cta * cols + local_col) * 2]),
+                        x.ptr_to([x_offset]),
+                        16,
+                        source_bytes,
+                    )
+                    K.ptx["cp.async.ca.shared.global"](
+                        shared_raw.ptr_to([tile_bytes + (row_in_cta * cols + local_col) * 2]),
+                        residual.ptr_to([x_offset]),
+                        16,
+                        source_bytes,
+                    )
+                if cluster_n == 1:
+                    K.ptx["cp.async.ca.shared.global"](
+                        shared_raw.ptr_to([2 * tile_bytes + (row_in_cta * cols + local_col) * 2]),
+                        weight.ptr_to([absolute_col]),
+                        16,
+                        source_bytes,
+                    )
+            K.ptx.cp.async_.commit_group()
+            K.ptx.cp.async_.wait_group(0)
 
         x_words = K.alloc_local((packed_pairs,), "uint32")
         r_words = K.alloc_local((packed_pairs,), "uint32")
         for vb in range(vec_blocks):
             local_col: K.int32 = (thread_in_row + vb * tpr) * 8
-            K.ptx.ld.shared.v4.b32(
-                x_words[vb * 4],
-                x_words[vb * 4 + 1],
-                x_words[vb * 4 + 2],
-                x_words[vb * 4 + 3],
-                shared_raw.ptr_to([(row_in_cta * cols + local_col) * 2]),
-            )
-            K.ptx.ld.shared.v4.b32(
-                r_words[vb * 4],
-                r_words[vb * 4 + 1],
-                r_words[vb * 4 + 2],
-                r_words[vb * 4 + 3],
-                shared_raw.ptr_to([tile_bytes + (row_in_cta * cols + local_col) * 2]),
-            )
+            if use_async:
+                K.ptx.ld.shared.v4.b32(
+                    x_words[vb * 4],
+                    x_words[vb * 4 + 1],
+                    x_words[vb * 4 + 2],
+                    x_words[vb * 4 + 3],
+                    shared_raw.ptr_to([(row_in_cta * cols + local_col) * 2]),
+                )
+                K.ptx.ld.shared.v4.b32(
+                    r_words[vb * 4],
+                    r_words[vb * 4 + 1],
+                    r_words[vb * 4 + 2],
+                    r_words[vb * 4 + 3],
+                    shared_raw.ptr_to([tile_bytes + (row_in_cta * cols + local_col) * 2]),
+                )
+            else:
+                absolute_col: K.int32 = block_y * cols + local_col
+                x_offset: K.int64 = K.cast(actual_row, "int64") * K.int64(H) + K.cast(
+                    absolute_col, "int64"
+                )
+                K.ptx.ld.global_.v4.u32(
+                    x_words[vb * 4],
+                    x_words[vb * 4 + 1],
+                    x_words[vb * 4 + 2],
+                    x_words[vb * 4 + 3],
+                    x.ptr_to([x_offset]),
+                )
+                K.ptx.ld.global_.v4.u32(
+                    r_words[vb * 4],
+                    r_words[vb * 4 + 1],
+                    r_words[vb * 4 + 2],
+                    r_words[vb * 4 + 3],
+                    residual.ptr_to([x_offset]),
+                )
 
         x_f32 = K.alloc_local((total_values,), "float32")
         r_f32 = K.alloc_local((total_values,), "float32")
@@ -1461,19 +1497,23 @@ def _flashinfer_compiled(
     enable_pdl: bool,
     output_norm: bool,
 ):
-    from flashinfer.cute_dsl.add_rmsnorm_fp4quant import _get_compiled_kernel
-
-    return _get_compiled_kernel(
-        H,
-        block_size,
-        input_dtype == "float16",
-        100,
-        scale_format,
-        swizzled,
-        output_both_sf_layouts,
-        enable_pdl,
-        output_norm,
+    from flashinfer.cute_dsl.add_rmsnorm_fp4quant import (
+        AddRMSNormFP4QuantKernel,
+        _get_compiled_kernel,
     )
+
+    with _thor_source_cluster_limit(AddRMSNormFP4QuantKernel):
+        return _get_compiled_kernel(
+            H,
+            block_size,
+            input_dtype == "float16",
+            100,
+            scale_format,
+            swizzled,
+            output_both_sf_layouts,
+            enable_pdl,
+            output_norm,
+        )
 
 
 def _launch_flashinfer(data, output, config: dict[str, Any]):
@@ -1704,20 +1744,47 @@ def run_test(**config: Any) -> None:
     )
     if _launch_tirx(executable, tirx_data, tirx_output, config) is not None:
         raise AssertionError("TIRx AddRMSNormFP4Quant ABI must return None")
-    if _launch_flashinfer(source_data, source_output, config) is not None:
-        raise AssertionError("FlashInfer AddRMSNormFP4Quant ABI must return None")
+    use_source_reference = bool(_source_config(int(config["H"]))["use_async"])
+    if use_source_reference:
+        if _launch_flashinfer(source_data, source_output, config) is not None:
+            raise AssertionError("FlashInfer AddRMSNormFP4Quant ABI must return None")
     torch.cuda.synchronize()
 
-    _assert_raw_equal(tirx_output, source_output, config, name="FlashInfer raw-byte oracle")
-    if not torch.equal(tirx_data["residual"], source_data["residual"]):
-        count = int((tirx_data["residual"] != source_data["residual"]).sum().item())
-        raise AssertionError(f"FlashInfer residual oracle: {count} values differ")
+    if use_source_reference:
+        _assert_raw_equal(tirx_output, source_output, config, name="FlashInfer raw-byte oracle")
+        if not torch.equal(tirx_data["residual"], source_data["residual"]):
+            count = int((tirx_data["residual"] != source_data["residual"]).sum().item())
+            raise AssertionError(f"FlashInfer residual oracle: {count} values differ")
+    else:
+        M, H = int(config["M"]), int(config["H"])
+        h = tirx_snapshot["x"].view(M, H).float() + tirx_snapshot["residual"].view(M, H).float()
+        rstd = torch.rsqrt(h.square().mean(dim=-1, keepdim=True) + float(config["eps"]))
+        rounded_h = h.to(tirx_data["residual"].dtype)
+        values = (rounded_h * tirx_data["weight"]).to(rounded_h.dtype).float() * rstd
+        _assert_streaming_math(
+            tirx_output,
+            values,
+            tirx_data["global_scale"],
+            config,
+            exact_packed=False,
+            logical_scales=_logical_scale_bytes(tirx_output, config),
+        )
+        if bool(config["output_both_sf_layouts"]) and not torch.equal(
+            _logical_scale_bytes(tirx_output, config), tirx_output["scale_unswizzled"]
+        ):
+            raise AssertionError("streaming primary and linear scale layouts differ")
+        if bool(config["output_norm"]):
+            torch.testing.assert_close(
+                tirx_output["y_norm"], values.to(tirx_output["y_norm"].dtype), rtol=0, atol=0
+            )
     _assert_inputs_and_residual(tirx_data, tirx_snapshot, config, name="TIRx")
-    _assert_inputs_and_residual(source_data, source_snapshot, config, name="FlashInfer")
+    if use_source_reference:
+        _assert_inputs_and_residual(source_data, source_snapshot, config, name="FlashInfer")
     _assert_math(tirx_output, tirx_data, tirx_snapshot, config)
     _assert_output_integrity(tirx_output, config, name="TIRx output")
-    _assert_output_integrity(source_output, config, name="FlashInfer output")
-    _check_public_allocation(source_output, source_data, config)
+    if use_source_reference:
+        _assert_output_integrity(source_output, config, name="FlashInfer output")
+        _check_public_allocation(source_output, source_data, config)
 
 
 def prepare_bench(**config: Any):
@@ -1762,9 +1829,14 @@ def run_gpu(
             raise AssertionError("benchmark residual precheck differs")
         return source_launch
 
+    references = (
+        {"flashinfer_cutedsl": build_flashinfer_reference}
+        if bool(_source_config(int(config["H"]))["use_async"])
+        else {}
+    )
     return bench(
         {"tirx": tirx_launch},
-        references={"flashinfer_cutedsl": build_flashinfer_reference},
+        references=references,
         warmup=warmup,
         repeat=repeat,
         timer=timer,

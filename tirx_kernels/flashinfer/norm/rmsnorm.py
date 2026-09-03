@@ -15,11 +15,12 @@ from typing import Any
 
 import tirx_kernels.kern as K
 from tirx_kernels.runner import bench
+from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "flashinfer_rmsnorm",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -113,12 +114,22 @@ def _estimate_smem(H: int, cluster_n: int) -> int:
     )
 
 
-def _source_config(H: int) -> dict[str, int | bool]:
+def _source_cluster_n(H: int) -> int:
     cluster_n = 16
     for candidate in (1, 2, 4, 8, 16):
         if H % candidate == 0 and _estimate_smem(H, candidate) <= _OPTIN_SMEM_BYTES:
             cluster_n = candidate
             break
+    return cluster_n
+
+
+def _source_config(H: int) -> dict[str, int | bool]:
+    cluster_n = _source_cluster_n(H)
+    # Blackwell datacenter parts may launch the source schedule's 16-CTA
+    # cluster, while Thor supports at most eight CTAs per cluster.  Recompute
+    # the complete schedule after shrinking the launch shape so that all
+    # per-CTA slices and distributed reductions remain consistent.
+    cluster_n = prepare_cluster_shape((1, cluster_n))[1]
     return _derived_config(H, cluster_n)
 
 
@@ -977,6 +988,24 @@ def _flashinfer_api(variant: str, device):
     return api, flashinfer_norm
 
 
+@contextlib.contextmanager
+def _thor_source_cluster_limit():
+    """Retarget the pinned CuTe schedule without changing its kernel body."""
+    if prepare_cuda_arch() != "sm_110a":
+        yield
+        return
+    from flashinfer.norm.kernels.rmsnorm import RMSNormKernel
+
+    original = RMSNormKernel._compute_cluster_n
+    RMSNormKernel._compute_cluster_n = staticmethod(
+        lambda H, dtype, sm_version: min(original(H, dtype, sm_version), 8)
+    )
+    try:
+        yield
+    finally:
+        RMSNormKernel._compute_cluster_n = staticmethod(original)
+
+
 def _launch_tirx(executable, data, output, config: dict[str, Any]) -> None:
     M = int(config["M"])
     H = int(config["H"])
@@ -1058,10 +1087,11 @@ def run_test(**config: Any) -> None:
 
     flashinfer_norm.rmsnorm_cute = tracked_cute
     try:
-        reference_implicit = api(data["x"], data["weight"], eps, enable_pdl=enable_pdl)
-        returned = api(
-            data["x"], data["weight"], eps, out=reference_out["view"], enable_pdl=enable_pdl
-        )
+        with _thor_source_cluster_limit():
+            reference_implicit = api(data["x"], data["weight"], eps, enable_pdl=enable_pdl)
+            returned = api(
+                data["x"], data["weight"], eps, out=reference_out["view"], enable_pdl=enable_pdl
+            )
     finally:
         flashinfer_norm.rmsnorm_cute = original_cute
     if cute_calls != 2:
@@ -1121,9 +1151,14 @@ def run_gpu(
         api, _ = _flashinfer_api(variant, data["x"].device)
 
         def flashinfer_launch():
-            return api(
-                data["x"], data["weight"], eps, out=flashinfer_output["view"], enable_pdl=enable_pdl
-            )
+            with _thor_source_cluster_limit():
+                return api(
+                    data["x"],
+                    data["weight"],
+                    eps,
+                    out=flashinfer_output["view"],
+                    enable_pdl=enable_pdl,
+                )
 
         returned = flashinfer_launch()
         if returned is not flashinfer_output["view"]:

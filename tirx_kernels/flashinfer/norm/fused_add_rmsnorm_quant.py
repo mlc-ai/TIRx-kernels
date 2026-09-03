@@ -37,6 +37,7 @@ from ._kern_helpers import (
     _threads_per_row,
 )
 from .fused_add_rmsnorm import _source_config as _fused_source_config
+from .fused_add_rmsnorm import _thor_source_cluster_limit
 from .rmsnorm_quant import (
     _cvt_fp8_pair,
     _maximum_f32,
@@ -1354,15 +1355,16 @@ def run_test(**config: Any) -> None:
 
         flashinfer_norm.fused_add_rmsnorm_quant_cute = tracked_cute
         try:
-            reference_returned = api(
-                reference_output["view"],
-                reference["input"],
-                reference["residual"],
-                reference["weight"],
-                reference["scale"],
-                eps,
-                enable_pdl=enable_pdl,
-            )
+            with _thor_source_cluster_limit():
+                reference_returned = api(
+                    reference_output["view"],
+                    reference["input"],
+                    reference["residual"],
+                    reference["weight"],
+                    reference["scale"],
+                    eps,
+                    enable_pdl=enable_pdl,
+                )
         finally:
             flashinfer_norm.fused_add_rmsnorm_quant_cute = original_cute
         if cute_calls != 1:
@@ -1488,7 +1490,8 @@ def run_gpu(
 
         flashinfer_norm.fused_add_rmsnorm_quant_cute = tracked_cute
         try:
-            returned = flashinfer_launch()
+            with _thor_source_cluster_limit():
+                returned = flashinfer_launch()
         finally:
             flashinfer_norm.fused_add_rmsnorm_quant_cute = original_cute
         if cute_calls != 1:

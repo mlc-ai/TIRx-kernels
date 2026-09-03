@@ -16,6 +16,7 @@ from typing import Any
 
 import tirx_kernels.kern as K
 from tirx_kernels.runner import bench
+from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
 
 from ._kern_helpers import (
     _add_f32,
@@ -38,7 +39,7 @@ from ._kern_helpers import (
 KERNEL_META = {
     "name": "flashinfer_fused_add_rmsnorm",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
@@ -105,17 +106,22 @@ def _estimate_smem(H: int, cluster_n: int) -> int:
     )
 
 
-def _source_config(H: int) -> dict[str, int | bool]:
+def _source_cluster_n(H: int) -> int:
     best_fit = 1
     for candidate in (1, 2, 4, 8, 16):
         if H % candidate != 0:
             continue
         required = _estimate_smem(H, candidate)
         if required <= _OPTIN_SMEM_BYTES // 2:
-            return _derived_config(H, candidate)
+            return candidate
         if required <= _OPTIN_SMEM_BYTES and best_fit == 1:
             best_fit = candidate
-    return _derived_config(H, best_fit)
+    return best_fit
+
+
+def _source_config(H: int) -> dict[str, int | bool]:
+    cluster_n = prepare_cluster_shape((1, _source_cluster_n(H)))[1]
+    return _derived_config(H, cluster_n)
 
 
 def _uses_rolled_fragment_loops(H: int) -> bool:
@@ -1041,6 +1047,24 @@ def _flashinfer_api(variant: str, device):
     return getattr(flashinfer, variant), flashinfer_norm
 
 
+@contextlib.contextmanager
+def _thor_source_cluster_limit():
+    """Retarget the pinned CuTe schedule without changing its kernel body."""
+    if prepare_cuda_arch() != "sm_110a":
+        yield
+        return
+    from flashinfer.norm.kernels.fused_add_rmsnorm import FusedAddRMSNormKernel
+
+    original = FusedAddRMSNormKernel._compute_cluster_n
+    FusedAddRMSNormKernel._compute_cluster_n = staticmethod(
+        lambda H, dtype, sm_version: min(original(H, dtype, sm_version), 8)
+    )
+    try:
+        yield
+    finally:
+        FusedAddRMSNormKernel._compute_cluster_n = staticmethod(original)
+
+
 def _launch_tirx(executable, data: dict[str, Any], config: dict[str, Any]) -> None:
     M = int(config["M"])
     H = int(config["H"])
@@ -1096,13 +1120,14 @@ def run_test(**config: Any) -> None:
 
         flashinfer_norm.fused_add_rmsnorm_cute = tracked_cute
         try:
-            returned = api(
-                reference["input"],
-                reference["residual"],
-                reference["weight"],
-                eps,
-                enable_pdl=enable_pdl,
-            )
+            with _thor_source_cluster_limit():
+                returned = api(
+                    reference["input"],
+                    reference["residual"],
+                    reference["weight"],
+                    eps,
+                    enable_pdl=enable_pdl,
+                )
         finally:
             flashinfer_norm.fused_add_rmsnorm_cute = original_cute
         if returned is not None:
@@ -1171,13 +1196,14 @@ def run_gpu(
         api, _ = _flashinfer_api(variant, reference_data["input"].device)
 
         def flashinfer_launch():
-            return api(
-                reference_data["input"],
-                reference_data["residual"],
-                reference_data["weight"],
-                eps,
-                enable_pdl=enable_pdl,
-            )
+            with _thor_source_cluster_limit():
+                return api(
+                    reference_data["input"],
+                    reference_data["residual"],
+                    reference_data["weight"],
+                    eps,
+                    enable_pdl=enable_pdl,
+                )
 
         returned = flashinfer_launch()
         if returned is not None:

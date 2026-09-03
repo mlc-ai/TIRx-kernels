@@ -11,6 +11,7 @@ The source implementation is ``RMSNormFP4QuantKernel`` in
 ``flashinfer.norm.rmsnorm_fp4quant``.
 """
 
+import contextlib
 import functools
 from typing import Any
 
@@ -23,6 +24,7 @@ from tirx_kernels.flashinfer.utils.fp_quant import (
     sf_offset_128x4,
 )
 from tirx_kernels.runner import bench
+from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
 
 KERNEL_META = {
     "name": "flashinfer_rmsnorm_fp4quant",
@@ -379,16 +381,23 @@ def _estimate_smem(H: int, cluster_n: int) -> int:
     return config["tile_bytes"] + reduction * cluster_n + 8
 
 
-def _source_config(H: int) -> dict[str, int]:
+def _source_cluster_n(H: int) -> int:
     cluster_n = 16
     for candidate in (1, 2, 4, 8, 16):
         if H % candidate == 0 and _estimate_smem(H, candidate) <= _OPTIN_SMEM_BYTES:
             cluster_n = candidate
             break
+    return cluster_n
+
+
+def _source_config(H: int) -> dict[str, int]:
+    cluster_n = prepare_cluster_shape((1, _source_cluster_n(H)))[1]
     config = _derived_config(H, cluster_n)
+    use_async = _estimate_smem(H, cluster_n) <= _OPTIN_SMEM_BYTES
     config["cluster_n"] = cluster_n
+    config["use_async"] = use_async
     config["smem_bytes"] = (
-        config["tile_bytes"]
+        (config["tile_bytes"] if use_async else 0)
         + config["rows"] * config["warps_per_row"] * cluster_n * 4
         + (8 if cluster_n > 1 else 0)
     )
@@ -721,10 +730,11 @@ def get_kernel(
     vec_blocks = int(source["vec_blocks"])
     cols = int(source["cols"])
     tile_bytes = int(source["tile_bytes"])
+    use_async = bool(source["use_async"])
     smem_bytes = int(source["smem_bytes"])
     total_values = 8 * vec_blocks
     packed_pairs = total_values // 2
-    reduce_base = tile_bytes
+    reduce_base = tile_bytes if use_async else 0
     reduce_count = rows * warps_per_row * cluster_n
     mbar_offset = reduce_base + reduce_count * 4
     expected_bytes = reduce_count * 4
@@ -774,36 +784,50 @@ def get_kernel(
             K.ptx.barrier.cluster.arrive.relaxed()
             K.ptx.barrier.cluster.wait()
 
-        for vb in range(vec_blocks):
-            local_col: K.int32 = (thread_in_row + vb * tpr) * 8
-            absolute_col: K.int32 = block_y * cols + local_col
-            col_valid: K.bool = absolute_col < H
-            with K.If(row_valid), K.Then():
-                source_bytes: K.uint32 = K.uint32(16)
-                if not full_columns:
-                    source_bytes = K.cast(K.if_then_else(col_valid, 16, 0), "uint32")
-                x_offset: K.int64 = K.cast(actual_row, "int64") * K.int64(H) + K.cast(
-                    absolute_col, "int64"
-                )
-                K.ptx["cp.async.ca.shared.global"](
-                    shared_raw.ptr_to([(row_in_cta * cols + local_col) * 2]),
-                    x.ptr_to([x_offset]),
-                    16,
-                    source_bytes,
-                )
-        K.ptx.cp.async_.commit_group()
-        K.ptx.cp.async_.wait_group(0)
+        if use_async:
+            for vb in range(vec_blocks):
+                local_col: K.int32 = (thread_in_row + vb * tpr) * 8
+                absolute_col: K.int32 = block_y * cols + local_col
+                col_valid: K.bool = absolute_col < H
+                with K.If(row_valid), K.Then():
+                    source_bytes: K.uint32 = K.uint32(16)
+                    if not full_columns:
+                        source_bytes = K.cast(K.if_then_else(col_valid, 16, 0), "uint32")
+                    x_offset: K.int64 = K.cast(actual_row, "int64") * K.int64(H) + K.cast(
+                        absolute_col, "int64"
+                    )
+                    K.ptx["cp.async.ca.shared.global"](
+                        shared_raw.ptr_to([(row_in_cta * cols + local_col) * 2]),
+                        x.ptr_to([x_offset]),
+                        16,
+                        source_bytes,
+                    )
+            K.ptx.cp.async_.commit_group()
+            K.ptx.cp.async_.wait_group(0)
 
         x_words = K.alloc_local((packed_pairs,), "uint32")
         for vb in range(vec_blocks):
             local_col: K.int32 = (thread_in_row + vb * tpr) * 8
-            K.ptx.ld.shared.v4.b32(
-                x_words[vb * 4],
-                x_words[vb * 4 + 1],
-                x_words[vb * 4 + 2],
-                x_words[vb * 4 + 3],
-                shared_raw.ptr_to([(row_in_cta * cols + local_col) * 2]),
-            )
+            if use_async:
+                K.ptx.ld.shared.v4.b32(
+                    x_words[vb * 4],
+                    x_words[vb * 4 + 1],
+                    x_words[vb * 4 + 2],
+                    x_words[vb * 4 + 3],
+                    shared_raw.ptr_to([(row_in_cta * cols + local_col) * 2]),
+                )
+            else:
+                absolute_col: K.int32 = block_y * cols + local_col
+                x_offset: K.int64 = K.cast(actual_row, "int64") * K.int64(H) + K.cast(
+                    absolute_col, "int64"
+                )
+                K.ptx.ld.global_.v4.u32(
+                    x_words[vb * 4],
+                    x_words[vb * 4 + 1],
+                    x_words[vb * 4 + 2],
+                    x_words[vb * 4 + 3],
+                    x.ptr_to([x_offset]),
+                )
 
         x_f32_pairs = K.alloc_local((packed_pairs,), "uint64")
         for pair in range(packed_pairs):
@@ -1144,11 +1168,28 @@ def _compiled_test_specialization(
 def _flashinfer_compiled(
     H: int, block_size: int, input_dtype: str, scale_format: str, swizzled: bool, enable_pdl: bool
 ):
-    from flashinfer.cute_dsl.rmsnorm_fp4quant import _get_compiled_kernel
+    from flashinfer.cute_dsl.rmsnorm_fp4quant import RMSNormFP4QuantKernel, _get_compiled_kernel
 
-    return _get_compiled_kernel(
-        H, block_size, input_dtype == "float16", 100, scale_format, swizzled, enable_pdl
+    with _thor_source_cluster_limit(RMSNormFP4QuantKernel):
+        return _get_compiled_kernel(
+            H, block_size, input_dtype == "float16", 100, scale_format, swizzled, enable_pdl
+        )
+
+
+@contextlib.contextmanager
+def _thor_source_cluster_limit(kernel_type):
+    """Retarget a pinned CuTe FP4 schedule to Thor's eight-CTA limit."""
+    if prepare_cuda_arch() != "sm_110a":
+        yield
+        return
+    original = kernel_type._compute_cluster_n
+    kernel_type._compute_cluster_n = staticmethod(
+        lambda H, dtype, sm_version: min(original(H, dtype, sm_version), 8)
     )
+    try:
+        yield
+    finally:
+        kernel_type._compute_cluster_n = staticmethod(original)
 
 
 def _launch_flashinfer(data, output, config: dict[str, Any]):
@@ -1243,6 +1284,64 @@ def _assert_raw_equal(actual, expected, config: dict[str, Any], *, name: str) ->
         raise AssertionError(f"{name}: {count} logical scale bytes differ")
 
 
+def _nearest_e2m1_codes(values):
+    """Return round-to-nearest-even E2M1 nibbles for FP32 values."""
+    import torch
+
+    levels = torch.tensor((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0), device=values.device)
+    distances = (values.abs().unsqueeze(-1) - levels).abs()
+    minimum = distances.amin(dim=-1, keepdim=True)
+    indices = torch.arange(8, device=values.device)
+    even_candidate = torch.where(
+        (distances == minimum) & (indices % 2 == 0), indices, torch.full_like(indices, 8)
+    ).amin(dim=-1)
+    magnitude = torch.where(even_candidate == 8, distances.argmin(dim=-1), even_candidate)
+    return magnitude | (torch.signbit(values).to(torch.int64) * 8)
+
+
+def _assert_streaming_math(
+    output, values, global_scale, config: dict[str, Any], *, exact_packed: bool, logical_scales=None
+) -> None:
+    """Validate the low-smem Thor path against the complete FP4 equation."""
+    import torch
+
+    if int(config["block_size"]) != 16 or str(config["scale_format"]) != "e4m3":
+        raise AssertionError("the streaming oracle currently expects block-16 E4M3 scales")
+    M, H = int(config["M"]), int(config["H"])
+    blocks = values.view(M, H // 16, 16)
+    expected_scales = (
+        (global_scale.float() * blocks.abs().amax(dim=-1) / 6.0)
+        .clamp(max=448.0)
+        .to(torch.float8_e4m3fn)
+        .view(torch.uint8)
+    )
+    actual_scales = (
+        _logical_scale_bytes(output, config) if logical_scales is None else logical_scales
+    )
+    if not torch.equal(actual_scales, expected_scales):
+        count = int((actual_scales != expected_scales).sum().item())
+        raise AssertionError(f"FP32 scale oracle: {count} E4M3 scale bytes differ")
+
+    scale_values = actual_scales.view(torch.float8_e4m3fn).float()
+    scaled = blocks * (global_scale.float() / scale_values).unsqueeze(-1)
+    raw = output["y"].view(M, H // 2)
+    actual_codes = torch.empty((M, H), dtype=torch.int64, device=raw.device)
+    actual_codes[:, 0::2] = raw & 0xF
+    actual_codes[:, 1::2] = raw >> 4
+    levels = torch.tensor((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0), device=raw.device)
+    decoded = levels[actual_codes & 7] * torch.where(actual_codes & 8 != 0, -1.0, 1.0)
+    max_quant_error = float((decoded.view_as(scaled) - scaled).abs().max().item())
+    if max_quant_error > 1.001:
+        raise AssertionError(f"FP4 quantization error {max_quant_error} exceeds one E2M1 unit")
+
+    if exact_packed:
+        expected_codes = _nearest_e2m1_codes(scaled).view(M, H)
+        expected_raw = (expected_codes[:, 0::2] | (expected_codes[:, 1::2] << 4)).to(torch.uint8)
+        if not torch.equal(raw, expected_raw):
+            count = int((raw != expected_raw).sum().item())
+            raise AssertionError(f"FP32 packed oracle: {count} FP4 bytes differ")
+
+
 def _assert_math(output, data, config: dict[str, Any]) -> None:
     """Zero-global-scale invariant only; FlashInfer's raw bytes are the arbiter.
 
@@ -1259,6 +1358,16 @@ def _assert_math(output, data, config: dict[str, Any]) -> None:
             _logical_scale_bytes(output, config)
         ):
             raise AssertionError("zero global scale must produce signed-zero FP4 values and scales")
+
+
+def _streaming_values(data, config: dict[str, Any]):
+    import torch
+
+    M, H = int(config["M"]), int(config["H"])
+    x = data["x"].view(M, H)
+    rstd = torch.rsqrt(x.float().square().mean(dim=-1, keepdim=True) + float(config["eps"]))
+    product = (x * data["weight"]).to(x.dtype)
+    return product.float() * rstd
 
 
 def _check_public_allocation(data, reference, config: dict[str, Any]) -> None:
@@ -1316,15 +1425,23 @@ def run_test(**config: Any) -> None:
     )
     if _launch_tirx(executable, data, output, config) is not None:
         raise AssertionError("TIRx RMSNormFP4Quant ABI must return None")
-    if _launch_flashinfer(data, reference, config) is not None:
-        raise AssertionError("FlashInfer RMSNormFP4Quant ABI must return None")
+    use_source_reference = bool(_source_config(int(config["H"]))["use_async"])
+    if use_source_reference:
+        if _launch_flashinfer(data, reference, config) is not None:
+            raise AssertionError("FlashInfer RMSNormFP4Quant ABI must return None")
     torch.cuda.synchronize()
-    _assert_raw_equal(output, reference, config, name="FlashInfer raw-byte oracle")
+    if use_source_reference:
+        _assert_raw_equal(output, reference, config, name="FlashInfer raw-byte oracle")
+    else:
+        _assert_streaming_math(
+            output, _streaming_values(data, config), data["global_scale"], config, exact_packed=True
+        )
     _assert_math(output, data, config)
     _assert_inputs_unchanged(data, snapshot, config)
     _assert_output_integrity(output, name="TIRx output")
-    _assert_output_integrity(reference, name="FlashInfer output")
-    _check_public_allocation(data, reference, config)
+    if use_source_reference:
+        _assert_output_integrity(reference, name="FlashInfer output")
+        _check_public_allocation(data, reference, config)
 
 
 def prepare_bench(**config: Any):
@@ -1365,9 +1482,14 @@ def run_gpu(
         _assert_raw_equal(tirx_output, source_output, config, name="benchmark raw-byte precheck")
         return source_launch
 
+    references = (
+        {"flashinfer_cutedsl": build_flashinfer_reference}
+        if bool(_source_config(int(config["H"]))["use_async"])
+        else {}
+    )
     return bench(
         {"tirx": tirx_launch},
-        references={"flashinfer_cutedsl": build_flashinfer_reference},
+        references=references,
         warmup=warmup,
         repeat=repeat,
         timer=timer,

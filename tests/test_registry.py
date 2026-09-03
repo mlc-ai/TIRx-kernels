@@ -59,15 +59,12 @@ def test_exact_architectures_are_stored_in_source_index():
         )
     }
     assert counts == {
-        ("sm_100a",): 10,
+        ("sm_100a",): 9,
         ("sm_103a",): 6,
         ("sm_107a",): 4,
-        ("sm_100a", "sm_103a", "sm_107a"): 46,
-        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 44,
-        ("sm_100a", "sm_110a"): 1,
-        ("sm_107a",): 4,
-        ("sm_100a", "sm_103a", "sm_107a"): 35,
-        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 55,
+        ("sm_100a", "sm_103a", "sm_107a"): 23,
+        ("sm_100a", "sm_103a", "sm_107a", "sm_110a"): 67,
+        ("sm_100a", "sm_110a"): 2,
     }
 
 

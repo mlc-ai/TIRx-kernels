@@ -13,16 +13,16 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 56 kernels and 1,550 configurations
+- Fully validated: 69 kernels and 3,337 configurations
 
-The operator-level smoke sweep currently reports 56 numerical passes, 30
-failures, and 9 skips.  Follow-up launch-only checks show that 27 more kernels
-compile and launch successfully without their unavailable or incompatible
-external correctness references.  Seven DeepGEMM cases are blocked before
-launch by architecture-specific input layout preparation, two communication
-kernels require NVSHMEM, two DeepEP kernels require eight GPUs, and the
-agent-evolved KDA kernel remains conservatively disabled after an earlier
-long-running Thor launch.
+The completed full matrices add 13 kernels to the original operator-level
+smoke sweep. Earlier launch-only checks provide non-numerical evidence for
+some of the 26 kernels not yet admitted, but do not count as correctness
+passes. Seven DeepGEMM cases are blocked before launch by
+architecture-specific input layout preparation, two communication kernels
+require NVSHMEM, two DeepEP kernels require eight GPUs, and the agent-evolved
+KDA kernel remains conservatively disabled after an earlier long-running Thor
+launch.
 
 ## Performance baseline
 
@@ -116,6 +116,28 @@ launch paths checked per shape.  Because its frozen CUDA binary has no Thor
 target, correctness is measured against an independent FP32
 `input @ weight.T + bias` equation rounded to BF16.
 
+## TopK, RMSNorm, and FlashKDA
+
+All three FlashInfer TopK implementations pass their complete Thor matrices:
+FilteredTopK 107/107, single-CTA radix TopK 234/234, and multi-CTA radix TopK
+354/354. Coverage includes FP32, FP16, and BF16; plain, page-table, and ragged
+index transforms; deterministic and atomic collection; tie handling; and the
+workspace reset/reuse paths.
+
+The base RMSNorm family passes 960/960 configurations: RMSNorm 279/279, fused
+add RMSNorm 281/281, and QK RMSNorm 400/400. Three extreme hidden dimensions
+select a 16-CTA cluster in the pinned B200 schedule. On Thor, both the TIRx
+kernel and the unchanged pinned CuTe body are recomputed as complete 8-CTA
+schedules, preserving the source comparison while staying within Thor's
+cluster limit.
+
+The six FlashKDA decode stages pass 126/126 configurations and the BF16 M128
+fused prefill kernel passes 6/6. Their Thor checks use independent FP32
+recurrent gated-delta-rule equations, including speculative checkpoint and
+accepted-token semantics. The BF16 comparison floor is one representable step;
+this covers the handful of hundred-million-element state outputs that differ
+from a differently ordered FP32 recurrence by exactly one BF16 ULP.
+
 ## BSA forward-combine oracle
 
 `cudnn_sm100_bsa_forward_combine_blk64` retains a bitwise-exact comparison
@@ -154,6 +176,14 @@ The resumable local JSONL runs are kept outside the repository under `/tmp`:
 - `tirx-thor-main-0512291-batch18-gdn-cp-full.jsonl`
 - `tirx-thor-main-0512291-batch19-proj-rope-full.jsonl`
 - `tirx-thor-main-0512291-batch20-tinygemm-full.jsonl`
+- `tirx-thor-main-0512291-batch12-filtered-topk.jsonl`
+- `tirx-thor-main-0512291-batch12-radix-single.jsonl`
+- `tirx-thor-main-0512291-batch12-radix-multi.jsonl`
+- `tirx-thor-main-0512291-batch14-rmsnorm-final.jsonl`
+- `tirx-thor-main-0512291-batch14-fused-add-rmsnorm-final.jsonl`
+- `tirx-thor-main-0512291-batch14-qk-rmsnorm.jsonl`
+- `tirx-thor-main-0512291-batch17-flashkda-final.jsonl`
+- `tirx-thor-main-0512291-batch21-flashkda-fused-full.jsonl`
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only
