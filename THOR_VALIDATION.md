@@ -13,24 +13,21 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 69 kernels and 3,337 configurations
+- Fully validated: 90 kernels and 9,204 configurations
 
-The completed full matrices add 13 kernels to the original operator-level
-smoke sweep. Earlier launch-only checks provide non-numerical evidence for
-some of the 26 kernels not yet admitted, but do not count as correctness
-passes. Seven DeepGEMM cases are blocked before launch by
-architecture-specific input layout preparation, two communication kernels
-require NVSHMEM, two DeepEP kernels require eight GPUs, and the agent-evolved
-KDA kernel remains conservatively disabled after an earlier long-running Thor
-launch.
+The remaining five modules contain 78 configurations. Two collectives require
+NVSHMEM (and half of their cases require four GPUs), both DeepEP modules require
+eight GPUs, and MegaMoE combines a compute-10-only DeepGEMM host path with 15
+multi-GPU cases. They remain outside the exact Thor allowlist; the boundary is
+recorded below rather than treating missing hardware or an unavailable
+reference as a correctness pass.
 
 ## Performance baseline
 
-The 23 fully validated kernels also completed all 69 representative benchmark
-rows on Thor: 69 passed, 0 failed, and 0 interference retries.  The
-final run uses the same Proton timer, 25 ms warmup budget, 100 ms repeat budget,
-five independent rounds, and arithmetic-mean aggregation as the repository's
-historical SM100/B200 baseline.
+The final performance campaign uses the same Proton timer, 25 ms warmup budget,
+100 ms repeat budget, five independent rounds, and arithmetic-mean aggregation
+as the repository's historical SM100/B200 baseline. It includes every
+admitted Thor kernel that has a default benchmark workload.
 
 See [THOR_B200_PERFORMANCE.md](THOR_B200_PERFORMANCE.md) for the complete table,
 per-kernel summaries, GEMM effective throughput, round variability, provenance,
@@ -41,6 +38,8 @@ On this Thor environment, set
 `TRITON_CUPTI_LIB_PATH=/usr/local/cuda-13.1/extras/CUPTI/lib64` before running
 Proton.  Triton 3.5.1 otherwise selects its bundled CUDA 12.8 CUPTI, whose
 `cuptiSubscribe` cannot initialize against the CUDA 13.1 driver stack.
+Set `TRITON_PTXAS_PATH=/usr/local/cuda-13.1/bin/ptxas` as well when a reference
+uses Triton; its bundled CUDA 12.8 assembler does not recognize `sm_110a`.
 
 ## Mamba stochastic-rounding compatibility
 
@@ -131,12 +130,26 @@ kernel and the unchanged pinned CuTe body are recomputed as complete 8-CTA
 schedules, preserving the source comparison while staying within Thor's
 cluster limit.
 
+The four quantized RMSNorm modules pass 5,378/5,378 configurations: FP4
+RMSNorm 1,025/1,025, fused-add FP4 RMSNorm 1,245/1,245, RMSNorm quantization
+1,552/1,552, and fused-add RMSNorm quantization 1,556/1,556. Coverage includes
+BF16/FP16 inputs, E4M3/E5M2/int8 outputs, PDL, scale modes, swizzled layouts,
+residual paths, automatic allocation, fragment boundaries, and hidden sizes
+through 1,048,576.
+
 The six FlashKDA decode stages pass 126/126 configurations and the BF16 M128
 fused prefill kernel passes 6/6. Their Thor checks use independent FP32
 recurrent gated-delta-rule equations, including speculative checkpoint and
 accepted-token semantics. The BF16 comparison floor is one representable step;
 this covers the handful of hundred-million-element state outputs that differ
 from a differently ordered FP32 recurrence by exactly one BF16 ULP.
+
+The agent-evolved KDA forward kernel passes its sole production shape
+(`B=1,T=8192,H=96,D=128`) against the pinned FLA numerical reference. B200's
+148 SMs launch its 96 work items as 96 CTAs, but the generic 20-SM Thor launch
+collapsed them to 20 CTAs and reused barrier/TMEM state for multiple heads,
+which deadlocked. Thor now preserves one work item per CTA and lets CUDA issue
+the 96 CTAs in waves; other architectures keep their original launch rule.
 
 ## BSA forward-combine oracle
 
@@ -148,42 +161,67 @@ the single one-ULP reduction difference previously observed at larger
 magnitudes without weakening the primary source gate.  The complete matrix now
 passes 9/9 configurations.
 
+## DeepGEMM kernels
+
+Ten DeepGEMM modules pass 382/382 configurations on Thor.  The five shared
+FP8 GEMM/BMM families account for 60 cases; paged FP4/FP8 MQA logits account
+for 209; and non-paged FP4/FP8 MQA logits plus TF32 HC pre-norm GEMM account
+for 113.  Their Thor paths preserve the generated kernel bodies and replace
+only B200-specific host preparation or unavailable DeepGEMM reference
+dispatch with independent structured equations.
+
+The paged MQA schedule derives the persistent launch shape from Thor's 20 SMs
+instead of retaining a 148-SM B200 assumption.  Correctness includes both
+logical page layouts, invalid entries, variable lengths, FP4/FP8 scale
+layouts, and the full published configuration matrices.
+
+## MSA sparse attention
+
+All five MSA modules pass 91/91 configurations: flat-schedule preparation
+28/28, split-atomic preparation 27/27, sparse attention forward 10/10,
+NVFP4-KV forward 12/12, and forward combine 14/14.  Thor uses independent
+PyTorch scheduling and attention equations where the pinned MSA package has
+no compute-11 host dispatch.  The matrices cover masking, ragged sequences,
+page tables, FP4 dequantization, split scheduling, empty work, and combine
+reductions.
+
+## FlashMLA sparse decode
+
+Sparse FlashMLA head-64 decode passes 15/15 configurations for both V3.2 and
+Model1 cache layouts, including the 148/256-batch, 16K-top-k pressure cases.
+The Thor oracle decodes only indexed FP8 cache rows and evaluates attention in
+chunks, following the pinned FlashMLA mathematical reference without relying
+on its compute-10-only host dispatcher.  Correctness fixtures may alias
+physical pages to keep their cache below Thor's unified-memory budget while
+preserving logical sequence, top-k, scheduler, page-table, and masking
+semantics.  Performance preparation retains the original full physical cache.
+
+## Explicitly blocked modules
+
+| Module | Configurations | Thor evidence / blocker |
+|---|---:|---|
+| `allgather_gemm` | 16 | Eight one-GPU cases fail before compile because NVSHMEM is not installed; eight require four GPUs. |
+| `gemm_reduce_scatter` | 16 | Eight one-GPU cases fail before compile because NVSHMEM is not installed; eight require four GPUs. |
+| `deepep_dispatch` | 4 | Every configuration requires eight GPUs. |
+| `deepep_combine` | 4 | Every configuration requires eight GPUs. |
+| `sm100_fp8_fp4_mega_moe` | 38 | The smallest one-GPU case reaches DeepGEMM's compute-10-only scale-layout host guard; 15 cases additionally require 2/4/6 GPUs. |
+
+This is 5/95 modules and 78/9,282 configurations. The validated fraction is
+90/95 modules (94.7%) and 9,204/9,282 configurations (99.2%).
+
 ## Validation artifacts
 
-The resumable local JSONL runs are kept outside the repository under `/tmp`:
+Resumable evidence from the final phase is outside the repository under
+`/home/tlopexh/thor-validation/correctness-final`:
 
-- `tirx-thor-main-0512291-smoke.jsonl`
-- `tirx-thor-main-0512291-launch-failures.jsonl`
-- `tirx-thor-main-0512291-launch-skips.jsonl`
-- `tirx-thor-main-0512291-fp16-bf16-full.jsonl`
-- `tirx-thor-main-0512291-batch2-full.jsonl`
-- `tirx-thor-main-0512291-batch3-quant-full.jsonl`
-- `tirx-thor-main-0512291-batch4-kda-rms-full.jsonl`
-- `tirx-thor-main-0512291-batch5-bsa-full.jsonl`
-- `tirx-thor-main-0512291-batch6-gdn-decode-full.jsonl`
-- `tirx-thor-main-0512291-batch7-gdn-prefill-full.jsonl`
-- `tirx-thor-main-0512291-batch8-linear-attention-full.jsonl`
-- `tirx-thor-main-0512291-batch9-attention-norm-full.jsonl`
-- `tirx-thor-main-0512291-batch10-mamba-ssu-final.jsonl`
-- `tirx-thor-main-0512291-batch11-topk-norm-gemm-final.jsonl`
-- `tirx-thor-main-0512291-batch13-bsa-combine-final.jsonl`
-- `tirx-thor-main-0512291-batch15-amax.jsonl`
-- `tirx-thor-main-0512291-batch15-dsrelu.jsonl`
-- `tirx-thor-main-0512291-batch15-srelu.jsonl`
-- `tirx-thor-main-0512291-batch15-swiglu-blockscaled-final.jsonl`
-- `tirx-thor-main-0512291-batch15-dglu-blockscaled.jsonl`
-- `tirx-thor-main-0512291-batch16-dsa-full.jsonl`
-- `tirx-thor-main-0512291-batch18-gdn-cp-full.jsonl`
-- `tirx-thor-main-0512291-batch19-proj-rope-full.jsonl`
-- `tirx-thor-main-0512291-batch20-tinygemm-full.jsonl`
-- `tirx-thor-main-0512291-batch12-filtered-topk.jsonl`
-- `tirx-thor-main-0512291-batch12-radix-single.jsonl`
-- `tirx-thor-main-0512291-batch12-radix-multi.jsonl`
-- `tirx-thor-main-0512291-batch14-rmsnorm-final.jsonl`
-- `tirx-thor-main-0512291-batch14-fused-add-rmsnorm-final.jsonl`
-- `tirx-thor-main-0512291-batch14-qk-rmsnorm.jsonl`
-- `tirx-thor-main-0512291-batch17-flashkda-final.jsonl`
-- `tirx-thor-main-0512291-batch21-flashkda-fused-full.jsonl`
+- `rmsnorm/*.jsonl`: 5,378 unique PASS results
+- `flashmla-compact/all.jsonl`: 15 unique PASS results
+- `kda-system-ptxas.jsonl`: one PASS result
+- `communication-blockers.jsonl`: the 40 exact NVSHMEM/topology blocker results
+
+Earlier full matrices were written to `/tmp` during the staged investigation
+and did not survive the machine restart; their aggregate results and the fixes
+they gated are recorded by the sections above and their focused commits.
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only
