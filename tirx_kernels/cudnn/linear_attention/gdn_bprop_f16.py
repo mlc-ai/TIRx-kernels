@@ -1519,6 +1519,11 @@ def _make_main(
                             product0, product1, beta_rows[pair * 2], beta_rows[pair * 2 + 1]
                         )
                         K.assign(kk_pack[pair], _pack_io_pair(value0, value1, io_dtype))
+                    # A prior reverse iteration used this scratch for the
+                    # dgate reduction.  Delay only the next overwrite until
+                    # every CG0 warp has completed that reduction.
+                    with K.If(reverse_index > 0), K.Then():
+                        K.ptx.bar.sync(K.uint32(2), K.uint32(128))
                     for fragment in range(4):
                         _stmatrix_x4(
                             arena.ptr_to(
@@ -2025,6 +2030,11 @@ def _make_main(
                         K.Then(),
                     ):
                         K.assign(dgate_last, dgate_last + cumprod_total * state_dot)
+                    # All four CG0 warps read the shared KK tile through
+                    # ldmatrix above.  Do not let a faster warp reuse that
+                    # storage for the dgate reduction until every peer has
+                    # finished its read.
+                    K.ptx.bar.sync(K.uint32(2), K.uint32(128))
                     token0 = (lane // 4) * 8 + (lane % 4) * 2
                     K.ptx.st.shared.f32(
                         arena.ptr_to([_KK_BASE + (warp_in_group * 64 + token0) * 4]), dgate0
