@@ -204,6 +204,11 @@ def _markdown(run: dict, *, run_path: Path) -> str:
             "the same fused operation on the same generated inputs. The workload roster is "
             "[`scripts/thor_flashinfer_representative.yaml`](scripts/thor_flashinfer_representative.yaml).",
             "",
+            "Because attention is the most prominent result, a separate complete 32-config "
+            "sequence-length, GQA-ratio, and causal-mask sweep is reported in "
+            "[THOR_FLASHINFER_ATTENTION.md](THOR_FLASHINFER_ATTENTION.md). TIRx is faster in "
+            "all 32 rows, with a 2.187x geometric-mean speedup over FlashInfer FA2.",
+            "",
             "The GDN and grouped-KDA choices follow production dispatch shapes present in SGLang's "
             "kernel configuration manifests. FlashInfer remains the timed implementation baseline; "
             "SGLang supplies shape provenance rather than a second timing column. FlashInfer has "

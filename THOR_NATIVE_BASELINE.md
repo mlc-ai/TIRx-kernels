@@ -12,7 +12,7 @@ Measured on 2026-09-03 on one NVIDIA Jetson AGX Thor Developer Kit. Every row co
 | FlashInfer faster by more than 5% | **2/13** |
 | Geometric-mean TIRx speedup | **1.094x** |
 
-The mixed aggregate hides a wide spread: TIRx FlashAttention4 is 3.030x the throughput of FlashInfer FA2 at the selected GQA-prefill shape, the plain RMSNorm and activation paths favor FlashInfer, and most other rows are close. Use the per-family and per-kernel rows for tuning decisions rather than the single mixed-workload mean.
+The mixed aggregate hides a wide spread: TIRx FlashAttention4 is 3.030x the throughput of FlashInfer FA2 at the selected GQA-prefill shape, the plain RMSNorm and GELU activation paths favor FlashInfer, and most other rows are close. Use the per-family and per-kernel rows for tuning decisions rather than the single mixed-workload mean.
 
 ## Results by family
 
@@ -49,6 +49,8 @@ The 5% band is descriptive, not a statistical significance test.
 ## Selection and interpretation
 
 The roster deliberately samples serving-relevant operator families rather than every shape: attention, RMSNorm, fused activation, FP4 quantization, four TopK variants, and three recurrent/SSM paths. Each reference adapter lives beside its kernel and executes the same fused operation on the same generated inputs. The workload roster is [`scripts/thor_flashinfer_representative.yaml`](scripts/thor_flashinfer_representative.yaml).
+
+Because attention is the most prominent result, a separate complete 32-config sequence-length, GQA-ratio, and causal-mask sweep is reported in [THOR_FLASHINFER_ATTENTION.md](THOR_FLASHINFER_ATTENTION.md). TIRx is faster in all 32 rows, with a 2.187x geometric-mean speedup over FlashInfer FA2.
 
 The GDN and grouped-KDA choices follow production dispatch shapes present in SGLang's kernel configuration manifests. FlashInfer remains the timed implementation baseline; SGLang supplies shape provenance rather than a second timing column. FlashInfer has no FA3 binary for `sm_110a` in this environment, so the attention baseline is its supported FA2 backend.
 

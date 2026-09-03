@@ -31,12 +31,19 @@ five independent rounds, and arithmetic-mean aggregation.
 Because clocks cannot be locked without root on the validation host, this
 Thor-only roster raises the per-implementation warmup budget from the standard
 25 ms to 1,000 ms to avoid charging the first implementation for the cold DVFS
-transition. All 13
-TIRx and FlashInfer paths pass their numerical checks. TIRx wins four rows by
+transition. All 13 TIRx and FlashInfer paths pass their numerical checks. TIRx
+wins four rows by
 more than 5%, is within 5% on seven, and trails on two; the mixed-suite
 geometric-mean TIRx speedup is 1.094x. The important result is the per-kernel
 spread, including 3.030x for the selected FlashAttention4-versus-FlashInfer-FA2
 shape, rather than the aggregate alone.
+
+The complete FlashAttention4 matrix then passes 32/32 exact-shape comparisons
+against FlashInfer FA2: every TIRx row is faster, with a 2.187x geometric-mean
+speedup and a 1.075x to 3.051x range across four sequence lengths, four GQA
+ratios, and causal/non-causal execution. See
+[THOR_FLASHINFER_ATTENTION.md](THOR_FLASHINFER_ATTENTION.md) for the full table
+and `scripts/report_thor_attention.py` for its generator.
 
 See [THOR_NATIVE_BASELINE.md](THOR_NATIVE_BASELINE.md) for the representative
 table, exact reference implementation names, selection rationale, raw evidence,
