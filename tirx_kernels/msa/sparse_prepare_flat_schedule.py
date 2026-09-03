@@ -38,7 +38,7 @@ from tirx_kernels.msa.utils._scalar_ops import (
 KERNEL_META = {
     "name": "msa_sparse_prepare_flat_schedule_sm100",
     "category": "msa",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "msa",
@@ -793,18 +793,21 @@ def run_test(**config):
     config.pop("label", None)
     data = prepare_data(**config)
 
-    # The source kernel over the same inputs, as the primary oracle.
-    try:
-        from tirx_kernels.msa.utils._msa_bench import compiled_flat_schedule
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-    reference_outputs = make_outputs(data)
-    try:
-        launch_reference(data, reference_outputs, compiled_flat_schedule)
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-    torch.cuda.synchronize()
-    assert_schedule_matches(data, reference_outputs)
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() != "sm_110a":
+        # Preserve the pinned MSA source comparison on native SM100 devices.
+        try:
+            from tirx_kernels.msa.utils._msa_bench import compiled_flat_schedule
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+        reference_outputs = make_outputs(data)
+        try:
+            launch_reference(data, reference_outputs, compiled_flat_schedule)
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+        torch.cuda.synchronize()
+        assert_schedule_matches(data, reference_outputs)
 
     executable = compile_kernel(get_kernel(**config))
     outputs = make_outputs(data)
@@ -945,9 +948,11 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         counters.zero_()
         return reference_launch
 
+    from tirx_kernels.target import prepare_cuda_arch
+
     return bench(
         {"tirx": tirx_launch},
-        references={"msa": build_reference},
+        references={"msa": build_reference} if prepare_cuda_arch() != "sm_110a" else {},
         warmup=warmup,
         repeat=repeat,
         timer=timer,

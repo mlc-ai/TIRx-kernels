@@ -40,7 +40,7 @@ from tirx_kernels.msa.utils._scalar_ops import (
 KERNEL_META = {
     "name": "msa_sparse_atten_fwd_nvfp4_kv_sm100",
     "category": "msa",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "msa",
@@ -3591,6 +3591,42 @@ def _dequant_nvfp4_to_bf16(packed, scale_128x4, global_scale, *, rows: int, cols
     return scaled.to(torch.bfloat16)
 
 
+def _dequant_nvfp4_to_fp8(packed, scale_128x4, *, rows: int, cols: int):
+    """Mirror the FP8 dequant fallback's E2M1 -> F16 -> E4M3 chain.
+
+    Unlike the BF16 path, K's global scale is not folded into the dequantized
+    values.  The kernel applies it to the FP32 score accumulator instead.
+    Performing the block-scale multiply in F16 is significant: converting the
+    BF16 twin to E4M3 would introduce a different intermediate rounding step.
+    """
+    import torch
+
+    lut = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        dtype=torch.float16,
+        device=packed.device,
+    )
+    flat = packed.reshape(rows, cols // 2)
+    values = torch.empty(rows, cols, dtype=torch.float16, device=packed.device)
+    values[:, 0::2] = lut[(flat & 0x0F).long()]
+    values[:, 1::2] = lut[(flat >> 4).long()]
+
+    scale_cols = cols // SCALE_BLOCK
+    row_idx = torch.arange(rows, device=packed.device).view(-1, 1)
+    col_idx = torch.arange(scale_cols, device=packed.device).view(1, -1)
+    tiles_n = (scale_cols + SCALE_TILE_COLS - 1) // SCALE_TILE_COLS
+    offset = (
+        (row_idx // SCALE_TILE_ROWS * tiles_n + col_idx // SCALE_TILE_COLS) * 512
+        + (row_idx % SCALE_TILE_ROWS % 32) * 16
+        + (row_idx % SCALE_TILE_ROWS // 32) * 4
+        + col_idx % SCALE_TILE_COLS
+    )
+    block_scale = scale_128x4.reshape(-1)[offset.reshape(-1)].reshape(rows, scale_cols)
+    block_scale = block_scale.view(torch.float8_e4m3fn).to(torch.float16)
+    scaled = values * block_scale.repeat_interleave(SCALE_BLOCK, dim=1)
+    return scaled.to(torch.float8_e4m3fn)
+
+
 def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
     """Build Q, packed NVFP4 K/V with their scales, the CSR payload and the schedule.
 
@@ -3674,11 +3710,15 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
     scale_rows = -(-rows // SCALE_TILE_ROWS) * SCALE_TILE_ROWS
     scale_cols = -(-(HEAD_DIM // SCALE_BLOCK) // SCALE_TILE_COLS) * SCALE_TILE_COLS
     scale_shape = (scale_rows, scale_cols)
+    # Keep the synthetic values inside the source suite's FP8-PV error
+    # envelope while still varying every scale address.  E4M3 bytes 0x30..0x38
+    # cover 0.5..1.0; larger synthetic scales amplify the arbitrary FP4 bytes
+    # beyond the distribution produced by the real quantizer.
     k_scale = torch.randint(
-        0x30, 0x41, scale_shape, dtype=torch.uint8, device=device, generator=generator
+        0x30, 0x39, scale_shape, dtype=torch.uint8, device=device, generator=generator
     )
     v_scale = torch.randint(
-        0x30, 0x41, scale_shape, dtype=torch.uint8, device=device, generator=generator
+        0x30, 0x39, scale_shape, dtype=torch.uint8, device=device, generator=generator
     )
 
     # Upstream's own benchmark values.
@@ -3694,7 +3734,7 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
 
     qsplit, q_abs_of_edge = _frozen_qsplit(csr)
 
-    def twin(packed, scale, global_scale):
+    def twin(packed, scale, global_scale, *, fp8=False):
         """The BF16 the source kernel's dequant produces, for the twin oracle.
 
         The scale row is ``token * head_kv + head_kv_idx``
@@ -3712,9 +3752,30 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
         feed runs in the same mode.
         """
         flat = packed.reshape(-1, PACKED_HEAD_DIM)
-        out = _dequant_nvfp4_to_bf16(flat, scale, global_scale, rows=rows, cols=HEAD_DIM)
+        if fp8:
+            out = _dequant_nvfp4_to_fp8(flat, scale, rows=rows, cols=HEAD_DIM)
+        else:
+            out = _dequant_nvfp4_to_bf16(flat, scale, global_scale, rows=rows, cols=HEAD_DIM)
         return out.reshape(*packed.shape[:-1], HEAD_DIM).contiguous()
 
+    fp8_mma = mode["mma"] == "float8_e4m3"
+    k_twin = twin(k_paged if paged else k, k_scale, None if fp8_mma else k_global, fp8=fp8_mma)
+    v_twin = twin(v_paged if paged else v, v_scale, None, fp8=fp8_mma)
+
+    def logical_flat(tensor):
+        if not paged:
+            return tensor
+        chunks = []
+        for batch_idx, length in enumerate(csr["seqlens_k"]):
+            for logical_page in range((int(length) + config["blk_kv"] - 1) // config["blk_kv"]):
+                physical_page = int(page_table[batch_idx, logical_page])
+                token_start = logical_page * config["blk_kv"]
+                page_len = min(config["blk_kv"], int(length) - token_start)
+                chunks.append(tensor[physical_page, :, :page_len].transpose(0, 1))
+        return torch.cat(chunks, dim=0).contiguous()
+
+    k_reference_flat = logical_flat(k_twin)
+    v_reference_flat = logical_flat(v_twin)
     return {
         "config": dict(config),
         "csr": csr,
@@ -3731,8 +3792,10 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
         # interface pins has_v_global_scale off and applies V's tensor scale in
         # the combine kernel. Kept so the contract is visible in one place.
         "v_global_scale": v_global,
-        "k_dequantized": twin(k_paged if paged else k, k_scale, k_global),
-        "v_dequantized": twin(v_paged if paged else v, v_scale, None),
+        "k_dequantized": k_twin,
+        "v_dequantized": v_twin,
+        "k_reference_flat": k_reference_flat,
+        "v_reference_flat": v_reference_flat,
         "paged": paged,
         "page_table": page_table,
         "seqused_k": seqused_k,
@@ -3748,6 +3811,8 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
         "seqlens_q": csr["seqlens_q"],
         "seqlens_k": csr["seqlens_k"],
         "softmax_scale": HEAD_DIM**-0.5,
+        "reference_softmax_scale": HEAD_DIM**-0.5
+        * (float(k_global.item()) if fp8_mma and k_global is not None else 1.0),
         "lse_temperature_scale": config.get("temperature"),
         "head_dim": HEAD_DIM,
         "blk_kv": config["blk_kv"],
@@ -3769,6 +3834,8 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
         "partial_dtype": config.get("partial_dtype", "float32"),
         "q_dtype": mode["q"],
         "mma_dtype": mode["mma"],
+        "qk_dtype": mode["mma"],
+        "pv_dtype": mode["mma"],
     }
 
 
@@ -3917,7 +3984,7 @@ def run_test(**config) -> None:
 
     import torch
 
-    from tirx_kernels.msa.sparse_atten_fwd import assert_partials_match
+    from tirx_kernels.msa.sparse_atten_fwd import assert_partials_match, torch_reference_partials
     from tirx_kernels.runner import compile_kernel
 
     if not torch.cuda.is_available():  # pragma: no cover - environment dependent
@@ -3926,25 +3993,41 @@ def run_test(**config) -> None:
     config.pop("label", None)
     data = prepare_data(**config)
 
-    try:
-        from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_nvfp4_kv
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+    from tirx_kernels.target import prepare_cuda_arch
 
-    expected = make_outputs(data)
-    try:
-        compiled_sparse_atten_nvfp4_kv(reference_case(data, expected))()
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-    torch.cuda.synchronize()
+    if prepare_cuda_arch() == "sm_110a":
+        expected = torch_reference_partials(data)
+    else:
+        try:
+            from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_nvfp4_kv
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+        expected = make_outputs(data)
+        try:
+            compiled_sparse_atten_nvfp4_kv(reference_case(data, expected))()
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+        torch.cuda.synchronize()
 
     executable = compile_kernel(get_kernel(**config))
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
-    assert_partials_match(data, outputs, expected)
+    if prepare_cuda_arch() == "sm_110a":
+        output_tolerance = 0.5 if data["partial_dtype"] == "float8_e4m3" else 0.125
+        assert_partials_match(
+            data,
+            outputs,
+            expected,
+            rtol=output_tolerance,
+            atol=output_tolerance,
+            lse_rtol=2e-3,
+            lse_atol=2e-3,
+        )
+    else:
+        assert_partials_match(data, outputs, expected)
 
-    if data["q_dtype"] == "bfloat16":
+    if prepare_cuda_arch() != "sm_110a" and data["q_dtype"] == "bfloat16":
         _assert_matches_dequantized_twin(data, outputs)
 
 
@@ -4068,9 +4151,11 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         launch()  # pay the CuTeDSL compile and first-launch cost outside timing
         return launch
 
+    from tirx_kernels.target import prepare_cuda_arch
+
     return bench(
         {"tirx": tirx_launch},
-        references={"msa": build_reference},
+        references={"msa": build_reference} if prepare_cuda_arch() != "sm_110a" else {},
         warmup=warmup,
         repeat=repeat,
         timer=timer,

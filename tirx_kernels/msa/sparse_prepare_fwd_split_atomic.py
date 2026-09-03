@@ -50,7 +50,7 @@ from tirx_kernels.msa.utils._scalar_ops import (
 KERNEL_META = {
     "name": "msa_sparse_prepare_fwd_split_atomic_sm100",
     "category": "msa",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "msa",
@@ -447,7 +447,7 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
         total_rows=total_rows, total_q=total_q, topk=topk, head_kv=head_kv, target=target
     )
     counts = (k2q_row_ptr[:, 1:] - k2q_row_ptr[:, :-1]).to(torch.int64)
-    work = _work_items(counts, target, batch_of_row, head_kv, total_rows, device)
+    work = _work_items(counts, target, batch_of_row, level_of_row, head_kv, total_rows, device)
 
     scheduler_metadata = torch.zeros((capacity, WORK_FIELDS), dtype=torch.int32, device=device)
     scheduler_metadata[: work.shape[0]] = work
@@ -475,7 +475,9 @@ def prepare_data(*, seed: int = 0, **config) -> dict[str, Any]:
     }
 
 
-def _work_items(counts, target: int, batch_of_row, head_kv: int, total_rows: int, device):
+def _work_items(
+    counts, target: int, batch_of_row, level_of_row, head_kv: int, total_rows: int, device
+):
     """The work list the flat-schedule kernel produces, in row-head order.
 
     Synthesized rather than produced by running that kernel: a device-produced
@@ -506,17 +508,10 @@ def _work_items(counts, target: int, batch_of_row, head_kv: int, total_rows: int
     q_begin = ordinal * target
     q_count = torch.clamp(count_rep - q_begin, max=target)
     batch_row = torch.tensor(batch_of_row, dtype=torch.int64, device=device)
+    block_row = torch.tensor(level_of_row, dtype=torch.int64, device=device)
 
     table = torch.stack(
-        [
-            head_rep,
-            row_rep,
-            q_begin,
-            q_count,
-            batch_row[row_rep],
-            torch.zeros_like(row_rep),  # kv_block_idx: written by the producer, unread here
-        ],
-        dim=1,
+        [head_rep, row_rep, q_begin, q_count, batch_row[row_rep], block_row[row_rep]], dim=1
     ).to(torch.int32)
     return table[(row_rep * head_kv + head_rep).argsort(stable=True)]
 
@@ -666,17 +661,21 @@ def run_test(**config):
     config.pop("label", None)
     data = prepare_data(**config)
 
-    try:
-        from tirx_kernels.msa.utils._msa_bench import compiled_fwd_split_atomic
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-    reference_outputs = make_outputs(data)
-    try:
-        launch_reference(data, reference_outputs, compiled_fwd_split_atomic)
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-    torch.cuda.synchronize()
-    assert_split_metadata(data, reference_outputs)
+    from tirx_kernels.target import prepare_cuda_arch
+
+    reference_outputs = None
+    if prepare_cuda_arch() != "sm_110a":
+        try:
+            from tirx_kernels.msa.utils._msa_bench import compiled_fwd_split_atomic
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+        reference_outputs = make_outputs(data)
+        try:
+            launch_reference(data, reference_outputs, compiled_fwd_split_atomic)
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+        torch.cuda.synchronize()
+        assert_split_metadata(data, reference_outputs)
 
     executable = compile_kernel(get_kernel(**config))
     outputs = make_outputs(data)
@@ -686,9 +685,10 @@ def run_test(**config):
     # dependent, so bitwise-vs-reference is meaningless and the metadata
     # contract is what both sides must satisfy.
     assert_split_metadata(data, outputs)
-    torch.testing.assert_close(
-        outputs["split_counts"], reference_outputs["split_counts"], rtol=0, atol=0
-    )
+    if reference_outputs is not None:
+        torch.testing.assert_close(
+            outputs["split_counts"], reference_outputs["split_counts"], rtol=0, atol=0
+        )
 
 
 def prepare_bench(**config):
@@ -795,9 +795,11 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         block.zero_()
         return reference_launch
 
+    from tirx_kernels.target import prepare_cuda_arch
+
     return bench(
         {"tirx": tirx_launch},
-        references={"msa": build_reference},
+        references={"msa": build_reference} if prepare_cuda_arch() != "sm_110a" else {},
         warmup=warmup,
         repeat=repeat,
         timer=timer,

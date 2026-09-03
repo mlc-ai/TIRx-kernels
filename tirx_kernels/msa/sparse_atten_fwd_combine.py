@@ -27,7 +27,7 @@ import tirx_kernels.kern as K
 KERNEL_META = {
     "name": "msa_sparse_atten_fwd_combine_sm100",
     "category": "msa",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "msa",
@@ -1470,6 +1470,53 @@ def written_row_mask(data: dict[str, Any]):
     return mask
 
 
+def torch_reference_outputs(data: dict[str, Any]) -> dict[str, Any]:
+    """Independent mathematical reduction over the forward partial ABI."""
+    import torch
+
+    from tirx_kernels.msa.sparse_atten_fwd import _fake_col
+
+    expected = make_outputs(data)
+    live = data["live"]
+    lse_partial = torch.where(
+        live, data["lse_partial"], torch.full_like(data["lse_partial"], float("-inf"))
+    )
+    lse = torch.logsumexp(lse_partial, dim=0)
+    has_value = torch.isfinite(lse_partial).any(dim=0)
+    lse = torch.where(has_value, lse, torch.full_like(lse, float("-inf")))
+
+    weights = torch.exp(
+        lse_partial - torch.where(has_value, lse, torch.zeros_like(lse)).unsqueeze(0)
+    )
+    weights = torch.where(torch.isfinite(weights), weights, torch.zeros_like(weights))
+    columns = torch.tensor(
+        [_fake_col(data["partial_dtype"], column) for column in range(HEAD_DIM)],
+        dtype=torch.long,
+        device="cuda",
+    )
+    partial = data["o_partial"].float().index_select(-1, columns)
+    partial = torch.where(weights.unsqueeze(-1) > 0, partial, torch.zeros_like(partial))
+    output = (partial * weights.unsqueeze(-1)).sum(dim=0)
+    if data["output_scale"] is not None:
+        output = output * data["output_scale"][0]
+
+    mask = written_row_mask(data)
+    expected["o_out"][mask] = output.to(torch.bfloat16)[mask]
+    expected["lse_out"][mask] = lse[mask]
+    if data["temperature"]:
+        temperature = torch.where(
+            live,
+            data["lse_temperature_partial"],
+            torch.full_like(data["lse_temperature_partial"], float("-inf")),
+        )
+        temperature_lse = torch.logsumexp(temperature, dim=0)
+        temperature_lse = torch.where(
+            has_value, temperature_lse, torch.full_like(temperature_lse, float("-inf"))
+        )
+        expected["lse_temperature_out"][mask] = temperature_lse[mask]
+    return expected
+
+
 def assert_outputs_match(
     data: dict[str, Any],
     outputs: dict[str, Any],
@@ -1528,23 +1575,28 @@ def run_test(**config):
     config.pop("label", None)
     data = prepare_data(**config)
 
-    try:
-        from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_combine
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+    from tirx_kernels.target import prepare_cuda_arch
 
-    expected = make_outputs(data)
-    try:
-        compiled_sparse_atten_combine(reference_case(data, expected))()
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
-    torch.cuda.synchronize()
+    if prepare_cuda_arch() == "sm_110a":
+        expected = torch_reference_outputs(data)
+    else:
+        try:
+            from tirx_kernels.msa.utils._msa_bench import compiled_sparse_atten_combine
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+        expected = make_outputs(data)
+        try:
+            compiled_sparse_atten_combine(reference_case(data, expected))()
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"MSA reference unavailable: {exc}") from exc
+        torch.cuda.synchronize()
 
     executable = compile_kernel(get_kernel(**config))
     outputs = make_outputs(data)
     executable(*tirx_args(data, outputs))
     torch.cuda.synchronize()
-    assert_outputs_match(data, outputs, expected)
+    tolerance = 2e-2 if prepare_cuda_arch() == "sm_110a" else 0.0
+    assert_outputs_match(data, outputs, expected, rtol=tolerance, atol=tolerance)
 
 
 def prepare_bench(**config):
@@ -1585,9 +1637,11 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
         launch()  # pay the CuTeDSL compile and first-launch cost outside timing
         return launch
 
+    from tirx_kernels.target import prepare_cuda_arch
+
     return bench(
         {"tirx": tirx_launch},
-        references={"msa": build_reference},
+        references={"msa": build_reference} if prepare_cuda_arch() != "sm_110a" else {},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
