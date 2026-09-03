@@ -15,10 +15,12 @@ replace the direct verdict. The same flag exists on
 registered kernel has one file. Files with `default_suite: true` select one to
 three representative single-GPU rows with `default: true`; curated three-row
 files label them `small`, `medium`, and `large`. The current default roster is
-263 rows across 90 device kernels: 260 rows from 89 kernels validated on
-`sm_100a`, `sm_103a`, and `sm_107a`, plus 3 rows from the `sm_107a`-only Rubin
-BMM. Thus an SM107 run selects all 263 rows, while SM100 and SM103 runs retain
-the 260-row subset.
+284 rows across 97 device kernels: 260 rows from 89 kernels validated on
+`sm_100a`, `sm_103a`, and `sm_107a`, plus three rows each from eight
+single-architecture kernels (the `sm_107a`-only Rubin BMM and SM107 block-scaled
+GEMM, the `sm_100a`-only Cake VSA blk128/longseq/ultrasparse ports, and the
+`sm_103a`-only Cake VSA longseq, fast.cu NVFP4 GEMM, and FP4 FA4 forward). Thus
+an SM107 run selects 266 rows while SM100 and SM103 runs select 269.
 GPU runs retain only rows registered for the pool's exact architecture.
 
 With no `--workloads`, the suite writes the selected rows to

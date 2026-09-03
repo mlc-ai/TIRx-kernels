@@ -72,6 +72,19 @@ matrix at a 0.9932x minimum. Once the target already has the shorter instruction
 stream, a register deficit plus excess consumer-release polling is a reason to
 sweep the consumer role rather than keep deleting arithmetic.
 
+The ptxas `--register-usage-level` knob has the same regime dependence and can
+flip as a step, not a slope. One 16-warp block-scaled attention forward with a
+quantized P was 18.46 us at levels 4-10 and 15.47 us at levels 1-3 on a
+single-wave grid (64 tiles on 152 SMs, eight blocks per tile; reference 16.23
+us, ratio 0.877x -> 1.049x), with identical executed-instruction counts and an
+identical softmax-role binary: only the matrix-issue and correction roles were
+rescheduled (R2UR 46 -> 25, IMAD 71 -> 48 in the issue role). The same level 3
+ran 168.8 us against 130.9 us (+28%) on the 4096-key, 24-head stream of the
+same kernel, and every other mode of the kernel measured flat across levels
+3-10. The level was therefore keyed on the grid regime (`num_tiles <= num_sms`)
+for that one specialization; a per-mode key alone would have traded the small
+shape against the long streams.
+
 ## Boundary
 
 An occupancy proof only shows that a larger budget is affordable; it does not

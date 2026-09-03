@@ -183,6 +183,17 @@ cleared the strict gate, while the former still required an independent
 register-schedule fix. This rewrite was retained through the complete
 correctness and performance matrices.
 
+Where no compound four-pair conversion intrinsic exists (the `cvt.rn.satfinite.e2m1x2.f32`
+table entry stages its `.b8` result through a `cvt.u16.u8` carrier and the table
+has no `mov.b32 {b8x4}`), every spelling of the four-byte pack costs the same:
+shift/or and explicit `prmt` both lowered to 4 LOP3 + 2 PRMT (or 3 PRMT) per
+word around the same 4 `F2FP.SATFINITE.E2M1.F32.PACK_AB_MERGE_C`, because the
+carrier's `(uint8_t)` truncation survives as an `and.b16 255` per byte. The
+reference's `mov.b32 {b0,b1,b2,b3}` chained the four merges for free. Measured
+in a softmax step that quantizes 128 values: +92 instructions per step (LOP3
++248k, PRMT +131k dynamic per launch), about 6% of the step; every benchmarked
+shape of that mode still passed, so it was recorded rather than worked around.
+
 ## Boundary
 
 The exact packed/scalar selector is a property of the source fragment layout

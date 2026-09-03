@@ -50,6 +50,13 @@
       "install_subdirectory": "flash_attn/cute"
     },
     {
+      "name": "flash-attention-fp4",
+      "import_name": "flash_attn.cute",
+      "url": "https://github.com/hao-ai-lab/flash-attention-fp4.git",
+      "revision": "5aa37a9680f7b76a11799b5f4846100ed5a3e6d8",
+      "install_subdirectory": "flash_attn/cute"
+    },
+    {
       "name": "flash-mla",
       "import_name": "flash_mla",
       "url": "https://github.com/deepseek-ai/FlashMLA.git",

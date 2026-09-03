@@ -6,10 +6,10 @@ High-performance GPU kernels authored in
 
 ## Kernels
 
-All registered kernels target `sm_100a`. Each linked name below is the public
-registry name accepted by `--kernel`; the link opens its implementation. Run
-`python -m tirx_kernels.registry --format json` for the authoritative config
-list.
+Registered kernels declare their CUDA target architecture in `KERNEL_META`.
+Each linked name below is the public registry name accepted by `--kernel`; the
+link opens its implementation. Run `python -m tirx_kernels.registry --format json`
+for the authoritative config list.
 
 ### Native TIRx
 
@@ -51,6 +51,7 @@ contract and results.
   [`cudnn_sm100_gdn_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn_prefill_f16.py),
   [`cudnn_sm100_gdn_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn_recompute_f16.py),
   [`cudnn_sm100_gdn2_prefill_f16`](tirx_kernels/cudnn/linear_attention/gdn2_prefill_f16.py),
+  [`cudnn_sm100_gdn2_recompute_f16`](tirx_kernels/cudnn/linear_attention/gdn2_recompute_f16.py),
   [`cudnn_sm100_gdn2_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn2_bprop_f16.py),
   [`cudnn_sm100_gdn_bprop_f16`](tirx_kernels/cudnn/linear_attention/gdn_bprop_f16.py)
 - **CSA compression:**
@@ -117,6 +118,11 @@ Grouped by the FlashInfer Python entry point each port backs.
 - **`flashinfer.gdn_prefill`:**
   [`gdn_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py),
   [`gdn_cp_prefill_sm100`](tirx_kernels/flashinfer/gdn_prefill/gdn_cp_prefill_sm100.py)
+- **`flashinfer.cake_vsa`:**
+  [`cake_vsa_blk128_compact_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_blk128_compact_sm100.py),
+  [`cake_vsa_ultrasparse_bsr_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_ultrasparse_bsr_sm100.py),
+  [`cake_vsa_longseq_sm100`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_longseq_sm100.py),
+  [`cake_vsa_longseq_sm103`](tirx_kernels/flashinfer/cake_vsa/cake_vsa_longseq_sm103.py)
 - **`flashinfer.gemm`:**
   [`tinygemm2_sm100`](tirx_kernels/flashinfer/gemm/tinygemm2_sm100.py),
   [`bmm_fp8_rubin`](tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py)
@@ -275,7 +281,7 @@ License 2.0; see [LICENSE](LICENSE). Required Apache attribution notices are
 collected in [NOTICE](NOTICE).
 
 Every Python source file carries SPDX tags. Kernel ports derived from third-party projects
-(cuDNN Frontend, DeepGEMM, FlashMLA, flash-attention, FlashInfer, MSA) additionally cite the upstream
+(cuDNN Frontend, DeepGEMM, fast.cu, FlashMLA, flash-attention, flash-attention-fp4, FlashInfer, MSA) additionally cite the upstream
 project and the exact commit ported, retain the upstream copyright notice, and
 declare the combined terms — for example `Apache-2.0 AND MIT`. Where an upstream
 license requires its conditions text to travel with the source, that text is kept

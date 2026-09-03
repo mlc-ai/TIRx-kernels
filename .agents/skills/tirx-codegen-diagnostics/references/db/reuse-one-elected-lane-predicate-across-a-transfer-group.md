@@ -60,6 +60,16 @@ equivalence did not make the three regions one profitable issue group. Hoist
 only after the source PTX/SASS shows one election governing the same contiguous
 region.
 
+A second counterexample combined this hoist with plain-scalar descriptor
+halves in a 16-warp block-scaled attention matrix-issue role (four
+`tcgen05.cp` scale copies plus two block-scaled MMAs per group, thirteen-slot
+FP4 operand ring). The two target rows did not move (18.54 and 126.07 us) and
+the long 4096-key stream regressed from 131.6 to 167.2 us (1.012x -> 0.797x).
+The two changes were applied together, so the regression is not attributed to
+either alone; the reviewed per-instruction form was restored and the sentinel
+recovered to 131.6 us. Measure the long-stream sentinel of every ring depth
+before keeping a hoist that only the latency-bound shape motivated.
+
 ## Verification
 
 Confirm in SASS that the hot loop contains one election for the logical transfer

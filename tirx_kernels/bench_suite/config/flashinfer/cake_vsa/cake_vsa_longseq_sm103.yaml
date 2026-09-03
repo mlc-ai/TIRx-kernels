@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: cake_vsa_longseq_sm103
+selection_rationale: The three defaults span the longseq dispatch domain by query count, KV length, and selected-block density (2K/16K with 8 blocks, 8K/32K with 64 blocks, and 32K/128K at the 192-block capacity); the non-default rows isolate large-KV sparse prologue pressure, a locality-rich 32-block window, and the amplified-Q rescale path.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: m2048_n16384_h8_sel8, default: true, selection_role: small}
+  - {config: m8192_n32768_h8_sel64, default: true, selection_role: medium}
+  - {config: m32768_n131072_h8_sel192, default: true, selection_role: large}
+  - {config: m2048_n131072_h8_sel8, default: false}
+  - {config: m16384_n32768_h8_sel32_window, default: false}
+  - {config: m8192_n65536_h8_sel64_kramp, default: false}

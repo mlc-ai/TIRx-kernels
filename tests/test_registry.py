@@ -46,11 +46,17 @@ def test_exact_architectures_are_stored_in_source_index():
     assert index
     assert all(record.runtime_cuda_archs for record in index.values())
     assert index["bmm_fp8_rubin"].runtime_cuda_archs == ("sm_107a",)
+    assert index["dense_blockscaled_gemm_sm107"].runtime_cuda_archs == ("sm_107a",)
     counts = {
         archs: sum(record.runtime_cuda_archs == archs for record in index.values())
-        for archs in (("sm_100a",), ("sm_107a",), ("sm_100a", "sm_103a", "sm_107a"))
+        for archs in (("sm_100a",), ("sm_103a",), ("sm_107a",), ("sm_100a", "sm_103a", "sm_107a"))
     }
-    assert counts == {("sm_100a",): 6, ("sm_107a",): 1, ("sm_100a", "sm_103a", "sm_107a"): 89}
+    assert counts == {
+        ("sm_100a",): 9,
+        ("sm_103a",): 3,
+        ("sm_107a",): 2,
+        ("sm_100a", "sm_103a", "sm_107a"): 90,
+    }
 
 
 def test_reference_requirements_are_stored_in_source_index():
@@ -67,8 +73,21 @@ def test_reference_requirements_are_stored_in_source_index():
         "flashinfer": ("flashinfer-python", "nvidia-cutlass-dsl"),
         "msa": ("msa", "nvidia-cutlass-dsl", "quack-kernels"),
     }
+    # Kernels whose upstream reference is not a CuTe-DSL program pin only the
+    # source project (the Cake VSA route loads a prebuilt cubin via FlashInfer's
+    # own tvm-ffi launcher).
+    expected_by_kernel = {
+        "cake_vsa_blk128_compact_sm100": ("flashinfer-python",),
+        "cake_vsa_longseq_sm100": ("flashinfer-python",),
+        "cake_vsa_longseq_sm103": ("flashinfer-python",),
+        "cake_vsa_ultrasparse_bsr_sm100": ("flashinfer-python",),
+        # The FP4 FA4 port quantizes its correctness inputs with FlashInfer.
+        "flash_attention4_fp4": ("flash-attn-4", "nvidia-cutlass-dsl", "flashinfer-python"),
+    }
     for name, record in index.items():
-        if record.category in expected_by_category:
+        if name in expected_by_kernel:
+            assert packages(name) == expected_by_kernel[name]
+        elif record.category in expected_by_category:
             assert packages(name) == expected_by_category[record.category]
 
     assert {

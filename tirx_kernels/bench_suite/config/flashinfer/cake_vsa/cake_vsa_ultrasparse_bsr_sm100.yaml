@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: cake_vsa_ultrasparse_bsr_sm100
+selection_rationale: The three defaults span the ultrasparse_bsr dispatch domain (8 MHA heads, exactly six shared BSR blocks per 128-row query block, at least 625 query blocks, persistent grid of min(mb*8, SM count) CTAs) by scale (80000 tokens with 5000 tiles and an uneven persistent tail, 131072 tokens with 8192 tiles and 67 MB K/V gathers, 262144 tokens with 16384 tiles and 268 MB K/V); the non-default rows add the six-block dense regime with L2-resident K/V, a diagonal window with high L2 reuse across adjacent persistent tiles, and a banded K-amplified pattern that keeps the O-rescale branch active.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: m80000_n8192_h8_sel6, default: true, selection_role: small}
+  - {config: m131072_n32768_h8_sel6, default: true, selection_role: medium}
+  - {config: m262144_n131072_h8_sel6, default: true, selection_role: large}
+  - {config: m80256_n768_h8_sel6_dense, default: false}
+  - {config: m131072_n16384_h8_sel6_window, default: false}
+  - {config: m80000_n4096_h8_sel6_kramp, default: false}

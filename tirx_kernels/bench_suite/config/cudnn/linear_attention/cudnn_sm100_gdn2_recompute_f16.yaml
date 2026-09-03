@@ -1,0 +1,22 @@
+# Complete production sweep for the cuDNN Frontend GDN2 state-recompute port.
+kernel: cudnn_sm100_gdn2_recompute_f16
+selection_rationale: The selected defaults cover an underfilled single-batch launch, the central four-batch production point, and the longest seeded-state workload; the full matrix sweeps production sequence lengths, batch occupancy, and both the checkpoint-only regen specialization the backward pass runs and the seeded initial/final-state one.
+configs:
+  - {config: perf_b4_s2048_h64_nostate, default: false}
+  - {config: perf_b4_s4096_h64_nostate, default: false}
+  - {config: perf_b4_s8192_h64_nostate, default: true, selection_role: medium}
+  - {config: perf_b4_s16384_h64_nostate, default: false}
+  - {config: perf_b4_s32768_h64_nostate, default: false}
+  - {config: perf_b1_s8192_h64_nostate, default: true, selection_role: small}
+  - {config: perf_b2_s8192_h64_nostate, default: false}
+  - {config: perf_b8_s8192_h64_nostate, default: false}
+  - {config: perf_b16_s8192_h64_nostate, default: false}
+  - {config: perf_b4_s2048_h64_state, default: false}
+  - {config: perf_b4_s4096_h64_state, default: false}
+  - {config: perf_b4_s8192_h64_state, default: false}
+  - {config: perf_b4_s16384_h64_state, default: false}
+  - {config: perf_b4_s32768_h64_state, default: true, selection_role: large}
+  - {config: perf_b1_s8192_h64_state, default: false}
+  - {config: perf_b2_s8192_h64_state, default: false}
+  - {config: perf_b8_s8192_h64_state, default: false}
+  - {config: perf_b16_s8192_h64_state, default: false}
