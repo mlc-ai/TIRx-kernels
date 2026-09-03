@@ -13,7 +13,7 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 40 kernels and 1,012 configurations
+- Fully validated: 45 kernels and 1,254 configurations
 
 The operator-level smoke sweep currently reports 56 numerical passes, 30
 failures, and 9 skips.  Follow-up launch-only checks show that 27 more kernels
@@ -56,6 +56,26 @@ initially reproduced the unsupported-instruction error.  After the fallback,
 the complete family passes 236/236 configurations, including STP/MTP,
 horizontal/vertical/simple, and intermediate-state variants.
 
+## Persistent-cluster and FP8 reference compatibility
+
+Thor rejects the non-portable 16-block cluster shapes accepted by B200 with
+`CUDA_ERROR_INVALID_CLUSTER_SIZE`.  The target helper preserves every B200
+shape at eight blocks or below and reduces only 16-block shapes to eight on an
+explicit `sm_110a` prepare.  Both the TIRx and pinned CUTLASS DSL paths receive
+the same adjusted schedule; the operation and tensor shapes do not change.
+
+PyTorch cannot export its FP8 tensor dtypes through DLPack on this environment.
+The dense SwiGLU reference adapter therefore exports their byte views and sets
+the corresponding CUTLASS element type explicitly, preserving the exact input
+bytes.  All 75 dense SwiGLU and 42 grouped dGLU configurations then compile and
+launch.  Two batched N-major, two-CTA dense SwiGLU specializations expose a
+pinned-source C-store bug: TIRx agrees with the direct FP32 equation on every
+element while the source can store the other batch's value.  Those exact two
+cases use the mathematical oracle; the other 73 retain the source comparison.
+
+Together with FastTopK, fused DiT LayerNorm, and stable-sort TopK, this batch
+passes 242/242 configurations on Thor.
+
 ## BSA forward-combine observation
 
 `cudnn_sm100_bsa_forward_combine_blk64` passes 8 of its 9 correctness
@@ -94,6 +114,7 @@ The resumable local JSONL runs are kept outside the repository under `/tmp`:
 - `tirx-thor-main-0512291-batch8-linear-attention-full.jsonl`
 - `tirx-thor-main-0512291-batch9-attention-norm-full.jsonl`
 - `tirx-thor-main-0512291-batch10-mamba-ssu-final.jsonl`
+- `tirx-thor-main-0512291-batch11-topk-norm-gemm-final.jsonl`
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from math import prod
 
 PREPARE_CUDA_ARCH_ENV = "TIRX_PREPARE_CUDA_ARCH"
 
@@ -35,4 +36,37 @@ def supports_sm100_kernel(capability: Sequence[int], *, declared_arch: str = "sm
     return (major, minor) == (11, 0) and prepare_cuda_arch(declared_arch) == "sm_110a"
 
 
-__all__ = ["PREPARE_CUDA_ARCH_ENV", "prepare_cuda_arch", "supports_sm100_kernel"]
+def prepare_cluster_shape(
+    cluster_shape: Sequence[int], *, declared_arch: str = "sm_100a"
+) -> tuple[int, ...]:
+    """Return a launchable cluster shape for the explicitly prepared target.
+
+    B200 accepts the non-portable 16-block clusters used by a few persistent
+    SM100 schedules. Thor accepts at most eight blocks per cluster. Preserve
+    the M dimension whenever possible because two-CTA MMA atoms require it to
+    remain divisible by two, and shrink only the schedule -- never the problem
+    shape or numerical operation.
+    """
+    shape = tuple(int(extent) for extent in cluster_shape)
+    if not shape or any(extent <= 0 for extent in shape):
+        raise ValueError(f"cluster shape must contain positive extents, got {shape!r}")
+    if prepare_cuda_arch(declared_arch) != "sm_110a" or prod(shape) <= 8:
+        return shape
+    mutable = list(shape)
+    while prod(mutable) > 8:
+        shrink_axis = next(
+            (axis for axis in range(len(mutable) - 1, -1, -1) if mutable[axis] % 2 == 0),
+            None,
+        )
+        if shrink_axis is None:
+            raise ValueError(f"cannot reduce cluster shape {shape!r} to eight blocks")
+        mutable[shrink_axis] //= 2
+    return tuple(mutable)
+
+
+__all__ = [
+    "PREPARE_CUDA_ARCH_ENV",
+    "prepare_cluster_shape",
+    "prepare_cuda_arch",
+    "supports_sm100_kernel",
+]

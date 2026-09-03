@@ -33,6 +33,18 @@ def test_thor_sm100_compatibility_requires_explicit_sm110a_prepare(monkeypatch):
     assert not supports_sm100_kernel((12, 0))
 
 
+def test_thor_cluster_shape_limit(monkeypatch):
+    from tirx_kernels.target import prepare_cluster_shape
+
+    monkeypatch.delenv(runner.PREPARE_CUDA_ARCH_ENV, raising=False)
+    assert prepare_cluster_shape((2, 8)) == (2, 8)
+    monkeypatch.setenv(runner.PREPARE_CUDA_ARCH_ENV, "sm_110a")
+    assert prepare_cluster_shape((2, 8)) == (2, 4)
+    assert prepare_cluster_shape((1, 16)) == (1, 8)
+    assert prepare_cluster_shape((16, 1)) == (8, 1)
+    assert prepare_cluster_shape((2, 4)) == (2, 4)
+
+
 @pytest.fixture
 def bench_child_handler():
     """Install the bench child's SIGUSR1 handler shape for the test's duration."""
