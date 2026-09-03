@@ -121,15 +121,15 @@ def _markdown(
         f"- Thor completed **{statuses.get('ok', 0)}/{len(rows)}** workloads with "
         f"**{pipeline.get('interference_retry_count', 0)} interference retries**.",
         f"- **{len(matched)}** rows have a usable TIR/TIRx timing in the repository's historical "
-        f"SM100/B200 baseline; **{unusable_b200}** exact baseline row failed, and "
+        f"SM100/B200 baseline; **{unusable_b200}** exact matched baseline rows failed, and "
         f"**{missing_b200}** Thor workload rows are absent there.",
         f"- Across the {len(matched)} matched rows, geometric-mean Thor/B200 latency is "
         f"**{overall:.3f}x**; equivalently, Thor delivers **{1 / overall:.1%}** of B200's "
         "throughput on this workload mix.",
         f"- The median latency ratio is **{median:.3f}x** and the observed range is "
         f"**{min(matched):.3f}x--{max(matched):.3f}x**.",
-        f"- Thor has {thor_sms} SMs versus {b200_sms} on B200 ({b200_sms / thor_sms:.1f}x as "
-        "many). The aggregate per-SM-normalized throughput is about "
+        f"- Thor has {thor_sms} SMs versus {b200_sms} on B200; B200 has "
+        f"{b200_sms / thor_sms:.1f}x as many. The aggregate per-SM-normalized throughput is about "
         f"**{(1 / overall) * (b200_sms / thor_sms):.1%}** of the B200 baseline, but this is "
         "only a rough diagnostic because the table mixes compute-, bandwidth-, and latency-bound kernels.",
         "",

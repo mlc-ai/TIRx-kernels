@@ -29,6 +29,13 @@ The final performance campaign uses the same Proton timer, 25 ms warmup budget,
 as the repository's historical SM100/B200 baseline. It includes every
 admitted Thor kernel that has a default benchmark workload.
 
+The final single-piece run completed 254/254 representative workloads across
+87 kernels with no failures or interference retries. Of those rows, 183 have
+usable exact-shape timings in the historical B200 baseline. Their geometric-
+mean Thor/B200 latency ratio is 10.433x (9.6% relative throughput), and the
+median is 12.205x. This is a cross-machine comparison with different software
+revisions and dynamic Thor clocks, not a controlled hardware-only A/B.
+
 See [THOR_B200_PERFORMANCE.md](THOR_B200_PERFORMANCE.md) for the complete table,
 per-kernel summaries, GEMM effective throughput, round variability, provenance,
 and comparison limitations.  Generate it from the raw JSON with
@@ -171,9 +178,12 @@ only B200-specific host preparation or unavailable DeepGEMM reference
 dispatch with independent structured equations.
 
 The paged MQA schedule derives the persistent launch shape from Thor's 20 SMs
-instead of retaining a 148-SM B200 assumption.  Correctness includes both
-logical page layouts, invalid entries, variable lengths, FP4/FP8 scale
-layouts, and the full published configuration matrices.
+instead of retaining a 148-SM B200 assumption. The prepared benchmark path
+also compiles with that hardware-resolved SM count; otherwise its fixed
+148-CTA launch indexes schedule metadata allocated for only 20 SMs. B200 keeps
+the original 148-SM default. Correctness includes both logical page layouts,
+invalid entries, variable lengths, FP4/FP8 scale layouts, and the full
+published configuration matrices.
 
 ## MSA sparse attention
 
