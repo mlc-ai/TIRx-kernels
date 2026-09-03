@@ -651,6 +651,9 @@ def build_kernel(spec: GemmSpec):
         mma_role = roles.role("mma", warps=[1])
         transpose_role = roles.role("transpose", warps=[2])
         roles.role("idle", warps=[3])
+        first_tail_warp = first_epilogue_warp + num_store_warps
+        if first_tail_warp < total_warps:
+            roles.role("idle_tail", warps=range(first_tail_warp, total_warps))
         epilogue_role = roles.role(
             "epilogue", warps=range(first_epilogue_warp, first_epilogue_warp + num_store_warps)
         )

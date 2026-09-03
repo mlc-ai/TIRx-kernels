@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
-"""Operand construction, scale-factor packing and the shared correctness gate.
+"""Operand construction, scale-factor packing and correctness gates.
 
 Everything here runs on the host, outside any timed closure.  The scale-factor
 layout is produced by DeepGEMM's own `transform_sf_into_required_layout`, so our
@@ -24,6 +24,8 @@ __all__ = [
     "assert_within_threshold",
     "bench_against_deepgemm",
     "calc_diff",
+    "dequantize",
+    "max_diff_threshold",
     "quantize_a",
     "quantize_b",
     "require_sm100",
@@ -81,6 +83,15 @@ def calc_diff(x, y) -> float:
 DIRECT_DIFF_THRESHOLD = 1e-6
 
 
+def max_diff_threshold(a_dtype: str, b_dtype: str) -> float:
+    """Return DeepGEMM's tolerance for a dequantized mathematical oracle."""
+    if a_dtype == "fp4" and b_dtype == "fp4":
+        return 0.02
+    if a_dtype == "fp4" or b_dtype == "fp4":
+        return 0.01
+    return 0.001
+
+
 def quantize_a(x, *, gran_k: int = 128, dtype: str = "fp8") -> tuple:
     """Per-token quantization of the A operand (`recipe_a = (1, gran_k)`)."""
     from deep_gemm.utils.math import per_token_cast_to_fp4, per_token_cast_to_fp8
@@ -134,9 +145,28 @@ def transform_sf(sf, mn: int, k: int, recipe: tuple[int, int], num_groups: int |
     same bytes; `csrc/apis/layout.hpp:49-53` is the SM100 branch that runs.
     """
     deep_gemm = require_deep_gemm()
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        gran_mn, gran_k = recipe
+        if gran_k not in (32, 128):
+            raise ValueError(f"unsupported Thor scale K granularity: {gran_k}")
+        if gran_mn != 1:
+            import torch
+
+            rows = torch.arange(mn, device=sf.device).floor_divide_(gran_mn)
+            sf = sf.index_select(-2, rows)
+        return deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
     if num_groups is None:
         return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
     return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe, num_groups)
+
+
+def broadcast_block_sf(sf, mn: int, gran_mn: int):
+    """Expand one block scale to every logical MN row."""
+    if gran_mn == 1:
+        return sf
+    return sf.repeat_interleave(gran_mn, dim=-2)[..., :mn, :]
 
 
 def to_major(x, major: str):
@@ -156,6 +186,18 @@ def to_major(x, major: str):
         # K-major everywhere on SM100, so this combination should never be built.
         raise ValueError("packed FP4 operands are K-major only")
     return x.t().contiguous().t()
+
+
+def dequantize(quantized, sf_raw, *, dtype: str, gran_k: int, gran_mn: int = 1):
+    """Reconstruct the exact quantized values consumed by the MMA."""
+    from deep_gemm.utils.math import cast_back_from_fp4, cast_back_from_fp8
+
+    sf_rows = broadcast_block_sf(sf_raw, quantized.size(-2), gran_mn)
+    if dtype == "fp8":
+        return cast_back_from_fp8(quantized, sf_rows, gran_k=gran_k)
+    if dtype == "fp4":
+        return cast_back_from_fp4(quantized, sf_rows, gran_k=gran_k)
+    raise ValueError(f"unsupported dtype: {dtype}")
 
 
 # --------------------------------------------------------------------------------------
@@ -195,10 +237,15 @@ def prepare_normal(
     recipe_b = recipe_for(b_dtype, gran_k_b, is_a=False, is_wgrad=is_wgrad)
     b_q, b_sf = quantize_b(b_bf16, gran_k=gran_k_b, dtype=b_dtype, per_block=recipe_b[0] != 1)
 
+    a_ref = dequantize(a_q, a_sf, dtype="fp8", gran_k=gran_k_a)
+    b_ref = dequantize(b_q, b_sf, dtype=b_dtype, gran_k=gran_k_b, gran_mn=recipe_b[0])
+
     out_dtype = torch.float32 if cd_dtype == "fp32" else torch.bfloat16
+    ref = (a_ref.float() @ b_ref.float().t()).to(out_dtype)
     c = None
     if accumulate:
         c = torch.randn((M, N), device="cuda", dtype=out_dtype)
+        ref = (ref.float() + c.float()).to(out_dtype)
     d = torch.empty((M, N), device="cuda", dtype=out_dtype)
 
     sfa = transform_sf(a_sf, M, K, recipe_for("fp8", gran_k_a, is_a=True))
@@ -227,6 +274,7 @@ def prepare_normal(
         "b_raw_sf": b_sf,
         "c": c,
         "d": d,
+        "ref": ref,
         "recipe_a": recipe_for("fp8", gran_k_a, is_a=True),
         "recipe_b": recipe_b,
         # Once `transform_sf` has run, the scales are per-row and already packed,
@@ -258,6 +306,17 @@ def _quantize_grouped_b(b_bf16, *, gran_k: int, dtype: str, per_block: bool):
     data = torch.stack([g[0] for g in groups])
     sf = torch.stack([g[1] for g in groups])
     return data, sf
+
+
+def _dequantize_grouped_b(b_q, b_sf, *, dtype: str, gran_k: int, gran_mn: int):
+    import torch
+
+    return torch.stack(
+        [
+            dequantize(b_q[i], b_sf[i], dtype=dtype, gran_k=gran_k, gran_mn=gran_mn)
+            for i in range(b_q.size(0))
+        ]
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -320,6 +379,13 @@ def prepare_m_grouped_contiguous(
     b_q, b_sf = _quantize_grouped_b(
         b_bf16, gran_k=gran_k_b, dtype=b_dtype, per_block=recipe_b[0] != 1
     )
+    a_ref = dequantize(a_q, a_sf, dtype="fp8", gran_k=gran_k_a)
+    b_ref = _dequantize_grouped_b(b_q, b_sf, dtype=b_dtype, gran_k=gran_k_b, gran_mn=recipe_b[0])
+    ref = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
+    for i, (start, _actual_end, aligned_end) in enumerate(spans):
+        ref[start:aligned_end] = (a_ref[start:aligned_end].float() @ b_ref[i].float().t()).to(
+            torch.bfloat16
+        )
     d = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
 
     psum_layout = grouped_layout if use_psum_layout else None
@@ -339,6 +405,7 @@ def prepare_m_grouped_contiguous(
         "sfb": sfb,
         "grouped_layout": grouped_layout,
         "d": d,
+        "ref": ref,
         "c": None,
         "alignment": alignment,
         "use_psum_layout": use_psum_layout,
@@ -367,8 +434,20 @@ def transform_sf_psum(sf, mn: int, k: int, recipe, psum_layout, alignment: int |
     factors out on a different grid than A and D.
     """
     deep_gemm = require_deep_gemm()
+    from tirx_kernels.target import prepare_cuda_arch
+
     if alignment is not None:
         deep_gemm.set_mk_alignment_for_contiguous_layout(alignment)
+    if prepare_cuda_arch() == "sm_110a":
+        gran_mn, gran_k = recipe
+        if gran_k not in (32, 128):
+            raise ValueError(f"unsupported Thor scale K granularity: {gran_k}")
+        if gran_mn != 1:
+            import torch
+
+            rows = torch.arange(mn, device=sf.device).floor_divide_(gran_mn)
+            sf = sf.index_select(-2, rows)
+        return deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf, psum_layout)
     if psum_layout is None:
         return deep_gemm.transform_sf_into_required_layout(sf, mn, k, recipe)
     # Positional signature: (sf, mn, k, recipe, num_groups, is_sfa,
@@ -430,6 +509,14 @@ def prepare_m_grouped_masked(
         b_bf16, gran_k=gran_k_b, dtype=b_dtype, per_block=recipe_b[0] != 1
     )
 
+    used_m = max(counts)
+    a_ref = dequantize(a_q_flat, a_sf_flat, dtype="fp8", gran_k=gran_k_a).view(
+        num_groups, max_m, K
+    )[:, :used_m]
+    b_ref = _dequantize_grouped_b(b_q, b_sf, dtype=b_dtype, gran_k=gran_k_b, gran_mn=recipe_b[0])
+    ref = torch.zeros((num_groups, max_m, N), device="cuda", dtype=torch.bfloat16)
+    ref[:, :used_m] = torch.einsum("gmk,gnk->gmn", a_ref.float(), b_ref.float()).to(torch.bfloat16)
+
     d = torch.empty((num_groups, max_m, N), device="cuda", dtype=torch.bfloat16)
 
     sfa = transform_sf(a_sf, max_m, K, recipe_for("fp8", gran_k_a, is_a=True), num_groups)
@@ -449,6 +536,7 @@ def prepare_m_grouped_masked(
         "masked_m": masked_m,
         "grouped_layout": masked_m,
         "d": d,
+        "ref": ref,
         "c": None,
         "a_dtype": "fp8",
         "b_dtype": b_dtype,
@@ -475,19 +563,19 @@ def prepare_m_grouped_masked(
 # keeps compilation and setup out of the timed region on both sides.
 
 
-def assert_within_threshold(diff, data, *, kernel: str, detail: str, **extra) -> dict:
+def assert_within_threshold(
+    diff, data, *, kernel: str, detail: str, threshold: float | None = None, **extra
+) -> dict:
     """Raise unless the TIRx-vs-DeepGEMM diff clears the direct threshold.
 
     Every entry module compares one number against `DIRECT_DIFF_THRESHOLD` and
     reports the same two keys, so the check lives here and each module supplies
     only its own identifying `detail`.
     """
-    del data
-    if not diff < DIRECT_DIFF_THRESHOLD:
-        raise AssertionError(
-            f"{kernel} {detail}: TIRx-vs-DeepGEMM diff {diff:.3e} >= {DIRECT_DIFF_THRESHOLD:.0e}"
-        )
-    return {"diff": diff, "threshold": DIRECT_DIFF_THRESHOLD, **extra}
+    threshold = DIRECT_DIFF_THRESHOLD if threshold is None else threshold
+    if not diff < threshold:
+        raise AssertionError(f"{kernel} {detail}: diff {diff:.3e} >= {threshold:.0e}")
+    return {"diff": diff, "threshold": threshold, **extra}
 
 
 def bench_against_deepgemm(
@@ -505,9 +593,12 @@ def bench_against_deepgemm(
         launch, _out = reference_launcher(data)
         return launch
 
+    from tirx_kernels.target import prepare_cuda_arch
+
+    references = {} if prepare_cuda_arch() == "sm_110a" else {"deepgemm": build_reference}
     result = bench(
         {"tirx": tirx_launch},
-        references={"deepgemm": build_reference},
+        references=references,
         warmup=warmup,
         repeat=repeat,
         timer=timer,
@@ -695,6 +786,13 @@ def prepare_bmm(*, expr: str, H: int, R: int, D: int, B: int, seed: int = 0) -> 
     for i in range(H):
         y_q[i], y_sf[i] = per_block_cast_to_fp8(y[i], use_ue8m0=True)
 
+    x_ref = dequantize(
+        x_q.view(-1, R), x_sf.view(-1, ceil_div(R, gran_k)), dtype="fp8", gran_k=gran_k
+    ).view(B, H, R)
+    y_ref = torch.stack(
+        [dequantize(y_q[i], y_sf[i], dtype="fp8", gran_k=gran_k, gran_mn=gran_k) for i in range(H)]
+    )
+    ref = torch.einsum("bhr,hdr->bhd", x_ref.float(), y_ref.float()).to(torch.bfloat16)
     z = torch.empty((B, H, D), device="cuda", dtype=torch.bfloat16)
 
     # The `(batch, m, n, k)` views `fp8_bmm` actually sees.
@@ -716,6 +814,7 @@ def prepare_bmm(*, expr: str, H: int, R: int, D: int, B: int, seed: int = 0) -> 
         "sfa": sfa,
         "sfb": sfb,
         "d": d_view,
+        "ref": ref.permute(1, 0, 2),
         "c": None,
         "z": z,
         # `fp8_einsum` permutes each SF operand before handing it to `fp8_bmm`,
@@ -779,6 +878,13 @@ def _prepare_bmm_bhd_hdr_bhr(*, H: int, R: int, D: int, B: int, gran_k: int) -> 
     for i in range(H):
         y_q[i], y_sf[i] = per_block_cast_to_fp8(y[i], use_ue8m0=True)
 
+    x_ref = dequantize(
+        x_q.view(-1, D), x_sf.view(-1, ceil_div(D, gran_k)), dtype="fp8", gran_k=gran_k
+    ).view(B, H, D)
+    y_ref = torch.stack(
+        [dequantize(y_q[i], y_sf[i], dtype="fp8", gran_k=gran_k, gran_mn=gran_k) for i in range(H)]
+    )
+    ref = torch.einsum("bhd,hdr->bhr", x_ref.float(), y_ref.float()).to(torch.bfloat16)
     z = torch.empty((B, H, R), device="cuda", dtype=torch.bfloat16)
 
     sfa = transform_sf(x_sf.permute(1, 0, 2), B, D, (1, gran_k), H)
@@ -795,6 +901,7 @@ def _prepare_bmm_bhd_hdr_bhr(*, H: int, R: int, D: int, B: int, gran_k: int) -> 
         "sfa": sfa,
         "sfb": sfb,
         "d": z.permute(1, 0, 2),
+        "ref": ref.permute(1, 0, 2),
         "c": None,
         "z": z,
         # See the note in `_prepare_bmm_bhr_hdr_bhd`: the already-packed scales
@@ -827,6 +934,15 @@ def _prepare_bmm_bhd_bhr_hdr(*, H: int, R: int, D: int, B: int, gran_k: int) -> 
     x_q, x_sf = x_q.view(B, H, D), x_sf.view(ceil_div(B, gran_k), H, D)
     y_q, y_sf = y_q.view(B, H, R), y_sf.view(ceil_div(B, gran_k), H, R)
 
+    x_ref = (
+        x_q.float().view(B, -1)
+        * x_sf.view(ceil_div(B, gran_k), -1).repeat_interleave(gran_k, dim=0)[:B]
+    ).view(B, H, D)
+    y_ref = (
+        y_q.float().view(B, -1)
+        * y_sf.view(ceil_div(B, gran_k), -1).repeat_interleave(gran_k, dim=0)[:B]
+    ).view(B, H, R)
+    ref = z0 + torch.einsum("bhd,bhr->hdr", x_ref, y_ref)
     z = z0.clone()
 
     sfa = transform_sf(x_sf.permute(1, 2, 0), D, B, (1, gran_k), H)
@@ -843,6 +959,7 @@ def _prepare_bmm_bhd_bhr_hdr(*, H: int, R: int, D: int, B: int, gran_k: int) -> 
         "sfa": sfa,
         "sfb": sfb,
         "d": z,
+        "ref": ref,
         "c": z,
         "z": z,
         "z0": z0,
@@ -905,6 +1022,28 @@ def k_grouped_quantize(x, ks: list[int], *, gran_k: int, group_ends: list[int] |
     return quantized, sf
 
 
+def k_grouped_dequantize(q, sf, ks: list[int], *, gran_k: int, group_ends=None):
+    """Undo ``k_grouped_quantize`` for the mathematical reference."""
+    import itertools
+
+    import torch
+    from deep_gemm.utils.math import ceil_div
+
+    if group_ends is None:
+        group_ends = list(itertools.accumulate(ks))
+    out = torch.zeros(q.shape, dtype=torch.float32, device=q.device)
+    sf_row = 0
+    for k, end in zip(ks, group_ends):
+        if k == 0:
+            continue
+        start = end - k
+        rows = ceil_div(k, gran_k)
+        block = sf[sf_row : sf_row + rows]
+        sf_row += rows
+        out[start:end] = q[start:end].float() * block.repeat_interleave(gran_k, dim=0)[:k]
+    return out
+
+
 def prepare_k_grouped(
     *,
     num_groups: int,
@@ -955,6 +1094,16 @@ def prepare_k_grouped(
 
     a_q, a_sf = k_grouped_quantize(a_bf16, ks, gran_k=gran_k, group_ends=group_ends)
     b_q, b_sf = k_grouped_quantize(b_bf16, ks, gran_k=gran_k, group_ends=group_ends)
+    a_ref = k_grouped_dequantize(a_q, a_sf, ks, gran_k=gran_k, group_ends=group_ends)
+    b_ref = k_grouped_dequantize(b_q, b_sf, ks, gran_k=gran_k, group_ends=group_ends)
+
+    import itertools
+
+    ends_it = group_ends or list(itertools.accumulate(ks))
+    ref = c.clone()
+    for i, (k, end) in enumerate(zip(ks, ends_it)):
+        if k:
+            ref[i] += a_ref[end - k : end].t() @ b_ref[end - k : end]
     d = c.clone()
 
     sfa = deep_gemm.get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor(
@@ -983,6 +1132,7 @@ def prepare_k_grouped(
         "grouped_layout": layout,
         "c": c,
         "d": d,
+        "ref": ref,
         "use_psum_layout": use_psum_layout,
         "gran_k_a": gran_k,
         "gran_k_b": gran_k,

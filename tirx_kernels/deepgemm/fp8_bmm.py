@@ -29,7 +29,7 @@ from ._sm100_fp8_fp4_gemm_1d1d import GemmDesc, GemmType, Major, get_best_config
 KERNEL_META = {
     "name": "deepgemm_sm100_fp8_bmm",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -166,10 +166,13 @@ def run_test(**config):
     """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
+    from tirx_kernels.target import prepare_cuda_arch
+
     from ._sm100_fp8_fp4_gemm_1d1d.data import (
         assert_within_threshold,
         calc_diff,
         deepgemm_launch_bmm,
+        max_diff_threshold,
     )
 
     config.pop("label", None)
@@ -184,20 +187,24 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
-    # DeepGEMM itself, on the same quantized operands, is the arbiter.  The
-    # accumulate entry reads C from its own output, so that output must be
-    # seeded with the same accumulator our launch started from; `z` and the
-    # DeepGEMM buffer share a layout, so the comparison needs no view games.
-    _, deepgemm_out = deepgemm_launch_bmm(
-        data, out=data["z0"].clone() if data["c"] is not None else None
-    )
-    torch.cuda.synchronize()
+    if prepare_cuda_arch() == "sm_110a":
+        actual, expected = data["d"], data["ref"]
+        threshold = max_diff_threshold(data["a_dtype"], data["b_dtype"])
+    else:
+        # Preserve the bitwise DeepGEMM comparison on native SM100 devices.
+        _, expected = deepgemm_launch_bmm(
+            data, out=data["z0"].clone() if data["c"] is not None else None
+        )
+        torch.cuda.synchronize()
+        actual = data["z"]
+        threshold = None
 
     return assert_within_threshold(
-        calc_diff(data["z"], deepgemm_out),
+        calc_diff(actual, expected),
         data,
         kernel="deepgemm_sm100_fp8_bmm",
         detail=(f"{data['expr']} batch={data['batch']} M={data['M']} N={data['N']} K={data['K']}"),
+        threshold=threshold,
     )
 
 

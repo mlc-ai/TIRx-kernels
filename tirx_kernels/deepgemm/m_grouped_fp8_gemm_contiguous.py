@@ -28,7 +28,7 @@ from ._sm100_fp8_fp4_gemm_1d1d import (
 KERNEL_META = {
     "name": "deepgemm_sm100_m_grouped_fp8_gemm_contiguous",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -226,10 +226,13 @@ def run_test(**config):
     """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
+    from tirx_kernels.target import prepare_cuda_arch
+
     from ._sm100_fp8_fp4_gemm_1d1d.data import (
         assert_within_threshold,
         calc_diff,
         deepgemm_launch_m_grouped_contiguous,
+        max_diff_threshold,
         psum_slice_diff,
     )
 
@@ -240,20 +243,25 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
-    # DeepGEMM itself, on the same quantized operands, is the arbiter.
-    _, deepgemm_out = deepgemm_launch_m_grouped_contiguous(data)
-    torch.cuda.synchronize()
+    if prepare_cuda_arch() == "sm_110a":
+        expected = data["ref"]
+        threshold = max_diff_threshold(data["a_dtype"], data["b_dtype"])
+    else:
+        # Preserve the bitwise DeepGEMM comparison on native SM100 devices.
+        _, expected = deepgemm_launch_m_grouped_contiguous(data)
+        torch.cuda.synchronize()
+        threshold = None
 
     if data["use_psum_layout"]:
         diff = psum_slice_diff(
             data["d"],
-            deepgemm_out,
+            expected,
             data["grouped_layout"],
             data["alignment"],
             zero_padding=data["ensure_zero_padding"],
         )
     else:
-        diff = calc_diff(data["d"], deepgemm_out)
+        diff = calc_diff(data["d"], expected)
     return assert_within_threshold(
         diff,
         data,
@@ -263,6 +271,7 @@ def run_test(**config):
             f"psum={data['use_psum_layout']} zp={data['ensure_zero_padding']} "
             f"b_dtype={data['b_dtype']}"
         ),
+        threshold=threshold,
         M=data["M"],
     )
 

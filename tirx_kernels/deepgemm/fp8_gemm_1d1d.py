@@ -19,7 +19,7 @@ from ._sm100_fp8_fp4_gemm_1d1d import GemmDesc, GemmType, Major, get_best_config
 KERNEL_META = {
     "name": "deepgemm_sm100_fp8_gemm_1d1d",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -199,10 +199,13 @@ def run_test(**config):
     """Compile, launch and compare against DeepGEMM on the same operands."""
     import torch
 
+    from tirx_kernels.target import prepare_cuda_arch
+
     from ._sm100_fp8_fp4_gemm_1d1d.data import (
         assert_within_threshold,
         calc_diff,
         deepgemm_launch_normal,
+        max_diff_threshold,
     )
 
     config.pop("label", None)
@@ -216,13 +219,17 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
-    # DeepGEMM itself, on the same quantized operands, is the arbiter (the
-    # launcher seeds and runs once into its own output).
-    _, deepgemm_out = deepgemm_launch_normal(data)
-    torch.cuda.synchronize()
+    if prepare_cuda_arch() == "sm_110a":
+        expected = data["ref"]
+        threshold = max_diff_threshold(data["a_dtype"], data["b_dtype"])
+    else:
+        # Preserve the bitwise DeepGEMM comparison on native SM100 devices.
+        _, expected = deepgemm_launch_normal(data)
+        torch.cuda.synchronize()
+        threshold = None
 
     return assert_within_threshold(
-        calc_diff(data["d"], deepgemm_out),
+        calc_diff(data["d"], expected),
         data,
         kernel="deepgemm_sm100_fp8_gemm_1d1d",
         detail=(
@@ -230,6 +237,7 @@ def run_test(**config):
             f"major={data['major_a']}{data['major_b']} b_dtype={data['b_dtype']} "
             f"cd={data['cd_dtype']} acc={data['accumulate']}"
         ),
+        threshold=threshold,
     )
 
 
