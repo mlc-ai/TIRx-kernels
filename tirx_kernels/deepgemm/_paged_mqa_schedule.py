@@ -1,4 +1,6 @@
-# SPDX-License-Identifier: Apache-2.0
+# This file is a TIRx port of code from DeepGEMM
+# (https://github.com/deepseek-ai/DeepGEMM @ 559d79fb), Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 """Host replica of DeepGEMM's SM100 paged-MQA scheduling metadata."""

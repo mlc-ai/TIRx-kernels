@@ -11,7 +11,6 @@ import json
 import math
 import statistics
 from collections import defaultdict
-from datetime import date
 from pathlib import Path
 
 _CATEGORY_ORDER = (
@@ -117,8 +116,14 @@ def _markdown(run: dict, *, run_path: Path) -> str:
     speedups = [item["speedup"] for item in rows]
     overall = _geomean(speedups)
     attention_speedup = by_category["Attention"][0]
+    measured_date = (results[0].get("started_at") or "")[:10] or "unknown date"
     pipeline = run.get("pipeline") or {}
-    protocol = pipeline.get("measurement_protocol") or {}
+    protocol = results[0].get("benchmark_protocol") or {}
+    protocol_fields = ("warmup", "repeat", "rounds", "round_aggregate")
+    for row in results[1:]:
+        row_protocol = row.get("benchmark_protocol") or {}
+        if any(row_protocol.get(field) != protocol.get(field) for field in protocol_fields):
+            raise ValueError("representative rows do not share one timing protocol")
     selection = run.get("selection") or {}
     git = run.get("git") or {}
     baselines = run.get("baselines") or {}
@@ -128,7 +133,7 @@ def _markdown(run: dict, *, run_path: Path) -> str:
     lines = [
         "# NVIDIA Thor native-baseline performance",
         "",
-        f"Measured on {date.today().isoformat()} on one NVIDIA Jetson AGX Thor Developer Kit. "
+        f"Measured on {measured_date} on one NVIDIA Jetson AGX Thor Developer Kit. "
         "Every row compares TIRx with a FlashInfer implementation on the same GPU and exact input "
         "shape.",
         "",
@@ -144,10 +149,10 @@ def _markdown(run: dict, *, run_path: Path) -> str:
         f"| FlashInfer faster by more than 5% | **{verdicts['FlashInfer faster']}/{len(rows)}** |",
         f"| Geometric-mean TIRx speedup | **{overall:.3f}x** |",
         "",
-        "The aggregate is nearly even, but it hides a wide spread: TIRx FlashAttention4 is "
+        "The mixed aggregate hides a wide spread: TIRx FlashAttention4 is "
         f"{attention_speedup:.3f}x the throughput of FlashInfer FA2 at the selected "
-        "GQA-prefill shape, while "
-        "FlashInfer leads most selected normalization and TopK paths. Use the per-family and "
+        "GQA-prefill shape, the plain RMSNorm and GELU activation paths favor FlashInfer, and "
+        "most other rows are close. Use the per-family and "
         "per-kernel rows for tuning decisions rather than the single mixed-workload mean.",
         "",
         "## Results by family",
@@ -244,7 +249,7 @@ def _markdown(run: dict, *, run_path: Path) -> str:
             "  --with-references --timer proton --rounds 5 --cooldown 0 \\",
             "  --max-prepare-processes 1 --ready-backlog 1 --no-probe --no-report",
             "python scripts/report_thor_native.py \\",
-            "  --run /home/tlopexh/thor-validation/flashinfer-native-final/runs/1.json \\",
+            f"  --run {run_path} \\",
             "  --output THOR_NATIVE_BASELINE.md",
             "```",
             "",

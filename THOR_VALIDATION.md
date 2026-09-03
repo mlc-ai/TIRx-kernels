@@ -26,12 +26,16 @@ reference as a correctness pass.
 
 The primary performance comparison is now a same-device A/B against pinned
 FlashInfer implementations.  The 13 serving-representative rows use the same
-Thor GPU, exact input shape, generated data, Proton timer, 25 ms warmup budget,
-100 ms repeat budget, five independent rounds, and arithmetic-mean aggregation.
-All 13 TIRx and FlashInfer paths pass their numerical checks.  TIRx wins three
-rows by more than 5%, is within 5% on three, and trails on seven; the mixed-suite
-geometric-mean TIRx speedup is 1.011x.  The important result is the per-kernel
-spread, including 3.005x for the selected FlashAttention4-versus-FlashInfer-FA2
+Thor GPU, exact input shape, generated data, Proton timer, 100 ms repeat budget,
+five independent rounds, and arithmetic-mean aggregation.
+Because clocks cannot be locked without root on the validation host, this
+Thor-only roster raises the per-implementation warmup budget from the standard
+25 ms to 1,000 ms to avoid charging the first implementation for the cold DVFS
+transition. All 13
+TIRx and FlashInfer paths pass their numerical checks. TIRx wins four rows by
+more than 5%, is within 5% on seven, and trails on two; the mixed-suite
+geometric-mean TIRx speedup is 1.094x. The important result is the per-kernel
+spread, including 3.030x for the selected FlashAttention4-versus-FlashInfer-FA2
 shape, rather than the aggregate alone.
 
 See [THOR_NATIVE_BASELINE.md](THOR_NATIVE_BASELINE.md) for the representative

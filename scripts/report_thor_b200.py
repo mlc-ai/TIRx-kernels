@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright TIRx authors
 
 """Render a Thor versus repository SM100/B200 benchmark comparison."""
+
+# ruff: noqa: E501
 
 from __future__ import annotations
 
