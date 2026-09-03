@@ -15,6 +15,7 @@ from functools import cache
 from itertools import combinations
 
 import tirx_kernels.kern as K
+from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -1566,7 +1567,7 @@ def _benchmark_configs():
 KERNEL_META = {
     "name": "cudnn_sm100_dense_blockscaled_gemm_persistent_srelu_quant",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -3001,6 +3002,7 @@ def get_kernel(
     alpha=None,
 ):
     del alpha
+    cluster_shape_mn = prepare_cluster_shape(cluster_shape_mn)
     return _make_kernel(
         M,
         N,
@@ -3144,13 +3146,15 @@ def _load_reference_source():
 
 
 def _compile_reference(data, config):
-    from tirx_kernels.cudnn._reference import import_cutlass_reference
+    from tirx_kernels.cudnn._reference import from_dlpack_typed, import_cutlass_reference
 
     cutlass = import_cutlass_reference()
     import cutlass.cute as cute
     import torch
     from cuda.bindings import driver as cuda
-    from cutlass.cute.runtime import from_dlpack, make_fake_stream
+    from cutlass.cute.runtime import make_fake_stream
+
+    from_dlpack = from_dlpack_typed
 
     module = _load_reference_source()
     config = _without_label(config)
@@ -3180,13 +3184,14 @@ def _compile_reference(data, config):
     prob_cute = dynamic(prob, 0 if config["a_major"] == "m" else 1)
     amax_cute = from_dlpack(amax, assumed_align=16)
 
+    cluster_shape_mn = prepare_cluster_shape(config["cluster_shape_mn"])
     kernel = module.Sm100BlockScaledPersistentDenseGemmKernel(
         sf_vec_size=config["sf_vec_size"],
         mma_tiler_mn=tuple(config["mma_tiler_mn"]),
-        cluster_shape_mn=tuple(config["cluster_shape_mn"]),
+        cluster_shape_mn=cluster_shape_mn,
         vector_f32=config["vector_f32"],
     )
-    cluster_size = config["cluster_shape_mn"][0] * config["cluster_shape_mn"][1]
+    cluster_size = cluster_shape_mn[0] * cluster_shape_mn[1]
     max_active_clusters = cutlass.utils.HardwareInfo().get_max_active_clusters(cluster_size)
 
     def epilogue_op(x):
@@ -3302,8 +3307,54 @@ def _validate_outputs(data, config, *, with_source):
     )
 
 
+def _validate_with_oracle(data, config):
+    """Validate the structured block-scaled GEMM and sReLU equation."""
+    import math
+
+    import torch
+
+    K_dim = config["K"]
+    scale_exponent = math.ceil(math.log2(max(1.0, K_dim / 512.0)))
+    scale_product = 2.0 ** (-scale_exponent) * 0.5
+    c_f32 = (
+        data["a"]["factors"][:, None, :]
+        * data["b"]["factors"][None, :, :]
+        * (K_dim * scale_product * config["alpha"])
+    )
+    prob = data["prob"]["values"][:, None, :]
+    d_f32 = torch.relu(c_f32).square() * prob
+    expected_c = c_f32.to(_torch_dtype(torch, config["c_dtype"]))
+    expected_d = d_f32.to(_torch_dtype(torch, config["d_dtype"]))
+    c_atol, c_rtol = _output_tolerance(config["c_dtype"])
+    d_atol, d_rtol = _output_tolerance(config["d_dtype"])
+    _assert_close(
+        torch,
+        data["tirx_c"]["source"],
+        expected_c,
+        atol=c_atol,
+        rtol=c_rtol,
+        label="TIRx C versus FP32 oracle",
+    )
+    _assert_close(
+        torch,
+        data["tirx_d"]["source"],
+        expected_d,
+        atol=d_atol,
+        rtol=d_rtol,
+        label="TIRx D versus FP32 oracle",
+    )
+    _assert_close(
+        torch,
+        data["tirx_amax"],
+        d_f32.abs().amax().reshape(1),
+        atol=0.12,
+        rtol=0.02,
+        label="TIRx amax versus FP32 oracle",
+    )
+
+
 def run_test(**config):
-    """Compare TIRx with the cuDNN Frontend kernel on identical inputs."""
+    """Compare TIRx with the pinned source, or the FP32 oracle on Thor."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -3312,14 +3363,20 @@ def run_test(**config):
     data = prepare_data(**kernel_config)
     executable = compile_kernel(get_kernel(**kernel_config))
     tirx_launch = _tirx_launch(executable, data, kernel_config["alpha"])
-    source_launch = _compile_reference(data, kernel_config)
     _reset_outputs(data, "tirx")
     tirx_launch()
-    _reset_outputs(data, "source")
-    source_launch()
-    torch.cuda.synchronize()
-    _validate_outputs(data, kernel_config, with_source=True)
-    return {"amax": float(data["source_amax"].item())}
+    if prepare_cuda_arch() == "sm_110a":
+        torch.cuda.synchronize()
+        _validate_with_oracle(data, kernel_config)
+        result = data["tirx_amax"]
+    else:
+        source_launch = _compile_reference(data, kernel_config)
+        _reset_outputs(data, "source")
+        source_launch()
+        torch.cuda.synchronize()
+        _validate_outputs(data, kernel_config, with_source=True)
+        result = data["source_amax"]
+    return {"amax": float(result.item())}
 
 
 def prepare_bench(**config):
@@ -3340,7 +3397,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
 
     config = {**prepared["config"], **kwargs}
     kernel_config = _without_label(config)
-    with_source = external_references_enabled()
+    with_source = external_references_enabled() and prepare_cuda_arch() != "sm_110a"
     gpu_state = prepared.get("gpu_state")
     if gpu_state is None:
         data = prepare_data(**kernel_config)

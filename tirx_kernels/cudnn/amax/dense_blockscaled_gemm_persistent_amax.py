@@ -15,6 +15,7 @@ from functools import cache
 from itertools import combinations, product
 
 import tirx_kernels.kern as K
+from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
 
 _TRY_WAIT_TICKS = 10_000_000
 _SMEM_CAPACITY = 232_448
@@ -355,7 +356,7 @@ def _benchmark_configs():
 KERNEL_META = {
     "name": "cudnn_sm100_dense_blockscaled_gemm_persistent_amax",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -1621,6 +1622,7 @@ def get_kernel(
     mma_tiler_mn,
     cluster_shape_mn,
 ):
+    cluster_shape_mn = prepare_cluster_shape(cluster_shape_mn)
     return _make_kernel(
         M,
         N,
@@ -1765,13 +1767,15 @@ def _load_reference_source():
 
 
 def _compile_reference(data, config):
-    from tirx_kernels.cudnn._reference import import_cutlass_reference
+    from tirx_kernels.cudnn._reference import from_dlpack_typed, import_cutlass_reference
 
     cutlass = import_cutlass_reference()
     import cutlass.cute as cute
     import torch
     from cuda.bindings import driver as cuda
-    from cutlass.cute.runtime import from_dlpack, make_fake_stream
+    from cutlass.cute.runtime import make_fake_stream
+
+    from_dlpack = from_dlpack_typed
 
     if os.environ.get("CUDNNFE_CLUSTER_OVERLAP_MARGIN", "0") != "0":
         raise RuntimeError("CUDNNFE_CLUSTER_OVERLAP_MARGIN must be 0")
@@ -1795,12 +1799,13 @@ def _compile_reference(data, config):
         leading_dim=0 if config["c_major"] == "m" else 1
     )
     amax_cute = from_dlpack(amax, assumed_align=16)
+    cluster_shape_mn = prepare_cluster_shape(config["cluster_shape_mn"])
     kernel = module.Sm100BlockScaledPersistentDenseGemmKernel(
         sf_vec_size=config["sf_vec_size"],
         mma_tiler_mn=tuple(config["mma_tiler_mn"]),
-        cluster_shape_mn=tuple(config["cluster_shape_mn"]),
+        cluster_shape_mn=cluster_shape_mn,
     )
-    cluster_size = config["cluster_shape_mn"][0] * config["cluster_shape_mn"][1]
+    cluster_size = cluster_shape_mn[0] * cluster_shape_mn[1]
     max_active_clusters = cutlass.utils.HardwareInfo().get_max_active_clusters(cluster_size)
     executable = cute.compile(
         kernel,
@@ -1894,8 +1899,44 @@ def _validate_outputs(data, config, *, with_source):
     )
 
 
+def _validate_with_oracle(data, config):
+    """Validate the deliberately sparse GEMM inputs without the SM100 source."""
+    import torch
+
+    M, N, L = (config[key] for key in ("M", "N", "L"))
+    expected = torch.zeros((M, N, L), dtype=torch.float32, device="cuda")
+    for batch in range(L):
+        a_index = data["a"]["k_indices"][batch]
+        b_index = data["b"]["k_indices"][batch]
+        products = data["a"]["values"][batch][:, None] * data["b"]["values"][batch][None, :]
+        expected[:, :, batch] = torch.where(a_index[:, None] == b_index[None, :], products, 0.0)
+    dtype = config["c_dtype"]
+    if dtype != "float4_e2m1fn":
+        expected_output = expected.to(_torch_dtype(torch, dtype)).float()
+    else:
+        expected_output = expected
+    actual = _output_as_float(torch, data["tirx_output"], M, N, L, dtype)
+    tolerance = 0.1 if _dtype_bits(dtype) <= 8 else 0.01
+    _assert_close(
+        torch,
+        actual,
+        expected_output,
+        atol=tolerance,
+        rtol=tolerance,
+        label="TIRx output versus FP32 oracle",
+    )
+    _assert_close(
+        torch,
+        data["tirx_amax"],
+        expected.abs().amax().reshape(1),
+        atol=0.1,
+        rtol=0.1,
+        label="TIRx amax versus FP32 oracle",
+    )
+
+
 def run_test(**config):
-    """Compare TIRx with the pinned source kernel on identical inputs."""
+    """Compare TIRx with the pinned source, or the FP32 oracle on Thor."""
     import torch
 
     from tirx_kernels.runner import compile_kernel
@@ -1903,12 +1944,18 @@ def run_test(**config):
     kernel_config = _without_label(config)
     data = prepare_data(**kernel_config)
     tirx_launch = _tirx_launch(compile_kernel(get_kernel(**kernel_config)), data)
-    source_launch = _compile_reference(data, kernel_config)
     tirx_launch()
-    source_launch()
-    torch.cuda.synchronize()
-    _validate_outputs(data, kernel_config, with_source=True)
-    return {"max_abs": float(data["source_amax"].abs().amax().item())}
+    if prepare_cuda_arch() == "sm_110a":
+        torch.cuda.synchronize()
+        _validate_with_oracle(data, kernel_config)
+        result = data["tirx_amax"]
+    else:
+        source_launch = _compile_reference(data, kernel_config)
+        source_launch()
+        torch.cuda.synchronize()
+        _validate_outputs(data, kernel_config, with_source=True)
+        result = data["source_amax"]
+    return {"max_abs": float(result.abs().amax().item())}
 
 
 def prepare_bench(**config):
@@ -1932,7 +1979,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     tirx_launch = _tirx_launch(prepared["executable"], data)
     tirx_launch()
     torch.cuda.synchronize()
-    with_source = external_references_enabled()
+    with_source = external_references_enabled() and prepare_cuda_arch() != "sm_110a"
     references = None
     if with_source:
         source_launch = _compile_reference(data, kernel_config)

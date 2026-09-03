@@ -16,6 +16,8 @@ per-row ``dprob``, per-expert ``dbias`` and ``amax``, and FP8 row/column output
 scale factors.
 """
 
+from tirx_kernels.target import prepare_cluster_shape, prepare_cuda_arch
+
 from ._moe_blockscaled_grouped_gemm_dglu_dbias import data as _data
 from ._moe_blockscaled_grouped_gemm_dglu_dbias import kernel as _kernel
 from ._moe_blockscaled_grouped_gemm_dglu_dbias import spec as _spec
@@ -23,7 +25,7 @@ from ._moe_blockscaled_grouped_gemm_dglu_dbias import spec as _spec
 KERNEL_META = {
     "name": "cudnn_sm100_moe_blockscaled_grouped_gemm_dglu_dbias",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -45,14 +47,19 @@ def _without_label(config):
     return {key: value for key, value in config.items() if key != "label"}
 
 
+def _runtime_config(config):
+    config = _without_label(config)
+    return {**config, "cluster_shape_mn": prepare_cluster_shape(config["cluster_shape_mn"])}
+
+
 def get_kernel(**config):
     """Return the launch sequence for one static specialization."""
-    return _kernel.get_kernel(**config)
+    return _kernel.get_kernel(**_runtime_config(config))
 
 
 def prepare_data(**config):
     """Allocate one input set shared by TIRx, the upstream kernel, and the oracle."""
-    return _data.prepare_data(**config)
+    return _data.prepare_data(**_runtime_config(config))
 
 
 def run_test(**config):
@@ -71,10 +78,10 @@ def run_test(**config):
     executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
     tirx_launch = _data.tirx_launch(executables, data)
     tirx_launch()
-    if _spec.upstream_launch_is_flaky(kernel_config):
-        # The upstream kernel faults intermittently here and the fault is sticky,
-        # so launching it would also invalidate the context TIRx just ran in.
-        # See ``spec.upstream_launch_is_flaky``.
+    if prepare_cuda_arch() == "sm_110a" or _spec.upstream_launch_is_flaky(kernel_config):
+        # The pinned source either has the documented flaky launch or cannot
+        # lower its device IR for sm_110a. In both cases the independent FP32
+        # oracle remains available for the TIRx result.
         torch.cuda.synchronize()
         _data.validate_outputs(data, sources=("tirx",))
     else:
@@ -111,7 +118,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     tirx_launch = _data.tirx_launch(prepared["executables"], data)
     tirx_launch()
     torch.cuda.synchronize()
-    with_source = external_references_enabled()
+    with_source = external_references_enabled() and prepare_cuda_arch() != "sm_110a"
     references = None
     if with_source:
         source_launch = _data.compile_reference(data)

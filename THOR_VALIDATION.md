@@ -13,7 +13,7 @@ correctness check.
 - TVM: Apache TVM `main` at `15b607d6bf`, including Thor target tag PR #20259
 - TIRx-kernels base: `0512291`
 - Candidate scope: 95 SM100 kernels and 9,282 correctness configurations
-- Fully validated: 46 kernels and 1,263 configurations
+- Fully validated: 52 kernels and 1,520 configurations
 
 The operator-level smoke sweep currently reports 56 numerical passes, 30
 failures, and 9 skips.  Follow-up launch-only checks show that 27 more kernels
@@ -76,6 +76,29 @@ cases use the mathematical oracle; the other 73 retain the source comparison.
 Together with FastTopK, fused DiT LayerNorm, and stable-sort TopK, this batch
 passes 242/242 configurations on Thor.
 
+## Block-scaled GEMM and DSA compatibility
+
+The five block-scaled cuDNN Frontend ports now pass 245/245 configurations on
+Thor: persistent Amax, DSReLU quantization, SReLU quantization, interleaved
+SwiGLU quantization, and grouped MoE dGLU/dbias.  Their TIRx schedules use the
+same explicit cluster reduction described above.  FP8 and packed-FP4 tensors
+are passed to the pinned CuTe source through byte-preserving typed DLPack
+views.
+
+The pinned source's NVVM path cannot lower four of these kernels for
+`sm_110a`, so their existing structured FP32 equations are the numerical
+oracle on Thor.  Interleaved SwiGLU retains the pinned-source comparison on 56
+configurations.  Two 256x64-tile schedules make the source cross AB12 epilogue
+tiles after retargeting; for those exact schedules, TIRx agrees exactly with
+the independently evaluated structured GEMM while the source stores values
+from another tile.
+
+The four-stage DSA sparse-attention backward chain passes 12/12 configurations
+against its full FP32 attention/gradient oracle.  Coverage includes BF16 and
+FP16, ragged and empty rows, negative indices, sink folding, and no-sink
+execution.  The pinned DSA source has no compute-11 host dispatch, so it is not
+used as a Thor timing peer.
+
 ## BSA forward-combine oracle
 
 `cudnn_sm100_bsa_forward_combine_blk64` retains a bitwise-exact comparison
@@ -105,6 +128,12 @@ The resumable local JSONL runs are kept outside the repository under `/tmp`:
 - `tirx-thor-main-0512291-batch10-mamba-ssu-final.jsonl`
 - `tirx-thor-main-0512291-batch11-topk-norm-gemm-final.jsonl`
 - `tirx-thor-main-0512291-batch13-bsa-combine-final.jsonl`
+- `tirx-thor-main-0512291-batch15-amax.jsonl`
+- `tirx-thor-main-0512291-batch15-dsrelu.jsonl`
+- `tirx-thor-main-0512291-batch15-srelu.jsonl`
+- `tirx-thor-main-0512291-batch15-swiglu-blockscaled-final.jsonl`
+- `tirx-thor-main-0512291-batch15-dglu-blockscaled.jsonl`
+- `tirx-thor-main-0512291-batch16-dsa-full.jsonl`
 
 These files are evidence from this machine, not portable repository inputs.
 Repeat validation through `scripts/validate_thor.py`; do not infer support only

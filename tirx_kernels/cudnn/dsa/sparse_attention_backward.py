@@ -17,6 +17,8 @@ sink-folded-LSE preprocess, the 20-warp main kernel, an FP32-to-element-dtype dK
 conversion, and the attention-sink gradient reduction.
 """
 
+from tirx_kernels.target import prepare_cuda_arch
+
 from ._sparse_attention_backward import data as _data
 from ._sparse_attention_backward import kernel as _kernel
 from ._sparse_attention_backward import spec as _spec
@@ -24,7 +26,7 @@ from ._sparse_attention_backward import spec as _spec
 KERNEL_META = {
     "name": "cudnn_sm100_dsa_sparse_attention_backward",
     "category": "cudnn",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "nvidia-cudnn-frontend",
@@ -67,10 +69,14 @@ def run_test(**config):
     executables = [compile_kernel(func) for func in get_kernel(**kernel_config)]
     tirx_launch = _data.tirx_launch(executables, data, synchronize_stages=True)
     tirx_launch()
-    source_launch = _data.compile_reference(data)
-    source_launch()
-    torch.cuda.synchronize()
-    _data.validate_outputs(data, sources=("tirx", "source"))
+    if prepare_cuda_arch() == "sm_110a":
+        torch.cuda.synchronize()
+        _data.validate_outputs(data, sources=("tirx",))
+    else:
+        source_launch = _data.compile_reference(data)
+        source_launch()
+        torch.cuda.synchronize()
+        _data.validate_outputs(data, sources=("tirx", "source"))
     return {
         "seqlen_q": data["derived"]["seqlen_q"],
         "seqlen_kv": data["derived"]["seqlen_kv"],
@@ -104,7 +110,7 @@ def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldow
     torch.cuda.synchronize()
 
     references = None
-    if external_references_enabled():
+    if external_references_enabled() and prepare_cuda_arch() != "sm_110a":
         source_launch = _data.compile_reference(data)
         source_launch()
         torch.cuda.synchronize()
