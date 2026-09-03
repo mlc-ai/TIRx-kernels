@@ -1538,7 +1538,6 @@ def _make_main(
                                 kk_pack[fragment * 4 + 3],
                             ],
                         )
-                    _tcgen_wait_load()
                     with K.If(reverse_index < cend - first_state_chunk), K.Then():
                         _arrive_barrier(arena, _BAR_KK_DONE)
 
@@ -1578,7 +1577,6 @@ def _make_main(
                                 a_pack[fragment * 4 + 3],
                             ],
                         )
-                    _tcgen_wait_load()
                     K.ptx.fence.proxy.async_.shared__cta()
                     _arrive_barrier(arena, _BAR_A_READY, a_stage)
 
@@ -2432,7 +2430,6 @@ def _make_main(
                             + K.shift_left(warp_in_group * 32 + sub * 16, K.int32(16)),
                             packed,
                         )
-                    _tcgen_wait_load()
                     _tcgen_wait_store()
                     _arrive_barrier(arena, _BAR_DU_INP_READY)
 
@@ -2460,7 +2457,6 @@ def _make_main(
                                     ),
                                 )
                             store_col_fragment(_V_U_BASE, v_stage, sub, matrix_row, packed)
-                    _tcgen_wait_load()
                     K.ptx.fence.proxy.async_.shared__cta()
                     _arrive_barrier(arena, _BAR_U_READY)
 
@@ -2491,7 +2487,6 @@ def _make_main(
                             + K.shift_left(warp_in_group * 32 + sub * 16, K.int32(16)),
                             dyp_pack,
                         )
-                    _tcgen_wait_load()
                     _tcgen_wait_store()
                     _arrive_barrier(arena, _BAR_DYP_INP_READY)
 
@@ -2605,7 +2600,6 @@ def _make_main(
                             arena.ptr_to([_DQ_BASE + (256 + warp_in_group * 64 + token0 + 1) * 4]),
                             part_g1,
                         )
-                    _tcgen_wait_load()
                     K.ptx.bar.sync(K.uint32(5), K.uint32(128))
                     with K.If(cg1_thread < 64), K.Then():
                         ysum = K.local_scalar("float32", init=K.float32(0.0))
