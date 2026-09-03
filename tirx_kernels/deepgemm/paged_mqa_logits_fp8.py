@@ -1843,10 +1843,13 @@ def run_test(**kwargs: Any) -> None:
 
 def prepare_bench(**kwargs: Any):
     """Compile the paged MQA executable without allocating CUDA data."""
-    from tirx_kernels.runner import prepared_gpu_benchmark
+    from tirx_kernels.runner import hardware_num_sms, prepared_gpu_benchmark
 
     config = _make_config(**kwargs)
-    executable = _compile_tirx_paged_mqa(config)
+    compile_config = PagedMQALogitsFP8Config(
+        **{**asdict(config), "num_sms": hardware_num_sms(config.num_sms)}
+    )
+    executable = _compile_tirx_paged_mqa(compile_config)
     return prepared_gpu_benchmark(run_gpu, {"config": dict(kwargs), "executable": executable})
 
 
