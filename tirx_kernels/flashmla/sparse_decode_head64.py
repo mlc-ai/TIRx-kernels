@@ -263,7 +263,7 @@ CONFIGS = [
 KERNEL_META = {
     "name": "sparse_flashmla_decode_head64",
     "category": "flashmla",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flash-mla",
@@ -2339,6 +2339,7 @@ def get_kernel(**kwargs: Any):
 def prepare_data(**kwargs: Any) -> dict[str, Any]:
     from tirx_kernels.target import supports_sm100_kernel
 
+    compact_kv = bool(kwargs.pop("_compact_kv", False))
     cfg = _cfg(**kwargs)
     if not torch.cuda.is_available():
         raise SkipTest("CUDA is required for sparse FlashMLA decode")
@@ -2348,7 +2349,9 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
     )
     capability = (props.major, props.minor)
     if not supports_sm100_kernel(capability):
-        raise SkipTest(f"SM100f or prepared Thor is required, got compute capability {props.major}.{props.minor}")
+        raise SkipTest(
+            f"SM100f or prepared Thor is required, got compute capability {props.major}.{props.minor}"
+        )
 
     device_generator = torch.Generator(device=device)
     device_generator.manual_seed(cfg.seed)
@@ -2399,13 +2402,32 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
             max(_ceil_div(int(cache_seqlens_cpu.max().item()), max_seqlen_alignment), 1)
             * max_seqlen_alignment
         )
-        blocks_per_sequence = max_seqlen_pad // page_block_size
+        logical_blocks_per_sequence = max_seqlen_pad // page_block_size
+        blocks_per_sequence = logical_blocks_per_sequence
+        if compact_kv:
+            # Correctness only needs the indexed rows, not a unique physical
+            # page for every logical position.  Reusing pages keeps the two
+            # extreme 148/256-batch cases below Thor's unified-memory budget;
+            # run_gpu leaves this disabled so performance working sets retain
+            # the source benchmark's full cache geometry.
+            blocks_per_sequence = min(
+                logical_blocks_per_sequence, max(4, _ceil_div(topk, page_block_size))
+            )
         num_blocks = cfg.b * blocks_per_sequence
 
-        block_ids = torch.arange(num_blocks, dtype=torch.int32, device=device)
-        block_table = block_ids.index_select(
-            0, torch.randperm(num_blocks, device=device, generator=device_generator)
-        ).view(cfg.b, blocks_per_sequence)
+        if compact_kv:
+            logical_page = torch.arange(
+                logical_blocks_per_sequence, dtype=torch.int32, device=device
+            )
+            physical_page = (logical_page * 131).remainder(blocks_per_sequence)
+            block_table = physical_page.view(1, -1) + (
+                torch.arange(cfg.b, dtype=torch.int32, device=device) * blocks_per_sequence
+            ).view(-1, 1)
+        else:
+            block_ids = torch.arange(num_blocks, dtype=torch.int32, device=device)
+            block_table = block_ids.index_select(
+                0, torch.randperm(num_blocks, device=device, generator=device_generator)
+            ).view(cfg.b, blocks_per_sequence)
 
         source_shape = (num_blocks, page_block_size, cfg.h_kv, cfg.d_qk)
         source_storage = torch.randn(
@@ -2448,7 +2470,7 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
 
         safe_indices = absolute_indices.clamp_min(0)
         batch_block_offsets = (
-            torch.arange(cfg.b, dtype=torch.int32, device=device) * blocks_per_sequence
+            torch.arange(cfg.b, dtype=torch.int32, device=device) * logical_blocks_per_sequence
         ).view(cfg.b, 1, 1)
         block_lookup = safe_indices // page_block_size + batch_block_offsets
         physical_blocks = block_table.view(-1).index_select(0, block_lookup.view(-1).long())
@@ -3072,43 +3094,173 @@ def _launch_tirx(case: dict[str, Any], executables: tuple[Any, Any]) -> None:
     combine_ex(*_tirx_combine_args(case))
 
 
+def _dequantize_selected_kv(
+    case: dict[str, Any],
+    storage: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    block_stride: int,
+    page_block_size: int,
+) -> torch.Tensor:
+    """Decode only the physical KV rows selected by one request.
+
+    The largest correctness cases select 16K rows from caches containing many
+    millions of tokens.  Decoding the complete cache would need several GiB,
+    while the attention result depends only on these indexed rows.
+    """
+    cfg: SparseFlashMLADecodeHead64Config = case["config"]
+    flat_storage = storage.reshape(-1)
+    safe = indices.clamp_min(0).reshape(-1).to(torch.int64)
+    block = torch.div(safe, page_block_size, rounding_mode="floor")
+    row = safe.remainder(page_block_size)
+    value_base = block * block_stride + row * (
+        656 if cfg.normalized_model_type is ModelType.V32 else 576
+    )
+
+    if cfg.normalized_model_type is ModelType.V32:
+        columns = torch.arange(512, device=storage.device, dtype=torch.int64)
+        nope = flat_storage[value_base[:, None] + columns].view(torch.float8_e4m3fn)
+        scale_columns = torch.arange(16, device=storage.device, dtype=torch.int64)
+        scales = (
+            flat_storage[value_base[:, None] + 512 + scale_columns].contiguous().view(torch.float32)
+        )
+        decoded = torch.empty((safe.numel(), cfg.d_qk), dtype=torch.bfloat16, device=storage.device)
+        for tile in range(4):
+            decoded[:, tile * 128 : (tile + 1) * 128] = (
+                nope[:, tile * 128 : (tile + 1) * 128].float() * scales[:, tile : tile + 1]
+            )
+        rope_columns = torch.arange(128, device=storage.device, dtype=torch.int64)
+        decoded[:, 512:] = (
+            flat_storage[value_base[:, None] + 528 + rope_columns].contiguous().view(torch.bfloat16)
+        )
+    else:
+        columns = torch.arange(448, device=storage.device, dtype=torch.int64)
+        nope = flat_storage[value_base[:, None] + columns].view(torch.float8_e4m3fn)
+        scale_base = block * block_stride + page_block_size * 576 + row * 8
+        scale_columns = torch.arange(7, device=storage.device, dtype=torch.int64)
+        scales = flat_storage[scale_base[:, None] + scale_columns].view(torch.float8_e8m0fnu)
+        decoded = torch.empty((safe.numel(), cfg.d_qk), dtype=torch.bfloat16, device=storage.device)
+        for tile in range(7):
+            decoded[:, tile * 64 : (tile + 1) * 64] = nope[:, tile * 64 : (tile + 1) * 64].to(
+                torch.bfloat16
+            ) * scales[:, tile : tile + 1].to(torch.bfloat16)
+        rope_columns = torch.arange(128, device=storage.device, dtype=torch.int64)
+        decoded[:, 448:] = (
+            flat_storage[value_base[:, None] + 448 + rope_columns].contiguous().view(torch.bfloat16)
+        )
+
+    return decoded.view(*indices.shape, cfg.d_qk)
+
+
+def _torch_reference(case: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Chunked mathematical oracle transcribed from FlashMLA ``tests/ref.py``."""
+    cfg: SparseFlashMLADecodeHead64Config = case["config"]
+    expected_out = torch.empty_like(case["out"])
+    expected_lse = torch.empty_like(case["lse"])
+
+    for batch in range(cfg.b):
+        indices = case["indices"][batch]
+        gathered = _dequantize_selected_kv(
+            case,
+            case["kv_storage"],
+            indices,
+            block_stride=case["stride_kv_block"],
+            page_block_size=cfg.page_block_size,
+        )
+        invalid = indices < 0
+        if cfg.have_topk_length:
+            invalid = invalid | (
+                torch.arange(cfg.topk, device=indices.device).view(1, -1)
+                >= case["topk_length"][batch]
+            )
+
+        if cfg.extra_topk:
+            extra_indices = case["extra_indices"][batch]
+            extra = _dequantize_selected_kv(
+                case,
+                case["extra_kv_storage"],
+                extra_indices,
+                block_stride=case["stride_extra_kv_block"],
+                page_block_size=cfg.extra_page_block_size,
+            )
+            extra_invalid = extra_indices < 0
+            if cfg.have_extra_topk_length:
+                extra_invalid = extra_invalid | (
+                    torch.arange(cfg.extra_topk, device=indices.device).view(1, -1)
+                    >= case["extra_topk_length"][batch]
+                )
+            gathered = torch.cat((gathered, extra), dim=1)
+            invalid = torch.cat((invalid, extra_invalid), dim=1)
+
+        gathered_f32 = gathered.float()
+        # The fixture poisons every unreferenced cache row with NaN.  Invalid
+        # indices are clamped for gathering, so transcribe FlashMLA's reference
+        # behavior and neutralize those poison values before the masked MMA.
+        gathered_f32.nan_to_num_(nan=0.0)
+        q = case["q"][batch].float()
+        scores = torch.einsum("qhd,qkd->qhk", q, gathered_f32) * case["sm_scale"]
+        scores.masked_fill_(invalid.unsqueeze(1), float("-inf"))
+        lse = torch.logsumexp(scores, dim=-1)
+        probability = torch.exp(scores - lse.unsqueeze(-1))
+        output = torch.einsum("qhk,qkd->qhd", probability, gathered_f32[..., :D_V])
+
+        if cfg.have_attn_sink:
+            sink_weight = 1.0 / (1.0 + torch.exp(case["attn_sink"].view(1, cfg.h_q) - lse))
+            output *= sink_weight.unsqueeze(-1)
+        lonely = lse == float("-inf")
+        output.masked_fill_(lonely.unsqueeze(-1), 0.0)
+        lse.masked_fill_(lonely, float("inf"))
+        expected_out[batch] = output.to(torch.bfloat16)
+        expected_lse[batch] = lse
+
+    return expected_out, expected_lse
+
+
 def run_test(**kwargs: Any) -> None:
     cfg = _cfg(**kwargs)
     # Upstream clears the allocator before every generated case; keep the
     # 15-case performance sweep from retaining cached pressure-shape blocks.
     torch.cuda.empty_cache()
-    case = prepare_data(**kwargs)
+    case = prepare_data(_compact_kv=True, **kwargs)
     executables = _compile_decode_kernels(**kwargs)
 
-    from tirx_kernels.flashmla.utils._flashmla_bench import (
-        _import_flash_mla,
-        run_flashmla_sparse_decode,
-    )
+    from tirx_kernels.target import prepare_cuda_arch
 
-    flash_mla = _import_flash_mla()
-    sched_meta, _ = flash_mla.get_mla_metadata()
-    ref_out, ref_lse = run_flashmla_sparse_decode(case, sched_meta)
-    torch.cuda.synchronize()
+    if prepare_cuda_arch() == "sm_110a":
+        ref_out, ref_lse = _torch_reference(case)
+    else:
+        from tirx_kernels.flashmla.utils._flashmla_bench import (
+            _import_flash_mla,
+            run_flashmla_sparse_decode,
+        )
 
-    # Validate the host replica against the actual CUDA scheduler.  Inactive
-    # rows only have a defined begin_req_idx; the remaining CUDA fields may
-    # contain shared-memory tail values and are never consumed.
-    ref_metadata = sched_meta.tile_scheduler_metadata
-    ref_num_splits = sched_meta.num_splits
-    if ref_metadata is None or ref_num_splits is None:
-        raise AssertionError("FlashMLA did not initialize decode scheduler metadata")
-    ours_metadata = case["tile_scheduler_metadata"]
-    torch.testing.assert_close(ours_metadata[:, 0], ref_metadata[:, 0], rtol=0, atol=0)
-    active = ours_metadata[:, 0] < cfg.b
-    torch.testing.assert_close(ours_metadata[active, :7], ref_metadata[active, :7], rtol=0, atol=0)
-    torch.testing.assert_close(case["num_splits"], ref_num_splits, rtol=0, atol=0)
+        flash_mla = _import_flash_mla()
+        sched_meta, _ = flash_mla.get_mla_metadata()
+        ref_out, ref_lse = run_flashmla_sparse_decode(case, sched_meta)
+        torch.cuda.synchronize()
+
+        # Validate the host replica against the actual CUDA scheduler.  Inactive
+        # rows only have a defined begin_req_idx; the remaining CUDA fields may
+        # contain shared-memory tail values and are never consumed.
+        ref_metadata = sched_meta.tile_scheduler_metadata
+        ref_num_splits = sched_meta.num_splits
+        if ref_metadata is None or ref_num_splits is None:
+            raise AssertionError("FlashMLA did not initialize decode scheduler metadata")
+        ours_metadata = case["tile_scheduler_metadata"]
+        torch.testing.assert_close(ours_metadata[:, 0], ref_metadata[:, 0], rtol=0, atol=0)
+        active = ours_metadata[:, 0] < cfg.b
+        torch.testing.assert_close(
+            ours_metadata[active, :7], ref_metadata[active, :7], rtol=0, atol=0
+        )
+        torch.testing.assert_close(case["num_splits"], ref_num_splits, rtol=0, atol=0)
 
     case["out"].fill_(float("nan"))
     case["lse"].fill_(float("nan"))
     _launch_tirx(case, executables)
     torch.cuda.synchronize()
     torch.testing.assert_close(case["out"], ref_out, rtol=2.01 / 128, atol=1.0e-3)
-    torch.testing.assert_close(case["lse"], ref_lse.transpose(1, 2), rtol=8.01 / 65536, atol=1.0e-6)
+    expected_lse = ref_lse if prepare_cuda_arch() == "sm_110a" else ref_lse.transpose(1, 2)
+    torch.testing.assert_close(case["lse"], expected_lse, rtol=8.01 / 65536, atol=1.0e-6)
     cfg.validate()
 
 
@@ -3136,14 +3288,20 @@ def run_gpu(
     def tirx_decode():
         _launch_tirx(case, executables)
 
-    from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_decode_reference_builder
+    from tirx_kernels.target import prepare_cuda_arch
+
+    references = {}
+    if prepare_cuda_arch() != "sm_110a":
+        from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_decode_reference_builder
+
+        references = {"flashmla": lambda: flashmla_decode_reference_builder(case)}
 
     return bench(
         {"tirx": tirx_decode},
         warmup=warmup,
         repeat=repeat,
         timer=timer,
-        references={"flashmla": lambda: flashmla_decode_reference_builder(case)},
+        references=references,
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
