@@ -122,7 +122,7 @@ def _markdown(
         f"**{pipeline.get('interference_retry_count', 0)} interference retries**.",
         f"- **{len(matched)}** rows have a usable TIR/TIRx timing in the repository's historical "
         f"SM100/B200 baseline; **{unusable_b200}** exact baseline row failed, and "
-        f"**{missing_b200}** new BSA rows are absent there.",
+        f"**{missing_b200}** Thor workload rows are absent there.",
         f"- Across the {len(matched)} matched rows, geometric-mean Thor/B200 latency is "
         f"**{overall:.3f}x**; equivalently, Thor delivers **{1 / overall:.1%}** of B200's "
         "throughput on this workload mix.",
@@ -178,7 +178,7 @@ def _markdown(
                 "",
                 "The aggregate is repeatable, but individual absolute times can move substantially "
                 "between sessions under dynamic clocks. The complete table uses only the final, "
-                "single-piece 69-row run; no samples were spliced from the earlier run.",
+                f"single-piece {len(rows)}-row run; no samples were spliced from the earlier run.",
                 "",
             ]
         )
@@ -273,8 +273,8 @@ def _markdown(
             f"The performance roster contains only the {len(thor_by_kernel)} kernels already admitted "
             "for exact `sm_110a` runtime support after their complete correctness matrices passed: "
             f"{validated_configs}/{validated_configs} configurations. The {len(rows)} timed rows are "
-            "three representative performance shapes per kernel; they do not replace "
-            "the complete numerical validation matrices.",
+            "the suite's selected representative performance shapes; they do not replace the "
+            "complete numerical validation matrices.",
             "",
             "## Raw evidence",
             "",
@@ -285,7 +285,7 @@ def _markdown(
             f"{pipeline.get('failure_count', 0)} failures, "
             f"{pipeline.get('interference_retry_count', 0)} interference retries",
             f"- Usable B200 matches: {len(matched)} rows; failed B200 baseline rows: "
-            f"{unusable_b200}; absent new BSA rows: {missing_b200}",
+            f"{unusable_b200}; workload rows absent from the B200 baseline: {missing_b200}",
             "",
         ]
     )
@@ -300,7 +300,12 @@ def main() -> None:
     parser.add_argument("--thor-device", default="NVIDIA Jetson AGX Thor Developer Kit")
     parser.add_argument("--thor-sms", type=int, default=20)
     parser.add_argument("--b200-sms", type=int, default=148)
-    parser.add_argument("--validated-configs", type=int, default=485)
+    parser.add_argument(
+        "--validated-configs",
+        type=int,
+        required=True,
+        help="Number of correctness configurations passed by the admitted Thor kernels",
+    )
     parser.add_argument("--prior-thor", type=Path, default=None)
     args = parser.parse_args()
 
