@@ -1519,6 +1519,11 @@ def _make_main(
                             product0, product1, beta_rows[pair * 2], beta_rows[pair * 2 + 1]
                         )
                         K.assign(kk_pack[pair], _pack_io_pair(value0, value1, io_dtype))
+                    # A prior reverse iteration used this scratch for the
+                    # dgate reduction.  Delay only the next overwrite until
+                    # every CG0 warp has completed that reduction.
+                    with K.If(reverse_index > 0), K.Then():
+                        K.ptx.bar.sync(K.uint32(2), K.uint32(128))
                     for fragment in range(4):
                         _stmatrix_x4(
                             arena.ptr_to(
@@ -2072,10 +2077,6 @@ def _make_main(
                             gate_partial + dgate_sum,
                         )
 
-                    # The next reverse iteration writes a new KK tile into the
-                    # same scratch.  Keep all CG0 writers behind the 64-thread
-                    # reduction above, even when its next input was prefetched.
-                    K.ptx.bar.sync(K.uint32(2), K.uint32(128))
                     _arrive_barrier(arena, _BAR_GATE_DONE, gate_stage)
                     _arrive_barrier(arena, _BAR_BETA_DONE, beta_stage)
                 sched_consume(sched_state, tile)
