@@ -51,7 +51,7 @@ from tirx_kernels.target import prepare_cluster_shape
 KERNEL_META = {
     "name": "flashinfer_add_rmsnorm_fp4quant",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",

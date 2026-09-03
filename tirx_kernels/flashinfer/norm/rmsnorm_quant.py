@@ -24,7 +24,7 @@ from .rmsnorm import _thor_source_cluster_limit
 KERNEL_META = {
     "name": "flashinfer_rmsnorm_quant",
     "category": "flashinfer",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "flashinfer-python",
