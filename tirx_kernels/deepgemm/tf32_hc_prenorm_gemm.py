@@ -170,7 +170,7 @@ def _make_case(*, m: int, n: int, k: int, num_splits: int, seed: int) -> dict[st
 KERNEL_META = {
     "name": "deepgemm_sm100_tf32_hc_prenorm_gemm",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -279,8 +279,10 @@ def prepare_data(**kwargs: Any) -> dict[str, Any]:
         torch.cuda.set_device(torch.cuda.current_device())
     else:
         raise SkipTest("CUDA is required for SM100 TF32 HC prenorm GEMM")
-    if torch.cuda.get_device_capability()[0] < 10:
-        raise SkipTest("SM100 TF32 HC prenorm GEMM requires compute capability 10.x")
+    from tirx_kernels.target import supports_sm100_kernel
+
+    if not supports_sm100_kernel(torch.cuda.get_device_capability()):
+        raise SkipTest("SM100 TF32 HC prenorm GEMM requires SM100 or prepared Thor")
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -1059,15 +1061,17 @@ def _assert_correct_case(
 
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
-    deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
-    torch.cuda.synchronize()
-    # Library-anchored: the torch ref is a yardstick, not the arbiter --
-    # DeepGEMM's own diff on the same inputs bounds what TIRx must achieve.
-    deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
+    from tirx_kernels.target import prepare_cuda_arch
+
+    deepgemm_diff = None
+    if prepare_cuda_arch() != "sm_110a":
+        deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
+        torch.cuda.synchronize()
+        deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
     tirx_d, tirx_sqr = _launch_tirx_hc(data)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_d, tirx_sqr, name="TIRx")
-    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
+    if deepgemm_diff is not None and tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
         raise AssertionError(
             f"TIRx diff {tirx_diff:.10g} is worse than DeepGEMM diff {deepgemm_diff:.10g}"
         )
@@ -1151,7 +1155,9 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     def _deepgemm():
         return lambda: _bench_deepgemm_case(case)
 
-    references = {"deepgemm": _deepgemm}
+    from tirx_kernels.target import prepare_cuda_arch
+
+    references = {"deepgemm": _deepgemm} if prepare_cuda_arch() != "sm_110a" else {}
 
     result = bench(
         funcs,
