@@ -1,5 +1,10 @@
 # NVIDIA Thor versus B200 TIRx performance
 
+> This historical cross-machine comparison is retained as broad porting
+> evidence, not as the primary performance baseline. For controlled same-Thor
+> comparisons against FlashInfer, see
+> [THOR_NATIVE_BASELINE.md](THOR_NATIVE_BASELINE.md).
+
 Measured on 2026-09-03 using the default representative workload roster.
 
 ## At a glance

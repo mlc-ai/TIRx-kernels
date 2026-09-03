@@ -4,6 +4,9 @@
 defaults:
   timer: proton
   num_gpus: 1
+  # Thor clocks cannot be locked without root on the validation host. Give each
+  # implementation enough GPU work to leave the cold DVFS state before timing.
+  warmup: 1000
 
 workloads:
   - kernel: flash_attention4
