@@ -134,43 +134,22 @@ def _source_config(H: int) -> dict[str, int | bool]:
     return _derived_config(H, cluster_n)
 
 
-def _select_ptxas_reg_level(variant: str, M: int, H: int, enable_pdl: bool) -> str:
+def _select_ptxas_reg_level(variant: str, H: int) -> str:
     """Choose the measured Thor schedule while retaining the sm_100a default."""
     if prepare_cuda_arch() != "sm_110a":
         return "10"
     if H == 4096:
-        if variant == "rmsnorm" and M == 32 and enable_pdl:
-            return "4"
         return "6"
     return "10"
 
 
-def _select_max_registers(
-    threads: int, variant: str, M: int, H: int, enable_pdl: bool
-) -> int | None:
+def _select_max_registers(threads: int, H: int, enable_pdl: bool) -> int | None:
     """Choose the existing per-entry register budget."""
     if threads != 128:
         return None
     if prepare_cuda_arch() == "sm_110a" and enable_pdl and H == 4096:
-        if variant == "rmsnorm" and M == 32:
-            return None
         return 56
     return 64 if enable_pdl else (96 if H == 8192 else 93)
-
-
-def _select_min_blocks_per_sm(
-    threads: int, variant: str, M: int, H: int, enable_pdl: bool
-) -> int | None:
-    if (
-        prepare_cuda_arch() == "sm_110a"
-        and threads == 128
-        and variant == "rmsnorm"
-        and M == 32
-        and H == 4096
-        and enable_pdl
-    ):
-        return 1
-    return None if threads == 128 else 1
 
 
 def _butterfly_sum_f32(acc, lane_xors: tuple[int, ...]) -> None:
@@ -504,7 +483,7 @@ def get_kernel(
 ):
     """Return the compact or explicit-i64-strided runtime-M specialization."""
     _validate(variant, dtype, M, H, input_layout, output_layout, eps)
-    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_ptxas_reg_level(variant, M, H, enable_pdl)
+    os.environ["TVM_CUDA_PTXAS_REG_LEVEL"] = _select_ptxas_reg_level(variant, H)
     compact = _uses_compact_specialization(M, H, input_layout, output_layout)
     source = _source_config(H)
     cluster_n = int(source["cluster_n"])
@@ -554,7 +533,7 @@ def get_kernel(
 
     # A 128-thread entry caps its own allocation; the 256-thread entry pins one
     # CTA per SM instead, and the two spellings are mutually exclusive downstream.
-    max_registers = _select_max_registers(threads, variant, M, H, enable_pdl)
+    max_registers = _select_max_registers(threads, H, enable_pdl)
 
     def entry_registers():
         if max_registers is None:
@@ -847,7 +826,7 @@ def get_kernel(
         "warps": threads // 32,
         "arch": "sm_100a",
         "grid": False,
-        "min_blocks_per_sm": _select_min_blocks_per_sm(threads, variant, M, H, enable_pdl),
+        "min_blocks_per_sm": None if threads == 128 else 1,
     }
 
     if compact:

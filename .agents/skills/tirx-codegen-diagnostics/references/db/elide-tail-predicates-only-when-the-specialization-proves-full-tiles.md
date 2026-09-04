@@ -39,15 +39,15 @@ TIRx latency reduction.  The complete eleven-row matrix had minimum ratio
 0.994679.
 
 On Thor, the static `M=32`, `H=4096`, PDL RMSNorm specialization also launches
-an exactly full grid.  Folding its row-valid predicate, selecting ptxas register
-level 4, and replacing the 56-register cap with a one-block launch bound removed
-the redundant reconvergence pair.  A 1,800-pair warm counterbalanced run measured
-2.250894 us TIRx / 2.275355 us source (ratio 1.010867, order subsets 1.020061 and
-1.001705).  Two later 2,400-pair runs in a different latency band measured ratios
-0.994144 and 0.997820, so treat the change as bringing this shape to parity rather
-than as a stable throughput win.  Both the affected PDL shape and its non-PDL
-sibling passed the numerical oracle, and the SM100 selector defaults were checked
-unchanged.
+an exactly full grid. Folding its row-valid predicate while retaining the
+measured ptxas level-6, 56-register schedule removed the redundant reconvergence
+pair. The final child allocated the same 56 registers and 17.536 KB shared memory
+as the source, had zero local traffic, and reduced dynamic warp instructions from
+44,800 to 44,288 and predicated-on thread instructions from 1,409,728 to
+1,391,488. Its paired NCU duration was 25.920 us versus 26.240 us for the source;
+the required 15-round bench-suite row measured 12.014 us versus 12.018 us (ratio
+1.0003x). Both the affected PDL shape and its non-PDL sibling passed the numerical
+oracle, and the SM100 selector defaults were checked unchanged.
 
 ## Boundary
 
