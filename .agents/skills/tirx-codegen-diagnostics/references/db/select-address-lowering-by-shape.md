@@ -1,6 +1,6 @@
 # Select address lowering by shape
 
-**Symptoms:** `excess_address_math`, `register_pressure`, `schedule_regression`
+**Symptoms:** `excess_address_math`, `long_scoreboard`, `register_pressure`, `schedule_regression`
 
 ## Symptom
 
@@ -34,6 +34,13 @@ USE_NATIVE_OFFSETS=_HAS_NATIVE_PTX_ADDR and (seq_len == 2 or 3 < seq_len < 8),
 Retain cursor induction only when the emitted address chain and the affected
 shapes demonstrate a gain.
 
+For an unrolled gathered copy, one alternative is to materialize the absolute
+source row pointers and the invariant swizzled shared-memory base once per
+output tile. Inside the staged loop, form one warp-uniform byte offset and add
+it to each row pointer; keep the destination row-group offsets as compile-time
+immediates. Select this form only for specializations whose profile localizes
+the stall to the repeated gather-address chain.
+
 ## Rationale
 
 Native `[base+imm]` addressing removes explicit pointer arithmetic only when the
@@ -55,6 +62,17 @@ instructions, and moved the first copy earlier without changing the floating
 point, copy, or store counts. It still measured only 0.980x, so the shorter
 instruction stream did not translate to a shorter timed path and the rewrite
 was reverted.
+
+The opposite result appeared after paired profiling localized long-scoreboard
+stalls to an eight-row gathered-copy address chain. Materializing eight
+absolute row pointers, one invariant swizzled destination base, and one
+warp-uniform stage offset replaced eight repeated `IMAD.WIDE` chains and seven
+repeated swizzles with eight 64-bit adds and immediate 2 KiB destination
+offsets. The isolated specialization improved from approximately 104.5 us to
+103.25 us (about 1.2%), passed exact full-allocation correctness, and survived
+the final complete matrix. Applying the same lowering broadly had already
+shown no material gain on three other regimes, so the profile-localized
+specialization is part of the result.
 
 A measured block-scaled epilogue showed the same choice within one store helper.
 Hoisting every output base across the epilogue produced 69 registers and 976

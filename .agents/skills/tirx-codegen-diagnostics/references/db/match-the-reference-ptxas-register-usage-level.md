@@ -10,10 +10,16 @@ Same key-instruction counts as the reference (`UTCHMMA`, `LDTM`, `STTM`,
 producer warp, and a larger stack frame, in a build that goes through the
 nvcc path with its default `--register-usage-level=10`.
 
+The same lever can matter without allocation traffic: paired SASS profiles may
+show equal occupancy, register counts, and zero spill, yet different barrier or
+long-scoreboard behavior and issue schedules across register-usage levels.
+
 ## What to change
 
-Pin the ptxas register-usage level the reference is built with (its native
-default is 5) around the kernel's compile call, and document the measurement.
+Use the ptxas register-usage level the reference is built with (its native
+default is 5) as the first candidate. When generated SASS or paired profiles
+still show schedule divergence, sweep a compact level range and pin the measured
+winner around the compile call. Restore the caller's environment exactly.
 
 ```python
 _PTXAS_REG_LEVEL = "5"
@@ -50,12 +56,35 @@ six-row bench-suite minimum/geometric-mean ratios moved from
 0.9734x/0.9749x to 0.9926x/1.0055x, with all seven correctness configurations
 remaining bitwise identical to the reference.
 
+In a 12-warp persistent attention pipeline, levels 0 through 6 and 10 all used
+151 registers with zero stack and local traffic, but produced different
+schedules: levels 0-3 emitted 3,048 static instructions, levels 4-5 emitted
+2,824, and levels 6/10 emitted 2,984. Level 2 beat the reference-default level 5
+despite its larger static program, improving a four-shape targeted
+minimum/geometric mean from 0.9393x/0.9681x to 0.9552x/0.9816x while preserving
+bitwise correctness. The change helped but did not clear the gate; a separate
+unsigned-index lowering fix was still required.
+
+An independent 16-warp persistent paged-attention pipeline showed the zero-spill
+case more strongly. Both builds used 128 registers, 148,480 dynamic shared bytes,
+one CTA per SM, and zero stack or local traffic; the generated build was already
+slightly shorter at 2,800 static SASS instructions against the reference's 2,808,
+yet paired profiles showed extra uniform address/control instructions and higher
+long-scoreboard exposure. A compact sweep was sharply non-monotonic: levels 2,
+4, 5, and 6 produced targeted minimum/geometric-mean ratios of
+0.9925x/0.9990x, 0.9695x/0.9810x, 0.9699x/0.9822x, and 0.9615x/0.9773x.
+Pinning level 2 with exact environment restoration kept all four targeted rows
+above 0.99x, and the complete ten-row suite cleared at a 0.9904x minimum and
+0.9961x geometric mean; all seven correctness configurations remained bitwise
+identical.
+
 ## Boundary
 
-The sibling kernel of the same source family, which had zero spills at level
-10, measured level 5 as neutral (within 0.5%); sweep only when the SASS shows
-allocation traffic the reference lacks. This is a beta ptxas option, so record
-the toolkit version with the measurement and re-check after toolchain moves.
+The sibling kernel of the same source family, which had zero spills at level 10,
+measured level 5 as neutral (within 0.5%). Zero spills alone are therefore not a
+reason to sweep. Without allocation traffic, require paired evidence of schedule
+divergence such as barrier/scoreboard stalls or instruction-order differences.
+Record the toolkit version and re-check this beta option after toolchain moves.
 
 The register-usage-level response is non-monotonic. In a fixed three-shape
 sweep around the reference level, levels 4, 5, and 6 produced targeted

@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: blackwell_msa_decode_uniform_fp8_qkv_paged_sm100
+default_suite: false
+defaults:
+  num_gpus: 1
+configs:
+  - {config: b128_q1_kv4096_h64_hkv4, default: false}
+  - {config: b128_q2_kv4096_h64_hkv4, default: false}
+  - {config: b128_q3_kv4096_h64_hkv4, default: false}
+  - {config: b128_q4_kv4096_h64_hkv4, default: false}
+  - {config: b128_q5_kv4096_h64_hkv4, default: false}
+  - {config: b128_q6_kv4096_h64_hkv4, default: false}
+  - {config: b128_q7_kv4096_h64_hkv4, default: false}
+  - {config: b128_q8_kv4096_h64_hkv4, default: false}
+  - {config: b128_q9_kv4096_h64_hkv4, default: false}
+  - {config: b128_q10_kv4096_h64_hkv4, default: false}
+  - {config: b128_q11_kv4096_h64_hkv4, default: false}
+  - {config: b128_q12_kv4096_h64_hkv4, default: false}
+  - {config: b128_q13_kv4096_h64_hkv4, default: false}
+  - {config: b128_q14_kv4096_h64_hkv4, default: false}
+  - {config: b128_q15_kv4096_h64_hkv4, default: false}
+  - {config: b128_q16_kv4096_h64_hkv4, default: false}
+  - {config: b16_q4_kv4096_h64_hkv4_even128, default: false}

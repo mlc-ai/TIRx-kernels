@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: blackwell_msa_decode_q1_bf16_query_fp8_kv_xform2_paged_sm103
+defaults:
+  num_gpus: 1
+configs:
+  - {config: decode_fp8_b128_q1_kv4096_h64_seed53, default: true}
+  - {config: decode_fp8_b128_q1_ragged_boundaries_h64, default: true}
+  - {config: decode_fp8_b128_q1_kv4096_h64_scattered_pages, default: true}

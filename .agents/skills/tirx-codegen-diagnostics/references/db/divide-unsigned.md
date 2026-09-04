@@ -74,6 +74,15 @@ shape moving 0.824x to 1.082x. Static totals had already matched the reference
 exactly at that point -- same load, store, divide, atomic and barrier counts --
 because the correction is arithmetic the totals do not separate from the work.
 
+In a 12-warp persistent attention pipeline, making all four role counters
+unsigned and using unsigned division/remainder for query/head decomposition cut
+static SASS from 3,048 to 2,632 instructions while keeping 151 registers and
+zero local traffic. The weakest ratio in a four-shape targeted matrix improved
+from 0.955x to 1.015x, and a 17-shape sweep then cleared with a 1.015x minimum
+and 1.046x geometric mean. Merely materializing the same signed expressions had
+reduced static code by 56 instructions but was benchmark-neutral; carrying the unsigned
+proof from the grid-stride counter was the decisive part of the rewrite.
+
 ## Boundary
 
 What the cast removes is the correction, not the division: these divisors are

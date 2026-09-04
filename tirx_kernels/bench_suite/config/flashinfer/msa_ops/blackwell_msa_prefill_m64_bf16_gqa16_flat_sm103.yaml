@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright TIRx authors
+
+kernel: blackwell_msa_prefill_m64_bf16_gqa16_flat_sm103
+selection_rationale: The three defaults span the source domain with a small single-head launch, a production multi-head launch, and the maximum 8192-token shape; the non-default rows isolate ragged scheduling, noncausal execution, and the optional statistics epilogue and remain in the port's complete required matrix.
+defaults:
+  num_gpus: 1
+configs:
+  - {config: b1_q1024_kv2048_h16_hkv1_causal, default: true, selection_role: small}
+  - {config: b1_q4096_kv4096_h64_hkv4_causal, default: true, selection_role: medium}
+  - {config: b1_q8192_kv8192_h64_hkv4_causal, default: true, selection_role: large}
+  - {config: b3_q513_1025_2049_kv1024_4096_8192_h32_hkv2, default: false}
+  - {config: b2_q2048_1024_kv8192_4096_h32_hkv2_noncausal, default: false}
+  - {config: b1_q4096_kv8192_h16_hkv1_bothlse, default: false}

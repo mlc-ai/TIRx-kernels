@@ -246,5 +246,9 @@ tirx_kernels/flashinfer/gdn_prefill/gdn_prefill_sm100.py (full license text is
                               reproduced in the file header)
 tirx_kernels/flashinfer/gemm/bmm_fp8_rubin.py (full license text is reproduced
                               in the file header)
+tirx_kernels/flashinfer/gemm/grouped_gemm_masked_rubin.py (full license text is
+                              reproduced in the file header)
+tirx_kernels/flashinfer/fused_moe/blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion_rubin.py
+                             (full license text is reproduced in the file header)
 tirx_kernels/cudnn/bsa/block_sparse_attention_forward_combine_sm100_blk64.py
                              (full license text is reproduced in the file header)
