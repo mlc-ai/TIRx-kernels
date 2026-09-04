@@ -1153,6 +1153,10 @@ def compare_outputs(data: dict[str, Any], mine: dict[str, Any], theirs: dict[str
             assert torch.equal(mine["indices"][row], theirs["indices"][row]), (
                 f"row {row}: the trivial branch is deterministic and must match positionally"
             )
+            if mode == "plain":
+                torch.testing.assert_close(
+                    mine["values"][row], theirs["values"][row], rtol=0, atol=0
+                )
             continue
         local = local_indices(data, mine["indices"][row], row).long()
         assert int(local.min()) >= 0 and int(local.max()) < row_len, (

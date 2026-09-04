@@ -82,6 +82,7 @@ from tirx_kernels.flashinfer.utils.topk_harness import (
     SOURCE_ALGO_FILTERED,
     alloc_outputs,
     assert_device_matches_compile_profile,
+    assert_valid_outputs,
     pin_source_algo,
     row_local_indices,
     selected_values,
@@ -1117,6 +1118,8 @@ def compare_filtered_outputs(
     """
     import torch
 
+    assert_valid_outputs(cfg, data, ref)
+    assert_valid_outputs(cfg, data, got)
     plan = finalize_plan(cfg["mode"], cfg["k"], cfg["deterministic"], cfg["tie_break"])
     if plan is not None and plan["sort_local_indices"]:
         torch.testing.assert_close(got["indices"], ref["indices"], rtol=0, atol=0)
@@ -1133,22 +1136,6 @@ def compare_filtered_outputs(
     ref_vals = selected_values(cfg, data, ref["indices"])
     got_vals = selected_values(cfg, data, got["indices"])
     torch.testing.assert_close(got_vals, ref_vals, rtol=0, atol=0)
-    if cfg["mode"] == "basic":
-        ref_out = torch.sort(ref["values"].to(torch.float32), dim=-1, descending=True).values
-        got_out = torch.sort(got["values"].to(torch.float32), dim=-1, descending=True).values
-        torch.testing.assert_close(got_out, ref_out, rtol=0, atol=0)
-        # The emitted values must be the scores at the emitted indices.  On the
-        # trivial path the padding slots carry a literal 0 (:2417) that is not a
-        # score, and `selected_values` sorts padding to -inf, so the two orderings
-        # only line up over the real entries; restrict the check to those.
-        _, pad = row_local_indices(cfg, data, got["indices"])
-        real = torch.where(
-            pad,
-            torch.full_like(got["values"].to(torch.float32), float("-inf")),
-            got["values"].to(torch.float32),
-        )
-        real = torch.sort(real, dim=-1, descending=True).values
-        torch.testing.assert_close(real, got_vals, rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------

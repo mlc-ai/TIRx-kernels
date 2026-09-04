@@ -139,6 +139,38 @@ def selected_values(cfg: dict[str, Any], data: dict[str, Any], out_indices):
     return torch.sort(vals, dim=-1, descending=True).values
 
 
+def assert_valid_outputs(
+    cfg: dict[str, Any], data: dict[str, Any], outputs: dict[str, Any]
+) -> None:
+    """Check index bounds, uniqueness, padding and each plain value/index pair."""
+    import torch
+
+    raw_indices = outputs["indices"]
+    if tuple(raw_indices.shape) != (cfg["num_rows"], cfg["k"]):
+        raise AssertionError("top-k indices have the wrong shape")
+    indices, padding = row_local_indices(cfg, data, raw_indices)
+    if bool((raw_indices[padding] != -1).any()):
+        raise AssertionError("top-k padding indices must be -1")
+    lengths = data.get("lengths")
+    starts = data.get("row_starts")
+    for row in range(cfg["num_rows"]):
+        length = int(lengths[row]) if lengths is not None else cfg["length"]
+        start = int(starts[row]) if starts is not None else 0
+        selected = indices[row, ~padding[row]]
+        if selected.numel() != min(cfg["k"], length):
+            raise AssertionError(f"row {row}: incorrect number of top-k padding indices")
+        if bool(((selected < 0) | (selected >= length)).any()):
+            raise AssertionError(f"row {row}: top-k index outside the active row")
+        if bool(((selected + start < 0) | (selected + start >= data["scores"].shape[1])).any()):
+            raise AssertionError(f"row {row}: top-k index outside the score storage")
+        if torch.unique(selected).numel() != selected.numel():
+            raise AssertionError(f"row {row}: duplicate top-k indices")
+        if cfg["mode"] == "basic":
+            expected = torch.zeros_like(outputs["values"][row])
+            expected[~padding[row]] = data["scores"][row, selected + start]
+            torch.testing.assert_close(outputs["values"][row], expected, rtol=0, atol=0)
+
+
 def compare_outputs(
     cfg: dict[str, Any], data: dict[str, Any], ref: dict[str, Any], got: dict[str, Any]
 ) -> None:
@@ -151,6 +183,8 @@ def compare_outputs(
     """
     import torch
 
+    assert_valid_outputs(cfg, data, ref)
+    assert_valid_outputs(cfg, data, got)
     if cfg["deterministic"]:
         torch.testing.assert_close(got["indices"], ref["indices"], rtol=0, atol=0)
         if cfg["mode"] == "basic":
@@ -160,9 +194,3 @@ def compare_outputs(
     ref_vals = selected_values(cfg, data, ref["indices"])
     got_vals = selected_values(cfg, data, got["indices"])
     torch.testing.assert_close(got_vals, ref_vals, rtol=0, atol=0)
-    if cfg["mode"] == "basic":
-        ref_out = torch.sort(ref["values"].to(torch.float32), dim=-1, descending=True).values
-        got_out = torch.sort(got["values"].to(torch.float32), dim=-1, descending=True).values
-        torch.testing.assert_close(got_out, ref_out, rtol=0, atol=0)
-        # The emitted values must be the scores at the emitted indices.
-        torch.testing.assert_close(got_out, got_vals, rtol=0, atol=0)
