@@ -150,6 +150,7 @@ Useful options:
 | `--ab-before REV` | Run REV/current as a same-GPU paired campaign |
 | `--filter TEXT` | Keep selected kernel names containing `TEXT` |
 | `--rounds N` | Independent standard-timer samples |
+| `--serial-prepare` | Run one child through preparation, GPU work, and exit before starting another |
 | `--cooldown S` | Delay before each implementation |
 | `--timer NAME` | Override every selected workload timer (for example, `event` when Proton/CUPTI is unavailable) |
 | `--threshold PCT` | Report threshold; the direct gate remains fixed at 1% |
@@ -157,6 +158,17 @@ Useful options:
 | `--check-imports` | Resolve selected imports and exit |
 | `--no-report` | Skip report generation |
 | `--with-references` | Also run external references and the ratio report (not with `--ab-before`) |
+
+On systems with shared CPU/GPU memory, such as Thor, use `--serial-prepare`
+to keep one workload's host compilation from overlapping another workload's
+GPU measurements. This option serializes children across the whole GPU pool,
+including retries and process cleanup. A multi-GPU workload still receives its
+required GPU group. The default remains concurrent preparation and GPU work.
+Setting `--max-prepare-processes 1 --ready-backlog 1` only limits buffering and
+does not provide this isolation. The run's `pipeline.serial_prepare` and
+`pipeline.max_active_children` fields record the scheduling choice. Timer,
+rounds, cooldown, implementation order, and cache behavior are unchanged.
+`--serial-prepare` does not apply to the separate `--ab-before` runner.
 
 ## Artifacts
 
