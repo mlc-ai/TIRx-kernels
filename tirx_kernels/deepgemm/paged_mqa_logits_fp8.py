@@ -342,6 +342,12 @@ CONFIGS = _SMOKE_CONFIGS + DSA_INDEXER_LIKE_COVERAGE + SGLANG_BENCH_CONFIGS
 
 
 def load_deep_gemm_paged_mqa() -> tuple[Any, str]:
+    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        return load_reference("deep-gemm"), "verified_thor_variant"
+
     try:
         import deep_gemm as module
     except Exception as exc:
@@ -1819,14 +1825,12 @@ def run_test(**kwargs: Any) -> None:
     config: PagedMQALogitsFP8Config = data["config"]
     from tirx_kernels.target import prepare_cuda_arch
 
-    deepgemm_diff = None
-    if prepare_cuda_arch() != "sm_110a":
-        deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
-        deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
+    deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+    deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_paged_mqa(data)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
-    if deepgemm_diff is not None and tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
+    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
         raise AssertionError(
             f"TIRx diff {tirx_diff:.6g} is worse than DeepGEMM diff {deepgemm_diff:.6g}"
         )
@@ -1881,7 +1885,7 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     max_diff = None
     from tirx_kernels.target import prepare_cuda_arch
 
-    use_external = external_references_enabled() and prepare_cuda_arch() != "sm_110a"
+    use_external = external_references_enabled()
     if use_external:
         deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
         tirx_logits = _run_tirx_invocation(data, invocation)
@@ -1904,6 +1908,10 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         )
         return cutedsl_runner
 
+    references = {"deepgemm": _deepgemm}
+    if prepare_cuda_arch() != "sm_110a":
+        references["sglang_cutedsl"] = _sglang_cutedsl
+
     result = bench(
         {"tirx": lambda: _run_tirx_invocation(data, invocation)},
         warmup=warmup,
@@ -1911,12 +1919,13 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         timer=timer,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
-        references=(
-            {"deepgemm": _deepgemm, "sglang_cutedsl": _sglang_cutedsl} if use_external else {}
-        ),
+        references=references,
     )
     if max_diff is not None:
         result["max_diff"] = max_diff
+    from tirx_kernels.reference_variants import reference_provenance
+
+    result["reference_variant"] = reference_provenance("deep-gemm")
     return result
 
 

@@ -53,6 +53,12 @@ def require_deep_gemm():
     """Return the `deep_gemm` module, or skip if it is not installed."""
     from unittest import SkipTest
 
+    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        return load_reference("deep-gemm")
+
     try:
         import deep_gemm
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -593,9 +599,9 @@ def bench_against_deepgemm(
         launch, _out = reference_launcher(data)
         return launch
 
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.reference_variants import reference_provenance
 
-    references = {} if prepare_cuda_arch() == "sm_110a" else {"deepgemm": build_reference}
+    references = {"deepgemm": build_reference}
     result = bench(
         {"tirx": tirx_launch},
         references=references,
@@ -605,6 +611,7 @@ def bench_against_deepgemm(
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
+    result["reference_variant"] = reference_provenance("deep-gemm")
     result.update(extra)
     return result
 

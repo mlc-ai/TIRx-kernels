@@ -253,6 +253,12 @@ BENCH_CONFIGS = CONFIGS + LEGACY_CONFIGS
 
 
 def load_deep_gemm_hc() -> tuple[Any, str]:
+    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        return load_reference("deep-gemm"), "verified_thor_variant"
+
     try:
         import deep_gemm as module
 
@@ -1063,17 +1069,13 @@ def _assert_correct_case(
 
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
-    from tirx_kernels.target import prepare_cuda_arch
-
-    deepgemm_diff = None
-    if prepare_cuda_arch() != "sm_110a":
-        deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
-        torch.cuda.synchronize()
-        deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
+    deepgemm_d, deepgemm_sqr = _run_deepgemm_hc(data)
+    torch.cuda.synchronize()
+    deepgemm_diff = _assert_correct(data, deepgemm_d, deepgemm_sqr, name="DeepGEMM")
     tirx_d, tirx_sqr = _launch_tirx_hc(data)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_d, tirx_sqr, name="TIRx")
-    if deepgemm_diff is not None and tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
+    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
         raise AssertionError(
             f"TIRx diff {tirx_diff:.10g} is worse than DeepGEMM diff {deepgemm_diff:.10g}"
         )
@@ -1155,11 +1157,12 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     funcs = {"tirx": lambda: _bench_tirx_case(case, executable)}
 
     def _deepgemm():
+        source_d, source_sqr = _bench_deepgemm_case(case)
+        torch.cuda.synchronize()
+        _assert_correct_case(case, source_d, source_sqr, name="DeepGEMM")
         return lambda: _bench_deepgemm_case(case)
 
-    from tirx_kernels.target import prepare_cuda_arch
-
-    references = {"deepgemm": _deepgemm} if prepare_cuda_arch() != "sm_110a" else {}
+    references = {"deepgemm": _deepgemm}
 
     result = bench(
         funcs,
@@ -1172,6 +1175,9 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     )
     result["tirx_diff"] = tirx_diff
     result["max_diff"] = tirx_diff
+    from tirx_kernels.reference_variants import reference_provenance
+
+    result["reference_variant"] = reference_provenance("deep-gemm")
     return result
 
 

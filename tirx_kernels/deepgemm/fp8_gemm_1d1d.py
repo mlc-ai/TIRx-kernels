@@ -219,26 +219,27 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
+    def check(expected, threshold=None):
+        return assert_within_threshold(
+            calc_diff(data["d"], expected),
+            data,
+            kernel="deepgemm_sm100_fp8_gemm_1d1d",
+            detail=(
+                f"M={data['M']} N={data['N']} K={data['K']} "
+                f"major={data['major_a']}{data['major_b']} b_dtype={data['b_dtype']} "
+                f"cd={data['cd_dtype']} acc={data['accumulate']}"
+            ),
+            threshold=threshold,
+        )
+
     if prepare_cuda_arch() == "sm_110a":
         expected = data["ref"]
         threshold = max_diff_threshold(data["a_dtype"], data["b_dtype"])
-    else:
-        # Preserve the bitwise DeepGEMM comparison on native SM100 devices.
-        _, expected = deepgemm_launch_normal(data)
-        torch.cuda.synchronize()
-        threshold = None
+        check(expected, threshold)
 
-    return assert_within_threshold(
-        calc_diff(data["d"], expected),
-        data,
-        kernel="deepgemm_sm100_fp8_gemm_1d1d",
-        detail=(
-            f"M={data['M']} N={data['N']} K={data['K']} "
-            f"major={data['major_a']}{data['major_b']} b_dtype={data['b_dtype']} "
-            f"cd={data['cd_dtype']} acc={data['accumulate']}"
-        ),
-        threshold=threshold,
-    )
+    _, expected = deepgemm_launch_normal(data)
+    torch.cuda.synchronize()
+    return check(expected)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):

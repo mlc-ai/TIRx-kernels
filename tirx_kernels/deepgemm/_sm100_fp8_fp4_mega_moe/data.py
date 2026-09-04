@@ -44,6 +44,12 @@ _DEEP_GEMM_MODULE_NAME = "deep_gemm"
 
 
 def load_deep_gemm_mega() -> tuple[Any, str]:
+    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        return load_reference("deep-gemm"), "verified_thor_variant"
+
     try:
         import deep_gemm as module
     except Exception as exc:
@@ -663,9 +669,12 @@ def _run_worker(
             missing = expected_impls - set(impls)
             if missing:
                 raise RuntimeError(f"Benchmark did not report timings for: {sorted(missing)}")
+            from tirx_kernels.reference_variants import reference_provenance
+
             result = {
                 "status": "OK",
                 "reference_source": source,
+                "reference_variant": reference_provenance("deep-gemm"),
                 "impls": {name: float(impls[name]) for name in sorted(expected_impls)},
                 "round_samples": bench_result.get("round_samples", {}),
                 "errors": bench_result["errors"],
@@ -779,6 +788,11 @@ def _run_distributed(
     device_uuids: tuple[str, ...] | None = None,
     **kwargs,
 ) -> dict[str, Any]:
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a" and config.num_processes != 1:
+        raise SkipTest("Thor MegaMoE supports only num_processes=1; multi-GPU remains unvalidated")
+
     cfg_dict = {**asdict(config), **kwargs}
     if device_indices is None:
         device_indices = tuple(range(config.num_processes))

@@ -208,6 +208,12 @@ CONFIGS = DSA_INDEXER_LIKE_COVERAGE
 
 
 def load_deep_gemm_paged_mqa() -> tuple[Any, str]:
+    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        return load_reference("deep-gemm"), "verified_thor_variant"
+
     try:
         import deep_gemm as module
     except Exception as exc:
@@ -1814,16 +1820,12 @@ def _assert_correct(data: dict[str, Any], logits: torch.Tensor, *, name: str) ->
 
 def run_test(**kwargs: Any) -> None:
     data = prepare_data(**kwargs)
-    from tirx_kernels.target import prepare_cuda_arch
-
-    deepgemm_diff = None
-    if prepare_cuda_arch() != "sm_110a":
-        deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
-        deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
+    deepgemm_logits = _run_deepgemm_paged_mqa(data, clean_logits=False)
+    deepgemm_diff = _assert_correct(data, deepgemm_logits, name="DeepGEMM")
     tirx_logits = _launch_tirx_paged_mqa(data)
     torch.cuda.synchronize()
     tirx_diff = _assert_correct(data, tirx_logits, name="TIRx")
-    if deepgemm_diff is not None and tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
+    if tirx_diff > max(deepgemm_diff, _TEST_DIFF_THRESHOLD):
         raise AssertionError(
             f"TIRx diff {tirx_diff:.6g} is worse than DeepGEMM diff {deepgemm_diff:.6g}"
         )
@@ -1844,7 +1846,6 @@ def prepare_bench(**kwargs: Any):
 def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
     kwargs = {**prepared["config"], **kwargs}
     from tirx_kernels.runner import bench
-    from tirx_kernels.target import prepare_cuda_arch
 
     # Tiny (~8-11µs) paged kernel: event timing is launch-jitter-noisy (sporadic
     # 10-13% ratio spread) and ~2x inflated by launch overhead. timer=None inherits the
@@ -1879,9 +1880,12 @@ def run_gpu(prepared, **kwargs: Any) -> dict[str, Any]:
         timer=timer,
         rounds=_rounds,
         cooldown_s=_cooldown_s,
-        references={"deepgemm": _deepgemm} if prepare_cuda_arch() != "sm_110a" else {},
+        references={"deepgemm": _deepgemm},
     )
     result["max_diff"] = tirx_diff
+    from tirx_kernels.reference_variants import reference_provenance
+
+    result["reference_variant"] = reference_provenance("deep-gemm")
     return result
 
 

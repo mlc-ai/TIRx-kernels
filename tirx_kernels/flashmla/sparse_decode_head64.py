@@ -3224,43 +3224,43 @@ def run_test(**kwargs: Any) -> None:
     case = prepare_data(_compact_kv=True, **kwargs)
     executables = _compile_decode_kernels(**kwargs)
 
+    from tirx_kernels.flashmla.utils._flashmla_bench import (
+        _import_flash_mla,
+        run_flashmla_sparse_decode,
+    )
     from tirx_kernels.target import prepare_cuda_arch
 
-    if prepare_cuda_arch() == "sm_110a":
-        ref_out, ref_lse = _torch_reference(case)
-    else:
-        from tirx_kernels.flashmla.utils._flashmla_bench import (
-            _import_flash_mla,
-            run_flashmla_sparse_decode,
-        )
+    flash_mla = _import_flash_mla()
+    sched_meta, _ = flash_mla.get_mla_metadata()
+    ref_out, ref_lse = run_flashmla_sparse_decode(case, sched_meta)
+    torch.cuda.synchronize()
 
-        flash_mla = _import_flash_mla()
-        sched_meta, _ = flash_mla.get_mla_metadata()
-        ref_out, ref_lse = run_flashmla_sparse_decode(case, sched_meta)
-        torch.cuda.synchronize()
-
-        # Validate the host replica against the actual CUDA scheduler.  Inactive
-        # rows only have a defined begin_req_idx; the remaining CUDA fields may
-        # contain shared-memory tail values and are never consumed.
-        ref_metadata = sched_meta.tile_scheduler_metadata
-        ref_num_splits = sched_meta.num_splits
-        if ref_metadata is None or ref_num_splits is None:
-            raise AssertionError("FlashMLA did not initialize decode scheduler metadata")
-        ours_metadata = case["tile_scheduler_metadata"]
-        torch.testing.assert_close(ours_metadata[:, 0], ref_metadata[:, 0], rtol=0, atol=0)
-        active = ours_metadata[:, 0] < cfg.b
-        torch.testing.assert_close(
-            ours_metadata[active, :7], ref_metadata[active, :7], rtol=0, atol=0
-        )
-        torch.testing.assert_close(case["num_splits"], ref_num_splits, rtol=0, atol=0)
+    # Validate the host replica against the actual CUDA scheduler.  Inactive
+    # rows only have a defined begin_req_idx; the remaining CUDA fields may
+    # contain shared-memory tail values and are never consumed.
+    ref_metadata = sched_meta.tile_scheduler_metadata
+    ref_num_splits = sched_meta.num_splits
+    if ref_metadata is None or ref_num_splits is None:
+        raise AssertionError("FlashMLA did not initialize decode scheduler metadata")
+    ours_metadata = case["tile_scheduler_metadata"]
+    torch.testing.assert_close(ours_metadata[:, 0], ref_metadata[:, 0], rtol=0, atol=0)
+    active = ours_metadata[:, 0] < cfg.b
+    torch.testing.assert_close(ours_metadata[active, :7], ref_metadata[active, :7], rtol=0, atol=0)
+    torch.testing.assert_close(case["num_splits"], ref_num_splits, rtol=0, atol=0)
 
     case["out"].fill_(float("nan"))
     case["lse"].fill_(float("nan"))
     _launch_tirx(case, executables)
     torch.cuda.synchronize()
     torch.testing.assert_close(case["out"], ref_out, rtol=2.01 / 128, atol=1.0e-3)
-    expected_lse = ref_lse if prepare_cuda_arch() == "sm_110a" else ref_lse.transpose(1, 2)
+    expected_lse = ref_lse.transpose(1, 2)
     torch.testing.assert_close(case["lse"], expected_lse, rtol=8.01 / 65536, atol=1.0e-6)
+    if prepare_cuda_arch() == "sm_110a":
+        oracle_out, oracle_lse = _torch_reference(case)
+        torch.testing.assert_close(case["out"], oracle_out, rtol=2.01 / 128, atol=1.0e-3)
+        torch.testing.assert_close(case["lse"], oracle_lse, rtol=8.01 / 65536, atol=1.0e-6)
+        torch.testing.assert_close(ref_out, oracle_out, rtol=2.01 / 128, atol=1.0e-3)
+        torch.testing.assert_close(expected_lse, oracle_lse, rtol=8.01 / 65536, atol=1.0e-6)
     cfg.validate()
 
 
@@ -3288,15 +3288,11 @@ def run_gpu(
     def tirx_decode():
         _launch_tirx(case, executables)
 
-    from tirx_kernels.target import prepare_cuda_arch
+    from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_decode_reference_builder
 
-    references = {}
-    if prepare_cuda_arch() != "sm_110a":
-        from tirx_kernels.flashmla.utils._flashmla_bench import flashmla_decode_reference_builder
+    references = {"flashmla": lambda: flashmla_decode_reference_builder(case)}
 
-        references = {"flashmla": lambda: flashmla_decode_reference_builder(case)}
-
-    return bench(
+    result = bench(
         {"tirx": tirx_decode},
         warmup=warmup,
         repeat=repeat,
@@ -3305,6 +3301,10 @@ def run_gpu(
         rounds=rounds,
         cooldown_s=cooldown_s,
     )
+    from tirx_kernels.reference_variants import reference_provenance
+
+    result["reference_variant"] = reference_provenance("flash-mla")
+    return result
 
 
 def run_bench(

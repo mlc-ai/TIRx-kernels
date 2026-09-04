@@ -41,7 +41,7 @@ from ._sm100_fp8_fp4_mega_moe.spec import (
 KERNEL_META = {
     "name": "sm100_fp8_fp4_mega_moe",
     "category": "deepgemm",
-    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a"],
+    "runtime_cuda_archs": ["sm_100a", "sm_103a", "sm_107a", "sm_110a"],
     "reference_requirements": (
         {
             "package": "deep-gemm",
@@ -226,6 +226,10 @@ def _make_config(
         fast_math=fast_math,
     )
     config.validate()
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a" and config.num_processes != 1:
+        raise SkipTest("Thor MegaMoE supports only num_processes=1; multi-GPU remains unvalidated")
     return config
 
 

@@ -10,6 +10,12 @@ from typing import Any
 
 
 def _import_flash_mla():
+    from tirx_kernels.reference_variants import load_reference
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        return load_reference("flash-mla")
+
     path = os.environ.get("FLASH_MLA_PATH", os.path.expanduser("~/FlashMLA"))
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -18,10 +24,10 @@ def _import_flash_mla():
     return flash_mla
 
 
-def run_flashmla_sparse_prefill(case: dict[str, Any]):
+def run_flashmla_sparse_prefill_outputs(case: dict[str, Any]):
     flash_mla = _import_flash_mla()
     cfg = case["config"]
-    out, _, _ = flash_mla.flash_mla_sparse_fwd(
+    return flash_mla.flash_mla_sparse_fwd(
         case["q"],
         case["kv"],
         case["indices"],
@@ -30,7 +36,23 @@ def run_flashmla_sparse_prefill(case: dict[str, Any]):
         attn_sink=case["attn_sink"] if cfg.have_attn_sink else None,
         topk_length=case["topk_length"] if cfg.have_topk_length else None,
     )
-    return out
+
+
+def run_flashmla_sparse_prefill(case: dict[str, Any]):
+    return run_flashmla_sparse_prefill_outputs(case)[0]
+
+
+def validate_flashmla_sparse_prefill(case, oracle, *, output_rtol: float) -> None:
+    """Check all three public source outputs against the oracle and TIRx."""
+    import torch
+
+    source_outputs = run_flashmla_sparse_prefill_outputs(case)
+    torch.cuda.synchronize()
+    for index, key in enumerate(("out", "max_logits", "lse")):
+        rtol = output_rtol if index == 0 else 2.01 / 65536
+        atol = 5e-3 if index == 0 else 1e-6
+        torch.testing.assert_close(source_outputs[index], oracle[index], rtol=rtol, atol=atol)
+        torch.testing.assert_close(case[key], source_outputs[index], rtol=rtol, atol=atol)
 
 
 def flashmla_reference_builder(case: dict[str, Any]) -> Callable[[], Any]:

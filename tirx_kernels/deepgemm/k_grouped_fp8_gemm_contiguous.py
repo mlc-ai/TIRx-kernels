@@ -267,27 +267,28 @@ def run_test(**config):
     launch()
     torch.cuda.synchronize()
 
+    def check(expected, threshold=None):
+        return assert_within_threshold(
+            calc_diff(data["d"], expected),
+            data,
+            kernel="deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
+            detail=(
+                f"g={data['num_groups']} M={data['M']} N={data['N']} K={data['K']} "
+                f"gran={data['gran_k_a']} align={data['k_alignment']} "
+                f"psum={data['use_psum_layout']}"
+            ),
+            threshold=threshold,
+            K=data["K"],
+        )
+
     if prepare_cuda_arch() == "sm_110a":
         expected = data["ref"]
         threshold = max_diff_threshold(data["a_dtype"], data["b_dtype"])
-    else:
-        # Preserve the bitwise DeepGEMM comparison on native SM100 devices.
-        _, expected = deepgemm_launch_k_grouped(data)
-        torch.cuda.synchronize()
-        threshold = None
+        check(expected, threshold)
 
-    return assert_within_threshold(
-        calc_diff(data["d"], expected),
-        data,
-        kernel="deepgemm_sm100_k_grouped_fp8_gemm_contiguous",
-        detail=(
-            f"g={data['num_groups']} M={data['M']} N={data['N']} K={data['K']} "
-            f"gran={data['gran_k_a']} align={data['k_alignment']} "
-            f"psum={data['use_psum_layout']}"
-        ),
-        threshold=threshold,
-        K=data["K"],
-    )
+    _, expected = deepgemm_launch_k_grouped(data)
+    torch.cuda.synchronize()
+    return check(expected)
 
 
 def run_gpu(prepared, *, warmup=None, repeat=None, timer=None, rounds=1, cooldown_s=1.0, **config):

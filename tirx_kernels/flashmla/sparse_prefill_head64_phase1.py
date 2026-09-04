@@ -1510,13 +1510,19 @@ def run_test(**kwargs: Any) -> None:
     ex = compile_kernel(prim_func)
     ex(*_tirx_args(case))
     torch.cuda.synchronize()
-    # Torch oracle retained by design: no library exposes phase-1's split
-    # intermediates (out/max_logits/lse per split), so nothing upstream can
-    # arbitrate them.
+    # Preserve the independent oracle for all three outputs.
     ref_out, ref_max_logits, ref_lse = _reference_sparse_prefill(case)
     torch.testing.assert_close(case["out"], ref_out, rtol=3.01 / 128, atol=5e-3)
     torch.testing.assert_close(case["max_logits"], ref_max_logits, rtol=2.01 / 65536, atol=1e-6)
     torch.testing.assert_close(case["lse"], ref_lse, rtol=2.01 / 65536, atol=1e-6)
+    from tirx_kernels.target import prepare_cuda_arch
+
+    if prepare_cuda_arch() == "sm_110a":
+        from tirx_kernels.flashmla.utils._flashmla_bench import validate_flashmla_sparse_prefill
+
+        validate_flashmla_sparse_prefill(
+            case, (ref_out, ref_max_logits, ref_lse), output_rtol=3.01 / 128
+        )
     cfg.validate()
 
 
@@ -1557,7 +1563,7 @@ def run_gpu(
     if trtllm_gen_config_compatible(case["config"]):
         references["trtllm_gen"] = lambda: trtllm_gen_reference_builder(case)
 
-    return bench(
+    result = bench(
         funcs,
         warmup=warmup,
         repeat=repeat,
@@ -1566,6 +1572,10 @@ def run_gpu(
         rounds=_rounds,
         cooldown_s=_cooldown_s,
     )
+    from tirx_kernels.reference_variants import reference_provenance
+
+    result["reference_variant"] = reference_provenance("flash-mla")
+    return result
 
 
 def run_bench(
