@@ -135,6 +135,17 @@ outputs remain in registers, and do not use an opaque multi-output helper for
 loads whose independence, address validity, or ordering is not statically
 established.
 
+The useful issue window can also shrink on a target with fewer memory resources.
+On a 20-SM `sm_110a` eight-token grouped KDA decode, staging all eight tokens
+ahead of the recurrence left excess LG-throttle and miscellaneous stalls even
+with 228 registers and zero spills. Chunking the same raw-load-first schedule
+by two tokens removed the miscellaneous stalls, reduced LG-throttle samples
+from 228 to 95, and moved the paired 15-round result to 404.411 us versus
+414.255 us for the reference (1.0243x). Width one reached only 0.9745x and
+width four reached 0.9272x in their paired runs. All 23 affected correctness
+configurations passed. Treat staging width as a target-and-shape parameter;
+neither maximum exposure nor minimum live range is a universal optimum.
+
 ## Verification
 
 Confirm the load issue window and load-to-first-consumer distance in SASS, then

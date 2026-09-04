@@ -27,6 +27,7 @@ import tirx_kernels.kern as K
 import tvm
 import tvm.testing
 from tirx_kernels.runner import bench
+from tirx_kernels.target import prepare_cuda_arch
 from tvm.tirx.cuda import iket
 from tvm.tirx.cuda.iket import IketProfiler
 
@@ -521,14 +522,18 @@ def make_kernel(
             K.ptx.mov.b32(out[idx + 1], combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1]))
 
         # ---- roles — orig:L752/765/1060/1396 ---------------------------------
-        # The frozen kernel's register budget is exactly the 65536-register CTA
-        # file: 200*32*8 + 64*32*4 + 48*32*4 = 65536. K checks that, plus the
-        # exact partition of warps 0..15 and setmaxnreg warpgroup-uniformity;
-        # the original satisfies all three, verified nowhere.
+        # Both role splits consume the complete 65536-register CTA file.  Keep
+        # the frozen 200/64/48 split on SM100; the pinned reference source now
+        # uses 192/72/56 for causal D128.  K also checks the exact partition of
+        # warps 0..15 and setmaxnreg warpgroup-uniformity.
+        thor_causal_d128 = prepare_cuda_arch() == "sm_110a" and is_causal and HEAD_DIM == 128
+        softmax_regs = 192 if thor_causal_d128 else 200
+        correction_regs = 72 if thor_causal_d128 else 64
+        other_regs = 56 if thor_causal_d128 else 48
         sp = K.specialize(chain_dispatch=True)
-        r_softmax = sp.role("softmax", warps=[0, 1, 2, 3, 4, 5, 6, 7], regs=200)
-        r_correction = sp.role("correction", warps=[8, 9, 10, 11], regs=64)
-        wg3 = sp.warpgroup("wg3", warps=range(12, 16), regs=48)
+        r_softmax = sp.role("softmax", warps=[0, 1, 2, 3, 4, 5, 6, 7], regs=softmax_regs)
+        r_correction = sp.role("correction", warps=[8, 9, 10, 11], regs=correction_regs)
+        wg3 = sp.warpgroup("wg3", warps=range(12, 16), regs=other_regs)
         r_mma = sp.role("mma", warps=[12], group=wg3)
         r_load = sp.role("load", warps=[13], group=wg3)
         r_store = sp.role("store", warps=[14], group=wg3)

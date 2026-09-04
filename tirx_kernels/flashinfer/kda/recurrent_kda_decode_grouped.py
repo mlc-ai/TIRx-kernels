@@ -49,6 +49,7 @@ from unittest import SkipTest
 import torch
 
 import tirx_kernels.kern as K
+from tirx_kernels.target import prepare_cuda_arch
 
 # Sibling import: the one-warp port is the canonical home for the shared PTX,
 # bf16-conversion and shuffle helpers (mamba's convention, e.g.
@@ -572,77 +573,82 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         ves = K.alloc_local((NUM_TOKENS,), "uint16")  # stays BF16 until :681
         bbs = K.alloc_local((NUM_TOKENS,), "float32")
 
-        # Issue every token's global loads before consuming any of them.  With a
-        # cold L2 -- which is what bench_suite measures, and what an inference
-        # server sees -- the kernel is bound by how many DRAM misses are in flight,
-        # not by instruction count.  Loading and consuming one token at a time keeps
-        # only EPT*3+2 requests outstanding; hoisting all T tokens keeps T times as
-        # many.
-        q_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
-        k_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
-        g_bits = K.alloc_local((NUM_TOKENS * EPT,), "uint16")
-        b_bits = K.alloc_local((NUM_TOKENS,), "uint16")
-        for t in range(NUM_TOKENS):
-            K.assign(slots[t], _load_i32(ssm_idx, n * NUM_TOKENS + t))
-            # Out-of-row tokens clamp to token 0 so the loads stay in bounds; the
-            # value is discarded by the `active` predicate in phase B.
-            pidx: K.int32 = K.if_then_else(t < seq_len, token_base + t, 0)
-            K.assign(ves[t], _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx))
-            K.assign(b_bits[t], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
-            for e in range(EPT):
-                de_l: K.int32 = d + e * NT
+        # B200 benefits from issuing every token's loads before any gate work.
+        # Thor's smaller memory subsystem reaches its best issue window at two
+        # tokens: batching four or eight pushes the state loads behind a burst of
+        # q/k/g loads and raises LG/misc stalls.  This is a prepare-time schedule
+        # choice only; the shared layout and numerical path remain identical.
+        phase_a_stage = min(2, NUM_TOKENS) if prepare_cuda_arch() == "sm_110a" else NUM_TOKENS
+        q_bits = K.alloc_local((phase_a_stage * EPT,), "uint16")
+        k_bits = K.alloc_local((phase_a_stage * EPT,), "uint16")
+        g_bits = K.alloc_local((phase_a_stage * EPT,), "uint16")
+        b_bits = K.alloc_local((phase_a_stage,), "uint16")
+        for t_base in range(0, NUM_TOKENS, phase_a_stage):
+            for ti in range(phase_a_stage):
+                t = t_base + ti
+                K.assign(slots[t], _load_i32(ssm_idx, n * NUM_TOKENS + t))
+                # Out-of-row tokens clamp to token 0 so the loads stay in bounds; the
+                # value is discarded by the `active` predicate in phase B.
+                pidx: K.int32 = K.if_then_else(t < seq_len, token_base + t, 0)
                 K.assign(
-                    q_bits[t * EPT + e],
-                    _load_bf16_bits(q, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l),
+                    ves[t], _load_bf16_bits(v, (pidx * NUM_VALUE_HEADS + hv) * HEAD_DIM + v_idx)
                 )
-                K.assign(
-                    k_bits[t * EPT + e],
-                    _load_bf16_bits(k, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l),
-                )
-                K.assign(
-                    g_bits[t * EPT + e],
-                    _load_bf16_bits(g, pidx * g_stride_q + hv * HEAD_DIM + de_l),
-                )
-        for t in range(NUM_TOKENS):
-            K.assign(bbs[t], _bf16_to_f32(b_bits[t]))
+                K.assign(b_bits[ti], _load_bf16_bits(beta, pidx * NUM_VALUE_HEADS + hv))
+                for e in range(EPT):
+                    de_l: K.int32 = d + e * NT
+                    K.assign(
+                        q_bits[ti * EPT + e],
+                        _load_bf16_bits(q, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l),
+                    )
+                    K.assign(
+                        k_bits[ti * EPT + e],
+                        _load_bf16_bits(k, (pidx * NUM_HEADS + h) * HEAD_DIM + de_l),
+                    )
+                    K.assign(
+                        g_bits[ti * EPT + e],
+                        _load_bf16_bits(g, pidx * g_stride_q + hv * HEAD_DIM + de_l),
+                    )
+            for ti in range(phase_a_stage):
+                t = t_base + ti
+                K.assign(bbs[t], _bf16_to_f32(b_bits[ti]))
 
-            sqp: K.float32 = K.float32(0.0)
-            skp: K.float32 = K.float32(0.0)
-            for e in range(EPT):
-                de: K.int32 = d + e * NT
-                qe = q_bits[t * EPT + e]
-                ke = k_bits[t * EPT + e]
-                ge = g_bits[t * EPT + e]
+                sqp: K.float32 = K.float32(0.0)
+                skp: K.float32 = K.float32(0.0)
+                for e in range(EPT):
+                    de: K.int32 = d + e * NT
+                    qe = q_bits[ti * EPT + e]
+                    ke = k_bits[ti * EPT + e]
+                    ge = g_bits[ti * EPT + e]
 
-                # The L2 partials consume the raw BF16 registers.
-                sqp = _fma_bf16(qe, qe, sqp)
-                skp = _fma_bf16(ke, ke, skp)
+                    # The L2 partials consume the raw BF16 registers.
+                    sqp = _fma_bf16(qe, qe, sqp)
+                    skp = _fma_bf16(ke, ke, skp)
 
-                x: K.float32 = _add_bf16(ge, dtb[e])
-                gate: K.float32 = K.float32(0.0)
-                if GATE_MODE == GATE_MODE_SOFTPLUS:
-                    gate = _mul(_softplus(x), _neg(av))
-                else:
-                    # The negation is its own instruction; it is not folded into a
-                    # negative LOG2_E constant (recurrent_kda.py:623-627).
-                    sig_e = _exp2(_mul(_mul(av, _neg(x)), K.float32(LOG2_E)))
-                    gate = _mul(lower_bound, _rcp_rn(_add(sig_e, K.float32(1.0))))
+                    x: K.float32 = _add_bf16(ge, dtb[e])
+                    gate: K.float32 = K.float32(0.0)
+                    if GATE_MODE == GATE_MODE_SOFTPLUS:
+                        gate = _mul(_softplus(x), _neg(av))
+                    else:
+                        # The negation is its own instruction; it is not folded into a
+                        # negative LOG2_E constant (recurrent_kda.py:623-627).
+                        sig_e = _exp2(_mul(_mul(av, _neg(x)), K.float32(LOG2_E)))
+                        gate = _mul(lower_bound, _rcp_rn(_add(sig_e, K.float32(1.0))))
 
-                # The staged key/query are the RAW values; L2 normalization is a
-                # scalar factor applied in phase B.  They convert here because the
-                # staging planes are FP32.
-                _st_shared_f32(s_eg, t * HEAD_DIM + de, _exp2(_mul(gate, K.float32(LOG2_E))))
-                _st_shared_f32(s_kr, t * HEAD_DIM + de, _bf16_to_f32(ke))
-                _st_shared_f32(s_qr, t * HEAD_DIM + de, _bf16_to_f32(qe))
+                    # The staged key/query are the RAW values; L2 normalization is a
+                    # scalar factor applied in phase B.  They convert here because the
+                    # staging planes are FP32.
+                    _st_shared_f32(s_eg, t * HEAD_DIM + de, _exp2(_mul(gate, K.float32(LOG2_E))))
+                    _st_shared_f32(s_kr, t * HEAD_DIM + de, _bf16_to_f32(ke))
+                    _st_shared_f32(s_qr, t * HEAD_DIM + de, _bf16_to_f32(qe))
 
-            # Full 32-lane butterfly, five rounds, DESCENDING offsets: the source's
-            # warp_reduction_sum halves a group width.  FP32 addition is not
-            # associative and the checkpoints must be exact, so the order matters.
-            sqp = _warp_reduce_sum(sqp)
-            skp = _warp_reduce_sum(skp)
-            publish = K.And(lane == 0, wid < SW)
-            _st_shared_f32_pred(s_red, t * 16 + wid, sqp, publish)
-            _st_shared_f32_pred(s_red, t * 16 + 8 + wid, skp, publish)
+                # Full 32-lane butterfly, five rounds, DESCENDING offsets: the source's
+                # warp_reduction_sum halves a group width.  FP32 addition is not
+                # associative and the checkpoints must be exact, so the order matters.
+                sqp = _warp_reduce_sum(sqp)
+                skp = _warp_reduce_sum(skp)
+                publish = K.And(lane == 0, wid < SW)
+                _st_shared_f32_pred(s_red, t * 16 + wid, sqp, publish)
+                _st_shared_f32_pred(s_red, t * 16 + 8 + wid, skp, publish)
 
         # The ONLY barrier: it separates the two thread-index mappings.
         K.cuda.cta_sync()
@@ -653,8 +659,8 @@ def _make_recurrent_kda_decode_grouped(spec: dict[str, Any]):
         # shapes (dec_hv16_b4 0.855 -> 1.06-1.09 measured on a clock-verified GPU)
         # and is within run-to-run noise on every T > 1 shape, so it is
         # unconditional.  It used to sit behind a `T <= 2` constexpr because before
-        # phase A issued all T tokens' loads up front it cost 2-3% at T = 8; that
-        # cost is gone, and with it the boundary.
+        # phase A issued all T tokens' loads up front on SM100 it cost 2-3% at
+        # T = 8; that cost is gone there, and with it the boundary.
         for gi in range(G):
             for pr in range(4):
                 w = s_words[gi * 4 + pr]
