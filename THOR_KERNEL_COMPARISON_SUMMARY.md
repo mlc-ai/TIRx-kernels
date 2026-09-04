@@ -10,13 +10,30 @@ Speedup 定义为 `baseline latency / TIRx latency`，大于 1.0 表示 TIRx 更
 |---|---:|
 | 数值与执行完成 | **20/20** |
 | 严格 `baseline/TIRx > 0.99` | **15/20** |
-| TIRx 快超过 5% | **3/20** |
-| 差距在 ±5% 内 | **17/20** |
+| TIRx 快超过 5% | **4/20** |
+| 差距在 ±5% 内 | **16/20** |
 | Baseline 快超过 5% | **0/20** |
-| 几何平均 TIRx speedup | **1.017x** |
+| 几何平均 TIRx speedup | **1.072x** |
 | 任一侧 CV 超过 10% | **8/20** |
 
-最终可复现结果里没有 baseline 快超过 5% 的经典行。FA4 收敛到 0.978x，Fused Add RMSNorm 的独立 30 轮确认是 0.974x，Recurrent KDA Grouped 从 0.912x 修到 1.023x。所有短轮次看似有效、但长轮次无法复现的改动均已回退，没有为了表格数字保留不稳定优化。
+最终可复现结果里没有 baseline 快超过 5% 的经典行。Fast TopK 在 Thor 上改为由已有 row 并行度决定 cluster 宽度后从 0.996x 提升到 2.833x；FA4 收敛到 0.978x，Fused Add RMSNorm 的独立 30 轮确认是 0.974x，Recurrent KDA Grouped 从 0.912x 修到 1.023x。所有短轮次看似有效、但长轮次无法复现的改动均已回退，没有为了表格数字保留不稳定优化。
+
+如果把目标收紧为严格 `baseline/TIRx > 1.0`，后续对原先低于或接近 1.0 的 9 项做了同一轮 15-round paired recheck。Fast TopK、LayerNorm 和 Radix TopK Multi-CTA 已严格领先；其余 6 项仍是 0.967x–0.993x，不能声称已经全部快于 baseline。
+
+| 严格复核项 | Speedup | 当前状态 |
+|---|---:|---|
+| Fast TopK Clusters | **2.833x** | 已优化并长轮次确认 |
+| LayerNorm | **1.015x** | 已快于 baseline，无需改动 |
+| Radix TopK Multi-CTA | **1.015x** | 已快于 baseline，无需改动 |
+| RMSNorm Quant | **0.993x** | 尚差 0.7% |
+| FlashAttention-4 | **0.982x** | 尚差 1.8% |
+| QK RMSNorm | **0.980x** | 尚差 2.0% |
+| Fused DiT LayerNorm | **0.980x** | 尚差 2.0% |
+| RMSNorm | **0.979x** | 尚差 2.1% |
+| Fused Add RMSNorm | **0.967x** | 尚差 3.3% |
+
+这张严格复核表中的非 Fast-TopK 行来自
+`/home/tlopexh/TIRx-kernels/.porting/thor_classic_strict/after-fasttopk-15r/runs/1.json`；Fast TopK 使用随后完成的完整 5-shape、15-round 受影响矩阵。
 
 主表除 NVFP4 GEMM 和 Fused Add RMSNorm 外取自同一轮完整 20-row campaign。那两项在完整 campaign 与此前结果冲突，因此使用紧接其后的独立 30 轮成对复测；这样避免把 Thor 未锁频时的顺序/热状态漂移误报成 kernel 回归。
 
@@ -37,7 +54,7 @@ Speedup 定义为 `baseline latency / TIRx latency`，大于 1.0 表示 TIRx 更
 | GELU-and-Mul | FlashInfer CUDA | 2233.054 | 3.6% | 2233.962 | 3.4% | **1.000x** | ±5% |
 | MXFP4 Quantize | FlashInfer CuTeDSL | 232.590 | 12.7% | 242.089 | 6.0% | **1.041x** | ±5% |
 | NVFP4 Quantize | FlashInfer CuTeDSL | 210.232 | 7.1% | 212.055 | 13.3% | **1.009x** | ±5% |
-| Fast TopK Clusters | FlashInfer | 193.904 | 1.0% | 193.215 | 0.7% | **0.996x** | ±5% |
+| Fast TopK Clusters | FlashInfer | 68.033 | 8.2% | 192.713 | 1.2% | **2.833x** | TIRx 快 183.3% |
 | Filtered TopK | FlashInfer | 43.536 | 5.9% | 48.248 | 2.1% | **1.108x** | TIRx 快 10.8% |
 | Radix TopK Multi-CTA | FlashInfer | 65.835 | 5.4% | 64.276 | 3.2% | **0.976x** | ±5% |
 | Radix TopK Single-CTA | FlashInfer | 177.806 | 2.4% | 184.081 | 2.4% | **1.035x** | ±5% |
@@ -57,12 +74,15 @@ NVFP4 的独立 30 轮同一行还测得 cuBLASLt 为 382.956 µs，即 `cuBLASL
 | RMSNorm Quant | 0.880x | **0.986x** | register-level 候选的长轮次无增益，回退 |
 | Recurrent KDA Grouped | 0.889x | **1.023x** | 保留 Thor 专用 phase-A 两 token staging；SM100 仍一次 stage 全部 token |
 | FlashAttention-4 | 0.948x | **0.978x** | Thor causal D128 采用当前上游 192/72/56 role split；SM100 保持 200/64/48 |
+| Fast TopK Clusters | 0.996x | **2.833x** | Thor 在独立 row 已提供至少 3 个 device wave、长度不超过 16K 时使用 1 CTA/row；SM100 和长行保持原启发式 |
 
 NVFP4 的 NCU 因果证据最明确：148→20 CTA 后，寄存器、共享内存和 L2 流量不变，线程指令从 73.14M 降至 70.12M，long-scoreboard 样本从 6631 降至 5843，NCU 时间从 319.616 降至 301.088 µs；两边均为零 local load/store、零 spill。删除的是 Thor 上多余 persistent CTA 的调度工作，不是修改数学算法。
 
 KDA 的 NCU 前后保持相同 grid、block、全局/共享访问数、228 registers 和零 spill。两-token staging 把 miscellaneous stall 从 1017 降到 0、LG-throttle 从 228 降到 95；两次独立 15 轮结果分别为 1.024x 和 1.023x，23/23 数值配置通过。
 
 FA4 的两个 role split 都恰好使用完整 CTA register budget。Thor 改为当前上游的 192/72/56 后，两次 15 轮代表结果为 0.985x 和 0.978x；受影响的 16/16 causal D128 数值配置全部通过。`sm_100a` 路径没有改变。
+
+Fast TopK 的 15 轮完整受影响矩阵覆盖 5 个 dtype/k 组合，全部数值通过且 speedup 为 2.198x–2.833x。代表行 NCU 中，4→1 CTA/row 后 grid 从 256 降到 64，global load 指令基本不变（41,597→41,472），warp 指令从 4.91M 降到 1.64M，共享读从 123,819 降到 28,956，barrier stall sample 从 1,442 降到 258；local load/store 与 spill 仍为零。这个优化删除的是 Thor 上已有足够 row 并行度时的重复 distributed reduction，而不是减少输入数据或放宽数值合同。
 
 ## 测量方法与限制
 
@@ -79,4 +99,6 @@ FA4 的两个 role split 都恰好使用完整 CTA register budget。Thor 改为
 - NVFP4 独立 30 轮确认：`/home/tlopexh/TIRx-kernels/.porting/nvfp4_gemm/perf_gate/recheck-after-full-30r/runs/1.json`
 - Fused Add RMSNorm 独立 30 轮确认：`/home/tlopexh/TIRx-kernels/.porting/flashinfer_fused_add_rmsnorm/perf_gate/recheck-current-after-full-30r/runs/1.json`
 - FA4 独立 15 轮：`/home/tlopexh/TIRx-kernels/.porting/flash_attention4/perf_gate/thor-upstream-regs-15r/runs/1.json`
+- Fast TopK 受影响 5 项 15 轮矩阵：`/home/tlopexh/TIRx-kernels/.porting/fast_topk_clusters/perf_gate/thor-row-parallel-15r/runs/1.json`
+- Fast TopK 代表项独立 30 轮：`/home/tlopexh/TIRx-kernels/.porting/fast_topk_clusters/perf_gate/thor-cluster1-30r/runs/1.json`
 - 更详细的 family、baseline 和 provenance 表见 [THOR_CLASSIC_BASELINE_RESULTS.md](THOR_CLASSIC_BASELINE_RESULTS.md)。

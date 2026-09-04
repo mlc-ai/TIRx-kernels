@@ -8,10 +8,10 @@ Measured on 2026-09-04 on one NVIDIA Jetson AGX Thor Developer Kit. The table is
 |---|---:|
 | Measured exact-shape rows | **20/20 passed** |
 | Main classic families with at least one numeric row | **12/17** |
-| TIRx faster by more than 5% | **3/20** |
-| Within 5% | **17/20** |
+| TIRx faster by more than 5% | **4/20** |
+| Within 5% | **16/20** |
 | Reference faster by more than 5% | **0/20** |
-| Geometric-mean TIRx speedup | **1.017x** |
+| Geometric-mean TIRx speedup | **1.072x** |
 | Rows with either CV above 10% | **8/20** |
 
 The mixed geomean is descriptive only: it gives one vote to each selected workload, not to each model invocation. The per-row numbers are the result to use.
@@ -34,7 +34,7 @@ The source-to-benchmark mapping for every row is audited in [THOR_SOURCE_BENCHMA
 | Activation / quantization | `act_and_mul/gelu_tanh_fp16_d11008_t8192` | 2233.054 | 3.6% | `flashinfer` | 2233.962 | 3.4% | **1.000x** |
 | Activation / quantization | `mxfp4_quantize/fp16_linear_m4096_k4096` | 232.590 | 12.7% | `flashinfer` | 242.089 | 6.0% | **1.041x** |
 | Activation / quantization | `nvfp4_quantize/fp16_linear_m4096_k4096` | 210.232 | 7.1% | `flashinfer` | 212.055 | 13.3% | **1.009x** |
-| TopK | `fast_topk_clusters/f32_plain_b64_l16384_k256` | 193.904 | 1.0% | `flashinfer` | 193.215 | 0.7% | **0.996x** |
+| TopK | `fast_topk_clusters/f32_plain_b64_l16384_k256` | 68.033 | 8.2% | `flashinfer` | 192.713 | 1.2% | **2.833x** |
 | TopK | `filtered_topk/f32_plain_r64_l8192_k256` | 43.536 | 5.9% | `flashinfer` | 48.248 | 2.1% | **1.108x** |
 | TopK | `radix_topk_multi_cta/f32_basic_r4_l115188_k256_ctas3` | 65.835 | 5.4% | `flashinfer` | 64.276 | 3.2% | **0.976x** |
 | TopK | `radix_topk_single_cta/f32_basic_r64_l32768_k512` | 177.806 | 2.4% | `flashinfer` | 184.081 | 2.4% | **1.035x** |
@@ -46,7 +46,7 @@ The NVFP4 row also measured cuBLASLt at **382.956 µs** (CV 3.8%), or **1.077x**
 
 The attention row uses upstream FA4 CuTeDSL as its primary baseline. On the same row, FlashInfer CuTeDSL measured **980.931 µs** and the legacy FlashInfer FA2 control measured **2945.198 µs**; neither secondary control enters the geomean.
 
-The complete campaign contained all 20 rows. NVFP4 GEMM and Fused Add RMSNorm then received isolated 30-round confirmations because their full-campaign ratios contradicted prior paired runs; the table uses those longer confirmations. This substitution is reflected in the summary counts and geometric mean.
+The complete campaign contained all 20 rows. NVFP4 GEMM and Fused Add RMSNorm then received isolated 30-round confirmations because their full-campaign ratios contradicted prior paired runs. Fast TopK uses the subsequent complete 15-round affected-shape matrix after its Thor schedule change. These substitutions are reflected in the summary counts and geometric mean.
 
 ## Main-family coverage without a publishable Thor number
 
@@ -71,7 +71,7 @@ These are unavailable comparisons, not zero performance and not failed TIRx corr
 | Rounds / aggregation | 15; two confirmation rows use 30 / arithmetic mean |
 | Warmup / repeat | 1000 ms / 100 ms per implementation per round |
 | TVM/TIR revision | `15b607d6` |
-| TIRx-kernels revision | `86fe2638-dirty` |
+| TIRx-kernels revision | `7c2377c0` plus the Fast TopK Thor schedule in this change |
 | FlashInfer version / revision | `0.6.18` / `f2e04400` |
 | FlashAttention-4 revision | `0251105a` |
 
@@ -82,4 +82,5 @@ Rows above 10% CV are retained and visibly flagged by their CV columns. In parti
 - Complete 20-row run: `/home/tlopexh/thor-validation/final-classic-after-tuning-15r/runs/1.json`
 - NVFP4 30-round confirmation: `/home/tlopexh/TIRx-kernels/.porting/nvfp4_gemm/perf_gate/recheck-after-full-30r/runs/1.json`
 - Fused Add RMSNorm 30-round confirmation: `/home/tlopexh/TIRx-kernels/.porting/flashinfer_fused_add_rmsnorm/perf_gate/recheck-current-after-full-30r/runs/1.json`
+- Fast TopK five-shape 15-round matrix: `/home/tlopexh/TIRx-kernels/.porting/fast_topk_clusters/perf_gate/thor-row-parallel-15r/runs/1.json`
 - All selected final artifacts had no failures or interference retries.
