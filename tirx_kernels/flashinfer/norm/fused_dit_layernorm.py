@@ -17,6 +17,7 @@ from typing import Any
 import tirx_kernels.kern as K
 from tirx_kernels.flashinfer.utils.fp_quant import cvt_e2m1x8
 from tirx_kernels.runner import bench
+from tirx_kernels.target import prepare_cuda_arch
 
 KERNEL_META = {
     "name": "flashinfer_fused_dit_layernorm",
@@ -172,10 +173,12 @@ def _rsqrt_accurate(value, result):
             K.ptx.rsqrt.approx.ftz.f32(result[0], value)
 
 
-def _pack_bf16x8(values):
+def _pack_bf16x8(values, offset=0):
     words = K.alloc_local((4,), "uint32")
     for pair in range(4):
-        K.ptx.cvt.rn.bf16x2.f32(words[pair], values[pair * 2 + 1], values[pair * 2])
+        K.ptx.cvt.rn.bf16x2.f32(
+            words[pair], values[offset + pair * 2 + 1], values[offset + pair * 2]
+        )
     return words
 
 
@@ -502,13 +505,19 @@ def get_kernel(
     norm_values_per_row = _HIDDEN_SIZE if output_format == "bf16" else _HIDDEN_SIZE // 8
     if output_format == "mxfp8":
         norm_values_per_row = _HIDDEN_SIZE // 4
+    thor_block_192 = prepare_cuda_arch() == "sm_110a" and mode == "grgb" and output_format == "bf16"
+    block_size = 192 if thor_block_192 else _BLOCK_SIZE
+    values_per_thread = _HIDDEN_SIZE // block_size
+    pairs_per_thread = values_per_thread // 2
+    chunks_per_thread = values_per_thread // 8
+    num_warps = block_size // 32
     sf_k_tiles = 1
     if output_format == "nvfp4":
         sf_k_tiles = (_HIDDEN_SIZE + 63) // 64
     elif output_format == "mxfp8":
         sf_k_tiles = (_HIDDEN_SIZE + 127) // 128
 
-    @K.kernel(warps=_BLOCK_SIZE // 32, arch="sm_100a", grid="runtime_num_rows")
+    @K.kernel(warps=num_warps, arch="sm_100a", grid="runtime_num_rows")
     def flashinfer_fused_dit_layernorm(
         input_buffer: K.gptr[K.bf16],
         residual_buffer: K.gptr[K.bf16],
@@ -546,10 +555,35 @@ def get_kernel(
             input_scale: K.float32 = K.float32(1.0)
 
         if mode == "grgb":
-            gamma_values = _load_global_f32x8(gamma_buffer, K.cast(tid * 8, "int64"))
-            beta_values = _load_global_f32x8(beta_buffer, K.cast(tid * 8, "int64"))
+            if chunks_per_thread == 1:
+                gamma_values = _load_global_f32x8(gamma_buffer, K.cast(tid * 8, "int64"))
+                beta_values = _load_global_f32x8(beta_buffer, K.cast(tid * 8, "int64"))
+            else:
+                gamma_values = K.alloc_local((values_per_thread,), "float32")
+                beta_values = K.alloc_local((values_per_thread,), "float32")
+                for chunk in range(chunks_per_thread):
+                    value_offset = chunk * 8
+                    gamma_chunk = _load_global_f32x8(
+                        gamma_buffer, K.cast(tid * values_per_thread + value_offset, "int64")
+                    )
+                    beta_chunk = _load_global_f32x8(
+                        beta_buffer, K.cast(tid * values_per_thread + value_offset, "int64")
+                    )
+                    for value in range(8):
+                        K.assign(gamma_values[value_offset + value], gamma_chunk[value])
+                        K.assign(beta_values[value_offset + value], beta_chunk[value])
         if mode in ("grgb", "grss"):
-            gate_bias_values = _load_global_f32x8(gate_bias_buffer, K.cast(tid * 8, "int64"))
+            if chunks_per_thread == 1:
+                gate_bias_values = _load_global_f32x8(gate_bias_buffer, K.cast(tid * 8, "int64"))
+            else:
+                gate_bias_values = K.alloc_local((values_per_thread,), "float32")
+                for chunk in range(chunks_per_thread):
+                    value_offset = chunk * 8
+                    gate_bias_chunk = _load_global_f32x8(
+                        gate_bias_buffer, K.cast(tid * values_per_thread + value_offset, "int64")
+                    )
+                    for value in range(8):
+                        K.assign(gate_bias_values[value_offset + value], gate_bias_chunk[value])
         if mode in ("rss", "grss"):
             scale_bias_values = _load_global_f32x8(scale_bias_buffer, K.cast(tid * 8, "int64"))
             shift_bias_values = _load_global_f32x8(shift_bias_buffer, K.cast(tid * 8, "int64"))
@@ -558,27 +592,51 @@ def get_kernel(
             global_row: K.int64 = K.cast(batch_id, "int64") * K.cast(
                 runtime_num_rows, "int64"
             ) + K.cast(row, "int64")
-            dense_index: K.int64 = global_row * K.int64(_HIDDEN_SIZE) + K.cast(tid * 8, "int64")
+            dense_index: K.int64 = global_row * K.int64(_HIDDEN_SIZE) + K.cast(
+                tid * values_per_thread, "int64"
+            )
             auxiliary_index: K.int64 = global_row * K.int64(_AUXILIARY_STRIDE) + K.cast(
-                tid * 8, "int64"
+                tid * values_per_thread, "int64"
             )
 
-            input_values = _load_global_bf16x8(input_buffer, dense_index)
-            residual_values = K.alloc_local((8,), "float32")
+            if chunks_per_thread == 1:
+                input_values = _load_global_bf16x8(input_buffer, dense_index)
+            else:
+                input_values = K.alloc_local((values_per_thread,), "float32")
+                for chunk in range(chunks_per_thread):
+                    value_offset = chunk * 8
+                    input_chunk = _load_global_bf16x8(input_buffer, dense_index + value_offset)
+                    for value in range(8):
+                        K.assign(input_values[value_offset + value], input_chunk[value])
+            residual_values = K.alloc_local((values_per_thread,), "float32")
             with K.If(runtime_has_residual != 0):
                 with K.Then():
-                    loaded_residual = _load_global_bf16x8(residual_buffer, dense_index)
-                    for value in range(8):
-                        K.assign(residual_values[value], loaded_residual[value])
+                    for chunk in range(chunks_per_thread):
+                        value_offset = chunk * 8
+                        loaded_residual = _load_global_bf16x8(
+                            residual_buffer, dense_index + value_offset
+                        )
+                        for value in range(8):
+                            K.assign(residual_values[value_offset + value], loaded_residual[value])
                 with K.Else():
-                    for value in range(8):
+                    for value in range(values_per_thread):
                         K.assign(residual_values[value], K.float32(0.0))
 
             if mode in ("grgb", "grss"):
-                gate_values = _load_global_bf16x8(gate_buffer, auxiliary_index)
+                if chunks_per_thread == 1:
+                    gate_values = _load_global_bf16x8(gate_buffer, auxiliary_index)
+                else:
+                    gate_values = K.alloc_local((values_per_thread,), "float32")
+                    for chunk in range(chunks_per_thread):
+                        value_offset = chunk * 8
+                        gate_chunk = _load_global_bf16x8(
+                            gate_buffer, auxiliary_index + value_offset
+                        )
+                        for value in range(8):
+                            K.assign(gate_values[value_offset + value], gate_chunk[value])
                 if use_input_sf_scale:
-                    biased_gate_values = K.alloc_local((8,), "float32")
-                    for pair in range(4):
+                    biased_gate_values = K.alloc_local((values_per_thread,), "float32")
+                    for pair in range(pairs_per_thread):
                         biased_gate = _f32x2_binary(
                             "add.rn.ftz.f32x2",
                             gate_values[pair * 2],
@@ -588,8 +646,8 @@ def get_kernel(
                         )
                         K.assign(biased_gate_values[pair * 2], biased_gate[0])
                         K.assign(biased_gate_values[pair * 2 + 1], biased_gate[1])
-                    scaled_gate_values = K.alloc_local((8,), "float32")
-                    for pair in range(4):
+                    scaled_gate_values = K.alloc_local((values_per_thread,), "float32")
+                    for pair in range(pairs_per_thread):
                         scaled_gate = _f32x2_binary(
                             "mul.rn.ftz.f32x2",
                             biased_gate_values[pair * 2],
@@ -599,7 +657,7 @@ def get_kernel(
                         )
                         K.assign(scaled_gate_values[pair * 2], scaled_gate[0])
                         K.assign(scaled_gate_values[pair * 2 + 1], scaled_gate[1])
-                    for pair in range(4):
+                    for pair in range(pairs_per_thread):
                         updated = _f32x2_fma(
                             input_values[pair * 2],
                             input_values[pair * 2 + 1],
@@ -611,7 +669,7 @@ def get_kernel(
                         K.assign(input_values[pair * 2], updated[0])
                         K.assign(input_values[pair * 2 + 1], updated[1])
                 else:
-                    for pair in range(4):
+                    for pair in range(pairs_per_thread):
                         biased_gate = _f32x2_binary(
                             "add.rn.ftz.f32x2",
                             gate_values[pair * 2],
@@ -631,7 +689,7 @@ def get_kernel(
                         K.assign(input_values[pair * 2 + 1], updated[1])
             else:
                 if use_input_sf_scale:
-                    for pair in range(4):
+                    for pair in range(pairs_per_thread):
                         updated = _f32x2_fma(
                             input_values[pair * 2],
                             input_values[pair * 2 + 1],
@@ -643,7 +701,7 @@ def get_kernel(
                         K.assign(input_values[pair * 2], updated[0])
                         K.assign(input_values[pair * 2 + 1], updated[1])
                 else:
-                    for pair in range(4):
+                    for pair in range(pairs_per_thread):
                         updated = _f32x2_binary(
                             "add.rn.ftz.f32x2",
                             input_values[pair * 2],
@@ -654,12 +712,16 @@ def get_kernel(
                         K.assign(input_values[pair * 2], updated[0])
                         K.assign(input_values[pair * 2 + 1], updated[1])
 
-            residual_words = _pack_bf16x8(input_values)
-            _store_global_v4_b32(residual_output_buffer, dense_index, residual_words)
+            for chunk in range(chunks_per_thread):
+                value_offset = chunk * 8
+                residual_words = _pack_bf16x8(input_values, value_offset)
+                _store_global_v4_b32(
+                    residual_output_buffer, dense_index + value_offset, residual_words
+                )
 
             thread_sum = K.local_scalar(K.f32, init=K.float32(0.0))
             thread_sum_sq = K.local_scalar(K.f32, init=K.float32(0.0))
-            for pair in range(4):
+            for pair in range(pairs_per_thread):
                 K.assign(
                     thread_sum,
                     _add_f32(
@@ -713,7 +775,7 @@ def get_kernel(
             K.ptx.bar.sync(K.uint32(0))
 
             with K.If(tid == 0), K.Then():
-                for partial_index in range(11):
+                for partial_index in range(num_warps - 1):
                     partial_word = K.alloc_local((1,), "uint64")
                     K.ptx.ld.shared.b64(
                         partial_word[0], reduce_store.ptr_to([24 + partial_index * 8])
@@ -750,7 +812,7 @@ def get_kernel(
             mean_pair = _unpack_f32x2(mean_word[0])
             inv_std_pair = _unpack_f32x2(inv_std_word[0])
 
-            for pair in range(4):
+            for pair in range(pairs_per_thread):
                 centered = _f32x2_fma(
                     K.float32(-1.0),
                     K.float32(-1.0),
@@ -763,7 +825,7 @@ def get_kernel(
                 K.assign(input_values[pair * 2 + 1], centered[1])
 
             if mode == "grgb":
-                for pair in range(4):
+                for pair in range(pairs_per_thread):
                     scaled_inv = _f32x2_binary(
                         "mul.rn.ftz.f32x2",
                         inv_std_pair[0],
@@ -782,7 +844,7 @@ def get_kernel(
                     K.assign(input_values[pair * 2], normalized[0])
                     K.assign(input_values[pair * 2 + 1], normalized[1])
             else:
-                for pair in range(4):
+                for pair in range(pairs_per_thread):
                     normalized = _f32x2_binary(
                         "mul.rn.ftz.f32x2",
                         input_values[pair * 2],
@@ -796,7 +858,7 @@ def get_kernel(
             if mode in ("rss", "grss"):
                 scale_values = _load_global_bf16x8(scale_buffer, auxiliary_index)
                 shift_values = _load_global_bf16x8(shift_buffer, auxiliary_index)
-                for pair in range(4):
+                for pair in range(pairs_per_thread):
                     biased_scale = _f32x2_binary(
                         "add.rn.ftz.f32x2",
                         scale_values[pair * 2],
@@ -829,10 +891,15 @@ def get_kernel(
                     K.assign(input_values[pair * 2], output_pair[0])
                     K.assign(input_values[pair * 2 + 1], output_pair[1])
 
-            output_words = _pack_bf16x8(input_values)
             if output_format == "bf16":
-                _store_generic_v4_b32(norm_output_buffer, dense_index, output_words)
+                for chunk in range(chunks_per_thread):
+                    value_offset = chunk * 8
+                    output_words = _pack_bf16x8(input_values, value_offset)
+                    _store_generic_v4_b32(
+                        norm_output_buffer, dense_index + value_offset, output_words
+                    )
             elif output_format == "nvfp4":
+                output_words = _pack_bf16x8(input_values)
                 _store_nvfp4(
                     output_words,
                     norm_output_buffer,
@@ -844,6 +911,7 @@ def get_kernel(
                     runtime_num_rows,
                 )
             else:
+                output_words = _pack_bf16x8(input_values)
                 _store_mxfp8(
                     output_words,
                     norm_output_buffer,
